@@ -2220,10 +2220,13 @@ mod readiness_progress_tests {
             crate::git::GitSensorMode::InProcess
         };
         assert_eq!(crate::git::GitSensorMode::default(), expected);
+        // Ensure the sidecar binary is available before creating a server in
+        // sidecar mode.  In a fresh worktree with no prior `cargo build`,
+        // `resolve_or_build_sidecar_binary` builds it once via `cargo build
+        // --bin lain-git-sidecar` and caches the result.
+        crate::server::git::sidecar_binary_helpers::ensure_sidecar_bin_env()
+            .expect("sidecar binary must be available or buildable for this test");
         let root = git_fixture_with_one_file();
-        // Force the sidecar mode explicitly so the test is deterministic
-        // regardless of whether the env-var resolution finds a usable sidecar
-        // binary on the host.
         let server = LainServer::with_git_sensor_mode(
             root.path(),
             &root.path().join("state/graph.bin"),

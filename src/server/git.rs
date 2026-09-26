@@ -866,6 +866,178 @@ pub fn git_sensor_busy_error() -> LainError {
 }
 
 #[cfg(test)]
+pub(crate) mod sidecar_binary_helpers {
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+
+    /// Caches the resolved sidecar binary path across all test threads.
+    /// An empty `PathBuf` is the sentinel for "not found / not buildable".
+    static SIDECAR_BIN: OnceLock<PathBuf> = OnceLock::new();
+
+    const SIDECAR_NAME: &str = if cfg!(windows) {
+        "lain-git-sidecar.exe"
+    } else {
+        "lain-git-sidecar"
+    };
+
+    /// Returns the resolved path to the `lain-git-sidecar` binary, or `None`
+    /// if it could not be found or built.
+    ///
+    /// Resolution order:
+    ///  1. `CARGO_BIN_EXE_lain-git-sidecar` env var (set when binary targets
+    ///     are compiled alongside lib tests).
+    ///  2. `target/{debug,release}/lain-git-sidecar` relative to
+    ///     `CARGO_MANIFEST_DIR` — the standard `cargo build` output path.
+    ///  3. Same paths under `CARGO_TARGET_DIR` when that env var is set.
+    ///  4. `cargo build --bin lain-git-sidecar` with `--manifest-path` and
+    ///     `--target-dir` inferred from the environment; captures stdout
+    ///     to extract the compiled artifact path.
+    ///
+    /// The result is cached after the first call. Building the binary is
+    /// intentionally the last resort: it avoids mutating the filesystem
+    /// in the common case where the binary is already present from a prior
+    /// `cargo build` invocation.
+    pub fn resolve_or_build_sidecar_binary() -> Option<PathBuf> {
+        let cached = SIDECAR_BIN.get_or_init(|| {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+            // Helper: check debug + release under a given target root.
+            let check_target_root = |root: &Path| -> Option<PathBuf> {
+                for profile in &["debug", "release"] {
+                    let p = root.join(profile).join(SIDECAR_NAME);
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+                None
+            };
+
+            // 1. CARGO_BIN_EXE_lain-git-sidecar — available when binary targets
+            //    were compiled alongside lib tests.
+            if let Ok(val) = std::env::var("CARGO_BIN_EXE_lain-git-sidecar") {
+                let p = PathBuf::from(val);
+                if p.exists() {
+                    return p;
+                }
+            }
+
+            // 2. Standard paths under the manifest dir.
+            if let Some(p) = check_target_root(&manifest_dir.join("target")) {
+                return p;
+            }
+
+            // 3. Custom CARGO_TARGET_DIR.
+            if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+                if let Some(p) = check_target_root(&PathBuf::from(target_dir)) {
+                    return p;
+                }
+            }
+
+            // 4. Last resort: build the sidecar binary to the manifest dir's
+            //    target directory.  We always build to the manifest dir's target
+            //    (not CARGO_TARGET_DIR) because that path has the source tree's
+            //    disk budget; CARGO_TARGET_DIR may be a small tempfs that can't
+            //    hold the dependency graph (libgit2, ort, tokenizers, etc.).
+            let target_dir = manifest_dir.join("target");
+
+            let output = match std::process::Command::new("cargo")
+                .args([
+                    "build",
+                    "--bin",
+                    "lain-git-sidecar",
+                    "--manifest-path",
+                    manifest_dir.join("Cargo.toml").to_str().unwrap(),
+                    "--target-dir",
+                    target_dir.to_str().unwrap(),
+                ])
+                .output()
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("[sidecar_binary_helpers] failed to run cargo build: {e}");
+                    return PathBuf::new();
+                }
+            };
+
+            if !output.status.success() {
+                eprintln!(
+                    "[sidecar_binary_helpers] cargo build --bin lain-git-sidecar failed:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return PathBuf::new();
+            }
+
+            // cargo build prints "  Compiling lain vX.Y.Z ..." lines followed by
+            // "    Finished ..." / "    Running ..." lines. The binary path is
+            // the last whitespace-separated token on lines that end with the
+            // binary name.  Extract the first such token after the last "Finished"
+            // or "Running" line in stdout.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut built_path: Option<PathBuf> = None;
+            let exe_suffix = std::env::consts::EXE_SUFFIX;
+            for line in stdout.lines().rev() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // Look for a token ending with the binary name.
+                for token in trimmed.split_whitespace().rev() {
+                    let t = token.trim_end_matches(|c: char| c == ',' || c == ')');
+                    if t.ends_with(SIDECAR_NAME)
+                        || t.ends_with(&format!("lain-git-sidecar{exe_suffix}"))
+                    {
+                        let candidate = PathBuf::from(t);
+                        if candidate.exists() {
+                            built_path = Some(candidate);
+                            break;
+                        }
+                    }
+                }
+                if built_path.is_some() {
+                    break;
+                }
+            }
+
+            built_path.unwrap_or_else(|| {
+                // Fallback: construct the expected path manually.
+                let fallback = target_dir
+                    .join(if cfg!(debug_assertions) {
+                        "debug"
+                    } else {
+                        "release"
+                    })
+                    .join(SIDECAR_NAME);
+                if fallback.exists() {
+                    fallback
+                } else {
+                    PathBuf::new()
+                }
+            })
+        });
+        if cached.as_os_str().is_empty() {
+            None
+        } else {
+            Some(cached.clone())
+        }
+    }
+
+    /// Resolves (or builds) the `lain-git-sidecar` binary and sets the
+    /// `LAIN_GIT_SIDECAR_BIN` environment variable to point at it.
+    /// Returns the resolved path on success, `None` if the binary could
+    /// not be located or built.
+    ///
+    /// Tests that exercise `GitSensorMode::Sidecar` behaviour **must** call
+    /// this function before creating any `SidecarGitSensor` or
+    /// `LainServer` in sidecar mode.  Calling it is idempotent: the binary
+    /// is located or built at most once per test binary invocation.
+    pub fn ensure_sidecar_bin_env() -> Option<PathBuf> {
+        let path = resolve_or_build_sidecar_binary()?;
+        std::env::set_var("LAIN_GIT_SIDECAR_BIN", &path);
+        Some(path)
+    }
+}
+
+#[cfg(test)]
 mod tracked_files_tests {
     use super::*;
 
