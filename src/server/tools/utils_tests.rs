@@ -501,6 +501,7 @@ mod file_content_cache_tests {
             label: None,
             last_lsp_sync: None,
             last_git_sync: None,
+            container: None,
             commit_hash: None,
             is_hydrated: false,
             repo_id: None,
