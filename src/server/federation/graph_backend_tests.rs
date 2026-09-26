@@ -214,7 +214,7 @@ fn petgraph_backend_rejects_headerless_legacy_payload() {
 fn petgraph_backend_rejects_short_file() {
     let dir = tempfile::tempdir().unwrap();
     let bin_path = dir.path().join("federated_graph.bin");
-    std::fs::write(&bin_path, &[0u8; 4]).unwrap();
+    std::fs::write(&bin_path, [0u8; 4]).unwrap();
 
     let err = match PetgraphBackend::new(dir.path()) {
         Ok(_) => panic!("expected FederationSchemaMismatch"),
