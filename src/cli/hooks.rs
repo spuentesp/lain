@@ -266,7 +266,6 @@ fn write_session(agent_name: &str, sess: &HookSession) -> Result<()> {
     Ok(())
 }
 
-
 /// Normalize the `--url` flag value to the canonical MCP endpoint URL.
 /// Accepts both shapes for backwards compatibility with the project-wide
 /// `LAIN_URL=http://localhost:9999/mcp` default:
@@ -672,7 +671,10 @@ fn release_filesystem(path: &str, agent_name: &str) -> Result<()> {
     let nonce = read_lock_nonce(agent_name, &lock_path)?;
     match nonce {
         None => {
-            println!("no recorded nonce for {}; sentinel left in place", lock_path.display());
+            println!(
+                "no recorded nonce for {}; sentinel left in place",
+                lock_path.display()
+            );
             Ok(())
         }
         Some(n) => match presence_lock::release_lock_for_path(&workspace_root, file_path, &n) {
@@ -681,11 +683,17 @@ fn release_filesystem(path: &str, agent_name: &str) -> Result<()> {
                 println!("released {}", lock_path.display());
                 Ok(())
             }
-            Err(presence_lock::ReleaseError::NotOwner { expected, found, .. }) => Err(anyhow::anyhow!(
+            Err(presence_lock::ReleaseError::NotOwner {
+                expected, found, ..
+            }) => Err(anyhow::anyhow!(
                 "not the owner of {}: expected nonce {}, found {}",
                 lock_path.display(),
                 expected,
-                if found.is_empty() { "<none>".to_string() } else { found }
+                if found.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    found
+                }
             )),
             Err(presence_lock::ReleaseError::Io(e)) => {
                 // Nonce is intentionally NOT removed; retry can use it.
@@ -903,7 +911,10 @@ pub fn unlock(workspace_root: &str, path: &str, agent_name: &str) -> Result<()> 
             // by this CLI, or the session file is too old. Surface
             // the sentinel as-is (still operator-readable) and let
             // the operator remove it by hand if they really mean it.
-            println!("no recorded nonce for {}; sentinel left in place", lock_path.display());
+            println!(
+                "no recorded nonce for {}; sentinel left in place",
+                lock_path.display()
+            );
             Ok(())
         }
         Some(n) => match presence_lock::release_lock_for_path(workspace, file_path, &n) {
@@ -912,11 +923,17 @@ pub fn unlock(workspace_root: &str, path: &str, agent_name: &str) -> Result<()> 
                 println!("released {}", lock_path.display());
                 Ok(())
             }
-            Err(presence_lock::ReleaseError::NotOwner { expected, found, .. }) => Err(anyhow::anyhow!(
+            Err(presence_lock::ReleaseError::NotOwner {
+                expected, found, ..
+            }) => Err(anyhow::anyhow!(
                 "not the owner of {}: expected nonce {}, found {}",
                 lock_path.display(),
                 expected,
-                if found.is_empty() { "<none>".to_string() } else { found }
+                if found.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    found
+                }
             )),
             Err(presence_lock::ReleaseError::Io(e)) => {
                 // Nonce is intentionally NOT removed; retry can use it.

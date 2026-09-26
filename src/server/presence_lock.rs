@@ -105,9 +105,18 @@ pub enum ReleaseError {
 impl std::fmt::Display for ReleaseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReleaseError::NotOwner { path, expected, found } => {
-                write!(f, "lock at {} no longer owned by us: expected nonce {}, found {}",
-                       path.display(), expected, found)
+            ReleaseError::NotOwner {
+                path,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "lock at {} no longer owned by us: expected nonce {}, found {}",
+                    path.display(),
+                    expected,
+                    found
+                )
             }
             ReleaseError::Io(e) => write!(f, "I/O error during lock release: {}", e),
         }
@@ -305,11 +314,7 @@ pub fn lock_path_for(workspace_root: &Path, path: &Path) -> PathBuf {
 /// `unlock(<file>)` against this specific path — atomic, and
 /// incapable of clobbering any other holder because no other lock
 /// lives at this filename.
-pub fn lock_path_for_with_nonce(
-    workspace_root: &Path,
-    path: &Path,
-    nonce: &str,
-) -> PathBuf {
+pub fn lock_path_for_with_nonce(workspace_root: &Path, path: &Path, nonce: &str) -> PathBuf {
     workspace_root
         .join(".lain")
         .join("locks")
@@ -347,7 +352,12 @@ fn current_holder(workspace_root: &Path, path: &Path) -> Option<LockConflict> {
             continue;
         }
         let (holder, kind, intent, mtime) = read_current_holder(&entry_path);
-        return Some(LockConflict { holder, kind, intent, mtime });
+        return Some(LockConflict {
+            holder,
+            kind,
+            intent,
+            mtime,
+        });
     }
     None
 }
@@ -355,7 +365,9 @@ fn current_holder(workspace_root: &Path, path: &Path) -> Option<LockConflict> {
 /// Read the lock file at `lock_path` and parse the holder's
 /// metadata. Returns placeholder fields on any error so the caller
 /// can still surface a best-effort conflict.
-pub(crate) fn read_current_holder(lock_path: &Path) -> (AgentId, AgentKind, ClaimIntent, SystemTime) {
+pub(crate) fn read_current_holder(
+    lock_path: &Path,
+) -> (AgentId, AgentKind, ClaimIntent, SystemTime) {
     let mtime = std::fs::metadata(lock_path)
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::now());
@@ -523,7 +535,11 @@ impl FileLock {
                 "lock at {} no longer owned by us: expected nonce {}, found {}",
                 self.path.display(),
                 self.nonce,
-                if found.is_empty() { "<missing>".to_string() } else { found }
+                if found.is_empty() {
+                    "<missing>".to_string()
+                } else {
+                    found
+                }
             ));
         }
         let now = SystemTime::now();

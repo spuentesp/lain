@@ -974,7 +974,11 @@ impl OccupancyMap {
     /// Returns the path of the filesystem lock for `agent_id`/`path`, if any.
     /// Used by tests to verify the lock file landed on disk.
     #[cfg(test)]
-    pub(crate) fn lock_lease_path(&self, agent_id: &AgentId, path: &Path) -> Option<std::path::PathBuf> {
+    pub(crate) fn lock_lease_path(
+        &self,
+        agent_id: &AgentId,
+        path: &Path,
+    ) -> Option<std::path::PathBuf> {
         let roots = self.claim_roots_snapshot();
         let canonical = canonical_claim_path(&roots, path);
         self.lock_leases
@@ -3116,7 +3120,10 @@ mod audit_persistence_tests {
         assert_eq!(occ.lock_leases_count(), 1);
         assert!(occ.has_lock_lease(&sess.id, Path::new("src/main.rs")));
         let lock_path = occ.lock_lease_path(&sess.id, Path::new("src/main.rs"));
-        assert!(lock_path.is_some(), "lock path must be recorded for Edit claim");
+        assert!(
+            lock_path.is_some(),
+            "lock path must be recorded for Edit claim"
+        );
         let lock_path = lock_path.unwrap();
         assert!(
             lock_path.exists(),
@@ -3136,7 +3143,8 @@ mod audit_persistence_tests {
         assert!(!occ.has_lock_lease(&sess.id, Path::new("src/lib.rs")));
         // Read claims don't create filesystem locks
         assert!(
-            occ.lock_lease_path(&sess.id, Path::new("src/lib.rs")).is_none(),
+            occ.lock_lease_path(&sess.id, Path::new("src/lib.rs"))
+                .is_none(),
             "filesystem lock must NOT be written for Read claim"
         );
 

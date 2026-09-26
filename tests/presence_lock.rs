@@ -11,7 +11,7 @@ use lain::server::presence::{AgentId, AgentKind, ClaimIntent};
 use lain::server::presence_lock::{release_lock, try_lock, ReleaseError};
 
 fn make_agent(id: &str) -> AgentId {
-    AgentId(format!("{id}-{}", std::process::id()).into())
+    AgentId(format!("{id}-{}", std::process::id()))
 }
 
 /// Serializes the hooks-CLI tests so they don't race on the process-wide
@@ -47,8 +47,7 @@ fn try_lock_acquires_release_releases() {
     let ws = tmp.path();
     let path = ws.join("foo.rs");
     let agent = make_agent("alice");
-    let lock = try_lock(ws, &path, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit)
-        .expect("lock");
+    let lock = try_lock(ws, &path, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("lock");
     assert!(lock.path.exists());
     release_lock(&lock).unwrap();
     assert!(!lock.path.exists());
@@ -65,8 +64,8 @@ fn try_lock_returns_conflict_on_duplicate() {
     let path = ws.join("foo.rs");
     let alice = make_agent("alice");
     let bob = make_agent("bob");
-    let first = try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit)
-        .expect("first");
+    let first =
+        try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("first");
     let second = try_lock(ws, &path, &bob, AgentKind::ClaudeCode, ClaimIntent::Edit);
     assert!(second.is_err());
     let conflict = second.unwrap_err();
@@ -86,8 +85,8 @@ fn stale_lock_can_be_taken_after_mtime_window() {
     let path = ws.join("foo.rs");
     let alice = make_agent("alice");
     let bob = make_agent("bob");
-    let first = try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit)
-        .expect("first");
+    let first =
+        try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("first");
     // Backdate the lock file's mtime to simulate a dead writer. Uses
     // `File::set_modified` (stable) rather than the nightly-only
     // `std::fs::set_file_mtime`.
@@ -99,8 +98,8 @@ fn stale_lock_can_be_taken_after_mtime_window() {
             .unwrap();
         f.set_modified(past).unwrap();
     }
-    let second = try_lock(ws, &path, &bob, AgentKind::Kimi, ClaimIntent::Read)
-        .expect("stale lock taken");
+    let second =
+        try_lock(ws, &path, &bob, AgentKind::Kimi, ClaimIntent::Read).expect("stale lock taken");
     release_lock(&second).unwrap();
 }
 
@@ -115,8 +114,7 @@ fn refresh_lock_keeps_lock_alive() {
     let ws = tmp.path();
     let path = ws.join("foo.rs");
     let agent = make_agent("alice");
-    let lock = try_lock(ws, &path, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit)
-        .expect("lock");
+    let lock = try_lock(ws, &path, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("lock");
     let mtime_before = std::fs::metadata(&lock.path).unwrap().modified().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
     lock.refresh_lock().unwrap();
@@ -139,74 +137,74 @@ fn zero_daemon_claim_and_release_work_without_a_server() {
     let _guard = HOOKS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let xdg = tempfile::tempdir().unwrap();
     with_hooks_xdg(xdg.path(), || {
-    let tmp = tempfile::tempdir().unwrap();
-    let ws = tmp.path();
-    let file_path = ws.join("foo.rs");
-    std::fs::write(&file_path, "fn x() {}").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let file_path = ws.join("foo.rs");
+        std::fs::write(&file_path, "fn x() {}").unwrap();
 
-    // Port 1 is reserved by IANA — nothing should be listening here.
-    let dead_url = "http://127.0.0.1:1";
+        // Port 1 is reserved by IANA — nothing should be listening here.
+        let dead_url = "http://127.0.0.1:1";
 
-    // First agent claims — should succeed via the filesystem fallback.
-    claim(
-        dead_url,
-        &[file_path.to_string_lossy().to_string()],
-        "",
-        "edit",
-        "agent-a",
-        "claude-code",
-        "",
-    )
-    .expect("zero-daemon claim must succeed when no server is running");
+        // First agent claims — should succeed via the filesystem fallback.
+        claim(
+            dead_url,
+            &[file_path.to_string_lossy().to_string()],
+            "",
+            "edit",
+            "agent-a",
+            "claude-code",
+            "",
+        )
+        .expect("zero-daemon claim must succeed when no server is running");
 
-    // Second agent claims the same path — must observe a conflict.
-    let conflict = claim(
-        dead_url,
-        &[file_path.to_string_lossy().to_string()],
-        "",
-        "edit",
-        "agent-b",
-        "kimi",
-        "",
-    );
-    assert!(
-        conflict.is_err(),
-        "second agent must see a filesystem conflict, got Ok"
-    );
+        // Second agent claims the same path — must observe a conflict.
+        let conflict = claim(
+            dead_url,
+            &[file_path.to_string_lossy().to_string()],
+            "",
+            "edit",
+            "agent-b",
+            "kimi",
+            "",
+        );
+        assert!(
+            conflict.is_err(),
+            "second agent must see a filesystem conflict, got Ok"
+        );
 
-    // Release — idempotent. First call removes the sentinel; second is
-    // a no-op (ENOENT-as-success). Both must succeed so a hook that
-    // fires twice doesn't break the agent.
-    release(
-        dead_url,
-        file_path.to_str().unwrap(),
-        "",
-        "agent-a",
-        "claude-code",
-        "",
-    )
-    .expect("first release must succeed");
-    release(
-        dead_url,
-        file_path.to_str().unwrap(),
-        "",
-        "agent-a",
-        "claude-code",
-        "",
-    )
-    .expect("second release must be idempotent");
+        // Release — idempotent. First call removes the sentinel; second is
+        // a no-op (ENOENT-as-success). Both must succeed so a hook that
+        // fires twice doesn't break the agent.
+        release(
+            dead_url,
+            file_path.to_str().unwrap(),
+            "",
+            "agent-a",
+            "claude-code",
+            "",
+        )
+        .expect("first release must succeed");
+        release(
+            dead_url,
+            file_path.to_str().unwrap(),
+            "",
+            "agent-a",
+            "claude-code",
+            "",
+        )
+        .expect("second release must be idempotent");
 
-    // After release, the second agent can claim cleanly.
-    claim(
-        dead_url,
-        &[file_path.to_string_lossy().to_string()],
-        "",
-        "edit",
-        "agent-b",
-        "kimi",
-        "",
-    )
-    .expect("agent-b must be able to claim after agent-a released");
+        // After release, the second agent can claim cleanly.
+        claim(
+            dead_url,
+            &[file_path.to_string_lossy().to_string()],
+            "",
+            "edit",
+            "agent-b",
+            "kimi",
+            "",
+        )
+        .expect("agent-b must be able to claim after agent-a released");
     })
 }
 
@@ -303,15 +301,20 @@ fn distinct_paths_have_distinct_claim_files() {
     let under = ws.join("a_b");
     let agent = make_agent("alice");
 
-    let lock_dotted =
-        try_lock(ws, &dotted, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit)
-            .expect("dotted path claim");
-    let lock_under =
-        try_lock(ws, &under, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit)
-            .expect("underscore path claim");
+    let lock_dotted = try_lock(
+        ws,
+        &dotted,
+        &agent,
+        AgentKind::ClaudeCode,
+        ClaimIntent::Edit,
+    )
+    .expect("dotted path claim");
+    let lock_under = try_lock(ws, &under, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit)
+        .expect("underscore path claim");
 
     assert_ne!(
-        lock_dotted.path, lock_under.path,
+        lock_dotted.path,
+        lock_under.path,
         "{} and {} must map to distinct sentinel files; got {:?} and {:?}",
         dotted.display(),
         under.display(),
@@ -352,9 +355,8 @@ fn stale_release_preserves_replacement_holder_under_repeat() {
         let alice = make_agent(&format!("alice-{iter}"));
         let bob = make_agent(&format!("bob-{iter}"));
 
-        let alice_lock =
-            try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit)
-                .expect("alice acquires");
+        let alice_lock = try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit)
+            .expect("alice acquires");
         let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
         {
             let f = std::fs::OpenOptions::new()
@@ -381,7 +383,10 @@ fn stale_release_preserves_replacement_holder_under_repeat() {
         );
 
         release_lock(&bob_lock).expect("bob's release succeeds");
-        assert!(!bob_lock.path.exists(), "iter {iter}: bob's release clears the sentinel");
+        assert!(
+            !bob_lock.path.exists(),
+            "iter {iter}: bob's release clears the sentinel"
+        );
     }
 }
 
@@ -402,9 +407,8 @@ fn stale_release_does_not_clobber_concurrent_acquire() {
         let alice = make_agent(&format!("alice-{iter}"));
         let bob = make_agent(&format!("bob-{iter}"));
 
-        let alice_lock =
-            try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit)
-                .expect("alice acquires");
+        let alice_lock = try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit)
+            .expect("alice acquires");
         let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
         {
             let f = std::fs::OpenOptions::new()
@@ -430,13 +434,7 @@ fn stale_release_does_not_clobber_concurrent_acquire() {
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                try_lock(
-                    &ws_b,
-                    &path_b,
-                    &bob,
-                    AgentKind::Kimi,
-                    ClaimIntent::Edit,
-                )
+                try_lock(&ws_b, &path_b, &bob, AgentKind::Kimi, ClaimIntent::Edit)
             })
         };
         let _ = alice_handle.join();
@@ -472,84 +470,82 @@ fn hook_release_preserves_nonce_on_failure_for_retry() {
     let _guard = HOOKS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let xdg = tempfile::tempdir().unwrap();
     with_hooks_xdg(xdg.path(), || {
-    let ws = tempfile::tempdir().unwrap();
-    let ws_str = ws.path().to_string_lossy().to_string();
-    let file_path = ws.path().join("foo.rs");
-    std::fs::write(&file_path, "fn x() {}").unwrap();
-    let path_str = file_path.to_string_lossy().to_string();
-    let agent_name = "retry-agent";
+        let ws = tempfile::tempdir().unwrap();
+        let ws_str = ws.path().to_string_lossy().to_string();
+        let file_path = ws.path().join("foo.rs");
+        std::fs::write(&file_path, "fn x() {}").unwrap();
+        let path_str = file_path.to_string_lossy().to_string();
+        let agent_name = "retry-agent";
 
-    // Acquire: writes a lock sentinel and records the nonce in the
-    // hooks session file under `XDG_CONFIG_HOME/lain/hooks/<agent>.session`.
-    lock(&ws_str, &path_str, agent_name, "claude-code", "edit")
-        .expect("lock must succeed");
-    let lock_path = lain::server::presence_lock::lock_path_for(ws.path(), &file_path);
-    let session_path =
-        lain::config::hooks_dir().join(format!("{agent_name}.session"));
+        // Acquire: writes a lock sentinel and records the nonce in the
+        // hooks session file under `XDG_CONFIG_HOME/lain/hooks/<agent>.session`.
+        lock(&ws_str, &path_str, agent_name, "claude-code", "edit").expect("lock must succeed");
+        let lock_path = lain::server::presence_lock::lock_path_for(ws.path(), &file_path);
+        let session_path = lain::config::hooks_dir().join(format!("{agent_name}.session"));
 
-    let nonce_before = read_nonce_from_session(&session_path, &lock_path);
-    assert!(
-        nonce_before.is_some(),
-        "lock must record the nonce in the hooks session"
-    );
+        let nonce_before = read_nonce_from_session(&session_path, &lock_path);
+        assert!(
+            nonce_before.is_some(),
+            "lock must record the nonce in the hooks session"
+        );
 
-    // The actual sentinel on disk lives at <canonical>.lock-<nonce_hex>,
-    // not at the canonical path used as the session-file key.
-    let nonce_value = nonce_before.as_ref().expect("nonce present");
-    let actual_lock_path = lain::server::presence_lock::lock_path_for_with_nonce(
-        ws.path(),
-        &file_path,
-        &nonce_value,
-    );
+        // The actual sentinel on disk lives at <canonical>.lock-<nonce_hex>,
+        // not at the canonical path used as the session-file key.
+        let nonce_value = nonce_before.as_ref().expect("nonce present");
+        let actual_lock_path = lain::server::presence_lock::lock_path_for_with_nonce(
+            ws.path(),
+            &file_path,
+            nonce_value,
+        );
 
-    // Force a release I/O failure by replacing the lock sentinel with
-    // a directory of the same name. `rename(L, T)` fails with `IsADirectory`
-    // because POSIX rename rejects source-dir → dest-file when the
-    // destination is on a non-empty filesystem, and the new
-    // compare-and-delete code surfaces that as `ReleaseError::Io`.
-    std::fs::remove_file(&actual_lock_path).unwrap();
-    std::fs::create_dir(&actual_lock_path).unwrap();
+        // Force a release I/O failure by replacing the lock sentinel with
+        // a directory of the same name. `rename(L, T)` fails with `IsADirectory`
+        // because POSIX rename rejects source-dir → dest-file when the
+        // destination is on a non-empty filesystem, and the new
+        // compare-and-delete code surfaces that as `ReleaseError::Io`.
+        std::fs::remove_file(&actual_lock_path).unwrap();
+        std::fs::create_dir(&actual_lock_path).unwrap();
 
-    let first_attempt = unlock(&ws_str, &path_str, agent_name);
-    assert!(
-        first_attempt.is_err(),
-        "unlock must fail when the lock path is a directory, got {first_attempt:?}"
-    );
+        let first_attempt = unlock(&ws_str, &path_str, agent_name);
+        assert!(
+            first_attempt.is_err(),
+            "unlock must fail when the lock path is a directory, got {first_attempt:?}"
+        );
 
-    let nonce_after_fail = read_nonce_from_session(&session_path, &lock_path);
-    assert_eq!(
-        nonce_after_fail, nonce_before,
-        "nonce must survive a failed release so the caller can retry"
-    );
+        let nonce_after_fail = read_nonce_from_session(&session_path, &lock_path);
+        assert_eq!(
+            nonce_after_fail, nonce_before,
+            "nonce must survive a failed release so the caller can retry"
+        );
 
-    // Restore the lock sentinel as a regular file carrying the same
-    // nonce. Now the second `unlock` call can authenticate and finish
-    // the release.
-    std::fs::remove_dir(&actual_lock_path).unwrap();
-    let body = serde_json::json!({
-        "agent_id": "retry-agent",
-        "kind": "claude-code",
-        "intent": "edit",
-        "nonce": nonce_value,
-        "claimed_at": 0,
-    });
-    std::fs::write(&actual_lock_path, serde_json::to_string(&body).unwrap()).unwrap();
+        // Restore the lock sentinel as a regular file carrying the same
+        // nonce. Now the second `unlock` call can authenticate and finish
+        // the release.
+        std::fs::remove_dir(&actual_lock_path).unwrap();
+        let body = serde_json::json!({
+            "agent_id": "retry-agent",
+            "kind": "claude-code",
+            "intent": "edit",
+            "nonce": nonce_value,
+            "claimed_at": 0,
+        });
+        std::fs::write(&actual_lock_path, serde_json::to_string(&body).unwrap()).unwrap();
 
-    let second_attempt = unlock(&ws_str, &path_str, agent_name);
-    assert!(
-        second_attempt.is_ok(),
-        "retry must succeed once the lock is recoverable, got {second_attempt:?}"
-    );
-    assert!(
-        !actual_lock_path.exists(),
-        "lock sentinel must be gone after a successful retry"
-    );
+        let second_attempt = unlock(&ws_str, &path_str, agent_name);
+        assert!(
+            second_attempt.is_ok(),
+            "retry must succeed once the lock is recoverable, got {second_attempt:?}"
+        );
+        assert!(
+            !actual_lock_path.exists(),
+            "lock sentinel must be gone after a successful retry"
+        );
 
-    let nonce_after_success = read_nonce_from_session(&session_path, &lock_path);
-    assert!(
-        nonce_after_success.is_none(),
-        "nonce must be cleared after a successful release (no dangling credential)"
-    );
+        let nonce_after_success = read_nonce_from_session(&session_path, &lock_path);
+        assert!(
+            nonce_after_success.is_none(),
+            "nonce must be cleared after a successful release (no dangling credential)"
+        );
     })
 }
 
