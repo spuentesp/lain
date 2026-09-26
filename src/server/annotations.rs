@@ -31,6 +31,15 @@ use uuid::Uuid;
 /// boundary; rows over the cap are rejected before the SQL write.
 pub const MAX_BODY_BYTES: usize = 4096;
 
+/// Maximum number of cross-references an annotation may carry.
+///
+/// The body is capped at [`MAX_BODY_BYTES`], but a peer can still ship
+/// millions of `AnnotationTarget` entries in `refs`; the whole array
+/// is serialized into the SQLite row's `refs_json` TEXT column, and
+/// re-listed on every `list_annotations` call. Without this cap one
+/// annotation can balloon the response to gigabytes.
+pub const MAX_REFS: usize = 256;
+
 fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
@@ -309,6 +318,11 @@ impl AnnotationStore {
         if a.body.len() > MAX_BODY_BYTES {
             return Err(LainError::InvalidArgument(format!(
                 "annotation body exceeds {MAX_BODY_BYTES} bytes"
+            )));
+        }
+        if a.refs.len() > MAX_REFS {
+            return Err(LainError::InvalidArgument(format!(
+                "annotation refs exceeds {MAX_REFS} entries"
             )));
         }
         let refs_json = serde_json::to_string(&a.refs).unwrap_or_else(|_| "[]".into());
@@ -1000,5 +1014,51 @@ mod tests {
         // Reconstructed prefix must equal the first 239 chars of the body.
         let prefix = &body[..239];
         assert!(s.body_excerpt.starts_with(prefix));
+    }
+
+    #[test]
+    fn add_rejects_oversized_refs_array() {
+        // Without `MAX_REFS`, a peer could ship an annotation with
+        // millions of `AnnotationTarget` entries; the whole array is
+        // serialized into the SQLite row's `refs_json` column and
+        // re-listed on every `list_annotations` call.
+        let (_tmp, store) = open_store();
+
+        // MAX_REFS + 1 entries — over the cap.
+        let too_many: Vec<AnnotationTarget> = (0..=MAX_REFS)
+            .map(|i| AnnotationTarget::Symbol {
+                symbol: format!("s{i}"),
+            })
+            .collect();
+        let over = AddAnnotationInputs {
+            target: AnnotationTarget::Symbol {
+                symbol: "fn a".into(),
+            },
+            kind: AnnotationKind::Note,
+            body: "ok".into(),
+            author: AgentId("alice".into()),
+            refs: too_many,
+        }
+        .into_annotation();
+        let err = store.add(&over).unwrap_err();
+        assert!(format!("{err}").contains("refs"), "error names the field");
+
+        // The boundary itself is allowed.
+        let exactly_max: Vec<AnnotationTarget> = (0..MAX_REFS)
+            .map(|i| AnnotationTarget::Symbol {
+                symbol: format!("s{i}"),
+            })
+            .collect();
+        let at = AddAnnotationInputs {
+            target: AnnotationTarget::Symbol {
+                symbol: "fn a".into(),
+            },
+            kind: AnnotationKind::Note,
+            body: "ok".into(),
+            author: AgentId("alice".into()),
+            refs: exactly_max,
+        }
+        .into_annotation();
+        store.add(&at).unwrap();
     }
 }

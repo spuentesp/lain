@@ -5,7 +5,7 @@ tool descriptions. The original implementation plan was retired on 2026-09-20
 after its completed and aspirational sections began contradicting one another.
 Git history contains the full plan.
 
-For unfinished work, use [`FOLLOWUPS.md`](FOLLOWUPS.md). For user-facing
+For unfinished work, see the issue tracker. For user-facing
 behavior, use the [quickstart](QUICKSTART.md), [user manual](USER_MANUAL.md),
 and [tool guide](quickstart-tools.md).
 
@@ -28,7 +28,7 @@ The stable design principles are:
 
 | # | Milestone | Current state |
 |---|---|---|
-| 1 | Frictionless distribution | Published at npm `latest`; Linux and macOS acceptance pass. Windows clean-room installation is the active defect tracked in `FOLLOWUPS.md`. |
+| 1 | Frictionless distribution | Published at npm `latest`; Linux and macOS acceptance pass. Windows clean-room installation is the active defect, tracked in the issue tracker. |
 | 2 | Guided `lain setup` | Complete for generic, Claude Code, Codex, Cursor, VS Code, and Continue adapters. |
 | 3 | `lain doctor` | Complete; shares the capability/readiness model used by `lain capabilities` and `lain status`. |
 | 4 | Zero-config MCP startup | Complete; background indexing, per-repository readiness, cooperative cancellation, blocking-work isolation, and watcher handoff are implemented. The async-only upstream LSP transport remains a separately tracked limitation. |
@@ -63,4 +63,4 @@ describe the current generated surface rather than preserving old counts.
 
 Do not append implementation diaries or completed PR inventories here. Update
 the milestone table only when user-visible state changes, and place concrete
-unfinished work with evidence and acceptance criteria in `FOLLOWUPS.md`.
+unfinished work with evidence and acceptance criteria in the issue tracker.

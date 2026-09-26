@@ -19,7 +19,7 @@ missing-DLL and missing-sidecar failures, while
 `npm-shim/scripts/install.test.js` covers the install side. The
 actual release that carries the fix is the next release PR — until
 the next tag, the published artifact still ships `lain.exe` alone.
-See [`FOLLOWUPS.md`](FOLLOWUPS.md).
+Unfinished work deferred from merged PRs is tracked in the issue tracker.
 
 ## What the runtime needs
 
@@ -104,7 +104,7 @@ should verify each completed step before announcing the release.
       `runtime.js::verifyBinary` already does; the smoke is a
       human-facing sanity check that the published launcher actually
       ran end to end (download → extract → chmod → exec).
-- [ ] **Update current status.** Refresh `docs/FOLLOWUPS.md` and the milestone
+- [ ] **Update current status.** Refresh the milestone
       summary in `docs/AGENT_UX_ROADMAP.md` if the release changes published
       behavior or resolves a distribution defect.
 

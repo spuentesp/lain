@@ -45,7 +45,7 @@ impl LainServer {
         if self.ingest().graph().is_read_only() {
             return Ok(());
         }
-        // AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md): every long-
+        // AGENT_UX_ROADMAP.md M4 follow-up: every long-
         // running phase observes the server-owned cancellation token.
         // A `Drop` on `LainServer` cancels it (via `LifecycleInfo`'s
         // `Drop` impl), so a shutdown during a cold-boot re-index

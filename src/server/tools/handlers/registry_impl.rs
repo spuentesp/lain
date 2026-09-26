@@ -1413,8 +1413,7 @@ inventory::submit!(ToolHandlerEntry(&SearchCodeHandler));
 //
 // `explain_symbol` and `get_blast_radius` both surface an
 // `### Open annotations` section so the agent's first call about a
-// symbol surfaces the human notes left there (FOLLOWUPS.md
-// "Auto-include in `explain_symbol` / `get_blast_radius` markdown").
+// symbol surfaces the human notes left there ("Auto-include in `explain_symbol` / `get_blast_radius` markdown").
 // This helper does the lookup against the live annotation registry
 // attached to the executor's `ToolContext` and formats the appendix
 // the way `annotation_tools::format_open_annotations_section` lays it

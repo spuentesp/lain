@@ -480,7 +480,7 @@ the deterministic `agy_e2e.sh` pass:
   mid-cycle, a fresh server is started after the stale-lock
   window, bob attempts the same scope. Variant 1 currently
   surfaces a real linearizability gap (`OccupancyMap::load` does
-  not drop stale-by-agent claims); see `FOLLOWUPS.md`.
+  not drop stale-by-agent claims); tracked in the issue tracker.
 - **corrupt state** — the state file is truncated between
   iterations; recovery must succeed.
 - **stale-lock takeover** — a stale filesystem lock is planted

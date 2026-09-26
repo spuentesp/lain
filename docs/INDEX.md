@@ -36,7 +36,7 @@ single-repository setup, federation, and basic troubleshooting.
   automated guardrails
 - [Agent UX design record](AGENT_UX_ROADMAP.md): stable milestone vocabulary
   referenced by code and tool descriptions
-- [Current follow-ups](FOLLOWUPS.md): unfinished work deferred from merged PRs
+
 - [Vulnerability triage](VULNS.md): current OSV findings and remediation
 - [OpenSSF Scorecard](SCORECARD.md): current external score and process gaps
 - [Graph data-source decision](opinions/graph-tab-data-source.md): why the
