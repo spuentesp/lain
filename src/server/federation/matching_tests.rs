@@ -8,6 +8,20 @@ fn node(repo: &str, name: &str, sig: &str) -> GraphNode {
     n
 }
 
+fn mk_node(name: &str, kind: &str, repo: &str, signature: Option<&str>, line: u32) -> GraphNode {
+    let node_kind = match kind {
+        "Function" => NodeType::Function,
+        "Method" => NodeType::Method,
+        _ => panic!("unsupported test kind {kind}"),
+    };
+    let kind_str = format!("{node_kind:?}");
+    let mut n = GraphNode::new(node_kind, name.into(), "src/lib.rs".into())
+        .with_location(line, line + 2);
+    n.id = format!("{repo}:{kind_str}:{}:{}:{}", "src/lib.rs", name, line);
+    n.signature = signature.map(|s| s.to_string());
+    n
+}
+
 #[test]
 fn signature_tokens_splits_on_punctuation() {
     let toks = signature_tokens("fn verify_token(user: &User) -> Result<Token>");
@@ -47,8 +61,8 @@ fn find_cross_repo_matches_above_threshold() {
         node("repo3", "validate", "fn validate(x: i32) -> bool"),
         node("repo4", "verify_token", "fn totally_different() -> String"),
     ];
-    let matches = find_cross_repo_matches(&new_node, &candidates, 5, 0.5);
-    let matched_ids: Vec<&str> = matches.iter().map(|(id, _)| id.as_str()).collect();
+    let matches = find_cross_repo_matches(&new_node, &candidates, 5, 0.5, false);
+    let matched_ids: Vec<&str> = matches.iter().map(|(id, _, _)| id.as_str()).collect();
     assert!(matched_ids.contains(&"repo2:Function:src/lib.rs:verify_token:0"));
     assert!(!matched_ids.contains(&"repo3:Function:src/lib.rs:validate:0"));
     assert!(!matched_ids.contains(&"repo4:Function:src/lib.rs:verify_token:0"));
@@ -57,14 +71,12 @@ fn find_cross_repo_matches_above_threshold() {
 #[test]
 fn find_cross_repo_matches_caps_at_top_k() {
     let new_node = node("repo1", "f", "fn f(x: i32)");
-    let candidates: Vec<GraphNode> = (0..20)
-        .map(|i| {
-            let mut n = node(&format!("repo{i}"), "f", "fn f(x: i32)");
-            n.signature = Some("fn f(x: i32)".into());
-            n
-        })
-        .collect();
-    let matches = find_cross_repo_matches(&new_node, &candidates, 5, 0.0);
+    let candidates: Vec<GraphNode> = (0..20).map(|i| {
+        let mut n = node(&format!("repo{i}"), "f", "fn f(x: i32)");
+        n.signature = Some("fn f(x: i32)".into());
+        n
+    }).collect();
+    let matches = find_cross_repo_matches(&new_node, &candidates, 5, 0.0, false);
     assert_eq!(matches.len(), 5);
 }
 
@@ -72,6 +84,45 @@ fn find_cross_repo_matches_caps_at_top_k() {
 fn find_cross_repo_matches_excludes_same_repo() {
     let new_node = node("repo1", "f", "fn f(x: i32)");
     let candidates = vec![node("repo1", "f", "fn f(x: i32)")];
-    let matches = find_cross_repo_matches(&new_node, &candidates, 5, 0.0);
+    let matches = find_cross_repo_matches(&new_node, &candidates, 5, 0.0, false);
     assert!(matches.is_empty(), "same-repo matches should be excluded");
+}
+
+#[test]
+fn find_cross_repo_matches_both_signatures_empty_returns_empty() {
+    let a = mk_node("a", "Method", "repo_a", None, 1);
+    let b = mk_node("a", "Method", "repo_b", None, 1);
+    let out = find_cross_repo_matches(&a, &[b], 5, 0.5, false);
+    assert!(out.is_empty(), "empty signatures must produce zero matches, got {out:?}");
+}
+
+#[test]
+fn find_cross_repo_matches_name_only_without_flag_returns_empty() {
+    // Name overlap exists but signatures are also empty → must refuse.
+    let a = mk_node("verify_token", "Function", "repo_a", None, 1);
+    let b = mk_node("verify_token", "Function", "repo_b", None, 1);
+    let out = find_cross_repo_matches(&a, &[b], 5, 0.5, false);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn find_cross_repo_matches_shared_param_name_passes() {
+    let a = mk_node("foo", "Function", "repo_a", Some("pub fn foo(x: u32)"), 1);
+    let b = mk_node("foo", "Function", "repo_b", Some("pub fn foo(x: i64)"), 1);
+    let out = find_cross_repo_matches(&a, &[b], 5, 0.5, false);
+    assert_eq!(out.len(), 1, "shared param `x` should match, got {out:?}");
+    let (id, _sim, conf) = &out[0];
+    assert!(id.starts_with("repo_b:"));
+    assert_eq!(*conf, MatchConfidence::Signature);
+}
+
+#[test]
+fn find_cross_repo_matches_stop_words_filtered() {
+    // Both signatures are pure stop words (just `fn new()`). No
+    // non-stop tokens to overlap. The `new` itself is in
+    // SIGNATURE_STOP_WORDS, so it doesn't count as overlap.
+    let a = mk_node("new", "Function", "repo_a", Some("pub fn new"), 1);
+    let b = mk_node("new", "Function", "repo_b", Some("fn new"), 1);
+    let out = find_cross_repo_matches(&a, &[b], 5, 0.5, false);
+    assert!(out.is_empty(), "stop-word-only signatures should not match, got {out:?}");
 }

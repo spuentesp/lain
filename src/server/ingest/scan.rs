@@ -218,6 +218,7 @@ pub async fn scan_file_structure(
                         &mut edges,
                         &file_id,
                         symbol,
+                        &workspace,
                         lsp_sync,
                         git_sync,
                         commit_hash.clone(),
@@ -404,6 +405,30 @@ fn apply_attribute_labels(defs: &[crate::treesitter::SymbolDef], nodes: &mut [Gr
     }
 }
 
+/// When the LSP returns an empty `detail`, derive a signature from
+/// the symbol's source body so cross-repo matching has a signal to
+/// work with. Cuts at the first `{` (Rust/TS/JS/Go) or `:` (Python/Ruby).
+/// Multi-line signatures (rare — mostly Rust `where` clauses) fall back
+/// to the first source line.
+pub fn derive_signature(symbol: &HierarchicalSymbol, workspace: &Path) -> Option<String> {
+    let node = &symbol.node;
+    if let Some(sig) = &node.signature {
+        if !sig.is_empty() { return Some(sig.clone()); }
+    }
+    let line_start = node.line_start?;
+    let path = if Path::new(&node.path).is_absolute() {
+        PathBuf::from(&node.path)
+    } else {
+        workspace.join(&node.path)
+    };
+    let content = std::fs::read_to_string(&path).ok()?;
+    let line = content.lines().nth(line_start.saturating_sub(1) as usize)?;
+    let trimmed = line.trim();
+    let end = trimmed.find(['{', ':']).unwrap_or(trimmed.len());
+    let candidate = trimmed[..end].trim();
+    if candidate.is_empty() { None } else { Some(candidate.to_string()) }
+}
+
 /// Does this symbol name a unit-test container?
 ///
 /// The LSP hands back names, kinds and ranges — never attributes — so a
@@ -423,19 +448,13 @@ pub async fn process_symbol_recursive_enriched(
     edges: &mut Vec<GraphEdge>,
     parent_id: &str,
     symbol: HierarchicalSymbol,
+    workspace: &Path,
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
 ) {
     process_symbol_recursive_inner(
-        nodes,
-        edges,
-        parent_id,
-        symbol,
-        lsp_sync,
-        git_sync,
-        commit_hash,
-        false,
+        nodes, edges, parent_id, symbol, workspace, lsp_sync, git_sync, commit_hash, false,
     )
     .await
 }
@@ -447,12 +466,19 @@ async fn process_symbol_recursive_inner(
     edges: &mut Vec<GraphEdge>,
     parent_id: &str,
     symbol: HierarchicalSymbol,
+    workspace: &Path,
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
     inside_test_container: bool,
 ) {
+    let derived_signature = derive_signature(&symbol, workspace);
     let mut node = symbol.node;
+    if node.signature.as_deref().map(str::is_empty).unwrap_or(true) {
+        if let Some(derived) = derived_signature {
+            node.signature = Some(derived);
+        }
+    }
     node.last_lsp_sync = Some(lsp_sync);
     node.last_git_sync = Some(git_sync);
     node.commit_hash = Some(commit_hash.clone());
@@ -479,6 +505,7 @@ async fn process_symbol_recursive_inner(
             edges,
             &node_id,
             child,
+            workspace,
             lsp_sync,
             git_sync,
             commit_hash.clone(),
@@ -692,6 +719,61 @@ mod tests {
                 .map(|e| (&e.edge_type, &e.source_id, &e.target_id))
                 .collect::<Vec<_>>()
         );
+    }
+
+    fn make_symbol(name: &str, path: &str, line_start: Option<u32>, signature: Option<&str>) -> HierarchicalSymbol {
+        let mut node = GraphNode::new(NodeType::Function, name.into(), path.into());
+        node.line_start = line_start;
+        node.signature = signature.map(|s| s.to_string());
+        HierarchicalSymbol { node, children: Vec::new() }
+    }
+
+    #[test]
+    fn derive_signature_passthrough_when_lsp_provided() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn foo() {}\n").unwrap();
+        let sym = make_symbol("foo", "lib.rs", Some(1), Some("pub fn foo()"));
+
+        assert_eq!(
+            derive_signature(&sym, dir.path()),
+            Some("pub fn foo()".into())
+        );
+    }
+
+    #[test]
+    fn derive_signature_rust_function_with_empty_lsp_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn foo(x: u32) -> Result<(), Error> {\n    todo!()\n}\n",
+        ).unwrap();
+        let sym = make_symbol("foo", "lib.rs", Some(1), None);
+
+        let derived = derive_signature(&sym, dir.path()).unwrap();
+        assert!(derived.starts_with("pub fn foo"), "got: {derived}");
+        assert!(!derived.contains('{'), "must cut at the brace");
+    }
+
+    #[test]
+    fn derive_signature_python_function_cuts_at_colon() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("foo.py"),
+            "def foo(x: int) -> None:\n    pass\n",
+        ).unwrap();
+        let sym = make_symbol("foo", "foo.py", Some(1), None);
+
+        let derived = derive_signature(&sym, dir.path()).unwrap();
+        assert!(derived.starts_with("def foo"), "got: {derived}");
+        assert!(!derived.contains(':'), "must cut at the colon");
+    }
+
+    #[test]
+    fn derive_signature_returns_none_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sym = make_symbol("foo", "src/lib.rs", Some(1), None);
+
+        assert_eq!(derive_signature(&sym, dir.path()), None);
     }
 }
 

@@ -573,55 +573,10 @@ impl FederatedIndex {
                 })
             })
             .collect();
-        // Collect matched edges and the peer nodes they target, then write
-        // both in one batch each at the end. `upsert_node`/`upsert_edge`
-        // (singular) each do a synchronous `save_to_disk_sync()` per call —
-        // exactly what `upsert_nodes_batch`/`upsert_edges_batch` two blocks
-        // above this one exist to avoid ("calling upsert_node per node
-        // would do ~3k disk syncs"). Before this fix, this loop's match
-        // list was always empty (the id-parse bug dropped every
-        // candidate), so calling the singular methods here never actually
-        // cost anything; now that matches materialize, a federation with
-        // many cross-repo peers would re-wedge the loader one disk sync
-        // per match. `target_nodes` is keyed by id to dedupe: several
-        // matches can target the same peer node.
-        let mut target_nodes: std::collections::HashMap<String, GraphNode> =
-            std::collections::HashMap::new();
-        let mut cross_repo_edges: Vec<GraphEdge> = Vec::new();
-        for new_node in &batch_nodes {
-            let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5);
-            for (target_gid, sim) in matches {
-                // The matched node's owning repo may not have run its own
-                // `project_repo` yet (callers project repos one at a time,
-                // in whatever order they choose — this test fixture calls
-                // `project_repo(a)` then `project_repo(b)`), so the target
-                // may exist in `other_nodes` (read from the in-memory
-                // per-repo index) without yet existing in `self.backend`.
-                // `upsert_edges_batch` requires both endpoints to already
-                // be present.
-                //
-                // Queue the full node we already have in `other_nodes`,
-                // not a bare stand-in built from just its kind/path/name
-                // (the way the pending cross-repo `Calls` edges drained
-                // above have to, since that path only has a bare id
-                // string to work with). The backend's node-upsert overwrite
-                // is unconditional — `GraphNode::new`'s `is_hydrated: true`
-                // default means the "only overwrite if hydrated" guard in
-                // `GraphDatabase::upsert_node` never actually blocks
-                // anything here — so a bare 4-field placeholder written
-                // *after* the target repo's own `project_repo` has already
-                // published the real node (richer node data can arrive in
-                // either order; `project_repo` calls are not sequenced)
-                // would silently strip its signature, line numbers,
-                // docstring, and embedding. Queuing the full node here is
-                // strictly correct in both orderings: if the target hasn't
-                // been projected yet, this is that node's first (complete)
-                // appearance; if it already has been, this just re-writes
-                // the same data.
-                if let Some(target_node) = other_nodes.iter().find(|n| n.id == target_gid) {
-                    target_nodes.insert(target_gid.clone(), target_node.clone());
-                }
-                cross_repo_edges.push(GraphEdge {
+        for new_node in &nodes {
+            let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5, false);
+            for (target_gid, sim, _confidence) in matches {
+                self.backend.upsert_edge(GraphEdge {
                     edge_type: EdgeType::CrossRepoSameSymbol,
                     source_id: GlobalId::new(id, new_node.node_type.clone(), &new_node.path, &new_node.name, new_node.line_start)
                         .as_str()
@@ -632,13 +587,6 @@ impl FederatedIndex {
                     provenance: None,
                 });
             }
-        }
-        if !target_nodes.is_empty() {
-            let nodes: Vec<GraphNode> = target_nodes.into_values().collect();
-            self.backend.upsert_nodes_batch(&nodes)?;
-        }
-        if !cross_repo_edges.is_empty() {
-            self.backend.upsert_edges_batch(&cross_repo_edges)?;
         }
 
         // Rebuild the federation-wide `symbol_to_repos` only when this
