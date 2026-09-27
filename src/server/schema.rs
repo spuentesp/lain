@@ -184,7 +184,7 @@ impl std::fmt::Display for NodeType {
 }
 
 /// Edge types in the Lain graph
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EdgeType {
     Contains,      // File -> Symbol
     Calls,         // Function -> Function

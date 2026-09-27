@@ -2221,3 +2221,184 @@ async fn cross_repo_matches_with_synthesized_signatures_finds_real_overlap() {
     );
     assert_eq!(matches[0].2, MatchConfidence::Signature);
 }
+
+// ---------------------------------------------------------------------------
+// F10 — federation edge reconciliation (Codex review wave-2 contract
+// `reconciliation_removes_obsolete_calls_between_live_nodes`).
+//
+// Repro: a repo drops a `Calls` edge from its per-repo DB while the
+// caller and callee are still indexed. Before the fix, `project_edges`
+// only upserted, so the federated edge persisted until the node itself
+// went away — `search_org` and blast-radius queries kept reporting a
+// dependency that no longer existed.
+//
+// The reconciliation pass keys edge ownership off the
+// `source_id` prefix: every edge `project_edges` writes has its
+// `source_id` rewritten to the calling repo's global-id form, so the
+// prefix `<repo>:` is unambiguous and stable. On every projection the
+// pass computes the diff between the backend's current set of
+// repo-owned edges and the set the current projection would produce,
+// and removes the difference.
+//
+// `CrossRepoSameSymbol` peer edges and cross-repo `Calls` follow the
+// same rule — the source prefix is the calling repo's id, and that
+// repo's `project_edges` is the only writer that knows when the edge
+// should be retracted.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reconciliation_removes_obsolete_calls_between_live_nodes() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("svc");
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    std::fs::write(
+        repo_root.join("src/lib.rs"),
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )
+    .unwrap();
+    git2::Repository::init(&repo_root).unwrap();
+
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    let id = RepoId::new("svc").unwrap();
+    let source = WorkspaceDirSource::new(id.clone(), repo_root).unwrap();
+    fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+
+    let repo = fed.get_repo(&id).expect("repo registered");
+
+    // Seed two function nodes directly into the per-repo DB. We bypass
+    // `RepoIndex::index()` because the regression is about what
+    // `project_edges` does with whatever the per-repo DB reports, not
+    // about how the ingest pipeline produces it. The local node ids
+    // match what `upsert_node` mints deterministically from
+    // (kind, path, name, line).
+    let caller_local = GraphNode::new(
+        NodeType::Function,
+        "caller".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(1, 3);
+    let callee_local = GraphNode::new(
+        NodeType::Function,
+        "callee".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(2, 4);
+    repo.db().insert_node(&caller_local).unwrap();
+    repo.db().insert_node(&callee_local).unwrap();
+
+    // The intra-repo `Calls` edge from caller to callee.
+    let edge = GraphEdge::new(
+        EdgeType::Calls,
+        caller_local.id.clone(),
+        callee_local.id.clone(),
+    );
+    repo.db().insert_edge(&edge).unwrap();
+
+    // First projection: the federated backend should now carry the
+    // `Calls` edge in global-id form.
+    fed.project_nodes(&id).await.unwrap();
+    fed.project_edges(&id).await.unwrap();
+
+    let global_caller = format!(
+        "svc:Function:src/lib.rs:caller:{}",
+        caller_local.line_start.unwrap_or(0)
+    );
+    let global_callee = format!(
+        "svc:Function:src/lib.rs:callee:{}",
+        callee_local.line_start.unwrap_or(0)
+    );
+    let after_first: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == global_caller
+                && e.target_id == global_callee
+        })
+        .collect();
+    assert_eq!(
+        after_first.len(),
+        1,
+        "first projection must materialize the Calls edge in the federated backend; \
+         backend edges: {:?}",
+        backend.all_edges().unwrap()
+    );
+
+    // The defect: drop the `Calls` edge from the per-repo DB while
+    // both nodes remain. Pre-fix the next projection was a no-op for
+    // this edge, and `all_edges()` kept returning it.
+    repo.db()
+        .remove_edges(&[edge.clone()])
+        .expect("remove_edges on per-repo db");
+    assert!(
+        repo.db().all_edges().is_empty(),
+        "per-repo DB should have no edges after the Calls edge is dropped, \
+         got {:?}",
+        repo.db().all_edges()
+    );
+
+    // Re-project nodes (re-asserts endpoints are still live) and edges.
+    // The reconciliation pass should retract the stale federated edge.
+    fed.project_nodes(&id).await.unwrap();
+    fed.project_edges(&id).await.unwrap();
+
+    let after_second: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == global_caller
+                && e.target_id == global_callee
+        })
+        .collect();
+    assert!(
+        after_second.is_empty(),
+        "F10 reconciliation: dropping the per-repo Calls edge must retract \
+         the federated edge too; backend edges: {:?}",
+        backend.all_edges().unwrap()
+    );
+
+    // Both endpoints survive. The retraction is edge-only — the
+    // defect description is explicit that the nodes remain.
+    assert!(
+        backend.has_node(&global_caller).unwrap(),
+        "caller node must survive edge retraction"
+    );
+    assert!(
+        backend.has_node(&global_callee).unwrap(),
+        "callee node must survive edge retraction"
+    );
+
+    // Re-adding the same edge locally must re-materialize it in the
+    // backend. Reconciliation is idempotent and symmetric with upsert.
+    repo.db().insert_edge(&edge).unwrap();
+    fed.project_edges(&id).await.unwrap();
+    let after_third: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == global_caller
+                && e.target_id == global_callee
+        })
+        .collect();
+    assert_eq!(
+        after_third.len(),
+        1,
+        "re-adding the per-repo edge must re-materialize it in the \
+         federated backend; got {:?}",
+        backend.all_edges().unwrap()
+    );
+}

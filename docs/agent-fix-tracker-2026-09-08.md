@@ -356,8 +356,8 @@ Multi-agent: dispatch wave 0 as 6 parallel assignments. Coordinator marks each `
 
 ### F10 — Reconcile federation edge removals
 
-- Status: `Unassigned`
-- Owner: `—`
+- Status: `In progress`
+- Owner: `codex-wave2-agent`
 - Priority: P1
 - Depends on: none
 - Scope: federation backend edge ownership/indexing, `project_edges`, graph

@@ -41,6 +41,18 @@ impl GraphBackend for HashMapBackend {
             .retain(|e| !global_ids.contains(&e.source_id) && !global_ids.contains(&e.target_id));
         Ok(removed)
     }
+    fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
+        let targets: std::collections::HashSet<(String, String, EdgeType)> = edges
+            .iter()
+            .map(|e| (e.source_id.clone(), e.target_id.clone(), e.edge_type.clone()))
+            .collect();
+        let before = self.edges.read().unwrap().len();
+        self.edges
+            .write()
+            .unwrap()
+            .retain(|e| !targets.contains(&(e.source_id.clone(), e.target_id.clone(), e.edge_type.clone())));
+        Ok(before - self.edges.read().unwrap().len())
+    }
     fn upsert_node_global(
         &self,
         global_id: &str,
@@ -138,6 +150,56 @@ fn contract_upsert_edge_increments_count() {
     .unwrap();
     assert_eq!(b.node_count(), 2);
     assert_eq!(b.edge_count(), 1);
+}
+
+/// F10 — `remove_edges` retracts edges without touching their
+/// endpoints. The federation's reconciliation pass uses it to drop
+/// edges the source repo no longer reports while keeping the
+/// caller/callee nodes live.
+#[test]
+fn contract_remove_edges_drops_only_matching_endpoints_stay() {
+    let b = HashMapBackend::new();
+    let n1 = GraphNode::new(NodeType::Function, "a".into(), "src/lib.rs".into());
+    let n2 = GraphNode::new(NodeType::Function, "b".into(), "src/lib.rs".into());
+    b.upsert_node(n1.clone()).unwrap();
+    b.upsert_node(n2.clone()).unwrap();
+    let edge = GraphEdge::new(EdgeType::Calls, n1.id.clone(), n2.id.clone());
+    b.upsert_edge(edge.clone()).unwrap();
+
+    let removed = b.remove_edges(&[edge.clone()]).unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(b.edge_count(), 0);
+    assert_eq!(b.node_count(), 2, "endpoints must survive edge removal");
+
+    // Removing an already-gone edge is a no-op, not an error.
+    let removed_again = b.remove_edges(&[edge]).unwrap();
+    assert_eq!(removed_again, 0);
+}
+
+/// F10 — `remove_edges` matches on the full `(edge_type, source_id,
+/// target_id)` triple. An edge that differs only in `edge_type` (e.g.
+/// `Contains` vs `Calls`) is not collateral damage of removing a
+/// `Calls` edge between the same endpoints.
+#[test]
+fn contract_remove_edges_only_matches_full_triple() {
+    let b = HashMapBackend::new();
+    let n1 = GraphNode::new(NodeType::Function, "a".into(), "src/lib.rs".into());
+    let n2 = GraphNode::new(NodeType::Function, "b".into(), "src/lib.rs".into());
+    b.upsert_node(n1.clone()).unwrap();
+    b.upsert_node(n2.clone()).unwrap();
+    b.upsert_edge(GraphEdge::new(EdgeType::Calls, n1.id.clone(), n2.id.clone())).unwrap();
+    b.upsert_edge(GraphEdge::new(EdgeType::Uses, n1.id.clone(), n2.id.clone())).unwrap();
+
+    let removed = b.remove_edges(&[GraphEdge::new(
+        EdgeType::Calls,
+        n1.id.clone(),
+        n2.id.clone(),
+    )])
+    .unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(b.edge_count(), 1, "Uses edge survives Calls removal");
+    let remaining = b.all_edges().unwrap();
+    assert_eq!(remaining[0].edge_type, EdgeType::Uses);
 }
 
 #[test]

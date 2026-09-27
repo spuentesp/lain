@@ -55,6 +55,13 @@ pub trait GraphBackend: Send + Sync {
     /// function left it answering `search_org` forever even after the per-repo
     /// graph had correctly dropped it.
     fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError>;
+    /// Remove edges matching `(source_id, target_id, edge_type)`. Endpoints
+    /// stay. Companion to [`Self::remove_nodes`] for cases where the caller
+    /// and callee are still indexed but the edge between them should be
+    /// retracted (the federation's reconciliation pass — see
+    /// `FederatedIndex::project_edges`). Dedups the input; returns the
+    /// number of edges actually removed from the backend.
+    fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError>;
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError>;
     /// Default: `get_node(gid)?.is_some()`. Backends may override
     /// when they have a cheaper existence check (e.g. a `DashMap`
@@ -259,6 +266,14 @@ impl GraphBackend for PetgraphBackend {
         for id in global_ids {
             self.index.remove(id);
         }
+        if removed > 0 {
+            self.save()?;
+        }
+        Ok(removed)
+    }
+
+    fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
+        let removed = self.db.remove_edges(edges)?;
         if removed > 0 {
             self.save()?;
         }
