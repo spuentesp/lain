@@ -3,10 +3,11 @@
 //! Shared helpers for argument parsing, text enrichment, and similarity.
 
 use serde_json::{Map, Value};
-use crate::schema::GraphNode;
 use crate::error::LainError;
+use crate::federation::federated_index::FederatedIndex;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
+use crate::schema::GraphNode;
 use std::path::{Path, PathBuf};
 
 /// A handle "looks like a path" when it has an explicit separator or
@@ -87,6 +88,64 @@ pub fn resolve_node(
 /// unique. Callers surface it; nobody is refused an answer over it,
 /// because erroring on ambiguity would break every call that is
 /// perfectly clear today.
+
+/// Resolve `handle` against the federation when the caller's repo graph
+/// is empty. Two callers are forwarded here:
+///
+/// 1. **`search_org`** — when no indexed repo matches the caller's name
+///    resolution chain, the query "parse" could live in any of N repos.
+///    Skipping the per-repo lookup and going straight to the federation
+///    gives the call a meaningful answer. Without this fallback, calls
+///    made in that window return "Node not found for handle" even
+///    though the symbol is in the federation's view. Reproduces
+///    intermittently on slow CI runners.
+/// 2. **Cross-repo callers.** A bare handle like `parse` could be a
+///    function in any of N repos. `ctx.graph` only sees one; the
+///    federation sees all of them.
+///
+/// Returns `Ok(None)` when the federation also has nothing; the
+/// caller (the original `resolve_node` caller) is then free to
+/// surface its NotFound with whatever context it has.
+pub fn resolve_node_federation_fallback(
+    federation: &FederatedIndex,
+    handle: &str,
+) -> Option<GraphNode> {
+    let canonical_handle = if Path::new(handle).exists() {
+        dunce::canonicalize(handle)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| handle.to_string())
+    } else {
+        handle.to_string()
+    };
+
+    for (repo_id, _) in federation.list_repos() {
+        let Some(repo) = federation.get_repo(&repo_id) else {
+            continue;
+        };
+        let graph = repo.db();
+        if let Some(n) = graph.find_node_by_name(handle) {
+            return Some(n);
+        }
+        if let Some(n) = graph.find_node_by_path(handle) {
+            return Some(n);
+        }
+        if let Some(n) = graph.find_node_by_path(&canonical_handle) {
+            return Some(n);
+        }
+    }
+    if let Ok(backend_nodes) = federation.backend().list_nodes() {
+        for n in backend_nodes {
+            if n.name == handle {
+                return Some(n);
+            }
+            if n.path == handle || n.path == canonical_handle {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
 pub fn resolve_node_ambiguous(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
@@ -221,6 +280,39 @@ pub fn u32_arg(args: &Map<String, Value>, key: &str) -> Option<u32> {
 /// when missing. Equivalent to `str_arg(args, key)`.
 pub fn opt_str_arg(args: &Map<String, Value>, key: &str) -> String {
     str_arg(args, key)
+}
+
+/// Render a duration in seconds as a coarse "X{s,m,h,d} ago" string.
+///
+/// Ladder: < 1 min → seconds, < 1 h → minutes, < 1 d → hours, else days.
+/// Negative inputs are rendered as "Ns ago" with the absolute value
+/// (the git history path can see negative diffs when the commit's
+/// recorded time is in the future relative to a slightly stale clock).
+pub fn format_duration(seconds: i64) -> String {
+    let s = seconds.unsigned_abs();
+    if s < 60 {
+        format!("{seconds}s ago")
+    } else if s < 3600 {
+        format!("{}m ago", seconds / 60)
+    } else if s < 86400 {
+        format!("{}h ago", seconds / 3600)
+    } else {
+        format!("{}d ago", seconds / 86400)
+    }
+}
+
+/// Like [`format_duration`] but takes a Unix timestamp and computes
+/// the "now - ts" diff. Returns "unknown" for non-positive timestamps
+/// (zero / negative git-time sentinels).
+pub fn format_ago(unix_secs: i64) -> String {
+    if unix_secs <= 0 {
+        return "unknown".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    format_duration(now - unix_secs)
 }
 
 /// Build enriched text for embedding: name + signature + docstring + path

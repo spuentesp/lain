@@ -73,6 +73,9 @@ pub enum LainError {
 
     #[error("Ambiguous symbol: matches repos {0:?}")]
     AmbiguousSymbol(Vec<crate::federation::repo_id::RepoId>),
+
+    #[error("federation graph was written by schema v{found}; this build expects schema v{required}. Run `lain reindex` to rebuild.")]
+    FederationSchemaMismatch { found: u32, required: u32 },
 }
 
 impl From<git2::Error> for LainError {

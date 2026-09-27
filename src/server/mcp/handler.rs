@@ -2533,7 +2533,7 @@ mod tests {
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         fed.backend()
             .upsert_node_global(
-                "repo-x:Function:src/lib.rs:only_one",
+                "repo-x:Function:src/lib.rs:only_one:0",
                 NodeType::Function,
                 "src/lib.rs",
                 "only_one",
@@ -2574,7 +2574,7 @@ mod tests {
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         fed.backend()
             .upsert_node_global(
-                "repo-a:Function:src/lib.rs:shared",
+                "repo-a:Function:src/lib.rs:shared:0",
                 NodeType::Function,
                 "src/lib.rs",
                 "shared",
@@ -2582,7 +2582,7 @@ mod tests {
             .unwrap();
         fed.backend()
             .upsert_node_global(
-                "repo-b:Function:src/lib.rs:shared",
+                "repo-b:Function:src/lib.rs:shared:0",
                 NodeType::Function,
                 "src/lib.rs",
                 "shared",
@@ -2709,7 +2709,7 @@ mod tests {
         let backend = fed.backend();
         backend
             .upsert_node_global(
-                "repo-a:Function:src/x.rs:shared",
+                "repo-a:Function:src/x.rs:shared:0",
                 NodeType::Function,
                 "src/x.rs",
                 "shared",
@@ -2717,7 +2717,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-b:Function:src/x.rs:shared",
+                "repo-b:Function:src/x.rs:shared:0",
                 NodeType::Function,
                 "src/x.rs",
                 "shared",
@@ -2725,7 +2725,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-b:Function:src/y.rs:caller",
+                "repo-b:Function:src/y.rs:caller:0",
                 NodeType::Function,
                 "src/y.rs",
                 "caller",
@@ -2734,15 +2734,15 @@ mod tests {
         backend
             .upsert_edge(GraphEdge::new(
                 EdgeType::Calls,
-                "repo-b:Function:src/y.rs:caller".into(),
-                "repo-a:Function:src/x.rs:shared".into(),
+                "repo-b:Function:src/y.rs:caller:0".into(),
+                "repo-a:Function:src/x.rs:shared:0".into(),
             ))
             .unwrap();
         backend
             .upsert_edge(GraphEdge::new(
                 EdgeType::Calls,
-                "repo-b:Function:src/y.rs:caller".into(),
-                "repo-b:Function:src/x.rs:shared".into(),
+                "repo-b:Function:src/y.rs:caller:0".into(),
+                "repo-b:Function:src/x.rs:shared:0".into(),
             ))
             .unwrap();
 

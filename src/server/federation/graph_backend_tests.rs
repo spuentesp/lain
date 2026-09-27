@@ -151,7 +151,7 @@ fn petgraph_backend_persists_and_reloads() {
     let tmp = tempfile::tempdir().unwrap();
     let b = PetgraphBackend::new(tmp.path()).unwrap();
     b.upsert_node_global(
-        "repo1:Function:src/lib.rs:f",
+        "repo1:Function:src/lib.rs:f:0",
         NodeType::Function,
         "src/lib.rs",
         "f",
@@ -163,7 +163,32 @@ fn petgraph_backend_persists_and_reloads() {
     let b2 = PetgraphBackend::new(tmp.path()).unwrap();
     assert_eq!(b2.node_count(), 1);
     assert!(b2
-        .get_node("repo1:Function:src/lib.rs:f")
+        .get_node("repo1:Function:src/lib.rs:f:0")
         .unwrap()
         .is_some());
+}
+
+#[test]
+fn petgraph_backend_rejects_pre_bump_version_header() {
+    // Write a federated_graph.bin with header = 1 (pre-bump).
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // legacy version
+    bytes.extend_from_slice(&[0u8; 16]);          // payload placeholder
+    std::fs::write(&bin_path, &bytes).unwrap();
+
+    // Loading must return FederationSchemaMismatch, not a parse error
+    // and not a silent success.
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationSchemaMismatch { found, required } => {
+            assert_eq!(found, 1);
+            assert_eq!(required, 2);
+        }
+        other => panic!("expected FederationSchemaMismatch, got {other:?}"),
+    }
 }

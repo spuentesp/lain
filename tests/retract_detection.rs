@@ -60,7 +60,7 @@ fn build_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<dyn G
 /// post-`project_repo`-deduplication state.
 fn insert_verify_token(backend: &dyn GraphBackend) {
     let repo = RepoId::new("test").unwrap();
-    let gid = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", "verify_token");
+    let gid = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", "verify_token", None);
     backend
         .upsert_node_global(
             gid.as_str(),

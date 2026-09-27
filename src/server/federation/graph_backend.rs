@@ -4,7 +4,14 @@ use crate::graph::GraphDatabase;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use dashmap::DashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Schema version of the on-disk federated graph. Bump when the
+/// `GlobalId` format or the persisted payload changes in a
+/// non-backward-compatible way. The loader refuses any graph whose
+/// header doesn't match this value and asks the operator to run
+/// `lain reindex`. No silent migration.
+pub const FEDERATION_GRAPH_VERSION: u32 = 2;
 
 pub trait GraphBackend: Send + Sync {
     fn upsert_node(&self, node: GraphNode) -> Result<(), LainError>;
@@ -73,18 +80,57 @@ pub trait GraphBackend: Send + Sync {
 pub struct PetgraphBackend {
     db: GraphDatabase,
     index: DashMap<String, GlobalId>,
+    bin_path: PathBuf,
 }
 
 impl PetgraphBackend {
     pub fn new(data_dir: &Path) -> Result<Self, LainError> {
-        let db = GraphDatabase::new(&data_dir.join("federated_graph.bin"))?;
+        let bin_path = data_dir.join("federated_graph.bin");
+
+        // Schema version gate. The federated_graph.bin file starts with a
+        // 4-byte little-endian u32 version header followed by the bincode
+        // payload. Pre-bump graphs (no header) load as v1; mismatched
+        // headers fail fast with FederationSchemaMismatch.
+        if bin_path.exists() {
+            let bytes = std::fs::read(&bin_path)?;
+            if bytes.len() >= 4 {
+                let found = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                if found != FEDERATION_GRAPH_VERSION {
+                    return Err(LainError::FederationSchemaMismatch {
+                        found,
+                        required: FEDERATION_GRAPH_VERSION,
+                    });
+                }
+                // Strip the 4-byte version header so the file
+                // `GraphDatabase::new` reads is the raw bincode payload.
+                // We rewrite in place because `GraphDatabase::new` expects
+                // a bincode-encoded payload on disk.
+                std::fs::write(&bin_path, &bytes[4..])?;
+            }
+        }
+
+        let db = GraphDatabase::new(&bin_path)?;
         let index = DashMap::new();
         for node in db.get_all_nodes() {
             if let Ok(global_id) = GlobalId::parse(&node.id) {
                 index.insert(node.id, global_id);
             }
         }
-        Ok(Self { db, index })
+        Ok(Self { db, index, bin_path })
+    }
+
+    /// Save the federated graph to disk, prepending the schema version
+    /// header so [`Self::new`] can validate it on the next load. We write
+    /// the bare bincode payload first (via `GraphDatabase::save`), then
+    /// splice the version header in front.
+    fn save(&self) -> Result<(), LainError> {
+        self.db.save_to_disk_sync()?;
+        let payload = std::fs::read(&self.bin_path)?;
+        let mut with_header = Vec::with_capacity(4 + payload.len());
+        with_header.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
+        with_header.extend_from_slice(&payload);
+        std::fs::write(&self.bin_path, &with_header)?;
+        Ok(())
     }
 
     pub fn upsert_node_global(
@@ -99,7 +145,7 @@ impl PetgraphBackend {
         node.id = global_id.to_string();
         self.db.upsert_node(node)?;
         self.index.insert(global_id.to_string(), parsed);
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     /// Direct access to the underlying `GraphDatabase` for bulk operations.
@@ -124,7 +170,7 @@ impl GraphBackend for PetgraphBackend {
         let global_id = GlobalId::parse(&node.id)?;
         self.db.upsert_node(node.clone())?;
         self.index.insert(node.id, global_id);
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn upsert_node_global(
@@ -139,7 +185,7 @@ impl GraphBackend for PetgraphBackend {
 
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         self.db.upsert_edge(edge)?;
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn upsert_edges_batch(&self, edges: &[GraphEdge]) -> Result<(), LainError> {
@@ -149,7 +195,7 @@ impl GraphBackend for PetgraphBackend {
         for edge in edges {
             self.db.upsert_edge(edge.clone())?;
         }
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn upsert_nodes_batch(&self, nodes: &[GraphNode]) -> Result<(), LainError> {
@@ -161,7 +207,7 @@ impl GraphBackend for PetgraphBackend {
             self.db.upsert_node(node.clone())?;
             self.index.insert(node.id.clone(), global_id);
         }
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError> {
@@ -170,7 +216,7 @@ impl GraphBackend for PetgraphBackend {
             self.index.remove(id);
         }
         if removed > 0 {
-            self.db.save_to_disk_sync()?;
+            self.save()?;
         }
         Ok(removed)
     }

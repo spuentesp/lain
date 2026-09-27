@@ -2,7 +2,7 @@
 //! nodes/edges into a global petgraph via `GraphBackend`, and provides
 //! cross-repo symbol resolution.
 //!
-//! The global ID format is `repo_id:Kind:path:name` (see `GlobalId::new`), and
+//! The global ID format is `repo_id:Kind:path:name:line_start` (see `GlobalId::new`), and
 //! every per-repo node is re-keyed to that format before being upserted into the
 //! backend. Cross-repo edges (`CrossRepoSameSymbol`) are added by running
 //! `find_cross_repo_matches` against signatures.
@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// rewrite passes (this repo's own nodes, and — for cross-repo matching —
 /// every other repo's nodes) so the rewrite rule can't drift between them.
 fn global_id_str(repo: &RepoId, node: &GraphNode) -> String {
-    GlobalId::new(repo, node.node_type.clone(), &node.path, &node.name)
+    GlobalId::new(repo, node.node_type.clone(), &node.path, &node.name, node.line_start)
         .as_str()
         .to_string()
 }
@@ -356,8 +356,8 @@ impl FederatedIndex {
             .collect()
     }
 
-    pub fn global_id(&self, repo: &RepoId, kind: NodeType, path: &str, name: &str) -> GlobalId {
-        GlobalId::new(repo, kind, path, name)
+    pub fn global_id(&self, repo: &RepoId, kind: NodeType, path: &str, name: &str, line_start: Option<u32>) -> GlobalId {
+        GlobalId::new(repo, kind, path, name, line_start)
     }
 
     pub fn backend(&self) -> Arc<dyn GraphBackend> {
@@ -379,12 +379,12 @@ impl FederatedIndex {
             std::collections::HashMap::with_capacity(nodes.len());
         let mut batch_nodes: Vec<crate::schema::GraphNode> = Vec::with_capacity(nodes.len());
         for n in &nodes {
-            let gid = global_id_str(id, n);
+            let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name, n.line_start);
             let mut rewritten = n.clone();
-            rewritten.id = gid.clone();
-            live.insert(gid.clone());
+            rewritten.id = gid.as_str().to_string();
+            live.insert(gid.as_str().to_string());
             batch_nodes.push(rewritten);
-            local_to_global.insert(n.id.clone(), gid);
+            local_to_global.insert(n.id.clone(), gid.as_str().to_string());
         }
         // Batch upsert: one disk save at the end instead of ~N syncs.
         // The per-node path saved on every upsert and wedged the
@@ -623,7 +623,9 @@ impl FederatedIndex {
                 }
                 cross_repo_edges.push(GraphEdge {
                     edge_type: EdgeType::CrossRepoSameSymbol,
-                    source_id: new_node.id.clone(),
+                    source_id: GlobalId::new(id, new_node.node_type.clone(), &new_node.path, &new_node.name, new_node.line_start)
+                        .as_str()
+                        .to_string(),
                     target_id: target_gid,
                     weight: Some(sim),
                     cross_repo: true,
@@ -820,6 +822,7 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                         node.node_type.clone(),
                         &node.path,
                         &node.name,
+                        node.line_start,
                     ));
                 }
             }
@@ -844,6 +847,7 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                                 node.node_type.clone(),
                                 &node.path,
                                 &node.name,
+                                node.line_start,
                             ));
                         }
                     }
