@@ -331,7 +331,9 @@ pub async fn scan_file_structure(
     for (callee_id, sel_line, sel_col) in selection_positions {
         let refs = {
             let mut lsp = lsp_mux.lock().await;
-            lsp.get_references(&path, sel_line, sel_col).await.unwrap_or_default()
+            lsp.get_references(&path, sel_line, sel_col)
+                .await
+                .unwrap_or_default()
         };
         for r in refs {
             external_references.push((callee_id.clone(), r));
@@ -545,7 +547,9 @@ fn apply_attribute_labels(defs: &[crate::treesitter::SymbolDef], nodes: &mut [Gr
 pub fn derive_signature(symbol: &HierarchicalSymbol, workspace: &Path) -> Option<String> {
     let node = &symbol.node;
     if let Some(sig) = &node.signature {
-        if !sig.is_empty() { return Some(sig.clone()); }
+        if !sig.is_empty() {
+            return Some(sig.clone());
+        }
     }
     let line_start = node.line_start?;
     let path = if Path::new(&node.path).is_absolute() {
@@ -575,7 +579,11 @@ pub fn derive_signature(symbol: &HierarchicalSymbol, workspace: &Path) -> Option
 }
 
 fn non_empty(s: &str) -> Option<String> {
-    if s.is_empty() { None } else { Some(s.to_string()) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 fn terminator_for_path(path: &str) -> char {
@@ -589,11 +597,12 @@ fn terminator_for_path(path: &str) -> char {
 /// Walk a `HierarchicalSymbol` tree, recording each symbol's id and
 /// selection position so the caller can run `get_references` against
 /// the LSP using the symbol's own identifier position.
-fn collect_selection_positions(
-    out: &mut Vec<(String, u32, u32)>,
-    symbol: &HierarchicalSymbol,
-) {
-    out.push((symbol.node.id.clone(), symbol.selection_line, symbol.selection_col));
+fn collect_selection_positions(out: &mut Vec<(String, u32, u32)>, symbol: &HierarchicalSymbol) {
+    out.push((
+        symbol.node.id.clone(),
+        symbol.selection_line,
+        symbol.selection_col,
+    ));
     for child in &symbol.children {
         collect_selection_positions(out, child);
     }
@@ -613,6 +622,7 @@ fn is_test_container(node: &GraphNode) -> bool {
         && (node.name == "tests" || node.name == "test")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn process_symbol_recursive_enriched(
     nodes: &mut Vec<GraphNode>,
     edges: &mut Vec<GraphEdge>,
@@ -922,7 +932,12 @@ mod tests {
         );
     }
 
-    fn make_symbol(name: &str, path: &str, line_start: Option<u32>, signature: Option<&str>) -> HierarchicalSymbol {
+    fn make_symbol(
+        name: &str,
+        path: &str,
+        line_start: Option<u32>,
+        signature: Option<&str>,
+    ) -> HierarchicalSymbol {
         let mut node = GraphNode::new(NodeType::Function, name.into(), path.into());
         node.line_start = line_start;
         node.signature = signature.map(|s| s.to_string());
@@ -952,7 +967,8 @@ mod tests {
         std::fs::write(
             dir.path().join("lib.rs"),
             "pub fn foo(x: u32) -> Result<(), Error> {\n    todo!()\n}\n",
-        ).unwrap();
+        )
+        .unwrap();
         let sym = make_symbol("foo", "lib.rs", Some(0), None);
 
         let derived = derive_signature(&sym, dir.path()).unwrap();
@@ -970,7 +986,8 @@ mod tests {
         std::fs::write(
             dir.path().join("foo.py"),
             "def foo(x: int) -> None:\n    pass\n",
-        ).unwrap();
+        )
+        .unwrap();
         let sym = make_symbol("foo", "foo.py", Some(0), None);
 
         let derived = derive_signature(&sym, dir.path()).unwrap();
@@ -1011,7 +1028,10 @@ mod tests {
             derived.contains("Result<u32, Error>"),
             "Rust return type with generics must be preserved; got: {derived}"
         );
-        assert!(!derived.contains('{'), "must cut at the brace; got: {derived}");
+        assert!(
+            !derived.contains('{'),
+            "must cut at the brace; got: {derived}"
+        );
     }
 
     /// Codex contract `signature_synthesis_uses_actual_parser_coordinates`,
@@ -1029,10 +1049,7 @@ mod tests {
 
         let derived = derive_signature(&sym, dir.path())
             .expect("line_start=0 must synthesize from the very first line");
-        assert!(
-            derived.starts_with("pub fn first"),
-            "got: {derived}"
-        );
+        assert!(derived.starts_with("pub fn first"), "got: {derived}");
     }
 
     /// Codex contract `signature_synthesis_uses_actual_parser_coordinates`,
@@ -1048,12 +1065,9 @@ mod tests {
         .unwrap();
         let sym = make_symbol("make", "lib.rs", Some(0), None);
 
-        let derived = derive_signature(&sym, dir.path())
-            .expect("multi-line Rust signature must synthesize");
-        assert!(
-            derived.starts_with("fn make"),
-            "got: {derived}"
-        );
+        let derived =
+            derive_signature(&sym, dir.path()).expect("multi-line Rust signature must synthesize");
+        assert!(derived.starts_with("fn make"), "got: {derived}");
         assert!(
             derived.contains("where"),
             "where clause must be included; got: {derived}"
@@ -1062,7 +1076,10 @@ mod tests {
             derived.contains("Clone"),
             "trait bound must be included; got: {derived}"
         );
-        assert!(!derived.contains('{'), "must still cut at the brace; got: {derived}");
+        assert!(
+            !derived.contains('{'),
+            "must still cut at the brace; got: {derived}"
+        );
     }
 
     /// The scanner must ask `get_references` for each symbol's
@@ -1082,11 +1099,8 @@ mod tests {
     async fn scanner_calls_get_references_at_each_symbols_selection_position() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let file = tmp.path().join("lib.rs");
-        std::fs::write(
-            &file,
-            "pub fn helper() {}\npub fn caller() { helper(); }\n",
-        )
-        .expect("write");
+        std::fs::write(&file, "pub fn helper() {}\npub fn caller() { helper(); }\n")
+            .expect("write");
 
         let helper_path_str = "lib.rs".to_string();
         let mut helper_node = GraphNode::new(
@@ -1170,11 +1184,8 @@ mod tests {
     async fn scanner_pairs_references_with_the_callee_symbol_id_not_the_file_id() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let file = tmp.path().join("lib.rs");
-        std::fs::write(
-            &file,
-            "pub fn helper() {}\npub fn caller() { helper(); }\n",
-        )
-        .expect("write");
+        std::fs::write(&file, "pub fn helper() {}\npub fn caller() { helper(); }\n")
+            .expect("write");
 
         let helper_node = {
             let mut n = GraphNode::new(
@@ -1268,11 +1279,8 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let file = tmp.path().join("lib.rs");
-        std::fs::write(
-            &file,
-            "pub fn helper() {}\npub fn caller() { helper(); }\n",
-        )
-        .expect("write");
+        std::fs::write(&file, "pub fn helper() {}\npub fn caller() { helper(); }\n")
+            .expect("write");
 
         let helper_node = {
             let mut n = GraphNode::new(
@@ -1359,7 +1367,10 @@ mod tests {
         let edge = &edges[0];
         assert_eq!(edge.edge_type, EdgeType::Calls);
         assert_eq!(edge.source_id, caller_id, "source must be the caller");
-        assert_eq!(edge.target_id, helper_id, "target must be the callee (helper)");
+        assert_eq!(
+            edge.target_id, helper_id,
+            "target must be the callee (helper)"
+        );
     }
 }
 

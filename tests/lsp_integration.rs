@@ -38,8 +38,12 @@ fn symbol_response(name: &str, line: u32, col: u32, end_col: u32) -> serde_json:
 }
 
 fn two_symbols(
-    helper_line: u32, helper_col: u32, helper_end: u32,
-    caller_line: u32, caller_col: u32, caller_end: u32,
+    helper_line: u32,
+    helper_col: u32,
+    helper_end: u32,
+    caller_line: u32,
+    caller_col: u32,
+    caller_end: u32,
 ) -> serde_json::Value {
     serde_json::json!([
         symbol_response("helper", helper_line, helper_col, helper_end),
@@ -67,22 +71,16 @@ fn location(uri: &str, line: u32, col: u32, end_col: u32) -> serde_json::Value {
 async fn lsp_wire_path_emits_caller_to_callee_edge() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let file: PathBuf = tmp.path().join("lib.rs");
-    std::fs::write(
-        &file,
-        "pub fn helper() {}\npub fn caller() { helper(); }\n",
-    )
-    .expect("write fixture");
+    std::fs::write(&file, "pub fn helper() {}\npub fn caller() { helper(); }\n")
+        .expect("write fixture");
 
     let uri = format!("file://{}", file.display());
 
     let fake = FakeLspServer::bind().await.expect("bind fake lsp");
     let host = fake.host();
     let port = fake.port();
-    fake.set_document_symbols(
-        &uri,
-        two_symbols(0, 7, 13, 1, 7, 13),
-    )
-    .await;
+    fake.set_document_symbols(&uri, two_symbols(0, 7, 13, 1, 7, 13))
+        .await;
     fake.set_references(&uri, 0, 7, serde_json::json!([location(&uri, 1, 17, 23)]))
         .await;
     let received = fake.received();
@@ -155,20 +153,20 @@ async fn lsp_wire_path_emits_caller_to_callee_edge() {
     let edge = &edges[0];
     assert_eq!(edge.edge_type, EdgeType::Calls);
     assert_eq!(edge.source_id, caller_id, "source must be the caller");
-    assert_eq!(edge.target_id, helper_id, "target must be the callee (helper)");
-
-    let doc_sym_calls = received.document_symbol.lock().expect("recv lock");
-    assert!(
-        !doc_sym_calls.is_empty(),
-        "scanner must have called textDocument/documentSymbol over the wire"
+    assert_eq!(
+        edge.target_id, helper_id,
+        "target must be the callee (helper)"
     );
-    drop(doc_sym_calls);
 
-    let ref_calls: Vec<serde_json::Value> = received
-        .references
-        .lock()
-        .expect("recv lock")
-        .clone();
+    {
+        let doc_sym_calls = received.document_symbol.lock().expect("recv lock");
+        assert!(
+            !doc_sym_calls.is_empty(),
+            "scanner must have called textDocument/documentSymbol over the wire"
+        );
+    }
+
+    let ref_calls: Vec<serde_json::Value> = received.references.lock().expect("recv lock").clone();
     assert!(
         !ref_calls.is_empty(),
         "scanner must have called textDocument/references over the wire"

@@ -1784,8 +1784,7 @@ async fn cold_start_projects_edges_in_one_pass() {
     use std::sync::Arc;
 
     let tmp = tempfile::tempdir().unwrap();
-    let backend: Arc<dyn GraphBackend> =
-        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
 
     // Two repos. Consumer imports Provider's function.
@@ -1799,20 +1798,35 @@ async fn cold_start_projects_edges_in_one_pass() {
     let consumer_id = RepoId::new("consumer").unwrap();
     let provider_id = RepoId::new("provider").unwrap();
 
-    for (id, path) in [(&consumer_id, &consumer_path), (&provider_id, &provider_path)] {
+    for (id, path) in [
+        (&consumer_id, &consumer_path),
+        (&provider_id, &provider_path),
+    ] {
         let source = WorkspaceDirSource::new(id.clone(), path.clone()).unwrap();
         fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
     }
 
     // Inject symbols + a cross-repo Calls edge that targets the provider's
     // function. After Phase 1/2 orchestration, the edge must resolve.
-    let provider_fn = GraphNode::new(NodeType::Function, "verify_token".into(), "src/lib.rs".into())
-        .with_location(1, 3);
+    let provider_fn = GraphNode::new(
+        NodeType::Function,
+        "verify_token".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(1, 3);
     let consumer_caller = GraphNode::new(NodeType::Function, "charge".into(), "src/lib.rs".into())
         .with_location(1, 5);
 
-    fed.get_repo(&provider_id).unwrap().db().insert_node(&provider_fn).unwrap();
-    fed.get_repo(&consumer_id).unwrap().db().insert_node(&consumer_caller).unwrap();
+    fed.get_repo(&provider_id)
+        .unwrap()
+        .db()
+        .insert_node(&provider_fn)
+        .unwrap();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_node(&consumer_caller)
+        .unwrap();
 
     // Cross-repo edges are inserted with the target's *global* id (the
     // resolve phase produces them this way). `insert_edges_batch`
@@ -1820,14 +1834,24 @@ async fn cold_start_projects_edges_in_one_pass() {
     // `pending_external_edges` for the federation's `project_edges` to
     // drain.
     let provider_global_id = fed
-        .global_id(&provider_id, NodeType::Function, "src/lib.rs", "verify_token", Some(1))
+        .global_id(
+            &provider_id,
+            NodeType::Function,
+            "src/lib.rs",
+            "verify_token",
+            Some(1),
+        )
         .as_str()
         .to_string();
-    fed.get_repo(&consumer_id).unwrap().db().insert_edges_batch(&[GraphEdge::new(
-        EdgeType::Calls,
-        consumer_caller.id.clone(),
-        provider_global_id,
-    )]).unwrap();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_edges_batch(&[GraphEdge::new(
+            EdgeType::Calls,
+            consumer_caller.id.clone(),
+            provider_global_id,
+        )])
+        .unwrap();
 
     // Cold-start: register both repos, then orchestrate Phase 1 (nodes)
     // for both, then Phase 2 (edges) for both. This mirrors the
@@ -1838,10 +1862,14 @@ async fn cold_start_projects_edges_in_one_pass() {
     fed.project_edges(&consumer_id).await.unwrap();
 
     let edges = backend.all_edges().unwrap();
-    let cross = edges.iter().filter(|e| {
-        e.edge_type == EdgeType::Calls && e.target_id.starts_with("provider:")
-    }).count();
-    assert_eq!(cross, 1, "the consumer's Calls edge must resolve to the provider's node");
+    let cross = edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls && e.target_id.starts_with("provider:"))
+        .count();
+    assert_eq!(
+        cross, 1,
+        "the consumer's Calls edge must resolve to the provider's node"
+    );
 }
 
 // ─── loader_path_resolves_cross_repo_edges (Task 4 fix review / Finding B) ───
@@ -1886,7 +1914,7 @@ async fn loader_path_resolves_cross_repo_edges() {
     use lain::federation::federated_index::FederatedIndex;
     use lain::federation::loader::load_federation_with_workspace;
     use lain::federation::repo_id::RepoId;
-    use lain::federation::workspace::{WorkspacesFile, WorkspaceSpec};
+    use lain::federation::workspace::{WorkspaceSpec, WorkspacesFile};
     use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
     use std::sync::Arc;
 
@@ -1929,13 +1957,10 @@ async fn loader_path_resolves_cross_repo_edges() {
     // that re-introduced parallel `project_repo` spawns inside the
     // loader's Phase 0 task would compile and run fine here, but would
     // race the per-repo projections below.
-    let fed: Arc<FederatedIndex> = load_federation_with_workspace(
-        &repos_yaml,
-        &workspaces_yaml,
-        "two-repo",
-    )
-    .await
-    .expect("load_federation_with_workspace");
+    let fed: Arc<FederatedIndex> =
+        load_federation_with_workspace(&repos_yaml, &workspaces_yaml, "two-repo")
+            .await
+            .expect("load_federation_with_workspace");
 
     let consumer_id = RepoId::new("consumer").unwrap();
     let provider_id = RepoId::new("provider").unwrap();
@@ -1945,39 +1970,69 @@ async fn loader_path_resolves_cross_repo_edges() {
     // consumer's `pending_external_edges`, exactly as `repo.index()`
     // does in production after the resolve phase rewrites the target
     // to the global id.
-    let provider_fn = GraphNode::new(NodeType::Function, "verify_token".into(), "src/lib.rs".into())
-        .with_location(1, 3);
+    let provider_fn = GraphNode::new(
+        NodeType::Function,
+        "verify_token".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(1, 3);
     let consumer_caller = GraphNode::new(NodeType::Function, "charge".into(), "src/lib.rs".into())
         .with_location(1, 5);
 
-    fed.get_repo(&provider_id).unwrap().db().insert_node(&provider_fn).unwrap();
-    fed.get_repo(&consumer_id).unwrap().db().insert_node(&consumer_caller).unwrap();
+    fed.get_repo(&provider_id)
+        .unwrap()
+        .db()
+        .insert_node(&provider_fn)
+        .unwrap();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_node(&consumer_caller)
+        .unwrap();
 
     let provider_global_id = fed
-        .global_id(&provider_id, NodeType::Function, "src/lib.rs", "verify_token", Some(1))
+        .global_id(
+            &provider_id,
+            NodeType::Function,
+            "src/lib.rs",
+            "verify_token",
+            Some(1),
+        )
         .as_str()
         .to_string();
-    fed.get_repo(&consumer_id).unwrap().db().insert_edges_batch(&[GraphEdge::new(
-        EdgeType::Calls,
-        consumer_caller.id.clone(),
-        provider_global_id.clone(),
-    )]).unwrap();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_edges_batch(&[GraphEdge::new(
+            EdgeType::Calls,
+            consumer_caller.id.clone(),
+            provider_global_id.clone(),
+        )])
+        .unwrap();
 
     // Project the consumer first then the provider. The critical
     // assertion is that the provider's metadata is intact after
     // both projections — the consumer-first ordering makes the
     // real node win the hydration tiebreaker because
     // `upsert_nodes_batch` overwrites the placeholder last.
-    fed.project_repo(&consumer_id).await.expect("project_repo consumer");
-    fed.project_repo(&provider_id).await.expect("project_repo provider");
+    fed.project_repo(&consumer_id)
+        .await
+        .expect("project_repo consumer");
+    fed.project_repo(&provider_id)
+        .await
+        .expect("project_repo provider");
 
     // Assert the cross-repo edge landed in the federated backend.
     let backend = fed.backend();
     let edges = backend.all_edges().unwrap();
-    let cross = edges.iter().filter(|e| {
-        e.edge_type == EdgeType::Calls && e.target_id == provider_global_id
-    }).count();
-    assert_eq!(cross, 1, "cross-repo Calls edge must resolve to the provider's global id");
+    let cross = edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls && e.target_id == provider_global_id)
+        .count();
+    assert_eq!(
+        cross, 1,
+        "cross-repo Calls edge must resolve to the provider's global id"
+    );
 
     // Assert the provider's node is intact: path and name are NOT
     // the placeholder's corrupted concatenation. Under
@@ -1990,8 +2045,14 @@ async fn loader_path_resolves_cross_repo_edges() {
         .get_node(&provider_global_id)
         .expect("get_node")
         .expect("provider node must exist after projection");
-    assert_eq!(provider_node.path, "src/lib.rs", "path must not be corrupted by placeholder upsert");
-    assert_eq!(provider_node.name, "verify_token", "name must not be corrupted by placeholder upsert");
+    assert_eq!(
+        provider_node.path, "src/lib.rs",
+        "path must not be corrupted by placeholder upsert"
+    );
+    assert_eq!(
+        provider_node.name, "verify_token",
+        "name must not be corrupted by placeholder upsert"
+    );
     assert_eq!(provider_node.node_type, NodeType::Function);
 }
 
@@ -2011,7 +2072,7 @@ async fn loader_path_resolves_cross_repo_edges_provider_first() {
     use lain::federation::federated_index::FederatedIndex;
     use lain::federation::loader::load_federation_with_workspace;
     use lain::federation::repo_id::RepoId;
-    use lain::federation::workspace::{WorkspacesFile, WorkspaceSpec};
+    use lain::federation::workspace::{WorkspaceSpec, WorkspacesFile};
     use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
     use std::sync::Arc;
 
@@ -2047,56 +2108,89 @@ async fn loader_path_resolves_cross_repo_edges_provider_first() {
     };
     std::fs::write(&workspaces_yaml, serde_yaml::to_string(&ws).unwrap()).unwrap();
 
-    let fed: Arc<FederatedIndex> = load_federation_with_workspace(
-        &repos_yaml,
-        &workspaces_yaml,
-        "two-repo",
-    )
-    .await
-    .expect("load_federation_with_workspace");
+    let fed: Arc<FederatedIndex> =
+        load_federation_with_workspace(&repos_yaml, &workspaces_yaml, "two-repo")
+            .await
+            .expect("load_federation_with_workspace");
 
     let consumer_id = RepoId::new("consumer").unwrap();
     let provider_id = RepoId::new("provider").unwrap();
 
-    let provider_fn = GraphNode::new(NodeType::Function, "verify_token".into(), "src/lib.rs".into())
-        .with_location(1, 3);
+    let provider_fn = GraphNode::new(
+        NodeType::Function,
+        "verify_token".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(1, 3);
     let consumer_caller = GraphNode::new(NodeType::Function, "charge".into(), "src/lib.rs".into())
         .with_location(1, 5);
 
-    fed.get_repo(&provider_id).unwrap().db().insert_node(&provider_fn).unwrap();
-    fed.get_repo(&consumer_id).unwrap().db().insert_node(&consumer_caller).unwrap();
+    fed.get_repo(&provider_id)
+        .unwrap()
+        .db()
+        .insert_node(&provider_fn)
+        .unwrap();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_node(&consumer_caller)
+        .unwrap();
 
     let provider_global_id = fed
-        .global_id(&provider_id, NodeType::Function, "src/lib.rs", "verify_token", Some(1))
+        .global_id(
+            &provider_id,
+            NodeType::Function,
+            "src/lib.rs",
+            "verify_token",
+            Some(1),
+        )
         .as_str()
         .to_string();
-    fed.get_repo(&consumer_id).unwrap().db().insert_edges_batch(&[GraphEdge::new(
-        EdgeType::Calls,
-        consumer_caller.id.clone(),
-        provider_global_id.clone(),
-    )]).unwrap();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_edges_batch(&[GraphEdge::new(
+            EdgeType::Calls,
+            consumer_caller.id.clone(),
+            provider_global_id.clone(),
+        )])
+        .unwrap();
 
     // Provider-first: the real node lands first, then the consumer's
     // project_edges fires. Without the `has_node` gate the placeholder
     // upsert would corrupt the provider's `path` / `name`; with the
     // gate the placeholder upsert is skipped because the real node is
     // already present.
-    fed.project_repo(&provider_id).await.expect("project_repo provider");
-    fed.project_repo(&consumer_id).await.expect("project_repo consumer");
+    fed.project_repo(&provider_id)
+        .await
+        .expect("project_repo provider");
+    fed.project_repo(&consumer_id)
+        .await
+        .expect("project_repo consumer");
 
     let backend = fed.backend();
     let edges = backend.all_edges().unwrap();
-    let cross = edges.iter().filter(|e| {
-        e.edge_type == EdgeType::Calls && e.target_id == provider_global_id
-    }).count();
-    assert_eq!(cross, 1, "cross-repo Calls edge must resolve to the provider's global id");
+    let cross = edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls && e.target_id == provider_global_id)
+        .count();
+    assert_eq!(
+        cross, 1,
+        "cross-repo Calls edge must resolve to the provider's global id"
+    );
 
     let provider_node = backend
         .get_node(&provider_global_id)
         .expect("get_node")
         .expect("provider node must exist after projection");
-    assert_eq!(provider_node.path, "src/lib.rs", "provider path must survive the consumer's placeholder branch — gate check");
-    assert_eq!(provider_node.name, "verify_token", "provider name must survive the consumer's placeholder branch — gate check");
+    assert_eq!(
+        provider_node.path, "src/lib.rs",
+        "provider path must survive the consumer's placeholder branch — gate check"
+    );
+    assert_eq!(
+        provider_node.name, "verify_token",
+        "provider name must survive the consumer's placeholder branch — gate check"
+    );
     assert_eq!(provider_node.node_type, NodeType::Function);
 }
 
@@ -2121,8 +2215,7 @@ async fn federation_keeps_same_named_methods_at_different_lines_distinct() {
     use std::sync::Arc;
 
     let tmp = tempfile::tempdir().unwrap();
-    let backend: Arc<dyn GraphBackend> =
-        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
 
     let repo_path = tmp.path().join("one");
@@ -2134,11 +2227,13 @@ async fn federation_keeps_same_named_methods_at_different_lines_distinct() {
 
     let repo = fed.get_repo(&id).unwrap();
     let db = repo.db();
-    let a = GraphNode::new(NodeType::Method, "new".into(), "src/lib.rs".into())
-        .with_location(2, 4);
-    let b = GraphNode::new(NodeType::Method, "new".into(), "src/lib.rs".into())
-        .with_location(12, 14);
-    assert_ne!(a.id, b.id, "precondition: distinct line ranges → distinct local ids");
+    let a = GraphNode::new(NodeType::Method, "new".into(), "src/lib.rs".into()).with_location(2, 4);
+    let b =
+        GraphNode::new(NodeType::Method, "new".into(), "src/lib.rs".into()).with_location(12, 14);
+    assert_ne!(
+        a.id, b.id,
+        "precondition: distinct line ranges → distinct local ids"
+    );
     db.insert_nodes_batch(&[a.clone(), b.clone()]).unwrap();
     fed.project_nodes(&id).await.unwrap();
     fed.project_edges(&id).await.unwrap();
@@ -2161,7 +2256,7 @@ async fn federation_keeps_same_named_methods_at_different_lines_distinct() {
 async fn cross_repo_matches_with_synthesized_signatures_finds_real_overlap() {
     use lain::federation::federated_index::FederatedIndex;
     use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
-    use lain::federation::matching::{MatchConfidence, find_cross_repo_matches};
+    use lain::federation::matching::{find_cross_repo_matches, MatchConfidence};
     use lain::federation::repo_id::RepoId;
     use lain::federation::repo_source::WorkspaceDirSource;
     use lain::schema::{GraphNode, NodeType};
@@ -2185,8 +2280,7 @@ async fn cross_repo_matches_with_synthesized_signatures_finds_real_overlap() {
         git2::Repository::init(&repo_root).unwrap();
     }
 
-    let backend: Arc<dyn GraphBackend> =
-        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
 
     for name in ["alpha", "bravo"] {
@@ -2290,8 +2384,7 @@ async fn reconciliation_removes_obsolete_calls_between_live_nodes() {
     .unwrap();
     git2::Repository::init(&repo_root).unwrap();
 
-    let backend: Arc<dyn GraphBackend> =
-        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
 
     let id = RepoId::new("svc").unwrap();
@@ -2306,18 +2399,10 @@ async fn reconciliation_removes_obsolete_calls_between_live_nodes() {
     // about how the ingest pipeline produces it. The local node ids
     // match what `upsert_node` mints deterministically from
     // (kind, path, name, line).
-    let caller_local = GraphNode::new(
-        NodeType::Function,
-        "caller".into(),
-        "src/lib.rs".into(),
-    )
-    .with_location(1, 3);
-    let callee_local = GraphNode::new(
-        NodeType::Function,
-        "callee".into(),
-        "src/lib.rs".into(),
-    )
-    .with_location(2, 4);
+    let caller_local = GraphNode::new(NodeType::Function, "caller".into(), "src/lib.rs".into())
+        .with_location(1, 3);
+    let callee_local = GraphNode::new(NodeType::Function, "callee".into(), "src/lib.rs".into())
+        .with_location(2, 4);
     repo.db().insert_node(&caller_local).unwrap();
     repo.db().insert_node(&callee_local).unwrap();
 
@@ -2364,7 +2449,7 @@ async fn reconciliation_removes_obsolete_calls_between_live_nodes() {
     // both nodes remain. Pre-fix the next projection was a no-op for
     // this edge, and `all_edges()` kept returning it.
     repo.db()
-        .remove_edges(&[edge.clone()])
+        .remove_edges(std::slice::from_ref(&edge))
         .expect("remove_edges on per-repo db");
     assert!(
         repo.db().all_edges().is_empty(),
@@ -2466,39 +2551,30 @@ async fn cross_repo_calls_survive_repeated_projection() {
 
     let lib_root = tmp.path().join("lib");
     std::fs::create_dir_all(lib_root.join("src")).unwrap();
-    std::fs::write(
-        lib_root.join("src/lib.rs"),
-        "pub fn callee() {}\n",
-    )
-    .unwrap();
+    std::fs::write(lib_root.join("src/lib.rs"), "pub fn callee() {}\n").unwrap();
     git2::Repository::init(&lib_root).unwrap();
 
-    let backend: Arc<dyn GraphBackend> =
-        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
 
     let svc_id = RepoId::new("svc").unwrap();
     let lib_id = RepoId::new("lib").unwrap();
     let svc_source = WorkspaceDirSource::new(svc_id.clone(), svc_root).unwrap();
     let lib_source = WorkspaceDirSource::new(lib_id.clone(), lib_root).unwrap();
-    fed.add_repo(Box::new(svc_source), tmp.path()).await.unwrap();
-    fed.add_repo(Box::new(lib_source), tmp.path()).await.unwrap();
+    fed.add_repo(Box::new(svc_source), tmp.path())
+        .await
+        .unwrap();
+    fed.add_repo(Box::new(lib_source), tmp.path())
+        .await
+        .unwrap();
 
     let svc_repo = fed.get_repo(&svc_id).expect("svc registered");
     let lib_repo = fed.get_repo(&lib_id).expect("lib registered");
 
-    let caller_local = GraphNode::new(
-        NodeType::Function,
-        "caller".into(),
-        "src/lib.rs".into(),
-    )
-    .with_location(1, 1);
-    let callee_local = GraphNode::new(
-        NodeType::Function,
-        "callee".into(),
-        "src/lib.rs".into(),
-    )
-    .with_location(1, 1);
+    let caller_local = GraphNode::new(NodeType::Function, "caller".into(), "src/lib.rs".into())
+        .with_location(1, 1);
+    let callee_local = GraphNode::new(NodeType::Function, "callee".into(), "src/lib.rs".into())
+        .with_location(1, 1);
     svc_repo.db().insert_node(&caller_local).unwrap();
     lib_repo.db().insert_node(&callee_local).unwrap();
 
@@ -2514,8 +2590,10 @@ async fn cross_repo_calls_survive_repeated_projection() {
     // `insert_edges_batch` routes to `pending_external_edges` when the
     // target is not in the local index — exactly the path the resolve
     // phase takes for genuine cross-repo calls.
-    let dropped =
-        svc_repo.db().insert_edges_batch(&[cross_edge.clone()]).unwrap();
+    let dropped = svc_repo
+        .db()
+        .insert_edges_batch(std::slice::from_ref(&cross_edge))
+        .unwrap();
     assert_eq!(dropped, 0, "cross-repo edge must reach the external stash");
 
     // First projection: drains the stash, materializes the cross-repo

@@ -102,7 +102,11 @@ pub fn resolve_call_edges(
             }
         }
         if let Some(caller_id) = resolved_caller {
-            edges.push(GraphEdge::new(EdgeType::Calls, caller_id, callee_id.clone()));
+            edges.push(GraphEdge::new(
+                EdgeType::Calls,
+                caller_id,
+                callee_id.clone(),
+            ));
         }
     }
     edges
@@ -1368,8 +1372,14 @@ mod call_edge_direction_tests {
         assert_eq!(edges.len(), 1, "exactly one Calls edge");
         let edge = &edges[0];
         assert_eq!(edge.edge_type, EdgeType::Calls);
-        assert_eq!(edge.source_id, entry_id, "source must be the caller (entry)");
-        assert_eq!(edge.target_id, helper_id, "target must be the callee (helper)");
+        assert_eq!(
+            edge.source_id, entry_id,
+            "source must be the caller (entry)"
+        );
+        assert_eq!(
+            edge.target_id, helper_id,
+            "target must be the callee (helper)"
+        );
     }
 
     /// A reference at the callee's own declaration line has the
@@ -1517,6 +1527,9 @@ mod call_edge_direction_tests {
             file_path: "src/lib.rs".to_string(),
             source_line: 2,
             target_name: "outer".to_string(),
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
             edge_type: EdgeType::Calls,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
@@ -1525,7 +1538,10 @@ mod call_edge_direction_tests {
             1,
             "exactly one edge; got {} ({:?})",
             edges.len(),
-            edges.iter().map(|e| (&e.source_id, &e.target_id)).collect::<Vec<_>>()
+            edges
+                .iter()
+                .map(|e| (&e.source_id, &e.target_id))
+                .collect::<Vec<_>>()
         );
         let edge = &edges[0];
         assert_ne!(
@@ -1538,9 +1554,6 @@ mod call_edge_direction_tests {
             edge.source_id, inner_id,
             "call on row 2 must attribute to `inner` (rows 1-2), not `after` (row 3)"
         );
-        assert_eq!(
-            edge.target_id, outer_id,
-            "callee must be `outer`"
-        );
+        assert_eq!(edge.target_id, outer_id, "callee must be `outer`");
     }
 }

@@ -1549,9 +1549,7 @@ impl LspMultiplexer {
 
     pub async fn shutdown(&mut self) {
         if let Some(remote) = self.remote.take() {
-            let _ = remote
-                .notify("shutdown", serde_json::Value::Null)
-                .await;
+            let _ = remote.notify("shutdown", serde_json::Value::Null).await;
             let _ = remote.notify("exit", serde_json::Value::Null).await;
             return;
         }
@@ -2780,11 +2778,7 @@ impl JsonRpcClient {
     }
 
     /// Send a JSON-RPC notification (no id, no response).
-    pub async fn notify(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<(), LainError> {
+    pub async fn notify(&self, method: &str, params: serde_json::Value) -> Result<(), LainError> {
         let message = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -2897,7 +2891,10 @@ fn parse_document_symbols(value: serde_json::Value) -> Vec<DocumentSymbol> {
                         detail: None,
                         kind: info.kind,
                         tags: info.tags,
-                        deprecated: info.deprecated,
+                        // lsp_types still requires this field even though
+                        // it is deprecated in favour of `tags`.
+                        #[allow(deprecated)]
+                        deprecated: None,
                         range: info.location.range,
                         selection_range: info.location.range,
                         children: None,
@@ -2933,20 +2930,20 @@ fn parse_locations(value: serde_json::Value) -> Vec<ParsedLocation> {
             })
             .unwrap_or("");
         let path = uri.replace("file://", "");
-        let range = entry
-            .get("range")
-            .or_else(|| entry.get("targetSelectionRange").or_else(|| entry.get("target_selection_range")));
-        let (line, col) = match range
+        let range = entry.get("range").or_else(|| {
+            entry
+                .get("targetSelectionRange")
+                .or_else(|| entry.get("target_selection_range"))
+        });
+        let (line, col) = range
             .and_then(|r| r.get("start"))
             .map(|s| {
                 (
                     s.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                     s.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                 )
-            }) {
-            Some(v) => v,
-            None => (0, 0),
-        };
+            })
+            .unwrap_or_default();
         out.push(ParsedLocation { path, line, col });
     }
     out
@@ -3072,13 +3069,18 @@ pub mod test_support {
                     let references = Arc::clone(&references);
                     let received = Arc::clone(&received);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(socket, symbols, references, received).await {
+                        if let Err(e) =
+                            handle_connection(socket, symbols, references, received).await
+                        {
                             eprintln!("fake lsp connection: {e}");
                         }
                     });
                 }
             });
-            FakeLspHandle { task, received: self.received }
+            FakeLspHandle {
+                task,
+                received: self.received,
+            }
         }
     }
 
@@ -3113,7 +3115,10 @@ pub mod test_support {
                 .unwrap_or("")
                 .to_string();
             let id = value.get("id").cloned();
-            let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            let params = value
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             match method.as_str() {
                 "initialize" => {
                     received.initialize.lock().unwrap().push(value.clone());
@@ -3212,7 +3217,7 @@ pub mod test_support {
     ) -> std::io::Result<Option<String>> {
         match read_frame(reader).await {
             Ok(v) => Ok(v),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+            Err(e) => Err(std::io::Error::other(e.to_string())),
         }
     }
 }

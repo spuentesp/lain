@@ -341,9 +341,30 @@ mod tests {
     async fn search_org_finds_across_repos() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
-        fed.backend().upsert_node_global("repo-a:Function:src/auth.rs:verify_token:0", crate::schema::NodeType::Function, "src/auth.rs", "verify_token").unwrap();
-        fed.backend().upsert_node_global("repo-b:Function:src/auth.rs:verify_token:0", crate::schema::NodeType::Function, "src/auth.rs", "verify_token").unwrap();
-        fed.backend().upsert_node_global("repo-c:Function:src/x.rs:other:0", crate::schema::NodeType::Function, "src/x.rs", "other").unwrap();
+        fed.backend()
+            .upsert_node_global(
+                "repo-a:Function:src/auth.rs:verify_token:0",
+                crate::schema::NodeType::Function,
+                "src/auth.rs",
+                "verify_token",
+            )
+            .unwrap();
+        fed.backend()
+            .upsert_node_global(
+                "repo-b:Function:src/auth.rs:verify_token:0",
+                crate::schema::NodeType::Function,
+                "src/auth.rs",
+                "verify_token",
+            )
+            .unwrap();
+        fed.backend()
+            .upsert_node_global(
+                "repo-c:Function:src/x.rs:other:0",
+                crate::schema::NodeType::Function,
+                "src/x.rs",
+                "other",
+            )
+            .unwrap();
         let hits = search_org(&fed, "verify", 10);
         assert_eq!(hits.len(), 2);
         let repos: std::collections::HashSet<_> = hits.iter().map(|h| h.repo_id.clone()).collect();
@@ -365,14 +386,37 @@ mod tests {
         // the actual grouping path.
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
-        fed.backend().upsert_node_global("repo-a:Function:src/x.rs:shared:0", crate::schema::NodeType::Function, "src/x.rs", "shared").unwrap();
-        fed.backend().upsert_node_global("repo-b:Function:src/x.rs:shared:0", crate::schema::NodeType::Function, "src/x.rs", "shared").unwrap();
-        fed.backend().upsert_node_global("repo-b:Function:src/y.rs:caller_of_shared:0", crate::schema::NodeType::Function, "src/y.rs", "caller_of_shared").unwrap();
-        fed.backend().upsert_edge(crate::schema::GraphEdge::new(
-            crate::schema::EdgeType::Calls,
-            "repo-b:Function:src/y.rs:caller_of_shared:0".into(),
-            "repo-b:Function:src/x.rs:shared:0".into(),
-        )).unwrap();
+        fed.backend()
+            .upsert_node_global(
+                "repo-a:Function:src/x.rs:shared:0",
+                crate::schema::NodeType::Function,
+                "src/x.rs",
+                "shared",
+            )
+            .unwrap();
+        fed.backend()
+            .upsert_node_global(
+                "repo-b:Function:src/x.rs:shared:0",
+                crate::schema::NodeType::Function,
+                "src/x.rs",
+                "shared",
+            )
+            .unwrap();
+        fed.backend()
+            .upsert_node_global(
+                "repo-b:Function:src/y.rs:caller_of_shared:0",
+                crate::schema::NodeType::Function,
+                "src/y.rs",
+                "caller_of_shared",
+            )
+            .unwrap();
+        fed.backend()
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-b:Function:src/y.rs:caller_of_shared:0".into(),
+                "repo-b:Function:src/x.rs:shared:0".into(),
+            ))
+            .unwrap();
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
         assert_eq!(
             result.by_repo.get("repo-a").map(|v| v.len()).unwrap_or(0),
@@ -406,43 +450,109 @@ mod tests {
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         let backend = fed.backend();
         // Nodes
-        backend.upsert_node_global("repo-a:Function:src/x.rs:shared:0", crate::schema::NodeType::Function, "src/x.rs", "shared").unwrap();
-        backend.upsert_node_global("repo-b:Function:src/x.rs:shared:0", crate::schema::NodeType::Function, "src/x.rs", "shared").unwrap();
-        backend.upsert_node_global("repo-b:Function:src/y.rs:direct_consumer:0", crate::schema::NodeType::Function, "src/y.rs", "direct_consumer").unwrap();
-        backend.upsert_node_global("repo-b:Function:src/z.rs:transitive_consumer:0", crate::schema::NodeType::Function, "src/z.rs", "transitive_consumer").unwrap();
-        backend.upsert_node_global("repo-a:Function:src/x.rs:self_call:0", crate::schema::NodeType::Function, "src/x.rs", "self_call").unwrap();
-        backend.upsert_node_global("repo-a:Function:src/w.rs:other_caller:0", crate::schema::NodeType::Function, "src/w.rs", "other_caller").unwrap();
-        backend.upsert_node_global("repo-a:Function:src/v.rs:transitive_caller:0", crate::schema::NodeType::Function, "src/v.rs", "transitive_caller").unwrap();
-        backend.upsert_node_global("repo-b:Function:src/y.rs:caller_of_shared:0", crate::schema::NodeType::Function, "src/y.rs", "caller_of_shared").unwrap();
+        backend
+            .upsert_node_global(
+                "repo-a:Function:src/x.rs:shared:0",
+                crate::schema::NodeType::Function,
+                "src/x.rs",
+                "shared",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-b:Function:src/x.rs:shared:0",
+                crate::schema::NodeType::Function,
+                "src/x.rs",
+                "shared",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-b:Function:src/y.rs:direct_consumer:0",
+                crate::schema::NodeType::Function,
+                "src/y.rs",
+                "direct_consumer",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-b:Function:src/z.rs:transitive_consumer:0",
+                crate::schema::NodeType::Function,
+                "src/z.rs",
+                "transitive_consumer",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-a:Function:src/x.rs:self_call:0",
+                crate::schema::NodeType::Function,
+                "src/x.rs",
+                "self_call",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-a:Function:src/w.rs:other_caller:0",
+                crate::schema::NodeType::Function,
+                "src/w.rs",
+                "other_caller",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-a:Function:src/v.rs:transitive_caller:0",
+                crate::schema::NodeType::Function,
+                "src/v.rs",
+                "transitive_caller",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-b:Function:src/y.rs:caller_of_shared:0",
+                crate::schema::NodeType::Function,
+                "src/y.rs",
+                "caller_of_shared",
+            )
+            .unwrap();
         // Outgoing noise — must be ignored (blast radius is callers):
-        backend.upsert_edge(crate::schema::GraphEdge::new(
-            crate::schema::EdgeType::Calls,
-            "repo-a:Function:src/x.rs:shared:0".into(),
-            "repo-b:Function:src/y.rs:direct_consumer:0".into(),
-        )).unwrap();
-        backend.upsert_edge(crate::schema::GraphEdge::new(
-            crate::schema::EdgeType::Calls,
-            "repo-a:Function:src/x.rs:shared:0".into(),
-            "repo-a:Function:src/x.rs:self_call:0".into(),
-        )).unwrap();
+        backend
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/x.rs:shared:0".into(),
+                "repo-b:Function:src/y.rs:direct_consumer:0".into(),
+            ))
+            .unwrap();
+        backend
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/x.rs:shared:0".into(),
+                "repo-a:Function:src/x.rs:self_call:0".into(),
+            ))
+            .unwrap();
         // Incoming edges to the seed (repo-a's `shared`):
-        backend.upsert_edge(crate::schema::GraphEdge::new(
-            crate::schema::EdgeType::Calls,
-            "repo-a:Function:src/w.rs:other_caller:0".into(),
-            "repo-a:Function:src/x.rs:shared:0".into(),
-        )).unwrap();
+        backend
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/w.rs:other_caller:0".into(),
+                "repo-a:Function:src/x.rs:shared:0".into(),
+            ))
+            .unwrap();
         // Incoming edge to repo-b's `shared`:
-        backend.upsert_edge(crate::schema::GraphEdge::new(
-            crate::schema::EdgeType::Calls,
-            "repo-b:Function:src/y.rs:caller_of_shared:0".into(),
-            "repo-b:Function:src/x.rs:shared:0".into(),
-        )).unwrap();
+        backend
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-b:Function:src/y.rs:caller_of_shared:0".into(),
+                "repo-b:Function:src/x.rs:shared:0".into(),
+            ))
+            .unwrap();
         // Transitive caller (depth 2) of repo-a's `shared`:
-        backend.upsert_edge(crate::schema::GraphEdge::new(
-            crate::schema::EdgeType::Calls,
-            "repo-a:Function:src/v.rs:transitive_caller:0".into(),
-            "repo-a:Function:src/w.rs:other_caller:0".into(),
-        )).unwrap();
+        backend
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/v.rs:transitive_caller:0".into(),
+                "repo-a:Function:src/w.rs:other_caller:0".into(),
+            ))
+            .unwrap();
 
         // Resolve via repo-a's `shared` (the seed). Callers at depths
         // 1 and 2: other_caller (depth 1, repo-a), transitive_caller
@@ -506,13 +616,29 @@ mod tests {
         // requires a git source dir). `resolve_symbol` has a fallback to
         // `backend.find_nodes_by_name`, so direct backend insertion is
         // enough to populate the symbol index for this test.
-        backend.upsert_node_global("repo-only:Function:src/x.rs:lonely:0", crate::schema::NodeType::Function, "src/x.rs", "lonely").unwrap();
-        backend.upsert_node_global("repo-only:Function:src/y.rs:caller_of_lonely:0", crate::schema::NodeType::Function, "src/y.rs", "caller_of_lonely").unwrap();
-        backend.upsert_edge(crate::schema::GraphEdge::new(
-            crate::schema::EdgeType::Calls,
-            "repo-only:Function:src/y.rs:caller_of_lonely:0".into(),
-            "repo-only:Function:src/x.rs:lonely:0".into(),
-        )).unwrap();
+        backend
+            .upsert_node_global(
+                "repo-only:Function:src/x.rs:lonely:0",
+                crate::schema::NodeType::Function,
+                "src/x.rs",
+                "lonely",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-only:Function:src/y.rs:caller_of_lonely:0",
+                crate::schema::NodeType::Function,
+                "src/y.rs",
+                "caller_of_lonely",
+            )
+            .unwrap();
+        backend
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-only:Function:src/y.rs:caller_of_lonely:0".into(),
+                "repo-only:Function:src/x.rs:lonely:0".into(),
+            ))
+            .unwrap();
         let result = get_cross_repo_blast_radius(&fed, "lonely", 1..3).unwrap();
         assert_eq!(
             result
