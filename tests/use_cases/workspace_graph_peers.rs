@@ -54,7 +54,7 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
     .unwrap();
     std::fs::write(
         a_dir.join("src/lib.rs"),
-        "/// The peer function — same name and signature in repo `b`.\n\
+        "/// The peer function — identical in both repos.\n\
          pub fn shared_helper() -> u32 { 42 }\n",
     )
     .unwrap();
@@ -69,7 +69,7 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
     .unwrap();
     std::fs::write(
         b_dir.join("src/lib.rs"),
-        "/// The peer function — same name and signature in repo `a`.\n\
+        "/// The peer function — identical in both repos.\n\
          pub fn shared_helper() -> u32 { 99 }\n",
     )
     .unwrap();
