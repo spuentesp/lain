@@ -546,8 +546,13 @@ fn apply_attribute_labels(defs: &[crate::treesitter::SymbolDef], nodes: &mut [Gr
 /// that carries the terminator.
 pub fn derive_signature(symbol: &HierarchicalSymbol, workspace: &Path) -> Option<String> {
     let node = &symbol.node;
+    // A non-empty LSP `detail` is not automatically a *usable*
+    // signature: some language servers report fragments like "()" or
+    // "->" that carry no identifier tokens at all, and a matcher fed
+    // those refuses to score (correctly). Fall through to synthesis
+    // unless the detail names something.
     if let Some(sig) = &node.signature {
-        if !sig.is_empty() {
+        if !sig.is_empty() && sig.chars().any(|c| c.is_alphanumeric()) {
             return Some(sig.clone());
         }
     }
