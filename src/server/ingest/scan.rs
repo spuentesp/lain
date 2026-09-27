@@ -544,15 +544,26 @@ fn apply_attribute_labels(defs: &[crate::treesitter::SymbolDef], nodes: &mut [Gr
 /// `range.start.line` are both zero-based). Multi-line signatures — most
 /// often Rust `where` clauses — are joined up to and including the line
 /// that carries the terminator.
+/// Does this signature text carry at least one token the federation
+/// matcher can score on? Mirrors `matching`'s tokenisation: split on
+/// non-alphanumerics, drop stop words, and require one survivor.
+fn signature_names_something(sig: &str) -> bool {
+    sig.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .any(|w| !crate::server::federation::matching::SIGNATURE_STOP_WORDS.contains(&w.as_str()))
+}
+
 pub fn derive_signature(symbol: &HierarchicalSymbol, workspace: &Path) -> Option<String> {
     let node = &symbol.node;
     // A non-empty LSP `detail` is not automatically a *usable*
-    // signature: some language servers report fragments like "()" or
-    // "->" that carry no identifier tokens at all, and a matcher fed
-    // those refuses to score (correctly). Fall through to synthesis
-    // unless the detail names something.
+    // signature: language servers report fragments like "()", "->",
+    // or "pub fn" that carry no non-stop tokens at all, and a matcher
+    // fed those refuses to score (correctly) — which silently drops
+    // cross-repo peer edges. Fall through to synthesis unless the
+    // detail would actually give the matcher something to compare.
     if let Some(sig) = &node.signature {
-        if !sig.is_empty() && sig.chars().any(|c| c.is_alphanumeric()) {
+        if signature_names_something(sig) {
             return Some(sig.clone());
         }
     }
