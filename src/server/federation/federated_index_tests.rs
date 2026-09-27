@@ -43,7 +43,13 @@ async fn add_repo_registers_and_lists_it() {
 async fn global_id_format() {
     let tmp = tempfile::tempdir().unwrap();
     let fed = FederatedIndex::new(petgraph_backend(&tmp));
-    let id = fed.global_id(&RepoId::new("repo-a").unwrap(), NodeType::Function, "src/lib.rs", "f", None);
+    let id = fed.global_id(
+        &RepoId::new("repo-a").unwrap(),
+        NodeType::Function,
+        "src/lib.rs",
+        "f",
+        None,
+    );
     assert_eq!(id.as_str(), "repo-a:Function:src/lib.rs:f:0");
 }
 
@@ -52,7 +58,14 @@ fn resolve_symbol_unique_match_returns_repo() {
     let tmp = tempfile::tempdir().unwrap();
     let fed = FederatedIndex::new(petgraph_backend(&tmp));
     let backend = fed.backend();
-    backend.upsert_node_global("repo-a:Function:src/lib.rs:only_one:0", NodeType::Function, "src/lib.rs", "only_one").unwrap();
+    backend
+        .upsert_node_global(
+            "repo-a:Function:src/lib.rs:only_one:0",
+            NodeType::Function,
+            "src/lib.rs",
+            "only_one",
+        )
+        .unwrap();
     let resolved = fed.resolve_symbol("only_one").unwrap();
     assert_eq!(resolved.as_str(), "repo-a");
 }
@@ -72,8 +85,22 @@ fn resolve_symbol_multiple_matches_returns_ambiguous() {
     let tmp = tempfile::tempdir().unwrap();
     let fed = FederatedIndex::new(petgraph_backend(&tmp));
     let backend = fed.backend();
-    backend.upsert_node_global("repo-a:Function:src/lib.rs:shared:0", NodeType::Function, "src/lib.rs", "shared").unwrap();
-    backend.upsert_node_global("repo-b:Function:src/lib.rs:shared:0", NodeType::Function, "src/lib.rs", "shared").unwrap();
+    backend
+        .upsert_node_global(
+            "repo-a:Function:src/lib.rs:shared:0",
+            NodeType::Function,
+            "src/lib.rs",
+            "shared",
+        )
+        .unwrap();
+    backend
+        .upsert_node_global(
+            "repo-b:Function:src/lib.rs:shared:0",
+            NodeType::Function,
+            "src/lib.rs",
+            "shared",
+        )
+        .unwrap();
     let err = fed.resolve_symbol("shared").unwrap_err();
     assert!(matches!(err, crate::error::LainError::AmbiguousSymbol(_)));
 }

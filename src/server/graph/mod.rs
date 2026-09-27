@@ -632,7 +632,13 @@ impl GraphDatabase {
 
         let targets: std::collections::HashSet<(String, String, EdgeType)> = edges
             .iter()
-            .map(|e| (e.source_id.clone(), e.target_id.clone(), e.edge_type.clone()))
+            .map(|e| {
+                (
+                    e.source_id.clone(),
+                    e.target_id.clone(),
+                    e.edge_type.clone(),
+                )
+            })
             .collect();
 
         let mut removed = 0usize;
@@ -648,8 +654,7 @@ impl GraphDatabase {
                     w.source_id.clone(),
                     w.target_id.clone(),
                     w.edge_type.clone(),
-                ))
-                {
+                )) {
                     to_remove.push(edge.id());
                 }
             }

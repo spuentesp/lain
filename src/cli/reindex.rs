@@ -18,11 +18,7 @@ use crate::cli::resolve_repos_config;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-pub async fn run_reindex(
-    config: PathBuf,
-    workspace: Option<String>,
-    verbose: bool,
-) -> Result<()> {
+pub async fn run_reindex(config: PathBuf, workspace: Option<String>, verbose: bool) -> Result<()> {
     let config_path = resolve_repos_config(&config);
     let federation_cfg = crate::server::federation::config::FederationConfig::load(&config_path)
         .with_context(|| format!("loading {}", config_path.display()))?;
@@ -67,9 +63,8 @@ pub async fn run_reindex(
         if verbose {
             eprintln!("removing stale sidecar {}", graph_bin_sidecar.display());
         }
-        std::fs::remove_file(&graph_bin_sidecar).with_context(|| {
-            format!("removing stale sidecar {}", graph_bin_sidecar.display())
-        })?;
+        std::fs::remove_file(&graph_bin_sidecar)
+            .with_context(|| format!("removing stale sidecar {}", graph_bin_sidecar.display()))?;
     }
 
     // Step 2: load the federation. The loader's Phase 0/1/2
@@ -124,9 +119,7 @@ pub async fn run_reindex(
         // graph is already fresh and a re-run picks up the projection
         // for free.
         if let Err(e) = fed.project_repo(&repo_id).await {
-            tracing::warn!(
-                "project_repo for '{repo_id}' after re-indexing failed: {e}"
-            );
+            tracing::warn!("project_repo for '{repo_id}' after re-indexing failed: {e}");
         }
     }
 

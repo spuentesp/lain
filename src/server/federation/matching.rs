@@ -4,12 +4,46 @@ use crate::schema::{EdgeType, GraphNode};
 /// Tokens that don't carry parameter / type information and shouldn't
 /// contribute to cross-repo signature similarity.
 pub const SIGNATURE_STOP_WORDS: &[&str] = &[
-    "pub", "private", "protected", "public", "export", "default",
-    "static", "async", "const", "let", "var", "final", "abstract",
-    "override", "virtual", "unsafe", "fn", "def", "function", "class",
-    "struct", "enum", "interface", "trait", "impl", "type", "record",
-    "data", "use", "import", "from", "module", "namespace", "extern",
-    "crate", "self", "cls", "func", "method", "new",
+    "pub",
+    "private",
+    "protected",
+    "public",
+    "export",
+    "default",
+    "static",
+    "async",
+    "const",
+    "let",
+    "var",
+    "final",
+    "abstract",
+    "override",
+    "virtual",
+    "unsafe",
+    "fn",
+    "def",
+    "function",
+    "class",
+    "struct",
+    "enum",
+    "interface",
+    "trait",
+    "impl",
+    "type",
+    "record",
+    "data",
+    "use",
+    "import",
+    "from",
+    "module",
+    "namespace",
+    "extern",
+    "crate",
+    "self",
+    "cls",
+    "func",
+    "method",
+    "new",
 ];
 
 /// Confidence tag for a single cross-repo match.
@@ -27,8 +61,10 @@ pub fn signature_tokens(sig: &str) -> Vec<String> {
         .collect()
 }
 
-fn non_stop_tokens<'a>(tokens: &'a [String]) -> impl Iterator<Item = &'a String> {
-    tokens.iter().filter(|t| !SIGNATURE_STOP_WORDS.contains(&t.as_str()))
+fn non_stop_tokens(tokens: &[String]) -> impl Iterator<Item = &String> {
+    tokens
+        .iter()
+        .filter(|t| !SIGNATURE_STOP_WORDS.contains(&t.as_str()))
 }
 
 pub fn signature_similarity(a: &[String], b: &[String]) -> f32 {
@@ -127,11 +163,17 @@ pub fn find_cross_repo_matches(
             // Hard requirement: at least one shared non-stop-word token,
             // unless we're in name-only mode (in which case we accept any
             // candidate and tag confidence as NameOnly).
-            let shares_token = new_non_stop.iter().any(|t| candidate_non_stop.iter().any(|c| *c == t));
+            let shares_token = new_non_stop
+                .iter()
+                .any(|t| candidate_non_stop.contains(&t));
             let confidence = if new_signature.is_some() && candidate_signature.is_some() {
-                if shares_token { MatchConfidence::Signature }
-                else if allow_name_only { MatchConfidence::NameOnly }
-                else { return None; }
+                if shares_token {
+                    MatchConfidence::Signature
+                } else if allow_name_only {
+                    MatchConfidence::NameOnly
+                } else {
+                    return None;
+                }
             } else if allow_name_only {
                 MatchConfidence::NameOnly
             } else {

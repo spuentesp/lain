@@ -31,9 +31,15 @@ use std::sync::Arc;
 /// rewrite passes (this repo's own nodes, and — for cross-repo matching —
 /// every other repo's nodes) so the rewrite rule can't drift between them.
 fn global_id_str(repo: &RepoId, node: &GraphNode) -> String {
-    GlobalId::new(repo, node.node_type.clone(), &node.path, &node.name, node.line_start)
-        .as_str()
-        .to_string()
+    GlobalId::new(
+        repo,
+        node.node_type.clone(),
+        &node.path,
+        &node.name,
+        node.line_start,
+    )
+    .as_str()
+    .to_string()
 }
 
 pub struct FederatedIndex {
@@ -418,7 +424,14 @@ impl FederatedIndex {
             .collect()
     }
 
-    pub fn global_id(&self, repo: &RepoId, kind: NodeType, path: &str, name: &str, line_start: Option<u32>) -> GlobalId {
+    pub fn global_id(
+        &self,
+        repo: &RepoId,
+        kind: NodeType,
+        path: &str,
+        name: &str,
+        line_start: Option<u32>,
+    ) -> GlobalId {
         GlobalId::new(repo, kind, path, name, line_start)
     }
 
@@ -615,12 +628,9 @@ impl FederatedIndex {
                             id.as_str(),
                             gid.as_str(),
                         );
-                        let _ = self.backend.upsert_node_global(
-                            gid.as_str(),
-                            kind,
-                            path,
-                            name,
-                        );
+                        let _ = self
+                            .backend
+                            .upsert_node_global(gid.as_str(), kind, path, name);
                         placeholder_ids.push(gid.as_str().to_string());
                     }
                 }
@@ -758,8 +768,16 @@ impl FederatedIndex {
         // `remove_node` takes incident edges with it) or the entire
         // source repo is removed.
         let prefix = format!("{}:", id.as_str());
-        let new_keys: std::collections::HashSet<(crate::schema::EdgeType, String, String)> =
-            batch.iter().map(|e| (e.edge_type.clone(), e.source_id.clone(), e.target_id.clone())).collect();
+        let new_keys: std::collections::HashSet<(crate::schema::EdgeType, String, String)> = batch
+            .iter()
+            .map(|e| {
+                (
+                    e.edge_type.clone(),
+                    e.source_id.clone(),
+                    e.target_id.clone(),
+                )
+            })
+            .collect();
         let stale: Vec<crate::schema::GraphEdge> = self
             .backend
             .all_edges()?
@@ -769,7 +787,13 @@ impl FederatedIndex {
                 !(e.edge_type == crate::schema::EdgeType::Calls
                     && !e.target_id.starts_with(&prefix))
             })
-            .filter(|e| !new_keys.contains(&(e.edge_type.clone(), e.source_id.clone(), e.target_id.clone())))
+            .filter(|e| {
+                !new_keys.contains(&(
+                    e.edge_type.clone(),
+                    e.source_id.clone(),
+                    e.target_id.clone(),
+                ))
+            })
             .collect();
         if !stale.is_empty() {
             let removed = self.backend.remove_edges(&stale)?;
