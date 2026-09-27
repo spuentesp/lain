@@ -2000,6 +2000,32 @@ fn federation_schema_version_mismatch_errors_with_clear_message() {
     }
 }
 
+#[test]
+fn federation_rejects_corrupt_payload_under_valid_header() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{FEDERATION_GRAPH_VERSION, PetgraphBackend};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::from(&b"LNF2"[..]);
+    bytes.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
+    bytes.extend_from_slice(b"corrupt bincode payload");
+    std::fs::write(&bin_path, bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected corrupt federation payload to be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            err,
+            LainError::FederationSchemaMismatch { found, required }
+                if found == FEDERATION_GRAPH_VERSION && required == FEDERATION_GRAPH_VERSION
+        ),
+        "expected FederationSchemaMismatch for corrupt payload, got {err:?}"
+    );
+}
+
 /// End-to-end coverage for the signature-synthesis gate introduced in
 /// Task 3: two repos each declare a Rust function `verify_token` whose
 /// LSP signature field is empty. Setting the synthesized signature

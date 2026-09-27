@@ -6,12 +6,23 @@ use dashmap::DashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-/// Schema version of the on-disk federated graph. Bump when the
-/// `GlobalId` format or the persisted payload changes in a
-/// non-backward-compatible way. The loader refuses any graph whose
-/// header doesn't match this value and asks the operator to run
-/// `lain reindex`. No silent migration.
+/// On-disk envelope for `federated_graph.bin`: the `LNF2` magic followed
+/// by a little-endian `u32` schema version. Anything else — headerless
+/// bytes, an unknown magic, a version mismatch, or a corrupt body under a
+/// valid header — is rejected with `LainError::FederationSchemaMismatch`
+/// rather than loaded.
+pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
 pub const FEDERATION_GRAPH_VERSION: u32 = 2;
+pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
+
+/// Sibling file holding the validated payload (everything after the
+/// envelope header); this is what `GraphDatabase` is opened against, so
+/// reloads see only bytes that passed `validate_persisted_payload`.
+fn payload_path_for(bin_path: &Path) -> std::path::PathBuf {
+    let mut p = bin_path.as_os_str().to_owned();
+    p.push(".payload");
+    std::path::PathBuf::from(p)
+}
 
 pub trait GraphBackend: Send + Sync {
     fn upsert_node(&self, node: GraphNode) -> Result<(), LainError>;
@@ -88,11 +99,13 @@ pub struct PetgraphBackend {
     db: GraphDatabase,
     index: DashMap<String, GlobalId>,
     bin_path: PathBuf,
+    payload_path: PathBuf,
 }
 
 impl PetgraphBackend {
     pub fn new(data_dir: &Path) -> Result<Self, LainError> {
         let bin_path = data_dir.join("federated_graph.bin");
+        let payload_path = payload_path_for(&bin_path);
 
         // Schema version gate. The federated_graph.bin file starts with a
         // 4-byte little-endian u32 version header followed by the bincode
@@ -100,40 +113,65 @@ impl PetgraphBackend {
         // headers fail fast with FederationSchemaMismatch.
         if bin_path.exists() {
             let bytes = std::fs::read(&bin_path)?;
-            if bytes.len() >= 4 {
-                let found = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            // A zero-byte file is *truncated*, not "no graph yet" — the
+            // envelope (magic + version, 8 bytes) is mandatory, and any
+            // shorter file means a torn write or a hand-crafted sentinel.
+            // Treating it as a valid no-op (the previous behaviour) lets a
+            // `GraphDatabase::new` soft-fall-through mask the corruption.
+            if bytes.is_empty()
+                || bytes.len() < FEDERATION_GRAPH_HEADER_LEN
+                || &bytes[..FEDERATION_GRAPH_MAGIC.len()] != FEDERATION_GRAPH_MAGIC
+            {
+                return Err(LainError::FederationSchemaMismatch {
+                    found: 0,
+                    required: FEDERATION_GRAPH_VERSION,
+                });
+            } else {
+                let found = u32::from_le_bytes([
+                    bytes[FEDERATION_GRAPH_MAGIC.len()],
+                    bytes[FEDERATION_GRAPH_MAGIC.len() + 1],
+                    bytes[FEDERATION_GRAPH_MAGIC.len() + 2],
+                    bytes[FEDERATION_GRAPH_MAGIC.len() + 3],
+                ]);
                 if found != FEDERATION_GRAPH_VERSION {
                     return Err(LainError::FederationSchemaMismatch {
                         found,
                         required: FEDERATION_GRAPH_VERSION,
                     });
                 }
-                // Strip the 4-byte version header so the file
-                // `GraphDatabase::new` reads is the raw bincode payload.
-                // We rewrite in place because `GraphDatabase::new` expects
-                // a bincode-encoded payload on disk.
-                std::fs::write(&bin_path, &bytes[4..])?;
+                let payload = &bytes[FEDERATION_GRAPH_HEADER_LEN..];
+                GraphDatabase::validate_persisted_payload(payload).map_err(|error| {
+                    tracing::warn!(
+                        "Rejecting corrupt federation graph payload at {}: {error}. Run `lain reindex` to rebuild.",
+                        bin_path.display()
+                    );
+                    LainError::FederationSchemaMismatch {
+                        found: FEDERATION_GRAPH_VERSION,
+                        required: FEDERATION_GRAPH_VERSION,
+                    }
+                })?;
+                std::fs::write(&payload_path, payload)?;
             }
         }
 
-        let db = GraphDatabase::new(&bin_path)?;
+        let db = GraphDatabase::new(&payload_path)?;
         let index = DashMap::new();
         for node in db.get_all_nodes() {
             if let Ok(global_id) = GlobalId::parse(&node.id) {
                 index.insert(node.id, global_id);
             }
         }
-        Ok(Self { db, index, bin_path })
+        Ok(Self { db, index, bin_path, payload_path })
     }
 
-    /// Save the federated graph to disk, prepending the schema version
-    /// header so [`Self::new`] can validate it on the next load. We write
-    /// the bare bincode payload first (via `GraphDatabase::save`), then
-    /// splice the version header in front.
+    /// Save the federated graph to disk, prepending the schema envelope
+    /// (magic + version) before the bincode payload so the canonical
+    /// file is always self-describing on the next load.
     fn save(&self) -> Result<(), LainError> {
         self.db.save_to_disk_sync()?;
-        let payload = std::fs::read(&self.bin_path)?;
-        let mut with_header = Vec::with_capacity(4 + payload.len());
+        let payload = std::fs::read(&self.payload_path)?;
+        let mut with_header = Vec::with_capacity(FEDERATION_GRAPH_HEADER_LEN + payload.len());
+        with_header.extend_from_slice(FEDERATION_GRAPH_MAGIC);
         with_header.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
         with_header.extend_from_slice(&payload);
         std::fs::write(&self.bin_path, &with_header)?;

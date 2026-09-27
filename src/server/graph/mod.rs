@@ -1533,6 +1533,18 @@ impl GraphDatabase {
         Ok(())
     }
 
+    pub(crate) fn validate_persisted_payload(data: &[u8]) -> Result<(), LainError> {
+        let (state, _) = persist::decode_state(data)
+            .map_err(|e| LainError::Database(e.to_string()))?;
+        if state.path_format_version != PATH_FORMAT_VERSION {
+            return Err(LainError::Database(format!(
+                "graph payload path format v{} does not match v{}",
+                state.path_format_version, PATH_FORMAT_VERSION
+            )));
+        }
+        Ok(())
+    }
+
     pub fn load_from_disk(&self) -> Result<(), LainError> {
         // load_from_disk is allowed on read-only graphs — it's how we hydrate
         // the static sidecar view from the owner's on-disk snapshot. Only
