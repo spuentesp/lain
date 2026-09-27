@@ -65,10 +65,13 @@ impl PatternLimits {
     };
 }
 
-/// Link external refs (already-resolved source ids + LSP reference
-/// locations) to internal nodes. For every ref whose target resolves
-/// to a known node at `path:line`, emit a `Calls` edge from the
-/// source id to the target id — skipping self-edges.
+/// Link external refs (already-resolved callee ids + LSP reference
+/// locations) to internal nodes. Each tuple is `(callee_id, ref_loc)`
+/// where `callee_id` is the symbol the LSP `references` request was
+/// asked about, and `ref_loc` identifies a use site of that symbol.
+/// The function containing the use site is the caller; emit a
+/// `Calls` edge caller -> callee, skipping self-edges and unresolved
+/// use sites.
 ///
 /// `workspace` is the path used by [`graph_path`] to translate an
 /// absolute reference path into the same relative key the scanner
@@ -81,29 +84,25 @@ pub fn resolve_call_edges(
     source_repo: Option<&RepoId>,
 ) -> Vec<GraphEdge> {
     let mut edges = Vec::with_capacity(refs.len());
-    for (source_id, ref_loc) in refs {
+    for (callee_id, ref_loc) in refs {
         let path_str = graph_path(workspace, &ref_loc.path);
-        let mut resolved_target: Option<String> = None;
-        if let Some(target) = db.get_node_at_location(&path_str, ref_loc.line) {
-            if target.id != *source_id {
-                resolved_target = Some(target.id);
+        let mut resolved_caller: Option<String> = None;
+        if let Some(caller) = db.get_node_at_location(&path_str, ref_loc.line) {
+            if caller.id != *callee_id {
+                resolved_caller = Some(caller.id);
             }
         } else if let (Some(resolver), Some(src)) = (resolver, source_repo) {
             if let Some(gid) =
                 resolver.resolve_cross_repo(src, None, Some(&ref_loc.path), Some(ref_loc.line))
             {
                 let gid_str = gid.as_str().to_string();
-                if gid_str != *source_id {
-                    resolved_target = Some(gid_str);
+                if gid_str != *callee_id {
+                    resolved_caller = Some(gid_str);
                 }
             }
         }
-        if let Some(target_id) = resolved_target {
-            edges.push(GraphEdge::new(
-                EdgeType::Calls,
-                source_id.clone(),
-                target_id,
-            ));
+        if let Some(caller_id) = resolved_caller {
+            edges.push(GraphEdge::new(EdgeType::Calls, caller_id, callee_id.clone()));
         }
     }
     edges
@@ -613,5 +612,167 @@ mod ambiguous_name_tests {
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "a unique name must still resolve");
         assert_eq!(edges[0].target_id, target_id);
+    }
+}
+
+#[cfg(test)]
+mod call_edge_direction_tests {
+    use super::*;
+    use crate::graph::GraphDatabase;
+    use crate::schema::{GraphNode, NodeType};
+    use std::path::PathBuf;
+
+    fn fn_node(name: &str, path: &str, lines: (u32, u32)) -> GraphNode {
+        let mut n = GraphNode::new(NodeType::Function, name.to_string(), path.to_string());
+        n.line_start = Some(lines.0);
+        n.line_end = Some(lines.1);
+        n
+    }
+
+    /// An LSP `references` result is a *use site* — the function
+    /// containing the reference is the caller; the symbol we asked
+    /// about is the callee. The edge must start at the caller, not at
+    /// the referenced declaration. Live finding: with the bug, the
+    /// `source_id` (`callee_id`) was emitted as the edge source and
+    /// `entry` was emitted as the target, so `entry -> helper` came
+    /// out backwards as `helper -> entry`.
+    #[test]
+    fn reference_use_site_resolves_to_caller_not_callee() {
+        let tmp = std::env::temp_dir().join("lain_call_direction");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let helper = fn_node("helper", "src/util.rs", (1, 3));
+        let helper_id = helper.id.clone();
+        let entry = fn_node("entry", "src/main.rs", (10, 30));
+        let entry_id = entry.id.clone();
+        db.upsert_node(helper).unwrap();
+        db.upsert_node(entry).unwrap();
+
+        let refs = vec![(
+            helper_id.clone(),
+            ReferenceLocation {
+                path: PathBuf::from("/ws/src/main.rs"),
+                line: 20,
+                col: 4,
+                context: String::new(),
+            },
+        )];
+
+        let edges = resolve_call_edges(&db, Path::new("/ws"), &refs, None, None);
+        assert_eq!(edges.len(), 1, "exactly one Calls edge");
+        let edge = &edges[0];
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(edge.source_id, entry_id, "source must be the caller (entry)");
+        assert_eq!(edge.target_id, helper_id, "target must be the callee (helper)");
+    }
+
+    /// A reference at the callee's own declaration line has the
+    /// function at that location equal to the callee; emit a
+    /// self-edge would be a lie. Drop it.
+    #[test]
+    fn reference_at_callees_own_declaration_is_a_self_edge_and_is_dropped() {
+        let tmp = std::env::temp_dir().join("lain_call_self_edge");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let helper = fn_node("helper", "src/util.rs", (1, 3));
+        let helper_id = helper.id.clone();
+        db.upsert_node(helper).unwrap();
+
+        let refs = vec![(
+            helper_id.clone(),
+            ReferenceLocation {
+                path: PathBuf::from("/ws/src/util.rs"),
+                line: 1,
+                col: 4,
+                context: String::new(),
+            },
+        )];
+
+        let edges = resolve_call_edges(&db, Path::new("/ws"), &refs, None, None);
+        assert!(
+            edges.is_empty(),
+            "a self-edge must not be emitted; got {} edge(s)",
+            edges.len()
+        );
+    }
+
+    /// A reference at a line that no function contains has no
+    /// resolvable caller; skip rather than invent one.
+    #[test]
+    fn reference_outside_any_function_produces_no_edge() {
+        let tmp = std::env::temp_dir().join("lain_call_no_caller");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let helper = fn_node("helper", "src/util.rs", (1, 3));
+        let helper_id = helper.id.clone();
+        db.upsert_node(helper).unwrap();
+
+        let refs = vec![(
+            helper_id.clone(),
+            ReferenceLocation {
+                path: PathBuf::from("/ws/src/main.rs"),
+                line: 999,
+                col: 0,
+                context: String::new(),
+            },
+        )];
+
+        let edges = resolve_call_edges(&db, Path::new("/ws"), &refs, None, None);
+        assert!(
+            edges.is_empty(),
+            "no caller at line 999 means no edge; got {} edge(s)",
+            edges.len()
+        );
+    }
+
+    /// Multiple references to one callee across multiple call sites
+    /// each become their own caller -> callee edge.
+    #[test]
+    fn multiple_call_sites_produce_one_edge_per_caller() {
+        let tmp = std::env::temp_dir().join("lain_call_multi");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let helper = fn_node("helper", "src/util.rs", (1, 3));
+        let helper_id = helper.id.clone();
+        let alpha = fn_node("alpha", "src/main.rs", (10, 20));
+        let alpha_id = alpha.id.clone();
+        let beta = fn_node("beta", "src/main.rs", (40, 60));
+        let beta_id = beta.id.clone();
+        db.upsert_node(helper).unwrap();
+        db.upsert_node(alpha).unwrap();
+        db.upsert_node(beta).unwrap();
+
+        let refs = vec![
+            (
+                helper_id.clone(),
+                ReferenceLocation {
+                    path: PathBuf::from("/ws/src/main.rs"),
+                    line: 15,
+                    col: 4,
+                    context: String::new(),
+                },
+            ),
+            (
+                helper_id.clone(),
+                ReferenceLocation {
+                    path: PathBuf::from("/ws/src/main.rs"),
+                    line: 50,
+                    col: 4,
+                    context: String::new(),
+                },
+            ),
+        ];
+
+        let edges = resolve_call_edges(&db, Path::new("/ws"), &refs, None, None);
+        let sources: std::collections::HashSet<&str> =
+            edges.iter().map(|e| e.source_id.as_str()).collect();
+        assert_eq!(edges.len(), 2, "two callers must produce two edges");
+        assert!(sources.contains(alpha_id.as_str()));
+        assert!(sources.contains(beta_id.as_str()));
+        assert!(edges.iter().all(|e| e.target_id == helper_id));
     }
 }

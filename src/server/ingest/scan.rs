@@ -27,7 +27,7 @@ pub struct PatternRef {
 pub struct FileScanResult {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
-    pub external_references: Vec<(String, ReferenceLocation)>, // source_node_id, reference
+    pub external_references: Vec<(String, ReferenceLocation)>, // (callee_id, reference_use_site)
     pub static_refs: Vec<StaticFileRef>,
     pub pattern_refs: Vec<PatternRef>,
 }
@@ -126,49 +126,7 @@ pub async fn scan_file_structure(
         ));
     }
 
-    // 3. Fetch all references for this file while we hold the
-    //    lock (prevents nested-lock deadlock).
-    //
-    //    AGENT_UX_ROADMAP.md Milestone 4 (PR E follow-up):
-    //    lsp-bridge 0.2's `LspMultiplexer::get_references` is an
-    //    `async fn` that internally drives the LSP child process
-    //    over stdio. Unlike the libgit2 / tree-sitter / ONNX
-    //    migrations PR B + E landed, this call can't move onto
-    //    `spawn_blocking` from this repo: the only way to expose
-    //    sync LSP is upstream in lsp-bridge (sync subprocess entry
-    //    point), and `Handle::block_on(inside spawn_blocking)` is
-    //    the anti-pattern this whole initiative was designed to
-    //    avoid. What we *can* do from here is race each LSP await
-    //    against the cancel token — a shutdown that lands mid-scan
-    //    aborts the LSP round-trip promptly instead of waiting for
-    //    the child to answer. The `tokio::select!` below does that.
-    let file_refs: Vec<ReferenceLocation> = {
-        let mut lsp = lsp_mux.lock().await;
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                // Cancellation lands between the lock acquire and
-                // the LSP round-trip. Drop the lock and bail out
-                // before any graph mutation.
-                return Ok(FileScanResult {
-                    nodes,
-                    edges,
-                    external_references,
-                    static_refs: vec![],
-                    pattern_refs: vec![],
-                });
-            }
-            refs = lsp.get_references(&path, 0, 0) => refs.unwrap_or_default(),
-        }
-    };
-
-    // Collect (node_id, reference) tuples for deferred resolution
-    for r in &file_refs {
-        external_references.push((file_id.clone(), r.clone()));
-    }
-
-    // 4. Recursive symbols (no more per-symbol lock acquisition).
-    //    Same cancellation race as the references call above.
+    // 4. Recursive symbols (no more per-symbol lock acquisition)
     let symbols_result = {
         let mut lsp = lsp_mux.lock().await;
         let ns = crate::schema::RepoNamespace::for_test();
@@ -190,6 +148,8 @@ pub async fn scan_file_structure(
             ) => result,
         }
     };
+
+    let mut selection_positions: Vec<(String, u32, u32)> = Vec::new();
 
     match symbols_result {
         Ok(symbols) => {
@@ -213,6 +173,7 @@ pub async fn scan_file_structure(
                 .await;
             } else {
                 for symbol in symbols {
+                    collect_selection_positions(&mut selection_positions, &symbol);
                     process_symbol_recursive_enriched(
                         &mut nodes,
                         &mut edges,
@@ -249,12 +210,22 @@ pub async fn scan_file_structure(
         }
     }
 
-    // Tree-sitter static analysis: extract call, type-usage refs,
-    // string literals, and definitions in one offthread call so
-    // we amortize the spawn_blocking round-trip. The closure
-    // captures only `Path` and `&str` (both Send + 'static-friendly);
-    // the result is the same three vectors the inline version
-    // produced, just produced off the async runtime.
+    // 5. Per-symbol LSP references — each symbol's selection position
+    //    identifies the declaration whose references we want. Pair each
+    //    returned reference with the symbol's node id so the resolve
+    //    phase can build caller -> callee edges.
+    for (callee_id, sel_line, sel_col) in selection_positions {
+        let refs = {
+            let mut lsp = lsp_mux.lock().await;
+            lsp.get_references(&path, sel_line, sel_col).await.unwrap_or_default()
+        };
+        for r in refs {
+            external_references.push((callee_id.clone(), r));
+        }
+    }
+
+    // Tree-sitter static analysis: extract call, type-usage refs, and string literals from source
+    // Read file once — reuse content for both extractors
     let (static_refs, pattern_refs) = if let Ok(content) = tokio::fs::read_to_string(&path).await {
         // Attribute labels, merged onto whatever produced the nodes.
         //
@@ -427,6 +398,23 @@ pub fn derive_signature(symbol: &HierarchicalSymbol, workspace: &Path) -> Option
     let end = trimmed.find(['{', ':']).unwrap_or(trimmed.len());
     let candidate = trimmed[..end].trim();
     if candidate.is_empty() { None } else { Some(candidate.to_string()) }
+}
+
+/// Walk a `HierarchicalSymbol` tree, recording each symbol's id and
+/// selection position so the caller can run `get_references` against
+/// the LSP using the symbol's own identifier position.
+fn collect_selection_positions(
+    out: &mut Vec<(String, u32, u32)>,
+    symbol: &HierarchicalSymbol,
+) {
+    out.push((
+        symbol.node.id.clone(),
+        symbol.node.line_start.unwrap_or(0),
+        0,
+    ));
+    for child in &symbol.children {
+        collect_selection_positions(out, child);
+    }
 }
 
 /// Does this symbol name a unit-test container?
@@ -725,7 +713,12 @@ mod tests {
         let mut node = GraphNode::new(NodeType::Function, name.into(), path.into());
         node.line_start = line_start;
         node.signature = signature.map(|s| s.to_string());
-        HierarchicalSymbol { node, children: Vec::new() }
+        HierarchicalSymbol {
+            node,
+            selection_line: line_start.unwrap_or(0),
+            selection_col: 0,
+            children: Vec::new(),
+        }
     }
 
     #[test]
@@ -774,6 +767,294 @@ mod tests {
         let sym = make_symbol("foo", "src/lib.rs", Some(1), None);
 
         assert_eq!(derive_signature(&sym, dir.path()), None);
+    }
+
+    /// The scanner must ask `get_references` for each symbol's
+    /// selection position (line + column of the identifier), not
+    /// `(0, 0)`. With the pre-fix code, the scanner asked once per
+    /// file at `(0, 0)`, so the LSP returned nothing useful and the
+    /// resolve phase had zero callees to link — every `Calls` edge
+    /// silently disappeared.
+    ///
+    /// The fixture returns a single symbol `helper` at selection
+    /// `(1, 4)` (the identifier column inside `pub fn helper`) and
+    /// one canned reference at that position pointing into `entry`.
+    /// If the scanner passes any position other than `(1, 4)` to
+    /// `get_references`, the override is not hit and the reference
+    /// set comes back empty.
+    #[tokio::test]
+    async fn scanner_calls_get_references_at_each_symbols_selection_position() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("lib.rs");
+        std::fs::write(
+            &file,
+            "pub fn helper() {}\npub fn caller() { helper(); }\n",
+        )
+        .expect("write");
+
+        let helper_path_str = "lib.rs".to_string();
+        let mut helper_node = GraphNode::new(
+            NodeType::Function,
+            "helper".to_string(),
+            helper_path_str.clone(),
+        );
+        helper_node.line_start = Some(1);
+        helper_node.line_end = Some(1);
+        let helper_symbol = HierarchicalSymbol {
+            node: helper_node,
+            selection_line: 1,
+            selection_col: 8,
+            children: Vec::new(),
+        };
+
+        let lsp = Arc::new(AsyncMutex::new(
+            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default())
+                .expect("lsp mux"),
+        ));
+        lsp.lock().await.mark_unavailable("rust-analyzer");
+        {
+            let mut guard = lsp.lock().await;
+            let mut symbols = std::collections::HashMap::new();
+            symbols.insert(file.clone(), vec![helper_symbol.clone()]);
+            guard.set_test_document_symbols(symbols);
+            let mut refs = std::collections::HashMap::new();
+            refs.insert(
+                (file.clone(), 1u32, 8u32),
+                vec![ReferenceLocation {
+                    path: file.clone(),
+                    line: 2,
+                    col: 12,
+                    context: String::new(),
+                }],
+            );
+            guard.set_test_references(refs);
+        }
+
+        let result = scan_file_structure(
+            file.clone(),
+            tmp.path().to_path_buf(),
+            lsp,
+            0,
+            0,
+            "abc".to_string(),
+        )
+        .await
+        .expect("scan ok");
+
+        assert_eq!(
+            result.external_references.len(),
+            1,
+            "scanner must emit exactly one external ref for the one canned reference; got {:?}",
+            result
+                .external_references
+                .iter()
+                .map(|(id, r)| (id, r.line, r.col))
+                .collect::<Vec<_>>()
+        );
+        let (callee_id, ref_loc) = &result.external_references[0];
+        assert_eq!(
+            callee_id, &helper_symbol.node.id,
+            "external_references must pair the ref with the callee (the symbol we asked about)"
+        );
+        assert_eq!(ref_loc.line, 2);
+        assert_eq!(ref_loc.col, 12);
+    }
+
+    /// The scanner must pair each returned reference with the
+    /// *callee* (the symbol whose selection position was asked
+    /// about), not the file id. The Codex review reproduced
+    /// `lsp_reference_location_becomes_caller_not_callee`: with the
+    /// pre-fix code the `source_node_id` was always the file id and
+    /// the resolve phase then emitted `file -> caller`, which the
+    /// caller attribute label tests confirm is the wrong direction.
+    #[tokio::test]
+    async fn scanner_pairs_references_with_the_callee_symbol_id_not_the_file_id() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("lib.rs");
+        std::fs::write(
+            &file,
+            "pub fn helper() {}\npub fn caller() { helper(); }\n",
+        )
+        .expect("write");
+
+        let helper_node = {
+            let mut n = GraphNode::new(
+                NodeType::Function,
+                "helper".to_string(),
+                "lib.rs".to_string(),
+            );
+            n.line_start = Some(1);
+            n.line_end = Some(1);
+            n
+        };
+        let helper_symbol = HierarchicalSymbol {
+            node: helper_node.clone(),
+            selection_line: 1,
+            selection_col: 8,
+            children: Vec::new(),
+        };
+
+        let lsp = Arc::new(AsyncMutex::new(
+            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default())
+                .expect("lsp mux"),
+        ));
+        lsp.lock().await.mark_unavailable("rust-analyzer");
+        {
+            let mut guard = lsp.lock().await;
+            let mut symbols = std::collections::HashMap::new();
+            symbols.insert(file.clone(), vec![helper_symbol.clone()]);
+            guard.set_test_document_symbols(symbols);
+            let mut refs = std::collections::HashMap::new();
+            refs.insert(
+                (file.clone(), 1u32, 8u32),
+                vec![ReferenceLocation {
+                    path: file.clone(),
+                    line: 2,
+                    col: 12,
+                    context: String::new(),
+                }],
+            );
+            guard.set_test_references(refs);
+        }
+
+        let result = scan_file_structure(
+            file.clone(),
+            tmp.path().to_path_buf(),
+            lsp,
+            0,
+            0,
+            "abc".to_string(),
+        )
+        .await
+        .expect("scan ok");
+
+        let file_id = result
+            .nodes
+            .iter()
+            .find(|n| matches!(n.node_type, NodeType::File))
+            .expect("file node")
+            .id
+            .clone();
+
+        let (paired_id, _) = &result.external_references[0];
+        assert_ne!(
+            *paired_id, file_id,
+            "the ref must be paired with the callee, not the file; file_id={file_id}"
+        );
+        assert_eq!(
+            *paired_id, helper_node.id,
+            "the ref must be paired with the symbol we asked about (helper)"
+        );
+    }
+
+    /// End-to-end through the deterministic fixture: one declaration
+    /// (`helper`) with one use site inside `caller` produces a
+    /// `caller -> helper` edge at the expected source position.
+    ///
+    /// The Codex review's contract
+    /// `lsp_reference_location_becomes_caller_not_callee` reproduced
+    /// this defect: with the pre-fix code the resolve phase emitted
+    /// `helper -> caller` because the source/target interpretation was
+    /// reversed and the call to `get_references` was at `(0, 0)`. With
+    /// the fix, the scanner asks at the symbol's selection position and
+    /// the resolver pairs the use site with the function containing
+    /// it, so the edge is `caller -> helper`.
+    #[tokio::test]
+    async fn fixture_to_edge_pipeline_emits_caller_to_callee() {
+        use crate::graph::GraphDatabase;
+        use crate::server::ingest::resolve::resolve_call_edges;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("lib.rs");
+        std::fs::write(
+            &file,
+            "pub fn helper() {}\npub fn caller() { helper(); }\n",
+        )
+        .expect("write");
+
+        let helper_node = {
+            let mut n = GraphNode::new(
+                NodeType::Function,
+                "helper".to_string(),
+                "lib.rs".to_string(),
+            );
+            n.line_start = Some(1);
+            n.line_end = Some(1);
+            n
+        };
+        let caller_node = {
+            let mut n = GraphNode::new(
+                NodeType::Function,
+                "caller".to_string(),
+                "lib.rs".to_string(),
+            );
+            n.line_start = Some(2);
+            n.line_end = Some(2);
+            n
+        };
+        let helper_symbol = HierarchicalSymbol {
+            node: helper_node.clone(),
+            selection_line: 1,
+            selection_col: 8,
+            children: Vec::new(),
+        };
+
+        let lsp = Arc::new(AsyncMutex::new(
+            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default())
+                .expect("lsp mux"),
+        ));
+        lsp.lock().await.mark_unavailable("rust-analyzer");
+        {
+            let mut guard = lsp.lock().await;
+            let mut symbols = std::collections::HashMap::new();
+            symbols.insert(file.clone(), vec![helper_symbol.clone()]);
+            guard.set_test_document_symbols(symbols);
+            let mut refs = std::collections::HashMap::new();
+            refs.insert(
+                (file.clone(), 1u32, 8u32),
+                vec![ReferenceLocation {
+                    path: file.clone(),
+                    line: 2,
+                    col: 12,
+                    context: String::new(),
+                }],
+            );
+            guard.set_test_references(refs);
+        }
+
+        let result = scan_file_structure(
+            file.clone(),
+            tmp.path().to_path_buf(),
+            lsp,
+            0,
+            0,
+            "abc".to_string(),
+        )
+        .await
+        .expect("scan ok");
+
+        let db_tmp = tempfile::tempdir().expect("db tmp");
+        let db_path = db_tmp.path().join("graph.bin");
+        let db = GraphDatabase::new(&db_path).expect("graph db");
+        let helper_id = helper_node.id.clone();
+        let caller_id = caller_node.id.clone();
+        db.upsert_node(helper_node).expect("upsert helper");
+        db.upsert_node(caller_node).expect("upsert caller");
+
+        let edges = resolve_call_edges(&db, tmp.path(), &result.external_references, None, None);
+        assert_eq!(
+            edges.len(),
+            1,
+            "the canned use site inside caller must produce exactly one Calls edge; got {:?}",
+            edges
+                .iter()
+                .map(|e| (&e.source_id, &e.target_id))
+                .collect::<Vec<_>>()
+        );
+        let edge = &edges[0];
+        assert_eq!(edge.edge_type, EdgeType::Calls);
+        assert_eq!(edge.source_id, caller_id, "source must be the caller");
+        assert_eq!(edge.target_id, helper_id, "target must be the callee (helper)");
     }
 }
 
