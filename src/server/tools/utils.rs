@@ -7,6 +7,7 @@ use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::GraphNode;
 use crate::server::federation::federated_index::FederatedIndex;
+use crate::server::federation::repo_id::GlobalId;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -137,6 +138,25 @@ pub fn resolve_node(
     // 1. Try Overlay by ID
     if let Some(n) = overlay.get_node(handle) {
         return Ok(n);
+    }
+    // 2b. A federation `GlobalId` (the id every federation tool
+    //     reports — `repo:Kind:path:name:line_start`). Per-repo graphs
+    //     key nodes by their own ids, so re-resolve through the id's
+    //     name+path components, preferring an exact line match. Ids
+    //     must round-trip: anything a tool hands back has to work as a
+    //     handle for the next tool.
+    if let Ok(gid) = GlobalId::parse(handle) {
+        if let (Some(gname), Some(gpath)) = (gid.name(), gid.path()) {
+            let by_path: Vec<GraphNode> = graph
+                .find_all_nodes_by_name(gname)
+                .into_iter()
+                .filter(|n| n.path == gpath)
+                .collect();
+            let exact = by_path.iter().position(|n| gid.line_start() == n.line_start);
+            if let Some(n) = exact.map(|i| by_path[i].clone()).or_else(|| by_path.into_iter().next()) {
+                return Ok(n);
+            }
+        }
     }
     // 2. Try Graph by ID
     if let Ok(Some(n)) = graph.get_node(handle) {
