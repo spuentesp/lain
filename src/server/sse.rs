@@ -26,7 +26,7 @@
 //! before the live stream is plugged in.
 
 use crate::server::events_log::EventsLog;
-use crate::server::presence::PresenceEvent;
+use crate::server::presence::{PresenceEvent, PresenceEventPublic};
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ fn frame_for(id: u64, event: PresenceEventPublic) -> SseFrame {
     let event_name = event_name(&event);
     let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
     SseFrame {
-        event: event_name(event),
+        event: event_name,
         data,
         id,
     }
@@ -132,7 +132,7 @@ pub fn serve_sse(
         .map(|last_id| {
             events_log
                 .replay_after(last_id)
-                .map(|(id, ev)| frame_for(id, &ev))
+                .map(|(id, ev)| frame_for(id, ev))
                 .collect()
         })
         .unwrap_or_default();
@@ -192,7 +192,7 @@ mod tests {
 
         // The SSE event-name mapping must be `edit_landed` — that's
         // what the Command Center subscribes to.
-        let frame = build_frame_for(&PresenceEvent::EditLanded {
+        let frame = build_frame_for(PresenceEvent::EditLanded {
             event: AuditEvent {
                 ts_unix: 0.0,
                 agent_id: AgentId("z".into()),
@@ -223,7 +223,7 @@ mod tests {
             severity: "high".to_string(),
         };
 
-        let frame = build_frame_for(&event).await;
+        let frame = build_frame_for(event.clone()).await;
         let payload: serde_json::Value = serde_json::from_str(&frame.data).unwrap();
         assert_eq!(frame.event, "conflict_detected");
         assert_eq!(payload["ConflictDetected"]["severity"], "high");

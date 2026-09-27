@@ -2495,6 +2495,8 @@ fn claims_outside_the_workspace_are_refused() {
     let err = claim(&escape).expect_err("unborn escape");
     assert!(err.contains("outside the repository"), "{err}");
     assert!(claim("").is_err(), "empty path");
+}
+
 // --- F01 rework #2: events_log boundary must not persist session_token ---
 
 /// `EventsLog::append` is the durable replay cache for SSE
@@ -2528,7 +2530,11 @@ fn events_log_persists_public_dto_no_token() {
         None,
     );
     let bearer = session.session_token.clone();
-    assert_eq!(bearer.len(), 32, "precondition: register mints 32 hex chars");
+    assert_eq!(
+        bearer.len(),
+        32,
+        "precondition: register mints 32 hex chars"
+    );
     assert!(bearer.chars().all(|c| c.is_ascii_hexdigit()));
 
     let id = log.append(&PresenceEvent::AgentJoined(session));
@@ -2550,7 +2556,10 @@ fn events_log_persists_public_dto_no_token() {
     // The agent's identity (id, name, kind) is the non-credential
     // payload — confirm it's present so the test isn't passing by
     // accident (e.g. an empty line).
-    assert!(payload.contains("alice"), "payload must still carry the agent name: {payload:?}");
+    assert!(
+        payload.contains("alice"),
+        "payload must still carry the agent name: {payload:?}"
+    );
     assert!(
         payload.contains("b1c2d3e4-1111-2222-3333-444455556666"),
         "payload must still carry the agent id: {payload:?}",
