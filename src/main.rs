@@ -163,20 +163,8 @@ fn main() -> Result<()> {
             tool,
             args,
         }) => lain::cli::oneshot::run_oneshot(workspace.as_deref(), &tool, &args),
-        Some(Commands::Doctor {
-            json,
-            workspace,
-            probe_mcp,
-        }) => {
-            if probe_mcp {
-                return tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?
-                    .block_on(lain::cli::doctor::run_probe(
-                        workspace.as_deref().context("probe workspace")?,
-                    ));
-            }
-            let code = match lain::cli::doctor::run_doctor(json, workspace.as_deref()) {
+        Some(Commands::Doctor) => {
+            let code = match lain::cli::doctor::run_doctor(false, None) {
                 Ok(code) => code,
                 Err(error) => {
                     eprintln!("doctor failed: {error:#}");
@@ -224,6 +212,21 @@ fn main() -> Result<()> {
                 2
             });
             std::process::exit(code);
+        }
+        Some(Commands::Reindex {
+            config,
+            workspace,
+            verbose,
+        }) => {
+            // `reindex` rebuilds the federation backend, which fans
+            // out into parallel per-repo indexing tasks inside the
+            // loader — same shape as `server`, so reuse the multi-thread
+            // runtime.
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("build tokio runtime for reindex subcommand")?;
+            rt.block_on(lain::cli::run_reindex(config, workspace, verbose))
         }
         None => {
             // No subcommand: print help.

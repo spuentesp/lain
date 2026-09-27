@@ -51,8 +51,124 @@ lain setup --agent vscode
 lain setup --agent continue
 ```
 
-Use `lain setup --agent generic` for another MCP host. It writes this
-project-level configuration:
+---
+
+## The commands
+
+After install, `lain` exposes these subcommands:
+
+| Command | Purpose |
+|---------|---------|
+| `lain server` | Start the MCP server (the headline). Reads `repos.yaml`, serves MCP tools + the Command Center dashboard. Hot-reloads the config when it changes. |
+| `lain mcp` | Single-repo MCP server on stdio. Walks up from cwd for `.git` — the stable "drop in a clone and run" entrypoint. No `repos.yaml` required. |
+| `lain workspaces` | Manage `workspaces.yaml`. Create, list, show, activate (`use`), forget named groups of repos. |
+| `lain repos` | Manage `repos.yaml`. Add, list, remove a repo entry. |
+| `lain query` | Run a `query_graph` ops-array against the project's persisted graph. |
+| `lain oneshot` | One-shot MCP query: boots a transient `lain mcp` server, sends a single `tools/call`, prints the result as a table, and exits. For "just grep the symbols without keeping a server alive". |
+| `lain init` | Scaffold a `repos.yaml` for the current directory. Walks up for `.git`, then writes a minimal config pointing at the discovered workspace. |
+| `lain ask` | Single-user LLM-assisted query (uses `semantic_search` when an embedding model is loaded; falls back to lexical heuristics via `explain_symbol`). |
+| `lain hooks` | Agent pre-edit hook entry point: `claim` / `release` files, `overlap-check` for commit-time symbol overlap, `lock` / `unlock` for the zero-daemon filesystem-fallback layer. |
+| `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs (reaping session files older than 30 days), presence registry, and — when `LAIN_URL`/`LAIN_SERVER_URL` is set — both server reachability **and the live MCP surface**, calling `tools/list` and failing if it errors or advertises zero tools. Exits 0 clean, 1 on a hard failure. |
+| `lain schema` | Emit the canonical tool-surface schema dump (`dump [--out PATH]` defaults to `./docs/tool-schema.json`). Pair with `make schema && git diff --exit-code docs/tool-schema.json` in CI to fail on schema drift. |
+| `lain reindex` | Re-index the workspace from scratch. Backs up `<data_dir>/federated_graph.bin` to `federated_graph.bin.bak` and rebuilds every repo's per-repo graph plus the federation backend. Required after a federation schema version bump. With `--workspace <name>`, scopes the rebuild to that workspace's members. Idempotent. |
+| `scripts/demo.sh` | Capability demonstration and benchmark. Boots a real server against a synthetic repo whose call graph is known by construction, checks lain's answers against that ground truth (not merely that it answered), then benchmarks the same tools against this repo at ~3.5k nodes. `--quick` skips the build and benchmark phases; `--json FILE` writes machine-readable results; `--force-build` overrides `--quick` / `--no-build`; `--allow-stale` skips the binary-freshness check. Exits non-zero if any check fails (or if the binary is older than any source file and `--allow-stale` was not passed). |
+
+The cut surface (`agents`, `hook`, `projects`, top-level `use`) is
+gone — those concerns are reached through the commands above. `server`
+plus the two config CLIs (`workspaces`, `repos`) cover everything the
+prior surface did, scoped to a single project directory that owns a
+`repos.yaml`.
+
+This table is checked against `lain --help` by
+`tests/cli_surface.rs`, so it cannot drift from the binary again.
+
+---
+
+## Quick Start
+
+1. **Install** — see [QUICKSTART.md § Install](docs/QUICKSTART.md#install).
+2. **Configure** — see [QUICKSTART.md § Federation (multi-repo)](docs/QUICKSTART.md#federation-multi-repo).
+3. **Wire your agent** — see [QUICKSTART.md § Single-repo (recommended default)](docs/QUICKSTART.md#single-repo-recommended-default).
+
+---
+
+## Command Center
+
+For a narrated tour of every tab, see [command-center.md § Tour](docs/command-center.md#tour).
+
+When `lain server` runs with `--transport http`, it serves the Command
+Center dashboard at `GET /`. It's a self-contained vanilla-JS SPA that
+talks back to the running server over the same JSON-RPC endpoint the
+MCP tools use. No separate API, no auth portal.
+
+![Command Center — Overview tab](docs/screenshots/command-center-overview.png)
+
+Tabs:
+
+- **Overview** — `get_health` + `get_federation_health` in one view.
+- **Graph** — D3 force-directed graph of the active workspace.
+- **Repos** — per-repo table (id, path, health, node/edge counts).
+- **Query** — runs `query_graph` against the federation.
+- **Tools** — auto-generated MCP tool tester. Calls `tools/list`, then
+  renders a form per tool by introspecting its `inputSchema`. *Copy as
+  cURL* copies a `curl -X POST http://localhost:9999/mcp ...` snippet
+  to the clipboard.
+
+![Command Center — Repos tab](docs/screenshots/command-center-repos.png)
+
+The status bar in the footer polls every 2 s for `get_server_status`
+and `get_reload_status` so hand-edits to `repos.yaml` /
+`workspaces.yaml` show up live.
+
+See [`docs/command-center.md`](docs/command-center.md) for the full
+walkthrough.
+
+---
+
+## Hot Reload
+
+`lain server` watches `repos.yaml` and `workspaces.yaml` and rebuilds
+its federation state when they change — no restart needed. Both the
+`notify` watcher (for hand-edits) and the CLI (via `lain repos add`
+or `lain workspaces create`) trigger the same `ReloadBus`.
+
+When you run `lain repos add my-repo …`, the CLI writes the YAML
+atomically (write to temp file, then `rename`), then signals the
+running server over a Unix socket at
+`~/.local/lain/run/<repos-stem>.sock`. The server's rebuild task
+diffs the new file against the live federation and applies add / remove
+operations against `FederatedIndex`. `get_reload_status` reports the
+state (`idle` / `rebuilding` / `failed`); the Command Center status
+bar shows it live.
+
+See [`docs/hot-reload.md`](docs/hot-reload.md) for the full picture
+(internals, observability, failure modes, caveats).
+
+---
+
+## Federation mode
+
+For org-wide structural questions — "who else uses this function?",
+"what depends on this service?" — run `lain server --config
+./repos.yaml`. Federation mode exposes six MCP tools (`list_repos`,
+`get_repo_info`, `get_federation_health`, `search_org`,
+`get_cross_repo_blast_radius`,
+`get_cross_repo_blast_radius_for_repo`) that answer questions
+spanning repos. See [`docs/FEDERATION.md`](docs/FEDERATION.md) for the
+full guide and [`docs/REPOS_YAML.md`](docs/REPOS_YAML.md) for the
+config schema.
+
+---
+
+## Key Features
+
+- **Federation mode** — index N repos and answer org-wide structural questions across them.
+- **Command Center** — vanilla-JS SPA at `GET /` for human inspection, config editing, query running, and MCP tool testing.
+- **Hot reload** — `repos.yaml` / `workspaces.yaml` changes apply without restarting the server.
+
+### Query Language (`query_graph`)
+
+JSON-based ops array for flexible graph traversals:
 
 ```json
 {

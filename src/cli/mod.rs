@@ -10,6 +10,7 @@ pub mod mcp_stdio;
 pub mod oneshot;
 pub mod query;
 pub mod readiness;
+pub mod reindex;
 pub mod repos;
 pub mod schema;
 pub mod server;
@@ -18,10 +19,11 @@ pub mod signal;
 pub mod workspace;
 pub mod workspaces;
 
-pub use crate::resolve_repos_config;
-pub use ask::run_ask;
 pub use query::run_query;
+pub use ask::run_ask;
 pub use server::run_server;
+pub use reindex::run_reindex;
+pub use crate::resolve_repos_config;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -230,19 +232,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::cli::schema::SchemaAction,
     },
-    /// Diagnose repository readiness without changing files.
-    /// Exit codes: 0 ready, 1 usable but degraded, 2 unusable.
-    Doctor {
-        /// Emit the versioned diagnostic report as JSON.
-        #[arg(long)]
-        json: bool,
-        /// Inspect this repository (defaults to the current directory).
-        #[arg(long)]
-        workspace: Option<PathBuf>,
-        /// Internal read-only MCP transport used by the diagnostic probe.
-        #[arg(long, hide = true, conflicts_with = "json", requires = "workspace")]
-        probe_mcp: bool,
-    },
+    /// Run installation / version diagnostics — the
+    /// "one-version-of-truth" page operators can paste into bug
+    /// reports. Always exits 0 on a clean install, 1 on hard
+    /// failures (missing hook script, un-creatable dirs).
+    Doctor,
     /// List repository capabilities and their readiness states.
     Capabilities {
         #[arg(long)]
@@ -280,6 +274,22 @@ pub enum Commands {
         /// Never attempt to install the optional embedding model.
         #[arg(long)]
         no_model: bool,
+    },
+    /// Re-index the workspace from scratch. Backs up any existing
+    /// `<data_dir>/federated_graph.bin` to `federated_graph.bin.bak`
+    /// and rebuilds every repo's per-repo graph plus the federation
+    /// backend. Required after a federation schema version bump.
+    /// Idempotent.
+    Reindex {
+        #[arg(long, default_value = "./repos.yaml")]
+        config: PathBuf,
+        /// Workspace name. When omitted, re-indexes all workspaces
+        /// configured in `repos.yaml`.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Print each step as it runs.
+        #[arg(long, short)]
+        verbose: bool,
     },
 }
 
