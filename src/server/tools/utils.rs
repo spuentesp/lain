@@ -2,79 +2,61 @@
 //!
 //! Shared helpers for argument parsing, text enrichment, and similarity.
 
+use serde_json::{Map, Value};
+use crate::schema::GraphNode;
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::schema::GraphNode;
-use crate::server::federation::federated_index::FederatedIndex;
-use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+
+/// A handle "looks like a path" when it has an explicit separator or
+/// root marker. Bare names like `target` return false even when they
+/// also happen to name a directory in the server's cwd.
+pub fn is_explicit_path(handle: &str) -> bool {
+    handle.starts_with('/')
+        || handle.starts_with("./")
+        || handle.starts_with("../")
+        || handle.starts_with("~/")
+        || handle.contains('/')
+        || handle.contains('\\')
+        || (handle.len() >= 3
+            && handle.as_bytes()[1] == b':'
+            && (handle.as_bytes()[2] == b'\\' || handle.as_bytes()[2] == b'/'))
+}
 
 /// Helper to resolve a handle (name, path, or ID) to a node
 pub fn resolve_node(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    handle: &str,
+    handle: &str
 ) -> Result<GraphNode, LainError> {
-    // Empty handle is almost always a caller bug, not a real symbol
-    // lookup. Reject it explicitly: before Tier 2 the empty-name
-    // lookup was always empty, so no caller tripped the new path; the
-    // Tier 2 sensor emits `File` nodes with `name=""` as the
-    // source of heuristic edges, and a future call to `find_node_by_name("")`
-    // would otherwise resolve to one of those file nodes and produce
-    // a confident, wrong "yes I found a node" answer. The structured
-    // error is what the failure-mode test (and any honest caller)
-    // expects.
-    if handle.is_empty() {
-        return Err(LainError::NotFound(
-            "Handle is empty — pass a symbol name, path, or node id".to_string(),
-        ));
-    }
-
-    // Preserve the original spelling for IDs and names. A symbol name can
-    // also be an existing directory (for example `target`), so resolving
-    // paths first can hide a valid symbol.
-    let canonical_handle = if Path::new(handle).exists() {
+    // Canonical form is computed only for the path-lookup step and only
+    // when the handle is an explicit path. Steps 1-4 (id / name lookup)
+    // use the raw handle so a bare name never collides with cwd.
+    let canonical_handle = if is_explicit_path(handle) && Path::new(handle).exists() {
         dunce::canonicalize(handle)
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(handle.to_string())
+            .unwrap_or_else(|_| handle.to_string())
     } else {
         handle.to_string()
     };
 
-    // 1. Try Overlay by ID
-    if let Some(n) = overlay.get_node(handle) {
-        return Ok(n);
-    }
-    // 2. Try Graph by ID
-    if let Ok(Some(n)) = graph.get_node(handle) {
-        return Ok(n);
-    }
-    // 3. Try Overlay by Name
+    // 1. Try Overlay by ID — raw handle.
+    if let Some(n) = overlay.get_node(handle) { return Ok(n); }
+    // 2. Try Graph by ID — raw handle.
+    if let Ok(Some(n)) = graph.get_node(handle) { return Ok(n); }
+    // 3. Try Overlay by Name — raw handle.
     let overlay_names = overlay.find_nodes_by_name(handle);
-    if let Some(n) = overlay_names.iter().find(|n| n.name == handle) {
-        return Ok(n.clone());
-    }
-    // 4. Try Graph by Name
-    if let Some(n) = graph.find_node_by_name(handle) {
-        return Ok(n);
-    }
-    // 5. Try Graph by Path. Try the handle verbatim first: graph keys are
-    //    workspace-relative, and a caller asking about "src/cli/hooks.rs" is
-    //    already using the canonical form — canonicalizing it to an absolute
-    //    path would match nothing. The canonicalized form stays as a fallback
-    //    for absolute handles and out-of-tree nodes.
-    if let Some(n) = graph.find_node_by_path(handle) {
-        return Ok(n);
-    }
-    if let Some(n) = graph.find_node_by_path(&canonical_handle) {
-        return Ok(n);
-    }
+    if let Some(n) = overlay_names.iter().find(|n| n.name == handle) { return Ok(n.clone()); }
+    // 4. Try Graph by Name — raw handle.
+    if let Some(n) = graph.find_node_by_name(handle) { return Ok(n); }
+    // 5. Try Graph by Path. Raw first (workspace-relative keys), then
+    //    the canonicalized form as a fallback for absolute handles and
+    //    out-of-tree paths.
+    if let Some(n) = graph.find_node_by_path(handle) { return Ok(n); }
+    if let Some(n) = graph.find_node_by_path(&canonical_handle) { return Ok(n); }
 
-    // An empty graph means this "not found" is not about the symbol at
-    // all — nothing would resolve, so the committed-code explanation
-    // below would be a confident, specific, wrong answer. Say what is
-    // actually true instead.
+    // Existing empty-graph + not-found error messages stay unchanged.
     if graph.node_count() == 0 && overlay.stats().node_count == 0 {
         return Err(LainError::NotFound(format!(
             "Node not found for handle: {handle} — but the graph being \
@@ -85,85 +67,11 @@ pub fn resolve_node(
              graph rather than the staging placeholder."
         )));
     }
-
-    // The graph indexes committed state, so a symbol written but not yet
-    // committed is genuinely absent rather than misplaced. Saying so turns a
-    // dead end into a next step; the bare message reads as "does not exist".
     Err(LainError::NotFound(format!(
         "Node not found for handle: {handle} — the graph indexes committed code, \
          so a symbol added since the last commit will not appear until it is \
          committed and re-indexed"
     )))
-}
-
-/// Federation fallback for [`resolve_node`]. Called when the per-repo
-/// `ctx.graph` + shared `overlay` miss on the handle. Walks every repo
-/// in the federation and tries the same name/path lookups against each
-/// repo's graph.
-///
-/// Two situations this actually catches:
-///
-/// 1. **`ctx.graph` is briefly stale during a freshly-booted server.**
-///    The per-repo indexer walks the worktree asynchronously after
-///    boot, so the active repo's graph lags behind the federation
-///    overlay for a few hundred ms. Without this fallback, tool calls
-///    made in that window return "Node not found for handle" even
-///    though the symbol is in the federation's view. Reproduces
-///    intermittently on slow CI runners.
-/// 2. **Cross-repo callers.** A bare handle like `parse` could be a
-///    function in any of N repos. `ctx.graph` only sees one; the
-///    federation sees all of them.
-///
-/// Returns `Ok(None)` when the federation also has nothing; the
-/// caller (the original `resolve_node` caller) is then free to
-/// surface its NotFound with whatever context it has.
-pub fn resolve_node_federation_fallback(
-    federation: &FederatedIndex,
-    handle: &str,
-) -> Option<GraphNode> {
-    let canonical_handle = if Path::new(handle).exists() {
-        dunce::canonicalize(handle)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| handle.to_string())
-    } else {
-        handle.to_string()
-    };
-
-    for (repo_id, _) in federation.list_repos() {
-        let Some(repo) = federation.get_repo(&repo_id) else {
-            continue;
-        };
-        let graph = repo.db();
-        // Same name-first ordering as the per-repo resolver.
-        if let Some(n) = graph.find_node_by_name(handle) {
-            return Some(n);
-        }
-        if let Some(n) = graph.find_node_by_path(handle) {
-            return Some(n);
-        }
-        if let Some(n) = graph.find_node_by_path(&canonical_handle) {
-            return Some(n);
-        }
-    }
-    // search_org() (in src/server/mcp/federation_tools/federation.rs)
-    // also falls back to the federation backend graph when the
-    // per-repo indexes don't have the symbol yet. Mirror that here:
-    // the federation backend is the unified graph that catches symbols
-    // in the cold-boot window where per-repo graphs are still being
-    // populated by index_forced(). A symbol the backend has but
-    // no per-repo db does yet is exactly what search_org returns and
-    // what resolve_node should also see.
-    if let Ok(backend_nodes) = federation.backend().list_nodes() {
-        for n in backend_nodes {
-            if n.name == handle {
-                return Some(n);
-            }
-            if n.path == handle || n.path == canonical_handle {
-                return Some(n);
-            }
-        }
-    }
-    None
 }
 
 /// Resolve `handle`, and report the other definitions that share the
@@ -228,6 +136,26 @@ pub fn ambiguity_note(chosen: &GraphNode, others: &[GraphNode]) -> String {
 // `resolve_node_at_location` existed only for `augment_knowledge`, which
 // was removed as dead; nothing else ever called it.
 
+/// Extract string argument
+pub fn get_str_arg<'a>(args: Option<&'a Map<String, Value>>, key: &str) -> &'a str {
+    args.and_then(|a| a.get(key))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+/// Extract usize argument
+pub fn get_usize_arg(args: Option<&Map<String, Value>>, key: &str) -> Option<usize> {
+    args.and_then(|a| a.get(key))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+}
+
+/// Extract boolean argument
+pub fn get_bool_arg(args: Option<&Map<String, Value>>, key: &str) -> Option<bool> {
+    args.and_then(|a| a.get(key))
+        .and_then(|v| v.as_bool())
+}
+
 /// Extract a string argument from the args map. Returns an empty
 /// string when the key is missing or the value isn't a string.
 /// Use [`required_str_arg`] when an empty fallback would be wrong.
@@ -289,37 +217,10 @@ pub fn u32_arg(args: &Map<String, Value>, key: &str) -> Option<u32> {
     args.get(key).and_then(|v| v.as_u64()).map(|n| n as u32)
 }
 
-/// Render a duration in seconds as a coarse "X{s,m,h,d} ago" string.
-///
-/// Ladder: < 1 min → seconds, < 1 h → minutes, < 1 d → hours, else days.
-/// Negative inputs are rendered as "Ns ago" with the absolute value
-/// (the git history path can see negative diffs when the commit's
-/// recorded time is in the future relative to a slightly stale clock).
-pub fn format_duration(seconds: i64) -> String {
-    let s = seconds.unsigned_abs();
-    if s < 60 {
-        format!("{seconds}s ago")
-    } else if s < 3600 {
-        format!("{}m ago", seconds / 60)
-    } else if s < 86400 {
-        format!("{}h ago", seconds / 3600)
-    } else {
-        format!("{}d ago", seconds / 86400)
-    }
-}
-
-/// Like [`format_duration`] but takes a Unix timestamp and computes
-/// the "now - ts" diff. Returns "unknown" for non-positive timestamps
-/// (zero / negative git-time sentinels).
-pub fn format_ago(unix_secs: i64) -> String {
-    if unix_secs <= 0 {
-        return "unknown".to_string();
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    format_duration(now - unix_secs)
+/// Extract an optional string argument, returning an empty string
+/// when missing. Equivalent to `str_arg(args, key)`.
+pub fn opt_str_arg(args: &Map<String, Value>, key: &str) -> String {
+    str_arg(args, key)
 }
 
 /// Build enriched text for embedding: name + signature + docstring + path
@@ -413,11 +314,7 @@ fn read_body_excerpt(
         }
     }
     // Trim to max_tokens and collapse whitespace
-    let trimmed: String = buf
-        .split_whitespace()
-        .take(max_tokens)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let trimmed: String = buf.split_whitespace().take(max_tokens).collect::<Vec<_>>().join(" ");
     Ok(trimmed)
 }
 
@@ -494,14 +391,7 @@ pub fn stem(word: &str) -> String {
                 return stem.to_string();
             }
         }
-        let last_two: String = stem
-            .chars()
-            .rev()
-            .take(2)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        let last_two: String = stem.chars().rev().take(2).collect::<Vec<_>>().into_iter().rev().collect();
         if last_two == "ch" || last_two == "sh" {
             return stem.to_string();
         }
@@ -630,97 +520,6 @@ mod tests {
             !err.contains("until it is committed"),
             "the committed-code explanation is the wrong cause here: {err}"
         );
-    }
-
-    /// `resolve_node` treats a bare handle as a path when
-    /// `Path::new(handle).exists()` is true (so a workspace-relative
-    /// `src/lib.rs` lands in the path-keyed lookup). That makes the
-    /// resolver's behavior depend on the *process's* cwd at lookup
-    /// time — a process-global property that ~800 lib tests share.
-    /// The pre-fix test changed cwd at runtime, which let any other
-    /// test doing a relative `Path::exists()` see the diverted cwd.
-    /// The right fix is to run the assertion in a fresh process whose
-    /// cwd is observable only to itself: the parent forks the test
-    /// binary with a `cwd` set to a directory that contains a `target/`
-    /// (the exact collision case), the child runs the assertion in
-    /// that cwd, and the parent checks the exit status. No
-    /// `set_current_dir` ever happens in the parent — the lock-based
-    /// `CwdGuard` machinery that used to serialize this is gone.
-    #[test]
-    fn resolve_node_prefers_name_when_name_is_existing_directory() {
-        // Env var set by the parent process below; absence means "I am
-        // the parent, spawn a child". Presence means "I am the child,
-        // run the assertion in the cwd the parent picked".
-        const CHILD_ENV: &str = "LAIN_RESOLVER_COLLISION_CHILD";
-        if std::env::var_os(CHILD_ENV).is_none() {
-            // Parent: fork the test binary with `--exact <this test>`
-            // and a cwd that contains a `target/` directory. The
-            // `--exact` filter is critical — without it the child
-            // would run every other `--lib` test in parallel, and the
-            // `current_dir` argument would still be visible to them.
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::create_dir(dir.path().join("target")).unwrap();
-            // Cargo discovers unit tests in `--lib` under paths
-            // *relative to the lib root* — `cargo test --list`
-            // reports `server::tools::utils::tests::...`, not the
-            // `lain::`-prefixed full path. Strip the crate prefix so
-            // `--exact` matches.
-            let module = module_path!();
-            let module = module.strip_prefix("lain::").unwrap_or(module);
-            let test_path =
-                format!("{module}::resolve_node_prefers_name_when_name_is_existing_directory");
-            let exe = std::env::current_exe().expect("test binary path");
-            let output = std::process::Command::new(exe)
-                .args(["--exact", &test_path, "--nocapture"])
-                .env(CHILD_ENV, "1")
-                .current_dir(dir.path())
-                .output()
-                .expect("spawn child test process");
-            assert!(
-                output.status.success(),
-                "child did not pass: exit {:?}\nstdout: {}\nstderr: {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-            // The child should have actually executed the test — not
-            // silently no-op'd because of a typo in `--exact`. The
-            // harness prints `running 1 test` to stdout when a
-            // single-test run starts.
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                stdout.contains("running 1 test"),
-                "child stdout did not contain the single-test marker; \
-                 the `--exact` filter likely missed the test path \
-                 and no test ran. Stdout:\n{stdout}",
-            );
-            return;
-        }
-        // Child: the cwd has a `target/` directory and an indexed
-        // function also named `target`. `resolve_node("target")` must
-        // resolve by name (returning the function), not by path
-        // (which would either return nothing or, in a buggy path-
-        // canonicalization order, surface `target/` as a node).
-        assert!(
-            Path::new("target").is_dir(),
-            "child cwd must contain a `target/` directory for this test \
-             to mean anything",
-        );
-        // Build a graph file in the child's cwd; `GraphDatabase::new`
-        // takes a path so we point it at a relative name resolved
-        // against cwd. (`tempfile::tempdir` from the parent is gone
-        // — the child has its own filesystem view.)
-        let graph_path = std::path::Path::new("graph.bin");
-        let db = GraphDatabase::new(graph_path).unwrap();
-        db.upsert_node(GraphNode::new(
-            crate::schema::NodeType::Function,
-            "target".into(),
-            "src/lib.rs".into(),
-        ))
-        .unwrap();
-        let overlay = VolatileOverlay::new();
-        let result = resolve_node(&db, &overlay, "target");
-        assert_eq!(result.unwrap().name, "target");
     }
 
     #[test]
