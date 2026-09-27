@@ -174,27 +174,31 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
         eprintln!("[workspace_peers]   node: id={} name={}", n.id, n.name);
     }
 
+    // Global ids carry a `:line_start` segment whose value depends on
+    // the scan pipeline (the LSP path populates line numbers, the
+    // tree-sitter fallback may not), so match on the parsed
+    // (repo, name) pair rather than on literal id strings.
+    let id_is = |id: &str, repo: &str| -> bool {
+        lain::federation::repo_id::GlobalId::parse(id)
+            .map(|g| g.repo_id() == repo && g.name() == Some("shared_helper"))
+            .unwrap_or(false)
+    };
+
     let peer_edge_exists = edges.iter().any(|e| {
         let src = &e.source_id;
         let tgt = &e.target_id;
         // `edge_type` is a schema `EdgeType` enum after 3.3 — match the
         // variant directly rather than comparing against a Debug string.
         let et = &e.edge_type;
-        let pair_ab = src.contains("a:Function:src/lib.rs:shared_helper:0")
-            && tgt.contains("b:Function:src/lib.rs:shared_helper:0");
-        let pair_ba = src.contains("b:Function:src/lib.rs:shared_helper:0")
-            && tgt.contains("a:Function:src/lib.rs:shared_helper:0");
+        let pair_ab = id_is(src, "a") && id_is(tgt, "b");
+        let pair_ba = id_is(src, "b") && id_is(tgt, "a");
         (pair_ab || pair_ba) && *et == EdgeType::CrossRepoSameSymbol
     });
 
     // Pin the node-level contract first: the workspace graph
     // surfaces the function nodes from both repos.
-    let both_functions_present = nodes
-        .iter()
-        .any(|n| n.id == "a:Function:src/lib.rs:shared_helper:0" && n.name == "shared_helper")
-        && nodes
-            .iter()
-            .any(|n| n.id == "b:Function:src/lib.rs:shared_helper:0" && n.name == "shared_helper");
+    let both_functions_present =
+        nodes.iter().any(|n| id_is(&n.id, "a")) && nodes.iter().any(|n| id_is(&n.id, "b"));
     assert!(
         both_functions_present,
         "workspace graph must surface both `shared_helper` function \
