@@ -973,10 +973,11 @@ fn feat_negative_paths_end_to_end() {
         "get_cross_repo_blast_radius missing-depth message should name depth: {text}"
     );
 
-    // `depth` as a number — the documented mistake. The
-    // implementation distinguishes "missing" from "wrong type"
-    // and the wrong-type branch tells the caller depth must be a
-    // string.
+    // `depth` as a number is accepted sugar for the range form
+    // (`2` means `1..2`); only strings that are not ranges are an
+    // error. This used to be a wrong-type rejection — the surface
+    // hygiene pass made number and range forms equivalent so callers
+    // are not forced into a stringly-typed corner.
     let env = tools_call_envelope(
         &host,
         "get_cross_repo_blast_radius",
@@ -984,13 +985,13 @@ fn feat_negative_paths_end_to_end() {
     );
     assert_eq!(
         env.pointer("/result/isError").and_then(|v| v.as_bool()),
-        Some(true),
-        "get_cross_repo_blast_radius with number depth should set isError=true: {env}"
+        Some(false),
+        "number depth must be accepted as 1..N sugar: {env}"
     );
     let text = tool_result_text(&env).unwrap_or_default();
     assert!(
-        text.contains("depth") && text.to_lowercase().contains("string"),
-        "get_cross_repo_blast_radius number-depth message should mention depth/string: {text}"
+        text.contains("by_repo"),
+        "number-depth call should return the blast-radius shape: {text}"
     );
 
     // Malformed depth string — `parse_depth_range` rejects anything
