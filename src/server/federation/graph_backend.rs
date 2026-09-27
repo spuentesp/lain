@@ -232,10 +232,6 @@ impl GraphBackend for PetgraphBackend {
         self.db.get_node_by_id(global_id)
     }
 
-    fn has_node(&self, global_id: &str) -> Result<bool, LainError> {
-        Ok(self.db.get_node_by_id(global_id)?.is_some())
-    }
-
     fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError> {
         Ok(self
             .db

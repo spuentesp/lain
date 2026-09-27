@@ -279,7 +279,9 @@ pub enum Commands {
     /// `<data_dir>/federated_graph.bin` to `federated_graph.bin.bak`
     /// and rebuilds every repo's per-repo graph plus the federation
     /// backend. Required after a federation schema version bump.
-    /// Idempotent.
+    /// Idempotent. When `--workspace <name>` is set, only that
+    /// workspace's repos are re-indexed; otherwise all configured
+    /// repos.
     Reindex {
         #[arg(long, default_value = "./repos.yaml")]
         config: PathBuf,
