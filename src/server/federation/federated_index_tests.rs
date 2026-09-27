@@ -188,7 +188,7 @@ async fn project_repo_cross_repo_match_does_not_strip_already_published_peer_dat
     fed.project_repo(&RepoId::new("b").unwrap()).await.unwrap();
     let published = fed
         .backend()
-        .get_node("b:Function:src/lib.rs:shared_helper")
+        .get_node("b:Function:src/lib.rs:shared_helper:20")
         .unwrap();
     assert_eq!(
         published.and_then(|n| n.line_end),
@@ -203,7 +203,7 @@ async fn project_repo_cross_repo_match_does_not_strip_already_published_peer_dat
 
     let after = fed
         .backend()
-        .get_node("b:Function:src/lib.rs:shared_helper")
+        .get_node("b:Function:src/lib.rs:shared_helper:20")
         .unwrap();
     assert_eq!(
         after.and_then(|n| n.line_end),
