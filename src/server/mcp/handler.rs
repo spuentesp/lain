@@ -4531,8 +4531,14 @@ fn cross_repo_blast_radius_common(
 ) -> Result<crate::server::mcp::federation_tools::CrossRepoBlastRadius, String> {
     let symbol =
         crate::server::tools::utils::required_str_arg(map, "symbol").map_err(|e| e.to_string())?;
-    crate::server::mcp::federation_tools::get_cross_repo_blast_radius(fed, &symbol, depth_range)
-        .map_err(|e| e.to_string())
+    let repo_id = map.get("repo_id").and_then(|v| v.as_str());
+    crate::server::mcp::federation_tools::get_cross_repo_blast_radius(
+        fed,
+        &symbol,
+        depth_range,
+        repo_id,
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn get_cross_repo_blast_radius_handler(

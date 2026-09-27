@@ -206,8 +206,14 @@ pub fn get_cross_repo_blast_radius(
     fed: &FederatedIndex,
     symbol: &str,
     depth: Range<u32>,
+    repo_id: Option<&str>,
 ) -> Result<CrossRepoBlastRadius, LainError> {
-    let repo_id = fed.resolve_symbol(symbol)?;
+    // An explicit repo_id is the disambiguation the AmbiguousSymbol error
+    // advises; honour it here instead of re-running symbol resolution.
+    let repo_id = match repo_id {
+        Some(rid) => rid.to_string(),
+        None => fed.resolve_symbol(symbol)?.as_str().to_string(),
+    };
     get_cross_repo_blast_radius_for_repo(fed, repo_id.as_str(), symbol, depth)
 }
 
@@ -657,7 +663,7 @@ mod tests {
                 "repo-only:Function:src/x.rs:lonely:0".into(),
             ))
             .unwrap();
-        let result = get_cross_repo_blast_radius(&fed, "lonely", 1..3).unwrap();
+        let result = get_cross_repo_blast_radius(&fed, "lonely", 1..3, None).unwrap();
         assert_eq!(
             result
                 .by_repo
