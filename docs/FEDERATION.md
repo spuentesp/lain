@@ -332,17 +332,22 @@ Implementation notes:
 **Errors:**
 - `Missing required argument: symbol`
 - `Missing required argument: depth`
-- `Invalid depth: expected "<start>..<end>", got "<input>"` — depth string is malformed; the trailing `got "<input>"` echoes the offending value (debug-quoted) so you can see what the parser saw
+- `Invalid depth: expected "<start>..<end>" or a number, got <input>`
+  — `depth` accepts the range string `"1..3"` or a number `3`
+  (shorthand for `1..3`); anything else is echoed with its type
 - `NotFound: symbol <name> not found in any repo` — `resolve_symbol` found nothing
-- `AmbiguousSymbol: [...]` — `resolve_symbol` found the symbol in multiple repos; the caller should disambiguate via `repo_id` (use `get_cross_repo_blast_radius_for_repo` or pass a disambiguator)
-- `NotFound: symbol <name> not found in repo <id>` — only possible via the `_for_repo` variant
+- `AmbiguousSymbol: [...]` — `resolve_symbol` found the symbol in
+  multiple repos; re-call `get_cross_repo_blast_radius` with `repo_id`
+  set to the repo that owns the seed
+- `NotFound: symbol <name> not found in repo <id>` — the given
+  `repo_id` does not own that symbol
 
-### `get_cross_repo_blast_radius_for_repo`
+### `get_cross_repo_blast_radius_for_repo` (dispatch alias)
 
-Same shape as `get_cross_repo_blast_radius`, but the caller disambiguates
-the repo explicitly, bypassing `resolve_symbol`. Use this when the symbol
-exists in multiple repos and the agent already knows which repo owns
-the seed.
+Not advertised in `tools/list` — kept for callers that already use
+it. The primary path is `get_cross_repo_blast_radius` with `repo_id`
+set, which has identical semantics: the caller disambiguates the repo
+explicitly, bypassing `resolve_symbol`.
 
 - **Arguments:**
   - `repo_id` (string, required) — the repo id that owns the seed symbol
@@ -357,12 +362,34 @@ the seed.
 
 ---
 
+## Graph schema versioning and recovery
+
+The federated graph on disk carries an explicit envelope: the `LNF2`
+magic and a `FEDERATION_GRAPH_VERSION` (`src/server/federation/graph_backend.rs`).
+A graph written by another version — or a corrupt body under a valid
+header — is refused at load (`FederationSchemaMismatch` /
+`FederationPayloadCorrupt`), never silently migrated.
+
+Recovery is always the same command:
+
+```bash
+lain reindex --config ./repos.yaml          # all workspaces
+lain reindex --config ./repos.yaml --workspace backend-team
+```
+
+It backs the old graph up to `federated_graph.bin.bak`, removes stale
+sidecar state, and rebuilds every repo's per-repo graph plus the
+federation backend. See `CHANGELOG.md` for which releases bump the
+schema.
+
+---
+
 ## Tool resolution rules
 
 Federation tools that take a `repo_id` (currently `get_repo_info`,
-`get_cross_repo_blast_radius_for_repo`, and the per-repo tools in
-single-workspace mode that are resolved against a federation) use
-`resolve_repo_for_tool` in `src/mcp/handler.rs`. The rule, in order:
+`get_cross_repo_blast_radius` / its `_for_repo` alias, and the
+per-repo tools in single-workspace mode that are resolved against a
+federation) use `resolve_repo_for_tool` in `src/mcp/handler.rs`. The rule, in order:
 
 ```mermaid
 flowchart TB

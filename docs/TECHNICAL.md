@@ -252,8 +252,9 @@ by `RepoId` (parsed from each node's global id) into a
 `BTreeMap<String, Vec<String>>`. Cap at `BLAST_RADIUS_CAP = 1000`;
 when hit, `truncated: true`. The seed is excluded by `min_depth=1`.
 
-`_for_repo` variant skips `resolve_symbol` when the caller knows
-the owning repo.
+Passing `repo_id` skips `resolve_symbol` when the caller knows
+the owning repo (the `_for_repo` tool name is a dispatch alias for
+the same behaviour).
 
 ## MCP transports
 
