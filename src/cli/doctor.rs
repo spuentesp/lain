@@ -525,7 +525,9 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     if let Ok(ref r) = root {
         let (fed_active, ws_active) = detect_server_modes(r);
         let recomputed = inventory_in_profile
-            + crate::server::tools::profile::special_advertised_count(profile, fed_active, ws_active);
+            + crate::server::tools::profile::special_advertised_count(
+                profile, fed_active, ws_active,
+            );
         report.tool_profile.advertised_count = recomputed;
     }
     match root {

@@ -152,8 +152,13 @@ pub fn resolve_node(
                 .into_iter()
                 .filter(|n| n.path == gpath)
                 .collect();
-            let exact = by_path.iter().position(|n| gid.line_start() == n.line_start);
-            if let Some(n) = exact.map(|i| by_path[i].clone()).or_else(|| by_path.into_iter().next()) {
+            let exact = by_path
+                .iter()
+                .position(|n| gid.line_start() == n.line_start);
+            if let Some(n) = exact
+                .map(|i| by_path[i].clone())
+                .or_else(|| by_path.into_iter().next())
+            {
                 return Ok(n);
             }
         }

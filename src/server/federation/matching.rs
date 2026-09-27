@@ -163,9 +163,7 @@ pub fn find_cross_repo_matches(
             // Hard requirement: at least one shared non-stop-word token,
             // unless we're in name-only mode (in which case we accept any
             // candidate and tag confidence as NameOnly).
-            let shares_token = new_non_stop
-                .iter()
-                .any(|t| candidate_non_stop.contains(&t));
+            let shares_token = new_non_stop.iter().any(|t| candidate_non_stop.contains(&t));
             let confidence = if new_signature.is_some() && candidate_signature.is_some() {
                 if shares_token {
                     MatchConfidence::Signature
