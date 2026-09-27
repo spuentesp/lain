@@ -145,9 +145,8 @@ impl PetgraphBackend {
                         "Rejecting corrupt federation graph payload at {}: {error}. Run `lain reindex` to rebuild.",
                         bin_path.display()
                     );
-                    LainError::FederationSchemaMismatch {
-                        found: FEDERATION_GRAPH_VERSION,
-                        required: FEDERATION_GRAPH_VERSION,
+                    LainError::FederationPayloadCorrupt {
+                        reason: error.to_string(),
                     }
                 })?;
                 std::fs::write(&payload_path, payload)?;

@@ -32,6 +32,7 @@ pub async fn run_reindex(
 
     let graph_bin = data_dir.join("federated_graph.bin");
     let graph_bin_bak = data_dir.join("federated_graph.bin.bak");
+    let graph_bin_sidecar = data_dir.join("federated_graph.bin.payload");
 
     // Step 1: backup the existing graph so an operator can recover if
     // the rebuild misbehaves. `std::fs::rename` is atomic on the same
@@ -54,6 +55,21 @@ pub async fn run_reindex(
         })?;
     } else if verbose {
         eprintln!("no existing {} to back up", graph_bin.display());
+    }
+
+    // Step 1b: drop the sidecar (`<bin>.payload`) that
+    // `PetgraphBackend::save` writes next to the canonical envelope. The
+    // loader reads it whenever the canonical file is absent, so leaving
+    // a stale sidecar behind would let the next startup hydrate from a
+    // previous run's payload instead of rebuilding from source — which
+    // is precisely the failure mode `lain reindex` is supposed to fix.
+    if graph_bin_sidecar.exists() {
+        if verbose {
+            eprintln!("removing stale sidecar {}", graph_bin_sidecar.display());
+        }
+        std::fs::remove_file(&graph_bin_sidecar).with_context(|| {
+            format!("removing stale sidecar {}", graph_bin_sidecar.display())
+        })?;
     }
 
     // Step 2: load the federation. The loader's Phase 0/1/2
