@@ -128,7 +128,9 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
             }
         }
         for n in &nodes {
-            repo.db().upsert_node(n.clone()).expect("signature backfill");
+            repo.db()
+                .upsert_node(n.clone())
+                .expect("signature backfill");
         }
     }
 
