@@ -1965,9 +1965,19 @@ pub enum PresenceEventPublic {
     AgentJoined(AgentJoinedPublic),
     AgentLeft(AgentId),
     HeartbeatExpired(AgentId),
-    ClaimGranted { agent_id: AgentId, path: PathBuf },
-    ClaimReleased { agent_id: AgentId, path: PathBuf },
-    ClaimRevoked { agent_id: AgentId, path: PathBuf, reason: String },
+    ClaimGranted {
+        agent_id: AgentId,
+        path: PathBuf,
+    },
+    ClaimReleased {
+        agent_id: AgentId,
+        path: PathBuf,
+    },
+    ClaimRevoked {
+        agent_id: AgentId,
+        path: PathBuf,
+        reason: String,
+    },
     ConflictDetected {
         agent_id: AgentId,
         conflicts: Vec<ConflictEntry>,
@@ -1984,18 +1994,28 @@ impl From<PresenceEvent> for PresenceEventPublic {
             PresenceEvent::AgentJoined(s) => Self::AgentJoined(AgentJoinedPublic::from(s)),
             PresenceEvent::AgentLeft(a) => Self::AgentLeft(a),
             PresenceEvent::HeartbeatExpired(a) => Self::HeartbeatExpired(a),
-            PresenceEvent::ClaimGranted { agent_id, path } => {
-                Self::ClaimGranted { agent_id, path }
-            }
+            PresenceEvent::ClaimGranted { agent_id, path } => Self::ClaimGranted { agent_id, path },
             PresenceEvent::ClaimReleased { agent_id, path } => {
                 Self::ClaimReleased { agent_id, path }
             }
-            PresenceEvent::ClaimRevoked { agent_id, path, reason } => {
-                Self::ClaimRevoked { agent_id, path, reason }
-            }
-            PresenceEvent::ConflictDetected { agent_id, conflicts, severity } => {
-                Self::ConflictDetected { agent_id, conflicts, severity }
-            }
+            PresenceEvent::ClaimRevoked {
+                agent_id,
+                path,
+                reason,
+            } => Self::ClaimRevoked {
+                agent_id,
+                path,
+                reason,
+            },
+            PresenceEvent::ConflictDetected {
+                agent_id,
+                conflicts,
+                severity,
+            } => Self::ConflictDetected {
+                agent_id,
+                conflicts,
+                severity,
+            },
             PresenceEvent::EditLanded { event } => Self::EditLanded { event },
         }
     }
