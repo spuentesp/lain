@@ -365,8 +365,15 @@ impl FederatedIndex {
     }
 
     pub async fn project_repo(&self, id: &RepoId) -> Result<(), LainError> {
-        // No await points below: this guard cannot cross an async suspension.
-        let _guard = self.projection_lock.lock();
+        self.project_nodes(id).await?;
+        self.project_edges(id).await?;
+        Ok(())
+    }
+
+    /// Project this repo's nodes into the federated backend. Idempotent.
+    /// Safe to run before other repos' nodes are projected — by design,
+    /// the second pass ([`Self::project_edges`]) is what needs full visibility.
+    pub async fn project_nodes(&self, id: &RepoId) -> Result<(), LainError> {
         let repo = self
             .get_repo(id)
             .ok_or_else(|| LainError::NotFound(format!("repo {id}")))?;
@@ -375,8 +382,6 @@ impl FederatedIndex {
         // Re-key every node to its global id and upsert into the backend.
         let mut live: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(nodes.len());
-        let mut local_to_global: std::collections::HashMap<String, String> =
-            std::collections::HashMap::with_capacity(nodes.len());
         let mut batch_nodes: Vec<crate::schema::GraphNode> = Vec::with_capacity(nodes.len());
         for n in &nodes {
             let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name, n.line_start);
@@ -384,7 +389,6 @@ impl FederatedIndex {
             rewritten.id = gid.as_str().to_string();
             live.insert(gid.as_str().to_string());
             batch_nodes.push(rewritten);
-            local_to_global.insert(n.id.clone(), gid.as_str().to_string());
         }
         // Batch upsert: one disk save at the end instead of ~N syncs.
         // The per-node path saved on every upsert and wedged the
@@ -396,10 +400,55 @@ impl FederatedIndex {
             batch_nodes.len()
         );
 
+        // Retract what this repo no longer has. Projection was upsert-only, so
+        // the federated view accumulated every symbol a repo ever contained: a
+        // deleted function kept answering `search_org` long after the per-repo
+        // graph had dropped it. Scoped by the repo's global-id prefix, which is
+        // unambiguous because `RepoId` forbids `:`.
+        let prefix = format!("{}:", id.as_str());
+        let stale: Vec<String> = self
+            .backend
+            .list_nodes()?
+            .into_iter()
+            .map(|n| n.id)
+            .filter(|gid| gid.starts_with(&prefix) && !live.contains(gid))
+            .collect();
+        if !stale.is_empty() {
+            let removed = self.backend.remove_nodes(&stale)?;
+            tracing::info!(
+                "federation: retracted {removed} stale node(s) for repo '{}'",
+                id.as_str()
+            );
+        }
+        Ok(())
+    }
+
+    /// Project this repo's edges into the federated backend. Requires
+    /// all known repos' nodes to be projected first (via
+    /// [`Self::project_nodes`]) — otherwise an edge target's
+    /// `GlobalId` may not resolve.
+    pub async fn project_edges(&self, id: &RepoId) -> Result<(), LainError> {
+        let repo = self
+            .get_repo(id)
+            .ok_or_else(|| LainError::NotFound(format!("repo {id}")))?;
+        let nodes = repo.nodes();
+
+        // Build the local→global map from this repo's nodes. Edges
+        // reference per-repo node ids; the federated backend uses
+        // global ids. Recomputing this here keeps `project_edges`
+        // self-contained — it does not depend on `project_nodes`
+        // having been called in the same process.
+        let mut local_to_global: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(nodes.len());
+        for n in &nodes {
+            let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name, n.line_start);
+            local_to_global.insert(n.id.clone(), gid.as_str().to_string());
+        }
+
         // Project intra-repo edges (Calls / Contains / Uses / ...) with
         // their endpoint ids rewritten to global ids. The backend
         // upserts are idempotent on edge identity (source+target+
-        // edge_type), so re-running `project_repo` is safe. Edges with
+        // edge_type), so re-running `project_edges` is safe. Edges with
         // either endpoint missing from the local-to-global map (e.g.
         // scanner-introduced virtual edges) are skipped — they'll show
         // up next time the scanner emits them with stable ids.
@@ -449,16 +498,20 @@ impl FederatedIndex {
         // form so the local petgraph could not store them). Each drained
         // edge has `source_id` rewritten through `local_to_global` and
         // `target_id` passed through unchanged because it is already
-        // global. The target node may not have been projected yet —
-        // its owning repo's `project_repo` runs in parallel — so we
-        // upsert a placeholder node for it first; the real projection
-        // overwrites the placeholder when that repo's pass runs
-        // (`upsert_node_global` is idempotent on global id).
+        // global. With cold-start Phase 1/2 orchestration every owning
+        // repo's nodes are already projected by the time `project_edges`
+        // runs, so the placeholder branch below is unnecessary there.
+        // It still fires when the CLI server re-projects one repo at a
+        // time after `index()` (e.g. after a watcher event) and the
+        // target's owning repo hasn't been re-projected yet — defensive
+        // coverage that keeps the edge alive until the real projection
+        // overwrites the placeholder. The warn lets operators see when
+        // this defensive path fires.
         let external = repo.db().take_pending_external_edges();
         if !external.is_empty() {
             let mut external_batch: Vec<crate::schema::GraphEdge> =
                 Vec::with_capacity(external.len());
-            let mut placeholder_ids = std::collections::HashSet::new();
+            let mut placeholder_ids = Vec::new();
             for edge in &external {
                 // Ensure the target node exists in the backend. The
                 // global id is `repo:Kind:path:name`; reconstruct the
@@ -491,10 +544,18 @@ impl FederatedIndex {
                             Some(parts) => parts,
                             None => continue,
                         };
-                        let _ = self
-                            .backend
-                            .upsert_node_global(gid.as_str(), kind, path, name);
-                        placeholder_ids.insert(gid.as_str().to_string());
+                        tracing::warn!(
+                            "[federation] {:?}: cross-repo target {} not yet projected; upserting placeholder",
+                            id.as_str(),
+                            gid.as_str(),
+                        );
+                        let _ = self.backend.upsert_node_global(
+                            gid.as_str(),
+                            kind,
+                            path,
+                            name,
+                        );
+                        placeholder_ids.push(gid.as_str().to_string());
                     }
                 }
             }
@@ -523,27 +584,6 @@ impl FederatedIndex {
                 id.as_str(),
                 external_batch.len(),
                 placeholder_ids.len(),
-            );
-        }
-
-        // Retract what this repo no longer has. Projection was upsert-only, so
-        // the federated view accumulated every symbol a repo ever contained: a
-        // deleted function kept answering `search_org` long after the per-repo
-        // graph had dropped it. Scoped by the repo's global-id prefix, which is
-        // unambiguous because `RepoId` forbids `:`.
-        let prefix = format!("{}:", id.as_str());
-        let stale: Vec<String> = self
-            .backend
-            .list_nodes()?
-            .into_iter()
-            .map(|n| n.id)
-            .filter(|gid| gid.starts_with(&prefix) && !live.contains(gid))
-            .collect();
-        if !stale.is_empty() {
-            let removed = self.backend.remove_nodes(&stale)?;
-            tracing::info!(
-                "federation: retracted {removed} stale node(s) for repo '{}'",
-                id.as_str()
             );
         }
 

@@ -1573,3 +1573,89 @@ async fn resolve_node_ambiguous_returns_other_definitions() {
         "alternative should be a different path"
     );
 }
+
+// ─── cold_start_projects_edges_in_one_pass (Task 4 / Codex finding #4) ───
+//
+// Regression for the cold-start cross-repo edge miss: the loader used to
+// project per-repo in parallel, so when a consumer repo projected its
+// `Calls` edge before the provider repo projected its target node, the
+// target's `GlobalId` did not yet exist in the federated backend and the
+// edge was dropped. Phase 1/2 orchestration fixes this — project every
+// repo's nodes first, then every repo's edges.
+//
+// Note: this test mirrors the production resolve-phase path. Cross-repo
+// `Calls` edges are stashed in the consumer's per-repo
+// `pending_external_edges` via `insert_edges_batch` (which handles
+// foreign targets) and use the target's *global* id (e.g.
+// "provider:Function:src/lib.rs:verify_token:1"), not the foreign local
+// UUID. The federation's `project_edges` drains that stash and writes
+// the edge to the federated backend with the global target id intact.
+#[tokio::test]
+async fn cold_start_projects_edges_in_one_pass() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    // Two repos. Consumer imports Provider's function.
+    let consumer_path = tmp.path().join("consumer");
+    let provider_path = tmp.path().join("provider");
+    std::fs::create_dir_all(&consumer_path).unwrap();
+    std::fs::create_dir_all(&provider_path).unwrap();
+    git2::Repository::init(&consumer_path).unwrap();
+    git2::Repository::init(&provider_path).unwrap();
+
+    let consumer_id = RepoId::new("consumer").unwrap();
+    let provider_id = RepoId::new("provider").unwrap();
+
+    for (id, path) in [(&consumer_id, &consumer_path), (&provider_id, &provider_path)] {
+        let source = WorkspaceDirSource::new(id.clone(), path.clone()).unwrap();
+        fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+    }
+
+    // Inject symbols + a cross-repo Calls edge that targets the provider's
+    // function. After Phase 1/2 orchestration, the edge must resolve.
+    let provider_fn = GraphNode::new(NodeType::Function, "verify_token".into(), "src/lib.rs".into())
+        .with_location(1, 3);
+    let consumer_caller = GraphNode::new(NodeType::Function, "charge".into(), "src/lib.rs".into())
+        .with_location(1, 5);
+
+    fed.get_repo(&provider_id).unwrap().db().insert_node(&provider_fn).unwrap();
+    fed.get_repo(&consumer_id).unwrap().db().insert_node(&consumer_caller).unwrap();
+
+    // Cross-repo edges are inserted with the target's *global* id (the
+    // resolve phase produces them this way). `insert_edges_batch`
+    // detects the foreign target and stashes the edge in the consumer's
+    // `pending_external_edges` for the federation's `project_edges` to
+    // drain.
+    let provider_global_id = fed
+        .global_id(&provider_id, NodeType::Function, "src/lib.rs", "verify_token", Some(1))
+        .as_str()
+        .to_string();
+    fed.get_repo(&consumer_id).unwrap().db().insert_edges_batch(&[GraphEdge::new(
+        EdgeType::Calls,
+        consumer_caller.id.clone(),
+        provider_global_id,
+    )]).unwrap();
+
+    // Cold-start: register both repos, then orchestrate Phase 1 (nodes)
+    // for both, then Phase 2 (edges) for both. This mirrors the
+    // loader's orchestration post-fix.
+    fed.project_nodes(&provider_id).await.unwrap();
+    fed.project_nodes(&consumer_id).await.unwrap();
+    fed.project_edges(&provider_id).await.unwrap();
+    fed.project_edges(&consumer_id).await.unwrap();
+
+    let edges = backend.all_edges().unwrap();
+    let cross = edges.iter().filter(|e| {
+        e.edge_type == EdgeType::Calls && e.target_id.starts_with("provider:")
+    }).count();
+    assert_eq!(cross, 1, "the consumer's Calls edge must resolve to the provider's node");
+}
