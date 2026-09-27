@@ -383,4 +383,3 @@ impl Default for PresenceRegistry {
         Self::new()
     }
 }
-

@@ -167,7 +167,12 @@ impl PetgraphBackend {
                 index.insert(node.id, global_id);
             }
         }
-        Ok(Self { db, index, bin_path, payload_path })
+        Ok(Self {
+            db,
+            index,
+            bin_path,
+            payload_path,
+        })
     }
 
     /// Save the federated graph to disk, prepending the schema envelope

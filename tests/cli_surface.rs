@@ -200,7 +200,9 @@ fn the_documented_command_table_matches_the_binary() {
 /// header. Pattern modeled on `tests/doctor_smoke.rs::lain()`.
 #[test]
 fn lain_reindex_backs_up_graph_and_rebuilds() {
-    use lain::federation::graph_backend::{FEDERATION_GRAPH_VERSION, GraphBackend, PetgraphBackend};
+    use lain::federation::graph_backend::{
+        GraphBackend, PetgraphBackend, FEDERATION_GRAPH_VERSION,
+    };
     use std::process::Command;
 
     let project = tempfile::tempdir().expect("tempdir");
@@ -325,8 +327,7 @@ fn lain_reindex_backs_up_graph_and_rebuilds() {
     );
     let version = u32::from_le_bytes([fresh[4], fresh[5], fresh[6], fresh[7]]);
     assert_eq!(
-        version,
-        FEDERATION_GRAPH_VERSION,
+        version, FEDERATION_GRAPH_VERSION,
         "new graph.bin must carry version={}, got {version}",
         FEDERATION_GRAPH_VERSION
     );

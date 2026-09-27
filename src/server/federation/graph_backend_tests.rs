@@ -44,13 +44,22 @@ impl GraphBackend for HashMapBackend {
     fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
         let targets: std::collections::HashSet<(String, String, EdgeType)> = edges
             .iter()
-            .map(|e| (e.source_id.clone(), e.target_id.clone(), e.edge_type.clone()))
+            .map(|e| {
+                (
+                    e.source_id.clone(),
+                    e.target_id.clone(),
+                    e.edge_type.clone(),
+                )
+            })
             .collect();
         let before = self.edges.read().unwrap().len();
-        self.edges
-            .write()
-            .unwrap()
-            .retain(|e| !targets.contains(&(e.source_id.clone(), e.target_id.clone(), e.edge_type.clone())));
+        self.edges.write().unwrap().retain(|e| {
+            !targets.contains(&(
+                e.source_id.clone(),
+                e.target_id.clone(),
+                e.edge_type.clone(),
+            ))
+        });
         Ok(before - self.edges.read().unwrap().len())
     }
     fn upsert_node_global(
@@ -187,15 +196,22 @@ fn contract_remove_edges_only_matches_full_triple() {
     let n2 = GraphNode::new(NodeType::Function, "b".into(), "src/lib.rs".into());
     b.upsert_node(n1.clone()).unwrap();
     b.upsert_node(n2.clone()).unwrap();
-    b.upsert_edge(GraphEdge::new(EdgeType::Calls, n1.id.clone(), n2.id.clone())).unwrap();
-    b.upsert_edge(GraphEdge::new(EdgeType::Uses, n1.id.clone(), n2.id.clone())).unwrap();
-
-    let removed = b.remove_edges(&[GraphEdge::new(
+    b.upsert_edge(GraphEdge::new(
         EdgeType::Calls,
         n1.id.clone(),
         n2.id.clone(),
-    )])
+    ))
     .unwrap();
+    b.upsert_edge(GraphEdge::new(EdgeType::Uses, n1.id.clone(), n2.id.clone()))
+        .unwrap();
+
+    let removed = b
+        .remove_edges(&[GraphEdge::new(
+            EdgeType::Calls,
+            n1.id.clone(),
+            n2.id.clone(),
+        )])
+        .unwrap();
     assert_eq!(removed, 1);
     assert_eq!(b.edge_count(), 1, "Uses edge survives Calls removal");
     let remaining = b.all_edges().unwrap();
@@ -237,7 +253,7 @@ fn petgraph_backend_rejects_pre_bump_version_header() {
     let bin_path = dir.path().join("federated_graph.bin");
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&1u32.to_le_bytes()); // legacy version
-    bytes.extend_from_slice(&[0u8; 16]);          // payload placeholder
+    bytes.extend_from_slice(&[0u8; 16]); // payload placeholder
     std::fs::write(&bin_path, &bytes).unwrap();
 
     // Loading must return FederationSchemaMismatch, not a parse error

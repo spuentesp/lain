@@ -353,10 +353,9 @@ fn symbol_distance_via_graph(graph: &crate::graph::GraphDatabase, a: &str, b: &s
             return None;
         }
         for edge in graph.all_edges() {
-            if edge.source_id == node
-                && visited.insert(edge.target_id.clone()) {
-                    frontier.push_back((d + 1, edge.target_id));
-                }
+            if edge.source_id == node && visited.insert(edge.target_id.clone()) {
+                frontier.push_back((d + 1, edge.target_id));
+            }
         }
     }
     None

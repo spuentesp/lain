@@ -15,8 +15,8 @@ fn mk_node(name: &str, kind: &str, repo: &str, signature: Option<&str>, line: u3
         _ => panic!("unsupported test kind {kind}"),
     };
     let kind_str = format!("{node_kind:?}");
-    let mut n = GraphNode::new(node_kind, name.into(), "src/lib.rs".into())
-        .with_location(line, line + 2);
+    let mut n =
+        GraphNode::new(node_kind, name.into(), "src/lib.rs".into()).with_location(line, line + 2);
     n.id = format!("{repo}:{kind_str}:{}:{}:{}", "src/lib.rs", name, line);
     n.signature = signature.map(|s| s.to_string());
     n
@@ -71,11 +71,13 @@ fn find_cross_repo_matches_above_threshold() {
 #[test]
 fn find_cross_repo_matches_caps_at_top_k() {
     let new_node = node("repo1", "f", "fn f(x: i32)");
-    let candidates: Vec<GraphNode> = (0..20).map(|i| {
-        let mut n = node(&format!("repo{i}"), "f", "fn f(x: i32)");
-        n.signature = Some("fn f(x: i32)".into());
-        n
-    }).collect();
+    let candidates: Vec<GraphNode> = (0..20)
+        .map(|i| {
+            let mut n = node(&format!("repo{i}"), "f", "fn f(x: i32)");
+            n.signature = Some("fn f(x: i32)".into());
+            n
+        })
+        .collect();
     let matches = find_cross_repo_matches(&new_node, &candidates, 5, 0.0, false);
     assert_eq!(matches.len(), 5);
 }
@@ -93,7 +95,10 @@ fn find_cross_repo_matches_both_signatures_empty_returns_empty() {
     let a = mk_node("a", "Method", "repo_a", None, 1);
     let b = mk_node("a", "Method", "repo_b", None, 1);
     let out = find_cross_repo_matches(&a, &[b], 5, 0.5, false);
-    assert!(out.is_empty(), "empty signatures must produce zero matches, got {out:?}");
+    assert!(
+        out.is_empty(),
+        "empty signatures must produce zero matches, got {out:?}"
+    );
 }
 
 #[test]
@@ -124,5 +129,8 @@ fn find_cross_repo_matches_stop_words_filtered() {
     let a = mk_node("new", "Function", "repo_a", Some("pub fn new"), 1);
     let b = mk_node("new", "Function", "repo_b", Some("fn new"), 1);
     let out = find_cross_repo_matches(&a, &[b], 5, 0.5, false);
-    assert!(out.is_empty(), "stop-word-only signatures should not match, got {out:?}");
+    assert!(
+        out.is_empty(),
+        "stop-word-only signatures should not match, got {out:?}"
+    );
 }

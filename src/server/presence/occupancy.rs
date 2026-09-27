@@ -19,11 +19,12 @@ use std::time::SystemTime;
 use parking_lot::Mutex;
 
 use super::agent::AgentId;
-use super::claim::{Claim, ClaimIntent, ConflictEntry, Holder, OccupancyEntry, SymbolHash, SymbolOccupancy};
+use super::claim::{
+    Claim, ClaimIntent, ConflictEntry, Holder, OccupancyEntry, SymbolHash, SymbolOccupancy,
+};
 use super::registry::{AgentSession, PersistFn, PresenceRegistry};
 use crate::server::path_util::{canonical_form, lexical_normalize, posix_string};
 use crate::server::revision_log::RevisionId;
-
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ClaimRequest {
@@ -265,7 +266,8 @@ pub struct OccupancyMap {
     /// roots. Read by `canonical_claim_path`.
     pub(crate) claim_roots: std::sync::Arc<parking_lot::Mutex<Vec<PathBuf>>>,
     /// Active advisory filesystem lock leases: (AgentId, CanonicalClaimPath) -> LockFilePath.
-    pub(crate) lock_leases: std::sync::Arc<parking_lot::Mutex<HashMap<(AgentId, PathBuf), PathBuf>>>,
+    pub(crate) lock_leases:
+        std::sync::Arc<parking_lot::Mutex<HashMap<(AgentId, PathBuf), PathBuf>>>,
 }
 
 impl std::fmt::Debug for OccupancyMap {

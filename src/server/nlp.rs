@@ -15,30 +15,42 @@
 
 #[cfg(not(feature = "nlp"))]
 mod stub_types {
-    use std::path::{Path, PathBuf};
     use crate::error::LainError;
+    use std::path::{Path, PathBuf};
 
     #[derive(Clone, Default)]
     pub struct NlpEmbedder;
 
     impl NlpEmbedder {
-        pub fn new_stub() -> Self { NlpEmbedder }
+        pub fn new_stub() -> Self {
+            NlpEmbedder
+        }
         pub fn new_with_threads(_max_threads: usize) -> Result<Self, LainError> {
             Ok(NlpEmbedder)
         }
         pub fn new() -> Result<Self, LainError> {
-            Err(LainError::Unavailable("ML inference not compiled in this build".into()))
+            Err(LainError::Unavailable(
+                "ML inference not compiled in this build".into(),
+            ))
         }
-        pub fn with_max_threads(_model: &Path, _tokenizer: &Path, _max_threads: usize)
-            -> Result<Self, LainError>
-        {
-            Err(LainError::Unavailable("ML inference not compiled in this build".into()))
+        pub fn with_max_threads(
+            _model: &Path,
+            _tokenizer: &Path,
+            _max_threads: usize,
+        ) -> Result<Self, LainError> {
+            Err(LainError::Unavailable(
+                "ML inference not compiled in this build".into(),
+            ))
         }
         pub fn resolve_model_paths(_p: &Path) -> (PathBuf, PathBuf) {
             (PathBuf::new(), PathBuf::new())
         }
-        pub fn is_stub(&self) -> bool { true }
-        pub fn embedding_dim(&self) -> usize { 0 }
+        pub fn is_stub(&self) -> bool {
+            true
+        }
+        pub fn embedding_dim(&self) -> usize {
+            0
+        }
         pub fn embed(&self, _text: &str) -> Result<Vec<f32>, LainError> {
             // Stubs return an all-zero vector matching `embedding_dim()`,
             // matching the real impl's stub-mode contract (so test
@@ -50,18 +62,28 @@ mod stub_types {
             Ok(vec![0.0; self.embedding_dim()])
         }
         pub fn set_query_prefix(&mut self, _prefix: impl Into<String>) {}
-        pub fn query_prefix(&self) -> &str { "" }
+        pub fn query_prefix(&self) -> &str {
+            ""
+        }
     }
 
     #[derive(Clone, Default)]
     pub struct CrossEncoder;
 
     impl CrossEncoder {
-        pub fn from_dir(_dir: &Path) -> Self { CrossEncoder }
-        pub fn from_dir_with_threads(_dir: &Path, _max_threads: usize) -> Self { CrossEncoder }
-        pub fn is_active(&self) -> bool { false }
+        pub fn from_dir(_dir: &Path) -> Self {
+            CrossEncoder
+        }
+        pub fn from_dir_with_threads(_dir: &Path, _max_threads: usize) -> Self {
+            CrossEncoder
+        }
+        pub fn is_active(&self) -> bool {
+            false
+        }
         pub fn score(&self, _query: &str, _document: &str) -> Result<f32, LainError> {
-            Err(LainError::Unavailable("ML inference not compiled in this build".into()))
+            Err(LainError::Unavailable(
+                "ML inference not compiled in this build".into(),
+            ))
         }
     }
 }

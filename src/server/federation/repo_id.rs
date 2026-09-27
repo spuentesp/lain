@@ -140,14 +140,26 @@ mod tests {
     #[test]
     fn global_id_format_is_stable() {
         let repo = RepoId::new("auth-svc").unwrap();
-        let id = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", "verify_token", None);
+        let id = GlobalId::new(
+            &repo,
+            NodeType::Function,
+            "src/auth.rs",
+            "verify_token",
+            None,
+        );
         assert_eq!(id.as_str(), "auth-svc:Function:src/auth.rs:verify_token:0");
     }
 
     #[test]
     fn global_id_roundtrip() {
         let repo = RepoId::new("billing-svc").unwrap();
-        let id = GlobalId::new(&repo, NodeType::Method, "src/invoice.py", "calc_total", Some(42));
+        let id = GlobalId::new(
+            &repo,
+            NodeType::Method,
+            "src/invoice.py",
+            "calc_total",
+            Some(42),
+        );
         let parsed = GlobalId::parse(id.as_str()).unwrap();
         assert_eq!(parsed, id);
         assert_eq!(parsed.repo_id(), "billing-svc");
@@ -168,13 +180,7 @@ mod tests {
             (Some(12345), 12345),
         ];
         for (input, expected_line) in cases {
-            let gid = GlobalId::new(
-                &repo,
-                NodeType::Function,
-                "src/lib.rs",
-                "foo",
-                input,
-            );
+            let gid = GlobalId::new(&repo, NodeType::Function, "src/lib.rs", "foo", input);
             let parsed = GlobalId::parse(gid.as_str()).unwrap();
             // Round-trip preserves the string form; line_start is the
             // last `:`-delimited segment.
@@ -205,13 +211,7 @@ mod tests {
         assert_eq!(gid.name(), Some("verify_token"));
         assert_eq!(gid.line_start(), Some(42));
 
-        let zero = GlobalId::new(
-            &repo,
-            NodeType::Module,
-            "src/lib.rs",
-            "root",
-            None,
-        );
+        let zero = GlobalId::new(&repo, NodeType::Module, "src/lib.rs", "root", None);
         assert_eq!(zero.path(), Some("src/lib.rs"));
         assert_eq!(zero.name(), Some("root"));
         assert_eq!(zero.line_start(), Some(0));

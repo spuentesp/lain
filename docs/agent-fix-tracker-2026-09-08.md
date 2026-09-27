@@ -85,10 +85,10 @@ leftmost unblocked item at each step.
 | 0 | **F01** Remove bearer credentials from public presence events | No incoming deps | `Done` (commits `e897fd3`) |
 | 0 | **F02** Secure HTTP defaults | No incoming deps; gates F18 | `Done` (commits `f07bd0f`, F02 review-fix round 1) |
 | 0 | **F03** Make federation persistence versioned and fail closed | No incoming deps; gates F07 | `Done` (commits `22ef882`, `4cb4a3e`) |
-| 0 | **F04** Correct LSP reference direction and position fidelity | No incoming deps; gates F05, F15 | `Unassigned` |
-| 0 | **F10** Reconcile federation edge removals | No incoming deps; gates F11 | `Unassigned` |
-| 0 | **F13** Make zero-daemon claims ownership-safe | No incoming deps; gates F14 | `Unassigned` |
-| 1 | **F05** Standardize coordinates and repair signature synthesis | Waits on F04 | `Blocked` |
+| 0 | **F04** Correct LSP reference direction and position fidelity | No incoming deps; gates F05, F15 | `Done` (commits `474bf4d`, deeper `5930839`: real JSON-RPC wire fixture) |
+| 0 | **F10** Reconcile federation edge removals | No incoming deps; gates F11 | `Done` (commits `e827b83`, rework `a2544b1`: cross-repo `Calls` survive repeated projection) |
+| 0 | **F13** Make zero-daemon claims ownership-safe | No incoming deps; gates F14 | `Done` (commits `5dd8869`, `80637c2`, rework `4fe5ab0`: atomic compare-and-delete + read-first/remove-on-Ok) |
+| 1 | **F05** Standardize coordinates and repair signature synthesis | Waits on F04 | `Done` |
 | 1 | **F07** Repair overlay refresh lifecycle and watcher fallback | Waits on F03 | `Blocked` |
 | 1 | **F11** Retry unresolved cross-repository calls | Waits on F05, F10 | `Blocked` |
 | 1 | **F14** Make `lain reindex` recovery truthful | Waits on F13, F03 | `Blocked` |
@@ -253,8 +253,8 @@ Multi-agent: dispatch wave 0 as 6 parallel assignments. Coordinator marks each `
 
 ### F05 — Standardize coordinates and repair signature synthesis
 
-- Status: `Unassigned`
-- Owner: `—`
+- Status: `Done` (commit `<see report>`)
+- Owner: `Kimi Code subagent (F05)`
 - Priority: P1
 - Depends on: F04
 - Scope: `src/server/ingest/scan.rs`, `src/server/ingest/resolve.rs`,
@@ -270,7 +270,9 @@ Multi-agent: dispatch wave 0 as 6 parallel assignments. Coordinator marks each `
   - A definition after a blank/comment line produces its own signature.
   - Rust `fn f(x: Type) -> Result<T, E>` preserves the parameter/type content.
 - Focused test: scan unit tests and cross-repo matching integration test.
-- Evidence after implementation: `—`
+- Evidence after implementation: `cargo test --lib` (826 ok),
+  `cargo test --test use_cases` (178 ok); see
+  `.superpowers/sdd/agent-fix-tracker-2026-09-08/task-F05-report.md`.
 
 ### F06 — Give overlay edits replacement semantics
 

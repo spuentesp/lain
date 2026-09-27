@@ -2,12 +2,12 @@
 //!
 //! Shared helpers for argument parsing, text enrichment, and similarity.
 
-use serde_json::{Map, Value};
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::GraphNode;
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 /// A handle "looks like a path" when it has an explicit separator or
@@ -29,7 +29,7 @@ pub fn is_explicit_path(handle: &str) -> bool {
 pub fn resolve_node(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    handle: &str
+    handle: &str,
 ) -> Result<GraphNode, LainError> {
     // Canonical form is computed only for the path-lookup step and only
     // when the handle is an explicit path. Steps 1-4 (id / name lookup)
@@ -43,19 +43,31 @@ pub fn resolve_node(
     };
 
     // 1. Try Overlay by ID — raw handle.
-    if let Some(n) = overlay.get_node(handle) { return Ok(n); }
+    if let Some(n) = overlay.get_node(handle) {
+        return Ok(n);
+    }
     // 2. Try Graph by ID — raw handle.
-    if let Ok(Some(n)) = graph.get_node(handle) { return Ok(n); }
+    if let Ok(Some(n)) = graph.get_node(handle) {
+        return Ok(n);
+    }
     // 3. Try Overlay by Name — raw handle.
     let overlay_names = overlay.find_nodes_by_name(handle);
-    if let Some(n) = overlay_names.iter().find(|n| n.name == handle) { return Ok(n.clone()); }
+    if let Some(n) = overlay_names.iter().find(|n| n.name == handle) {
+        return Ok(n.clone());
+    }
     // 4. Try Graph by Name — raw handle.
-    if let Some(n) = graph.find_node_by_name(handle) { return Ok(n); }
+    if let Some(n) = graph.find_node_by_name(handle) {
+        return Ok(n);
+    }
     // 5. Try Graph by Path. Raw first (workspace-relative keys), then
     //    the canonicalized form as a fallback for absolute handles and
     //    out-of-tree paths.
-    if let Some(n) = graph.find_node_by_path(handle) { return Ok(n); }
-    if let Some(n) = graph.find_node_by_path(&canonical_handle) { return Ok(n); }
+    if let Some(n) = graph.find_node_by_path(handle) {
+        return Ok(n);
+    }
+    if let Some(n) = graph.find_node_by_path(&canonical_handle) {
+        return Ok(n);
+    }
 
     // Existing empty-graph + not-found error messages stay unchanged.
     if graph.node_count() == 0 && overlay.stats().node_count == 0 {
@@ -211,8 +223,7 @@ pub fn get_usize_arg(args: Option<&Map<String, Value>>, key: &str) -> Option<usi
 
 /// Extract boolean argument
 pub fn get_bool_arg(args: Option<&Map<String, Value>>, key: &str) -> Option<bool> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_bool())
+    args.and_then(|a| a.get(key)).and_then(|v| v.as_bool())
 }
 
 /// Extract a string argument from the args map. Returns an empty
@@ -406,7 +417,11 @@ fn read_body_excerpt(
         }
     }
     // Trim to max_tokens and collapse whitespace
-    let trimmed: String = buf.split_whitespace().take(max_tokens).collect::<Vec<_>>().join(" ");
+    let trimmed: String = buf
+        .split_whitespace()
+        .take(max_tokens)
+        .collect::<Vec<_>>()
+        .join(" ");
     Ok(trimmed)
 }
 
@@ -483,7 +498,14 @@ pub fn stem(word: &str) -> String {
                 return stem.to_string();
             }
         }
-        let last_two: String = stem.chars().rev().take(2).collect::<Vec<_>>().into_iter().rev().collect();
+        let last_two: String = stem
+            .chars()
+            .rev()
+            .take(2)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         if last_two == "ch" || last_two == "sh" {
             return stem.to_string();
         }

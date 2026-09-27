@@ -5,8 +5,8 @@
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::repo_id::RepoId;
-use crate::server::LainServer;
 use crate::server::mcp::tools_registry::{invoke_inventory, tool_result};
+use crate::server::LainServer;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited};
