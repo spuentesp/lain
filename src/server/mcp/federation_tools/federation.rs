@@ -125,20 +125,36 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
 pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<SymbolMatch> {
     let q = query.to_lowercase();
     let mut hits: Vec<SymbolMatch> = Vec::new();
-    let mut seen: std::collections::HashSet<(String, String, String)> =
+    // Dedup key is (repo, name, path, line_start): two same-named methods
+    // at different lines in one file are distinct nodes under GlobalId v2
+    // and must both be reported.
+    let mut seen: std::collections::HashSet<(String, String, String, u32)> =
         std::collections::HashSet::new();
-    let key =
-        |repo: &str, name: &str, path: &str| (repo.to_string(), name.to_string(), path.to_string());
+    let key = |repo: &str, name: &str, path: &str, line: u32| {
+        (repo.to_string(), name.to_string(), path.to_string(), line)
+    };
 
-    // Primary path: per-repo nodes.
+    // Primary path: per-repo nodes. Reported ids are the federation's
+    // GlobalId v2 strings (the same ids every other federation tool
+    // surfaces), not the per-repo local ids.
     for (repo_id, _) in fed.list_repos() {
         if let Some(repo) = fed.get_repo(&repo_id) {
             for n in repo.nodes() {
-                if (n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q))
-                    && seen.insert(key(repo_id.as_str(), &n.name, &n.path))
-                {
+                if !(n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q)) {
+                    continue;
+                }
+                let global_id = GlobalId::new(
+                    &repo_id,
+                    n.node_type.clone(),
+                    &n.path,
+                    &n.name,
+                    n.line_start,
+                )
+                .as_str()
+                .to_string();
+                if seen.insert(key(repo_id.as_str(), &n.name, &n.path, n.line_start.unwrap_or(0))) {
                     hits.push(SymbolMatch {
-                        global_id: n.id.clone(),
+                        global_id,
                         repo_id: repo_id.to_string(),
                         name: n.name.clone(),
                         path: n.path.clone(),
@@ -154,15 +170,17 @@ pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<Symbol
     // has no `list_repos()` iteration to draw from.
     if let Ok(backend_nodes) = fed.backend().list_nodes() {
         for n in backend_nodes {
-            let repo_id = GlobalId::parse(&n.id)
-                .ok()
+            let parsed = GlobalId::parse(&n.id).ok();
+            let repo_id = parsed
+                .as_ref()
                 .map(|g| g.repo_id().to_string())
                 .unwrap_or_default();
-            if seen.contains(&key(&repo_id, &n.name, &n.path)) {
+            let line = parsed.as_ref().and_then(|g| g.line_start()).unwrap_or(0);
+            if seen.contains(&key(&repo_id, &n.name, &n.path, line)) {
                 continue;
             }
             if n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q) {
-                seen.insert(key(repo_id.as_str(), &n.name, &n.path));
+                seen.insert(key(repo_id.as_str(), &n.name, &n.path, line));
                 hits.push(SymbolMatch {
                     global_id: n.id.clone(),
                     repo_id,
