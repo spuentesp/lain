@@ -75,8 +75,68 @@ cancels superseded runs for the same ref.
 
 ## Background
 
-The pre-2026-09-15 `AGENTS.md` was a release-tracking note about
-a v0.7.0 incident where the upstream tarball shipped a binary
-whose `--version` reported `0.6.1` (a missed `Cargo.toml` bump).
-That incident was resolved by PR #43. This file now supersedes
-that note with the current branching, CI, and release policy.
+The upstream `v0.7.0` release tarball shipped a `lain` binary whose
+`--version` reported `lain 0.6.1`. Root cause: `Cargo.toml`'s
+`version` field was never bumped from `0.6.1` when the `v0.7.0`
+git tag was cut, so any binary built from that tree carried the
+old version string. Functionally the binary behaved as v0.7.0;
+only the version string was wrong.
+
+## Status (2026-09-02 → 2026-09-03)
+
+1. **Local fix (commits `93d6344` + `ae2a527`):** bumped
+   `Cargo.toml` to `0.7.0` on `fix/v0.7.0-version-bump`, merged
+   to `main`, and rebuilt `~/.local/lain/lain` so `--version`
+   correctly reports `lain 0.7.0`. Original tarball binary is
+   kept as `~/.local/lain/lain.bak.0.6.1`.
+2. **Upstream fix (tag `v0.7.1`):** bumped `Cargo.toml` to `0.7.1`
+   and pushed the tag so the release workflow publishes corrected
+   binaries to GitHub Releases. `server.json`'s top-level + nested
+   `version` fields get updated automatically by the release
+   workflow; `Formula/lain.rb` and `npm-shim/package.json` are out
+   of scope for this fix.
+3. **Installer fix (tag `v0.7.2`):** `install.sh` had a
+   function-call-ordering bug — it invoked
+   `apply_noninteractive_defaults` at the top of the file before
+   defining the function further down. With `set -e`, that killed
+   the script with `command not found` before any work happened,
+   which is why this environment always installed Lain manually.
+   `apply_noninteractive_defaults` is now defined above its call
+   site, so `curl … | bash` and direct invocation both work.
+
+After the `v0.7.1` workflow completed, the official tarballs at
+<https://github.com/spuentesp/lain/releases/tag/v0.7.1> report
+the correct version string. After the `v0.7.2` workflow
+completes, fresh installs no longer hit the silent-exit bug.
+
+## Re-installing the official tarball
+
+`install.sh` from upstream will now install `lain 0.7.2` (or
+newer). Fresh installs work end-to-end via `curl … | bash` or
+direct invocation — no more manual install dance.
+
+## CI badge
+
+The repo runs its own `lain-health-badge` action on every pull
+request — see `.github/actions/lain-health-badge/`. The action
+ships as part of the v0.7.3 release and is referenced from
+`spuentesp/monitor_dm_system` PR #117 as a consumer demo; this
+note is the orientation for future agents landing changes.
+
+## If upstream `Cargo.toml` on `main` is regressed to `0.6.1`
+
+That would re-introduce the original packaging bug. The fix on
+this branch (or its descendant commits) bumps `Cargo.toml` to
+match each release tag. Verify with `git log --oneline --
+Cargo.toml` before cutting a new tag.
+
+## Federation schema bumps (2026-09-07 onwards)
+
+The federation graph on disk has an explicit version header (`FEDERATION_GRAPH_VERSION` in `src/server/federation/graph_backend.rs`). When the on-disk format changes in a non-backward-compatible way:
+
+1. Bump `FEDERATION_GRAPH_VERSION` in the same commit that introduces the change.
+2. The loader refuses to read graphs with a different header, returning `LainError::FederationSchemaMismatch`.
+3. The operator's recovery path is `lain reindex`, which backs up the old graph and rebuilds.
+4. CHANGELOG entry must name the schema bump and the recovery command.
+
+Do not silently migrate. The federated graph is regenerable from per-repo graphs, and silent migration risks hiding real corruption.
