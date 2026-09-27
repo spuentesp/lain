@@ -92,15 +92,9 @@ pub const FEDERATION_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_cross_repo_blast_radius",
-        description: "Resolve a symbol across the federation, traverse INCOMING Calls edges (the symbol's callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit. When the symbol matches several repos, pass repo_id to choose one.",
+        description: "Use this when you want to know what breaks across repositories: resolve a symbol, traverse INCOMING Calls edges (its callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit. When the symbol matches several repos, pass repo_id to choose one.",
         required_args: &["symbol", "depth"],
         optional_args: &["repo_id"],
-    },
-    ToolDef {
-        name: "get_cross_repo_blast_radius_for_repo",
-        description: "Same as get_cross_repo_blast_radius but the caller disambiguates the repo explicitly via repo_id, bypassing symbol resolution. Args: repo_id, symbol, depth (string range like \"1..3\", not a number). Traverses incoming Calls edges (callers), same as get_cross_repo_blast_radius. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}.",
-        required_args: &["repo_id", "symbol", "depth"],
-        optional_args: &[],
     },
 ];
 

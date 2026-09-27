@@ -2,71 +2,86 @@
 //!
 //! The underlying MCP dispatcher still has every specialised tool
 //! registered; what changes per profile is what `tools/list` returns.
-//! The default `Semantic` profile keeps the curated high-level layer
-//! visible (the M5/M6 set plus claim/release/multiplayer essentials),
-//! while `Full` advertises every registered tool.
+//! That split (advertise ≠ dispatch) is what lets hook scripts keep
+//! calling `claim_files` / `heartbeat` while the model's surface stays
+//! small.
 //!
-//! The default is `Semantic` because the project has consistently
-//! measured that raw 83-tool schemas encourage smaller models to
-//! pattern-match across all descriptions and flounder. The
-//! `LAIN_TOOL_PROFILE=full` opt-out is documented in
-//! `docs/quickstart-tools.md` and surfaced through `get_capabilities`
-//! so an agent can self-discover which profile is in effect.
+//! The default `Semantic` profile is the curated comprehension +
+//! impact layer — the tools a coding agent reaches for while reading
+//! and changing code. Everything else is opt-in per audience:
+//!
+//! - `session` — multiplayer plumbing (claims, heartbeat, occupancy).
+//!   Owned by hooks in most setups; advertised only when asked for.
+//! - `ops` — server/status/reload controls and federation-admin reads.
+//! - `full` — the entire registered surface.
+//!
+//! `LAIN_TOOL_PROFILE` accepts one value or a comma list
+//! (`session,ops`); the default is `semantic`. The choice is
+//! self-discoverable through `get_capabilities` and
+//! `get_agent_strategy`, so an agent can ask to see more rather than
+//! guessing at hidden names.
 
 use std::env;
 
-/// Names every tool advertised under the `Semantic` profile. The
-/// list is hand-curated to match `get_agent_strategy`'s recommended
-/// flow plus the multiplayer essentials. Order is preserved in the
-/// JSON Schema dump for diagnostic tools that want it (the runtime
-/// filtering doesn't depend on order).
+/// The comprehension + impact core, advertised under every non-`full`
+/// profile. The list is hand-curated to match `get_agent_strategy`'s
+/// recommended flow: bootstrap → find → understand → assess → act on
+/// impact. Order is preserved in the JSON Schema dump for diagnostic
+/// tools that want it (the runtime filtering doesn't depend on order).
 ///
 /// Adding a tool here is the *only* code change needed to expose it
-/// through the small semantic surface; everything else is data-
-/// driven.
+/// through the small semantic surface; everything else is data-driven.
 pub const SEMANTIC_PROFILE: &[&str] = &[
-    // M5 bootstrap
+    // Bootstrap
     "understand_repository",
-    // M6 semantic Agent API
+    // Comprehension
     "find_symbol",
     "get_context",
-    "find_related",
-    "assess_change",
     "search_code",
-    // Architecture / code-understanding: get_blast_radius, find_anchors,
-    // list_entry_points, get_call_chain, and get_coupling_radar are the
-    // primary tools `get_agent_strategy` recommends. explain_dispatch
-    // supplements them (Tiers 1-3: when get_blast_radius returns empty,
-    // explain_dispatch tells you whether the gap is because nothing calls
-    // you, or because static analysis can't see the dispatcher).
+    "explain_dispatch",
+    // Impact / architecture
+    "assess_change",
     "get_blast_radius",
+    "get_call_chain",
+    "find_related",
     "find_anchors",
     "list_entry_points",
-    "get_call_chain",
     "get_coupling_radar",
     "find_dead_code",
-    "explain_dispatch",
     // Readiness / self-discovery
     "get_health",
     "get_capabilities",
-    // Multiplayer
+    // Escape hatch — how to get more tools, on demand.
+    "get_agent_strategy",
+];
+
+/// Multiplayer plumbing. The hooks layer (`hooks/<agent>/`) calls
+/// these directly — the dispatcher serves them whether or not they
+/// are advertised — so hiding them from the default surface costs a
+/// hook-driven agent nothing. An agent without hook support opts in
+/// with `LAIN_TOOL_PROFILE=session` to claim files manually.
+pub const SESSION_PROFILE: &[&str] = &[
     "register_agent",
     "heartbeat",
     "claim_files",
     "release_files",
-    "get_world_state",
-    // Multiplayer file-level occupancy awareness
     "list_occupancy",
-    // Escape hatch — full tool enumeration, on demand.
-    "get_agent_strategy",
+    "get_world_state",
+];
+
+/// Server controls. Opt in with `LAIN_TOOL_PROFILE=ops`.
+pub const OPS_PROFILE: &[&str] = &[
+    "get_server_status",
+    "list_recent_projects",
+    "get_reload_status",
+    "request_reload",
 ];
 
 /// Tools in the special-case families (server-status, federation,
 /// workspace) are appended to `tools/list` by the dispatcher at
-/// runtime. They're not in `SEMANTIC_PROFILE` itself, but under the
-/// `Semantic` profile the agent should still see them when the
-/// server is in federation or workspace mode — these are the
-/// "what's around me?" tools that drive multiplayer-aware behaviour.
+/// runtime. They're not in [`SEMANTIC_PROFILE`] itself; each family
+/// splits into a Q&A half (visible under every profile — "what's
+/// around me?") and an admin half (only under `ops`).
 ///
 /// Each list matches a `*_TOOL_DEFS` array in
 /// `crate::server::mcp::definitions` and lives next to the dispatch
@@ -74,82 +89,130 @@ pub const SEMANTIC_PROFILE: &[&str] = &[
 pub struct SemanticProfileFamlies;
 
 impl SemanticProfileFamlies {
-    pub const SERVER_STATUS: &'static [&'static str] = &[
-        "get_server_status",
-        "list_recent_projects",
-        "get_reload_status",
-        "request_reload",
-    ];
-    pub const FEDERATION: &'static [&'static str] = &[
-        "list_repos",
-        "get_repo_info",
-        "get_federation_health",
-        "search_org",
-        "get_cross_repo_blast_radius",
-        "get_cross_repo_blast_radius_for_repo",
-    ];
-    pub const WORKSPACE: &'static [&'static str] = &[
-        "list_workspaces",
-        "get_active_workspace",
-        "get_workspace",
-        "get_workspace_graph",
-    ];
+    /// Federation-mode reads a coding agent needs (org-wide search and
+    /// cross-repo impact).
+    pub const FEDERATION_QA: &'static [&'static str] =
+        &["search_org", "get_cross_repo_blast_radius"];
+    /// Federation admin — repository inventory and health of the
+    /// federation itself.
+    pub const FEDERATION_ADMIN: &'static [&'static str] =
+        &["list_repos", "get_repo_info", "get_federation_health"];
+    /// Workspace-mode reads.
+    pub const WORKSPACE_QA: &'static [&'static str] = &["get_workspace_graph"];
+    /// Workspace admin — which workspaces exist and which is active.
+    pub const WORKSPACE_ADMIN: &'static [&'static str] =
+        &["list_workspaces", "get_active_workspace", "get_workspace"];
 }
 
-/// Two on-the-wire profiles. Lifted into MCP `initialize` so an agent
-/// can decide whether to opt out of the curated default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToolProfile {
-    /// Default. 21 tools (the M5/M6 high-level layer + architecture
-    /// tools + multiplayer essentials + escape hatch). Recommended for
-    /// smaller models and any cold-startup that doesn't need every
-    /// low-level tool.
-    Semantic,
-    /// Full 83-tool surface. Same schema as the generated on-disk snapshot.
-    /// before PR3. Opt-in via `LAIN_TOOL_PROFILE=full`.
-    Full,
+/// The active advertise-set. Composable: `session` and `ops` are
+/// flags on top of the semantic core, `full` is everything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ToolProfile {
+    /// Advertise the multiplayer plumbing (`SESSION_PROFILE`).
+    pub session: bool,
+    /// Advertise server controls and admin reads (`OPS_PROFILE` +
+    /// `*_ADMIN` families).
+    pub ops: bool,
+    /// Advertise every registered tool. Supersedes the flags.
+    pub full: bool,
 }
 
 impl ToolProfile {
     /// Read the active profile from the environment.
     ///
     /// Resolution order:
-    ///   1. `LAIN_TOOL_PROFILE` env var (case-insensitive). Unknown
-    ///      values fall back to `Semantic` and log a warning so the
-    ///      operator learns the typo without the agent being surprised.
-    ///   2. Default `Semantic`.
+    ///   1. `LAIN_TOOL_PROFILE` env var (case-insensitive). Accepts a
+    ///      single value or a comma list of `semantic`, `session`,
+    ///      `ops`, `full`. Unknown values fall back to the default and
+    ///      log a warning so the operator learns the typo without the
+    ///      agent being surprised.
+    ///   2. Default `semantic`.
     pub fn from_env() -> Self {
-        match env::var("LAIN_TOOL_PROFILE") {
-            Ok(v) => match v.to_ascii_lowercase().as_str() {
-                "semantic" => Self::Semantic,
-                "full" => Self::Full,
-                _ => {
-                    tracing::warn!(
-                        "LAIN_TOOL_PROFILE={v:?} is not a known profile; defaulting to Semantic. \
-                         Valid values: semantic, full."
-                    );
-                    Self::Semantic
+        let raw = match env::var("LAIN_TOOL_PROFILE") {
+            Ok(v) => v,
+            Err(_) => return Self::default(),
+        };
+        let mut profile = Self::default();
+        let mut known = false;
+        for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            match part.to_ascii_lowercase().as_str() {
+                "semantic" => known = true,
+                "session" => {
+                    profile.session = true;
+                    known = true;
                 }
-            },
-            Err(_) => Self::Semantic,
+                "ops" => {
+                    profile.ops = true;
+                    known = true;
+                }
+                "full" => {
+                    profile.full = true;
+                    known = true;
+                }
+                other => {
+                    tracing::warn!(
+                        "LAIN_TOOL_PROFILE={other:?} is not a known profile value; ignoring it. \
+                         Valid values: semantic, session, ops, full (comma-listable)."
+                    );
+                }
+            }
         }
+        if !known && !profile.session && !profile.ops && !profile.full {
+            tracing::warn!(
+                "LAIN_TOOL_PROFILE={raw:?} is not a known profile; defaulting to semantic. \
+                 Valid values: semantic, session, ops, full (comma-listable)."
+            );
+        }
+        profile
     }
 
     /// Stable string name for diagnostics and `get_capabilities`.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Semantic => "semantic",
-            Self::Full => "full",
+        if self.full {
+            "full"
+        } else {
+            match (self.session, self.ops) {
+                (true, true) => "session+ops",
+                (true, false) => "session",
+                (false, true) => "ops",
+                (false, false) => "semantic",
+            }
         }
     }
 }
 
+/// Whether `tool_name` is advertised under `profile`.
+///
+/// The semantic core and the mode Q&A families are visible under
+/// every non-`full` profile; `session` and `ops` add their own sets.
+pub(crate) fn profile_allows_inner(profile: ToolProfile, tool_name: &str) -> bool {
+    if profile.full {
+        return true;
+    }
+    if SEMANTIC_PROFILE.contains(&tool_name)
+        || SemanticProfileFamlies::FEDERATION_QA.contains(&tool_name)
+        || SemanticProfileFamlies::WORKSPACE_QA.contains(&tool_name)
+    {
+        return true;
+    }
+    if profile.session && SESSION_PROFILE.contains(&tool_name) {
+        return true;
+    }
+    if profile.ops
+        && (OPS_PROFILE.contains(&tool_name)
+            || SemanticProfileFamlies::FEDERATION_ADMIN.contains(&tool_name)
+            || SemanticProfileFamlies::WORKSPACE_ADMIN.contains(&tool_name))
+    {
+        return true;
+    }
+    false
+}
+
 /// Count of `tools/list` entries that come from the *non-inventory*
-/// sources: the always-on server-status family plus the
-/// federation family when the server runs in federation mode
-/// plus the workspace family when the server runs in workspace
-/// mode. The caller adds the inventory-side count themselves with
-/// the same profile filter so we don't double-count.
+/// sources under `profile`: the always-visible Q&A families plus the
+/// admin families under `ops`. The caller adds the inventory-side
+/// count themselves with the same profile filter so we don't
+/// double-count.
 ///
 /// All three flags are present on the signature even though
 /// `ToolContext` currently doesn't carry workspace state — the
@@ -157,24 +220,37 @@ impl ToolProfile {
 /// and `doctor.json` today, and a future PR that plumbs
 /// workspaces into `ToolContext` just swaps the call sites
 /// without changing the helper.
-///
-/// PR-fix-2 added `workspace_active` here so the helper is
-/// complete; PR that actually plumbs workspace state is a
-/// separate change.
 pub fn special_advertised_count(
     profile: ToolProfile,
     federation_active: bool,
     workspace_active: bool,
 ) -> usize {
-    use crate::server::tools::profile::SemanticProfileFamlies as Fam;
-    let mut count = Fam::SERVER_STATUS.len();
+    use SemanticProfileFamlies as Fam;
+    if profile.full {
+        // The caller treats `full` as "everything registered"; the
+        // non-inventory sources are all counted there.
+        return Fam::FEDERATION_QA.len()
+            + Fam::FEDERATION_ADMIN.len()
+            + Fam::WORKSPACE_QA.len()
+            + Fam::WORKSPACE_ADMIN.len()
+            + OPS_PROFILE.len();
+    }
+    let mut count = 0;
     if federation_active {
-        count += Fam::FEDERATION.len();
+        count += Fam::FEDERATION_QA.len();
     }
     if workspace_active {
-        count += Fam::WORKSPACE.len();
+        count += Fam::WORKSPACE_QA.len();
     }
-    let _ = profile; // Currently profile-independent; surface area lives at the dispatch site.
+    if profile.ops {
+        count += OPS_PROFILE.len();
+        if federation_active {
+            count += Fam::FEDERATION_ADMIN.len();
+        }
+        if workspace_active {
+            count += Fam::WORKSPACE_ADMIN.len();
+        }
+    }
     count
 }
 
@@ -185,9 +261,7 @@ mod tests {
 
     // Per-test serial env-var guard. `LAIN_TOOL_PROFILE` is process-wide
     // and `from_env` reads it on every call, so tests that mutate it
-    // need to either hold this guard or accept the flake risk. The
-    // first test to need it isn't here yet — surface this if future
-    // tests add env mutation.
+    // need to either hold this guard or accept the flake risk.
     // SAFETY: the env is process-global; tests that touch it must
     // serialise through `ENV_LOCK` below. Without this guard, two
     // tests running in parallel would race and pin each other's
@@ -198,131 +272,192 @@ mod tests {
     #[test]
     fn semantic_profile_is_small_and_curated() {
         let set = SEMANTIC_PROFILE;
-        // 22 hand-curated entries. Pinning a count catches "I added one
+        // 16 hand-curated entries. Pinning a count catches "I added one
         // more without realising" — if you add a tool, the change should
-        // be conscious, not silent.
-        assert_eq!(set.len(), 22, "SEMANTIC_PROFILE drifted; review the list");
+        // be conscious, not silent. The default must stay small enough
+        // that a cold agent reads every description.
+        assert_eq!(set.len(), 16, "SEMANTIC_PROFILE drifted; review the list");
 
-        // Sanity: every name in the list is non-empty and the list
-        // contains no duplicates (Set semantics).
+        // Sanity: every name is non-empty and the list has no
+        // duplicates (Set semantics).
         let mut sorted = set.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(
-            sorted.len(),
-            set.len(),
-            "SEMANTIC_PROFILE contains duplicates"
-        );
+        assert_eq!(sorted.len(), set.len(), "SEMANTIC_PROFILE contains duplicates");
         for name in set {
             assert!(!name.is_empty());
+            assert!(!name.contains(' '), "tool names cannot contain spaces: {name:?}");
+        }
+    }
+
+    #[test]
+    fn session_and_ops_do_not_overlap_the_core() {
+        for t in SESSION_PROFILE.iter().chain(OPS_PROFILE.iter()) {
             assert!(
-                !name.contains(' '),
-                "tool names cannot contain spaces: {name:?}"
+                !SEMANTIC_PROFILE.contains(t),
+                "{t} is advertised twice; the core and the opt-in sets must be disjoint"
             );
         }
     }
 
     #[test]
     fn profile_from_env_defaults_to_semantic() {
-        // We can't reliably unset-and-check without poisoning other
-        // tests, but `from_env` is small enough to inspect:
-        // it reads the env var; when unset (default), it returns
-        // Semantic. The naming convention relies on the absence of
-        // LAIN_TOOL_PROFILE in the test env, which is true for our
-        // own test runner but unsafe under heavier env-loading
-        // CI runners; the pinned-name check below is the safer form.
-        let def = ToolProfile::Semantic;
+        let def = ToolProfile::default();
         assert_eq!(def.as_str(), "semantic");
+        assert!(!def.session && !def.ops && !def.full);
     }
 
     #[test]
     fn profile_names_are_stable() {
         // These exact strings end up in `get_capabilities.tool_profile`
         // output. A rename here is a wire change.
-        assert_eq!(ToolProfile::Semantic.as_str(), "semantic");
-        assert_eq!(ToolProfile::Full.as_str(), "full");
+        assert_eq!(ToolProfile::default().as_str(), "semantic");
+        assert_eq!(
+            (ToolProfile {
+                session: true,
+                ..Default::default()
+            })
+            .as_str(),
+            "session"
+        );
+        assert_eq!(
+            (ToolProfile {
+                ops: true,
+                ..Default::default()
+            })
+            .as_str(),
+            "ops"
+        );
+        assert_eq!(
+            (ToolProfile {
+                session: true,
+                ops: true,
+                ..Default::default()
+            })
+            .as_str(),
+            "session+ops"
+        );
+        assert_eq!(
+            (ToolProfile {
+                full: true,
+                ..Default::default()
+            })
+            .as_str(),
+            "full"
+        );
     }
 
     #[test]
-    fn special_advertised_count_with_no_federation() {
-        let n = special_advertised_count(ToolProfile::Semantic, false, false);
-        // server-status is always-on; federation off; workspace off.
-        // The answer is exactly the server-status family size.
-        assert_eq!(n, SemanticProfileFamlies::SERVER_STATUS.len());
+    fn default_hides_session_and_ops_tools() {
+        let def = ToolProfile::default();
+        assert!(profile_allows_inner(def, "find_symbol"));
+        assert!(profile_allows_inner(def, "get_blast_radius"));
+        assert!(profile_allows_inner(def, "get_agent_strategy"));
+        // Mode Q&A families stay visible under the default.
+        assert!(profile_allows_inner(def, "search_org"));
+        assert!(profile_allows_inner(def, "get_workspace_graph"));
+        // Session and ops plumbing do not.
+        assert!(!profile_allows_inner(def, "claim_files"));
+        assert!(!profile_allows_inner(def, "heartbeat"));
+        assert!(!profile_allows_inner(def, "get_server_status"));
+        assert!(!profile_allows_inner(def, "list_repos"));
+    }
+
+    #[test]
+    fn opt_in_profiles_compose() {
+        let session = ToolProfile {
+            session: true,
+            ..Default::default()
+        };
+        assert!(profile_allows_inner(session, "claim_files"));
+        assert!(!profile_allows_inner(session, "request_reload"));
+
+        let both = ToolProfile {
+            session: true,
+            ops: true,
+            ..Default::default()
+        };
+        assert!(profile_allows_inner(both, "claim_files"));
+        assert!(profile_allows_inner(both, "request_reload"));
+        assert!(profile_allows_inner(both, "list_repos"));
+
+        let full = ToolProfile {
+            full: true,
+            ..Default::default()
+        };
+        assert!(profile_allows_inner(full, "query_graph"));
+    }
+
+    #[test]
+    fn default_surface_stays_small_in_every_mode() {
+        // The promise: a cold agent in the busiest mode sees at most
+        // 18 advertised tools (16 core + the federation Q&A pair).
+        let federation_mode = SEMANTIC_PROFILE.len() + SemanticProfileFamlies::FEDERATION_QA.len();
+        let workspace_mode = SEMANTIC_PROFILE.len() + SemanticProfileFamlies::WORKSPACE_QA.len();
+        assert!(
+            federation_mode <= 18,
+            "default federation surface grew to {federation_mode}; the point of the profile is that it stays readable"
+        );
+        assert!(
+            workspace_mode <= 18,
+            "default workspace surface grew to {workspace_mode}"
+        );
+    }
+
+    #[test]
+    fn user_manual_surface_table_matches_the_profiles() {
+        // The docs table is only useful if it is true. Derive every
+        // number from the same lists the dispatcher filters with and
+        // from the generated schema dump, then require the manual to
+        // state exactly those numbers.
+        let manual = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/USER_MANUAL.md"),
+        )
+        .expect("docs/USER_MANUAL.md must be readable");
+        let dump = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tool-schema.json"),
+        )
+        .expect("docs/tool-schema.json must exist (run `make schema`)");
+        let dump: serde_json::Value = serde_json::from_str(&dump).expect("dump is JSON");
+        let full_count = dump.as_array().expect("dump root is an array").len();
+
+        for needle in [
+            format!("| `semantic` (default) | {} |", SEMANTIC_PROFILE.len()),
+            format!("| `session` | adds {} |", SESSION_PROFILE.len()),
+            format!("| `ops` | adds {} |", OPS_PROFILE.len()),
+            format!("| `full` | {} |", full_count),
+        ] {
+            assert!(
+                manual.contains(&needle),
+                "docs/USER_MANUAL.md tool-surface table is stale; expected a row containing {needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn special_advertised_count_without_modes_matches_qa_families_only() {
+        let def = ToolProfile::default();
+        // No federation, no workspace: the Q&A families are empty and
+        // the default advertises no non-inventory tools at all.
+        assert_eq!(special_advertised_count(def, false, false), 0);
     }
 
     #[test]
     fn special_advertised_count_with_federation() {
-        let n = special_advertised_count(ToolProfile::Semantic, true, false);
-        let expected =
-            SemanticProfileFamlies::SERVER_STATUS.len() + SemanticProfileFamlies::FEDERATION.len();
-        assert_eq!(n, expected);
-    }
+        let def = ToolProfile::default();
+        let n = special_advertised_count(def, true, false);
+        assert_eq!(n, SemanticProfileFamlies::FEDERATION_QA.len());
 
-    #[test]
-    fn special_advertised_count_with_workspace() {
-        let n = special_advertised_count(ToolProfile::Semantic, false, true);
-        let expected =
-            SemanticProfileFamlies::SERVER_STATUS.len() + SemanticProfileFamlies::WORKSPACE.len();
-        assert_eq!(n, expected);
-    }
-
-    #[test]
-    fn special_advertised_count_with_federation_and_workspace() {
-        let n = special_advertised_count(ToolProfile::Semantic, true, true);
-        let expected = SemanticProfileFamlies::SERVER_STATUS.len()
-            + SemanticProfileFamlies::FEDERATION.len()
-            + SemanticProfileFamlies::WORKSPACE.len();
-        assert_eq!(n, expected);
-    }
-
-    #[test]
-    fn profile_filter_via_helpers_is_pure() {
-        // `from_env` should be deterministic: same input → same output.
-        // This is mostly to catch any future change that adds env
-        // lookup caching or thread-local state.
-        let a = ToolProfile::Semantic.as_str();
-        let b = ToolProfile::Semantic.as_str();
-        assert_eq!(a, b);
-        assert_ne!(a, ToolProfile::Full.as_str());
-    }
-
-    /// End-to-end-style test: the actual list of names an agent on
-    /// `Semantic` profile can see must be a strict subset of the
-    /// union of `SEMANTIC_PROFILE + SERVER_STATUS + FEDERATION +
-    /// WORKSPACE`. We pick canonical names from each family and
-    /// assert they pass the filter. A negative case (a tool that
-    /// has no business being in the Semantic surface, e.g.
-    /// `run_build`) must fail the filter.
-    #[test]
-    fn profile_allows_matches_documented_membership() {
-        use crate::server::tools::profile::SemanticProfileFamlies;
-        for canonical in SEMANTIC_PROFILE {
-            assert!(
-                SEMANTIC_PROFILE.contains(canonical),
-                "SEMANTIC_PROFILE should always contain itself: {canonical}"
-            );
-        }
-        for canonical in SemanticProfileFamlies::SERVER_STATUS {
-            assert!(
-                SemanticProfileFamlies::SERVER_STATUS.contains(canonical),
-                "SERVER_STATUS family check"
-            );
-        }
-        assert!(SEMANTIC_PROFILE.contains(&"find_symbol"));
-        assert!(SEMANTIC_PROFILE.contains(&"get_context"));
-        // `run_build` is in the inventory but NOT curated.
-        assert!(
-            !SEMANTIC_PROFILE.contains(&"run_build"),
-            "run_build is intentionally outside the Semantic profile"
+        let ops = ToolProfile {
+            ops: true,
+            ..Default::default()
+        };
+        let n_ops = special_advertised_count(ops, true, false);
+        assert_eq!(
+            n_ops,
+            SemanticProfileFamlies::FEDERATION_QA.len()
+                + SemanticProfileFamlies::FEDERATION_ADMIN.len()
+                + OPS_PROFILE.len()
         );
-        // Architecture / code-understanding tools recommended by get_agent_strategy
-        assert!(SEMANTIC_PROFILE.contains(&"get_blast_radius"));
-        assert!(SEMANTIC_PROFILE.contains(&"get_call_chain"));
-        assert!(SEMANTIC_PROFILE.contains(&"find_anchors"));
-        assert!(SEMANTIC_PROFILE.contains(&"list_entry_points"));
-        assert!(SEMANTIC_PROFILE.contains(&"get_coupling_radar"));
-        // Multiplayer occupancy
-        assert!(SEMANTIC_PROFILE.contains(&"list_occupancy"));
     }
 }

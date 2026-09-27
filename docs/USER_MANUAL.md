@@ -37,6 +37,22 @@ Run `lain <command> --help` for flags. The generated MCP tool schema lives at
 [`tool-schema.json`](tool-schema.json); the human-readable tool guide is
 [`quickstart-tools.md`](quickstart-tools.md).
 
+## Tool surface
+
+Lain advertises a small tool surface and keeps the rest registered but
+hidden — advertising is not dispatch, so hook scripts can call hidden
+tools (claims, heartbeat) whether or not the model sees them. Opt in
+with `LAIN_TOOL_PROFILE`; values compose as a comma list. The counts
+below are pinned by tests (`src/server/tools/profile.rs`) against the
+same lists the server filters with.
+
+| Profile (`LAIN_TOOL_PROFILE`) | Advertised | Contents |
+|---|---|---|
+| `semantic` (default) | 16 | Comprehension + impact; federation mode adds 2 Q&A tools, workspace mode adds 1 |
+| `session` | adds 6 | Multiplayer plumbing: `register_agent`, `heartbeat`, `claim_files`, `release_files`, `list_occupancy`, `get_world_state` |
+| `ops` | adds 4 | Server controls (`get_server_status`, `request_reload`, …); also exposes federation/workspace admin reads |
+| `full` | 82 | Every registered tool |
+
 ## Server lifecycle
 
 ```mermaid

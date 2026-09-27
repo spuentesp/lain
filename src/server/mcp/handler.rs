@@ -78,7 +78,32 @@ use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 ///
 /// Returns a descriptive error on malformed input. Used by both stdio
 /// and HTTP dispatch arms for `get_cross_repo_blast_radius*`.
+/// Read the `depth` argument as either the range string `"1..3"` or a
+/// bare number `3` (sugar for `1..3`). JSON numbers are accepted too,
+/// so schema-respecting clients are not forced into a stringly-typed
+/// corner.
+fn depth_arg(map: &serde_json::Map<String, serde_json::Value>) -> Result<std::ops::Range<u32>, String> {
+    match map.get("depth") {
+        Some(serde_json::Value::String(s)) => parse_depth_range(s),
+        Some(serde_json::Value::Number(n)) => {
+            let end = n
+                .as_u64()
+                .ok_or_else(|| format!("Invalid depth: {n} is not a positive integer"))?;
+            parse_depth_range(&format!("1..{end}"))
+        }
+        _ => Err("Missing required argument: depth".to_string()),
+    }
+}
+
 fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
+    let s = s.trim();
+    // Bare-number shorthand: `3` means `1..3`.
+    if !s.contains("..") {
+        let end: u32 = s.parse().map_err(|_| {
+            format!("Invalid depth: expected \"<start>..<end>\" or a number, got {s:?}")
+        })?;
+        return parse_depth_range(&format!("1..{end}"));
+    }
     let (start_s, end_s) = s
         .split_once("..")
         .ok_or_else(|| format!("Invalid depth: expected \"<start>..<end>\", got {s:?}"))?;
@@ -818,16 +843,7 @@ pub(crate) fn profile_allows(
     profile: crate::server::tools::profile::ToolProfile,
     tool_name: &str,
 ) -> bool {
-    use crate::server::tools::profile::{SemanticProfileFamlies, SEMANTIC_PROFILE};
-    match profile {
-        crate::server::tools::profile::ToolProfile::Full => true,
-        crate::server::tools::profile::ToolProfile::Semantic => {
-            SEMANTIC_PROFILE.contains(&tool_name)
-                || SemanticProfileFamlies::SERVER_STATUS.contains(&tool_name)
-                || SemanticProfileFamlies::FEDERATION.contains(&tool_name)
-                || SemanticProfileFamlies::WORKSPACE.contains(&tool_name)
-        }
-    }
+    crate::server::tools::profile::profile_allows_inner(profile, tool_name)
 }
 
 #[async_trait]
@@ -4547,10 +4563,7 @@ fn get_cross_repo_blast_radius_handler(
 ) -> Result<serde_json::Value, String> {
     let fed = fed_required(ctx)?;
     let map = args_map(&args)?;
-    let depth_str =
-        crate::server::tools::utils::required_str_arg(map, "depth").map_err(|e| e.to_string())?;
-    let depth =
-        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e.to_string())?;
+    let depth = depth_arg(map)?;
     let result = cross_repo_blast_radius_common(fed, map, depth)?;
     serde_json::to_value(result).map_err(|e| e.to_string())
 }
@@ -4565,10 +4578,7 @@ fn get_cross_repo_blast_radius_for_repo_handler(
 ) -> Result<serde_json::Value, String> {
     let fed = fed_required(ctx)?;
     let map = args_map(&args)?;
-    let depth_str =
-        crate::server::tools::utils::required_str_arg(map, "depth").map_err(|e| e.to_string())?;
-    let depth =
-        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e.to_string())?;
+    let depth = depth_arg(map)?;
     let symbol =
         crate::server::tools::utils::required_str_arg(map, "symbol").map_err(|e| e.to_string())?;
     let repo_id_str = map

@@ -1134,6 +1134,13 @@ impl ToolExecutor {
             "- **Start broad, zoom deep**: Use layered maps and anchors to find the right part, then blast radius to understand ripple effects.\n".to_string(),
             "- **Pattern edges over names**: Named queries like `get_call_chain` and `semantic_search` find connections that keyword search misses.\n".to_string(),
             "- **Offline-first**: All analysis runs on local data. No LLM API needed for structural queries.\n".to_string(),
+            "\n## Tool Profiles\n\n".to_string(),
+            "Lain advertises a small surface by default and keeps the rest registered but hidden — advertising is not dispatch, so hook scripts can call hidden tools (claims, heartbeat) whether or not you see them. `get_capabilities.tool_profile` reports the active profile.\n".to_string(),
+            "- **semantic** (default): comprehension + impact — the tools listed below.\n".to_string(),
+            "- **session** (`LAIN_TOOL_PROFILE=session`): multiplayer plumbing — `register_agent`, `heartbeat`, `claim_files`, `release_files`, `list_occupancy`, `get_world_state`. Hook-driven agents do not need these; opt in to claim files manually.\n".to_string(),
+            "- **ops** (`LAIN_TOOL_PROFILE=ops`): server controls (`get_server_status`, `request_reload`, …) and federation/workspace admin reads (`list_repos`, `get_repo_info`, …).\n".to_string(),
+            "- **full** (`LAIN_TOOL_PROFILE=full`): the entire registered surface.\n".to_string(),
+            "Values compose with a comma list, e.g. `LAIN_TOOL_PROFILE=session,ops`.\n".to_string(),
             "\n## Recommended Tool Sequence\n\n".to_string(),
         ];
 

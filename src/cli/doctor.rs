@@ -471,18 +471,10 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     let registry = crate::tools::registry::ToolRegistry::definitions();
     let inventory_in_profile = registry
         .iter()
-        .filter(|d| crate::server::tools::profile::SEMANTIC_PROFILE.contains(&d.name))
+        .filter(|d| crate::server::mcp::handler::profile_allows(profile, d.name))
         .count();
-    let initial_advertised = match profile {
-        crate::server::tools::profile::ToolProfile::Full => {
-            registry.len()
-                + crate::server::tools::profile::special_advertised_count(profile, false, false)
-        }
-        crate::server::tools::profile::ToolProfile::Semantic => {
-            inventory_in_profile
-                + crate::server::tools::profile::special_advertised_count(profile, false, false)
-        }
-    };
+    let initial_advertised = inventory_in_profile
+        + crate::server::tools::profile::special_advertised_count(profile, false, false);
 
     let mut report = DoctorReport {
         schema_version: SCHEMA_VERSION,
@@ -532,20 +524,8 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     // matches the live wire shape.
     if let Ok(ref r) = root {
         let (fed_active, ws_active) = detect_server_modes(r);
-        let recomputed = match profile {
-            crate::server::tools::profile::ToolProfile::Full => {
-                registry.len()
-                    + crate::server::tools::profile::special_advertised_count(
-                        profile, fed_active, ws_active,
-                    )
-            }
-            crate::server::tools::profile::ToolProfile::Semantic => {
-                inventory_in_profile
-                    + crate::server::tools::profile::special_advertised_count(
-                        profile, fed_active, ws_active,
-                    )
-            }
-        };
+        let recomputed = inventory_in_profile
+            + crate::server::tools::profile::special_advertised_count(profile, fed_active, ws_active);
         report.tool_profile.advertised_count = recomputed;
     }
     match root {

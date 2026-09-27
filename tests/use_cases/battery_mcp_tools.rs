@@ -941,7 +941,8 @@ async fn get_capabilities_reports_active_tool_profile_via_dispatcher() {
 /// This test pins the wire-level behaviour by setting
 /// `ctx.workspaces` on the executor and asserting that
 /// `advertised_count` includes the workspace family
-/// (`SemanticProfileFamlies::WORKSPACE.len() = 4`).
+/// (`SemanticProfileFamlies::WORKSPACE_QA` under the default
+/// profile — the admin half needs `LAIN_TOOL_PROFILE=ops`).
 #[tokio::test]
 async fn get_capabilities_advertised_count_includes_workspace_when_active() {
     use lain::server::federation::workspace::{WorkspaceSpec, WorkspacesFile};
@@ -990,9 +991,10 @@ async fn get_capabilities_advertised_count_includes_workspace_when_active() {
         .expect("advertised_count must be a u64") as usize;
 
     // The workspace-active advertised count should equal the
-    // baseline plus `SemanticProfileFamlies::WORKSPACE.len() = 4`.
+    // baseline plus the workspace Q&A family (the default profile
+    // hides the workspace admin half).
     let workspace_family_size =
-        lain::server::tools::profile::SemanticProfileFamlies::WORKSPACE.len();
+        lain::server::tools::profile::SemanticProfileFamlies::WORKSPACE_QA.len();
     assert_eq!(
         with_ws_count,
         baseline_count + workspace_family_size,

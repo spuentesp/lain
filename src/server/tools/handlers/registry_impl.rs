@@ -113,7 +113,8 @@ impl ToolHandler for ListEntryPointsHandler {
         "list_entry_points"
     }
     fn description(&self) -> &'static str {
-        "Identifies the architectural hearts of the system (main, App, etc.)"
+        "Use this when asking 'where does execution start?': main/App-style entry \
+         points and top-level routes."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{},"required":[]}"#
@@ -205,7 +206,7 @@ impl ToolHandler for UnderstandRepositoryHandler {
         "One-call bootstrap context: repository identity, top anchors, entry points, \
          capability states, and the intent->tool mapping the agent should reach for \
          first. AGENT_UX_ROADMAP.md Milestone 5. Useful when an agent just connected and \
-         hasn't yet explored the codebase."
+         hasn't yet explored the codebase. Symbol-level detail is `get_context`."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"budget_tokens":{"type":"integer","description":"Soft token budget for the payload; default 3000."}},"required":[]}"#
@@ -267,7 +268,9 @@ impl ToolHandler for GetCallChainHandler {
         "get_call_chain"
     }
     fn description(&self) -> &'static str {
-        "Finds the exact path of function calls between two points"
+        "Use this when you need the exact call path between two symbols (`from` to \
+         `to`). Traces within one repository — pass `repo_id` when a federation \
+         holds both ends. For what-breaks impact use `get_blast_radius`."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}"#
@@ -435,7 +438,10 @@ impl ToolHandler for GetBlastRadiusHandler {
         "get_blast_radius"
     }
     fn description(&self) -> &'static str {
-        "Calculates the transitive impact and ripple effect of changing a symbol"
+        "Use this when you want to know what breaks if you change a symbol: direct \
+         and transitive dependents. For an exact A-to-B call path use \
+         `get_call_chain`; for a pre-edit risk verdict use `assess_change`; for \
+         call-site dispatch honesty use `explain_dispatch`."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"},"include_weak_edges":{"type":"boolean","description":"Include heuristic callers (dynamic dispatch / bus / router) with confidence >= LAIN_HEURISTIC_MIN_CONFIDENCE. Default false."}},"required":["symbol"]}"#
@@ -473,7 +479,9 @@ impl ToolHandler for GetCouplingRadarHandler {
         "get_coupling_radar"
     }
     fn description(&self) -> &'static str {
-        "Identifies 'Hidden Coupling' between files based on historical Git co-change patterns"
+        "Use this when asking 'what changes together?': hidden coupling between files \
+         from historical git co-change. `find_related` adds graph and semantic \
+         neighbours to the same question."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
@@ -501,7 +509,8 @@ impl ToolHandler for FindAnchorsHandler {
         "find_anchors"
     }
     fn description(&self) -> &'static str {
-        "Lists the top 10 most foundational/stable components in the codebase"
+        "Use this when asking 'what should I read first?': the most foundational, \
+         stable components by corpus-wide anchor score."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#
@@ -579,7 +588,8 @@ impl ToolHandler for FindDeadCodeHandler {
         "find_dead_code"
     }
     fn description(&self) -> &'static str {
-        "Identifies reachable nodes with zero incoming callers or usages"
+        "Use this when asking 'what is unused?': nodes with zero incoming callers, \
+         test code excluded."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"like":{"type":"string","description":"Filter dead code semantically (e.g., \"auth handler\")"}},"required":[]}"#
@@ -1233,7 +1243,8 @@ impl ToolHandler for GetContextHandler {
          Markdown payload the agent can quote back. Cost: medium; \
          scales with `depth`. Low-level alternative: call each of \
          explain_symbol / get_call_sites / trace_dependency \
-         individually."
+         individually. Repo-level orientation is `understand_repository`; \
+         call-site dispatch honesty is `explain_dispatch`."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"integer","minimum":0,"maximum":3}},"required":["symbol"]}"#
