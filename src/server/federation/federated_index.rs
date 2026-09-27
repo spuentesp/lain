@@ -428,18 +428,27 @@ impl FederatedIndex {
     /// [`Self::project_nodes`]) — otherwise an edge target's
     /// `GlobalId` may not resolve.
     ///
-    /// Edge ownership: every federated edge this method writes has a
-    /// `source_id` whose global-id prefix is `id:` (the calling repo).
-    /// Retraction (the F10 reconciliation pass) keys on that prefix,
-    /// because the calling repo is the only writer that can know
-    /// when a previously-projected edge is no longer part of the
-    /// source-of-truth graph. Cross-repo `Calls` follow the same rule:
-    /// the caller is the local repo, the target is already global and
-    /// owned by the *other* repo, but the edge itself is owned by the
-    /// caller. Cross-repo `CrossRepoSameSymbol` peer edges likewise
-    /// — they are recomputed each projection from the current node
-    /// set, so a node disappearing (or losing a match) must retract
-    /// the edge the next time the owning repo's `project_edges` runs.
+    /// Edge ownership falls into three classes:
+    ///
+    /// 1. **Intra-repo edges** — both endpoints rewritten to the
+    ///    calling repo's global-id form, so the prefix `id:` appears
+    ///    in both `source_id` and `target_id`. Reconciled against the
+    ///    current per-repo DB: a stale edge (one no longer in the DB)
+    ///    is retracted via `remove_edges`, endpoints left intact.
+    /// 2. **Cross-repo outgoing `Calls`** — `source_id` rewritten to
+    ///    the calling repo's prefix; `target_id` already global,
+    ///    owned by a foreign repo. **Not** reconciled: the source of
+    ///    truth (the resolve-phase external-edge stash) is one-shot,
+    ///    so on a no-op reproject the new batch does not reproduce
+    ///    these edges and the diff would otherwise classify them as
+    ///    stale and delete them. They survive until either the
+    ///    foreign target node is removed (petgraph's `remove_node`
+    ///    takes incident edges with it) or the entire source repo is
+    ///    removed.
+    /// 3. **`CrossRepoSameSymbol` peer edges** — recomputed each
+    ///    projection from the current node set, so a node
+    ///    disappearing (or losing a match) must retract the edge the
+    ///    next time that repo's `project_edges` runs. Reconciled.
     pub async fn project_edges(&self, id: &RepoId) -> Result<(), LainError> {
         let repo = self
             .get_repo(id)
@@ -602,6 +611,14 @@ impl FederatedIndex {
         // reproduce. Without this pass, deleting a per-repo call left the
         // federated edge alive as long as its endpoints were still
         // indexed — `project_edges` only upserted.
+        //
+        // Cross-repo outgoing `Calls` edges are excluded from the
+        // diff: the resolve-phase stash that produced them is one-shot,
+        // so a no-op reproject would otherwise treat them as stale and
+        // delete them (Codex re-check 2026-09-08 H2). They survive until
+        // either the foreign target node is removed (petgraph's
+        // `remove_node` takes incident edges with it) or the entire
+        // source repo is removed.
         let prefix = format!("{}:", id.as_str());
         let new_keys: std::collections::HashSet<(crate::schema::EdgeType, String, String)> =
             batch.iter().map(|e| (e.edge_type.clone(), e.source_id.clone(), e.target_id.clone())).collect();
@@ -610,6 +627,10 @@ impl FederatedIndex {
             .all_edges()?
             .into_iter()
             .filter(|e| e.source_id.starts_with(&prefix))
+            .filter(|e| {
+                !(e.edge_type == crate::schema::EdgeType::Calls
+                    && !e.target_id.starts_with(&prefix))
+            })
             .filter(|e| !new_keys.contains(&(e.edge_type.clone(), e.source_id.clone(), e.target_id.clone())))
             .collect();
         if !stale.is_empty() {
