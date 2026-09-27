@@ -269,10 +269,10 @@ TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['r
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "80" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "79" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "79" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "78" "$TOOL_COUNT"
 fi
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
@@ -749,9 +749,10 @@ if [ "$(http_code "http://127.0.0.1:$FED_PORT/health")" = "200" ]; then
   check_contains "get_code_snippet reads beta's own checkout" "beta_only_helper" "$SNIP_B"
   XR=$(fcall get_cross_repo_blast_radius '{"symbol":"alpha_inner","depth":"1..3"}')
   check_contains "cross-repo blast radius groups by repo" "alpha" "$XR"
-  # depth is a range string; a number must say so, not "missing".
-  XE=$(fcall get_cross_repo_blast_radius '{"symbol":"alpha_inner","depth":2}')
-  check_contains "a wrong-typed arg names the type, not 'missing'" "must be a string" "$XE"
+  # depth accepts a range string or a number; a genuinely wrong type
+  # must name the type, not report "missing".
+  XE=$(fcall get_cross_repo_blast_radius '{"symbol":"alpha_inner","depth":true}')
+  check_contains "a wrong-typed arg names the type, not 'missing'" "boolean" "$XE"
 else
   skip "federation" "second server never became healthy"
 fi

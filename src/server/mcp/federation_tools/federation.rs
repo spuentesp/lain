@@ -152,7 +152,12 @@ pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<Symbol
                 )
                 .as_str()
                 .to_string();
-                if seen.insert(key(repo_id.as_str(), &n.name, &n.path, n.line_start.unwrap_or(0))) {
+                if seen.insert(key(
+                    repo_id.as_str(),
+                    &n.name,
+                    &n.path,
+                    n.line_start.unwrap_or(0),
+                )) {
                     hits.push(SymbolMatch {
                         global_id,
                         repo_id: repo_id.to_string(),

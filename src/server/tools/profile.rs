@@ -283,10 +283,17 @@ mod tests {
         let mut sorted = set.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), set.len(), "SEMANTIC_PROFILE contains duplicates");
+        assert_eq!(
+            sorted.len(),
+            set.len(),
+            "SEMANTIC_PROFILE contains duplicates"
+        );
         for name in set {
             assert!(!name.is_empty());
-            assert!(!name.contains(' '), "tool names cannot contain spaces: {name:?}");
+            assert!(
+                !name.contains(' '),
+                "tool names cannot contain spaces: {name:?}"
+            );
         }
     }
 

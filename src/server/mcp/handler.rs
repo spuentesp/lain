@@ -82,7 +82,9 @@ use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 /// bare number `3` (sugar for `1..3`). JSON numbers are accepted too,
 /// so schema-respecting clients are not forced into a stringly-typed
 /// corner.
-fn depth_arg(map: &serde_json::Map<String, serde_json::Value>) -> Result<std::ops::Range<u32>, String> {
+fn depth_arg(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<std::ops::Range<u32>, String> {
     match map.get("depth") {
         Some(serde_json::Value::String(s)) => parse_depth_range(s),
         Some(serde_json::Value::Number(n)) => {
@@ -91,7 +93,18 @@ fn depth_arg(map: &serde_json::Map<String, serde_json::Value>) -> Result<std::op
                 .ok_or_else(|| format!("Invalid depth: {n} is not a positive integer"))?;
             parse_depth_range(&format!("1..{end}"))
         }
-        _ => Err("Missing required argument: depth".to_string()),
+        Some(other) => Err(format!(
+            "Invalid depth: expected \"<start>..<end>\" or a number, got {}",
+            match other {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Object(_) => "object",
+            }
+        )),
+        None => Err("Missing required argument: depth".to_string()),
     }
 }
 

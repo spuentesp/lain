@@ -386,25 +386,44 @@ async fn cross_repo_calls_edges_materialize_via_real_lsp_pipeline() {
     // THE PROOF. The cross-repo `Calls` edge must survive the round
     // trip: caller rewritten to global form by `project_repo`, target
     // passed through unchanged because it was already global.
-    let expected_target = GlobalId::new(
+    // Derive both endpoint ids from the nodes the scanner actually
+    // produced. `line_start` is populated by the LSP path and may be
+    // None on the tree-sitter fallback, so hard-coding a line segment
+    // made this assertion pipeline-dependent; the contract is "the
+    // edge carries the real global ids", not a fixed line number.
+    let a_verify = a_nodes
+        .iter()
+        .find(|n| n.name == "verify_token")
+        .expect("repo a defines verify_token");
+    let expected_target_str = GlobalId::new(
         &RepoId::new("a").unwrap(),
-        NodeType::Function,
-        "src/lib.rs",
-        "verify_token",
-        None,
-    );
-    let expected_target_str = expected_target.as_str().to_string();
+        a_verify.node_type.clone(),
+        &a_verify.path,
+        &a_verify.name,
+        a_verify.line_start,
+    )
+    .as_str()
+    .to_string();
+    let b_caller = b_nodes
+        .iter()
+        .find(|n| n.name == "charge_invoice")
+        .expect("repo b defines charge_invoice");
+    let expected_caller_str = GlobalId::new(
+        &RepoId::new("b").unwrap(),
+        b_caller.node_type.clone(),
+        &b_caller.path,
+        &b_caller.name,
+        b_caller.line_start,
+    )
+    .as_str()
+    .to_string();
 
     let backend_edges = fed.backend().all_edges().expect("all_edges");
     let cross_edge = backend_edges.iter().any(|e| {
-        // Caller side: rewritten from b's local
-        // `Function:src/lib.rs:charge_invoice` to global
-        // `b:Function:src/lib.rs:charge_invoice`.
-        e.source_id.starts_with("b:")
-            && (e.source_id.ends_with(":charge_invoice")
-                || e.source_id.ends_with(":charge_invoice:0"))
-            // Target side: preserved verbatim as the global id the
-            // resolver returned. (The whole point of the fix.)
+        // Caller rewritten to global form; target preserved verbatim
+        // as the global id the resolver returned. (The whole point of
+        // the fix.)
+        e.source_id == expected_caller_str
             && e.target_id == expected_target_str
             && e.edge_type == EdgeType::Calls
     });
