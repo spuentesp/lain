@@ -129,6 +129,12 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
     let b_nodes = repo_b.nodes();
     eprintln!("[workspace_peers] repo_a nodes: {}", a_nodes.len());
     eprintln!("[workspace_peers] repo_b nodes: {}", b_nodes.len());
+    for n in a_nodes.iter().chain(b_nodes.iter()) {
+        eprintln!(
+            "[workspace_peers] sigdump id={} name={} line={:?} sig={:?}",
+            n.id, n.name, n.line_start, n.signature
+        );
+    }
     let backend_edges = fed.backend().all_edges().expect("all_edges");
     eprintln!(
         "[workspace_peers] federated backend edges: {}",
