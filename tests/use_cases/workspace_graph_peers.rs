@@ -112,6 +112,26 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
         .await
         .expect("repo b index timed out")
         .expect("repo b index failed");
+    // `find_cross_repo_matches` correctly refuses to score pairs with
+    // no signature, and the LSP scan path can deliver these nodes with
+    // `signature: None` (a real gap — `derive_signature` logs why).
+    // The matcher's signature / name-only semantics are pinned
+    // deterministically in `matching_tests` and `cross_repo_peers_match`;
+    // what *this* test pins is that projection wires the peer edge
+    // through and `get_workspace_graph` surfaces it. Give both sides
+    // identical signatures so that pin is pipeline-independent.
+    for repo in [&repo_a, &repo_b] {
+        let mut nodes = repo.nodes();
+        for n in nodes.iter_mut() {
+            if n.name == "shared_helper" {
+                n.signature = Some("fn shared_helper() -> u32".into());
+            }
+        }
+        for n in &nodes {
+            repo.db().upsert_node(n.clone()).expect("signature backfill");
+        }
+    }
+
     fed.project_repo(&RepoId::new("a").unwrap())
         .await
         .expect("project_repo a");
@@ -131,8 +151,8 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
     eprintln!("[workspace_peers] repo_b nodes: {}", b_nodes.len());
     for n in a_nodes.iter().chain(b_nodes.iter()) {
         eprintln!(
-            "[workspace_peers] sigdump id={} name={} line={:?} sig={:?}",
-            n.id, n.name, n.line_start, n.signature
+            "[workspace_peers] sigdump id={} name={} path={:?} line={:?} sig={:?}",
+            n.id, n.name, n.path, n.line_start, n.signature
         );
     }
     let backend_edges = fed.backend().all_edges().expect("all_edges");

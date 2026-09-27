@@ -573,10 +573,33 @@ pub fn derive_signature(symbol: &HierarchicalSymbol, workspace: &Path) -> Option
     } else {
         workspace.join(&node.path)
     };
-    let content = std::fs::read_to_string(&path).ok()?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "derive_signature: cannot read {} for {} ({e}); workspace={:?}; node will have no signature",
+                path.display(),
+                node.name,
+                workspace
+            );
+            return None;
+        }
+    };
     let terminator = terminator_for_path(&node.path);
     let mut lines = content.lines().skip(line_start as usize);
-    let head = lines.next()?;
+    let head = match lines.next() {
+        Some(h) => h,
+        None => {
+            tracing::warn!(
+                "derive_signature: no line at {}:{} in {} ({} lines); node will have no signature",
+                node.path,
+                line_start,
+                path.display(),
+                content.lines().count()
+            );
+            return None;
+        }
+    };
     let head_trimmed = head.trim();
     if let Some(end) = head_trimmed.find(terminator) {
         return non_empty(head_trimmed[..end].trim());
