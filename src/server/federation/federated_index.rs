@@ -636,7 +636,15 @@ impl FederatedIndex {
                 }
             }
             for edge in external {
-                if !placeholder_ids.contains(&edge.target_id) {
+                // Materialize every external edge whose target exists in
+                // the backend — either already projected (the normal
+                // Phase 1/2 case) or the placeholder written above. The
+                // old `placeholder_ids` check predates the `has_node`
+                // gate, when every parsed target got a placeholder and
+                // the two conditions were equivalent; with the gate,
+                // an already-present target gets no placeholder but its
+                // edge must still be written.
+                if !self.backend.has_node(&edge.target_id)? {
                     continue;
                 }
                 let Some(src) = local_to_global.get(&edge.source_id) else {
