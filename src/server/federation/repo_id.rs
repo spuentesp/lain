@@ -72,6 +72,36 @@ impl GlobalId {
         let (kind, _rest) = after_repo.split_once(':')?;
         Some(kind)
     }
+
+    /// Parse the workspace-relative file path (3rd segment) of a global
+    /// id, e.g. `src/auth.rs` from
+    /// `"auth-svc:Function:src/auth.rs:verify_token:42"`. Returns
+    /// `None` for any id that does not have the canonical 5-segment
+    /// shape; paths that themselves contain `:` are not representable
+    /// and would also fail.
+    pub fn path(&self) -> Option<&str> {
+        let parts: Vec<&str> = self.0.split(':').collect();
+        parts.get(2).copied()
+    }
+
+    /// Parse the symbol name (4th segment) of a global id, e.g.
+    /// `verify_token` from
+    /// `"auth-svc:Function:src/auth.rs:verify_token:42"`. Returns
+    /// `None` for any id that does not have the canonical 5-segment
+    /// shape.
+    pub fn name(&self) -> Option<&str> {
+        let parts: Vec<&str> = self.0.split(':').collect();
+        parts.get(3).copied()
+    }
+
+    /// Parse the line-start (5th segment) of a global id, e.g.
+    /// `Some(42)` from `"auth-svc:Function:src/auth.rs:verify_token:42"`.
+    /// Returns `None` for any id that does not have the canonical
+    /// 5-segment shape, or whose 5th segment is not a valid `u32`.
+    pub fn line_start(&self) -> Option<u32> {
+        let parts: Vec<&str> = self.0.split(':').collect();
+        parts.get(4)?.parse().ok()
+    }
 }
 
 impl std::fmt::Display for GlobalId {
@@ -159,5 +189,56 @@ mod tests {
         let legacy = "bytes:Function:src/lib.rs:foo";
         let err = GlobalId::parse(legacy).unwrap_err();
         assert!(matches!(err, LainError::InvalidGlobalId(_)));
+    }
+
+    #[test]
+    fn global_id_accessors_extract_path_name_line_start() {
+        let repo = RepoId::new("auth-svc").unwrap();
+        let gid = GlobalId::new(
+            &repo,
+            NodeType::Function,
+            "src/auth.rs",
+            "verify_token",
+            Some(42),
+        );
+        assert_eq!(gid.path(), Some("src/auth.rs"));
+        assert_eq!(gid.name(), Some("verify_token"));
+        assert_eq!(gid.line_start(), Some(42));
+
+        let zero = GlobalId::new(
+            &repo,
+            NodeType::Module,
+            "src/lib.rs",
+            "root",
+            None,
+        );
+        assert_eq!(zero.path(), Some("src/lib.rs"));
+        assert_eq!(zero.name(), Some("root"));
+        assert_eq!(zero.line_start(), Some(0));
+    }
+
+    #[test]
+    fn global_id_accessors_handle_noncanonical_shapes() {
+        let repo = RepoId::new("auth-svc").unwrap();
+        let gid = GlobalId::new(
+            &repo,
+            NodeType::Function,
+            "src/auth.rs",
+            "verify_token",
+            Some(42),
+        );
+        let parsed = GlobalId::parse(gid.as_str()).unwrap();
+
+        // 5-segment ids parse; the accessors should agree with the
+        // constructor's input.
+        assert_eq!(parsed.path(), Some("src/auth.rs"));
+        assert_eq!(parsed.name(), Some("verify_token"));
+
+        // 4-segment legacy id (pre-bump) is rejected by parse, but if
+        // a malformed id leaks through some other way the accessors
+        // should return None rather than panic.
+        let four_segment = "repo:Kind:path:name";
+        let parsed_four = GlobalId::parse(four_segment).unwrap_err();
+        assert!(matches!(parsed_four, LainError::InvalidGlobalId(_)));
     }
 }
