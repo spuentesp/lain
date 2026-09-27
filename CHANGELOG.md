@@ -3,27 +3,40 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased — 2026-09-07
+## [0.8.0] — 2026-09-27
 
-- Federation graph schema bumped to v2 (`FEDERATION_GRAPH_VERSION`).
-  Existing federated graphs are unreadable until `lain reindex` is run.
+### Migration required — read first
+
+- **Federation graph schema is now v2.** The on-disk
+  `federated_graph.bin` is refused at load with
+  `FederationSchemaMismatch` ("written by schema v0; this build expects
+  schema v2"). Run **`lain reindex`** to rebuild: it backs the old
+  graph up to `federated_graph.bin.bak`, clears any stale sidecar, and
+  regenerates both. There is no silent migration — a graph that does
+  not match the build is never loaded.
+
+### Federation schema v2 and projection correctness
+
+- `GlobalId` is now five-segment — `repo:Kind:path:name:line_start` —
+  so two same-named methods at different lines in one file stay
+  distinct in the federated graph. Four-segment ids are rejected at
+  parse; `GlobalId::path/name/line_start` accessors replace string
+  splitting.
 - `resolve_node` no longer canonicalizes bare-name handles that happen
-  to match a directory in cwd (closes Codex review finding #1).
-- `GlobalId` includes `line_start`, so two same-named methods at
-  different lines in the same file stay distinct in the federated
-  graph (closes Codex review finding #2).
-- Cross-repo `find_cross_repo_matches` now requires non-empty
-  signatures on both sides; an `allow_name_only` flag is available
-  for callers that explicitly opt in. The ingestion pipeline
-  synthesizes signatures from source when the LSP returns empty
-  `detail` (closes Codex review finding #3).
-- Federation projection now runs in two passes (nodes, then edges);
-  cold-start no longer misses cross-repo callers in the first pass
-  (closes Codex review finding #4).
+  to match a directory in cwd, and now resolves federation `GlobalId`
+  handles directly, so ids round-trip between tools.
+- Cross-repo `find_cross_repo_matches` now requires non-empty,
+  matcher-usable signatures on both sides; `allow_name_only` opts in to
+  name-only pairing. Ingestion synthesizes signatures from source when
+  the LSP's `detail` is empty or carries no comparable tokens.
+- Federation projection runs in two passes (nodes, then edges) with a
+  Phase 0/1/2 loader: cold start no longer misses cross-repo callers,
+  repeated projections reconcile away stale edges instead of only
+  upserting, and cross-repo `Calls` edges survive re-projection.
+- Placeholder node upserts are gated on `has_node`, so a defensive
+  placeholder can no longer overwrite a real node's metadata.
 - `lain reindex` CLI subcommand added as the recovery path for
-  federation schema bumps (closes Codex review finding #5).
-
-## [Unreleased]
+  federation schema bumps.
 
 ### Added
 
@@ -247,23 +260,21 @@ All notable changes to LAIN are documented here. Versions follow
   typed `LainError::Config` instead of silently empty when the
   workspace isn't a git repository.
 
-- **Semantic-default tool profile.** `tools/list` now returns the
-  curated 14-tool semantic surface by default — the M5 bootstrap
-  (`understand_repository`), the M6 high-level Agent API
-  (`find_symbol`, `get_context`, `find_related`, `assess_change`,
-  `search_code`), readiness + self-discovery (`get_health`,
-  `get_capabilities`), and the multiplayer essentials
-  (`register_agent`, `heartbeat`, `claim_files`, `release_files`,
-  `get_world_state`) — with `get_agent_strategy` kept as an
-  on-demand escape hatch to the full list. Federation, workspace,
-  and server-status families are visible when in their respective
-  modes. The legacy 79-tool surface is reachable via
-  `LAIN_TOOL_PROFILE=full`. Active profile is exposed through
-  `get_capabilities.tool_profile` so agents self-discover which
-  filter is in effect at startup. The on-disk
-  `docs/tool-schema.json` is unchanged: schema-drift CI still
-  validates the fully-populated shape, only the runtime wire
-  shrinks.
+- **Tool profiles by audience.** `tools/list` defaults to a 16-tool
+  comprehension + impact core (`understand_repository`, `find_symbol`,
+  `get_context`, `search_code`, `explain_dispatch`, `assess_change`,
+  `get_blast_radius`, `get_call_chain`, `find_related`, `find_anchors`,
+  `list_entry_points`, `get_coupling_radar`, `find_dead_code`,
+  `get_health`, `get_capabilities`, `get_agent_strategy`), plus the
+  active mode's Q&A tools — at most 18 in any mode. Multiplayer
+  plumbing (claims, heartbeat, occupancy) is the `session` profile;
+  server controls and federation/workspace admin reads are `ops`; both
+  are opt-in via `LAIN_TOOL_PROFILE` and compose as a comma list.
+  Advertising is not dispatch: hook scripts keep calling hidden tools,
+  so hook-driven multiplayer is unaffected. The active profile is
+  exposed through `get_capabilities.tool_profile`. The on-disk
+  `docs/tool-schema.json` (82 tools) is the canonical full surface;
+  schema-drift CI validates it against `tools/list` under `full`.
 
 - **LSP prewarm visibility + operator knobs.** `GET /health` now
   includes `lsp_prewarm: { binary: { status, ms?, reason? } }` —
@@ -322,7 +333,7 @@ All notable changes to LAIN are documented here. Versions follow
     edges stay out of the default view.
 
   - **Tier 3 — runtime synthesis.** New `explain_dispatch` tool
-    (in the curated 15-tool `Semantic` profile) returns
+    (in the default `Semantic` profile) returns
     `{verdict, static_callers, heuristic_callers, runtime_callers,
     co_change_partners}` per symbol. The `verdict` field
     (`static_only`, `heuristic_only`, `runtime_only`,
@@ -539,7 +550,7 @@ All notable changes to LAIN are documented here. Versions follow
   resolved-annotation) so the contract can't regress
   silently.
 
-### Fixed
+### Fixed — hardening batch
 
 - **Relative workspace paths in `repos.yaml`.** Prevented silent 0-file indexing
   when workspace paths are relative.
@@ -553,6 +564,44 @@ All notable changes to LAIN are documented here. Versions follow
 ### Removed
 
 - Cleaned up obsolete build artifacts and temporary files.
+
+### Fixed — acceptance round
+
+- `search_org` reported per-repo local UUIDs in its `global_id` field
+  and deduplicated by (repo, name, path), collapsing same-named
+  methods at different lines. It now reports five-segment federation
+  ids and keys dedup on `line_start`.
+- `get_cross_repo_blast_radius` ignored `repo_id` while its own
+  ambiguity error advised passing it. The argument is honoured now
+  (and advertised in the tool schema); the `_for_repo` variant remains
+  dispatchable as an alias but is no longer advertised.
+- The federation external-edge drain skipped cross-repo `Calls` edges
+  whose target was already projected — the guard predates the
+  `has_node` gate. Cross-repo callers now materialize on cold start.
+- LSP references are requested at each symbol's identifier position
+  (not `(0, 0)`) and resolved as caller → callee, so call edges point
+  the right way when a language server is active.
+- `get_cross_repo_blast_radius` accepts `depth` as a number (`3`
+  meaning `1..3`) as well as the range string, and a wrong-typed
+  `depth` names the type instead of reporting the argument missing.
+- Tool descriptions open with "use this when…"; adjacent tools carry
+  vs-disambiguation (`get_context` / `explain_dispatch` /
+  `understand_repository`, `get_blast_radius` / `get_call_chain`).
+
+### Known issues
+
+- **Cross-repo similarity can under-report when language servers are
+  active.** Some LSP scan paths leave `signature` unset on scanned
+  symbols, and `find_cross_repo_matches` refuses to compare unsigned
+  pairs (by design — it will not guess). Call-graph features are
+  unaffected. `derive_signature` logs the cause when it cannot
+  synthesize one.
+- The Windows distribution lane (npm-shim `npx` install) was failing
+  at last audit and its fix ships in this release; treat Windows
+  binaries as unverified until the release battery's Windows jobs
+  pass.
+- Fuzz Nightly is red on harness compilation (pre-existing, out of
+  scope for this release).
 
 ## [0.7.4] — 2026-09-16
 

@@ -90,10 +90,10 @@ curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
 
 # Then, with the top result as the symbol, pinned to the repo it came from:
 curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_cross_repo_blast_radius_for_repo","arguments":{"repo_id":"bytes","symbol":"<top-anchor>","depth":"1..3"}},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_cross_repo_blast_radius","arguments":{"repo_id":"bytes","symbol":"<top-anchor>","depth":"1..3"}},"id":1}'
 ```
 
-Expected: the first call returns a numbered list of `bytes` anchors; replace `<top-anchor>` with the first item (e.g. `put_slice`) and the second response lists that symbol's callers grouped by repo, in both `bytes` and `tokio`. Pinning `repo_id` matters: `put_slice` is also defined in tokio, so the unpinned `get_cross_repo_blast_radius` asks you to choose.
+Expected: the first call returns a numbered list of `bytes` anchors; replace `<top-anchor>` with the first item (e.g. `put_slice`) and the second response lists that symbol's callers grouped by repo, in both `bytes` and `tokio`. Pinning `repo_id` matters: `put_slice` is also defined in tokio, so without it `get_cross_repo_blast_radius` asks you to choose.
 
 ### Smoke test the federation
 
