@@ -4282,7 +4282,7 @@ fn load_package_handler(
         "already_loaded": already,
         "tools": tools,
         "tools_list_changed": true,
-        "hint": "refetch tools/list to see the new tools (MCP: notifications/tools/list_changed)",
+        "hint": "refetch tools/list to see the new tools (MCP: notifications/tools/list_changed). If they still do not appear, reconnect the client — most refetch on the notification, a few cache tools/list for the session.",
     }))
 }
 inventory::submit!(McpToolEntry {

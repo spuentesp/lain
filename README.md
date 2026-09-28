@@ -156,6 +156,7 @@ empty result becomes `insufficient_evidence`, not a claim that the edit is safe.
 | [Quickstart](docs/QUICKSTART.md) | Installation, first query, and first aid |
 | [User manual](docs/USER_MANUAL.md) | CLI reference, tuning, operation, and troubleshooting |
 | [Tool guide](docs/quickstart-tools.md) | MCP tools, arguments, outputs, and limits |
+| [Skill bundle](skills/README.md) | Agent-loadable skills and role recipes |
 | [Federation](docs/FEDERATION.md) | Multi-repository configuration and queries |
 | [Multiplayer](docs/multiplayer.md) | Agent presence, intents, claims, and hooks |
 | [Architecture](docs/ARCHITECTURE.md) | Graph construction and design choices |
