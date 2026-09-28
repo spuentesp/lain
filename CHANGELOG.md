@@ -52,6 +52,18 @@ All notable changes to LAIN are documented here. Versions follow
   installs only the ones picked (interactively, or by this flag). Nothing
   is installed by default, and `--yes` does not imply any.
 
+- **Capability packages.** Every tool is tagged with a package name,
+  level (`core`, `arch`, `raw`, `verify`, `session`, `social`, `notes`,
+  `ops`, `federation`, `workspace`) and a short `what` / `when`
+  description in the registry. The `core` package is the default.
+  `list_packages` enumerates all packages (pitch, level, why-off-by-default,
+  tool list); `load_package("<name>")` opts a session into one or more
+  packages and answers with `tools_list_changed`, so the client refetches
+  `tools/list`. `LAIN_TOOL_PROFILE=<package,...>` composes packages at
+  config time. The `skills/` bundle ships five agent-loadable SKILL.md
+  files. Advertising is not dispatch — hook scripts keep calling hidden
+  tools regardless of which packages are active.
+
 ### Changed
 
 - `get_health` lists only the languages in the repository, with the
@@ -260,16 +272,18 @@ All notable changes to LAIN are documented here. Versions follow
   typed `LainError::Config` instead of silently empty when the
   workspace isn't a git repository.
 
-- **Tool profiles by audience.** `tools/list` defaults to a 16-tool
-  comprehension + impact core (`understand_repository`, `find_symbol`,
-  `get_context`, `search_code`, `explain_dispatch`, `assess_change`,
-  `get_blast_radius`, `get_call_chain`, `find_related`, `find_anchors`,
-  `list_entry_points`, `get_coupling_radar`, `find_dead_code`,
-  `get_health`, `get_capabilities`, `get_agent_strategy`), plus the
-  active mode's Q&A tools — at most 18 in any mode. Multiplayer
-  plumbing (claims, heartbeat, occupancy) is the `session` profile;
-  server controls and federation/workspace admin reads are `ops`; both
-  are opt-in via `LAIN_TOOL_PROFILE` and compose as a comma list.
+- **Tool profiles by audience.** `tools/list` advertises the tools in
+  the selected packages (see **Capability packages** below). The
+  `core` package provides the 16-tool comprehension + impact core
+  (`understand_repository`, `find_symbol`, `get_context`, `search_code`,
+  `explain_dispatch`, `assess_change`, `get_blast_radius`,
+  `get_call_chain`, `find_related`, `find_anchors`, `list_entry_points`,
+  `get_coupling_radar`, `find_dead_code`, `get_health`,
+  `get_capabilities`, `get_agent_strategy`), plus the active mode's
+  Q&A tools — at most 18 in any mode. The `session` package adds
+  multiplayer plumbing (claims, heartbeat, occupancy); `ops` adds
+  server controls and federation/workspace admin reads; both are
+  opt-in via `LAIN_TOOL_PROFILE` and compose as a comma list.
   Advertising is not dispatch: hook scripts keep calling hidden tools,
   so hook-driven multiplayer is unaffected. The active profile is
   exposed through `get_capabilities.tool_profile`. The on-disk
@@ -587,6 +601,11 @@ All notable changes to LAIN are documented here. Versions follow
 - Tool descriptions open with "use this when…"; adjacent tools carry
   vs-disambiguation (`get_context` / `explain_dispatch` /
   `understand_repository`, `get_blast_radius` / `get_call_chain`).
+- Arg-schema fixes: `get_call_chain`'s `from` / `to` arguments are now
+  documented; `annotation` tool's `target` shape (`{ path, line_start,
+  line_end }`) is advertised in `tools/list`; `depth` accepts a number
+  as sugar for `1..N`; `repo_id` / `session_token` argument names and
+  types are clarified.
 
 ### Known issues
 

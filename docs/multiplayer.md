@@ -485,3 +485,13 @@ the deterministic `agy_e2e.sh` pass:
   iterations; recovery must succeed.
 - **stale-lock takeover** — a stale filesystem lock is planted
   before a claim; the lock layer must take it over.
+
+## Hidden tools still dispatch
+
+Hooks may keep calling `claim_files`, `heartbeat`, `release_files`,
+and `register_agent` regardless of which packages the session profile
+advertises. The server accepts these calls whether or not they appear in
+`tools/list`. This is why claiming works with the default 18-tool
+profile: the hook dispatches them directly, bypassing the advertising
+filter. The `session` and `social` packages only change what the model
+sees in `tools/list`; they do not gate dispatch.
