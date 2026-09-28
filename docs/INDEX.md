@@ -17,6 +17,7 @@ single-repository setup, federation, and basic troubleshooting.
 ## Query Lain
 
 - [Tool guide](quickstart-tools.md): MCP tools and request examples
+- [Skill bundle](../skills/README.md): agent-loadable skills and role recipes
 - [Query tutorial](quickstart-query.md): a short introduction to `query_graph`
 - [Query language reference](query-language.md): the full ops-array format
 - [`tool-schema.json`](tool-schema.json): generated wire-format schema

@@ -269,10 +269,10 @@ TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['r
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "79" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "81" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "78" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "80" "$TOOL_COUNT"
 fi
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
@@ -280,6 +280,16 @@ fi
 # central readiness gate itself is built to answer even while every
 # other capability is warming up or broken.
 check_contains "get_capabilities reports the current capability snapshot" "schema_version" "$(call get_capabilities)"
+
+# Skill layer (capability packages): the menu must describe packages
+# and why they are off, and load_package must announce the tools it
+# brings and signal a tools/list change.
+MENU=$(call list_packages)
+check_contains "list_packages renders the skill menu" "why_off_by_default" "$MENU"
+check_contains "list_packages names its packages" "verify" "$MENU"
+LOAD=$(call load_package '{"package":"notes"}')
+check_contains "load_package signals a tools/list change" "tools_list_changed" "$LOAD"
+check_contains "load_package returns the tools it brings" "add_annotation" "$LOAD"
 
 H=$(call get_health)
 check_contains "get_health reports Operational" "Operational" "$H"

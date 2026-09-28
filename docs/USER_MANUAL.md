@@ -64,6 +64,22 @@ registry the server filters with.
 | `workspace` | 4 | Workspace groups (shown automatically when configured) |
 | `full` | 84 | Every registered tool |
 
+### Role recipes
+
+The reliable way to shape an agent's surface is at config time —
+`LAIN_TOOL_PROFILE` in the agent's MCP server entry (values compose):
+
+| Agent role | Profile | Why |
+|---|---|---|
+| Coding agent | *(default)* | 18-tool core: orient, understand, assess impact |
+| Reviewer / architect | `arch,verify` | layered maps, module comparison, build/test evidence |
+| Coordinator (multi-agent) | `session,social,notes` | claims, roster, handoffs |
+| Operator / setup | `ops` | reload, status, LSP install, re-enrichment |
+
+Agent-loadable skill files for these workflows ship in
+[`skills/`](../skills/README.md) — one SKILL.md per package group,
+installable into any agent's skills directory.
+
 ## Server lifecycle
 
 ```mermaid
