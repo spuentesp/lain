@@ -260,13 +260,13 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "resolve_annotation",
-        description: "Mark an open annotation as resolved by the calling agent (or by `resolved_by`). Returns { resolved: Annotation }. Annotations already resolved return an error so a typo'd id is loud.",
+        description: "Mark an open annotation as resolved by the calling agent (or by `resolved_by`). Returns { resolved: Annotation }. Annotations already resolved return an error so a typo'd id is loud. `session_token` is optional — omit unless you have one from register_agent.",
         required_args: &["id"],
         optional_args: &["session_token", "resolved_by"],
     },
     ToolDef {
         name: "leave_handoff_note",
-        description: "Leave a workspace-scoped note for the next agent that registers. Stored as an open Note annotation; expires after 24h. Body may carry a `[scope:<s>]` prefix for filtering on the read side. Returns { id, expires_at_unix_ms }. Single-repo mode only for now.",
+        description: "Leave a workspace-scoped note for the next agent that registers. Stored as an open Note annotation; expires after 24h. Body may carry a `[scope:<s>]` prefix for filtering on the read side. Returns { id, expires_at_unix_ms }. Single-repo mode only for now. `session_token` is optional — omit unless you have one from register_agent.",
         required_args: &["body"],
         optional_args: &["scope", "refs", "author", "session_token"],
     },

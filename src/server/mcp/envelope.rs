@@ -115,6 +115,16 @@ pub fn tool_arg_property_schema(
         );
         return p;
     }
+    // Wire annotation tools' target/refs args to the discriminated object
+    // schema so tools/list advertises the real shape agents must send.
+    if matches!(name, "target" | "refs")
+        && matches!(
+            tool,
+            "add_annotation" | "list_annotations" | "leave_handoff_note" | "get_pending_handoffs"
+        )
+    {
+        return arg_property_schema(name);
+    }
     arg_property_schema(name)
 }
 
@@ -248,6 +258,23 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
             p.insert(
                 "description".into(),
                 "Handoff scope: 'workspace' | 'repo:<id>' | 'agent_kind:<k>'.".into(),
+            );
+        }
+        "depth" => {
+            p.insert("oneOf".into(), serde_json::json!([
+                { "type": "string", "description": "range string e.g. \"1..3\"" },
+                { "type": "integer", "description": "shorthand: integer N means 1..N (capped at 3)", "maximum": 3 }
+            ]));
+            p.insert(
+                "description".into(),
+                "Traversal depth range: \"1..3\" (string) or a single integer N (shorthand for 1..N, capped at 3).".into(),
+            );
+        }
+        "repo_id" => {
+            p.insert("type".into(), "string".into());
+            p.insert(
+                "description".into(),
+                "pin the repo that owns the symbol when the name exists in multiple repos".into(),
             );
         }
         // Booleans must be typed: the generic fallback is `string`, and
