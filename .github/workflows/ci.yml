@@ -181,6 +181,12 @@ jobs:
       # within one OS is what the original ubuntu-only job relied on.
       - name: Rust Cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # A timed-out job must still save what it compiled — without
+          # this, a cold run that dies at the cap leaves the cache empty
+          # and the next run starts cold again (the loop that kept the
+          # macOS lane dying at 30/45/90 min).
+          save-always: true
 
       # 17 tests in `tests/use_cases/battery_*` invoke the `lain` binary at
       # `target/debug/lain` and panic with a helpful message if it is
@@ -219,7 +225,14 @@ jobs:
     name: Cargo Test cross-platform (${{ matrix.os }})
     needs: [changes]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # 180 min: measured — a COLD macOS run exceeded even 90 min (full
+    # workspace compile + 1800 tests + sidecar/reindex suites), and a
+    # timeout-cancelled job does not save its Swatinem cache, so every
+    # run stayed cold and died at its cap (30, then 45, then 90 all
+    # fell). The cap plus `save-always` below breaks the cycle: one run
+    # completes and seeds the cache, after which runs take ~10 min and
+    # this number can come back down.
+    timeout-minutes: 180
     if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
@@ -237,6 +250,12 @@ jobs:
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # A timed-out job must still save what it compiled — without
+          # this, a cold run that dies at the cap leaves the cache empty
+          # and the next run starts cold again (the loop that kept the
+          # macOS lane dying at 30/45/90 min).
+          save-always: true
 
       - name: Build binaries (for use_cases/battery_* and sidecar tests that invoke them as subprocesses)
         shell: bash
@@ -282,6 +301,12 @@ jobs:
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # A timed-out job must still save what it compiled — without
+          # this, a cold run that dies at the cap leaves the cache empty
+          # and the next run starts cold again (the loop that kept the
+          # macOS lane dying at 30/45/90 min).
+          save-always: true
 
       - name: Build release binary
         run: cargo build --release
@@ -389,6 +414,12 @@ jobs:
           components: rustfmt, clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # A timed-out job must still save what it compiled — without
+          # this, a cold run that dies at the cap leaves the cache empty
+          # and the next run starts cold again (the loop that kept the
+          # macOS lane dying at 30/45/90 min).
+          save-always: true
       # `cargo fmt --check` — URGENT FIXES #6 baseline. Pre-fix,
       # formatting was unchecked and drifted (~30 diffs in
       # committed code, per `docs/CI.md`). The companion commit
@@ -439,6 +470,12 @@ jobs:
           toolchain: stable
       - name: Rust Cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # A timed-out job must still save what it compiled — without
+          # this, a cold run that dies at the cap leaves the cache empty
+          # and the next run starts cold again (the loop that kept the
+          # macOS lane dying at 30/45/90 min).
+          save-always: true
       - name: Build release binary
         run: cargo build --release
       - name: Regenerate schema
@@ -558,6 +595,12 @@ jobs:
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # A timed-out job must still save what it compiled — without
+          # this, a cold run that dies at the cap leaves the cache empty
+          # and the next run starts cold again (the loop that kept the
+          # macOS lane dying at 30/45/90 min).
+          save-always: true
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
