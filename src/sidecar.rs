@@ -563,6 +563,11 @@ impl SidecarInner {
     }
 }
 
+// kill_on_drop equivalent: SidecarInner::force_teardown (called from Drop below)
+/// sends Shutdown over the socket, then kills-and-waits the child process,
+/// ensuring the sidecar daemon is reaped even if the handle is dropped without
+/// an explicit shutdown. This prevents orphaned sidecars from hanging the macOS
+/// CI lane by holding open the step output pipes.
 impl Drop for SidecarInner {
     fn drop(&mut self) {
         self.force_teardown();
