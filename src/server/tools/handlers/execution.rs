@@ -616,8 +616,7 @@ mod spawn_tests {
         // which calls `put_toolchain_on_child_path` and resolves
         // programs through `resolve_program` — those don't affect
         // `kill_on_drop` and would only complicate the test.
-        let mut cmd = tokio::process::Command::new("/bin/sleep");
-        cmd.arg("60");
+        let mut cmd = long_running_command();
         // Mirror the run_build / run_tests / run_clippy fix: set
         // kill_on_drop before awaiting cmd.output().
         cmd.kill_on_drop(true);
@@ -651,13 +650,51 @@ mod spawn_tests {
     }
 
     /// Helper: returns true if a process with this pid exists.
-    /// Uses `kill -0 <pid>` which exits 0 if the process exists and
-    /// 1 if it doesn't. Portable across Unix and Windows.
+    /// A long-running child to observe: `sleep` on Unix, `ping` on
+    /// Windows (61 pings ≈ 60 s). Both are spawned DIRECTLY — no
+    /// intermediate shell. On Windows the observed `Child` must be the
+    /// workload itself (`ping.exe`): `kill_on_drop` reaps only the
+    /// process it owns, and Windows does not cascade termination to
+    /// descendants, so a `cmd /C ping` wrapper would die first and
+    /// leave `ping.exe` running while the probe reported success.
+    fn long_running_command() -> tokio::process::Command {
+        #[cfg(unix)]
+        {
+            let mut cmd = tokio::process::Command::new("/bin/sleep");
+            cmd.arg("60");
+            cmd
+        }
+        #[cfg(windows)]
+        {
+            let mut cmd = tokio::process::Command::new("ping");
+            cmd.args(["-n", "61", "127.0.0.1"]);
+            cmd
+        }
+    }
+
+    /// True while the OS still has `pid` alive. Unix probes with
+    /// `kill -0` (exits 0 when the process exists); Windows asks
+    /// `tasklist` for the PID. The old probe shelled out to `kill`
+    /// unconditionally and reported every PID dead on Windows.
     fn proc_alive(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        #[cfg(unix)]
+        {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(windows)]
+        {
+            std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .map(|o| {
+                    o.status.success()
+                        && String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())
+                })
+                .unwrap_or(false)
+        }
     }
 }
