@@ -219,7 +219,9 @@ jobs:
     name: Cargo Test cross-platform (${{ matrix.os }})
     needs: [changes]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # 45 min: macOS has no Rust cache and runs sidecar + reindex tests
+    # that take ~26 min (vs ~10 min on cached Ubuntu); 30 min was too tight.
+    timeout-minutes: 45
     if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
