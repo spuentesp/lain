@@ -436,11 +436,19 @@ impl SidecarInner {
             bin_path, self.workspace
         );
 
+        // stderr must NOT be inherited: a spawned sidecar would hold the
+        // spawning process's stderr pipe open for its whole lifetime, and
+        // any caller that reads that pipe to EOF (the `lain reindex` test
+        // spawns reindex and collects its output; `Command::output()`
+        // anywhere) blocks forever — the hang that cost the macOS CI lane
+        // three job timeouts. The parent logs spawn/teardown at debug
+        // level; the child's chatter had nowhere better to go than the
+        // parent's console anyway.
         let child = Command::new(&bin_path)
             .arg(&self.workspace)
             .arg(&self.socket_path)
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| {
                 LainError::Unavailable(format!(
