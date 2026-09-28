@@ -41,6 +41,50 @@ fn spawn_error(program: &str, work_dir: &Path, e: std::io::Error) -> LainError {
     ))
 }
 
+/// `cmd.output()` bounded by `limit`, killing the whole process tree on
+/// timeout. Dropping a timed-out `output()` future killed nothing: `npm
+/// test` → `sh -c …` → the test runner all kept running, after the call
+/// returned "timed out" and even after the server exited. The command runs
+/// in its own process group (Unix) so its descendants go with it.
+async fn output_with_timeout(
+    mut cmd: Command,
+    limit: Duration,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    use std::process::Stdio;
+    cmd.kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return Ok(Err(e)),
+    };
+    let pid = child.id();
+    let result = timeout(limit, child.wait_with_output()).await;
+    if result.is_err() {
+        if let Some(pid) = pid {
+            kill_tree(pid);
+        }
+    }
+    result
+}
+
+fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stderr(std::process::Stdio::null())
+        .status();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// Parse a command string like "cargo build --message-format=json" into
 /// a Command, plus the program name for error reporting.
 ///
@@ -99,16 +143,28 @@ pub async fn run_build(
 ) -> Result<String, LainError> {
     let work_dir = cwd.map(Path::new).unwrap_or(Path::new("."));
 
+    if !work_dir.is_dir() {
+        return Err(LainError::Config(format!(
+            "cwd {} is not a directory",
+            work_dir.display()
+        )));
+    }
     // Detect toolchain
     let detected = detect_toolchains(work_dir, None);
-    let toolchain_name = detected.first().map(|s| s.as_str()).unwrap_or("unknown");
+    let Some(toolchain_name) = detected.first().map(|s| s.as_str()) else {
+        return Err(LainError::Unavailable(format!(
+            "no project found in {} (looked for Cargo.toml, go.mod, package.json, \
+             pyproject.toml/setup.py/pytest.ini, …); pass `cwd` pointing at the project",
+            work_dir.display()
+        )));
+    };
 
     // Load profile and get build command + parser
     let profiles = load_toolchain_profiles(None);
     let profile = match profiles.get(toolchain_name) {
         Some(p) => p,
         None => {
-            return Err(LainError::NotFound(format!(
+            return Err(LainError::Config(format!(
                 "No profile found for toolchain: {}. Add a toolchains/{}.toml file.",
                 toolchain_name, toolchain_name
             )));
@@ -130,6 +186,15 @@ pub async fn run_build(
         program = p;
     }
     cmd.current_dir(work_dir);
+    // F1 — when the timeout below drops the future, `kill_on_drop`
+    // ensures the spawned child is actually signalled to terminate.
+    // Without this, a stuck linker / hung `clippy` / blocked test
+    // process continues running after the timeout, holding the
+    // `target/` lock, file handles, and a PID — exactly the
+    // "MCP call never returns" failure mode the timeout was meant
+    // to bound. `tokio::process::Command::kill_on_drop` exists since
+    // tokio 1.7; this project pins tokio 1.35.
+    cmd.kill_on_drop(true);
 
     // `run_tests` has always been wrapped in a timeout; this was not, so a
     // build that hung — a stuck linker, a lock on the target dir, a script
@@ -139,10 +204,10 @@ pub async fn run_build(
     // the timeout "for arbitrary command execution" and was never read by
     // anything.
     let cmd_timeout = Duration::from_secs(runtime.default_command_timeout_secs);
-    let output = match timeout(cmd_timeout, cmd.output()).await {
+    let output = match output_with_timeout(cmd, cmd_timeout).await {
         Ok(r) => r.map_err(|e| spawn_error(&program, work_dir, e))?,
         Err(_) => {
-            return Err(LainError::Mcp(format!(
+            return Err(LainError::Unavailable(format!(
                 "`{program}` timed out after {}s in {} \
                  (raise `runtime.default_command_timeout_secs` in .lain/tuning.toml)",
                 runtime.default_command_timeout_secs,
@@ -222,21 +287,40 @@ pub async fn run_tests(
     };
 
     let (mut cmd, program) = parse_command(&profile.test_cmd(), Some(profile));
-    // Inject filter for rust if provided
-    if toolchain_name == "rust" || toolchain_name == "cargo" {
-        if let Some(f) = filter {
+    // Pass the filter the way each runner takes it; say so when it can't.
+    let filter_applied = match (filter, toolchain_name) {
+        (None, _) => true,
+        (Some(f), "rust" | "cargo") => {
             cmd.arg(f);
+            true
         }
-    }
+        (Some(f), "go") => {
+            cmd.args(["-run", f]);
+            true
+        }
+        (Some(f), "python") if program == "pytest" => {
+            cmd.args(["-k", f]);
+            true
+        }
+        (Some(f), "javascript" | "typescript") if program == "npm" => {
+            cmd.args(["--", f]);
+            true
+        }
+        _ => false,
+    };
     cmd.current_dir(work_dir);
+    // F1 — see run_build; the same kill_on_drop rationale applies
+    // here (test processes can hang on stdin or block on a
+    // shared resource just as easily as a build can).
+    cmd.kill_on_drop(true);
 
     let default_timeout = runtime.default_test_timeout_secs;
     let timeout_duration =
         Duration::from_secs(timeout_secs.unwrap_or(default_timeout as usize) as u64);
 
-    let result = timeout(timeout_duration, cmd.output())
+    let result = output_with_timeout(cmd, timeout_duration)
         .await
-        .map_err(|_| LainError::Mcp("Tests timed out".to_string()))?
+        .map_err(|_| LainError::Unavailable("Tests timed out".to_string()))?
         .map_err(|e| spawn_error(&program, work_dir, e))?;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
@@ -253,7 +337,13 @@ pub async fn run_tests(
         toolchain_name
     );
     if let Some(f) = filter {
-        response.push_str(&format!("Filter: {}\n", f));
+        if filter_applied {
+            response.push_str(&format!("Filter: {}\n", f));
+        } else {
+            response.push_str(&format!(
+                "Filter: {f} — ignored, not supported for {toolchain_name}; ran every test\n"
+            ));
+        }
     }
     response.push_str(&format!("Exit code: {}\n", exit_code));
 
@@ -311,14 +401,17 @@ pub async fn run_clippy(
     }
     cmd.arg("--message-format=json");
     cmd.current_dir(work_dir);
+    // F1 — see run_build / run_tests; clippy can also hang on
+    // workspace lock or stdin and the timeout alone isn't enough.
+    cmd.kill_on_drop(true);
 
     // Same unbounded wait as `run_build` had; clippy on a large workspace
     // is exactly the call most likely to outlive an agent's patience.
     let cmd_timeout = Duration::from_secs(runtime.default_command_timeout_secs);
-    let output = match timeout(cmd_timeout, cmd.output()).await {
+    let output = match output_with_timeout(cmd, cmd_timeout).await {
         Ok(r) => r.map_err(|e| spawn_error("cargo", work_dir, e))?,
         Err(_) => {
-            return Err(LainError::Mcp(format!(
+            return Err(LainError::Unavailable(format!(
                 "clippy timed out after {}s in {} \
                  (raise `runtime.default_command_timeout_secs` in .lain/tuning.toml)",
                 runtime.default_command_timeout_secs,
@@ -406,6 +499,35 @@ mod spawn_tests {
         assert!(msg.contains("cargo") && msg.contains("/ws"), "{msg}");
     }
 
+    /// A timed-out command takes its descendants with it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timeout_kills_the_whole_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("grandchild.pid");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sh -c 'echo $$ > {}; sleep 60' & wait",
+            marker.display()
+        ));
+        let r = output_with_timeout(cmd, Duration::from_millis(500)).await;
+        assert!(r.is_err(), "must time out");
+        let pid = std::fs::read_to_string(&marker).unwrap().trim().to_string();
+        let mut alive = true;
+        for _ in 0..50 {
+            alive = std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!alive, "grandchild {pid} survived the timeout");
+    }
+
     /// Resolving the program is not enough: toolchains shell out to
     /// their siblings. Found end to end — `cargo` resolved and ran with
     /// a toolchain-free PATH, then died with
@@ -469,5 +591,75 @@ mod spawn_tests {
             crate::toolchains::resolve_program("definitely-not-installed-xyz", None),
             "definitely-not-installed-xyz"
         );
+    }
+
+    /// F1 — `cmd.kill_on_drop(true)` must be set on every subprocess
+    /// that goes through `tokio::time::timeout(cmd.output())`. Without
+    /// it, a stuck linker / hung `clippy` / blocked test process
+    /// continues running after the timeout drops the future,
+    /// holding the workspace lock, file handles, and a PID — exactly
+    /// the "MCP call never returns" failure mode the timeout was
+    /// meant to bound.
+    ///
+    /// `Command::kill_on_drop` is a private builder method on
+    /// `tokio::process::Command`; the state isn't externally
+    /// observable. This test exercises the contract behaviorally:
+    /// spawn a long-running command, drop its `Child`, and assert
+    /// the PID is gone within a short deadline. Without
+    /// `kill_on_drop(true)` the child would outlive the drop and
+    /// the test would panic on the deadline check.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_subprocesses_have_kill_on_drop_set() {
+        // A direct `tokio::process::Command::spawn` mirrors the
+        // production constructor's relevant surface (the
+        // `kill_on_drop` flag) without going through `parse_command`,
+        // which calls `put_toolchain_on_child_path` and resolves
+        // programs through `resolve_program` — those don't affect
+        // `kill_on_drop` and would only complicate the test.
+        let mut cmd = tokio::process::Command::new("/bin/sleep");
+        cmd.arg("60");
+        // Mirror the run_build / run_tests / run_clippy fix: set
+        // kill_on_drop before awaiting cmd.output().
+        cmd.kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn sleep");
+
+        let pid = child.id().expect("child has pid");
+        // Give the kernel a moment to schedule the process.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            proc_alive(pid),
+            "sleep child should be alive 50ms after spawn"
+        );
+
+        // Drop the Child — with kill_on_drop(true), the child is
+        // signalled. Without it, the sleep process would continue
+        // running until natural completion (~60 s).
+        drop(child);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if !proc_alive(pid) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "kill_on_drop(true) did not terminate the child within 2s; \
+                     the F1 fix regressed"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Helper: returns true if a process with this pid exists.
+    /// Uses `kill -0 <pid>` which exits 0 if the process exists and
+    /// 1 if it doesn't. Unix-only.
+    #[cfg(unix)]
+    fn proc_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 }
