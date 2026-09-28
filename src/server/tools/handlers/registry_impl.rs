@@ -273,7 +273,7 @@ impl ToolHandler for GetCallChainHandler {
          holds both ends. For what-breaks impact use `get_blast_radius`."
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}"#
+        r#"{"type":"object","properties":{"from":{"type":"string","description":"symbol name the path starts at (the caller)"},"to":{"type":"string","description":"symbol name the path ends at (the callee)"}},"required":["from","to"]}"#
     }
     fn capability(&self) -> ToolCapability {
         ToolCapability::ReadOnly
