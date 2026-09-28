@@ -53,7 +53,7 @@ pub struct InstallationReport {
 /// `full`.
 #[derive(Debug, Serialize)]
 pub struct ToolProfileReport {
-    pub name: &'static str,
+    pub name: String,
     pub advertised_count: usize,
 }
 
@@ -471,10 +471,10 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     let registry = crate::tools::registry::ToolRegistry::definitions();
     let inventory_in_profile = registry
         .iter()
-        .filter(|d| crate::server::mcp::handler::profile_allows(profile, d.name))
+        .filter(|d| crate::server::mcp::handler::profile_allows(&profile, d.name))
         .count();
     let initial_advertised = inventory_in_profile
-        + crate::server::tools::profile::special_advertised_count(profile, false, false);
+        + crate::server::tools::profile::special_advertised_count(&profile, false, false);
 
     let mut report = DoctorReport {
         schema_version: SCHEMA_VERSION,
@@ -526,7 +526,7 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
         let (fed_active, ws_active) = detect_server_modes(r);
         let recomputed = inventory_in_profile
             + crate::server::tools::profile::special_advertised_count(
-                profile, fed_active, ws_active,
+                &profile, fed_active, ws_active,
             );
         report.tool_profile.advertised_count = recomputed;
     }

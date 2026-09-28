@@ -2,6 +2,7 @@
 //!
 //! Follows SOLID and DRY principles by delegating logic to specialized handlers.
 
+pub mod capabilities;
 pub mod definitions;
 pub mod handlers;
 pub mod profile;
@@ -708,11 +709,11 @@ impl ToolExecutor {
             .iter()
             .filter(|def| {
                 use crate::server::mcp::handler::profile_allows;
-                profile_allows(profile, def.name)
+                profile_allows(&profile, def.name)
             })
             .count()
             + crate::server::tools::profile::special_advertised_count(
-                profile,
+                &profile,
                 self.ctx.federation.is_some(),
                 // Workspace state is plumbed into ToolContext by
                 // `LainMcpServer::with_federation_and_workspaces`.
@@ -1125,8 +1126,7 @@ impl ToolExecutor {
     }
 
     fn get_agent_strategy(&self) -> Result<String, LainError> {
-        // Build strategy from registered tool capabilities
-        let tools = ToolRegistry::definitions();
+        // Build strategy from the capability registry.
         let mut sections = vec![
             "# AI Agent Strategy Guide for Lain\n".to_string(),
             "Lain is a code analysis engine that maintains a graph of your codebase. Use it to understand architecture, trace dependencies, and assess impact before making changes.\n".to_string(),
@@ -1144,73 +1144,11 @@ impl ToolExecutor {
             "\n## Recommended Tool Sequence\n\n".to_string(),
         ];
 
-        let mut readonly = Vec::new();
-        let mut structural = Vec::new();
-        let mut mutating = Vec::new();
-
-        let excluded = [
-            "get_health",
-            "get_agent_strategy",
-            "install_language_server",
-            "query_graph",
-        ];
-        let readonly_set = [
-            "explore_architecture",
-            "list_entry_points",
-            "compare_modules",
-            "architectural_observations",
-            "trace_dependency",
-            "get_call_chain",
-            "navigate_to_anchor",
-            "get_layered_map",
-            "get_master_map",
-            "semantic_search",
-            "find_anchors",
-            "get_anchor_score",
-            "get_context_depth",
-            "find_dead_code",
-            "explain_symbol",
-            "suggest_refactor_targets",
-            "get_context_for_prompt",
-            "get_code_snippet",
-            "get_call_sites",
-            "find_untested_functions",
-            "get_test_template",
-            "find_test_file",
-            "get_coverage_summary",
-            "get_cross_runtime_callers",
-            "describe_schema",
-        ];
-        let structural_set = [
-            "add_comment",
-            "tag_node",
-            "update_node_metadata",
-            "insert_reference_edge",
-        ];
-
-        for t in tools.iter().filter(|t| !excluded.contains(&t.name)) {
-            if readonly_set.contains(&t.name) {
-                readonly.push(t);
-            } else if structural_set.contains(&t.name) {
-                structural.push(t);
-            } else {
-                mutating.push(t);
-            }
-        }
-
-        sections.push("### Read-Only (Safe — No State Changes)\n".to_string());
-        for t in &readonly {
-            sections.push(format!("- **{}**: {}\n", t.name, t.description));
-        }
-        sections.push("\n### Structural Write (Modifies Graph)\n".to_string());
-        for t in &structural {
-            sections.push(format!("- **{}**: {}\n", t.name, t.description));
-        }
-        sections.push("\n### Mutating (Executes Commands / Side Effects)\n".to_string());
-        for t in &mutating {
-            sections.push(format!("- **{}**: {}\n", t.name, t.description));
-        }
-
+        // The package cards are generated from the capability
+        // registry, so this guide cannot describe a tool the surface
+        // does not have (or miss one it does).
+        sections.push(crate::server::tools::capabilities::all_package_cards());
+        sections.push("\n".to_string());
         sections.push("\n## Decision Flow\n\n".to_string());
         sections.push(
             "1. **Explore unknown area**: `get_layered_map` or `architectural_observations`\n"

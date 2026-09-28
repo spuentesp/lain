@@ -39,19 +39,30 @@ Run `lain <command> --help` for flags. The generated MCP tool schema lives at
 
 ## Tool surface
 
-Lain advertises a small tool surface and keeps the rest registered but
-hidden — advertising is not dispatch, so hook scripts can call hidden
-tools (claims, heartbeat) whether or not the model sees them. Opt in
-with `LAIN_TOOL_PROFILE`; values compose as a comma list. The counts
-below are pinned by tests (`src/server/tools/profile.rs`) against the
-same lists the server filters with.
+Lain advertises a small tool surface and keeps the rest registered
+but hidden — advertising is not dispatch, so hook scripts can call
+hidden tools (claims, heartbeat) whether or not the model sees them.
+Everything is organized into **capability packages** — small skills,
+each with a pitch, a level, and a "when to reach for it" per tool.
+`list_packages` renders the whole menu at runtime; `load_package`
+opts one into the session's `tools/list` (then refetch it).
+`LAIN_TOOL_PROFILE` opts packages in per process and composes as a
+comma list. Every count below is pinned by tests against the same
+registry the server filters with.
 
-| Profile (`LAIN_TOOL_PROFILE`) | Advertised | Contents |
+| Package | Tools | Skill |
 |---|---|---|
-| `semantic` (default) | 16 | Comprehension + impact; federation mode adds 2 Q&A tools, workspace mode adds 1 |
-| `session` | adds 6 | Multiplayer plumbing: `register_agent`, `heartbeat`, `claim_files`, `release_files`, `list_occupancy`, `get_world_state` |
-| `ops` | adds 4 | Server controls (`get_server_status`, `request_reload`, …); also exposes federation/workspace admin reads |
-| `full` | 82 | Every registered tool |
+| `core` | 18 | Orient, understand, assess impact (always on) |
+| `arch` | 10 | Map the system: layered views, traces, module comparison |
+| `raw` | 8 | Low-level reads: graph queries, snippets, call sites |
+| `verify` | 9 | Build, test, lint, coverage, git state |
+| `session` | 7 | Multiplayer claiming: register, claim, heartbeat |
+| `social` | 6 | Agent roster, overlap detection, audit trail |
+| `notes` | 8 | Annotations, handoff notes, intents |
+| `ops` | 10 | Server health, reload, LSP install, re-enrichment |
+| `federation` | 5 | Org-wide queries (shown automatically in federation mode) |
+| `workspace` | 4 | Workspace groups (shown automatically when configured) |
+| `full` | 84 | Every registered tool |
 
 ## Server lifecycle
 
