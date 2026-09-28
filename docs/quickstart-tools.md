@@ -36,6 +36,18 @@ Quick reference for LAIN MCP tools.
 > `inert_tool_names` filter, so a stub embedder suppresses
 > `semantic_search` on both transports equally.
 
+## Discovering more tools
+
+Every tool belongs to a **package** (core, arch, raw, verify, session,
+social, notes, ops, federation, workspace). Run `list_packages` to
+see the menu — pitch, level, why it is off by default, and which
+tools it contains. Call `load_package("ops")` (or any package name)
+to opt in; the response carries `tools_list_changed`, so the client
+refetches `tools/list`. For a persistent config, set
+`LAIN_TOOL_PROFILE=ops,notes` in the environment — packages compose
+as a comma-separated list. The `skills/` directory ships
+agent-loadable SKILL.md files alongside the binary.
+
 ## Project Management (CLI)
 
 A project is a directory containing `repos.yaml` (and optionally
