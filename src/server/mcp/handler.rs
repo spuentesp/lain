@@ -853,7 +853,7 @@ pub(crate) fn inert_tool_names(
 /// remain reachable, and the semantic-profile curation already
 /// includes the ones an agent needs.
 pub(crate) fn profile_allows(
-    profile: crate::server::tools::profile::ToolProfile,
+    profile: &crate::server::tools::profile::ToolProfile,
     tool_name: &str,
 ) -> bool {
     crate::server::tools::profile::profile_allows_inner(profile, tool_name)
@@ -931,7 +931,7 @@ impl ServerHandler for LainHandler {
         // honour `_meta`, which most don't, so we keep it in the
         // dedicated capabilities endpoint.
         let profile = crate::server::tools::profile::ToolProfile::from_env();
-        tools.retain(|t| profile_allows(profile, &t.name));
+        tools.retain(|t| profile_allows(&profile, &t.name));
 
         Ok(ListToolsResult {
             tools,
@@ -2240,7 +2240,7 @@ async fn handle_request(
                             .filter(|t| {
                                 t.get("name")
                                     .and_then(|n| n.as_str())
-                                    .is_none_or(|n| profile_allows(http_profile, n))
+                                    .is_none_or(|n| profile_allows(&http_profile, n))
                             })
                             .collect();
                         serde_json::json!({"jsonrpc": "2.0", "result": {"tools": tools}, "id": id})
@@ -2748,6 +2748,24 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
             name: "get_capabilities",
             description: "Return the current repository capability states, freshness, and indexing progress. Warming states are retryable.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
+        },
+        ToolDefinition {
+            name: "list_packages",
+            description: "The skill menu: every capability package with its pitch, level, why it is off by default, and its tools.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
+        },
+        ToolDefinition {
+            name: "load_package",
+            description: "Opt a package (verify, arch, raw, notes, session, social, ops) into this session's tools/list, then refetch it.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "package": { "type": "string", "description": "package name from list_packages" }
+                },
+                "required": ["package"]
+            }),
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
@@ -4206,6 +4224,71 @@ fn invoke_inventory(
     }
     None
 }
+
+/// The skill menu: every capability package with its pitch, level,
+/// why it is off by default, its tools, and whether it is loaded.
+fn list_packages_handler(
+    _ctx: &McpContext,
+    _args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::server::tools::capabilities as caps;
+    use crate::server::tools::capabilities::Package;
+    let loaded = caps::loaded_packages();
+    let cards: Vec<serde_json::Value> = Package::ALL
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name(),
+                "level": p.level().label(),
+                "pitch": p.pitch(),
+                "why_off_by_default": p.why_off_by_default(),
+                "tools": caps::package_tools(*p),
+                "loaded": *p == Package::Core || loaded.contains(p),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "packages": cards,
+        "profile": crate::server::tools::profile::ToolProfile::from_env().as_str(),
+        "how_to_load": "call load_package with a package name, then refetch tools/list",
+    }))
+}
+inventory::submit!(McpToolEntry {
+    name: "list_packages",
+    handler: list_packages_handler,
+});
+
+/// Opt a package into this session's `tools/list`. Advertising is
+/// not dispatch — the tools were always callable; this only makes
+/// them visible, and the response tells the client to refetch
+/// `tools/list` (the MCP `notifications/tools/list_changed` signal).
+fn load_package_handler(
+    _ctx: &McpContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::server::tools::capabilities as caps;
+    use crate::server::tools::capabilities::Package;
+    let map = args_map(&args)?;
+    let name =
+        crate::server::tools::utils::required_str_arg(map, "package").map_err(|e| e.to_string())?;
+    let package = Package::parse(&name)
+        .ok_or_else(|| format!("unknown package {name:?} — run `list_packages` for the menu"))?;
+    let already = !caps::load_package(package);
+    let tools = caps::package_tools(package);
+    Ok(serde_json::json!({
+        "package": package.name(),
+        "pitch": package.pitch(),
+        "loaded": true,
+        "already_loaded": already,
+        "tools": tools,
+        "tools_list_changed": true,
+        "hint": "refetch tools/list to see the new tools (MCP: notifications/tools/list_changed)",
+    }))
+}
+inventory::submit!(McpToolEntry {
+    name: "load_package",
+    handler: load_package_handler,
+});
 
 fn server_status_handler(
     ctx: &McpContext,

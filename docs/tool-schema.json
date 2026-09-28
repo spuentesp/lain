@@ -657,6 +657,30 @@
     "name": "get_capabilities"
   },
   {
+    "description": "The skill menu: every capability package with its pitch, level, why it is off by default, and its tools.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "list_packages"
+  },
+  {
+    "description": "Opt a package (verify, arch, raw, notes, session, social, ops) into this session's tools/list, then refetch it.",
+    "inputSchema": {
+      "properties": {
+        "package": {
+          "description": "package name from list_packages",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package"
+      ],
+      "type": "object"
+    },
+    "name": "load_package"
+  },
+  {
     "description": "Return the recommended tool sequence and quick-reference for working with Lain.",
     "inputSchema": {
       "properties": {},

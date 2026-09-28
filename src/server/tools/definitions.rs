@@ -34,6 +34,8 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "find_symbol"
             | "search_code"
             | "get_agent_strategy"
+            | "list_packages"
+            | "load_package"
             | "get_server_status"
             | "list_recent_projects"
             | "get_reload_status"

@@ -21,6 +21,9 @@ mod find_anchors;
 #[path = "use_cases/get_call_sites.rs"]
 mod get_call_sites;
 
+#[path = "use_cases/tool_packages.rs"]
+mod tool_packages;
+
 #[path = "use_cases/get_code_snippet_paths.rs"]
 mod get_code_snippet_paths;
 
