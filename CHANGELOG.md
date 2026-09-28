@@ -3,7 +3,7 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.8.0] — 2026-09-27
+## [0.8.0] — 2026-09-28
 
 ### Migration required — read first
 
