@@ -18,7 +18,7 @@
 //! [`crate::tools::definitions::ToolDefinition`], the type the
 //! `ToolRegistry` already enumerates.
 
-use crate::server::mcp::envelope::arg_property_schema;
+use crate::server::mcp::envelope::tool_arg_property_schema;
 use rust_mcp_schema::{Tool, ToolInputSchema};
 
 /// A typed tool declaration. `name`, `description`, and
@@ -49,10 +49,10 @@ impl ToolDef {
     pub fn to_input_schema(&self) -> ToolInputSchema {
         let mut props = std::collections::BTreeMap::new();
         for req in self.required_args {
-            props.insert((*req).to_string(), arg_property_schema(req));
+            props.insert((*req).to_string(), tool_arg_property_schema(self.name, req));
         }
         for opt in self.optional_args {
-            props.insert((*opt).to_string(), arg_property_schema(opt));
+            props.insert((*opt).to_string(), tool_arg_property_schema(self.name, opt));
         }
         ToolInputSchema::new(
             self.required_args.iter().map(|s| s.to_string()).collect(),
@@ -92,15 +92,9 @@ pub const FEDERATION_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_cross_repo_blast_radius",
-        description: "Resolve a symbol across the federation, traverse INCOMING Calls edges (the symbol's callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit.",
+        description: "Use this when you want to know what breaks across repositories: resolve a symbol, traverse INCOMING Calls edges (its callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit. When the symbol matches several repos, pass repo_id to choose one.",
         required_args: &["symbol", "depth"],
-        optional_args: &[],
-    },
-    ToolDef {
-        name: "get_cross_repo_blast_radius_for_repo",
-        description: "Same as get_cross_repo_blast_radius but the caller disambiguates the repo explicitly via repo_id, bypassing symbol resolution. Args: repo_id, symbol, depth (string range like \"1..3\", not a number). Traverses incoming Calls edges (callers), same as get_cross_repo_blast_radius. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}.",
-        required_args: &["repo_id", "symbol", "depth"],
-        optional_args: &[],
+        optional_args: &["repo_id"],
     },
 ];
 
@@ -236,9 +230,9 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_audit_log",
-        description: "Read the server's audit log (per-write events appended by the claim_files handler when a claim is granted). Args: since_unix (drop events whose ts_unix is strictly less than this), path_glob (filter to events whose path matches this glob — see src/server/glob_match.rs for the supported subset). Returns an array of AuditEvent objects (ts_unix, agent_id, path, claim_set, racers, plan_revision, landed_revision). The on-disk file is `<state_dir>/audit.jsonl`, rotation-capped at 50 MB.",
+        description: "Read the server's audit log (per-write events appended by the claim_files handler when a claim is granted). Args: since_unix (drop events whose ts_unix is strictly less than this), path_glob (filter to events whose path matches this glob — see src/server/glob_match.rs for the supported subset), limit (the most recent N matching events, default 200). Returns an array of AuditEvent objects, oldest first (ts_unix, agent_id, path, claim_set, racers, plan_revision, landed_revision). The on-disk file is `<state_dir>/audit.jsonl`, rotation-capped at 50 MB.",
         required_args: &[],
-        optional_args: &[],
+        optional_args: &["since_unix", "path_glob", "limit"],
     },
     ToolDef {
         name: "get_world_state",
@@ -250,7 +244,7 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
         name: "get_recent_activity",
         description: "Compact digest of the audit log: groups recent edit_landed events by path (default), agent, or hour and returns a count + sample per group. Designed for LLM session compaction — instead of re-reading every audit.jsonl line, the agent gets a navigable summary and can call get_audit_log with a specific path_glob for full detail. Args: since_unix (filter by ts_unix), group_by ('path' (default) | 'agent' | 'hour'), path_glob (pre-filter by path before grouping), limit (max groups returned, default 20). Returns { groups: [{ key, count, first_ts, last_ts, sample_event }], total_events, total_groups, truncated, group_by }. truncated=true when total_groups > limit.",
         required_args: &[],
-        optional_args: &[],
+        optional_args: &["since_unix", "group_by", "path_glob", "limit"],
     },
     ToolDef {
         name: "add_annotation",
@@ -266,13 +260,13 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "resolve_annotation",
-        description: "Mark an open annotation as resolved by the calling agent (or by `resolved_by`). Returns { resolved: Annotation }. Annotations already resolved return an error so a typo'd id is loud.",
+        description: "Mark an open annotation as resolved by the calling agent (or by `resolved_by`). Returns { resolved: Annotation }. Annotations already resolved return an error so a typo'd id is loud. `session_token` is optional — omit unless you have one from register_agent.",
         required_args: &["id"],
         optional_args: &["session_token", "resolved_by"],
     },
     ToolDef {
         name: "leave_handoff_note",
-        description: "Leave a workspace-scoped note for the next agent that registers. Stored as an open Note annotation; expires after 24h. Body may carry a `[scope:<s>]` prefix for filtering on the read side. Returns { id, expires_at_unix_ms }. Single-repo mode only for now.",
+        description: "Leave a workspace-scoped note for the next agent that registers. Stored as an open Note annotation; expires after 24h. Body may carry a `[scope:<s>]` prefix for filtering on the read side. Returns { id, expires_at_unix_ms }. Single-repo mode only for now. `session_token` is optional — omit unless you have one from register_agent.",
         required_args: &["body"],
         optional_args: &["scope", "refs", "author", "session_token"],
     },
@@ -281,6 +275,29 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
         description: "List open handoff notes from prior agents. Filters: scope (workspace | repo:<id> | agent_kind:<k>), since_unix_ms. Returns { handoffs: [Annotation] } — only kind=note, status=open rows within the 24h TTL.",
         required_args: &[],
         optional_args: &["scope", "since_unix_ms"],
+    },
+    // Intent layer (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
+    // Listed here (in addition to the inventory-registered entries
+    // in `handler.rs`) so the multiplayer tools are advertised in
+    // `tools/list` regardless of whether the inventory crate
+    // collected the static-linker section in a given build.
+    ToolDef {
+        name: "unregister_agent",
+        description: "Tear down an agent session: releases every claim, drops intent + activity entries, removes the presence session.",
+        required_args: &["agent_id", "session_token"],
+        optional_args: &[],
+    },
+    ToolDef {
+        name: "lain_intent",
+        description: "Declare or update an intent (goal + scopes + status). The response carries the live coordination level (GREEN / YELLOW / RED) and a `coordination` block with related activity. Returns {intent_id, revision, coordination, intent}.",
+        required_args: &["agent_id", "session_token"],
+        optional_args: &["goal", "scopes", "status", "add_scopes", "remove_scopes", "intent_id"],
+    },
+    ToolDef {
+        name: "list_active_intents",
+        description: "Per-agent activity feed: for each connected agent, returns intent {goal, scopes, status}, focus (most-recent observation target), observed_reads (deduped), and last_tool {tool, target, at_unix}. Optional `agent_id` filters to one agent.",
+        required_args: &[],
+        optional_args: &["agent_id"],
     },
 ];
 
@@ -315,13 +332,13 @@ pub fn defs_to_value_tools(defs: &[ToolDef]) -> Vec<serde_json::Value> {
             for req in d.required_args {
                 props.insert(
                     (*req).to_string(),
-                    serde_json::Value::Object(arg_property_schema(req)),
+                    serde_json::Value::Object(tool_arg_property_schema(d.name, req)),
                 );
             }
             for opt in d.optional_args {
                 props.insert(
                     (*opt).to_string(),
-                    serde_json::Value::Object(arg_property_schema(opt)),
+                    serde_json::Value::Object(tool_arg_property_schema(d.name, opt)),
                 );
             }
             let input_schema = serde_json::json!({

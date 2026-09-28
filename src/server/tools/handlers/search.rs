@@ -10,7 +10,7 @@ use crate::server::tools::utils::{
 };
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
@@ -20,7 +20,7 @@ pub fn semantic_search(
     overlay: &VolatileOverlay,
     embedder: &NlpEmbedder,
     cross_encoder: &CrossEncoder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     query: &str,
     limit: usize,
@@ -92,9 +92,11 @@ pub fn semantic_search(
         // embeds per query adds 22s. With caching, query 2+ runs in <1s.
         let emb_opt: Option<Vec<f32>> = if let Some(cached) = cache.get(&node.id) {
             Some(cached.clone())
-        } else if let Some(ref e_json) = node.embedding {
-            serde_json::from_str::<Vec<f32>>(e_json).ok()
-        } else if volatile_embed_count < 200 {
+        } else if !crate::server::nlp::needs_embedding(node.embedding.as_deref()) {
+            node.embedding
+                .as_deref()
+                .and_then(|e| serde_json::from_str::<Vec<f32>>(e).ok())
+        } else if volatile_embed_count < 200 && !embedder.is_stub() {
             // Cap cold-query on-demand embeddings so a single search call
             // stays fast even on large corpora. The per-call cache (set on
             // line below) means subsequent calls within the same process
@@ -112,8 +114,8 @@ pub fn semantic_search(
             // queries can reuse it. Before this fix, only persisted
             // embeddings were cached, and every cold query paid the
             // full embed cost (~22s for 500 nodes on this corpus).
-            if !cache.contains_key(&node.id) {
-                cache.insert(node.id.clone(), emb.clone());
+            if !cache.contains(&node.id) {
+                cache.put(node.id.clone(), emb.clone());
             }
             // Persist volatile embeddings back to graph.bin so the next
             // process start doesn't have to re-embed the same nodes.
@@ -122,7 +124,8 @@ pub fn semantic_search(
             // ~3 KB (384 floats * 8 bytes JSON), so 200 new writes add
             // ~600 KB to graph.bin. Cheap, and the alternative (re-
             // embedding on every cold start) costs 8-30 s.
-            if node.embedding.is_none() {
+            if crate::server::nlp::needs_embedding(node.embedding.as_deref()) && !embedder.is_stub()
+            {
                 if let Ok(emb_json) = serde_json::to_string(&emb) {
                     let mut updated = node.clone();
                     updated.embedding = Some(emb_json);

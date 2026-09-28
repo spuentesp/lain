@@ -8,7 +8,6 @@ use crate::query::spec::{
 };
 use anyhow::Result;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Result<()> {
@@ -28,6 +27,17 @@ pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Resul
             })?,
     };
     let memory_path = root.join(".lain/graph.bin");
+    // Opening a missing graph "succeeds" with an empty one, so an
+    // unindexed repository answered every query with `count: 0`, exit 0.
+    if !memory_path.is_file() {
+        eprintln!(
+            "Error: {} has no index yet ({} is missing).\n\nHint: run `lain oneshot find_anchors` \
+             there to build it (an agent's `lain mcp` also builds it on first start).",
+            root.display(),
+            memory_path.display()
+        );
+        std::process::exit(1);
+    }
 
     let graph = match GraphDatabase::new(&memory_path) {
         Ok(g) => g,
@@ -39,9 +49,20 @@ pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Resul
     };
 
     let embedder = NlpEmbedder::new()?;
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(
+            crate::server::tuning::TuningConfig::default().embedding_cache_capacity,
+        )
+        .expect("default capacity > 0"),
+    )));
     let mut executor = Executor::new(&graph, &embedder, &cache, &root);
-    let spec = parse_query_string(expression);
+    let spec = match parse_query(expression) {
+        Ok(spec) => spec,
+        Err(e) => {
+            eprintln!("Query error: {e}");
+            std::process::exit(2);
+        }
+    };
 
     match executor.execute(&spec) {
         Ok(result) => {
@@ -55,6 +76,90 @@ pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Resul
     }
 
     Ok(())
+}
+
+/// A `query_graph` ops array as JSON (`{"ops": [...]}` or `[...]`, as the
+/// docs describe), or the pipe syntax (`find Function name X | connect
+/// Calls incoming depth 2`). Unrecognised input is an error: it used to be
+/// ignored, and the query returned every node with exit 0.
+fn parse_query(expr: &str) -> Result<QuerySpec, String> {
+    let t = expr.trim();
+    if t.starts_with('{') {
+        return serde_json::from_str(t).map_err(|e| format!("invalid JSON query: {e}"));
+    }
+    if t.starts_with('[') {
+        let ops: serde_json::Value =
+            serde_json::from_str(t).map_err(|e| format!("invalid JSON ops array: {e}"))?;
+        return serde_json::from_value(serde_json::json!({ "ops": ops }))
+            .map_err(|e| format!("invalid JSON ops array: {e}"));
+    }
+    const STEPS: &[&str] = &[
+        "find",
+        "connect",
+        "filter",
+        "semantic_filter",
+        "sort",
+        "group",
+        "limit",
+    ];
+    for part in t.split('|').map(str::trim) {
+        let word = part.split_whitespace().next().unwrap_or("");
+        if !STEPS.contains(&word) {
+            return Err(format!(
+                "unknown query step '{part}'; expected one of: {}, or a JSON ops array",
+                STEPS.join(", ")
+            ));
+        }
+        check_step_words(part)?;
+    }
+    Ok(parse_query_string(t))
+}
+
+/// Reject words the pipe parser would silently skip: `find Function nmae
+/// x` returned every function, `connect Calls incomng` ran outgoing.
+fn check_step_words(part: &str) -> Result<(), String> {
+    let words: Vec<&str> = part.split_whitespace().collect();
+    let unknown = |w: &str, expected: &str| {
+        Err(format!(
+            "unknown word '{w}' in `{part}`; expected {expected}"
+        ))
+    };
+    match words.first().copied() {
+        Some("find") => {
+            let mut i = 1;
+            // An optional node type first.
+            if words
+                .get(i)
+                .is_some_and(|w| !matches!(*w, "name" | "limit"))
+            {
+                i += 1;
+            }
+            while i < words.len() {
+                match words[i] {
+                    "name" | "limit" if i + 1 < words.len() => i += 2,
+                    w => return unknown(w, "`name <pattern>` or `limit <n>` after the type"),
+                }
+            }
+            Ok(())
+        }
+        Some("connect") => {
+            let mut i = 2; // `connect <EdgeType>`
+            while i < words.len() {
+                match words[i] {
+                    "incoming" | "in" | "outgoing" | "out" | "both" => i += 1,
+                    "depth" if i + 1 < words.len() => i += 2,
+                    w => {
+                        return unknown(
+                            w,
+                            "incoming, outgoing, both or `depth <n|a..b>` after the edge type",
+                        )
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn parse_query_string(expr: &str) -> QuerySpec {
@@ -265,5 +370,26 @@ fn name_selector_from_string(s: &str) -> NameSelector {
         NameSelector::StartsWith(s[1..s.len() - 1].to_string())
     } else {
         NameSelector::Exact(s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn json_pipe_and_garbage() {
+        let json = r#"{"ops":[{"op":"find","type":"Function","name":"helper"}]}"#;
+        assert_eq!(parse_query(json).unwrap().ops.len(), 1);
+        let arr = r#"[{"op":"find","type":"Function","name":"helper"}]"#;
+        assert_eq!(parse_query(arr).unwrap().ops.len(), 1);
+        assert!(parse_query("find Function name helper | connect Calls incoming depth 2").is_ok());
+        assert!(parse_query("garbage").is_err());
+        assert!(parse_query("find Function | frobnicate").is_err());
+        assert!(parse_query("find Function nmae hello").is_err());
+        assert!(parse_query("find Function name hello | connect Calls incomng").is_err());
+        assert!(parse_query("find name hello limit 5").is_ok());
+        assert!(parse_query("find Function | connect Calls out depth 1..3").is_ok());
+        assert!(parse_query("{not json").is_err());
     }
 }

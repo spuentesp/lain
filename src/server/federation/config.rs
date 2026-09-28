@@ -15,6 +15,8 @@ pub struct FederationConfig {
     pub max_concurrent_indexers: usize,
     #[serde(default = "default_ready_threshold")]
     pub ready_threshold: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sensor: Option<crate::git::GitSensorMode>,
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
 }
@@ -25,6 +27,7 @@ impl Default for FederationConfig {
             data_dir: default_data_dir(),
             max_concurrent_indexers: default_max_concurrent_indexers(),
             ready_threshold: default_ready_threshold(),
+            git_sensor: None,
             repos: Vec::new(),
         }
     }
@@ -83,7 +86,41 @@ impl FederationConfig {
         Self::load_from_str(&s)
     }
     pub fn load_from_str(s: &str) -> Result<Self, LainError> {
-        serde_yaml::from_str(s).map_err(|e| LainError::Config(format!("yaml: {e}")))
+        let cfg: FederationConfig =
+            serde_yaml::from_str(s).map_err(|e| LainError::Config(format!("yaml: {e}")))?;
+        cfg.validate_unique_repo_ids()?;
+        Ok(cfg)
+    }
+    /// Reject duplicate `id` entries. Two `RepoConfig`s with the same id
+    /// both build sources pointing at `data_dir/<id>` on disk; the
+    /// federation then `deactivate`s the first inside `add_repo` and
+    /// silently keeps the second, while the on-disk graph.bin collides
+    /// between the two sources' `RepoIndex::new` reads. Fail loudly at
+    /// load time instead.
+    fn validate_unique_repo_ids(&self) -> Result<(), LainError> {
+        use std::collections::HashSet;
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.repos.len());
+        for r in &self.repos {
+            if !seen.insert(r.id.as_str()) {
+                return Err(LainError::Config(format!(
+                    "duplicate repo id '{}' in repos.yaml; ids must be unique",
+                    r.id
+                )));
+            }
+        }
+        Ok(())
+    }
+    /// Return the configured Git sensor mode, taking precedence in order:
+    /// 1. `LAIN_GIT_SENSOR` environment variable
+    /// 2. `git_sensor` field from config file
+    /// 3. Default `GitSensorMode::Sidecar`
+    pub fn git_sensor_mode(&self) -> crate::git::GitSensorMode {
+        if let Ok(val) = std::env::var("LAIN_GIT_SENSOR") {
+            if let Ok(mode) = val.parse() {
+                return mode;
+            }
+        }
+        self.git_sensor.unwrap_or_default()
     }
     pub fn build_sources(&self) -> Result<Vec<Box<dyn RepoSource>>, LainError> {
         let mut out = Vec::with_capacity(self.repos.len());
@@ -153,6 +190,48 @@ repos:
         let cfg: FederationConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.repos.len(), 2);
         assert_eq!(cfg.max_concurrent_indexers, 4);
+        // The sidecar needs Unix sockets; elsewhere the default is in-process.
+        let expected = if cfg!(unix) {
+            crate::git::GitSensorMode::Sidecar
+        } else {
+            crate::git::GitSensorMode::InProcess
+        };
+        assert_eq!(cfg.git_sensor_mode(), expected);
+    }
+
+    #[test]
+    fn parses_git_sensor_config() {
+        let yaml_sidecar = r#"
+git_sensor: sidecar
+repos:
+  - id: ws
+    source: { type: workspace_dir, path: /srv/ws }
+"#;
+        let cfg_sidecar: FederationConfig = serde_yaml::from_str(yaml_sidecar).unwrap();
+        assert_eq!(
+            cfg_sidecar.git_sensor,
+            Some(crate::git::GitSensorMode::Sidecar)
+        );
+        assert_eq!(
+            cfg_sidecar.git_sensor_mode(),
+            crate::git::GitSensorMode::Sidecar
+        );
+
+        let yaml_inproc = r#"
+git_sensor: in_process
+repos:
+  - id: ws
+    source: { type: workspace_dir, path: /srv/ws }
+"#;
+        let cfg_inproc: FederationConfig = serde_yaml::from_str(yaml_inproc).unwrap();
+        assert_eq!(
+            cfg_inproc.git_sensor,
+            Some(crate::git::GitSensorMode::InProcess)
+        );
+        assert_eq!(
+            cfg_inproc.git_sensor_mode(),
+            crate::git::GitSensorMode::InProcess
+        );
     }
 
     #[test]
@@ -181,5 +260,31 @@ repos:
     source: { type: nonsense }
 "#;
         assert!(FederationConfig::load_from_str(yaml).is_err());
+    }
+
+    /// Regression for round-3 federation #5: two entries with the
+    /// same id used to silently keep only the second while the
+    /// first's on-disk `graph.bin` collided with the second's
+    /// `RepoIndex::new` read. `load_from_str` now rejects at parse
+    /// time so the operator sees the mistake on startup.
+    #[test]
+    fn rejects_duplicate_repo_ids() {
+        let yaml = r#"
+data_dir: /tmp
+repos:
+  - id: same
+    source: { type: workspace_dir, path: /srv/a }
+  - id: same
+    source: { type: workspace_dir, path: /srv/b }
+"#;
+        let err = FederationConfig::load_from_str(yaml).unwrap_err();
+        assert!(
+            matches!(err, LainError::Config(_)),
+            "expected Config error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("duplicate repo id 'same'"),
+            "error should name the duplicate id: {err}"
+        );
     }
 }

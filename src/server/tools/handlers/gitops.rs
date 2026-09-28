@@ -1,16 +1,14 @@
 //! GitOps domain handlers - git operations for agent workflow
 
 use crate::error::LainError;
-use crate::git::{ChangeType, GitSensor};
-use parking_lot::Mutex;
+use crate::git::{AnyGitSensor, ChangeType};
 use std::sync::Arc;
 
 pub fn get_file_diff(
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
     path_filter: Option<&str>,
 ) -> Result<String, LainError> {
-    let git_guard = git.lock();
-    let changes = git_guard.get_uncommitted_changes()?;
+    let changes = git.get_uncommitted_changes()?;
 
     if changes.is_empty() {
         return Ok("No uncommitted changes.".to_string());
@@ -21,7 +19,15 @@ pub fn get_file_diff(
     let filtered: Vec<_> = if let Some(p) = path_filter {
         changes
             .iter()
-            .filter(|c| c.path.to_string_lossy().contains(p))
+            // A repo-relative file or directory, not a substring of the
+            // absolute path (`a` matched every file under `/home/a…`).
+            .filter(|c| {
+                let full = c.path.to_string_lossy().replace('\\', "/");
+                let want = p.trim_start_matches("./").trim_end_matches('/');
+                full == want
+                    || full.ends_with(&format!("/{want}"))
+                    || full.contains(&format!("/{want}/"))
+            })
             .collect()
     } else {
         changes.iter().collect()
@@ -41,11 +47,10 @@ pub fn get_file_diff(
 }
 
 pub fn get_commit_history(
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
     limit: Option<usize>,
 ) -> Result<String, LainError> {
-    let git_guard = git.lock();
-    let commits = git_guard.get_commit_history(limit.unwrap_or(20))?;
+    let commits = git.get_commit_history(limit.unwrap_or(20))?;
 
     if commits.is_empty() {
         return Ok("No commit history found.".to_string());
@@ -63,7 +68,8 @@ pub fn get_commit_history(
             .unwrap_or("(no message)")
             .trim();
         result.push_str(&format!(
-            "**{}** ({} ago)\n  {}\n\n",
+            // `format_ago` already ends in "ago".
+            "**{}** ({})\n  {}\n\n",
             &commit.id[..7.min(commit.id.len())],
             time_str,
             first_line
@@ -73,21 +79,33 @@ pub fn get_commit_history(
     Ok(result)
 }
 
-pub fn get_branch_status(git: &Arc<Mutex<GitSensor>>) -> Result<String, LainError> {
-    let git_guard = git.lock();
-    let branch = git_guard.get_current_branch()?;
-    let is_valid = git_guard.is_valid();
+pub fn get_branch_status(git: &Arc<AnyGitSensor>) -> Result<String, LainError> {
+    let branch = git.get_current_branch()?;
+    let is_valid = git.is_valid();
 
     let mut status = String::from("## Git Branch Status\n\n");
     status.push_str(&format!("**Branch:** `{}`\n", branch));
-    status.push_str(&format!(
-        "**Status:**{}\n",
-        if is_valid {
-            " ✅ Clean"
-        } else {
-            " ⚠️ Not a git repo"
-        }
-    ));
+    if !is_valid {
+        status.push_str("**Status:** ⚠️ Not a git repo\n");
+        return Ok(status);
+    }
+    // "Clean" used to mean only "this is a git repository".
+    let changes = git.get_uncommitted_changes()?;
+    if changes.is_empty() {
+        status.push_str("**Status:** ✅ Clean\n");
+    } else {
+        let count =
+            |t: fn(&ChangeType) -> bool| changes.iter().filter(|c| t(&c.change_type)).count();
+        let staged = changes.iter().filter(|c| c.staged).count();
+        status.push_str(&format!(
+            "**Status:** ✏️ {} uncommitted change(s): {} modified, {} added, {} deleted ({} staged)\n",
+            changes.len(),
+            count(|t| matches!(t, ChangeType::Modified)),
+            count(|t| matches!(t, ChangeType::Added)),
+            count(|t| matches!(t, ChangeType::Deleted)),
+            staged
+        ));
+    }
 
     Ok(status)
 }

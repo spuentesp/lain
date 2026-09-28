@@ -11,14 +11,16 @@ use super::background::{
 };
 use super::config::{LainConfig, Transport, PRESENCE_EVENT_CHANNEL_CAPACITY};
 use super::server::LainServer;
+use crate::server::activity::ActivityTracker;
 use crate::server::attribution::AttributionBackend;
 use crate::server::auth::AuthState;
 use crate::server::error::LainError;
 use crate::server::events_log::EventsLog;
 use crate::server::federation::federated_index::FederatedIndex;
 use crate::server::federation::workspace::WorkspacesFile;
-use crate::server::git::GitSensor;
+use crate::server::git::AnyGitSensor;
 use crate::server::graph::GraphDatabase;
+use crate::server::intent::IntentRegistry;
 use crate::server::lsp::LspPool;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::VolatileOverlay;
@@ -27,6 +29,7 @@ use crate::server::reload::ReloadBus;
 use crate::server::tools::{ToolExecutor, ToolExecutorConfig};
 use crate::server::tuning::{load_tuning_config, TuningConfig};
 use parking_lot::{Mutex, RwLock};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -39,6 +42,7 @@ struct FederationServerConfig {
     federation: Arc<FederatedIndex>,
     transport: Transport,
     port: u16,
+    bind: IpAddr,
     repos_yaml: Option<PathBuf>,
     attribution: Arc<dyn AttributionBackend>,
     embedding_model: Option<PathBuf>,
@@ -190,7 +194,7 @@ fn allocate_staging_dir() -> Result<PathBuf, LainError> {
 /// Removes any stale file so a prior process's graph doesn't leak in.
 fn init_workspace_state(ws: &Path) -> Result<PathBuf, LainError> {
     let mem_dir = ws.join(".lain");
-    std::fs::create_dir_all(&mem_dir)?;
+    crate::config::create_state_dir(&mem_dir)?;
     let mem_path = mem_dir.join("graph.bin");
     let _ = std::fs::remove_file(&mem_path);
     Ok(mem_path)
@@ -201,8 +205,9 @@ fn init_workspace_state(ws: &Path) -> Result<PathBuf, LainError> {
 /// Otherwise return the placeholder. The single-repo path
 /// unblocks `find_anchors` / `explain_symbol` / `get_blast_radius`
 /// / `query_graph` / `get_function_callers` / `get_function_callees`
-/// without waiting for the round-2 federation-aware handler refactor
-/// (which is the open follow-up for multi-repo).
+/// at the executor root. In multi-repo mode the executor keeps the
+/// placeholder as its default, while MCP dispatch injects `repo_id` and
+/// `ToolRegistry::dispatch` rebinds the context to that repo's graph.
 /// The single registered repo's checkout, when there is exactly one.
 ///
 /// `config.workspace` is a staging placeholder in federation mode, so
@@ -256,12 +261,7 @@ fn build_embedder_pair(
     model_path: Option<&Path>,
     tuning: &TuningConfig,
 ) -> Result<(NlpEmbedder, CrossEncoder), LainError> {
-    let mut embedder = if let Some(p) = model_path {
-        let (model, tokenizer) = NlpEmbedder::resolve_model_paths(p);
-        NlpEmbedder::with_max_threads(&model, &tokenizer, tuning.ingestion.nlp_max_threads)?
-    } else {
-        NlpEmbedder::new_with_threads(tuning.ingestion.nlp_max_threads)?
-    };
+    let mut embedder = NlpEmbedder::load_or_stub(model_path, tuning.ingestion.nlp_max_threads);
     // The query/document asymmetry belongs to the model, so the
     // embedder carries it rather than each caller remembering.
     embedder.set_query_prefix(tuning.query_prefix.clone());
@@ -304,6 +304,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         federation,
         transport,
         port,
+        bind,
         repos_yaml,
         attribution,
         embedding_model,
@@ -331,7 +332,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     // federation mode — holds no code" — while claiming to be the
     // subject repo's history.
     let git_root = single_repo_root(&federation).unwrap_or_else(|| ws.to_path_buf());
-    let git = Arc::new(Mutex::new(GitSensor::new(&git_root)?));
+    let git = Arc::new(AnyGitSensor::from_env(&git_root)?);
     let lsp_pool = Arc::new(LspPool::new(&ws, 1, &tuning.runtime)?);
 
     let tool_executor = ToolExecutor::new(ToolExecutorConfig {
@@ -403,8 +404,14 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     // Presence layer: registry + occupancy + broadcast channel.
     // The expiry loop prunes stale sessions + claim TTLs and
     // broadcasts `PresenceEvent` notifications.
-    let presence = Arc::new(PresenceRegistry::new());
+    let presence = Arc::new(PresenceRegistry::from_config(&tuning.presence));
     let occupancy = Arc::new(OccupancyMap::new());
+    // Intent + activity trackers ride alongside presence/occupancy
+    // (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). They share
+    // the same persistence path and the same install_persist_callback
+    // wiring; the data they carry is additive on the JSON snapshot.
+    let intent_registry = Arc::new(IntentRegistry::new());
+    let activity_tracker = Arc::new(ActivityTracker::new());
     let (presence_event_tx, _) = broadcast::channel(PRESENCE_EVENT_CHANNEL_CAPACITY);
     // P1 #2: open the events log before `mem_path` is moved into the
     // LainServer struct — the expiry loop and attribution watcher tag
@@ -435,7 +442,14 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     let presence_state_seen = Arc::new(Mutex::new(None));
     let overlay_paths = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
     let overlay_revision = Arc::new(AtomicU64::new(0));
-    let id_namespace = crate::schema::RepoNamespace::fresh();
+    // A single bound repo already has a stable, repo-derived namespace;
+    // minting a random one here gave overlay and sensor nodes ids that
+    // matched nothing in that repo's graph.
+    let id_namespace = if *graph.namespace() != crate::schema::RepoNamespace::for_test() {
+        *graph.namespace()
+    } else {
+        crate::schema::RepoNamespace::fresh()
+    };
     let process_change_lock = Arc::new(tokio::sync::Mutex::new(()));
     let overlay_updated = Arc::new(Notify::new());
 
@@ -443,9 +457,12 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         Arc::clone(&presence_state_seen),
         presence,
         occupancy,
+        intent_registry,
+        activity_tracker,
         presence_event_tx.clone(),
         repos_yaml.as_deref(),
         ws.as_path(),
+        &tuning.presence,
     ));
 
     let ingest_handle = Arc::new(super::handles::IngestHandle::new(
@@ -456,7 +473,6 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         graph,
         overlay,
         embedder,
-        cross_encoder,
         git,
         lsp_pool,
         tool_executor,
@@ -480,6 +496,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         workspaces_lock,
         Some(transport),
         Some(port),
+        Some(bind),
         repos_yaml,
     ));
 
@@ -498,6 +515,21 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     ));
 
     let lifecycle_handle = Arc::new(super::handles::LifecycleInfo::new(now));
+
+    // Bug #2 from the 2026-09-18 Tauri postmortem: a libgit2 call wedged
+    // inside a spawn_blocking thread holds the parking_lot
+    // `GitSensor` mutex indefinitely. The mitigation in
+    // `build_core_memory` already fails-fast on `try_lock`, but the
+    // stuck thread keeps running and the federation only transitions
+    // to `Degraded` once the full `index_timeout()` budget exhausts.
+    // This watchdog surfaces the hang earlier, at
+    // `LAIN_GIT_SENSOR_BUSY_THRESHOLD_SECS` (default 30 s).
+    let git_busy_threshold_secs: u64 = std::env::var("LAIN_GIT_SENSOR_BUSY_THRESHOLD_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    let _watchdog = ingest_handle
+        .start_git_sensor_watchdog(lifecycle_handle.cancel_token(), git_busy_threshold_secs);
 
     let annotations = crate::server::annotations::AnnotationRegistry::open_best_effort(
         &crate::config::state_dir(),
@@ -543,6 +575,21 @@ impl LainServer {
         memory_path: &Path,
         embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
+        Self::with_git_sensor_mode(
+            workspace,
+            memory_path,
+            embedding_model,
+            crate::git::GitSensorMode::from_env(),
+        )
+    }
+
+    /// Construct a `LainServer` with an explicit `GitSensorMode`.
+    pub fn with_git_sensor_mode(
+        workspace: &Path,
+        memory_path: &Path,
+        embedding_model: Option<&Path>,
+        git_mode: crate::git::GitSensorMode,
+    ) -> Result<Self, LainError> {
         let config = LainConfig {
             workspace: workspace.to_path_buf(),
             memory_path: memory_path.to_path_buf(),
@@ -550,21 +597,17 @@ impl LainServer {
 
         let tuning = Arc::new(load_tuning_config(workspace));
 
-        let graph = GraphDatabase::new(memory_path)?;
+        // One stable namespace for every id this server mints, shared
+        // with the graph so the ids it derives itself (co-change File
+        // endpoints) match the scanner's.
+        let id_namespace = crate::schema::RepoNamespace::from_workspace(workspace);
+        let mut graph = GraphDatabase::new(memory_path)?;
+        graph.set_namespace(id_namespace);
         let overlay = VolatileOverlay::new();
 
-        let embedder = if let Some(model_path) = embedding_model {
-            let (model, tokenizer_path) = NlpEmbedder::resolve_model_paths(model_path);
-            NlpEmbedder::with_max_threads(
-                &model,
-                &tokenizer_path,
-                tuning.ingestion.nlp_max_threads,
-            )?
-        } else {
-            // No --embedding-model CLI arg; fall back to LAIN_EMBEDDING_MODEL
-            // env var (handled inside NlpEmbedder::new_with_threads).
-            NlpEmbedder::new_with_threads(tuning.ingestion.nlp_max_threads)?
-        };
+        // No --embedding-model CLI arg falls back to LAIN_EMBEDDING_MODEL
+        // (inside `new_with_threads`); either way a bad model is a warning.
+        let embedder = NlpEmbedder::load_or_stub(embedding_model, tuning.ingestion.nlp_max_threads);
 
         if embedder.is_stub() {
             info!("NLP embedder running in stub mode - semantic search unavailable");
@@ -590,7 +633,7 @@ impl LainServer {
             );
         }
 
-        let git = Arc::new(Mutex::new(GitSensor::new(workspace)?));
+        let git = Arc::new(AnyGitSensor::new(workspace, git_mode)?);
         let lsp_pool = Arc::new(LspPool::new(
             workspace,
             tuning.ingestion.lsp_pool_size,
@@ -625,17 +668,25 @@ impl LainServer {
         let presence_state_seen = Arc::new(Mutex::new(None));
         let overlay_paths = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let overlay_revision = Arc::new(AtomicU64::new(0));
-        let id_namespace = crate::schema::RepoNamespace::fresh();
         let process_change_lock = Arc::new(tokio::sync::Mutex::new(()));
         let overlay_updated = Arc::new(Notify::new());
 
+        // Intent + activity trackers ride alongside presence/occupancy
+        // (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`); same
+        // persistence story as the federation-mode constructor.
+        let intent_registry = Arc::new(IntentRegistry::new());
+        let activity_tracker = Arc::new(ActivityTracker::new());
+
         let presence_handle = Arc::new(super::handles::PresenceLayer::new(
             Arc::clone(&presence_state_seen),
-            Arc::new(PresenceRegistry::new()),
+            Arc::new(PresenceRegistry::from_config(&tuning.presence)),
             Arc::new(OccupancyMap::new()),
+            intent_registry,
+            activity_tracker,
             presence_event_tx.clone(),
             None,
             workspace,
+            &tuning.presence,
         ));
 
         let ingest_handle = Arc::new(super::handles::IngestHandle::new(
@@ -643,7 +694,6 @@ impl LainServer {
             graph,
             overlay,
             embedder,
-            cross_encoder,
             git,
             lsp_pool,
             tool_executor,
@@ -663,7 +713,7 @@ impl LainServer {
         ));
 
         let federation_handle = Arc::new(super::handles::FederationHandle::new(
-            None, None, None, None, None,
+            None, None, None, None, None, None,
         ));
 
         let audit_handle = Arc::new(super::handles::AuditState::new(events_log.clone()));
@@ -731,6 +781,7 @@ impl LainServer {
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
+        bind: IpAddr,
         repos_yaml: Option<PathBuf>,
         embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
@@ -738,6 +789,7 @@ impl LainServer {
             federation,
             transport,
             port,
+            bind,
             repos_yaml,
             default_attribution_backend(),
             embedding_model,
@@ -756,6 +808,7 @@ impl LainServer {
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
+        bind: IpAddr,
         repos_yaml: Option<PathBuf>,
         attribution: Arc<dyn AttributionBackend>,
         embedding_model: Option<&Path>,
@@ -764,6 +817,7 @@ impl LainServer {
             federation,
             transport,
             port,
+            bind,
             repos_yaml,
             attribution,
             embedding_model: embedding_model.map(Path::to_path_buf),
@@ -786,6 +840,7 @@ impl LainServer {
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
+        bind: IpAddr,
         workspaces: Arc<WorkspacesFile>,
         repos_yaml: Option<PathBuf>,
         embedding_model: Option<&Path>,
@@ -794,6 +849,7 @@ impl LainServer {
             federation,
             transport,
             port,
+            bind,
             workspaces,
             repos_yaml,
             default_attribution_backend(),
@@ -804,10 +860,12 @@ impl LainServer {
     /// Same as [`Self::with_federation_and_workspaces`] but lets the
     /// caller supply an explicit [`AttributionBackend`]. See
     /// [`Self::with_federation_with_attribution`] for `embedding_model`.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_federation_and_workspaces_with_attribution(
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
+        bind: IpAddr,
         workspaces: Arc<WorkspacesFile>,
         repos_yaml: Option<PathBuf>,
         attribution: Arc<dyn AttributionBackend>,
@@ -817,6 +875,7 @@ impl LainServer {
             federation,
             transport,
             port,
+            bind,
             repos_yaml,
             attribution,
             embedding_model: embedding_model.map(Path::to_path_buf),

@@ -247,3 +247,15 @@ src/server/mcp/command_center/
 `theme.css` is also served to the standalone detail views under `src/ui/`
 (`blast-radius.html`, `call-chain.html`, `coupling.html`), which is why it is a
 separate file rather than a block at the top of `styles.css`.
+
+## Record the demo
+
+Rebuild the screenshots and hero animation after changing the Command Center:
+
+```bash
+make record-demo
+```
+
+The underlying commands are `npm run record-demo --prefix tests/js` for the
+Playwright driver and `scripts/record-spa-demo.sh` for encoding. Use
+`make record-demo-small` to record against the offline fixture.

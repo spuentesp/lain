@@ -1,4 +1,6 @@
+use lain::server::activity::ActivityTracker;
 use lain::server::ingest::LainServer;
+use lain::server::intent::IntentRegistry;
 use lain::server::presence::{
     load_pair, save_pair, AgentKind, AgentMode, ClaimIntent, ClaimRequest,
 };
@@ -36,14 +38,28 @@ fn presence_and_occupancy_survive_lain_restart() {
             plan_revision: None,
         }],
     );
-    save_pair(&state_path, server1.presence(), server1.occupancy()).expect("save");
+    save_pair(
+        &state_path,
+        server1.presence(),
+        server1.occupancy(),
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .expect("save");
 
     // Drop server1.
     drop(server1);
 
     // Round 2: new server, same data dir.
     let server2 = LainServer::new(tmp.path(), &mem, None).expect("server");
-    load_pair(&state_path, server2.presence(), server2.occupancy()).expect("load");
+    load_pair(
+        &state_path,
+        server2.presence(),
+        server2.occupancy(),
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .expect("load");
 
     let active = server2.presence().list_active(true);
     assert_eq!(active.len(), 1, "agent should survive restart");

@@ -94,6 +94,57 @@ pub fn revision_meta(
     Some(meta)
 }
 
+/// [`arg_property_schema`] with per-tool meanings. Argument names are
+/// shared across tools with different meanings — `kind` is an agent kind
+/// for `register_agent` but an annotation kind for `add_annotation` — and
+/// the name-only mapping gave annotations the agent description.
+pub fn tool_arg_property_schema(
+    tool: &str,
+    name: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    if name == "kind" && matches!(tool, "add_annotation" | "list_annotations") {
+        let mut p = serde_json::Map::new();
+        p.insert("type".into(), "string".into());
+        p.insert(
+            "enum".into(),
+            serde_json::json!(["note", "warning", "todo", "investigation", "fix"]),
+        );
+        p.insert(
+            "description".into(),
+            "annotation kind (default: note)".into(),
+        );
+        return p;
+    }
+    // Wire annotation tools' target/refs args to the discriminated object
+    // schema so tools/list advertises the real shape agents must send.
+    if matches!(name, "target" | "refs")
+        && matches!(
+            tool,
+            "add_annotation" | "list_annotations" | "leave_handoff_note" | "get_pending_handoffs"
+        )
+    {
+        return arg_property_schema(name);
+    }
+    arg_property_schema(name)
+}
+
+/// One annotation target, shared by `target` and each `refs` item.
+fn annotation_target_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.",
+        "properties": {
+            "kind": { "type": "string", "enum": ["symbol", "file", "repo", "edge"] },
+            "symbol": { "type": "string" },
+            "file": { "type": "string" },
+            "repo_id": { "type": "string" },
+            "from": { "type": "string" },
+            "to": { "type": "string" }
+        },
+        "required": ["kind"]
+    })
+}
+
 /// Schema for one tool argument. The MCP `tools/list` response
 /// describes each tool's `input_schema` as a JSON Schema object;
 /// callers that don't include the schema field get rejected by
@@ -147,6 +198,17 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
             p.insert("items".into(), serde_json::json!({ "type": "string" }));
             p.insert("description".into(), "symbol names".into());
         }
+        // `lain_intent` deserializes these as `Vec<String>`; advertising
+        // them as strings made every schema-following call fail with
+        // "invalid type: string, expected a sequence".
+        "scopes" | "add_scopes" | "remove_scopes" => {
+            p.insert("type".into(), "array".into());
+            p.insert("items".into(), serde_json::json!({ "type": "string" }));
+            p.insert(
+                "description".into(),
+                "paths or symbols the intent covers".into(),
+            );
+        }
         "limit" => {
             p.insert("type".into(), "integer".into());
             p.insert("description".into(), "max results".into());
@@ -156,32 +218,25 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
         // of the JSON-string fallback the default branch would
         // produce.
         "target" => {
-            p.insert("type".into(), "object".into());
-            p.insert(
-                "description".into(),
-                "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.".into(),
-            );
-            p.insert(
-                "properties".into(),
-                serde_json::json!({
-                    "kind": { "type": "string", "enum": ["symbol", "file", "repo", "edge"] },
-                    "symbol": { "type": "string" },
-                    "file": { "type": "string" },
-                    "repo_id": { "type": "string" },
-                    "from": { "type": "string" },
-                    "to": { "type": "string" }
-                }),
-            );
+            if let serde_json::Value::Object(m) = annotation_target_schema() {
+                p = m;
+            }
         }
         "refs" => {
             p.insert("type".into(), "array".into());
-            p.insert(
-                "items".into(),
-                serde_json::json!({ "$ref": "#/properties/target" }),
-            );
+            // Inline, not `$ref: #/properties/target`: `leave_handoff_note`
+            // takes `refs` but has no `target`, so the reference dangled.
+            p.insert("items".into(), annotation_target_schema());
             p.insert(
                 "description".into(),
                 "Cross-references to other annotation targets.".into(),
+            );
+        }
+        "since_unix" => {
+            p.insert("type".into(), "number".into());
+            p.insert(
+                "description".into(),
+                "Drop events with ts_unix < this (Unix seconds).".into(),
             );
         }
         "since_unix_ms" => {
@@ -203,6 +258,23 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
             p.insert(
                 "description".into(),
                 "Handoff scope: 'workspace' | 'repo:<id>' | 'agent_kind:<k>'.".into(),
+            );
+        }
+        "depth" => {
+            p.insert("oneOf".into(), serde_json::json!([
+                { "type": "string", "description": "range string e.g. \"1..3\"" },
+                { "type": "integer", "description": "shorthand: integer N means 1..N (capped at 3)", "maximum": 3 }
+            ]));
+            p.insert(
+                "description".into(),
+                "Traversal depth range: \"1..3\" (string) or a single integer N (shorthand for 1..N, capped at 3).".into(),
+            );
+        }
+        "repo_id" => {
+            p.insert("type".into(), "string".into());
+            p.insert(
+                "description".into(),
+                "pin the repo that owns the symbol when the name exists in multiple repos".into(),
             );
         }
         // Booleans must be typed: the generic fallback is `string`, and

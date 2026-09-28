@@ -21,6 +21,15 @@ pub enum IndexState {
 #[serde(rename_all = "snake_case")]
 pub enum IndexPhase {
     Discovering,
+    /// Cold-boot warm-up of every LSP the workspace needs before
+    /// `Scanning` starts. Distinct from `Scanning` because the
+    /// prewarm pass uses [`crate::server::lsp::LSP_PREWARM_TIMEOUT`]
+    /// (30 s default) and does NOT touch the runtime circuit
+    /// breaker — a slow prewarm is the whole point. Surfaced
+    /// through `get_capabilities` so agents see "PrewarmingLsp"
+    /// in the readiness snapshot instead of "Scanning" while the
+    /// first LSP round-trip is taking 5 s on a cold cache.
+    PrewarmingLsp,
     Scanning,
     Resolving,
     Enriching,
@@ -34,6 +43,22 @@ pub struct Problem {
     pub message: String,
     pub remediation: String,
     pub retryable: bool,
+}
+
+/// Progress of the background embedding pass behind semantic search.
+///
+/// Embeddings are computed after the structural index, most-central
+/// symbols first, so semantic search answers early but its results keep
+/// changing until the pass ends — on psf/requests for about 50 s after
+/// `semantic_search` already said `ready`. This makes that visible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingProgress {
+    /// Symbols with an embedding.
+    pub embedded: u64,
+    /// Symbols the pass covers.
+    pub total: u64,
+    /// The pass is still working through them.
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +77,8 @@ pub struct IndexLifecycleSnapshot {
     pub retry_after_ms: Option<u64>,
     pub problem: Option<Problem>,
     pub warnings: Vec<Problem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embeddings: Option<EmbeddingProgress>,
 }
 
 impl IndexLifecycleSnapshot {
@@ -71,6 +98,7 @@ impl IndexLifecycleSnapshot {
             retry_after_ms: Some(3000),
             problem: None,
             warnings: Vec::new(),
+            embeddings: None,
         }
     }
 }
@@ -152,7 +180,7 @@ impl ReadinessHandle {
         });
     }
 
-    /// AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md §"Cooperative
+    /// AGENT_UX_ROADMAP.md M4 follow-up ("Cooperative
     /// cancellation token"): publish `unavailable_error` with the
     /// stable `index_cancelled` problem code. Distinct from
     /// `failed()` because shutdown is not a failure: `retryable:
@@ -569,6 +597,7 @@ mod gate_tests {
             retry_after_ms: Some(3000),
             problem: None,
             warnings: Vec::new(),
+            embeddings: None,
         }
     }
 

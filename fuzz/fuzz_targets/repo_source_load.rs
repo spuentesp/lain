@@ -29,8 +29,7 @@
 
 use lain::server::federation::config::FederationConfig;
 
-#[libfuzzer_sys::fuzz_target]
-fn fuzz_repo_source_load(data: &[u8]) {
+libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Same lossy round-trip the production loader does. Invalid
     // UTF-8 must not panic the fuzzer itself.
     let input = String::from_utf8_lossy(data);
@@ -50,4 +49,4 @@ fn fuzz_repo_source_load(data: &[u8]) {
         // path returns or errs, not what it returned.
         let _ = cfg.build_source_for(repo);
     }
-}
+});

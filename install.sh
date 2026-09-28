@@ -22,6 +22,7 @@ OPT_YES=""
 # OPT_INTERACTIVE already set (e.g. tests driving the helper) don't get
 # clobbered by the source-time re-initialization.
 OPT_INTERACTIVE="${OPT_INTERACTIVE:-}"
+OPT_YES_AUTO="${OPT_YES_AUTO:-}"
 
 # Colors
 RED='\033[0;31m'
@@ -104,6 +105,10 @@ apply_noninteractive_defaults() {
     return 0   # stdin is a real terminal; keep existing behavior
   fi
   OPT_YES="yes"
+  # Remember that --yes was inferred, not asked for: under `curl | bash`
+  # stdin is the pipe even when a person is at the terminal, and the PATH
+  # step below can still ask them through /dev/tty.
+  OPT_YES_AUTO="yes"
   echo "[install.sh] stdin is not a TTY — enabling --yes mode automatically."
   echo "[install.sh] Pass --interactive to answer prompts (e.g. via heredoc)."
   return 0
@@ -139,6 +144,19 @@ prompt_path_mutation() {
   if [ -n "$OPT_YES" ] && [ -t 0 ]; then
     # TTY + explicit --yes: user confirmed on a real terminal.
     do_add="yes"
+  elif [ -n "$OPT_YES_AUTO" ] && [ -n "$shell_rc" ] && (exec 3</dev/tty) 2>/dev/null; then
+    # `curl … | bash` at a terminal: stdin is the script, but a person is
+    # there. The README promises this install puts lain on PATH, so ask
+    # them on the terminal itself (default yes) rather than never doing it.
+    echo ""
+    echo -e "${YELLOW}[PATH]${NC} lain is not in your PATH."
+    # Time out rather than hang: a script run with piped stdin from a
+    # terminal (`yes | ./install.sh`) has a /dev/tty but nobody answering.
+    read -t 30 -p "Add to $shell_rc automatically? [Y/n] (30s) " -n 1 -r path_reply </dev/tty || path_reply="n"
+    echo ""
+    if [[ $path_reply =~ ^[Yy]$ ]] || [ -z "$path_reply" ]; then
+      do_add="yes"
+    fi
   elif [ -n "$OPT_YES" ] && [ ! -t 0 ]; then
     # Non-interactive install — the footgun we're fixing.
     echo "[PATH] stdin is not a TTY; skipping auto-mutation of $shell_rc."
@@ -316,6 +334,132 @@ check_writeable() {
   return 1
 }
 
+# Detect which hash tool is available. Mirrors npm-shim/scripts/runtime.js:
+# sha256sum on Linux, shasum -a 256 on macOS.
+_hash_tool() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "sha256sum"
+  elif command -v shasum >/dev/null 2>&1; then
+    # macOS ships `shasum` (perl-based); -a 256 selects SHA-256.
+    echo "shasum -a 256"
+  else
+    echo ""
+  fi
+}
+
+# Compute the SHA-256 hex digest of a file using the available tool.
+_sha256_of() {
+  local file="$1"
+  local tool
+  tool=$(_hash_tool)
+  if [ -z "$tool" ]; then
+    return 1
+  fi
+  if [ ! -f "$file" ]; then
+    return 1
+  fi
+  case "$tool" in
+    sha256sum)
+      sha256sum "$file" 2>/dev/null | cut -d' ' -f1 ;;
+    "shasum -a 256")
+      shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1 ;;
+  esac
+}
+
+# Parse the expected SHA-256 hex digest from a SHA256SUMS text block
+# for the given asset filename.  Handles both GNU coreutils plain format
+# and the `*`-prefixed BSD/md5sum style.
+_parse_sha256sums() {
+  local sums_text="$1"
+  local asset_name="$2"
+  local line match
+  while IFS= read -r line || [ -n "$line" ]; do
+    match=$(echo "$line" | sed -nE 's/^([a-fA-F0-9]{64})[[:space:]]+\*?(.+)$/\1 \2/p')
+    if [ -z "$match" ]; then
+      continue
+    fi
+    local digest filename
+    digest=$(echo "$match" | cut -d' ' -f1)
+    filename=$(echo "$match" | cut -d' ' -f2-)
+    if [ "$filename" = "$asset_name" ]; then
+      echo "$digest"
+      return 0
+    fi
+  done <<< "$sums_text"
+  return 1
+}
+
+# Download SHA256SUMS from the release, then verify the downloaded tarball
+# against the expected hash BEFORE extraction.  Fails loudly on mismatch.
+_verify_archive() {
+  local version="$1"
+  local platform="$2"
+  local tmpdir="$3"
+  local asset_name="lain-${version}-${platform}.tar.gz"
+  local tarball="${tmpdir}/lain.tar.gz"
+  local sums_url="https://github.com/$REPO/releases/download/v${version}/SHA256SUMS"
+
+  info "Fetching SHA256SUMS for v${version}..."
+
+  local sums_text
+  if command -v curl >/dev/null 2>&1; then
+    sums_text=$(curl -fsSL "$sums_url") || {
+      error "Failed to download SHA256SUMS from $sums_url"
+      return 1
+    }
+  elif command -v wget >/dev/null 2>&1; then
+    sums_text=$(wget -q -O- "$sums_url") || {
+      error "Failed to download SHA256SUMS from $sums_url"
+      return 1
+    }
+  else
+    error "curl or wget is required to verify checksums."
+    return 1
+  fi
+
+  local expected
+  expected=$(_parse_sha256sums "$sums_text" "$asset_name") || {
+    error "SHA256SUMS has no entry for $asset_name"
+    echo ""
+    echo "Expected one of:"
+    echo "  lain-${version}-x86_64-unknown-linux-gnu.tar.gz"
+    echo "  lain-${version}-aarch64-apple-darwin.tar.gz"
+    echo "  lain-${version}-x86_64-pc-windows-msvc.tar.gz"
+    return 1
+  }
+
+  local tool
+  tool=$(_hash_tool)
+  if [ -z "$tool" ]; then
+    error "Neither sha256sum nor shasum is available. Cannot verify archive checksum."
+    return 1
+  fi
+
+  info "Verifying ${asset_name}..."
+
+  local actual
+  actual=$(_sha256_of "$tarball") || {
+    error "Failed to compute SHA-256 of downloaded archive."
+    return 1
+  }
+
+  if [ "$actual" != "$expected" ]; then
+    error "Checksum mismatch for ${asset_name}!"
+    echo ""
+    echo "  Expected:  $expected"
+    echo "  Actual:    $actual"
+    echo ""
+    echo "  This archive may have been corrupted in transit or tampered with."
+    echo "  Checksum source: $sums_url"
+    echo ""
+    echo "  To retry, re-run the installer."
+    return 1
+  fi
+
+  info "Checksum verified OK."
+  return 0
+}
+
 install() {
   local version="$1"
   local platform="$2"
@@ -346,6 +490,13 @@ install() {
     exit 1
   fi
 
+  # SHA-256 of the tarball against SHA256SUMS — done before extraction so
+  # a corrupted/tampered archive never gets extracted to disk.
+  if ! _verify_archive "$version" "$platform" "$tmpdir"; then
+    rm -rf "$tmpdir"
+    exit 1
+  fi
+
   info "Extracting..."
   tar xzf "${tmpdir}/lain.tar.gz" -C "$tmpdir" || {
     error "Failed to extract. The release may be malformed."
@@ -366,6 +517,14 @@ install() {
     exit 1
   fi
 
+  if [ -f "${tmpdir}/lain-git-sidecar" ]; then
+    mv "${tmpdir}/lain-git-sidecar" "${INSTALL_DIR}/lain-git-sidecar"
+    chmod +x "${INSTALL_DIR}/lain-git-sidecar"
+  elif [ -f "${tmpdir}/lain-git-sidecar.exe" ]; then
+    mv "${tmpdir}/lain-git-sidecar.exe" "${INSTALL_DIR}/lain-git-sidecar.exe"
+    chmod +x "${INSTALL_DIR}/lain-git-sidecar.exe"
+  fi
+
   chmod +x "${INSTALL_DIR}/${BIN_NAME}" || chmod +x "${INSTALL_DIR}/${BIN_NAME}.exe"
   rm -rf "$tmpdir"
 
@@ -380,21 +539,36 @@ verify_installation() {
     return 1
   fi
 
-  # Try to run it
-  if "${bin_path}" --version >/dev/null 2>&1; then
-    local installed_version
-    installed_version=$("${bin_path}" --version 2>&1 | head -1)
-    info "Successfully installed: $installed_version"
-    return 0
-  elif "${bin_path}.exe" --version >/dev/null 2>&1; then
-    local installed_version
-    installed_version=$("${bin_path}.exe" --version 2>&1 | head -1)
-    info "Successfully installed: $installed_version"
-    return 0
+  # Determine which binary was installed.
+  local run_bin="$bin_path"
+  [ ! -f "$bin_path" ] && run_bin="${bin_path}.exe"
+  [ ! -f "$run_bin" ] && run_bin="$bin_path"
+
+  # Second pass: binary --version check.
+  local installed_version
+  if "${run_bin}" --version >/dev/null 2>&1; then
+    installed_version=$("${run_bin}" --version 2>&1 | head -1)
+    info "Binary verified: $installed_version"
   else
     warn "Binary installed but --version check failed."
     return 1
   fi
+
+  # Third pass: sidecar --version check (non-fatal if only the sidecar
+  # check fails — the main binary is fine and users can update separately).
+  local sidecar_path="${INSTALL_DIR}/lain-git-sidecar"
+  [ ! -f "$sidecar_path" ] && sidecar_path="${INSTALL_DIR}/lain-git-sidecar.exe"
+  if [ -f "$sidecar_path" ]; then
+    if "${sidecar_path}" --version >/dev/null 2>&1; then
+      local sidecar_version
+      sidecar_version=$("${sidecar_path}" --version 2>&1 | head -1)
+      info "Sidecar verified: $sidecar_version"
+    else
+      warn "Sidecar binary present but --version check failed."
+    fi
+  fi
+
+  return 0
 }
 
 main() {
@@ -529,8 +703,13 @@ main() {
   # Offer to download ONNX model
   local model_path=""
   if [ -n "$OPT_EMBEDDING_MODEL" ]; then
-    model_path="$OPT_EMBEDDING_MODEL"
-    info "Using provided model: $model_path"
+    if [ -e "$OPT_EMBEDDING_MODEL" ]; then
+      # Absolute: the registration is global and runs from any directory.
+      model_path="$(cd "$(dirname "$OPT_EMBEDDING_MODEL")" && pwd)/$(basename "$OPT_EMBEDDING_MODEL")"
+      info "Using provided model: $model_path"
+    else
+      warn "--embedding-model $OPT_EMBEDDING_MODEL does not exist; registering without a model (semantic search off)"
+    fi
   elif [ -n "$OPT_DOWNLOAD_MODEL" ]; then
     model_path=$(download_onnx_model)
   elif [ -z "$OPT_YES" ]; then
@@ -550,15 +729,18 @@ main() {
   # no repos.yaml, and runs on stdio. (`lain init` was removed in the
   # CLI consolidation; registration is done here directly.)
   local lain_bin="${INSTALL_DIR}/${BIN_NAME}"
-  local lain_args="mcp"
+  # An array, so a model path with spaces stays one argument.
+  local lain_args=(mcp)
   if [ -n "$model_path" ]; then
-    lain_args="mcp --embedding-model $model_path"
+    lain_args=(mcp --embedding-model "$model_path")
   fi
+  # JSON string escaping for the paths shown in the manual-config hint.
+  json_str() { local v=${1//\\/\\\\}; v=${v//\"/\\\"}; printf '"%s"' "$v"; }
   local mcp_json
   if [ -n "$model_path" ]; then
-    mcp_json=$(printf '{"mcpServers":{"lain":{"command":"%s","args":["mcp","--embedding-model","%s"]}}}' "$lain_bin" "$model_path")
+    mcp_json=$(printf '{"mcpServers":{"lain":{"command":%s,"args":["mcp","--embedding-model",%s]}}}' "$(json_str "$lain_bin")" "$(json_str "$model_path")")
   else
-    mcp_json=$(printf '{"mcpServers":{"lain":{"command":"%s","args":["mcp"]}}}' "$lain_bin")
+    mcp_json=$(printf '{"mcpServers":{"lain":{"command":%s,"args":["mcp"]}}}' "$(json_str "$lain_bin")")
   fi
 
   echo ""
@@ -576,8 +758,11 @@ main() {
   case "$agent" in
     claude)
       if command -v claude >/dev/null 2>&1; then
-        # shellcheck disable=SC2086
-        if claude mcp add --scope user lain -- "$lain_bin" $lain_args; then
+        # A re-run replaces the entry: `add` refuses an existing name.
+        if claude mcp get lain >/dev/null 2>&1; then
+          claude mcp remove --scope user lain >/dev/null 2>&1 || true
+        fi
+        if claude mcp add --scope user lain -- "$lain_bin" "${lain_args[@]}"; then
           info "Registered 'lain' MCP server with Claude Code (user scope)"
         else
           warn "claude mcp add failed; add this manually to your MCP config:"
@@ -604,9 +789,21 @@ main() {
     info "Installation complete!"
     echo ""
     echo "Next steps:"
-    echo "  1. Open a new terminal (or: source ~/.zshrc)"
-    echo "  2. Restart your agent (Claude Code, Cursor, etc.)"
-    echo "  3. Try: lain query \"find Function | limit 5\""
+    local rc_hint="~/.bashrc"
+    if [ "$(basename "${SHELL:-}")" = "zsh" ]; then rc_hint="~/.zshrc"; fi
+    local lain_cmd="lain"
+    if check_in_path; then
+      echo "  1. Restart your agent (Claude Code, Cursor, etc.)"
+    elif grep -qs "$INSTALL_DIR" "$HOME/.bashrc" "$HOME/.zshrc" 2>/dev/null; then
+      echo "  1. Open a new terminal (or: source $rc_hint), then restart your agent"
+    else
+      # Nothing was added to a shell rc (non-interactive install): the
+      # full path works now; the PATH line above makes `lain` work too.
+      lain_cmd="${INSTALL_DIR}/${BIN_NAME}"
+      echo "  1. Restart your agent (Claude Code, Cursor, etc.)"
+    fi
+    echo "  2. In a repository: $lain_cmd setup    (checks the index, offers language servers)"
+    echo "  3. Try: $lain_cmd oneshot find_anchors"
     echo ""
     echo "Documentation: https://github.com/spuentesp/lain"
   else

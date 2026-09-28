@@ -18,7 +18,7 @@
 //! convention used by `presence_tools` so the handler does not need
 //! to know whether the call needs the orchestrator.
 
-use crate::server::audit::{read_audit_log, AuditEvent};
+use crate::server::audit::{read_audit_log, read_audit_log_recent, AuditEvent};
 use crate::server::glob_match;
 use crate::server::ingest::LainServer;
 use serde::Deserialize;
@@ -29,7 +29,14 @@ use std::path::Path;
 pub struct GetAuditLogArgs {
     pub since_unix: Option<f64>,
     pub path_glob: Option<String>,
+    /// Most recent matching events to return. Default
+    /// [`AUDIT_LOG_DEFAULT_LIMIT`].
+    pub limit: Option<usize>,
 }
+
+/// Unbounded, the tool returned the whole rotation window — 40 MB on a
+/// long-lived install.
+const AUDIT_LOG_DEFAULT_LIMIT: usize = 200;
 
 /// Read the audit log from the server's configured state directory
 /// (resolved via `LainServer::state_dir_for_audit`), apply the
@@ -39,7 +46,7 @@ pub struct GetAuditLogArgs {
 /// `is_error: true` `CallToolResult`.
 pub fn run_get_audit_log(server: &LainServer, args: Value) -> Result<Value, String> {
     let state_dir = server.state_dir_for_audit();
-    run_get_audit_log_with_dir(&state_dir, args)
+    run_get_audit_log_with_dir(&state_dir, Some(&server.audit_scope()), args)
 }
 
 /// Pure form of [`run_get_audit_log`] used by the test suite: takes
@@ -49,18 +56,31 @@ pub fn run_get_audit_log(server: &LainServer, args: Value) -> Result<Value, Stri
 /// keeping the tool logic itself decoupled from the server
 /// construction so a unit test can pre-populate a `tempdir` without
 /// touching `~/.local/lain/state`.
-pub fn run_get_audit_log_with_dir(state_dir: &Path, args: Value) -> Result<Value, String> {
-    let a: GetAuditLogArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    let mut events = read_audit_log(state_dir, a.since_unix).map_err(|e| e.to_string())?;
-    if let Some(pattern) = a.path_glob {
-        // Belt-and-braces: AuditEvent.path is already a forward-slash
-        // String (the write site calls posix_string), so passing it
-        // through glob_match directly is correct. The conversion was
-        // needed when the field was a PathBuf because Display-based
-        // serialization on Windows turned `/` into `\`; with the
-        // String type the wire format is whatever the writer put in.
-        events.retain(|e| glob_match::simple(&pattern, &e.path));
+/// Whether `ev` belongs to `scope`. Events from before `AuditEvent::scope`
+/// existed carry none and are kept; they cannot be attributed.
+fn in_scope(ev: &AuditEvent, scope: Option<&str>) -> bool {
+    match (scope, ev.scope.as_deref()) {
+        (Some(want), Some(have)) => want == have,
+        _ => true,
     }
+}
+
+pub fn run_get_audit_log_with_dir(
+    state_dir: &Path,
+    scope: Option<&str>,
+    args: Value,
+) -> Result<Value, String> {
+    let a: GetAuditLogArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    let limit = a.limit.unwrap_or(AUDIT_LOG_DEFAULT_LIMIT);
+    // AuditEvent.path is already a forward-slash String (the write site
+    // calls posix_string), so it goes through glob_match as is.
+    let events = read_audit_log_recent(state_dir, a.since_unix, limit, |e| {
+        in_scope(e, scope)
+            && a.path_glob
+                .as_deref()
+                .is_none_or(|pattern| glob_match::simple(pattern, &e.path))
+    })
+    .map_err(|e| e.to_string())?;
     serde_json::to_value(events).map_err(|e| e.to_string())
 }
 
@@ -108,15 +128,20 @@ const RECENT_ACTIVITY_DEFAULT_LIMIT: usize = 20;
 
 pub fn run_get_recent_activity(server: &LainServer, args: Value) -> Result<Value, String> {
     let state_dir = server.state_dir_for_audit();
-    run_get_recent_activity_with_dir(&state_dir, args)
+    run_get_recent_activity_with_dir(&state_dir, Some(&server.audit_scope()), args)
 }
 
-pub fn run_get_recent_activity_with_dir(state_dir: &Path, args: Value) -> Result<Value, String> {
+pub fn run_get_recent_activity_with_dir(
+    state_dir: &Path,
+    scope: Option<&str>,
+    args: Value,
+) -> Result<Value, String> {
     let a: GetRecentActivityArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let limit = a.limit.unwrap_or(RECENT_ACTIVITY_DEFAULT_LIMIT);
     let group_by = a.group_by.as_deref().unwrap_or("path");
 
     let mut events = read_audit_log(state_dir, a.since_unix).map_err(|e| e.to_string())?;
+    events.retain(|e| in_scope(e, scope));
     if let Some(pattern) = a.path_glob.as_deref() {
         events.retain(|e| glob_match::simple(pattern, &e.path));
     }
@@ -218,6 +243,7 @@ mod tests {
             racers: vec![],
             plan_revision: None,
             landed_revision: 1,
+            scope: None,
         }
     }
 
@@ -249,6 +275,7 @@ mod tests {
         // dispatcher's `serde_json::to_value` step is wired.
         let value = run_get_audit_log_with_dir(
             state_dir,
+            None,
             serde_json::json!({ "since_unix": null, "path_glob": "/b/**" }),
         )
         .expect("run_get_audit_log_with_dir");
@@ -296,9 +323,37 @@ mod tests {
             racers: vec![],
             plan_revision: None,
             landed_revision: 0,
+            scope: None,
         };
         let key = group_key(&event, "path");
         assert_eq!(key, "src/a.rs");
         assert!(!key.contains('\\'));
+    }
+
+    /// One audit file serves every workspace on the machine; each server
+    /// reads only its own events (plus unattributable legacy ones).
+    #[test]
+    fn audit_reads_are_scoped_to_the_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (ts, scope) in [(1.0, Some("repo-a")), (2.0, Some("repo-b")), (3.0, None)] {
+            let mut ev = sample(ts, "x", "src/lib.rs");
+            ev.scope = scope.map(str::to_string);
+            append_edit_event(tmp.path(), &ev).unwrap();
+        }
+        let ts_of = |v: Value| -> Vec<f64> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["ts_unix"].as_f64().unwrap())
+                .collect()
+        };
+        let a =
+            run_get_audit_log_with_dir(tmp.path(), Some("repo-a"), serde_json::json!({})).unwrap();
+        assert_eq!(ts_of(a), vec![1.0, 3.0]);
+
+        let digest =
+            run_get_recent_activity_with_dir(tmp.path(), Some("repo-b"), serde_json::json!({}))
+                .unwrap();
+        assert_eq!(digest["total_events"], 2);
     }
 }

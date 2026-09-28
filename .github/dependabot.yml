@@ -11,8 +11,14 @@
 version: 2
 
 updates:
+  # Per docs/CONTRIBUTING_AGENTS.md and AGENTS.md: all PRs target
+  # `dev`; `main` is release-only. Pinning Dependabot's
+  # target-branch prevents it from opening against `main` by
+  # default (which is what happened with the 10 stale PRs that
+  # targeted `main` and got closed in commit fixing this).
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -34,6 +40,7 @@ updates:
 
   - package-ecosystem: "cargo"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -48,6 +55,7 @@ updates:
 
   - package-ecosystem: "npm"
     directory: "/npm-shim"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"

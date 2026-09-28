@@ -35,6 +35,7 @@
 //! `LainServer::with_federation*` constructed inside `run_server`.
 
 use anyhow::{anyhow, Context, Result};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 /// Resolve the workspace list for `lain mcp`.
@@ -188,7 +189,7 @@ pub async fn run_mcp(
     // `.lain/graph.bin` lives next to the workspace so the persisted
     // graph follows the repo. Picked up by `save_state` / `load_state`.
     let mem_dir = workspace.join(".lain");
-    std::fs::create_dir_all(&mem_dir)
+    crate::config::create_state_dir(&mem_dir)
         .with_context(|| format!("create_dir_all({})", mem_dir.display()))?;
     let mem_path = mem_dir.join("graph.bin");
 
@@ -224,6 +225,17 @@ pub async fn run_mcp(
     // graph never advances past the commit it was first built from.
     crate::server::ingest::background::spawn_commit_sync(server.clone());
 
+    // Expire stale sessions and claim TTLs. Only the federation server
+    // started this, so under `lain mcp` a crashed agent's edit claims — and
+    // any `ttl_seconds` claim — were never dropped, blocking every other
+    // agent on those files for good.
+    crate::server::ingest::background::spawn_presence_expiry_loop(
+        server.presence().clone(),
+        server.occupancy().clone(),
+        server.presence_event_tx().clone(),
+        server.audit_handle().events_log().clone(),
+    );
+
     // Hand the executor's tool surface to a federation-free
     // `LainMcpServer`. Single-workspace mode — per-repo tools run
     // against `server.tool_executor.graph` directly. The re-index
@@ -245,6 +257,7 @@ pub async fn run_mcp(
 /// `run_server --transport stdio`. The tempfile is cleaned up after
 /// the server exits (success or failure).
 async fn run_mcp_federation(workspaces: &[PathBuf], embedding_model: Option<&Path>) -> Result<()> {
+    sweep_dead_federation_files();
     let yaml = build_repos_yaml_for_workspaces(workspaces);
     let tmp_path = std::env::temp_dir().join(format!(
         "lain-mcp-repos-{}-{}.yaml",
@@ -265,14 +278,70 @@ async fn run_mcp_federation(workspaces: &[PathBuf], embedding_model: Option<&Pat
     // and the stdio MCP server. We just need to feed it the config
     // and let it do its job. `workspace_arg = ""` means "all repos"
     // (no workspace filter).
-    let result =
-        crate::cli::server::run_server(&tmp_path, "stdio", 0, "info", "", false, embedding_model)
-            .await;
+    let result = crate::cli::server::run_server(
+        &tmp_path,
+        "stdio",
+        0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "info",
+        "",
+        false,
+        embedding_model,
+    )
+    .await;
 
     // Cleanup. Best-effort — a leftover tempfile in /tmp is annoying
-    // but not a correctness issue.
+    // but not a correctness issue. A process killed by a signal never gets
+    // here; `sweep_dead_federation_files` removes its files next time.
+    let _ = std::fs::remove_file(crate::cli::signal::socket_path_for(&tmp_path));
     let _ = std::fs::remove_file(&tmp_path);
     result
+}
+
+/// Remove `lain-mcp-repos-<pid>-…` configs and reload sockets left by
+/// `lain mcp` processes that no longer exist (killed by SIGTERM/SIGINT,
+/// which skip the cleanup above).
+fn sweep_dead_federation_files() {
+    let alive = |pid: &str| {
+        if pid == std::process::id().to_string() {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    };
+    let dirs = [
+        std::env::temp_dir(),
+        crate::config::run_dir(),
+        PathBuf::from("/tmp"),
+    ];
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(rest) = name
+                .strip_prefix("lain-mcp-repos-")
+                .or_else(|| name.strip_prefix("lain-lain-mcp-repos-"))
+            else {
+                continue;
+            };
+            let pid = rest.split('-').next().unwrap_or("");
+            if !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()) && !alive(pid) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Run a read-only **sidecar** MCP server against an owner.

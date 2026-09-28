@@ -48,8 +48,9 @@ async fn global_id_format() {
         NodeType::Function,
         "src/lib.rs",
         "f",
+        None,
     );
-    assert_eq!(id.as_str(), "repo-a:Function:src/lib.rs:f");
+    assert_eq!(id.as_str(), "repo-a:Function:src/lib.rs:f:0");
 }
 
 #[test]
@@ -59,7 +60,7 @@ fn resolve_symbol_unique_match_returns_repo() {
     let backend = fed.backend();
     backend
         .upsert_node_global(
-            "repo-a:Function:src/lib.rs:only_one",
+            "repo-a:Function:src/lib.rs:only_one:0",
             NodeType::Function,
             "src/lib.rs",
             "only_one",
@@ -86,7 +87,7 @@ fn resolve_symbol_multiple_matches_returns_ambiguous() {
     let backend = fed.backend();
     backend
         .upsert_node_global(
-            "repo-a:Function:src/lib.rs:shared",
+            "repo-a:Function:src/lib.rs:shared:0",
             NodeType::Function,
             "src/lib.rs",
             "shared",
@@ -94,7 +95,7 @@ fn resolve_symbol_multiple_matches_returns_ambiguous() {
         .unwrap();
     backend
         .upsert_node_global(
-            "repo-b:Function:src/lib.rs:shared",
+            "repo-b:Function:src/lib.rs:shared:0",
             NodeType::Function,
             "src/lib.rs",
             "shared",
@@ -187,7 +188,7 @@ async fn project_repo_cross_repo_match_does_not_strip_already_published_peer_dat
     fed.project_repo(&RepoId::new("b").unwrap()).await.unwrap();
     let published = fed
         .backend()
-        .get_node("b:Function:src/lib.rs:shared_helper")
+        .get_node("b:Function:src/lib.rs:shared_helper:20")
         .unwrap();
     assert_eq!(
         published.and_then(|n| n.line_end),
@@ -202,7 +203,7 @@ async fn project_repo_cross_repo_match_does_not_strip_already_published_peer_dat
 
     let after = fed
         .backend()
-        .get_node("b:Function:src/lib.rs:shared_helper")
+        .get_node("b:Function:src/lib.rs:shared_helper:20")
         .unwrap();
     assert_eq!(
         after.and_then(|n| n.line_end),

@@ -10,10 +10,11 @@ use crate::server::federation::repo_id::RepoId;
 use crate::server::federation::workspace::WorkspacesFile;
 use crate::server::ingest::config::Transport;
 use parking_lot::RwLock;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Federation index, workspaces lock, transport, port, and the
+/// Federation index, workspaces lock, transport, port, bind address, and the
 /// `repos.yaml` path the server was launched with. `None` on every
 /// field for single-workspace servers constructed via `LainServer::new`.
 pub struct FederationHandle {
@@ -21,6 +22,7 @@ pub struct FederationHandle {
     pub(crate) federation_workspaces: Option<Arc<RwLock<WorkspacesFile>>>,
     pub(crate) federation_transport: Option<Transport>,
     pub(crate) federation_port: Option<u16>,
+    pub(crate) federation_bind: Option<IpAddr>,
     pub(crate) repos_yaml: Option<PathBuf>,
 }
 
@@ -30,6 +32,7 @@ impl FederationHandle {
         federation_workspaces: Option<Arc<RwLock<WorkspacesFile>>>,
         federation_transport: Option<Transport>,
         federation_port: Option<u16>,
+        federation_bind: Option<IpAddr>,
         repos_yaml: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -37,6 +40,7 @@ impl FederationHandle {
             federation_workspaces,
             federation_transport,
             federation_port,
+            federation_bind,
             repos_yaml,
         }
     }
@@ -71,6 +75,13 @@ impl FederationHandle {
     /// single-workspace servers.
     pub fn port(&self) -> Option<u16> {
         self.federation_port
+    }
+
+    /// The address the HTTP listener binds on. Defaults to loopback
+    /// (`127.0.0.1`) when `federation_bind` is `None`.
+    pub fn bind(&self) -> IpAddr {
+        self.federation_bind
+            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
     }
 
     /// Path to the `repos.yaml` this server was launched with, if any.
@@ -135,14 +146,13 @@ impl FederationHandle {
                 "FederationHandle::add_repo called on a non-federation server".into(),
             )
         })?;
-        let source = crate::server::federation::config::FederationConfig::default()
-            .build_source_for(repo)
-            .map_err(|e| {
-                crate::server::error::LainError::Config(format!(
-                    "build_source_for({}): {e}",
-                    repo.id
-                ))
-            })?;
+        let config = crate::server::federation::config::FederationConfig {
+            data_dir: data_dir.to_path_buf(),
+            ..Default::default()
+        };
+        let source = config.build_source_for(repo).map_err(|e| {
+            crate::server::error::LainError::Config(format!("build_source_for({}): {e}", repo.id))
+        })?;
         // `WorkspaceDirSource::fetch` is a no-op; `LocalCloneSource` and
         // `ShallowCloneSource` actually clone. Hot-reload only sees
         // already-on-disk sources (`workspace_dir`), but we still call
@@ -152,6 +162,58 @@ impl FederationHandle {
         let repo_id = source.id().clone();
         fed.add_repo(source, data_dir).await?;
         fed.project_repo(&repo_id).await?;
+        // Index it, as startup does for every repo: adding only registered
+        // an empty graph that stayed `indexing` until the next restart.
+        // Then link calls between it and the others, and watch it.
+        //
+        // Order matters and mirrors the cold-start path in
+        // `crate::server::federation::loader`: wire the cross-repo
+        // resolver BEFORE `index()` so the new repo's outgoing
+        // `Calls` resolve into the existing federation; index the
+        // repo so its symbols exist; project it so existing repos'
+        // relink passes can resolve calls INTO it; THEN relink
+        // existing repos. Without this order, `relink_cross_repo`
+        // runs against a `symbol_to_repos` that does not yet contain
+        // the new repo's symbols and the new repo's own calls
+        // silently drop without a resolver — the federation-wide
+        // graph stays incomplete until an unrelated filesystem edit
+        // triggers a watcher re-link.
+        let fed = Arc::clone(fed);
+        let id = repo_id.clone();
+        tokio::spawn(async move {
+            let Some(repo) = fed.get_repo(&id) else {
+                return;
+            };
+            // 1. Wire resolver before index so the new repo's calls resolve.
+            repo.set_cross_repo_resolver(fed.clone());
+            if let Err(e) = repo.index().await {
+                tracing::warn!("indexing hot-added repo '{id}' failed: {e}");
+                repo.set_health(crate::federation::health::RepoHealth::Degraded);
+                return;
+            }
+            // 2. Project so existing repos' relinks see this repo's symbols.
+            if let Err(e) = fed.project_repo(&id).await {
+                tracing::warn!("project_repo for '{id}' failed: {e}");
+            }
+            // 3. Relink every repo (now they can resolve calls both ways).
+            for (other, _) in fed.list_repos() {
+                if let Some(r) = fed.get_repo(&other) {
+                    if let Err(e) = r.relink_cross_repo().await {
+                        tracing::warn!("cross-repo link for '{other}' failed: {e}");
+                    }
+                }
+            }
+            // 4. Re-project everyone so the federation-wide symbol index
+            //    reflects the new edges produced by the relinks.
+            for (other, _) in fed.list_repos() {
+                if let Err(e) = fed.project_repo(&other).await {
+                    tracing::warn!("project_repo for '{other}' failed: {e}");
+                }
+            }
+            if let Err(e) = repo.start_watcher().await {
+                tracing::warn!("could not watch hot-added repo '{id}': {e}");
+            }
+        });
         // `record_sync` lives on `RefreshState` in PR 3.7b; this handle
         // signals "sync happened" via a callback so the LainServer
         // can route it. In this PR we just log and let the caller
@@ -220,7 +282,7 @@ mod tests {
 
     #[test]
     fn single_workspace_construction_leaves_everything_none_or_zero() {
-        let handle = FederationHandle::new(None, None, None, None, None);
+        let handle = FederationHandle::new(None, None, None, None, None, None);
         assert!(handle.federation().is_none());
         assert_eq!(handle.transport(), None);
         assert_eq!(handle.port(), None);
@@ -237,7 +299,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let handle = FederationHandle::new(None, None, None, None, None);
+        let handle = FederationHandle::new(None, None, None, None, None, None);
         let tmp = tempfile::tempdir().unwrap();
         let repo = RepoConfig {
             id: "test".to_string(),
@@ -251,7 +313,7 @@ mod tests {
 
     #[test]
     fn remove_repo_errors_on_single_workspace() {
-        let handle = FederationHandle::new(None, None, None, None, None);
+        let handle = FederationHandle::new(None, None, None, None, None, None);
         let res = handle.remove_repo("any");
         assert!(res.is_err());
     }

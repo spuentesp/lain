@@ -10,6 +10,7 @@ pub mod mcp_stdio;
 pub mod oneshot;
 pub mod query;
 pub mod readiness;
+pub mod reindex;
 pub mod repos;
 pub mod schema;
 pub mod server;
@@ -21,9 +22,11 @@ pub mod workspaces;
 pub use crate::resolve_repos_config;
 pub use ask::run_ask;
 pub use query::run_query;
+pub use reindex::run_reindex;
 pub use server::run_server;
 
 use clap::{Parser, Subcommand};
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 /// Top-level `lain` CLI surface — kept subcommands only.
@@ -70,6 +73,15 @@ pub enum Commands {
         transport: String,
         #[arg(long, default_value = "9999")]
         port: u16,
+        /// Address to bind the HTTP listener on. Defaults to
+        /// `127.0.0.1` so the server is reachable only from the local
+        /// host (the `LAIN_BIND_ADDR` environment variable overrides
+        /// the default). Pass `0.0.0.0` (or another non-loopback
+        /// address) to expose it on the network — that requires
+        /// `LAIN_API_KEYS` to be set; otherwise the server refuses to
+        /// start.
+        #[arg(long, env = "LAIN_BIND_ADDR", default_value = "127.0.0.1")]
+        bind: IpAddr,
         #[arg(long, default_value = "info")]
         log_level: String,
         /// Active workspace. One of: "auto", "", or a workspace name.
@@ -141,11 +153,14 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Single-user LLM-assisted query.
+    /// PreToolUse hook handler: reads the hook's JSON (as the argument or
+    /// on stdin) and prints a decision. Not a question-answering command —
+    /// use `lain oneshot search_code "<text>"` for that.
     Ask {
         #[arg(long, default_value = "./repos.yaml")]
         config: PathBuf,
-        question: String,
+        /// The hook JSON payload (else read from stdin).
+        question: Option<String>,
     },
     /// Start an MCP server on stdio.
     ///
@@ -169,10 +184,10 @@ pub enum Commands {
         /// Repeatable: `lain mcp --workspace /repo/a --workspace /repo/b`.
         /// When omitted, the binary reads `LAIN_WORKSPACE` (a
         /// comma-separated list); if that's also unset, it walks up
-        /// from the agent harness's cwd (via `/proc/$PPID/cwd`),
-        /// falling back to the process's own cwd. That policy is
-        /// what makes `lain mcp` Just Work under any agent harness,
-        /// including Kimi's plugin-security cwd pinning.
+        /// from its own cwd (the directory the host launched it in),
+        /// falling back to the agent harness's cwd (`/proc/$PPID/cwd`)
+        /// when its own cwd is a plugin directory or holds the lain
+        /// binary — Kimi's plugin-security cwd pinning.
         #[arg(long, value_name = "PATH")]
         workspace: Vec<PathBuf>,
         /// Path to the ONNX bi-encoder model directory. See
@@ -262,8 +277,9 @@ pub enum Commands {
     Setup {
         #[arg(long)]
         workspace: Option<PathBuf>,
-        /// "claude-code" or "generic". Omit to be asked interactively
-        /// (TTY only); non-interactive runs default to "generic".
+        /// claude-code, codex, cursor, vscode, continue or generic. Omit
+        /// to be asked interactively (TTY only); non-interactive runs
+        /// default to "generic".
         #[arg(long)]
         agent: Option<String>,
         #[arg(long)]
@@ -280,6 +296,30 @@ pub enum Commands {
         /// Never attempt to install the optional embedding model.
         #[arg(long)]
         no_model: bool,
+        /// Optional language servers to install: `none`, `detected` (every
+        /// missing one for this repo's languages), or a comma list such as
+        /// `python,go`. Omit to be asked (TTY only); non-interactive runs
+        /// install none. Every language is indexed without them.
+        #[arg(long, value_name = "none|detected|LANG,...")]
+        lsp: Option<String>,
+    },
+    /// Re-index the workspace from scratch. Backs up any existing
+    /// `<data_dir>/federated_graph.bin` to `federated_graph.bin.bak`
+    /// and rebuilds every repo's per-repo graph plus the federation
+    /// backend. Required after a federation schema version bump.
+    /// Idempotent. When `--workspace <name>` is set, only that
+    /// workspace's repos are re-indexed; otherwise all configured
+    /// repos.
+    Reindex {
+        #[arg(long, default_value = "./repos.yaml")]
+        config: PathBuf,
+        /// Workspace name. When omitted, re-indexes all workspaces
+        /// configured in `repos.yaml`.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Print each step as it runs.
+        #[arg(long, short)]
+        verbose: bool,
     },
 }
 

@@ -68,6 +68,42 @@ function verifyBinary(file, version) {
   if (reported !== `lain ${normalizeVersion(version)}`) throw new Error(`Downloaded binary reports ${JSON.stringify(reported)}, expected "lain ${normalizeVersion(version)}"`);
 }
 
+function verifySidecarBinary(file, version) {
+  const result = spawnSync(file, ['--version'], { encoding: 'utf8', timeout: 10_000 });
+  if (result.error) throw new Error(`Cannot run downloaded sidecar: ${result.error.message}`);
+  if (result.status !== 0) throw new Error(`Downloaded sidecar exited ${result.status} during version check`);
+  const reported = String(result.stdout).trim();
+  if (reported !== `lain-git-sidecar ${normalizeVersion(version)}`) throw new Error(`Downloaded sidecar reports ${JSON.stringify(reported)}, expected "lain-git-sidecar ${normalizeVersion(version)}"`);
+}
+
+function installWindowsRuntimeDlls(source, destination, platform = process.platform) {
+  if (platform !== 'win32') return [];
+  const dlls = fs.readdirSync(source).filter((name) => name.toLowerCase().endsWith('.dll'));
+  if (!dlls.some((name) => name.toLowerCase() === 'directml.dll')) {
+    throw new Error('Windows release archive is missing DirectML.dll required by the Lain executable');
+  }
+  for (const name of dlls) {
+    const from = path.join(source, name);
+    const to = path.join(destination, name);
+    try {
+      fs.renameSync(from, to);
+    } catch (error) {
+      // Another concurrent npx invocation may have installed the same
+      // version first. The aggregate archive checksum authenticates the
+      // DLL bytes, and versioned cache directories keep releases apart.
+      if (!fs.existsSync(to)) throw error;
+    }
+  }
+  return dlls;
+}
+
+function verifyWindowsRuntimeDlls(directory, platform = process.platform) {
+  if (platform !== 'win32') return;
+  if (!fs.existsSync(path.join(directory, 'DirectML.dll'))) {
+    throw new Error('Cached Windows installation is missing DirectML.dll; remove this version from LAIN_CACHE_DIR and retry');
+  }
+}
+
 function download(url, destination, redirects = 5) {
   return new Promise((resolve, reject) => {
     const request = https.get(url, { headers: { 'User-Agent': '@spuentesp/lain-mcp' } }, (response) => {
@@ -107,11 +143,17 @@ async function ensureBinary(options = {}) {
   const version = normalizeVersion(options.version || selectedVersion(env));
   const target = targetFor(platform, arch);
   const finalBinary = binaryPath(version, target, env, platform);
+  const directory = path.dirname(finalBinary);
+  const sidecarName = platform === 'win32' ? 'lain-git-sidecar.exe' : 'lain-git-sidecar';
+  const finalSidecar = path.join(directory, sidecarName);
   if (fs.existsSync(finalBinary)) {
+    verifyWindowsRuntimeDlls(directory, platform);
     verifyBinary(finalBinary, version);
+    if (fs.existsSync(finalSidecar)) {
+      verifySidecarBinary(finalSidecar, version);
+    }
     return finalBinary;
   }
-  const directory = path.dirname(finalBinary);
   fs.mkdirSync(directory, { recursive: true });
   const temporary = path.join(directory, `.install-${process.pid}-${crypto.randomBytes(6).toString('hex')}`);
   fs.mkdirSync(temporary);
@@ -128,6 +170,18 @@ async function ensureBinary(options = {}) {
     if (!fs.existsSync(extracted)) throw new Error(`${asset} does not contain the Lain executable at its root`);
     if (platform !== 'win32') fs.chmodSync(extracted, 0o755);
     verifyBinary(extracted, version);
+    const extractedSidecar = path.join(temporary, sidecarName);
+    if (fs.existsSync(extractedSidecar)) {
+      if (platform !== 'win32') fs.chmodSync(extractedSidecar, 0o755);
+      verifySidecarBinary(extractedSidecar, version);
+      try {
+        fs.renameSync(extractedSidecar, finalSidecar);
+      } catch (error) {
+        if (!fs.existsSync(finalSidecar)) throw error;
+        verifySidecarBinary(finalSidecar, version);
+      }
+    }
+    installWindowsRuntimeDlls(temporary, directory, platform);
     try {
       fs.renameSync(extracted, finalBinary);
     } catch (error) {
@@ -140,4 +194,4 @@ async function ensureBinary(options = {}) {
   }
 }
 
-module.exports = { assetName, binaryPath, cacheRoot, ensureBinary, normalizeVersion, parseChecksum, releaseUrl, selectedVersion, sha256, targetFor, verifyArchive, verifyBinary };
+module.exports = { assetName, binaryPath, cacheRoot, ensureBinary, installWindowsRuntimeDlls, normalizeVersion, parseChecksum, releaseUrl, selectedVersion, sha256, targetFor, verifyArchive, verifyBinary, verifySidecarBinary, verifyWindowsRuntimeDlls };

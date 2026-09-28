@@ -2,7 +2,7 @@
 //! nodes/edges into a global petgraph via `GraphBackend`, and provides
 //! cross-repo symbol resolution.
 //!
-//! The global ID format is `repo_id:Kind:path:name` (see `GlobalId::new`), and
+//! The global ID format is `repo_id:Kind:path:name:line_start` (see `GlobalId::new`), and
 //! every per-repo node is re-keyed to that format before being upserted into the
 //! backend. Cross-repo edges (`CrossRepoSameSymbol`) are added by running
 //! `find_cross_repo_matches` against signatures.
@@ -31,12 +31,22 @@ use std::sync::Arc;
 /// rewrite passes (this repo's own nodes, and — for cross-repo matching —
 /// every other repo's nodes) so the rewrite rule can't drift between them.
 fn global_id_str(repo: &RepoId, node: &GraphNode) -> String {
-    GlobalId::new(repo, node.node_type.clone(), &node.path, &node.name)
-        .as_str()
-        .to_string()
+    GlobalId::new(
+        repo,
+        node.node_type.clone(),
+        &node.path,
+        &node.name,
+        node.line_start,
+    )
+    .as_str()
+    .to_string()
 }
 
 pub struct FederatedIndex {
+    /// Repositories from the config that could not be loaded (clone or
+    /// checkout failed), with the reason. They are left out rather than
+    /// stopping the server, and reported by `get_health`.
+    load_errors: RwLock<Vec<(String, String)>>,
     repos: RwLock<HashMap<RepoId, Arc<RepoIndex>>>,
     backend: Arc<dyn GraphBackend>,
     symbol_to_repos: DashMap<String, Vec<RepoId>>,
@@ -80,6 +90,9 @@ pub struct FederatedIndex {
     persist_lock: parking_lot::Mutex<()>,
     /// Serializes membership changes with complete backend projections.
     projection_lock: parking_lot::Mutex<()>,
+    /// `(source, target) -> source declares a dependency on target`;
+    /// see [`Self::repo_depends_on`].
+    depends_cache: DashMap<(String, String), bool>,
 }
 
 /// Collapse a per-definition repo list to the distinct repos in it,
@@ -113,7 +126,19 @@ impl FederatedIndex {
             manifest_path: RwLock::new(None),
             persist_lock: parking_lot::Mutex::new(()),
             projection_lock: parking_lot::Mutex::new(()),
+            depends_cache: DashMap::new(),
+            load_errors: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Record a repository that failed to load.
+    pub fn record_load_error(&self, repo: &str, error: String) {
+        self.load_errors.write().push((repo.to_string(), error));
+    }
+
+    /// Repositories that failed to load, with the reason.
+    pub fn load_errors(&self) -> Vec<(String, String)> {
+        self.load_errors.read().clone()
     }
 
     /// Set the path the federation should rewrite `FederationManifest`
@@ -211,7 +236,30 @@ impl FederatedIndex {
         // across repos and broke any workspace switch to a new repo_id).
         let per_repo_dir = data_dir.join("repos").join(id.as_str());
         std::fs::create_dir_all(&per_repo_dir).map_err(|e| LainError::Io(e.to_string()))?;
-        let index = Arc::new(RepoIndex::new(source, &per_repo_dir)?);
+        // PR-4 — guard against partial failure. Pre-fix, a failed
+        // `RepoIndex::new` (e.g., LSP pool construction failure)
+        // left the empty `data_dir/repos/<id>/` directory on disk
+        // because there was no rollback. `remove_repo` only cleans up
+        // dirs it inserted itself, so the orphan persisted across
+        // process restarts and accumulated over time. We can't roll
+        // back the `create_dir_all` *before* `RepoIndex::new` because
+        // the latter may also create files under that dir; the safe
+        // pattern is to roll back AFTER `RepoIndex::new` fails, when
+        // we know no partial state was committed.
+        let index = match RepoIndex::new(source, &per_repo_dir) {
+            Ok(idx) => Arc::new(idx),
+            Err(e) => {
+                // Best-effort cleanup. A failure here logs but
+                // doesn't override the original error.
+                if let Err(rm_err) = std::fs::remove_dir_all(&per_repo_dir) {
+                    tracing::warn!(
+                        "failed to clean up orphan per-repo dir {} after RepoIndex::new failure: {rm_err}",
+                        per_repo_dir.display()
+                    );
+                }
+                return Err(e);
+            }
+        };
         // If the federation already has an overlay wired in (the
         // production constructor installs it before the first `add_repo`),
         // share the same Arc so a successful index() updates the
@@ -221,10 +269,30 @@ impl FederatedIndex {
         }
         {
             let _guard = self.projection_lock.lock();
+            // Clone `id` before the insert moves it, so the
+            // post-lock overlay re-check below can use it.
+            let id_for_recheck = id.clone();
             if let Some(previous) = self.repos.write().insert(id, index) {
                 previous.deactivate();
             }
             self.rebuild_symbol_index();
+            // PR-4 — re-check `federation_overlay` under the
+            // `projection_lock` and re-apply it. The pre-fix code
+            // read the overlay BEFORE acquiring the projection
+            // lock, so a concurrent `install_overlay` could land
+            // between the read and the insert and leave the
+            // freshly-added repo with no overlay wired in (the
+            // documented contract is "every repo shares the
+            // federation's overlay"; the bug silently broke it for
+            // any add_repo that interleaved with install_overlay).
+            // Re-checking under the lock guarantees that any
+            // overlay set before this lock is also applied to this
+            // repo.
+            if let Some(overlay) = self.federation_overlay.read().clone() {
+                if let Some(repo) = self.repos.read().get(&id_for_recheck) {
+                    repo.set_overlay(overlay);
+                }
+            }
         }
         // Refresh the on-disk manifest so a runtime add survives a
         // restart. Best-effort; a save failure doesn't fail the add.
@@ -308,7 +376,7 @@ impl FederatedIndex {
                 // in-memory graph may not reflect it yet — surfacing
                 // the disk value would mislead callers into thinking
                 // the graph is current. The acceptance criterion
-                // (docs/FOLLOWUPS.md entry #6) is: `last_indexed_commit`
+                // (Cooperative cancellation token follow-up) is: `last_indexed_commit`
                 // is `null` until a successful index pass has
                 // reached a commit, then the actual commit string.
                 let last_indexed_commit = if indexed_signal {
@@ -356,8 +424,15 @@ impl FederatedIndex {
             .collect()
     }
 
-    pub fn global_id(&self, repo: &RepoId, kind: NodeType, path: &str, name: &str) -> GlobalId {
-        GlobalId::new(repo, kind, path, name)
+    pub fn global_id(
+        &self,
+        repo: &RepoId,
+        kind: NodeType,
+        path: &str,
+        name: &str,
+        line_start: Option<u32>,
+    ) -> GlobalId {
+        GlobalId::new(repo, kind, path, name, line_start)
     }
 
     pub fn backend(&self) -> Arc<dyn GraphBackend> {
@@ -365,7 +440,17 @@ impl FederatedIndex {
     }
 
     pub async fn project_repo(&self, id: &RepoId) -> Result<(), LainError> {
-        // No await points below: this guard cannot cross an async suspension.
+        self.project_nodes(id).await?;
+        self.project_edges(id).await?;
+        Ok(())
+    }
+
+    /// Project this repo's nodes into the federated backend. Idempotent.
+    /// Safe to run before other repos' nodes are projected — by design,
+    /// the second pass ([`Self::project_edges`]) is what needs full visibility.
+    pub async fn project_nodes(&self, id: &RepoId) -> Result<(), LainError> {
+        // Serialize each phase against add_repo/remove_repo. The guard
+        // must not cross an async suspension; neither phase awaits below.
         let _guard = self.projection_lock.lock();
         let repo = self
             .get_repo(id)
@@ -375,8 +460,6 @@ impl FederatedIndex {
         // Re-key every node to its global id and upsert into the backend.
         let mut live: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(nodes.len());
-        let mut local_to_global: std::collections::HashMap<String, String> =
-            std::collections::HashMap::with_capacity(nodes.len());
         let mut batch_nodes: Vec<crate::schema::GraphNode> = Vec::with_capacity(nodes.len());
         for n in &nodes {
             let gid = global_id_str(id, n);
@@ -384,7 +467,6 @@ impl FederatedIndex {
             rewritten.id = gid.clone();
             live.insert(gid.clone());
             batch_nodes.push(rewritten);
-            local_to_global.insert(n.id.clone(), gid);
         }
         // Batch upsert: one disk save at the end instead of ~N syncs.
         // The per-node path saved on every upsert and wedged the
@@ -395,134 +477,6 @@ impl FederatedIndex {
             id.as_str(),
             batch_nodes.len()
         );
-
-        // Project intra-repo edges (Calls / Contains / Uses / ...) with
-        // their endpoint ids rewritten to global ids. The backend
-        // upserts are idempotent on edge identity (source+target+
-        // edge_type), so re-running `project_repo` is safe. Edges with
-        // either endpoint missing from the local-to-global map (e.g.
-        // scanner-introduced virtual edges) are skipped — they'll show
-        // up next time the scanner emits them with stable ids.
-        //
-        // Cross-repo edges (wishlist #13): when an edge's target was
-        // already written in global form by the resolve phase (the
-        // `CrossRepoResolver` returned a `GlobalId` because the local
-        // DB missed), it does NOT appear in `local_to_global`. Try to
-        // parse it as a global id; on success, pass it through
-        // unchanged. On failure (genuinely unresolved), skip — same
-        // as the pre-fix behavior for non-cross-repo edges.
-        //
-        // BATCH: ~10k edges is normal for a large repo. The per-edge
-        // upsert saves the backend graph on every call, which would
-        // take minutes. Batch all the writes and save once.
-        let db = repo.db();
-        let mut batch: Vec<crate::schema::GraphEdge> = Vec::new();
-        for edge in &db.all_edges() {
-            let Some(src) = local_to_global.get(&edge.source_id) else {
-                continue;
-            };
-            let resolved_target: String = match local_to_global.get(&edge.target_id) {
-                Some(g) => g.clone(),
-                None => match GlobalId::parse(&edge.target_id) {
-                    Ok(gid) => gid.as_str().to_string(),
-                    Err(_) => continue,
-                },
-            };
-            batch.push(crate::schema::GraphEdge {
-                edge_type: edge.edge_type.clone(),
-                source_id: src.clone(),
-                target_id: resolved_target,
-                weight: edge.weight,
-                cross_repo: false,
-            });
-        }
-        self.backend.upsert_edges_batch(&batch)?;
-        tracing::info!(
-            "[federation] {:?}: projected {} intra-repo edges",
-            id.as_str(),
-            batch.len()
-        );
-
-        // Wishlist #13: drain the resolve phase's cross-repo edge stash
-        // (edges whose target lives in another repo, written in global
-        // form so the local petgraph could not store them). Each drained
-        // edge has `source_id` rewritten through `local_to_global` and
-        // `target_id` passed through unchanged because it is already
-        // global. The target node may not have been projected yet —
-        // its owning repo's `project_repo` runs in parallel — so we
-        // upsert a placeholder node for it first; the real projection
-        // overwrites the placeholder when that repo's pass runs
-        // (`upsert_node_global` is idempotent on global id).
-        let external = repo.db().take_pending_external_edges();
-        if !external.is_empty() {
-            let mut external_batch: Vec<crate::schema::GraphEdge> =
-                Vec::with_capacity(external.len());
-            let mut placeholder_ids = std::collections::HashSet::new();
-            for edge in &external {
-                // Ensure the target node exists in the backend. The
-                // global id is `repo:Kind:path:name`; reconstruct the
-                // `NodeType` from the `Debug` form (variants are bare
-                // identifiers, no colons — confirmed in
-                // `src/server/schema.rs:9-29`).
-                if let Ok(gid) = GlobalId::parse(&edge.target_id) {
-                    if !self
-                        .repos
-                        .read()
-                        .keys()
-                        .any(|id| id.as_str() == gid.repo_id())
-                    {
-                        continue;
-                    }
-                    if let Some(kind_str) = gid.node_kind_str() {
-                        // Parse the kind string into `NodeType`; the
-                        // placeholder gets overwritten when the real
-                        // repo's projection runs, so a wrong-but-present
-                        // placeholder is fine until then.
-                        let kind = parse_node_type(kind_str);
-                        // The path and name are everything after the
-                        // second `:` in the global id.
-                        let after_repo = gid.as_str().split_once(':').map(|(_, r)| r).unwrap_or("");
-                        let (_kind, rest) = match after_repo.split_once(':') {
-                            Some(parts) => parts,
-                            None => continue,
-                        };
-                        let (path, name) = match rest.rsplit_once(':') {
-                            Some(parts) => parts,
-                            None => continue,
-                        };
-                        let _ = self
-                            .backend
-                            .upsert_node_global(gid.as_str(), kind, path, name);
-                        placeholder_ids.insert(gid.as_str().to_string());
-                    }
-                }
-            }
-            for edge in external {
-                if !placeholder_ids.contains(&edge.target_id) {
-                    continue;
-                }
-                let Some(src) = local_to_global.get(&edge.source_id) else {
-                    // Caller vanished from this repo between the
-                    // resolve phase and now — drop and move on.
-                    continue;
-                };
-                // Target id is already global; pass it through verbatim.
-                external_batch.push(crate::schema::GraphEdge {
-                    edge_type: edge.edge_type.clone(),
-                    source_id: src.clone(),
-                    target_id: edge.target_id.clone(),
-                    weight: edge.weight,
-                    cross_repo: false,
-                });
-            }
-            self.backend.upsert_edges_batch(&external_batch)?;
-            tracing::info!(
-                "[federation] {:?}: projected {} cross-repo edges ({} placeholder node(s))",
-                id.as_str(),
-                external_batch.len(),
-                placeholder_ids.len(),
-            );
-        }
 
         // Retract what this repo no longer has. Projection was upsert-only, so
         // the federated view accumulated every symbol a repo ever contained: a
@@ -543,6 +497,170 @@ impl FederatedIndex {
                 "federation: retracted {removed} stale node(s) for repo '{}'",
                 id.as_str()
             );
+        }
+        Ok(())
+    }
+
+    /// Project this repo's edges into the federated backend. Requires
+    /// all known repos' nodes to be projected first (via
+    /// [`Self::project_nodes`]) — otherwise an edge target's
+    /// `GlobalId` may not resolve.
+    ///
+    /// Edge ownership falls into three classes:
+    ///
+    /// 1. **Intra-repo edges** — both endpoints rewritten to the
+    ///    calling repo's global-id form, so the prefix `id:` appears
+    ///    in both `source_id` and `target_id`. Reconciled against the
+    ///    current per-repo DB: a stale edge (one no longer in the DB)
+    ///    is retracted via `remove_edges`, endpoints left intact.
+    /// 2. **Cross-repo outgoing `Calls`** — `source_id` rewritten to
+    ///    the calling repo's prefix; `target_id` already global,
+    ///    owned by a foreign repo. **Not** reconciled: the source of
+    ///    truth (the resolve-phase external-edge stash) is one-shot,
+    ///    so on a no-op reproject the new batch does not reproduce
+    ///    these edges and the diff would otherwise classify them as
+    ///    stale and delete them. They survive until either the
+    ///    foreign target node is removed (petgraph's `remove_node`
+    ///    takes incident edges with it) or the entire source repo is
+    ///    removed.
+    /// 3. **`CrossRepoSameSymbol` peer edges** — recomputed each
+    ///    projection from the current node set, so a node
+    ///    disappearing (or losing a match) must retract the edge the
+    ///    next time that repo's `project_edges` runs. Reconciled.
+    pub async fn project_edges(&self, id: &RepoId) -> Result<(), LainError> {
+        let repo = self
+            .get_repo(id)
+            .ok_or_else(|| LainError::NotFound(format!("repo {id}")))?;
+        let nodes = repo.nodes();
+
+        // Build the local→global map from this repo's nodes. Edges
+        // reference per-repo node ids; the federated backend uses
+        // global ids. Recomputing this here keeps `project_edges`
+        // self-contained — it does not depend on `project_nodes`
+        // having been called in the same process.
+        let mut local_to_global: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(nodes.len());
+        for n in &nodes {
+            let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name, n.line_start);
+            local_to_global.insert(n.id.clone(), gid.as_str().to_string());
+        }
+
+        // Collect every edge this projection will write into one batch so
+        // the reconciliation pass can diff against the backend's current
+        // view. Two passes: first intra-repo (from the per-repo DB) and
+        // cross-repo external (from the resolve-phase stash), then the
+        // cross-repo `CrossRepoSameSymbol` peer matches. The intra and
+        // external passes follow the original rules; see the comments
+        // below for what each guard means.
+        let db = repo.db();
+        let mut batch: Vec<crate::schema::GraphEdge> = Vec::new();
+
+        // Intra-repo edges (Calls / Contains / Uses / ...) with
+        // endpoints rewritten to global ids. Edges with either endpoint
+        // missing from `local_to_global` (e.g. scanner-introduced virtual
+        // edges) are skipped — they'll show up next time the scanner
+        // emits them with stable ids.
+        //
+        // Cross-repo edges (wishlist #13): when an edge's target was
+        // already written in global form by the resolve phase, it does
+        // NOT appear in `local_to_global`. Try to parse it as a global
+        // id; on success, pass it through unchanged. On failure
+        // (genuinely unresolved), skip — same as the pre-fix behavior
+        // for non-cross-repo edges.
+        for edge in &db.all_edges() {
+            let Some(src) = local_to_global.get(&edge.source_id) else {
+                continue;
+            };
+            let resolved_target: String = match local_to_global.get(&edge.target_id) {
+                Some(g) => g.clone(),
+                None => match GlobalId::parse(&edge.target_id) {
+                    Ok(gid) => gid.as_str().to_string(),
+                    Err(_) => continue,
+                },
+            };
+            batch.push(crate::schema::GraphEdge {
+                edge_type: edge.edge_type.clone(),
+                source_id: src.clone(),
+                target_id: resolved_target,
+                weight: edge.weight,
+                cross_repo: false,
+                provenance: edge.provenance.clone(),
+            });
+        }
+
+        // Wishlist #13: drain the resolve phase's cross-repo edge stash
+        // (edges whose target lives in another repo, written in global
+        // form so the local petgraph could not store them).
+        let external = repo.db().take_pending_external_edges();
+        let mut placeholder_ids: Vec<String> = Vec::new();
+        if !external.is_empty() {
+            for edge in &external {
+                if let Ok(gid) = GlobalId::parse(&edge.target_id) {
+                    // Targets whose owning repo is not part of this
+                    // federation never get a placeholder.
+                    if !self
+                        .repos
+                        .read()
+                        .keys()
+                        .any(|id| id.as_str() == gid.repo_id())
+                    {
+                        continue;
+                    }
+                    // Skip placeholder upsert when the target is already
+                    // projected: Phase 1/2 orchestration guarantees every
+                    // owning repo's nodes are present before Phase 2. The
+                    // placeholder path also fires during runtime re-projection
+                    // after `index()` when the owning repo hasn't been
+                    // re-projected yet. A placeholder written over an
+                    // already-projected node corrupts its metadata.
+                    let target_already_present = self.backend.has_node(gid.as_str())?;
+                    if !target_already_present {
+                        // Placeholder upsert (see the original comment
+                        // for why): the real projection overwrites it.
+                        let (Some(kind_str), Some(path), Some(name)) =
+                            (gid.node_kind_str(), gid.path(), gid.name())
+                        else {
+                            continue;
+                        };
+                        let kind = parse_node_type(kind_str);
+                        tracing::warn!(
+                            "[federation] {:?}: cross-repo target {} not yet projected; upserting placeholder (owning repo's projection will overwrite when it runs)",
+                            id.as_str(),
+                            gid.as_str(),
+                        );
+                        let _ = self
+                            .backend
+                            .upsert_node_global(gid.as_str(), kind, path, name);
+                        placeholder_ids.push(gid.as_str().to_string());
+                    }
+                }
+            }
+            for edge in external {
+                // Materialize every external edge whose target exists in
+                // the backend — either already projected (the normal
+                // Phase 1/2 case) or the placeholder written above. The
+                // old `placeholder_ids` check predates the `has_node`
+                // gate, when every parsed target got a placeholder and
+                // the two conditions were equivalent; with the gate,
+                // an already-present target gets no placeholder but its
+                // edge must still be written.
+                if !self.backend.has_node(&edge.target_id)? {
+                    continue;
+                }
+                let Some(src) = local_to_global.get(&edge.source_id) else {
+                    // Caller vanished from this repo between the
+                    // resolve phase and now — drop and move on.
+                    continue;
+                };
+                batch.push(crate::schema::GraphEdge {
+                    edge_type: edge.edge_type.clone(),
+                    source_id: src.clone(),
+                    target_id: edge.target_id.clone(),
+                    weight: edge.weight,
+                    cross_repo: false,
+                    provenance: edge.provenance.clone(),
+                });
+            }
         }
 
         // Cross-repo matching: gather every other repo's nodes once, then for
@@ -583,12 +701,22 @@ impl FederatedIndex {
         // many cross-repo peers would re-wedge the loader one disk sync
         // per match. `target_nodes` is keyed by id to dedupe: several
         // matches can target the same peer node.
+        // This repo's nodes re-keyed to global ids (the same rewrite
+        // `project_nodes` publishes) so cross-repo matching sees the
+        // id shape `find_cross_repo_matches` parses.
+        let batch_nodes: Vec<GraphNode> = nodes
+            .iter()
+            .map(|n| {
+                let mut rewritten = n.clone();
+                rewritten.id = global_id_str(id, n);
+                rewritten
+            })
+            .collect();
         let mut target_nodes: std::collections::HashMap<String, GraphNode> =
             std::collections::HashMap::new();
-        let mut cross_repo_edges: Vec<GraphEdge> = Vec::new();
         for new_node in &batch_nodes {
-            let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5);
-            for (target_gid, sim) in matches {
+            let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5, false);
+            for (target_gid, sim, _confidence) in matches {
                 // The matched node's owning repo may not have run its own
                 // `project_repo` yet (callers project repos one at a time,
                 // in whatever order they choose — this test fixture calls
@@ -619,12 +747,13 @@ impl FederatedIndex {
                 if let Some(target_node) = other_nodes.iter().find(|n| n.id == target_gid) {
                     target_nodes.insert(target_gid.clone(), target_node.clone());
                 }
-                cross_repo_edges.push(GraphEdge {
+                batch.push(GraphEdge {
                     edge_type: EdgeType::CrossRepoSameSymbol,
                     source_id: new_node.id.clone(),
                     target_id: target_gid,
                     weight: Some(sim),
                     cross_repo: true,
+                    provenance: None,
                 });
             }
         }
@@ -632,8 +761,73 @@ impl FederatedIndex {
             let nodes: Vec<GraphNode> = target_nodes.into_values().collect();
             self.backend.upsert_nodes_batch(&nodes)?;
         }
-        if !cross_repo_edges.is_empty() {
-            self.backend.upsert_edges_batch(&cross_repo_edges)?;
+
+        // Reconcile: retract every federated edge owned by this repo
+        // (source-id prefix `id:`) that the current projection does not
+        // reproduce. Without this pass, deleting a per-repo call left the
+        // federated edge alive as long as its endpoints were still
+        // indexed — `project_edges` only upserted.
+        //
+        // Cross-repo outgoing `Calls` edges are excluded from the
+        // diff: the resolve-phase stash that produced them is one-shot,
+        // so a no-op reproject would otherwise treat them as stale and
+        // delete them (Codex re-check 2026-09-08 H2). They survive until
+        // either the foreign target node is removed (petgraph's
+        // `remove_node` takes incident edges with it) or the entire
+        // source repo is removed.
+        let prefix = format!("{}:", id.as_str());
+        let new_keys: std::collections::HashSet<(crate::schema::EdgeType, String, String)> = batch
+            .iter()
+            .map(|e| {
+                (
+                    e.edge_type.clone(),
+                    e.source_id.clone(),
+                    e.target_id.clone(),
+                )
+            })
+            .collect();
+        let stale: Vec<crate::schema::GraphEdge> = self
+            .backend
+            .all_edges()?
+            .into_iter()
+            .filter(|e| e.source_id.starts_with(&prefix))
+            .filter(|e| {
+                !(e.edge_type == crate::schema::EdgeType::Calls
+                    && !e.target_id.starts_with(&prefix))
+            })
+            .filter(|e| {
+                !new_keys.contains(&(
+                    e.edge_type.clone(),
+                    e.source_id.clone(),
+                    e.target_id.clone(),
+                ))
+            })
+            .collect();
+        if !stale.is_empty() {
+            let removed = self.backend.remove_edges(&stale)?;
+            tracing::info!(
+                "[federation] {:?}: retracted {removed} stale edge(s) during reconciliation",
+                id.as_str()
+            );
+        }
+
+        // BATCH: ~10k edges is normal for a large repo. The per-edge
+        // upsert saves the backend graph on every call, which would
+        // take minutes. Batch all the writes and save once.
+        if !batch.is_empty() {
+            self.backend.upsert_edges_batch(&batch)?;
+        }
+        tracing::info!(
+            "[federation] {:?}: projected {} edges (intra + external + peer)",
+            id.as_str(),
+            batch.len()
+        );
+        if !placeholder_ids.is_empty() {
+            tracing::info!(
+                "[federation] {:?}: {} cross-repo placeholder node(s) upserted",
+                id.as_str(),
+                placeholder_ids.len()
+            );
         }
 
         // Rebuild the federation-wide `symbol_to_repos` only when this
@@ -708,6 +902,9 @@ impl FederatedIndex {
     }
 
     fn rebuild_symbol_index(&self) {
+        // Dependency answers can change with the index (a manifest edited,
+        // a repo re-added elsewhere); recompute them lazily.
+        self.depends_cache.clear();
         self.symbol_to_repos.clear();
         let mut tmp: HashMap<String, Vec<RepoId>> = HashMap::new();
         // Snapshot the repo ids we have, then release the read lock before
@@ -778,6 +975,151 @@ fn parse_node_type(s: &str) -> NodeType {
     }
 }
 
+impl FederatedIndex {
+    /// Whether `source` declares a dependency on `target` in its manifests
+    /// (go.mod, package.json, Cargo.toml, pyproject.toml, requirements,
+    /// pom.xml, Gradle, Gemfile, composer.json, …): one of `target`'s
+    /// identifiers — repo id, directory name, or the module / package name
+    /// it declares — appears there as a whole token. A source with no
+    /// manifest at all cannot say, so it is not restricted.
+    fn repo_depends_on(&self, source: &RepoId, target: &RepoId) -> bool {
+        let key = (source.as_str().to_string(), target.as_str().to_string());
+        if let Some(hit) = self.depends_cache.get(&key) {
+            return *hit;
+        }
+        let (Some(src), Some(tgt)) = (self.get_repo(source), self.get_repo(target)) else {
+            return false;
+        };
+        let manifests = read_manifests(src.source().local_path());
+        let answer = if manifests.is_empty() {
+            true
+        } else {
+            let text = manifests.to_lowercase();
+            declared_identifiers(target, tgt.source().local_path())
+                .iter()
+                .any(|id| contains_token(&text, id))
+        };
+        self.depends_cache.insert(key, answer);
+        answer
+    }
+}
+
+const MANIFEST_FILES: &[&str] = &[
+    "go.mod",
+    "package.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "Pipfile",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "Gemfile",
+    "composer.json",
+    "Package.swift",
+    "build.sbt",
+    "CMakeLists.txt",
+    "vcpkg.json",
+    "conanfile.txt",
+];
+
+/// Manifest text at the repo root and one directory down (monorepo
+/// packages), plus any `*.csproj` / `*.gemspec` there.
+fn read_manifests(root: &Path) -> String {
+    let mut dirs = vec![root.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(root) {
+        dirs.extend(entries.flatten().map(|e| e.path()).filter(|p| {
+            p.is_dir()
+                && !p
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        }));
+    }
+    let mut text = String::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let is_manifest = MANIFEST_FILES.contains(&name.as_str())
+                || name.ends_with(".csproj")
+                || name.ends_with(".gemspec")
+                || (name.starts_with("requirements") && name.ends_with(".txt"));
+            if is_manifest {
+                if let Ok(t) = std::fs::read_to_string(&path) {
+                    text.push_str(&t);
+                    text.push('\n');
+                }
+            }
+        }
+    }
+    text
+}
+
+/// Names another repo would use to depend on `repo`: its id, its directory,
+/// and the module / package name it declares for itself.
+fn declared_identifiers(repo: &RepoId, root: &Path) -> Vec<String> {
+    let mut ids = vec![repo.as_str().to_lowercase()];
+    if let Some(dir) = root.file_name() {
+        ids.push(dir.to_string_lossy().to_lowercase());
+    }
+    let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap_or_default();
+    // go.mod: `module github.com/spf13/pflag` — the full path and its last segment.
+    if let Some(module) = read("go.mod")
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("module "))
+    {
+        let module = module.trim().to_lowercase();
+        if let Some(last) = module.rsplit('/').next() {
+            ids.push(last.to_string());
+        }
+        ids.push(module);
+    }
+    // package.json / Cargo.toml / pyproject.toml: the first `name` entry.
+    for (file, sep) in [
+        ("package.json", ':'),
+        ("Cargo.toml", '='),
+        ("pyproject.toml", '='),
+    ] {
+        if let Some(name) = read(file).lines().find_map(|l| {
+            let l = l.trim().trim_start_matches('"');
+            let rest = l.strip_prefix("name")?.trim_start_matches('"').trim_start();
+            let v = rest
+                .strip_prefix(sep)?
+                .trim()
+                .trim_matches(|c| c == '"' || c == ',' || c == '\'');
+            (!v.is_empty()).then(|| v.to_lowercase())
+        }) {
+            ids.push(name);
+        }
+    }
+    ids.retain(|i| i.len() >= 2);
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// `needle` occurs in `hay` bounded by characters that cannot be part of a
+/// package name, so `pflag` matches `github.com/spf13/pflag v1.0.5` but not
+/// `mypflagger` — nor `tokio` in `github.com/tokio-rs/bytes` or `tokio.rs`:
+/// `-` and `.` belong to names, so bytes' own repository URL is not a
+/// dependency on tokio.
+fn contains_token(hay: &str, needle: &str) -> bool {
+    let part = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
+    hay.match_indices(needle).any(|(i, _)| {
+        let before = hay[..i].chars().next_back();
+        let after = hay[i + needle.len()..].chars().next();
+        !before.is_some_and(part) && !after.is_some_and(part)
+    })
+}
+
 impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
     fn refresh(&self) {
         self.rebuild_symbol_index();
@@ -817,6 +1159,7 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                         node.node_type.clone(),
                         &node.path,
                         &node.name,
+                        node.line_start,
                     ));
                 }
             }
@@ -831,7 +1174,10 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                 let distinct = distinct_repos(entries.value());
                 distinct.into_iter().filter(|r| r != source_repo).collect()
             };
-            if cross_repos.len() == 1 {
+            // A bare name only means "that repo's symbol" if the calling
+            // repo depends on that repo: pflag's `fmt.Println(...)` and
+            // `Usage()` linked to cobra's methods of the same name.
+            if cross_repos.len() == 1 && self.repo_depends_on(source_repo, &cross_repos[0]) {
                 let rid = &cross_repos[0];
                 if let Some(idx) = self.get_repo(rid) {
                     for node in idx.nodes() {
@@ -841,6 +1187,7 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                                 node.node_type.clone(),
                                 &node.path,
                                 &node.name,
+                                node.line_start,
                             ));
                         }
                     }
@@ -849,5 +1196,58 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_are_bounded() {
+        assert!(contains_token(
+            "require github.com/spf13/pflag v1.0.5",
+            "pflag"
+        ));
+        assert!(contains_token(
+            "\"dependencies\": {\"left-pad\": \"1\"}",
+            "left-pad"
+        ));
+        assert!(!contains_token("mypflagger", "pflag"));
+        assert!(!contains_token(
+            "repository = \"https://github.com/tokio-rs/bytes\"",
+            "tokio"
+        ));
+        assert!(!contains_token("homepage = \"https://tokio.rs\"", "tokio"));
+        assert!(contains_token(
+            "[dependencies]\ntokio = { version = \"1\" }",
+            "tokio"
+        ));
+        assert!(contains_token("bytes = \"1.0\"", "bytes"));
+    }
+
+    #[test]
+    fn declared_identifiers_read_the_module_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module github.com/spf13/pflag\n\ngo 1.12\n",
+        )
+        .unwrap();
+        let ids = declared_identifiers(&RepoId::new("flags").unwrap(), dir.path());
+        assert!(ids.contains(&"pflag".to_string()), "{ids:?}");
+        assert!(
+            ids.contains(&"github.com/spf13/pflag".to_string()),
+            "{ids:?}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\n  \"name\": \"@acme/core\",\n}",
+        )
+        .unwrap();
+        let ids = declared_identifiers(&RepoId::new("core").unwrap(), dir.path());
+        assert!(ids.contains(&"@acme/core".to_string()), "{ids:?}");
     }
 }

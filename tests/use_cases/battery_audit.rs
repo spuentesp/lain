@@ -21,6 +21,7 @@ fn fresh_audit_event() -> AuditEvent {
         racers: vec![],
         plan_revision: None,
         landed_revision: RevisionId::default(),
+        scope: None,
     }
 }
 
@@ -90,9 +91,8 @@ fn file_lock_acquires_and_releases() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path();
     let path = Path::new("src/lib.rs");
-    let lock_path = lock_path_for(workspace, path);
     let agent = AgentId("agent-a".into());
-    let _lock = try_lock(
+    let lock = try_lock(
         workspace,
         path,
         &agent,
@@ -100,7 +100,7 @@ fn file_lock_acquires_and_releases() {
         ClaimIntent::Edit,
     )
     .expect("first acquire must succeed");
-    assert!(lock_path.exists(), "lock file must be created");
+    assert!(lock.path.exists(), "lock file must be created");
 }
 
 #[test]

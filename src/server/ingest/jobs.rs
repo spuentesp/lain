@@ -15,14 +15,17 @@ impl LainServer {
             let commit = self
                 .ingest()
                 .git()
-                .lock()
                 .get_latest_commit_info()
                 .map(|(commit, _)| commit)
                 .inspect_err(|e| warn!("Background sync: failed to get commit info: {}", e))
                 .ok();
             if let Some(commit) = commit {
-                if let Ok(Some(last)) = self.ingest().graph().get_last_commit() {
-                    if last != commit {
+                // Never indexed (the server started before the first commit,
+                // or the first pass failed) counts as out of date: skipping
+                // `None` left such a server unready until restarted.
+                let last = self.ingest().graph().get_last_commit().ok().flatten();
+                {
+                    if last.as_deref() != Some(commit.as_str()) {
                         info!("Background sync: new commits detected, triggering sync");
                         let s = self.clone();
                         // `build_core_memory` moves the gate to `warming_up`
@@ -32,7 +35,7 @@ impl LainServer {
                         // matching `ready`/`failed` transition back, the
                         // same contract `await_startup_reindex` follows
                         // for the startup path.
-                        match s.build_core_memory().await {
+                        match s.build_core_memory_until_complete().await {
                             Ok(()) => {
                                 if let Err(e) = s.sync_volatile_overlay().await {
                                     warn!(

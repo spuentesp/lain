@@ -11,7 +11,6 @@
 
 use lain::server::schema::GraphNode;
 
-#[libfuzzer_sys::fuzz_target]
-fn fuzz_graph_node(data: &[u8]) {
+libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let _ = serde_json::from_slice::<GraphNode>(data);
-}
+});

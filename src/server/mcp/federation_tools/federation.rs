@@ -88,6 +88,12 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
             RepoHealth::Missing => h.missing += 1,
         }
     }
+    // Repos in repos.yaml that failed to load are registered nowhere else,
+    // but they are part of the federation the operator asked for: count
+    // them as unavailable, or 2 of 4 repos loading read as "healthy".
+    let not_loaded = fed.load_errors().len();
+    h.total_repos += not_loaded;
+    h.unavailable += not_loaded;
     h.memory_estimate_bytes = (h.total_nodes as u64) * 200 + (h.total_edges as u64) * 100;
 
     // `docs/REPOS_YAML.md`: "Fraction of repos that must reach `Ready`
@@ -119,20 +125,41 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
 pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<SymbolMatch> {
     let q = query.to_lowercase();
     let mut hits: Vec<SymbolMatch> = Vec::new();
-    let mut seen: std::collections::HashSet<(String, String, String)> =
+    // Dedup key is (repo, name, path, line_start): two same-named methods
+    // at different lines in one file are distinct nodes under GlobalId v2
+    // and must both be reported.
+    let mut seen: std::collections::HashSet<(String, String, String, u32)> =
         std::collections::HashSet::new();
-    let key =
-        |repo: &str, name: &str, path: &str| (repo.to_string(), name.to_string(), path.to_string());
+    let key = |repo: &str, name: &str, path: &str, line: u32| {
+        (repo.to_string(), name.to_string(), path.to_string(), line)
+    };
 
-    // Primary path: per-repo nodes.
+    // Primary path: per-repo nodes. Reported ids are the federation's
+    // GlobalId v2 strings (the same ids every other federation tool
+    // surfaces), not the per-repo local ids.
     for (repo_id, _) in fed.list_repos() {
         if let Some(repo) = fed.get_repo(&repo_id) {
             for n in repo.nodes() {
-                if (n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q))
-                    && seen.insert(key(repo_id.as_str(), &n.name, &n.path))
-                {
+                if !(n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q)) {
+                    continue;
+                }
+                let global_id = GlobalId::new(
+                    &repo_id,
+                    n.node_type.clone(),
+                    &n.path,
+                    &n.name,
+                    n.line_start,
+                )
+                .as_str()
+                .to_string();
+                if seen.insert(key(
+                    repo_id.as_str(),
+                    &n.name,
+                    &n.path,
+                    n.line_start.unwrap_or(0),
+                )) {
                     hits.push(SymbolMatch {
-                        global_id: n.id.clone(),
+                        global_id,
                         repo_id: repo_id.to_string(),
                         name: n.name.clone(),
                         path: n.path.clone(),
@@ -148,15 +175,17 @@ pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<Symbol
     // has no `list_repos()` iteration to draw from.
     if let Ok(backend_nodes) = fed.backend().list_nodes() {
         for n in backend_nodes {
-            let repo_id = GlobalId::parse(&n.id)
-                .ok()
+            let parsed = GlobalId::parse(&n.id).ok();
+            let repo_id = parsed
+                .as_ref()
                 .map(|g| g.repo_id().to_string())
                 .unwrap_or_default();
-            if seen.contains(&key(&repo_id, &n.name, &n.path)) {
+            let line = parsed.as_ref().and_then(|g| g.line_start()).unwrap_or(0);
+            if seen.contains(&key(&repo_id, &n.name, &n.path, line)) {
                 continue;
             }
             if n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q) {
-                seen.insert(key(repo_id.as_str(), &n.name, &n.path));
+                seen.insert(key(repo_id.as_str(), &n.name, &n.path, line));
                 hits.push(SymbolMatch {
                     global_id: n.id.clone(),
                     repo_id,
@@ -182,8 +211,14 @@ pub fn get_cross_repo_blast_radius(
     fed: &FederatedIndex,
     symbol: &str,
     depth: Range<u32>,
+    repo_id: Option<&str>,
 ) -> Result<CrossRepoBlastRadius, LainError> {
-    let repo_id = fed.resolve_symbol(symbol)?;
+    // An explicit repo_id is the disambiguation the AmbiguousSymbol error
+    // advises; honour it here instead of re-running symbol resolution.
+    let repo_id = match repo_id {
+        Some(rid) => rid.to_string(),
+        None => fed.resolve_symbol(symbol)?.as_str().to_string(),
+    };
     get_cross_repo_blast_radius_for_repo(fed, repo_id.as_str(), symbol, depth)
 }
 
@@ -337,7 +372,7 @@ mod tests {
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         fed.backend()
             .upsert_node_global(
-                "repo-a:Function:src/auth.rs:verify_token",
+                "repo-a:Function:src/auth.rs:verify_token:0",
                 crate::schema::NodeType::Function,
                 "src/auth.rs",
                 "verify_token",
@@ -345,7 +380,7 @@ mod tests {
             .unwrap();
         fed.backend()
             .upsert_node_global(
-                "repo-b:Function:src/auth.rs:verify_token",
+                "repo-b:Function:src/auth.rs:verify_token:0",
                 crate::schema::NodeType::Function,
                 "src/auth.rs",
                 "verify_token",
@@ -353,7 +388,7 @@ mod tests {
             .unwrap();
         fed.backend()
             .upsert_node_global(
-                "repo-c:Function:src/x.rs:other",
+                "repo-c:Function:src/x.rs:other:0",
                 crate::schema::NodeType::Function,
                 "src/x.rs",
                 "other",
@@ -382,7 +417,7 @@ mod tests {
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         fed.backend()
             .upsert_node_global(
-                "repo-a:Function:src/x.rs:shared",
+                "repo-a:Function:src/x.rs:shared:0",
                 crate::schema::NodeType::Function,
                 "src/x.rs",
                 "shared",
@@ -390,7 +425,7 @@ mod tests {
             .unwrap();
         fed.backend()
             .upsert_node_global(
-                "repo-b:Function:src/x.rs:shared",
+                "repo-b:Function:src/x.rs:shared:0",
                 crate::schema::NodeType::Function,
                 "src/x.rs",
                 "shared",
@@ -398,7 +433,7 @@ mod tests {
             .unwrap();
         fed.backend()
             .upsert_node_global(
-                "repo-b:Function:src/y.rs:caller_of_shared",
+                "repo-b:Function:src/y.rs:caller_of_shared:0",
                 crate::schema::NodeType::Function,
                 "src/y.rs",
                 "caller_of_shared",
@@ -407,8 +442,8 @@ mod tests {
         fed.backend()
             .upsert_edge(crate::schema::GraphEdge::new(
                 crate::schema::EdgeType::Calls,
-                "repo-b:Function:src/y.rs:caller_of_shared".into(),
-                "repo-b:Function:src/x.rs:shared".into(),
+                "repo-b:Function:src/y.rs:caller_of_shared:0".into(),
+                "repo-b:Function:src/x.rs:shared:0".into(),
             ))
             .unwrap();
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
@@ -446,7 +481,7 @@ mod tests {
         // Nodes
         backend
             .upsert_node_global(
-                "repo-a:Function:src/x.rs:shared",
+                "repo-a:Function:src/x.rs:shared:0",
                 crate::schema::NodeType::Function,
                 "src/x.rs",
                 "shared",
@@ -454,7 +489,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-b:Function:src/x.rs:shared",
+                "repo-b:Function:src/x.rs:shared:0",
                 crate::schema::NodeType::Function,
                 "src/x.rs",
                 "shared",
@@ -462,7 +497,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-b:Function:src/y.rs:direct_consumer",
+                "repo-b:Function:src/y.rs:direct_consumer:0",
                 crate::schema::NodeType::Function,
                 "src/y.rs",
                 "direct_consumer",
@@ -470,7 +505,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-b:Function:src/z.rs:transitive_consumer",
+                "repo-b:Function:src/z.rs:transitive_consumer:0",
                 crate::schema::NodeType::Function,
                 "src/z.rs",
                 "transitive_consumer",
@@ -478,7 +513,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-a:Function:src/x.rs:self_call",
+                "repo-a:Function:src/x.rs:self_call:0",
                 crate::schema::NodeType::Function,
                 "src/x.rs",
                 "self_call",
@@ -486,7 +521,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-a:Function:src/w.rs:other_caller",
+                "repo-a:Function:src/w.rs:other_caller:0",
                 crate::schema::NodeType::Function,
                 "src/w.rs",
                 "other_caller",
@@ -494,7 +529,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-a:Function:src/v.rs:transitive_caller",
+                "repo-a:Function:src/v.rs:transitive_caller:0",
                 crate::schema::NodeType::Function,
                 "src/v.rs",
                 "transitive_caller",
@@ -502,7 +537,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-b:Function:src/y.rs:caller_of_shared",
+                "repo-b:Function:src/y.rs:caller_of_shared:0",
                 crate::schema::NodeType::Function,
                 "src/y.rs",
                 "caller_of_shared",
@@ -512,39 +547,39 @@ mod tests {
         backend
             .upsert_edge(crate::schema::GraphEdge::new(
                 crate::schema::EdgeType::Calls,
-                "repo-a:Function:src/x.rs:shared".into(),
-                "repo-b:Function:src/y.rs:direct_consumer".into(),
+                "repo-a:Function:src/x.rs:shared:0".into(),
+                "repo-b:Function:src/y.rs:direct_consumer:0".into(),
             ))
             .unwrap();
         backend
             .upsert_edge(crate::schema::GraphEdge::new(
                 crate::schema::EdgeType::Calls,
-                "repo-a:Function:src/x.rs:shared".into(),
-                "repo-a:Function:src/x.rs:self_call".into(),
+                "repo-a:Function:src/x.rs:shared:0".into(),
+                "repo-a:Function:src/x.rs:self_call:0".into(),
             ))
             .unwrap();
         // Incoming edges to the seed (repo-a's `shared`):
         backend
             .upsert_edge(crate::schema::GraphEdge::new(
                 crate::schema::EdgeType::Calls,
-                "repo-a:Function:src/w.rs:other_caller".into(),
-                "repo-a:Function:src/x.rs:shared".into(),
+                "repo-a:Function:src/w.rs:other_caller:0".into(),
+                "repo-a:Function:src/x.rs:shared:0".into(),
             ))
             .unwrap();
         // Incoming edge to repo-b's `shared`:
         backend
             .upsert_edge(crate::schema::GraphEdge::new(
                 crate::schema::EdgeType::Calls,
-                "repo-b:Function:src/y.rs:caller_of_shared".into(),
-                "repo-b:Function:src/x.rs:shared".into(),
+                "repo-b:Function:src/y.rs:caller_of_shared:0".into(),
+                "repo-b:Function:src/x.rs:shared:0".into(),
             ))
             .unwrap();
         // Transitive caller (depth 2) of repo-a's `shared`:
         backend
             .upsert_edge(crate::schema::GraphEdge::new(
                 crate::schema::EdgeType::Calls,
-                "repo-a:Function:src/v.rs:transitive_caller".into(),
-                "repo-a:Function:src/w.rs:other_caller".into(),
+                "repo-a:Function:src/v.rs:transitive_caller:0".into(),
+                "repo-a:Function:src/w.rs:other_caller:0".into(),
             ))
             .unwrap();
 
@@ -576,8 +611,8 @@ mod tests {
             .get("repo-a")
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default();
-        assert!(repo_a_ids.contains("repo-a:Function:src/w.rs:other_caller"));
-        assert!(repo_a_ids.contains("repo-a:Function:src/v.rs:transitive_caller"));
+        assert!(repo_a_ids.contains("repo-a:Function:src/w.rs:other_caller:0"));
+        assert!(repo_a_ids.contains("repo-a:Function:src/v.rs:transitive_caller:0"));
         // The pre-fix outgoing-direction result was direct_consumer
         // and self_call. Those must NOT appear in the by_repo buckets
         // — blast radius is callers, not callees.
@@ -612,7 +647,7 @@ mod tests {
         // enough to populate the symbol index for this test.
         backend
             .upsert_node_global(
-                "repo-only:Function:src/x.rs:lonely",
+                "repo-only:Function:src/x.rs:lonely:0",
                 crate::schema::NodeType::Function,
                 "src/x.rs",
                 "lonely",
@@ -620,7 +655,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-only:Function:src/y.rs:caller_of_lonely",
+                "repo-only:Function:src/y.rs:caller_of_lonely:0",
                 crate::schema::NodeType::Function,
                 "src/y.rs",
                 "caller_of_lonely",
@@ -629,11 +664,11 @@ mod tests {
         backend
             .upsert_edge(crate::schema::GraphEdge::new(
                 crate::schema::EdgeType::Calls,
-                "repo-only:Function:src/y.rs:caller_of_lonely".into(),
-                "repo-only:Function:src/x.rs:lonely".into(),
+                "repo-only:Function:src/y.rs:caller_of_lonely:0".into(),
+                "repo-only:Function:src/x.rs:lonely:0".into(),
             ))
             .unwrap();
-        let result = get_cross_repo_blast_radius(&fed, "lonely", 1..3).unwrap();
+        let result = get_cross_repo_blast_radius(&fed, "lonely", 1..3, None).unwrap();
         assert_eq!(
             result
                 .by_repo
@@ -679,6 +714,17 @@ mod ready_threshold_tests {
             h.healthy,
             "an empty federation has nothing failing to be ready"
         );
+    }
+
+    /// Repos that failed to load count against health.
+    #[test]
+    fn unloaded_repos_are_unavailable_and_unhealthy() {
+        let (_tmp, fed) = empty_fed();
+        fed.record_load_error("gone", "clone failed".into());
+        let h = get_federation_health(&fed);
+        assert_eq!(h.total_repos, 1);
+        assert_eq!(h.unavailable, 1);
+        assert!(!h.healthy);
     }
 
     #[test]

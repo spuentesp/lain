@@ -48,9 +48,9 @@ Command Center consumes.
 ## Operator quickstart
 
 Multiplayer is always on. Start `lain server` like you already do — the
-extra surface is 14 MCP tools (8 listed inline below, plus 5 more
-listed in their respective sections) and an SSE feed that the existing
-Command Center picks up automatically:
+extra surface is 21 MCP tools (the Session, Social, and Notes packages)
+plus the `POST /hook` observation endpoint and the SSE feed that the
+existing Command Center picks up automatically:
 
 ```bash
 # Start lain with the multiplayer features enabled (always-on in v0.5+)
@@ -61,13 +61,17 @@ What's new on the wire:
 
 | Surface | Purpose |
 |---|---|
-| 14 MCP tools (the multiplayer surface) | Presence: `register_agent`, `heartbeat`, `list_active_agents`, `who_am_i`, `list_subagents`, `my_claims`. Coordination: `claim_files`, `release_files`, `list_occupancy`. Diagnostics: `detect_overlap`, `get_audit_log`, `get_world_state`, `get_recent_activity`. (8 are listed inline below; the remaining 5 are documented in their respective sections.) |
-| `register_agent`, `heartbeat`, `list_active_agents`, `who_am_i`, `claim_files`, `release_files`, `list_occupancy`, `my_claims` | The eight call-shape tools introduced with the layer. |
+| 21 MCP tools (the multiplayer surface) | Presence: `register_agent`, `heartbeat`, `unregister_agent`, `list_active_agents`, `who_am_i`, `list_subagents`, `my_claims`. Coordination: `claim_files`, `release_files`, `list_occupancy`. Intent: `lain_intent`, `list_active_intents`. Diagnostics: `detect_overlap`, `get_audit_log`, `get_world_state`, `get_recent_activity`. (The remaining 5 rows each document one tool or tool group.) |
+| `register_agent`, `heartbeat`, `list_active_agents`, `who_am_i`, `claim_files`, `release_files`, `list_occupancy`, `my_claims` | The eight core call-shape tools introduced with the layer. |
+| `unregister_agent` | Tear down an agent's session: releases every claim, drops the intent + activity feed entries, removes the presence session. See [Lifecycle](#lifecycle). |
+| `lain_intent`, `list_active_intents` | The intent layer: declare a goal + scope, get a coordination level back (GREEN / YELLOW / RED). See [Intent layer](#intent-layer). |
 | `list_subagents` | Enumerate child sessions of a parent (passes parent session token). See [Subagents](#subagents). |
 | `detect_overlap` | Symbol-level conflict scan between two git refs. See [Commit-time overlap detection](#commit-time-overlap-detection). |
 | `get_audit_log` | Read recent claim and edit events. |
 | `get_world_state` | On-demand snapshot of the world-state envelope (changed symbols since a given `plan_revision`). See [world_state.changed_symbols](#world_statechanged_symbols). |
 | `get_recent_activity` | Recent activity feed (server-agnostic, polled). |
+| `POST /hook` | Tool-call observation ingestion from the agent's host-specific hook layer (Claude Code PostToolUse, AGY / Kimi / Codex pre-tool, …). Populates the activity feed surfaced via `list_active_intents` / `who_am_i`. See [docs/hooks.md](hooks.md#activity-observation). |
+| `POST /hook/evaluate` | Synchronous pre-edit consult: POST a target path or symbol, get back `Level + reason + related[]`. Wraps the `lain_intent` GREEN/YELLOW/RED evaluator for agents that want a YES/NO answer before Edit fires. See [docs/hooks.md](hooks.md). |
 | `GET /events` | Server-Sent Events stream. Fires whenever an agent joins, claims, releases, or a conflict is detected. The Command Center subscribes here for its live panels. |
 | Command Center panels | `GET /` now shows the **Agents online** and **Rooms** (file occupancy) panels, updated live. |
 | Existing tools | `query_graph`, `get_repo_info`, `explain_symbol`, and `get_cross_repo_blast_radius` now include attribution hints (active editors) and surfaces occupancy where it's relevant. |
@@ -78,38 +82,6 @@ multiplayer works.
 ## Agent quickstart
 
 Every agent that wants to participate goes through this 4-call dance:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Agent
-    participant Lain as lain server
-    participant Lock as state_lock
-    participant State as state file (config-stem-hash.json)
-
-    Agent->>Lain: register_agent(name, kind)
-    Lain->>Lock: acquire (timeout 2s)
-    Lock->>State: read
-    State-->>Lock: registry snapshot
-    Lock-->>Lain: snapshot
-    Lain->>Lain: add session
-    Lain->>State: write (under lock)
-    Lain-->>Agent: {agent_id, session_token, expires_at_unix}
-
-    Agent->>Lain: claim_files(auth.rs, symbols:[login])
-    Lain->>Lock: acquire
-    Lock->>State: re-read (peer may have written)
-    State-->>Lain: fresh snapshot
-    Lain->>Lain: check conflicts/advisories
-    Lain->>State: write (under lock)
-    Lain-->>Agent: {granted, conflicts, advisories}
-
-    Agent->>Lain: edit auth.rs
-    Agent->>Lain: release_files(auth.rs)
-    Lain->>Lock: acquire
-    Lain->>State: write
-    Lain-->>Agent: ok
-```
 
 ```js
 const { agent_id, session_token, expires_at_unix } = await mcp.call("register_agent", {name: "claude", kind: "claude-code", pid: process.pid});
@@ -202,25 +174,6 @@ curl -N http://localhost:9999/events
 # data: {"agent_id":"5f74f...", "path":"auth.rs"}
 ```
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Srv as lain server
-    participant Bus as event channel
-    participant Client as SSE consumer
-    participant CC as Command Center
-
-    Srv->>Bus: agent_joined(agent_id, name, kind)
-    Bus->>Client: event: agent_joined\ndata: {…}
-    Bus->>CC: event: agent_joined\ndata: {…}
-    Srv->>Bus: claim_granted(agent_id, path)
-    Bus->>Client: event: claim_granted\ndata: {…}
-    Bus->>CC: event: claim_granted\ndata: {…}
-    Srv->>Bus: conflict_detected(a, b, path)
-    Bus->>Client: event: conflict_detected\ndata: {…}
-    Bus->>CC: event: conflict_detected\ndata: {…}
-```
-
 Event types: `ready` (initial sync), `agent_joined`, `agent_left`,
 `heartbeat_expired`, `claim_granted`, `claim_released`, `claim_revoked`,
 `conflict_detected`, `edit_landed`. The Command Center consumes this
@@ -267,6 +220,21 @@ short TTL. They are a guess: they say so on every surface that reports
 them, and a wrong one expires on its own rather than sticking until the
 session dies. A claim the agent later declares itself is upgraded to a
 declared claim; an inference never downgrades a declaration.
+
+## Lifecycle
+
+The session lifecycle has three MCP tools:
+
+1. **`register_agent`** — create a session and receive `agent_id` +
+   `session_token`. Every subsequent multiplayer call carries both.
+2. **`heartbeat`** — refresh `last_heartbeat`. The expiry loop
+   drops the session (and releases every claim, intent, and
+   activity entry) after the interactive TTL elapses.
+3. **`unregister_agent`** — explicit teardown. Releases every
+   occupancy claim the agent held, drops the agent's intent and
+   activity entries, and removes the presence session. Use this
+   when the agent knows it's done (e.g. end of a subagent run); the
+   implicit expiry handles the agent-crashed case.
 
 ## Tuning
 
@@ -340,7 +308,7 @@ via `list_subagents` (passing its own session token).
 The MCP tool `detect_overlap` finds symbol-level conflicts between two git refs in the active workspace:
 
 ```bash
-lain detect_overlap --base HEAD~1 --head HEAD --workspace backend
+lain hooks overlap-check --url http://localhost:9999 --base HEAD~1 --head HEAD --workspace backend
 ```
 
 Returns:
@@ -408,3 +376,121 @@ If `world_state.note` is set, the agent must resync:
   the server reloaded and lost the revision counter; re-query.
 - `"plan_revision too old for delta; resync required"` →
   the agent's plan is too far in the past; re-query.
+
+## Intent layer
+
+Above the claim layer sits an *intent* layer: an explicit declaration
+of what the agent is trying to accomplish. The claim layer is the
+authoritative primitive for ownership (the file-lock fail-closed
+invariant). The
+intent layer is advisory; it gives the agent — and its peers — a
+richer picture than a list of file paths.
+
+### Three-level coordination
+
+Before any Edit, the agent consults `lain_intent` and receives one
+of three levels:
+
+- **GREEN** — declared scope matches, no peer intent overlaps, no
+  live exclusive claim on the target. Proceed.
+- **YELLOW** — proceed with caution. The reason is surfaced
+  alongside related activity (`OutsideDeclaredScope`,
+  `PeerIntentNearby`, `PeerIsReading`).
+- **RED** — another agent holds an exclusive lease
+  (`ExclusiveClaimHeld`). The agent must release the lease or wait
+  for expiry before editing.
+
+The split between presence and ownership is the load-bearing
+distinction: presence (registration, activity feed) is
+eventually-consistent and fail-open. Ownership (`claim_files`,
+`RED` evaluation) is strong-consistent and fail-closed. The
+coordination engine never downgrades a RED — the file-lock
+coordination primitive is the source of truth, not the in-memory registry.
+
+### Graph-distance refinement
+
+Symbol scopes that share a `Calls` edge in the static graph are
+treated as YELLOW even when their paths are siblings. The
+evaluator's `EvalContext` carries an `Option<&GraphDatabase>`;
+when supplied, `scope_distance` consults the graph via BFS over
+the `Calls` edge set (32-hop cap), with lexical `path_distance`
+remaining the fallback. This is what catches the
+`auth::validate_token` ↔ `session::SessionClaims` case: distinct files, one
+hop apart on the call graph.
+
+### `lain_intent`
+
+```json
+// Request
+{
+  "session_token": "...",
+  "agent_id": "...",
+  "goal": "Add refresh-token validation",
+  "scopes": ["auth::validate_token", "token::RefreshToken"],
+  "status": "editing"
+}
+```
+
+The response carries `intent_id`, the live `revision`, and the
+`coordination` block (`level` + `reason` + `related[]`).
+Updates take the same shape with `intent_id` set; partial updates
+use `add_scopes` / `remove_scopes` / `goal` / `status`.
+
+### Activity feed
+
+`POST /hook` accepts tool-call observations from the agent's
+host-specific hook layer (Claude Code, AGY, Cursor, …). Each
+observation populates the per-agent activity feed surfaced via
+`list_active_intents`, `who_am_i`, and `list_active_agents`:
+
+```json
+{
+  "agent_id": "alice",
+  "intent": { "goal": "Add refresh-token validation", "scopes": [...] },
+  "focus": ["auth::validate_token"],
+  "observed_reads": ["src/auth.rs", "src/token.rs"],
+  "last_tool": { "tool": "Read", "target": "src/auth.rs" }
+}
+```
+
+Wire shape for `POST /hook`:
+
+```json
+{
+  "session_token": "...",
+  "agent_id": "...",
+  "event": "tool_start",
+  "tool": "Read",
+  "target": "src/auth.rs"
+}
+```
+
+### End-to-end fixture
+
+`scripts/agy_e2e.sh` boots a `lain server`, registers two agents,
+exchanges `lain_intent` and `POST /hook` calls, and writes a
+`verdict.json`. This is the regression test for the design: a
+real-agent harness can run the same shape against a real server.
+
+`scripts/agy_chaos.sh` runs three additional variants on top of
+the deterministic `agy_e2e.sh` pass:
+
+- **kill winner** — alice claims, the server is SIGKILLed
+  mid-cycle, a fresh server is started after the stale-lock
+  window, bob attempts the same scope. Variant 1 currently
+  surfaces a real linearizability gap (`OccupancyMap::load` does
+  not drop stale-by-agent claims); tracked in the issue tracker.
+- **corrupt state** — the state file is truncated between
+  iterations; recovery must succeed.
+- **stale-lock takeover** — a stale filesystem lock is planted
+  before a claim; the lock layer must take it over.
+
+## Hidden tools still dispatch
+
+Hooks may keep calling `claim_files`, `heartbeat`, `release_files`,
+and `register_agent` regardless of which packages the session profile
+advertises. The server accepts these calls whether or not they appear in
+`tools/list`. This is why claiming works with the default 18-tool
+profile: the hook dispatches them directly, bypassing the advertising
+filter. The `session` and `social` packages only change what the model
+sees in `tools/list`; they do not gate dispatch.

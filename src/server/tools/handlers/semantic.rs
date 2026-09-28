@@ -28,13 +28,12 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::nlp::{CrossEncoder, NlpEmbedder};
 use crate::overlay::VolatileOverlay;
-use crate::schema::NodeType;
+use crate::schema::{GraphNode, NodeType};
 use crate::server::presence::OccupancyMap;
 use crate::server::tools::utils::{required_str_arg, resolve_node_ambiguous, str_arg, usize_arg};
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -53,6 +52,12 @@ pub fn find_symbol(
 ) -> Result<String, LainError> {
     let _ = overlay; // kept for API parity with the other M6 handlers
     let name = required_str_arg(args, "name")?;
+    // An empty name matched every nameless node (each File).
+    if name.trim().is_empty() {
+        return Err(LainError::NotFound(
+            "find_symbol needs a non-empty `name`".to_string(),
+        ));
+    }
     let path_hint = str_arg(args, "path_hint");
     let type_filter = str_arg(args, "type_filter").to_lowercase();
     let type_filter: Option<NodeType> = if type_filter.is_empty() {
@@ -66,7 +71,20 @@ pub fn find_symbol(
         hits.retain(|n| n.path.contains(hint));
     }
     if let Some(target) = type_filter {
-        hits.retain(|n| n.node_type == target);
+        // `method` has no node type of its own in most graphs: a method is
+        // a function defined in a type (`container`). `module` also covers
+        // the Namespace and Package nodes directories and packages get.
+        hits.retain(|n| match target {
+            NodeType::Method => {
+                n.node_type == NodeType::Method
+                    || (n.node_type == NodeType::Function && n.container.is_some())
+            }
+            NodeType::Module => matches!(
+                n.node_type,
+                NodeType::Module | NodeType::Namespace | NodeType::Package
+            ),
+            _ => n.node_type == target,
+        });
     }
     // Deterministic order: anchor score desc, then path asc, then
     // name asc as a tiebreaker for the rare dedup tie.
@@ -97,7 +115,7 @@ pub fn find_symbol(
         ));
     } else {
         out.push_str(&format!(
-            "Found {} matches. Disambiguate with the `path` argument:\n\n",
+            "Found {} matches. Disambiguate with the `path_hint` argument:\n\n",
             hits.len()
         ));
     }
@@ -106,7 +124,10 @@ pub fn find_symbol(
             .anchor_score
             .map(|s| format!(" anchor={s:.2}"))
             .unwrap_or_default();
-        let line = n.line_start.map(|l| format!(":{l}")).unwrap_or_default();
+        let line = n
+            .line_start
+            .map(|l| format!(":{}", l + 1))
+            .unwrap_or_default();
         out.push_str(&format!(
             "{}. `{}` {} {}{}{}\n",
             i + 1,
@@ -141,14 +162,15 @@ pub async fn get_context(
     )?;
 
     let source_section = match resolve_for_snippet(graph, overlay, &symbol) {
-        Ok((Some(ls), Some(le), Some(ref p))) => {
+        Ok((Some(ls), Some(_le), Some(ref p))) => {
             match crate::server::tools::handlers::context::get_code_snippet(
                 graph,
                 overlay,
                 workspace,
                 p.to_str().unwrap_or(""),
-                Some(ls),
-                Some(le.saturating_sub(ls) as usize),
+                // 1-based line; no extra context: exactly the symbol.
+                Some(ls + 1),
+                None,
             ) {
                 Ok(s) => format!("\n## Source\n\n{}", trim_for_section(&s, 30)),
                 Err(_) => String::new(),
@@ -191,13 +213,14 @@ pub async fn get_context(
 /// Composes `trace_dependency` for direct graph neighbors,
 /// `get_coupling_radar` for co-change partners, and `semantic_search`
 /// for semantic neighbors (when an NLP model is loaded).
+#[allow(clippy::too_many_arguments)]
 pub async fn find_related(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     workspace: &std::path::Path,
     embedder: &NlpEmbedder,
     cross_encoder: &CrossEncoder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     args: &Map<String, Value>,
     ui_link: crate::server::tools::UiLink<'_>,
@@ -274,38 +297,76 @@ pub async fn assess_change(
     ui_link: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
     let symbol = required_str_arg(args, "symbol")?;
-    let depth = str_arg(args, "depth");
     let include_tests = !matches!(
         args.get("include_tests").and_then(Value::as_bool),
         Some(false)
     );
 
     let blast = crate::server::tools::handlers::impact::get_blast_radius(
-        graph, overlay, &symbol, true, ui_link,
+        // `include_weak_edges=true`: the pre-edit risk verdict below
+        // is meaningless if it can't see dynamic-dispatch callers. A
+        // `bus.publish` site with only heuristic callers would
+        // otherwise report `direct=0, transitive=0, risk=low` and the
+        // agent would ship the regression `explain_dispatch` was
+        // built to prevent. Heuristic callers are tagged with `~`
+        // and `[heuristic, conf=X.XX]` so the agent can tell them
+        // apart from type-resolved calls.
+        graph, overlay, &symbol, true, true, ui_link,
     )
     .await?;
     let callsites =
         crate::server::tools::handlers::context::get_call_sites(workspace, graph, overlay, &symbol);
-    let untested = if include_tests {
-        crate::server::tools::handlers::testing::find_untested_functions(
-            graph,
-            overlay,
-            Some(usize_arg(args, "limit").unwrap_or(20)),
-        )
+    // Which tests reach this symbol through calls. This section used to be
+    // the repository-wide `find_untested_functions` list — nothing to do
+    // with the symbol's dependents.
+    let untested: Result<String, LainError> = if include_tests {
+        crate::server::tools::utils::resolve_node(graph, overlay, &symbol)
+            .map(|node| tests_reaching(graph, &node.id, usize_arg(args, "limit").unwrap_or(20)))
     } else {
         Ok(String::new())
     };
 
-    let direct = extract_section(&callsites.unwrap_or_default(), "Direct dependents");
+    let callsites = callsites.unwrap_or_default();
+    let direct = extract_section(&callsites, "Direct dependents");
     let transitive = extract_section(&blast, "indirect");
     let untested_section = match untested {
-        Ok(s) => format!("\n## Untested dependents\n\n{}", trim_for_section(&s, 8)),
-        Err(_) => String::new(),
+        Ok(s) if !s.is_empty() => format!("\n## Test coverage\n\n{s}\n"),
+        _ => String::new(),
     };
 
-    let direct_count = count_bullets(&direct);
-    let transitive_count = count_bullets(&transitive);
-    let risk = if direct_count == 0 && transitive_count == 0 {
+    // Counted from the stable lines of the two outputs, not from section
+    // text: one `- **caller**` line per calling function in the call-site
+    // listing, and blast radius's own total. Parsing sections by header
+    // found no "Direct dependents" header in call-site output, so the
+    // direct count was always 0 and the verdict too low.
+    let direct_count = callsites.lines().filter(|l| l.starts_with("- **")).count();
+    let transitive_count = blast
+        .lines()
+        .find_map(|l| {
+            l.trim_start_matches(['-', ' '])
+                .strip_prefix("Total transitively affected nodes: ")
+        })
+        .and_then(|n| n.trim().parse::<usize>().ok())
+        // Heuristic (pattern-matched) callers are reported separately by
+        // the heuristic-only verdict below, not counted as reach.
+        .map(|total| {
+            let heuristic = blast.lines().filter(|l| l.contains("[heuristic,")).count();
+            total.saturating_sub(direct_count).saturating_sub(heuristic)
+        })
+        .unwrap_or_else(|| count_bullets(&transitive));
+    // The blast-radius output carries a separate section ("~ N heuristic
+    // caller(s) included") that the section extractors above don't see.
+    // When the static graph is empty but heuristic evidence exists, the
+    // verdict is NOT actually 'low' — the agent should treat it the
+    // same way it would treat explain_dispatch's
+    // 'insufficient_evidence' (or 'heuristic_only'). Surfacing this in
+    // the risk line is the single change that closes the gap.
+    let heuristic_only = direct_count == 0
+        && transitive_count == 0
+        && blast.contains("heuristic caller(s) included");
+    let risk = if heuristic_only {
+        "low* — heuristic-only (see ~ N heuristic caller(s) below)"
+    } else if direct_count == 0 && transitive_count == 0 {
         "low"
     } else if direct_count <= 3 && transitive_count <= 20 {
         "medium"
@@ -313,14 +374,8 @@ pub async fn assess_change(
         "high"
     };
 
-    let depth_caveat = if depth.is_empty() {
-        String::new()
-    } else {
-        format!(" (depth={depth})")
-    };
-
     Ok(format!(
-        "## assess_change: {symbol}{depth_caveat}\n\n\
+        "## assess_change: {symbol}\n\n\
          ## Direct dependents\n\n{}\n\n\
          ## Transitive reach\n\n{}\n\
          {untested_section}\n\
@@ -330,34 +385,102 @@ pub async fn assess_change(
     ))
 }
 
+/// Test functions that reach `target` through `Calls` edges, walking
+/// callers breadth-first. A symbol no test reaches is the risk worth
+/// naming before an edit.
+fn tests_reaching(graph: &GraphDatabase, target: &str, limit: usize) -> String {
+    use crate::schema::EdgeType;
+    use std::collections::{HashSet, VecDeque};
+    const MAX_VISITED: usize = 5000;
+    let mut seen: HashSet<String> = HashSet::from([target.to_string()]);
+    let mut queue: VecDeque<String> = VecDeque::from([target.to_string()]);
+    let mut tests: Vec<String> = Vec::new();
+    while let Some(id) = queue.pop_front() {
+        if seen.len() > MAX_VISITED {
+            break;
+        }
+        for edge in graph.get_edges_to(&id).unwrap_or_default() {
+            if edge.edge_type != EdgeType::Calls || !seen.insert(edge.source_id.clone()) {
+                continue;
+            }
+            if let Ok(Some(caller)) = graph.get_node(&edge.source_id) {
+                if caller.label.as_deref() == Some("test") {
+                    tests.push(format!("{} ({})", caller.name, caller.path));
+                }
+            }
+            queue.push_back(edge.source_id);
+        }
+    }
+    if tests.is_empty() {
+        return "No test calls this symbol, directly or through its callers.".to_string();
+    }
+    tests.sort();
+    let shown: Vec<String> = tests.iter().take(limit).map(|t| format!("- {t}")).collect();
+    let more = tests.len().saturating_sub(limit);
+    format!(
+        "{} test(s) reach it:\n{}{}",
+        tests.len(),
+        shown.join("\n"),
+        if more > 0 {
+            format!("\n- … {more} more")
+        } else {
+            String::new()
+        }
+    )
+}
+
 /// M6 tool 5 of 5: `search_code` ("Find code that does Y")
 ///
 /// Mode-dispatched. `lexical` uses the graph's name index;
 /// `semantic` uses the NLP model; `auto` (default) tries
 /// semantic first and falls back to lexical, recording the
 /// fallback in the response so the agent knows what happened.
+#[allow(clippy::too_many_arguments)]
 pub fn search_code(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     embedder: &NlpEmbedder,
     cross_encoder: &CrossEncoder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     args: &Map<String, Value>,
 ) -> Result<String, LainError> {
     let query = required_str_arg(args, "query")?;
+    if query.trim().is_empty() {
+        return Err(LainError::InvalidArgument(
+            "search_code needs a non-empty `query`".to_string(),
+        ));
+    }
     let mode_arg = str_arg(args, "mode").to_lowercase();
     let mode = if mode_arg.is_empty() {
         "auto".to_string()
     } else {
         mode_arg
     };
+    if !matches!(mode.as_str(), "auto" | "lexical" | "semantic") {
+        return Err(LainError::InvalidArgument(format!(
+            "unknown search mode '{mode}'; use auto, lexical or semantic"
+        )));
+    }
     let limit = usize_arg(args, "limit").unwrap_or(10);
 
     let mut fell_back = false;
     let (effective_mode, body) = match mode.as_str() {
         "lexical" => ("lexical", lexical_search(graph, &query, limit)),
+        // No model: the stub embeds everything as zeros, so a semantic
+        // search "succeeded" with 0 results. Say so and answer lexically.
+        "semantic" if embedder.is_stub() => {
+            fell_back = true;
+            (
+                "lexical",
+                format!(
+                    "Semantic search unavailable: no embedding model is configured \
+                     (`lain setup` installs one).\n\nFalling back to lexical:\n\n{}",
+                    lexical_search(graph, &query, limit)
+                ),
+            )
+        }
         "semantic" => match semantic_call(
             workspace,
             graph,
@@ -429,14 +552,19 @@ fn parse_node_type(s: &str) -> Result<NodeType, LainError> {
     Ok(match s {
         "function" | "func" | "fn" => NodeType::Function,
         "struct" | "structure" => NodeType::Struct,
-        "trait" | "interface" => NodeType::Trait,
+        "trait" => NodeType::Trait,
+        // Java / Go / TypeScript / C# / Swift / Kotlin / PHP interfaces are
+        // `Interface` nodes; mapping this to `Trait` matched none of them.
+        "interface" | "protocol" => NodeType::Interface,
+        "enum" => NodeType::Enum,
         "module" | "namespace" | "ns" => NodeType::Module,
         "file" => NodeType::File,
+        "package" => NodeType::Module,
         "method" => NodeType::Method,
         "class" => NodeType::Class,
         other => {
-            return Err(LainError::Other(format!(
-                "unsupported type_filter `{other}` (try function/struct/trait/module/file)"
+            return Err(LainError::InvalidArgument(format!(
+                "unsupported type_filter `{other}` (try function/method/class/struct/interface/trait/enum/module/file)"
             )))
         }
     })
@@ -462,6 +590,7 @@ fn node_type_label(nt: &NodeType) -> &'static str {
         NodeType::Topic => "topic",
         NodeType::Resource => "resource",
         NodeType::Schema => "schema",
+        NodeType::Synthetic => "synthetic",
     }
 }
 
@@ -473,6 +602,7 @@ fn path_hint_option(s: &str) -> Option<String> {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn resolve_for_snippet(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
@@ -500,17 +630,45 @@ fn trim_for_section(body: &str, max_lines: usize) -> String {
 }
 
 fn extract_section(body: &str, header_marker: &str) -> String {
+    // F5 — the body produced by `get_call_sites` and `get_blast_radius`
+    // is NOT structured with `## ` H2 headings. `get_call_sites`
+    // outputs single-dash bullets (`- **caller** (...) calls it at
+    // line N`); `get_blast_radius` outputs `\n- Direct dependents
+    // (N):` and `\n  - depth N: count` lines. Pre-fix this function
+    // scanned for `## `, never matched, and always fell through to
+    // the fallback "first 20 non-empty lines" — which is then fed to
+    // `count_bullets` and produces 0 every time. Result: `direct_count`
+    // was always zero, and `transitive_count` was the only non-zero
+    // count (the fallback body never contained bullets either, so
+    // transitive was zero too).
+    //
+    // Fix: keep the public API but make the function actually find
+    // the bullet section. Match lines that contain the header marker
+    // (case-insensitive) at any indentation (we've seen `- `, `## `,
+    // and `  - ` styles). Once the header is found, take the body up
+    // until the next blank line OR a different heading — the body
+    // forms of these calls don't actually use a closing marker, so
+    // we fall through at EOF.
     let mut in_section = false;
     let mut buf: Vec<&str> = Vec::new();
+    let header_lower = header_marker.to_lowercase();
     for line in body.lines() {
-        if line.starts_with("## ") {
-            if in_section {
-                break;
-            }
-            if line.to_lowercase().contains(&header_marker.to_lowercase()) {
+        let trimmed = line.trim_start();
+        let trimmed_lower = trimmed.to_lowercase();
+        if !in_section {
+            if (trimmed_lower.starts_with("- ") || trimmed_lower.starts_with("## "))
+                && trimmed_lower.contains(&header_lower)
+            {
                 in_section = true;
             }
-        } else if in_section {
+        } else if trimmed.is_empty() {
+            // Blank line ends the section (body sections are
+            // consistently followed by a blank or next heading).
+            break;
+        } else if trimmed.starts_with("## ") || trimmed.starts_with("# ") {
+            // Hit the next heading without seeing the marker again.
+            break;
+        } else {
             buf.push(line);
         }
     }
@@ -526,19 +684,39 @@ fn extract_section(body: &str, header_marker: &str) -> String {
 }
 
 fn count_bullets(section: &str) -> usize {
+    // F5 — the actual caller-bullet format from `get_call_sites` is
+    // `- **caller_name** (...) calls it at line N`; the blast-radius
+    // body uses `  - depth N: count` for indented bullets. Both start
+    // with `- **` (the caller bullet) or `  - ` (the depth line).
+    // Pre-fix `count_bullets` checked only `  - ` and `- - `, neither
+    // of which matched the real caller output, so the count was
+    // always zero and the risk verdict degenerated to `low` even
+    // when callers existed. Match `- **` (the caller marker) AND
+    // `  - ` (the indented depth marker); exclude header lines like
+    // `- leaf_helper (Function)` and `- Overlay freshness: live`
+    // that aren't caller bullets.
     section
         .lines()
-        .filter(|l| l.trim_start().starts_with("- "))
+        .filter(|l| {
+            let t = l.trim_start();
+            if t == "-" || t == "--" || t.starts_with("---") {
+                return false;
+            }
+            // Caller bullets: `- **name**` (get_call_sites) or
+            // `  - depth N: count` (get_blast_radius indented).
+            t.starts_with("- **") || t.starts_with("  - ")
+        })
         .count()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn semantic_call(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     embedder: &NlpEmbedder,
     cross_encoder: &CrossEncoder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     query: &str,
     limit: usize,
@@ -556,38 +734,141 @@ fn semantic_call(
     )
 }
 
+/// Words of an identifier or query: split on non-alphanumerics and
+/// camelCase boundaries, lowercased and lightly stemmed, so
+/// `should_bypass_proxies`, `shouldBypassProxy` and "bypass proxy" meet.
+fn search_terms(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in text.chars() {
+        if !c.is_alphanumeric() {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower && !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+        prev_lower = c.is_lowercase() || c.is_ascii_digit();
+        cur.extend(c.to_lowercase());
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words.into_iter().map(|w| stem(&w)).collect()
+}
+
+/// Crude suffix stripping — enough for plurals and -ing/-ed forms to
+/// meet their base word; not a linguistic stemmer.
+fn stem(word: &str) -> String {
+    for (suffix, replacement) in [("ies", "y"), ("ing", ""), ("ed", ""), ("es", ""), ("s", "")] {
+        if let Some(base) = word.strip_suffix(suffix) {
+            if base.len() >= 3 && !(suffix == "s" && base.ends_with('s')) {
+                return format!("{base}{replacement}");
+            }
+        }
+    }
+    word.to_string()
+}
+
+/// Equal, or one abbreviates the other (`environ` / `environment`,
+/// `config` / `configuration`) with at least four letters in common.
+fn words_match(a: &str, b: &str) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    short == long || (short.len() >= 4 && long.starts_with(short))
+}
+
+/// Query words worth matching: stopwords and one- or two-letter words
+/// match too much to rank anything.
+fn query_terms(query: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "this", "that", "from", "into", "how", "what", "where",
+        "which", "who", "does", "when", "are", "code", "function", "method",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    search_terms(query)
+        .into_iter()
+        .filter(|t| t.len() >= 3 && !STOP.contains(&t.as_str()) && seen.insert(t.clone()))
+        .collect()
+}
+
 fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
+    // An exact substring of the name still ranks first; beyond that a
+    // symbol scores by how many query words its name (and, weighted
+    // lower, its path) contains. Matching the whole query as one
+    // substring made every multi-word query ("proxy bypass environment")
+    // return nothing.
     let needle = query.to_lowercase();
-    let mut hits: Vec<_> = graph
+    let terms = query_terms(query);
+    let needed = terms.len().div_ceil(2).max(1);
+    let mut hits: Vec<(u32, GraphNode)> = graph
         .get_all_nodes()
         .into_iter()
-        .filter(|n| n.name.to_lowercase().contains(&needle))
+        .filter_map(|n| {
+            if n.name.to_lowercase().contains(&needle) {
+                return Some((u32::MAX, n));
+            }
+            if terms.is_empty() {
+                return None;
+            }
+            let name_terms = search_terms(&n.name);
+            let has = |words: &[String], t: &str| words.iter().any(|w| words_match(w, t));
+            let in_name = terms.iter().filter(|t| has(&name_terms, t)).count();
+            if in_name == 0 {
+                return None;
+            }
+            // Path words only matter when the name alone is short of the bar.
+            let in_path = if in_name >= needed {
+                0
+            } else {
+                let path_terms = search_terms(&n.path);
+                terms
+                    .iter()
+                    .filter(|t| !has(&name_terms, t) && has(&path_terms, t))
+                    .count()
+            };
+            (in_name >= 1 && in_name + in_path >= needed)
+                .then_some(((in_name * 2 + in_path) as u32, n))
+        })
         .collect();
-    hits.sort_by(|a, b| {
-        b.anchor_score
-            .partial_cmp(&a.anchor_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+    hits.sort_by(|(sa, a), (sb, b)| {
+        sb.cmp(sa)
+            .then_with(|| {
+                b.anchor_score
+                    .partial_cmp(&a.anchor_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.path.cmp(&b.path))
     });
+    let hits: Vec<GraphNode> = hits.into_iter().map(|(_, n)| n).collect();
     if hits.is_empty() {
         return format!("No lexical matches for `{query}`.");
     }
     let mut out = String::new();
     for (i, n) in hits.iter().take(limit).enumerate() {
-        let line = n.line_start.map(|l| format!(":{l}")).unwrap_or_default();
+        let line = n
+            .line_start
+            .map(|l| format!(":{}", l + 1))
+            .unwrap_or_default();
         let anchor = n
             .anchor_score
             .map(|s| format!(" anchor={s:.2}"))
             .unwrap_or_default();
+        // The name first: an id alone made every hit need a second call
+        // to learn what it was.
         out.push_str(&format!(
-            "{}. `{}` {} {}{}{}\n",
+            "{}. **{}** {} {}{}{} (`{}`)\n",
             i + 1,
-            n.id,
+            n.name,
             node_type_label(&n.node_type),
             n.path,
             line,
-            anchor
+            anchor,
+            n.id
         ));
     }
     out
@@ -597,6 +878,45 @@ fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
 mod m6_tests {
     use super::*;
     use crate::schema::{EdgeType, GraphEdge, GraphNode};
+
+    #[test]
+    fn tests_reaching_walks_callers_to_tests() {
+        let tmp = std::env::temp_dir().join("test_semantic_tests_reaching");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let f = |n: &str| GraphNode::new(NodeType::Function, n.into(), "a.py".into());
+        let (target, mid) = (f("target"), f("mid"));
+        let mut t = f("test_mid");
+        t.label = Some("test".into());
+        let lonely = f("lonely");
+        let ids = (
+            target.id.clone(),
+            mid.id.clone(),
+            t.id.clone(),
+            lonely.id.clone(),
+        );
+        graph.insert_nodes_batch(&[target, mid, t, lonely]).unwrap();
+        graph
+            .insert_edge(&GraphEdge::new(
+                EdgeType::Calls,
+                ids.1.clone(),
+                ids.0.clone(),
+            ))
+            .unwrap();
+        graph
+            .insert_edge(&GraphEdge::new(
+                EdgeType::Calls,
+                ids.2.clone(),
+                ids.1.clone(),
+            ))
+            .unwrap();
+        let out = tests_reaching(&graph, &ids.0, 20);
+        assert!(
+            out.contains("1 test(s)") && out.contains("test_mid"),
+            "{out}"
+        );
+        assert!(tests_reaching(&graph, &ids.3, 20).starts_with("No test"));
+    }
 
     fn make_test_graph() -> (GraphDatabase, VolatileOverlay) {
         let tmp = std::env::temp_dir().join("test_semantic_handlers");
@@ -671,7 +991,7 @@ mod m6_tests {
         let (graph, overlay) = make_test_graph();
         let m = args(&[("name", "parse")]);
         let out = find_symbol(&graph, &overlay, &m).unwrap();
-        assert!(out.contains("Disambiguate with the `path` argument"));
+        assert!(out.contains("Disambiguate with the `path_hint` argument"));
         assert!(out.contains("/src/main.rs"));
         assert!(out.contains("/src/util.rs"));
     }
@@ -693,7 +1013,7 @@ mod m6_tests {
         let (graph, overlay) = make_test_graph();
         let m = args(&[("name", "parse"), ("type_filter", "function")]);
         let out = find_symbol(&graph, &overlay, &m).unwrap();
-        assert!(out.contains("Disambiguate with the `path` argument"));
+        assert!(out.contains("Disambiguate with the `path_hint` argument"));
         // The two `parse` nodes are Functions — narrowing kept both.
         assert_eq!(out.matches("/src/").count(), 2);
     }
@@ -709,6 +1029,41 @@ mod m6_tests {
         assert!(out.contains("## search_code: render"));
         assert!(out.contains("mode=lexical"));
         assert!(out.contains("fell_back=false"));
+    }
+
+    /// A multi-word query matches identifiers by their words, across
+    /// snake_case / camelCase and simple plurals.
+    #[test]
+    fn lexical_search_matches_query_words() {
+        let tmp = std::env::temp_dir().join("test_lexical_words");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        for (name, path) in [
+            ("should_bypass_proxies", "src/utils.py"),
+            ("getEnvironProxies", "src/utils.ts"),
+            ("render_page", "src/view.py"),
+        ] {
+            graph
+                .upsert_node(GraphNode::new(NodeType::Function, name.into(), path.into()))
+                .unwrap();
+        }
+        let out = lexical_search(&graph, "proxy bypass environment", 10);
+        assert!(
+            out.contains("src/utils.py"),
+            "snake_case + plural; got:\n{out}"
+        );
+        assert!(
+            out.contains("src/utils.ts"),
+            "camelCase + abbreviation; got:\n{out}"
+        );
+        assert!(
+            !out.contains("src/view.py"),
+            "unrelated symbol; got:\n{out}"
+        );
+        assert_eq!(
+            search_terms("getHTTPResponse_v2"),
+            vec!["get", "httpresponse", "v2"]
+        );
     }
 
     /// `search_code` lexical mode returns "No lexical matches"
@@ -739,6 +1094,555 @@ mod m6_tests {
         assert!(res.is_err(), "expected NotFound, got {res:?}");
     }
 
+    /// `assess_change` must surface heuristic (dynamic-dispatch)
+    /// callers in the risk verdict — the regression iter 14 closed.
+    /// Without this, a `bus.publish` site with only heuristic callers
+    /// would report `direct=0, transitive=0, risk=low` and the agent
+    /// would ship the regression `explain_dispatch` was built to
+    /// prevent.
+    ///
+    /// The fixture below builds a graph with one `parse` target
+    /// (the symbol under assessment) and one BusTopic heuristic edge
+    /// pointing at it. With `include_weak_edges=true` (the iter 14
+    /// default), the transitive list must include the heuristic
+    /// caller line tagged with `[heuristic, conf=...]`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_surfaces_heuristic_callers_in_risk_verdict() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        let tmp = std::env::temp_dir().join("test_assess_heuristic");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        let target = GraphNode::new(
+            NodeType::Function,
+            "handle_order".to_string(),
+            "/src/orders.py".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        // Heuristic edge: orders.py → Hub:message_bus_publisher. We
+        // swap the synthetic hub's id for the target's so the BFS
+        // walks into the symbol under assessment (mirrors the
+        // existing blast-radius heuristic test fixture).
+        let hub_name = "Hub:message_bus_publisher";
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
+        let caller_id = GraphNode::generate_id(&NodeType::File, "/src/orders.py", "", None, &ns);
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::File, String::new(), "/src/orders.py".to_string());
+                n.id = caller_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge {
+                edge_type: EdgeType::BusTopic,
+                source_id: caller_id,
+                target_id: target.id.clone(),
+                weight: Some(0.7),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Heuristic {
+                    detector: "message_bus_publisher".to_string(),
+                    confidence: 0.7,
+                }),
+            }])
+            .unwrap();
+
+        let mut a = Map::new();
+        a.insert(
+            "symbol".to_string(),
+            Value::String("handle_order".to_string()),
+        );
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        // Pre-iter-14: a symbol with one heuristic caller and zero
+        // type-resolved callers would report risk=low and no heuristic
+        // tag in the transitive section. Post-iter-14: the heuristic
+        // caller surfaces and the verdict reflects it.
+        assert!(
+            out.contains("[heuristic") || out.contains("heuristic caller(s) included"),
+            "expected heuristic marker in assess_change output, got:\n{out}"
+        );
+        assert!(
+            out.contains("conf=0.70") || out.contains("confidence"),
+            "expected confidence tag in assess_change output, got:\n{out}"
+        );
+        // Risk must NOT be `low` — a single heuristic caller at 0.7
+        // confidence is enough to push the verdict above the empty-
+        // blast-radius threshold.
+        assert!(
+            !out.contains("verdict: **low**"),
+            "heuristic callers must not let assess_change report risk=low, got:\n{out}"
+        );
+    }
+
+    /// When the static graph is empty but a heuristic caller exists,
+    /// `assess_change` must surface that — the previous contract
+    /// reported `risk=low` in this case, which is the false negative
+    /// `explain_dispatch` was built to prevent. Pinned by the
+    /// `low* — heuristic-only` line on the verdict.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_heuristic_only_verdict_does_not_say_low() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        let tmp = std::env::temp_dir().join("test_assess_heuristic_only");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        // Single Function target — no static callers, only one
+        // BusTopic heuristic edge pointing at it.
+        let target = GraphNode::new(
+            NodeType::Function,
+            "fire_handler".to_string(),
+            "/src/handler.py".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        let hub_name = "Hub:message_bus_publisher";
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
+        let caller_id = GraphNode::generate_id(&NodeType::File, "/src/caller.py", "", None, &ns);
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::File, String::new(), "/src/caller.py".to_string());
+                n.id = caller_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge {
+                edge_type: EdgeType::BusTopic,
+                source_id: caller_id,
+                target_id: target.id.clone(),
+                weight: Some(0.7),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Heuristic {
+                    detector: "message_bus_publisher".to_string(),
+                    confidence: 0.7,
+                }),
+            }])
+            .unwrap();
+
+        let mut a = Map::new();
+        a.insert(
+            "symbol".to_string(),
+            Value::String("fire_handler".to_string()),
+        );
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        // The static graph is empty (no Calls/Uses edges) but the
+        // heuristic caller exists. Pre-fix: verdict was bare `low`
+        // and the agent would treat this as safe. Post-fix: verdict
+        // must be `low*` and carry a pointer to the heuristic
+        // section so the agent knows the static graph is empty by
+        // blind-spot, not by absence of callers.
+        assert!(
+            !out.contains("verdict: **low**\n") && !out.ends_with("verdict: **low**."),
+            "heuristic-only assess_change must not say bare risk=low, got:\n{out}"
+        );
+        assert!(
+            out.contains("heuristic-only") || out.contains("heuristic caller(s) included"),
+            "expected explicit heuristic marker in the verdict line, got:\n{out}"
+        );
+    }
+
+    /// Truly-empty blast radius (no static callers AND no heuristic
+    /// callers) reports `risk=low` cleanly — no asterisk, no
+    /// heuristic marker. This is the third vertex of the risk-tier
+    /// contract:
+    ///
+    ///   1. N static callers → risk tier from count (medium / high)
+    ///   2. 0 static + N heuristic → `risk=low* — heuristic-only`
+    ///   3. 0 static + 0 heuristic → bare `risk=low`
+    ///
+    /// Without this third case pinned, the iter-21 `low*` heuristic
+    /// could leak into the truly-safe path and confuse an agent into
+    /// refusing to edit a leaf function.
+    /// Five direct callers: counted as five, and the verdict is high.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_counts_direct_callers() {
+        let tmp = std::env::temp_dir().join("test_assess_direct_count");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let target = GraphNode::new(NodeType::Function, "to_native".into(), "src/util.rs".into())
+            .with_location_in(0, 3, &ns);
+        graph.upsert_node(target.clone()).unwrap();
+        for i in 0..5u32 {
+            let caller = GraphNode::new(
+                NodeType::Function,
+                format!("caller_{i}"),
+                format!("src/c{i}.rs"),
+            )
+            .with_location_in(0, 5, &ns);
+            graph.upsert_node(caller.clone()).unwrap();
+            graph
+                .insert_edge(&GraphEdge::new(
+                    EdgeType::Calls,
+                    caller.id.clone(),
+                    target.id.clone(),
+                ))
+                .unwrap();
+        }
+        let mut a = Map::new();
+        a.insert("symbol".to_string(), Value::String("to_native".to_string()));
+        let out = assess_change(
+            &graph,
+            &overlay,
+            std::path::Path::new("/nonexistent"),
+            &a,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("Direct: 5;"), "{out}");
+        assert!(out.contains("verdict: **high**"), "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_truly_empty_blast_radius_says_low() {
+        // Fresh graph with a single Function node and no callers.
+        // The test fixture must be truly caller-free — make_test_graph
+        // wires up a Calls edge, so we build inline.
+        let tmp = std::env::temp_dir().join("test_assess_truly_empty");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let leaf = GraphNode::new(
+            NodeType::Function,
+            "leaf_helper".to_string(),
+            "/src/lib.rs".to_string(),
+        );
+        graph.upsert_node(leaf.clone()).unwrap();
+
+        let mut a = Map::new();
+        a.insert(
+            "symbol".to_string(),
+            Value::String("leaf_helper".to_string()),
+        );
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        // Pin the third vertex of the contract: bare `risk=low`,
+        // no asterisk, no heuristic-only marker.
+        assert!(
+            out.contains("verdict: **low**"),
+            "truly-empty blast radius must say bare risk=low, got:\n{out}"
+        );
+        assert!(
+            !out.contains("heuristic-only"),
+            "truly-empty blast radius must NOT carry the heuristic-only caveat, got:\n{out}"
+        );
+        assert!(
+            !out.contains("heuristic caller(s) included"),
+            "truly-empty blast radius must NOT carry the heuristic marker, got:\n{out}"
+        );
+    }
+
+    /// Mixed static + heuristic callers must produce the regular
+    /// risk tier (medium / high) — NOT the bare `low` of the
+    /// truly-empty case AND NOT the `low*` of the heuristic-only
+    /// case. The heuristic evidence augments an already-existing
+    /// caller surface; it doesn't replace the count-based tier.
+    /// Pinned here so a future refactor that re-routes the
+    /// heuristic-only verdict into the mixed path is a
+    /// deliberate decision.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_mixed_static_and_heuristic_uses_normal_tier() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        let tmp = std::env::temp_dir().join("test_assess_mixed");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        // Target with one Calls edge (static caller) and one
+        // BusTopic heuristic edge pointing at it. The static edge
+        // alone would put us in the `medium` tier (1 direct
+        // caller ≤ 3). The heuristic edge should not flip the
+        // verdict to bare low or to `low*`.
+        let target = GraphNode::new(
+            NodeType::Function,
+            "process".to_string(),
+            "/src/processor.rs".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        // Static caller: `main` → `process` via Calls.
+        let static_caller = GraphNode::new(
+            NodeType::Function,
+            "main".to_string(),
+            "/src/main.rs".to_string(),
+        );
+        graph.upsert_node(static_caller.clone()).unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge::new(
+                EdgeType::Calls,
+                static_caller.id.clone(),
+                target.id.clone(),
+            )])
+            .unwrap();
+
+        // Heuristic caller: a separate file publishing to a bus
+        // that lands on `process`.
+        let hub_name = "Hub:message_bus_publisher";
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
+        let heuristic_caller_id =
+            GraphNode::generate_id(&NodeType::File, "/src/publisher.rs", "", None, &ns);
+        graph
+            .upsert_node({
+                let mut n = GraphNode::new(
+                    NodeType::File,
+                    String::new(),
+                    "/src/publisher.rs".to_string(),
+                );
+                n.id = heuristic_caller_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge {
+                edge_type: EdgeType::BusTopic,
+                source_id: heuristic_caller_id,
+                target_id: target.id.clone(),
+                weight: Some(0.7),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Heuristic {
+                    detector: "message_bus_publisher".to_string(),
+                    confidence: 0.7,
+                }),
+            }])
+            .unwrap();
+
+        let mut a = Map::new();
+        a.insert("symbol".to_string(), Value::String("process".to_string()));
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        // The mixed case must NOT downgrade to either tier-3
+        // special verdict. The static caller's presence keeps the
+        // risk tier on the regular scale.
+        assert!(
+            !out.contains("verdict: **low**") && !out.contains("verdict: **low*"),
+            "mixed static+heuristic assess_change must NOT downgrade to \
+             bare low or low*, got:\n{out}"
+        );
+        assert!(
+            out.contains("verdict: **medium**") || out.contains("verdict: **high**"),
+            "mixed static+heuristic must report medium or high, got:\n{out}"
+        );
+        // And the heuristic evidence should still surface so
+        // the agent knows the runtime target has more callers
+        // than the static graph shows.
+        assert!(
+            out.contains("heuristic caller(s) included"),
+            "mixed case must still surface the heuristic evidence, got:\n{out}"
+        );
+    }
+
+    /// The `~ N heuristic caller(s) included` count in
+    /// `assess_change`'s body must reflect the actual number of
+    /// heuristic edges in the graph — agents rely on that count
+    /// to decide whether to follow up with `explain_dispatch`.
+    /// Fixture with three BusTopic heuristic edges pointing at
+    /// the same target pins `~ 3 heuristic caller(s) included`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_heuristic_caller_count_reflects_graph() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        let tmp = std::env::temp_dir().join("test_assess_heuristic_count");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        let target = GraphNode::new(
+            NodeType::Function,
+            "process".to_string(),
+            "/src/processor.py".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        // Three distinct files publish to the same message bus,
+        // each landing on `process`.
+        for path in [
+            "/src/orders.py",
+            "/src/payments.py",
+            "/src/notifications.py",
+        ] {
+            let caller_id = GraphNode::generate_id(&NodeType::File, path, "", None, &ns);
+            graph
+                .upsert_node({
+                    let mut n = GraphNode::new(NodeType::File, String::new(), path.to_string());
+                    n.id = caller_id.clone();
+                    n
+                })
+                .unwrap();
+            graph
+                .insert_edges_batch(&[GraphEdge {
+                    edge_type: EdgeType::BusTopic,
+                    source_id: caller_id,
+                    target_id: target.id.clone(),
+                    weight: Some(0.7),
+                    cross_repo: false,
+                    provenance: Some(EdgeProvenance::Heuristic {
+                        detector: "message_bus_publisher".to_string(),
+                        confidence: 0.7,
+                    }),
+                }])
+                .unwrap();
+        }
+
+        let mut a = Map::new();
+        a.insert("symbol".to_string(), Value::String("process".to_string()));
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        assert!(
+            out.contains("~ 3 heuristic caller(s) included"),
+            "the heuristic count must reflect the graph (3 edges), got:\n{out}"
+        );
+    }
+
+    /// Cross-tool contract: when `assess_change` reports
+    /// `risk=low*` (heuristic-only), the same symbol fed to
+    /// `explain_dispatch` must return one of the heuristic
+    /// verdicts — `heuristic_only` or `runtime_confirmed` (if a
+    /// matching runtime span exists). The static-only verdicts
+    /// (`static_only`, `mixed`) and `no_callers` / `insufficient_evidence`
+    /// are wrong — assess_change said `low*` precisely because the
+    /// static graph is empty but the heuristic sensor saw
+    /// something. Pinned here so a future refactor that decouples
+    /// the two paths (e.g. one stops calling the other) is caught
+    /// by CI.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_low_star_implies_explain_dispatch_sees_heuristic() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        // Re-use the heuristic-only fixture from iter 21.
+        let tmp = std::env::temp_dir().join("test_assess_low_star_to_explain");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        let target = GraphNode::new(
+            NodeType::Function,
+            "fire_handler".to_string(),
+            "/src/handler.py".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        let hub_name = "Hub:message_bus_publisher";
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
+        let caller_id = GraphNode::generate_id(&NodeType::File, "/src/caller.py", "", None, &ns);
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::File, String::new(), "/src/caller.py".to_string());
+                n.id = caller_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge {
+                edge_type: EdgeType::BusTopic,
+                source_id: caller_id,
+                target_id: target.id.clone(),
+                weight: Some(0.7),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Heuristic {
+                    detector: "message_bus_publisher".to_string(),
+                    confidence: 0.7,
+                }),
+            }])
+            .unwrap();
+
+        // 1) assess_change must report risk=low* — heuristic-only.
+        let mut a = Map::new();
+        a.insert(
+            "symbol".to_string(),
+            Value::String("fire_handler".to_string()),
+        );
+        let assess_out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+        assert!(
+            assess_out.contains("heuristic-only") || assess_out.contains("verdict: **low*"),
+            "expected risk=low* — heuristic-only; got:\n{assess_out}"
+        );
+
+        // 2) explain_dispatch on the same symbol must surface
+        // the heuristic caller (heuristic_only or
+        // runtime_confirmed — there are no runtime spans in this
+        // fixture so heuristic_only is the right answer).
+        let explain_out = crate::server::tools::handlers::explain_dispatch::explain_dispatch(
+            &graph,
+            &overlay,
+            "fire_handler",
+        )
+        .await
+        .expect("explain_dispatch on a known symbol must succeed");
+
+        assert!(
+            explain_out.contains("heuristic_only") || explain_out.contains("runtime_confirmed"),
+            "explain_dispatch must surface the heuristic caller \
+             (verdict heuristic_only or runtime_confirmed); got:\n{explain_out}"
+        );
+        assert!(
+            !explain_out.contains("verdict: no_callers"),
+            "explain_dispatch must NOT report no_callers when \
+             assess_change reported risk=low*; got:\n{explain_out}"
+        );
+    }
+
     /// Helper that wraps `search_code` with `cross_encoder` and
     /// `embedding_cache` defaulted to empty (so the lexical path
     /// is the only one exercised — that's what these unit tests
@@ -756,7 +1660,11 @@ mod m6_tests {
         use std::sync::Arc;
         let embedder = NlpEmbedder::new_stub();
         let cross = CrossEncoder::from_dir(std::path::Path::new("/nonexistent"));
-        let cache = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let tuning = TuningConfig::default();
+        let cache = Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(tuning.embedding_cache_capacity)
+                .expect("default capacity > 0"),
+        )));
         let tuning = TuningConfig::default();
         search_code(
             std::path::Path::new("/"),

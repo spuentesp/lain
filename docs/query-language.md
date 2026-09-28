@@ -100,7 +100,7 @@ flowchart LR
 |-------|-------------|
 | `edge` | `Calls`, `Contains`, `Uses`, `Implements`, `Imports`, `CoChangedWith`, `Pattern`, `CallsHttp`, `Produces`, `Consumes`, `DeployedTo`, `CrossRepoSameSymbol` |
 | `direction` | `outgoing` \| `incoming` \| `both` |
-| `depth` | Integer or `{ "min": N, "max": M }` |
+| `depth` | Integer `N` (1 to N hops; `0` is the start nodes) or `{ "min": N, "max": M }` (inclusive) |
 | `target` | Optional nested `FindOp` — only follow edges to matching nodes |
 
 ### filter
@@ -152,11 +152,13 @@ Pass `named` instead of `ops` for prebuilt queries:
 { "named": "get_callers" }
 { "named": "get_callees" }
 { "named": "get_file_functions" }
-{ "named": "get_function_imports" }
 { "named": "get_module_functions" }
-{ "named": "get_test_coverage" }
 { "named": "get_deprecated_functions" }
 ```
+
+Named queries take no parameters: they run over the whole graph. To aim
+one at a symbol, write the `ops` yourself (examples below), or use the
+dedicated tools (`get_call_chain`, `get_call_sites`, `get_blast_radius`).
 
 ---
 
@@ -224,15 +226,8 @@ With args via `ops` equivalent:
 
 ### Get all untested functions in a module
 
-```json
-{
-  "ops": [
-    { "op": "find", "type": "Function", "path": "src/handlers/" },
-    { "op": "connect", "edge": "Calls", "direction": "incoming", "depth": 0 },
-    { "op": "filter", "type": "Function" }
-  ]
-}
-```
+Use the `find_untested_functions` tool: "has no caller" is an absence,
+which a `connect` step cannot express.
 
 ### Find deprecated public functions
 
@@ -250,11 +245,6 @@ With args via `ops` equivalent:
 ### Get call chain between two functions
 
 ```json
-{ "named": "get_call_chain" }
-```
-
-With explicit ops:
-```json
 {
   "ops": [
     { "op": "find", "type": "Function", "name": "caller" },
@@ -265,9 +255,7 @@ With explicit ops:
 
 ### Structural coverage summary for a module
 
-```json
-{ "named": "get_test_coverage" }
-```
+Use the `get_coverage_summary` tool.
 
 ### Explain a symbol
 

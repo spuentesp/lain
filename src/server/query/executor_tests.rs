@@ -6,10 +6,9 @@ use crate::query::executor::Executor;
 use crate::query::spec::*;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::sync::Arc;
 
-type EmbeddingCache = Arc<Mutex<HashMap<String, Vec<f32>>>>;
+type EmbeddingCache = Arc<Mutex<lru::LruCache<String, Vec<f32>>>>;
 
 fn make_test_graph() -> GraphDatabase {
     let tmp = std::env::temp_dir().join("test_executor_graph");
@@ -82,7 +81,12 @@ fn make_test_graph() -> GraphDatabase {
 
 fn make_test_executor_params() -> (NlpEmbedder, EmbeddingCache) {
     let embedder = NlpEmbedder::new_stub();
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(
+            crate::tuning::TuningConfig::default().embedding_cache_capacity,
+        )
+        .expect("default capacity > 0"),
+    )));
     (embedder, cache)
 }
 
@@ -1226,4 +1230,47 @@ fn a_maximum_depth_stops_the_walk() {
         !names.contains(&"c".to_string()),
         "depth 3 is out of range: {names:?}"
     );
+}
+
+/// `depth: 2` reaches one- and two-hop callees; `target` keeps only the
+/// nodes it selects.
+#[test]
+fn test_connect_depth_is_up_to_and_target_filters() {
+    let graph = make_test_graph();
+    let (embedder, cache) = make_test_executor_params();
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+    let find_main = GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Single("Function".to_string())),
+        name: Some(NameSelector::Exact("main".to_string())),
+        ..Default::default()
+    });
+    let connect = |target: Option<FindOp>| {
+        GraphOp::Connect(ConnectOp {
+            edge: EdgeSelector::Single("Calls".to_string()),
+            direction: Direction::Outgoing,
+            depth: DepthSpec::Single(2),
+            target: target.map(Box::new),
+        })
+    };
+    let all = exec
+        .execute(&QuerySpec::new(vec![find_main.clone(), connect(None)]))
+        .unwrap();
+    assert_eq!(all.count, 3, "a, x and b");
+    let only_b = exec
+        .execute(&QuerySpec::new(vec![
+            find_main.clone(),
+            connect(Some(FindOp {
+                name: Some(NameSelector::Exact("b".to_string())),
+                ..Default::default()
+            })),
+        ]))
+        .unwrap();
+    let names: Vec<&str> = only_b.nodes.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, vec!["b"]);
+    // An unknown node type is an error, not an empty answer.
+    let bogus = exec.execute(&QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Single("function".to_string())),
+        ..Default::default()
+    })]));
+    assert!(bogus.is_err());
 }

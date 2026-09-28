@@ -28,7 +28,7 @@ async fn test_blast_radius_leaf_node() {
     let overlay = VolatileOverlay::new();
 
     // c is a leaf — nothing calls c
-    let result = get_blast_radius(&graph, &overlay, "c", false, None).await;
+    let result = get_blast_radius(&graph, &overlay, "c", false, false, None).await;
     assert!(result.is_ok());
     let text = result.unwrap();
     // Leaf has no callers, so only c itself is in visited set
@@ -42,7 +42,7 @@ async fn test_blast_radius_b_node() {
     let overlay = VolatileOverlay::new();
 
     // b has two callers: a and x. Both should appear in blast radius.
-    let result = get_blast_radius(&graph, &overlay, "b", false, None).await;
+    let result = get_blast_radius(&graph, &overlay, "b", false, false, None).await;
     assert!(result.is_ok());
     let text = result.unwrap();
     // Should show a and x as dependents (at minimum)
@@ -55,7 +55,7 @@ async fn test_blast_radius_main_node() {
     let overlay = VolatileOverlay::new();
 
     // main is root — no incoming edges to main in our test graph
-    let result = get_blast_radius(&graph, &overlay, "main", false, None).await;
+    let result = get_blast_radius(&graph, &overlay, "main", false, false, None).await;
     assert!(result.is_ok());
     let text = result.unwrap();
     // Either no dependents found OR transitively affected nodes for root
@@ -67,7 +67,7 @@ async fn test_blast_radius_unknown_node() {
     let graph = make_test_graph();
     let overlay = VolatileOverlay::new();
 
-    let result = get_blast_radius(&graph, &overlay, "nonexistent_symbol", false, None).await;
+    let result = get_blast_radius(&graph, &overlay, "nonexistent_symbol", false, false, None).await;
     assert!(result.is_err());
 }
 
@@ -80,7 +80,7 @@ async fn test_blast_radius_dedups_callers_and_count_matches_listing() {
     let graph = make_test_graph();
     let overlay = VolatileOverlay::new();
 
-    let text = get_blast_radius(&graph, &overlay, "b", false, None)
+    let text = get_blast_radius(&graph, &overlay, "b", false, false, None)
         .await
         .unwrap();
     assert_eq!(
@@ -319,4 +319,141 @@ fn test_graph_batch_edge_insert() {
         let outgoing = graph.get_edges_from(&node.id).unwrap();
         assert!(!outgoing.is_empty());
     }
+}
+
+/// `insert_edges_batch` silently drops edges whose endpoints are
+/// both missing from the index — and the production caller
+/// (`insert_edges_reporting`) emits a `warn!` carrying the
+/// dropped count so the operator learns about it. The function
+/// returns the count, but no test was pinning that contract;
+/// iter-17 found the silent-drop behavior the hard way when an
+/// `assess_change` fixture forgot to upsert one endpoint.
+///
+/// Pinned: a batch with one valid edge, one edge whose source
+/// is missing, and one edge whose target is missing must
+/// return `dropped == 2` and the valid edge must be in the
+/// graph afterwards. This is the property the production
+/// warning depends on.
+#[test]
+fn insert_edges_batch_reports_dropped_count_for_orphan_edges() {
+    let graph = make_test_graph();
+
+    // Pick two real nodes from the fixture as the valid pair.
+    let nodes = graph.get_all_nodes();
+    assert!(nodes.len() >= 2, "fixture should have ≥2 nodes");
+    let src = nodes[0].id.clone();
+    let tgt = nodes[1].id.clone();
+
+    // Synthetic source/target IDs that don't exist in the index.
+    // The format mimics `GraphNode::generate_id`'s output but
+    // with a stable test-only UUID so we never accidentally
+    // collide with a real node.
+    let orphan_src = "orphan-src-00000000-0000-0000-0000-000000000000".to_string();
+    let orphan_tgt = "orphan-tgt-11111111-1111-1111-1111-111111111111".to_string();
+
+    let batch = vec![
+        // Valid edge — both endpoints in the index.
+        GraphEdge::new(EdgeType::Calls, src.clone(), tgt.clone()),
+        // Missing source — `false, true` arm: held for federation
+        // drain. Counts as dropped only if BOTH endpoints are
+        // missing; with source missing the edge goes to the
+        // `pending_external_edges` queue, not the dropped
+        // counter.
+        GraphEdge::new(EdgeType::Calls, orphan_src.clone(), tgt.clone()),
+        // Missing target — `true, false` arm: held for federation
+        // drain. Same as above.
+        GraphEdge::new(EdgeType::Calls, src.clone(), orphan_tgt.clone()),
+        // Both endpoints missing — `false, _` arm: truly orphan,
+        // counted in `dropped`. THIS is the silent-drop case
+        // `insert_edges_reporting` warns about.
+        GraphEdge::new(EdgeType::Calls, orphan_src.clone(), orphan_tgt.clone()),
+    ];
+
+    let dropped = graph
+        .insert_edges_batch(&batch)
+        .expect("insert_edges_batch should not error on orphans");
+    // The match arm is `(false, _) => dropped`. That is:
+    //   - source missing AND target present: dropped (orphan)
+    //   - source missing AND target missing: dropped (orphan)
+    //   - source present AND target missing: NOT dropped; held for
+    //     federation drain (the source is local so we know which
+    //     repo the edge came from, and project_repo can rewrite
+    //     the missing target through the local-to-global map).
+    //
+    // So our batch of 4 (1 valid + 3 broken) drops 2: the
+    // missing-source edges. The missing-target edge is held for
+    // the federation to resolve later.
+    assert_eq!(
+        dropped, 2,
+        "exactly the two missing-source edges must be counted as dropped; \
+         the missing-target edge goes to pending_external_edges, not dropped"
+    );
+
+    // The valid edge made it into the graph.
+    let outgoing = graph.get_edges_from(&src).expect("get_edges_from");
+    assert!(
+        outgoing.iter().any(|e| e.target_id == tgt),
+        "the valid edge must be persisted; orphans must not steal it"
+    );
+}
+
+/// Companion to `insert_edges_batch_reports_dropped_count_for_orphan_edges`.
+/// That test pins the dropped count (and the valid-edge survival);
+/// this one pins the *positive* arm: an edge whose source IS in
+/// the local index but whose target is missing must end up in
+/// `take_pending_external_edges`, not the dropped counter.
+///
+/// The federation's `project_repo` drains that queue after the
+/// intra-repo edge pass to emit the edge to the federated
+/// backend. If `insert_edges_batch` ever silently drops this arm
+/// too, the federation's cross-repo projection breaks because
+/// nothing reaches the backend — and the dropped counter would
+/// not move, so the operator warning stays silent.
+#[test]
+fn insert_edges_batch_holds_missing_target_edge_for_federation_drain() {
+    let graph = make_test_graph();
+
+    // Pick a real source from the fixture and pair it with a
+    // synthetic target that doesn't exist anywhere.
+    let nodes = graph.get_all_nodes();
+    assert!(!nodes.is_empty(), "fixture should have ≥1 node");
+    let src = nodes[0].id.clone();
+    let orphan_tgt = "orphan-tgt-fed-22222222-2222-2222-2222-222222222222".to_string();
+
+    // Queue must be empty before we start; otherwise another
+    // test's drain path leaked across runs.
+    assert!(
+        graph.take_pending_external_edges().is_empty(),
+        "pending_external_edges must start empty for this test"
+    );
+
+    let batch = vec![GraphEdge::new(
+        EdgeType::Calls,
+        src.clone(),
+        orphan_tgt.clone(),
+    )];
+
+    let dropped = graph
+        .insert_edges_batch(&batch)
+        .expect("insert_edges_batch should not error on a missing target");
+    assert_eq!(
+        dropped, 0,
+        "missing-target edges must not be counted as dropped; \
+         they are held for federation drain"
+    );
+
+    let drained = graph.take_pending_external_edges();
+    assert_eq!(
+        drained.len(),
+        1,
+        "exactly the missing-target edge should have been queued for drain"
+    );
+    assert_eq!(drained[0].source_id, src);
+    assert_eq!(drained[0].target_id, orphan_tgt);
+
+    // Second drain returns empty — `take_*` semantics, not peek.
+    assert!(
+        graph.take_pending_external_edges().is_empty(),
+        "draining twice must not return the same edge"
+    );
 }

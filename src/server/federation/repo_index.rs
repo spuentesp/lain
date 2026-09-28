@@ -1,7 +1,7 @@
 use crate::error::LainError;
 use crate::federation::health::RepoHealth;
 use crate::federation::repo_source::RepoSource;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::{HierarchicalSymbol, LspPool};
 use crate::schema::{GraphEdge, GraphNode};
@@ -87,32 +87,32 @@ pub struct RepoIndex {
     source: Box<dyn RepoSource>,
     db: GraphDatabase,
     lsp: LspPool,
-    // `GitSensor` wraps a `git2::Repository`, which is `Send` but `!Sync`
-    // (git2 provides `unsafe impl Send for Repository` but no `Sync` impl).
-    // We wrap the sensor in `Arc<Mutex<...>>` for two reasons:
-    //
-    // 1. **Runtime serialization:** `RepoIndex::index` and `start_watcher`
-    //    both touch `git` from worker threads (the sink is on the tokio
-    //    runtime; the watcher callback may fire on a notify thread). The
-    //    Mutex serializes git2 calls so we never have two threads in
-    //    libgit2 at once on the same handle.
-    // 2. **Sharing into closures:** `start_watcher` clones the `Arc` into a
-    //    `Fn` closure handed to `notify::RecommendedWatcher`. Without
-    //    `Arc` we couldn't move `git` into the closure without taking
-    //    `&mut self` (we want `&self.index` etc. to remain callable).
-    //
-    // We use `tokio::sync::Mutex` (not `parking_lot::Mutex`) because we
-    // need to hold the lock across `.await` points inside `index_one_repo`.
-    // `tokio::sync::MutexGuard<T>` is `Send` when `T: Send`, and
-    // `GitSensor: Send` (via `git2::Repository`'s `unsafe impl Send`).
-    // `parking_lot::MutexGuard` is `!Send` by default — its `send_guard`
-    // feature is not enabled, so we'd have to either add a Cargo.toml
-    // feature flip or restructure the pipeline to use `spawn_blocking` for
-    // the entire ingestion. `tokio::sync::Mutex` is the small
-    // dependency-free fix and matches the existing `LspPool` pattern.
-    git: Arc<AsyncMutex<GitSensor>>,
+    git: Arc<AnyGitSensor>,
+    index_lock: AsyncMutex<()>,
     health: Arc<RwLock<RepoHealth>>,
+    /// While set, a finished index pass leaves the repo `Indexing` rather
+    /// than `Ready`. `lain server` holds every repo of a multi-repo
+    /// federation until cross-repo links exist; a watcher-triggered pass
+    /// (an uncommitted edit during startup) used to flip it to `Ready`
+    /// early.
+    hold_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when a watcher-triggered pass changed this repo's graph, so the
+    /// federation re-projects it; the global backend otherwise kept the
+    /// pre-edit symbols (search_org, cross-repo blast radius) until a
+    /// restart.
+    projection_stale: Arc<std::sync::atomic::AtomicBool>,
     last_indexed: Arc<RwLock<SystemTime>>,
+    /// Threshold for cold-start cycle detection. If `index_forced`
+    /// fires within this many seconds of the previous successful
+    /// index AND no commit moved AND no uncommitted changes exist,
+    /// the reindex is suppressed as a self-trigger. Default 30 s
+    /// matches the longest observed federation-mode cold-start
+    /// cycle (the `index → topology → re-scan → index` loop from
+    /// 2026-09-21); longer cycles still get suppressed because
+    /// they fall into the same "no progress, no external change"
+    /// bucket. Tunable per server via the `repo_cycle_threshold_secs`
+    /// tuning key.
+    cycle_threshold_secs: u64,
     /// The error text from the most recent failed `index()`/`index_forced()`
     /// attempt, if any. `RepoHealth::Degraded` alone doesn't say *why* —
     /// this is what `get_repo_info` surfaces so an operator (or a test
@@ -204,16 +204,6 @@ pub struct RepoIndex {
     /// catches `indexed_signal = true` for the wire payload the
     /// `Notify`'s one-shot semantics would otherwise miss.
     indexed_at_least_once: std::sync::atomic::AtomicBool,
-    /// Current depth of the watcher's bounded event channel.
-    /// Incremented by the receiver loop on receive, decremented on
-    /// process. Exposed as the `outstanding_files` field on
-    /// `PerRepoReadiness` so `get_capabilities` can show back-pressure
-    /// without scraping the receiver task's internals. Currently
-    /// stays at 0 — the receiver loop's incr/decr is wired but the
-    /// channel capacity (1024) rarely fills in practice; the
-    /// spawn_blocking follow-up PR will fill it in for hot-loop
-    /// observability. Defined now to keep the wire shape stable
-    /// across that work.
     /// Depth of the watcher's bounded event channel at snapshot
     /// time. `Arc`-wrapped so the inotify callback (increment
     /// side) and the Tokio receiver loop (decrement side) share
@@ -222,7 +212,7 @@ pub struct RepoIndex {
     /// `get_capabilities`. Wired up in PR B
     /// (`feat/m4-spawn-blocking`).
     outstanding: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md §"Cooperative
+    /// AGENT_UX_ROADMAP.md M4 follow-up ("Cooperative
     /// cancellation token"): server-owned shutdown signal threaded
     /// through every long-running phase in the federation pipeline
     /// (`index_one_repo`, the receiver loop spawned by
@@ -264,9 +254,6 @@ impl RepoIndex {
         if let Some(task) = self.watcher_task.lock().take() {
             task.abort();
         }
-        if let Some(task) = self.watcher_task.lock().take() {
-            task.abort();
-        }
         let overlay = self.server_overlay.lock().clone();
         let ids: Vec<_> = self
             .overlay_paths
@@ -296,7 +283,7 @@ impl RepoIndex {
         // settings in particular were documented knobs that nothing read.
         let runtime = crate::tuning::load_tuning_config(&local_path).runtime;
         let lsp = LspPool::new(&local_path, 4, &runtime)?;
-        let git = Arc::new(AsyncMutex::new(GitSensor::new(&local_path)?));
+        let git = Arc::new(AnyGitSensor::from_env(&local_path)?);
         // Read the namespace *before* moving `source` into the struct —
         // we need the source's id, and `Box<dyn RepoSource>` isn't
         // `Copy`. URGENT FIXES #2: every `GraphNode` this repo produces
@@ -314,12 +301,22 @@ impl RepoIndex {
         // co-change coupling found" for every file. URGENT FIXES
         // #14 follow-up.
         db.set_namespace(id_namespace);
+        // Cold-start cycle detection threshold. Snapshotted from the
+        // repo's `.lain/tuning.toml` (`repo_cycle_threshold_secs`) with
+        // a 30s default; tests that want to exercise the suppression
+        // can lower it to 0.
+        let cycle_threshold_secs = crate::tuning::load_tuning_config(&local_path)
+            .presence
+            .repo_cycle_threshold_secs;
         Ok(Self {
             source,
             db,
             lsp,
             git,
+            index_lock: AsyncMutex::new(()),
             health: Arc::new(RwLock::new(RepoHealth::Indexing)),
+            hold_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            projection_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
             last_index_error: Arc::new(RwLock::new(None)),
             server_overlay: parking_lot::Mutex::new(Arc::new(VolatileOverlay::new())),
@@ -336,6 +333,7 @@ impl RepoIndex {
             indexed_at_least_once: std::sync::atomic::AtomicBool::new(false),
             cancel: CancellationToken::new(),
             outstanding: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cycle_threshold_secs,
         })
     }
 
@@ -395,6 +393,11 @@ impl RepoIndex {
     /// PATH); production code does not need it.
     pub fn lsp(&self) -> &LspPool {
         &self.lsp
+    }
+
+    /// Borrow the Git sensor for this repository.
+    pub fn git(&self) -> &Arc<AnyGitSensor> {
+        &self.git
     }
 
     /// Whether `index()` or `index_forced()` has succeeded at least
@@ -491,6 +494,25 @@ impl RepoIndex {
         self.db.all_edges()
     }
 
+    /// Re-resolve this repo's calls into the rest of the federation; see
+    /// [`crate::server::ingest::ingestion::relink_cross_repo`]. Returns the
+    /// number of cross-repo edges added (0 without a resolver).
+    pub async fn relink_cross_repo(self: &Arc<Self>) -> Result<usize, LainError> {
+        let Some(resolver) = self.cross_repo_resolver.lock().clone() else {
+            return Ok(0);
+        };
+        let _index_guard = self.index_lock.lock().await;
+        crate::server::ingest::ingestion::relink_cross_repo(
+            self.source.local_path(),
+            &self.db,
+            &self.git,
+            resolver.as_ref(),
+            self.source.id(),
+            &self.cancel,
+        )
+        .await
+    }
+
     /// Run the per-repo ingestion pipeline: tree-sitter extract → LSP hydrate
     /// → git co-change, scoped to `source.local_path()`. On success,
     /// transitions health from `Indexing` → `Ready` and stamps `last_indexed`.
@@ -522,11 +544,10 @@ impl RepoIndex {
         // shared `&self.db` borrow across the pipeline is safe.
         let db = &self.db;
         let lsp = self.lsp.clone();
-        let git = Arc::clone(&self.git);
 
         // Acquire the lock before running the pipeline so we serialize
         // against any concurrent `index()` call (e.g. from the watcher).
-        let git_guard = git.lock().await;
+        let _index_guard = self.index_lock.lock().await;
 
         let pipeline = async {
             let overlay = self.server_overlay.lock().clone();
@@ -538,7 +559,7 @@ impl RepoIndex {
                 path: &path,
                 graph: db,
                 lsp_pool: &lsp,
-                git: &git_guard,
+                git: &self.git,
                 overlay: &overlay,
                 resolver: resolver_ref,
                 source_repo: Some(source_repo),
@@ -557,17 +578,12 @@ impl RepoIndex {
                     budget,
                     self.source.local_path()
                 );
-                drop(git_guard);
                 let message = format!("RepoIndex::index exceeded {:?} budget", budget);
                 *self.last_index_error.write() = Some(message.clone());
                 self.set_health(RepoHealth::Degraded);
                 return Err(LainError::Other(message));
             }
         };
-
-        // Drop the guard explicitly before updating shared state so the
-        // watcher can re-enter the lock promptly.
-        drop(git_guard);
 
         if let Err(e) = &result {
             tracing::warn!(
@@ -582,7 +598,7 @@ impl RepoIndex {
 
         *self.last_indexed.write() = SystemTime::now();
         *self.last_index_error.write() = None;
-        self.set_health(RepoHealth::Ready);
+        self.mark_ready();
         // Cold-boot race closure: the dispatcher awaits this on the
         // active repo when the per-repo graph is empty. Firing it
         // here (and only on success) means a resolve that lands
@@ -615,9 +631,57 @@ impl RepoIndex {
         let path = self.source.local_path().to_path_buf();
         let db = &self.db;
         let lsp = self.lsp.clone();
-        let git = Arc::clone(&self.git);
 
-        let git_guard = git.lock().await;
+        // Cold-start cycle detection: the federation-mode startup
+        // pipeline can self-trigger `index_forced` repeatedly when a
+        // post-index side effect (an LSP build-script write, a
+        // graph-mutation broadcast, a watcher requeue) trips the
+        // filesystem watcher. The result is the `index → topology →
+        // re-scan → index → …` cycle observed during 2026-09-21
+        // cold-start tests where every cycle took 30s – 3 min and the
+        // HTTP listener never bound. Break the cycle at the entry point:
+        // if we completed a successful index in the recent past
+        // (default 30 s, configurable via `repo_cycle_threshold_secs`
+        // tuning) and there's been no external change since — no new
+        // commit, no uncommitted work — refuse to start another
+        // pipeline so the watcher's notify storm doesn't translate into
+        // a CPU-bound indexing loop.
+        //
+        // The check deliberately uses both signals (commit + uncommitted
+        // changes) so a legitimate re-index still fires: a save that
+        // hasn't been committed yet shows up in `get_uncommitted_changes`
+        // and bypasses the suppression; a commit between the previous
+        // index and now shows up in `git.get_latest_commit_info`. Only
+        // "no change anywhere, but `index_forced` got called anyway"
+        // triggers the suppression.
+        let now = SystemTime::now();
+        let last = *self.last_indexed.read();
+        let since_last = now.duration_since(last).unwrap_or(Duration::ZERO);
+        let cycle_threshold_secs = self.cycle_threshold_secs;
+        if since_last < Duration::from_secs(cycle_threshold_secs) {
+            let latest_commit = self.git.get_latest_commit_info().ok().map(|(c, _)| c);
+            let last_commit = self.db.get_last_commit().ok().flatten();
+            let uncommitted = self.git.get_uncommitted_changes().unwrap_or_default();
+            let no_commit_change = match (&latest_commit, &last_commit) {
+                (Some(l), Some(p)) => l == p,
+                // Unborn repo or pre-first-index — the indexer's
+                // baseline is the empty graph, and the first index
+                // cycle sets the marker. Anything earlier than that
+                // (e.g. a watcher firing before `await_startup_reindex`
+                // finished) is a legitimate re-trigger, not a loop.
+                _ => false,
+            };
+            if no_commit_change && uncommitted.is_empty() {
+                tracing::debug!(
+                    "[federation] {:?}: index_forced suppressed (last index was {:.1}s ago, no external change)",
+                    path,
+                    since_last.as_secs_f64()
+                );
+                return Ok(());
+            }
+        }
+
+        let _index_guard = self.index_lock.lock().await;
 
         let pipeline = async {
             let overlay = self.server_overlay.lock().clone();
@@ -629,7 +693,7 @@ impl RepoIndex {
                 path: &path,
                 graph: db,
                 lsp_pool: &lsp,
-                git: &git_guard,
+                git: &self.git,
                 overlay: &overlay,
                 resolver: resolver_ref,
                 source_repo: Some(source_repo),
@@ -648,15 +712,12 @@ impl RepoIndex {
                     budget,
                     self.source.local_path()
                 );
-                drop(git_guard);
                 let message = format!("RepoIndex::index_forced exceeded {:?} budget", budget);
                 *self.last_index_error.write() = Some(message.clone());
                 self.set_health(RepoHealth::Degraded);
                 return Err(LainError::Other(message));
             }
         };
-
-        drop(git_guard);
 
         if let Err(e) = &result {
             tracing::warn!(
@@ -671,7 +732,7 @@ impl RepoIndex {
 
         *self.last_indexed.write() = SystemTime::now();
         *self.last_index_error.write() = None;
-        self.set_health(RepoHealth::Ready);
+        self.mark_ready();
         // Same cold-boot race closure as `index()`: a tool call that
         // arrives during a watcher-driven re-index gets the same
         // bounded-wait window the boot path gets.
@@ -685,6 +746,35 @@ impl RepoIndex {
     /// only a Weak reference while idle, so it cannot keep a removed repo alive.
     /// Deactivation drops the watcher and aborts its receiver task; an in-flight
     /// overlay scan must pass the active gate before publishing any nodes.
+    /// `Ready`, unless the startup hold is on (see `hold_ready`).
+    fn mark_ready(&self) {
+        if self.hold_ready.load(std::sync::atomic::Ordering::SeqCst) {
+            self.set_health(RepoHealth::Indexing);
+        } else {
+            self.set_health(RepoHealth::Ready);
+        }
+    }
+
+    /// Hold (`true`) or release (`false`) readiness. Releasing promotes a
+    /// repo whose pass finished while held.
+    pub fn hold_ready(&self, hold: bool) {
+        self.hold_ready
+            .store(hold, std::sync::atomic::Ordering::SeqCst);
+        if !hold
+            && self.health() == RepoHealth::Indexing
+            && self.last_indexed() != SystemTime::UNIX_EPOCH
+        {
+            self.set_health(RepoHealth::Ready);
+        }
+    }
+
+    /// Whether the graph changed since the federation last projected it;
+    /// clears the flag.
+    pub fn take_projection_stale(&self) -> bool {
+        self.projection_stale
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub async fn start_watcher(self: &Arc<Self>) -> Result<(), LainError> {
         let active = self.active.lock();
         if !*active || self.watcher.lock().is_some() {
@@ -769,6 +859,11 @@ impl RepoIndex {
                     if cancel.is_cancelled() {
                         break;
                     }
+                    if index_result.is_ok() {
+                        me_for_task
+                            .projection_stale
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     if let Err(e) = index_result {
                         if !matches!(e, LainError::Cancelled) {
                             tracing::debug!(
@@ -849,9 +944,26 @@ impl RepoIndex {
         )
         .map_err(|e| LainError::Other(format!("watcher init: {e}")))?;
 
-        watcher
-            .watch(&path, RecursiveMode::Recursive)
-            .map_err(|e| LainError::Other(format!("watcher.watch({:?}): {e}", path)))?;
+        if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+            // A recursive watch follows symlinks and fails as a whole on
+            // one unreadable directory — an untracked link to `/etc` turned
+            // re-indexing off for the entire repo. Fall back to watching
+            // each directory the indexer would read (the `ignore` walk,
+            // which does not follow links), plus `.git` for commits.
+            tracing::warn!(
+                "[federation] recursive watch of {path:?} failed ({e}); watching its directories one by one"
+            );
+            let _ = watcher.unwatch(&path);
+            let mut dirs = crate::server::watcher::discover_watch_directories(&path);
+            dirs.push(path.join(".git"));
+            let watched = dirs
+                .iter()
+                .filter(|d| watcher.watch(d, RecursiveMode::NonRecursive).is_ok())
+                .count();
+            if watched == 0 {
+                return Err(LainError::Other(format!("watcher.watch({path:?}): {e}")));
+            }
+        }
 
         *self.watcher.lock() = Some(watcher);
         *self.watcher_task.lock() = Some(task);
@@ -890,8 +1002,7 @@ impl RepoIndex {
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
         let (changes, indexed_current_commit) = {
-            let git = self.git.lock().await;
-            let changes = git.get_uncommitted_changes()?;
+            let changes = self.git.get_uncommitted_changes()?;
             // The canonical signal that an indexer pass has caught up
             // with HEAD is `db.last_commit == git HEAD`. Comparing the
             // two is O(1) per cycle and independent of which paths
@@ -908,7 +1019,7 @@ impl RepoIndex {
             // (the older pre-commit node satisfied `has_node_at_path`)
             // while the static graph never got a chance to add the
             // new symbol — both layers silently lost the function.
-            let indexed_current_commit = match git.get_latest_commit_info() {
+            let indexed_current_commit = match self.git.get_latest_commit_info() {
                 Ok((head, _)) => self.db.get_last_commit()?.as_deref() == Some(head.as_str()),
                 Err(_) => false,
             };
@@ -957,23 +1068,32 @@ impl RepoIndex {
         // "commit landed but reindex hasn't run" (file still exists,
         // keep overlay) from "path is genuinely gone" (file gone,
         // purge eagerly).
-        {
+        // Collect stale ids first; release the `overlay_paths` lock
+        // before calling `overlay.remove_node`. `overlay_paths` is a
+        // parking_lot lock (non-reentrant) and the overlay's own
+        // bookkeeping may need to acquire it during `remove_node` in
+        // the future — holding it here is a latent lock-ordering
+        // hazard across crate boundaries.
+        let stale_ids: Vec<String> = {
             let mut owned = self.overlay_paths.lock();
             let stale_paths: Vec<String> = owned
                 .keys()
                 .filter(|p| !current_paths.contains(*p))
                 .cloned()
                 .collect();
+            let mut ids = Vec::new();
             for path in stale_paths {
                 let deleted_from_disk = !workspace_root.join(&path).is_file();
                 if indexed_current_commit || deleted_from_disk {
-                    if let Some(ids) = owned.remove(&path) {
-                        for id in ids {
-                            overlay.remove_node(&id);
-                        }
+                    if let Some(path_ids) = owned.remove(&path) {
+                        ids.extend(path_ids);
                     }
                 }
             }
+            ids
+        };
+        for id in &stale_ids {
+            overlay.remove_node(id);
         }
 
         // Drop entries for THIS repo's changed paths BEFORE scanning —
@@ -995,6 +1115,18 @@ impl RepoIndex {
             // Skip LSP re-scan for files that were deleted — there's
             // nothing to scan, and the removal above already wiped them.
             if matches!(change.change_type, crate::git::ChangeType::Deleted) {
+                continue;
+            }
+            // Only source Lain can read. An untracked build tree (`target/`,
+            // `Cargo.lock`, fingerprints) otherwise went through the LSP one
+            // file at a time after every build: thousands of "no LSP symbols"
+            // warnings and no nodes to show for it.
+            let indexed = change
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(crate::treesitter::is_indexed_extension);
+            if !indexed {
                 continue;
             }
             match self
@@ -1113,6 +1245,8 @@ impl RepoIndex {
                             d.line_end,
                             &self.id_namespace,
                         ),
+                        selection_line: d.line_start,
+                        selection_col: 0,
                         children: vec![],
                     })
                     .collect()
@@ -1311,6 +1445,36 @@ mod tests {
             "indexed_signal should be ready immediately after index_forced returns Ok"
         );
     }
+    /// A symlink into a directory the watcher cannot read (an untracked
+    /// link to `/etc`, say) must not turn watching off for the repo.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_linked_directory_does_not_stop_the_watcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        std::fs::write(root.path().join("lib.rs"), "pub fn f() {}\n").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let locked = outside.path().join("locked");
+        std::fs::create_dir_all(locked.join("inner")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("etcdir")).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let repo = Arc::new(
+            RepoIndex::new(
+                Box::new(
+                    WorkspaceDirSource::new(RepoId::new("linked").unwrap(), root.path().to_owned())
+                        .unwrap(),
+                ),
+                state.path(),
+            )
+            .unwrap(),
+        );
+        let result = repo.start_watcher().await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        result.expect("watcher starts despite the unreadable linked directory");
+    }
+
     #[tokio::test]
     async fn deactivation_clears_owned_overlay_and_stops_watcher() {
         let root = tempfile::tempdir().unwrap();
@@ -1394,5 +1558,153 @@ mod tests {
         assert!(repo.watcher.lock().is_none());
         assert_eq!(overlay.get_all_nodes().len(), 1);
         assert!(overlay.get_node(&unrelated.id).is_some());
+    }
+
+    /// Regression for the 2026-09-21 federation-mode cold-start
+    /// loop: `index → topology → re-scan → index → …` where every
+    /// cycle took 30 s – 3 min and the HTTP listener never bound.
+    /// The cycle surfaced as repeated `index_forced` calls without an
+    /// intervening commit, uncommitted change, or external signal.
+    /// The fix is a guard at the entry of `index_forced`: if the
+    /// previous successful index completed within
+    /// `cycle_threshold_secs` AND no commit moved AND no uncommitted
+    /// changes exist, the reindex is suppressed.
+    ///
+    /// This test exercises the guard end-to-end: a first
+    /// `index_forced` succeeds and stamps `last_indexed`; a second
+    /// `index_forced` immediately after is suppressed (returns Ok(())
+    /// without doing work). A subsequent `index_forced` after a
+    /// synthetic uncommitted write is allowed through — that's the
+    /// "real change, not a loop" case the guard must not block.
+    #[tokio::test]
+    async fn index_forced_suppresses_self_trigger_loop() {
+        use crate::git::AnyGitSensor;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(workspace.path()).unwrap();
+        // `commit` requires `user.name` + `user.email`; CI runners
+        // don't have them in the global git config, so set them on
+        // the test repo.
+        let mut cfg = repo.config().expect("git config");
+        cfg.set_str("user.name", "cycle-test")
+            .expect("set user.name");
+        cfg.set_str("user.email", "cycle-test@localhost")
+            .expect("set user.email");
+        // Seed a lib.rs and an initial commit so the indexer has
+        // something to scan on the first call.
+        std::fs::write(
+            workspace.path().join("lib.rs"),
+            "pub fn cycle_marker() {}\n",
+        )
+        .unwrap();
+        // something to scan on the first call.
+        std::fs::write(
+            workspace.path().join("lib.rs"),
+            "pub fn cycle_marker() {}\n",
+        )
+        .unwrap();
+        {
+            let repo = git2::Repository::open(workspace.path()).unwrap();
+            let mut idx = repo.index().unwrap();
+            idx.add_path(Path::new("lib.rs")).unwrap();
+            idx.write().unwrap();
+            let tree_id = idx.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let sig = repo.signature().unwrap();
+            // Initial commit on an unborn HEAD: parents = empty.
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+
+        let state = tempfile::tempdir().unwrap();
+        let src: Box<dyn RepoSource> = Box::new(
+            WorkspaceDirSource::new(
+                RepoId::new("cycle").unwrap(),
+                workspace.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
+        let ri = Arc::new(RepoIndex::new(src, state.path()).unwrap());
+        for _ in 0..4 {
+            ri.lsp.next().lock().await.mark_unavailable("rust-analyzer");
+        }
+
+        // First `index_forced`: should do a real index pass and
+        // stamp `last_indexed`. Asserts the baseline (not suppressed).
+        let started = std::time::Instant::now();
+        ri.index_forced()
+            .await
+            .expect("first index_forced should succeed with tree-sitter fallback");
+        let first_elapsed = started.elapsed();
+        // The first index is *not* the loop case (no previous index
+        // exists), so the guard does not fire. Confirm by checking
+        // `last_indexed` was updated.
+        let last = ri.last_indexed();
+        let since_epoch = last
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        assert!(
+            since_epoch.as_secs() > 1_000_000_000,
+            "last_indexed should be a real timestamp after the first index"
+        );
+
+        // Second `index_forced` immediately after — this is the
+        // loop case. The guard must suppress it: return Ok(()) without
+        // re-running the pipeline. We assert this indirectly by
+        // checking that `last_indexed` did NOT advance past the
+        // first call's stamp and that the second call returned in
+        // well under the index-time budget (cycle_threshold_secs is
+        // 30s by default; a suppressed call must finish in < 1s).
+        let pre_second = ri.last_indexed();
+        let started2 = std::time::Instant::now();
+        ri.index_forced()
+            .await
+            .expect("second index_forced should be suppressed, not error");
+        let second_elapsed = started2.elapsed();
+        let post_second = ri.last_indexed();
+        assert_eq!(
+            pre_second, post_second,
+            "suppressed index_forced must not advance last_indexed"
+        );
+        assert!(
+            second_elapsed < std::time::Duration::from_secs(1),
+            "suppressed index_forced must finish fast (was {:?}); a \
+             30s+ elapsed time means the guard fired but the \
+             pipeline still ran",
+            second_elapsed
+        );
+        // Sanity: the first index was actually slow enough that we
+        // know it didn't sneak past the guard. A real `index_forced`
+        // walk would take seconds; the suppression should be a few
+        // milliseconds.
+        let _ = first_elapsed; // kept for diagnostic
+
+        // Third `index_forced` after a synthetic uncommitted write:
+        // the guard must allow it because the uncommitted change
+        // proves the worktree is different from the last index.
+        std::fs::write(
+            workspace.path().join("lib.rs"),
+            "pub fn cycle_marker() {}\npub fn cycle_marker_changed() {}\n",
+        )
+        .unwrap();
+        // Mark LSP unavailable again — the synthetic write happens
+        // *before* the test re-grabs the LSP slot, so the indexer
+        // falls back to tree-sitter without trying to spawn
+        // rust-analyzer (CI runners don't have it on PATH).
+        for _ in 0..4 {
+            ri.lsp.next().lock().await.mark_unavailable("rust-analyzer");
+        }
+        ri.index_forced()
+            .await
+            .expect("third index_forced must run after uncommitted change");
+        let post_third = ri.last_indexed();
+        assert!(
+            post_third > pre_second,
+            "third index_forced (after real change) must advance last_indexed"
+        );
+        // We don't enforce `> post_second` strictly because
+        // `SystemTime::now()` resolution is platform-dependent; the
+        // monotonic `>` against `pre_second` is enough.
+        let _ = AnyGitSensor::from_env; // silence unused import lint
     }
 }

@@ -55,12 +55,15 @@ favour of `inventory`-registered sub-handlers. Today it still has
 ~22 arms that will move into `PresenceToolRegistry`,
 `FederationToolRegistry`, and `WorkspaceToolRegistry` over the next few
 PRs. **Do not add new arms to it.** If you need to expose a new
-federation/presence/workspace tool:
+federation/presence/workspace/intent tool:
 
-1. Add a struct in `src/server/mcp/<presence,federation,workspace>_tools.rs`.
+1. Add a struct in `src/server/mcp/<presence,intent,federation,workspace>_tools.rs`.
 2. Implement `McpToolHandler` (or whatever the current registry trait is in that file).
 3. Call `inventory::submit!(…(&Handler))`.
-4. The dispatcher picks it up automatically.
+4. The dispatcher picks it up automatically. Hook-event ingestion
+   is its own module (`src/server/mcp/hook.rs`) and exposes `POST
+   /hook` from the HTTP handler directly; hook events don't go
+   through `tools/call`.
 
 If the inventory pattern is not yet wired in your target sub-namespace,
 add the handler file in the right sub-namespace but **don't** also add

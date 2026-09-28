@@ -9,6 +9,8 @@
 //!
 //! Reads `claim_files` end-to-end through the MCP dispatcher so the
 //! test exercises the same code path that hooks reach in production.
+#[path = "support/isolated_state.rs"]
+mod isolated_state;
 
 use lain::federation::federated_index::FederatedIndex;
 use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
@@ -16,6 +18,7 @@ use lain::federation::repo_id::{GlobalId, RepoId};
 use lain::schema::NodeType;
 use lain::server::mcp::presence_tools::{run_claim_files, run_register_agent};
 use lain::server::LainServer;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 /// Convenience: assert `claim_files` succeeds and return the parsed JSON.
@@ -48,8 +51,15 @@ fn claim(
 fn build_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<dyn GraphBackend>) {
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp).expect("backend"));
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
-    let server = LainServer::with_federation(fed, lain::server::Transport::Stdio, 0, None, None)
-        .expect("with_federation");
+    let server = LainServer::with_federation(
+        fed,
+        lain::server::Transport::Stdio,
+        0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        None,
+        None,
+    )
+    .expect("with_federation");
     (Arc::new(server), backend)
 }
 
@@ -60,7 +70,13 @@ fn build_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<dyn G
 /// post-`project_repo`-deduplication state.
 fn insert_verify_token(backend: &dyn GraphBackend) {
     let repo = RepoId::new("test").unwrap();
-    let gid = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", "verify_token");
+    let gid = GlobalId::new(
+        &repo,
+        NodeType::Function,
+        "src/auth.rs",
+        "verify_token",
+        None,
+    );
     backend
         .upsert_node_global(
             gid.as_str(),

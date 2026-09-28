@@ -245,7 +245,8 @@ pub async fn start_source_watcher(workspace: PathBuf, server: crate::server::Lai
     // cancel token into the watcher so a shutdown doesn't have to
     // wait for a slow LSP round-trip on a large file burst.
     let cancel = server.lifecycle_handle().cancel_token();
-    let ready = crate::server::watcher::FileWatcher::new().start(workspace, server, cancel);
+    let (ready, handle) =
+        crate::server::watcher::FileWatcher::new().start(workspace, server, cancel);
     match tokio::time::timeout(std::time::Duration::from_secs(5), ready).await {
         Ok(Ok(watched)) => {
             tracing::debug!("source file watcher: {watched} directories registered");
@@ -260,6 +261,14 @@ pub async fn start_source_watcher(workspace: PathBuf, server: crate::server::Lai
             );
         }
     }
+    // Hold the handle for the lifetime of the spawned event processor
+    // task. When this function returns (or panics, or the surrounding
+    // task is cancelled and drops the future), the handle's `Drop`
+    // sends `WatchCommand::Shutdown` and joins the watcher thread —
+    // releasing the OS watch handles promptly. Pre-fix the handle was
+    // discarded, leaving the thread detached for the rest of the
+    // process lifetime.
+    handle.stop();
 }
 
 #[cfg(test)]

@@ -4,7 +4,25 @@ use crate::graph::GraphDatabase;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use dashmap::DashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// On-disk envelope for `federated_graph.bin`: the `LNF2` magic followed
+/// by a little-endian `u32` schema version. Anything else — headerless
+/// bytes, an unknown magic, a version mismatch, or a corrupt body under a
+/// valid header — is rejected with `LainError::FederationSchemaMismatch`
+/// rather than loaded.
+pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
+pub const FEDERATION_GRAPH_VERSION: u32 = 2;
+pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
+
+/// Sibling file holding the validated payload (everything after the
+/// envelope header); this is what `GraphDatabase` is opened against, so
+/// reloads see only bytes that passed `validate_persisted_payload`.
+fn payload_path_for(bin_path: &Path) -> std::path::PathBuf {
+    let mut p = bin_path.as_os_str().to_owned();
+    p.push(".payload");
+    std::path::PathBuf::from(p)
+}
 
 pub trait GraphBackend: Send + Sync {
     fn upsert_node(&self, node: GraphNode) -> Result<(), LainError>;
@@ -37,7 +55,21 @@ pub trait GraphBackend: Send + Sync {
     /// function left it answering `search_org` forever even after the per-repo
     /// graph had correctly dropped it.
     fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError>;
+    /// Remove edges matching `(source_id, target_id, edge_type)`. Endpoints
+    /// stay. Companion to [`Self::remove_nodes`] for cases where the caller
+    /// and callee are still indexed but the edge between them should be
+    /// retracted (the federation's reconciliation pass — see
+    /// `FederatedIndex::project_edges`). Dedups the input; returns the
+    /// number of edges actually removed from the backend.
+    fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError>;
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError>;
+    /// Default: `get_node(gid)?.is_some()`. Backends may override
+    /// when they have a cheaper existence check (e.g. a `DashMap`
+    /// probe that avoids deserializing the full node). Test-only
+    /// backends like `HashMapBackend` rely on the default.
+    fn has_node(&self, global_id: &str) -> Result<bool, LainError> {
+        Ok(self.get_node(global_id)?.is_some())
+    }
     fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError>;
     /// Return every node currently in the backend. Used by
     /// `mcp::federation_tools::search_org` as a fallback for nodes inserted
@@ -73,18 +105,84 @@ pub trait GraphBackend: Send + Sync {
 pub struct PetgraphBackend {
     db: GraphDatabase,
     index: DashMap<String, GlobalId>,
+    bin_path: PathBuf,
+    payload_path: PathBuf,
 }
 
 impl PetgraphBackend {
     pub fn new(data_dir: &Path) -> Result<Self, LainError> {
-        let db = GraphDatabase::new(&data_dir.join("federated_graph.bin"))?;
+        let bin_path = data_dir.join("federated_graph.bin");
+        let payload_path = payload_path_for(&bin_path);
+
+        if bin_path.exists() {
+            let bytes = std::fs::read(&bin_path)?;
+            // A zero-byte file is *truncated*, not "no graph yet" — the
+            // envelope (magic + version, 8 bytes) is mandatory, and any
+            // shorter file means a torn write or a hand-crafted sentinel.
+            // Treating it as a valid no-op (the previous behaviour) lets a
+            // `GraphDatabase::new` soft-fall-through mask the corruption.
+            if bytes.is_empty()
+                || bytes.len() < FEDERATION_GRAPH_HEADER_LEN
+                || &bytes[..FEDERATION_GRAPH_MAGIC.len()] != FEDERATION_GRAPH_MAGIC
+            {
+                return Err(LainError::FederationSchemaMismatch {
+                    found: 0,
+                    required: FEDERATION_GRAPH_VERSION,
+                });
+            } else {
+                let found = u32::from_le_bytes([
+                    bytes[FEDERATION_GRAPH_MAGIC.len()],
+                    bytes[FEDERATION_GRAPH_MAGIC.len() + 1],
+                    bytes[FEDERATION_GRAPH_MAGIC.len() + 2],
+                    bytes[FEDERATION_GRAPH_MAGIC.len() + 3],
+                ]);
+                if found != FEDERATION_GRAPH_VERSION {
+                    return Err(LainError::FederationSchemaMismatch {
+                        found,
+                        required: FEDERATION_GRAPH_VERSION,
+                    });
+                }
+                let payload = &bytes[FEDERATION_GRAPH_HEADER_LEN..];
+                GraphDatabase::validate_persisted_payload(payload).map_err(|error| {
+                    tracing::warn!(
+                        "Rejecting corrupt federation graph payload at {}: {error}. Run `lain reindex` to rebuild.",
+                        bin_path.display()
+                    );
+                    LainError::FederationPayloadCorrupt {
+                        reason: error.to_string(),
+                    }
+                })?;
+                std::fs::write(&payload_path, payload)?;
+            }
+        }
+
+        let db = GraphDatabase::new(&payload_path)?;
         let index = DashMap::new();
         for node in db.get_all_nodes() {
             if let Ok(global_id) = GlobalId::parse(&node.id) {
                 index.insert(node.id, global_id);
             }
         }
-        Ok(Self { db, index })
+        Ok(Self {
+            db,
+            index,
+            bin_path,
+            payload_path,
+        })
+    }
+
+    /// Save the federated graph to disk, prepending the schema envelope
+    /// (magic + version) before the bincode payload so the canonical
+    /// file is always self-describing on the next load.
+    fn save(&self) -> Result<(), LainError> {
+        self.db.save_to_disk_sync()?;
+        let payload = std::fs::read(&self.payload_path)?;
+        let mut with_header = Vec::with_capacity(FEDERATION_GRAPH_HEADER_LEN + payload.len());
+        with_header.extend_from_slice(FEDERATION_GRAPH_MAGIC);
+        with_header.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
+        with_header.extend_from_slice(&payload);
+        std::fs::write(&self.bin_path, &with_header)?;
+        Ok(())
     }
 
     pub fn upsert_node_global(
@@ -99,7 +197,7 @@ impl PetgraphBackend {
         node.id = global_id.to_string();
         self.db.upsert_node(node)?;
         self.index.insert(global_id.to_string(), parsed);
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     /// Direct access to the underlying `GraphDatabase` for bulk operations.
@@ -124,7 +222,7 @@ impl GraphBackend for PetgraphBackend {
         let global_id = GlobalId::parse(&node.id)?;
         self.db.upsert_node(node.clone())?;
         self.index.insert(node.id, global_id);
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn upsert_node_global(
@@ -139,7 +237,7 @@ impl GraphBackend for PetgraphBackend {
 
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         self.db.upsert_edge(edge)?;
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn upsert_edges_batch(&self, edges: &[GraphEdge]) -> Result<(), LainError> {
@@ -149,7 +247,7 @@ impl GraphBackend for PetgraphBackend {
         for edge in edges {
             self.db.upsert_edge(edge.clone())?;
         }
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn upsert_nodes_batch(&self, nodes: &[GraphNode]) -> Result<(), LainError> {
@@ -161,7 +259,7 @@ impl GraphBackend for PetgraphBackend {
             self.db.upsert_node(node.clone())?;
             self.index.insert(node.id.clone(), global_id);
         }
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError> {
@@ -170,7 +268,15 @@ impl GraphBackend for PetgraphBackend {
             self.index.remove(id);
         }
         if removed > 0 {
-            self.db.save_to_disk_sync()?;
+            self.save()?;
+        }
+        Ok(removed)
+    }
+
+    fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
+        let removed = self.db.remove_edges(edges)?;
+        if removed > 0 {
+            self.save()?;
         }
         Ok(removed)
     }

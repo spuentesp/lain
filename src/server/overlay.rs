@@ -240,7 +240,11 @@ impl VolatileOverlay {
             .get(&edge.target_id)
             .ok_or_else(|| format!("Target node not found: {}", edge.target_id))?;
 
-        // Release index_map lock before acquiring graph lock
+        // CRITICAL: release `index_map` (read) before taking `graph`
+        // (write). `insert_node`/`remove_node` take `graph` first and
+        // then look at `index_map`, so the order here must stay
+        // A→B. Dropping the read guard explicitly keeps that ordering
+        // visible to any future refactor.
         drop(index_map);
 
         let mut graph = self.graph.write();

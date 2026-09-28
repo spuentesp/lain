@@ -22,7 +22,7 @@ use more than one.
 | Catch architectural regressions in pull requests | **CI** | The `lain-health-badge` action, or `lain mcp` in a workflow |
 
 **MCP** is the "agent in the IDE" mode. The agent launches lain as a
-stdio subprocess per session, and lain answers 69 read-only tools
+stdio subprocess per session, and lain answers its read-only tools
 against the on-disk graph of whatever repo the agent is in. This is
 the most common deployment and the one to start with.
 
@@ -72,8 +72,9 @@ symbols in this codebase?"
 
 **Benefits.**
 
-- 69 read-only tools over MCP — the same ones documented in
-  `docs/tool-schema.json`. None of them mutate the workspace.
+- Read-only tools over MCP: a focused default set, or every tool in
+  `docs/tool-schema.json` with `LAIN_TOOL_PROFILE=full`. None of the
+  default ones mutate the workspace.
 - Persistent on-disk index at `.lain/graph.bin`. The first call on
   a fresh checkout pays the index cost (seconds to minutes, bounded
   by `LAIN_REINDEX_TIMEOUT`); every later call is sub-second.
@@ -83,9 +84,20 @@ symbols in this codebase?"
   is the whole thing. No `repos.yaml`, no `workspaces.yaml`, no
   flags. The binary walks up for `.git` and serves.
 
-### Recipe: add lain to Claude Code
+### Recipe: connect your agent with `lain setup`
 
-Add to `.mcp.json` in your repo (or your global `~/.claude.json`):
+The fastest way to configure your AI agent is `lain setup`:
+
+```bash
+lain setup --agent <claude-code|cursor|vscode|continue|codex|generic>
+```
+
+- **Claude Code:** `lain setup --agent claude-code` (configures `.mcp.json` or runs `claude mcp add`).
+- **Cursor:** `lain setup --agent cursor` (writes `~/.cursor/mcp.json`, preserving other servers).
+- **VS Code:** `lain setup --agent vscode` (updates `.vscode/mcp.json` if present, or user-scoped config).
+- **Continue.dev:** `lain setup --agent continue` (updates `~/.continue/config.json`).
+- **Codex:** `lain setup --agent codex` (runs `codex mcp add` or edits `$CODEX_HOME/config.toml`).
+- **Generic / Kimi:** `lain setup --agent generic` writes standard `.mcp.json`:
 
 ```json
 {
@@ -98,9 +110,7 @@ Add to `.mcp.json` in your repo (or your global `~/.claude.json`):
 }
 ```
 
-Restart Claude Code. On the first turn it indexes; on the second
-turn, ask "what calls `parse_input`?" and you should see a
-`mcp__lain__get_blast_radius` call in the tool trace.
+Restart your editor/agent. On the first turn it indexes; on later turns it queries in milliseconds.
 
 **Verification:** `lain --version` reports a version, the agent
 sees `mcp__lain__*` tools, and the first call to any tool returns
@@ -135,17 +145,15 @@ the binary download — it is expected. Allow it.
 
 ### Recipe: add lain to Cursor / VS Code Copilot / Continue.dev
 
-The MCP config schema is the same across these hosts. For each,
-locate the MCP servers setting and add:
+`lain setup --agent cursor|vscode|continue` writes the right file for
+each host (recipes below). By hand, the entry differs per host:
 
-```json
-{
-  "lain": {
-    "command": "lain",
-    "args": ["mcp"]
-  }
-}
-```
+- **Cursor** (`~/.cursor/mcp.json`):
+  `{"mcpServers": {"lain": {"command": "lain", "args": ["mcp"]}}}`
+- **VS Code** (`.vscode/mcp.json` or the user `mcp.json`):
+  `{"servers": {"lain": {"type": "stdio", "command": "lain", "args": ["mcp"]}}}`
+- **Continue** (`<workspace>/.continue/mcpServers/lain.yaml`):
+  `name: Lain` / `version: 0.0.1` / `schema: v1` / `mcpServers: [{name: lain, command: lain, args: ["mcp"]}]`
 
 **Cursor:** `Settings` → `Cursor Settings` → `MCP` → `Add new
 global MCP server`. Paste the JSON.
@@ -153,8 +161,8 @@ global MCP server`. Paste the JSON.
 **VS Code Copilot:** `.vscode/mcp.json` in the workspace, or the
 Copilot Chat MCP settings UI.
 
-**Continue.dev:** `~/.continue/config.json` under
-`"experimental.modelContextProtocolServers"`.
+**Continue.dev:** a block file in `<workspace>/.continue/mcpServers/`
+(current Continue), or the legacy `~/.continue/config.json`.
 
 **Verification:** each host lists `lain` (or `mcp__lain__*`)
 tools in its tool picker.
@@ -202,12 +210,12 @@ command palette; `lain` should appear with a green status.
 lain setup --agent continue
 ```
 
-Writes `~/.continue/config.json` under
-`experimental.modelContextProtocolServers` (an array of MCP
-server entries, one per editor integration). The adapter
-deduplicates by `name`: any existing `lain` entry is replaced
-by the freshly-configured one, and every other entry is left
-intact.
+With `~/.continue/config.yaml` (current Continue) or no Continue config
+yet, writes a block file, `<workspace>/.continue/mcpServers/lain.yaml`,
+leaving your own config untouched. A legacy `config.json`-only setup
+gets an entry in `experimental.modelContextProtocolServers` (with a
+`transport` object); any existing `lain` entry is replaced and every
+other entry is left intact.
 
 Verification: open Continue, the `lain` model-context-protocol
 server should appear in the model dropdown.
@@ -520,7 +528,7 @@ mode is a no-op if the previous one isn't there.
 The inert-tool list at `src/server/tools.rs:580` is the contract
 for which tools are loaded by default. To publish a custom
 subset, fork `src/server/tools/registry.rs` and rebuild. Most
-teams will not need this; the default 69-tool surface is what
+teams will not need this; the default 16-tool surface is what
 the agents are tested against.
 
 ### Self-hosting the embedder model
@@ -563,10 +571,18 @@ copy. Use a different tool if:
 
 - **Your codebase is under ~1k LOC.** The graph is overkill; a
   reader and a good outline beat a query language.
-- **Your monorepo has no dominant language and you need uniform
-  coverage.** Lain's extractor coverage is uneven across
-  languages. Rust and TypeScript are first-class; everything
-  else is best-effort.
+- **Your monorepo leans on languages outside the built-in
+  fourteen.** Extraction and who-calls are uniform across Rust,
+  Python, TypeScript, JavaScript, Go, Java, C, C++, C#, Ruby,
+  Swift, Kotlin, Scala and PHP (plus the `<script>` blocks of Vue
+  and Svelte) — every one gets definitions and a call graph with
+  nothing else installed, verified symbol-by-symbol against a
+  textual oracle (`scripts/acceptance/breadth.py`, disagreements
+  hand-reviewed in `breadth_reviewed.json`). Anything outside that
+  list is not indexed at all. What *is* uneven is enrichment:
+  optional language servers deepen signatures and reference
+  resolution where they exist (deepest with rust-analyzer) and are
+  simply absent elsewhere.
 - **You need a verifier, not a navigator.** Lain answers "what
   does this code do, and what depends on it?" It does not
   answer "is this code correct?" Use a type-checker, a

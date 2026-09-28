@@ -3,6 +3,8 @@
 pub mod cli;
 pub mod config;
 pub mod server;
+pub mod sidecar;
+pub mod sidecar_proto;
 pub mod state;
 
 #[cfg(test)]

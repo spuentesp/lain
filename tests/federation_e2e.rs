@@ -254,114 +254,83 @@ impl FederationFixture {
 }
 
 /// Boot `lain server --transport http --port <port> --workspace auto
-/// --config <fixture>/repos.yaml`. Returns the `ServerGuard` so the
-/// spawned process is reaped on test exit. Health is verified by
-/// polling `/health` for up to 60s — federation bootstrap indexes
-/// every repo (tree-sitter + optional LSP) and the cold start can be
-/// slow on a CI runner.
-fn boot_federation(fixture: &FederationFixture, port: u16) -> ServerGuard {
-    let state = tempfile::tempdir().unwrap();
-    let xdg_config = tempfile::tempdir().unwrap();
+/// --config <fixture>/repos.yaml`. Returns `(host, ServerGuard)` so
+/// callers don't need to construct the host string from the port.
+///
+/// Federation bootstrap indexes every repo (tree-sitter + optional
+/// LSP) and the cold start can be slow on a CI runner, so the
+/// function waits for `/health` to return 200 (via
+/// `common::wait_for_health`) AND for the response body to surface
+/// the federation's `"federation"` payload — right after the
+/// listener comes up the federation tools may not have indexed yet,
+/// and the test wants a server whose federation state is queryable.
+fn boot_federation(fixture: &FederationFixture, port: u16) -> (String, ServerGuard) {
+    // Hold two `tempfile::TempDir` handles for the per-test state /
+    // config dirs. The pinning helper joins `{state_root}/state`,
+    // `{state_root}/config`, `{state_root}/jobs.json` under the
+    // caller-supplied root — using the state tempdir as the root
+    // keeps everything under one dir. Both `TempDir` handles are
+    // `mem::forget`-ed so they survive past the function return;
+    // the previous code let them drop, which unlinked the dirs
+    // while the server was still using them. The dirs themselves
+    // leak for the rest of the process lifetime, which is fine —
+    // each test allocates a unique port, the OS reclaims them on
+    // exit, and the alternative (threading the TempDir through the
+    // return type) would touch all four call sites.
+    let state_dir = tempfile::tempdir().unwrap();
+    let state_root = state_dir.path().to_path_buf();
+    let config_dir = tempfile::tempdir().unwrap();
+    let _ = config_dir.path(); // included in `state_root` via the helper's join
+    std::mem::forget(state_dir);
+    std::mem::forget(config_dir);
 
-    let stderr_path = std::env::temp_dir().join(format!("federation-e2e-stderr-{port}.log"));
-    let stderr_file = std::fs::File::create(&stderr_path).unwrap();
-
-    // We can't use `common::boot_server` directly here because the
-    // federation e2e needs the extra `XDG_STATE_HOME` / `XDG_CONFIG_HOME`
-    // / `LAIN_JOB_STORE` env vars that other tests don't. Compose
-    // around the shared `ServerGuard` (which handles the drop) and
-    // the shared wait-for-health pattern.
-    let child = Command::new(env!("CARGO_BIN_EXE_lain"))
-        .args([
-            "server",
-            "--transport",
-            "http",
-            "--port",
-            &port.to_string(),
-            "--workspace",
-            "auto",
-            "--config",
-            fixture.repos_yaml().to_str().unwrap(),
-        ])
-        .env("XDG_STATE_HOME", state.path())
-        .env("XDG_CONFIG_HOME", xdg_config.path())
-        .env("LAIN_JOB_STORE", state.path().join("jobs.json"))
-        .env_remove("LAIN_EMBEDDING_MODEL")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(stderr_file))
-        .spawn()
-        .unwrap_or_else(|e| {
-            panic!(
-                "spawn lain server failed: {e}; binary={}; stderr={}",
-                env!("CARGO_BIN_EXE_lain"),
-                stderr_path.display()
-            )
-        });
-
-    let guard = ServerGuard {
-        child,
-        stderr_path: std::path::PathBuf::from(""),
-    };
-
+    let guard = common::boot_server_with_pinning(
+        port,
+        &fixture.repos_yaml(),
+        &state_root,
+        "federation-e2e",
+    );
     let host = format!("127.0.0.1:{port}");
+    common::wait_for_health(&host, Duration::from_secs(60));
+
+    // Federation-specific readiness probe: poll /health until the
+    // response body surfaces the federation payload. The basic
+    // `wait_for_health` only checks for HTTP 200, which the server
+    // returns before federation indexing has produced a body.
     let start = Instant::now();
     let deadline = Duration::from_secs(60);
     loop {
         if start.elapsed() > deadline {
-            let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            let log = std::fs::read_to_string(&guard.stderr_path).unwrap_or_default();
             panic!(
-                "federation server did not become healthy within {deadline:?} on {host}; last stderr:\n{log}"
+                "federation payload did not surface within {deadline:?} on {host}; last stderr:\n{log}"
             );
         }
-        let attempt = (|| -> std::io::Result<(u16, String)> {
-            let mut stream = TcpStream::connect(&host)?;
-            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-            stream.write_all(
-                format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
-            )?;
-            let mut response = String::new();
-            stream.read_to_string(&mut response)?;
-            let status_line = response.lines().next().unwrap_or("");
-            let status: u16 = status_line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            let body_start = response
-                .find("\r\n\r\n")
-                .map(|i| i + 4)
-                .unwrap_or(response.len());
-            Ok((status, response[body_start..].to_string()))
-        })();
-        match attempt {
-            Ok((200, body)) => {
-                // Wait for the federation's `federation` health
-                // payload to surface. Right after the listener comes
-                // up the federation tools may not have indexed yet.
-                if body.contains("\"federation\"") {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            Ok((status, body)) => {
-                if start.elapsed() > Duration::from_secs(5) {
-                    panic!("server returned HTTP {status} from /health: {body}");
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-                panic!("health probe error: {e}; stderr:\n{log}");
-            }
+        let body = probe_health_body(&host).unwrap_or_default();
+        if body.contains("\"federation\"") {
+            break;
         }
+        std::thread::sleep(Duration::from_millis(200));
     }
-    // Suppress unused-variable warnings for helpers retained for the
-    // shared harness (other test files import `boot_server` directly).
-    guard
+    (host, guard)
+}
+
+/// Issue one `GET /health` and return the body, or `None` if the
+/// server isn't accepting connections yet. Used by `boot_federation`
+/// to poll for the federation payload without re-implementing the
+/// HTTP parse.
+fn probe_health_body(host: &str) -> Option<String> {
+    let mut stream = TcpStream::connect(host).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream
+        .write_all(
+            format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    let body_start = response.find("\r\n\r\n").map(|i| i + 4)?;
+    Some(response[body_start..].to_string())
 }
 
 // ---------------------------------------------------------------------------

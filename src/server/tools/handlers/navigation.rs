@@ -4,7 +4,7 @@ use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::schema::{GraphNode, NodeType};
+use crate::schema::{EdgeType, GraphNode, NodeType};
 use crate::server::tools::utils::{resolve_node, resolve_node_federation_fallback};
 use crate::server::tools::{UiSession, UiSessionData};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -17,7 +17,17 @@ pub fn trace_dependency(
 ) -> Result<String, LainError> {
     // 1. Resolve handle
     let start_node = resolve_node(graph, overlay, symbol)?;
+    let start_id = start_node.id.clone();
 
+    // Dependencies are what the code uses, not what contains it or merely
+    // changes with it: following `Contains` / `CoChangedWith` / `Pattern`
+    // pulled in whole files and unrelated modules.
+    let is_dependency = |t: &EdgeType| {
+        !matches!(
+            t,
+            EdgeType::Contains | EdgeType::CoChangedWith | EdgeType::Pattern
+        )
+    };
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
     let mut results = Vec::new();
@@ -28,22 +38,27 @@ pub fn trace_dependency(
             continue;
         }
         visited.insert(node.id.clone());
-        results.push(node.clone());
+        // The symbol is not its own dependency.
+        if node.id != start_id {
+            results.push(node.clone());
+        }
 
         // Get edges from both static and overlay
         let mut targets = HashSet::new();
 
         // Static edges
         if let Ok(edges) = graph.get_edges_from(&node.id) {
-            for e in edges {
+            for e in edges.into_iter().filter(|e| is_dependency(&e.edge_type)) {
                 targets.insert(e.target_id);
             }
         }
 
         // Overlay edges
         let overlay_edges = overlay.get_outgoing_edges(&node.id);
-        for (target, _) in overlay_edges {
-            targets.insert(target.id);
+        for (target, edge_type) in overlay_edges {
+            if is_dependency(&edge_type) {
+                targets.insert(target.id);
+            }
         }
 
         for tid in targets {
@@ -97,31 +112,79 @@ pub async fn get_call_chain(
             },
         }
     };
-    let start = resolve(from)?;
-    let end = resolve(to)?;
+    // A bare name can name several definitions — `request` is both
+    // `requests.api.request` and `Session.request`. Picking one of them
+    // (the first by path) answered "no path" whenever the chain ran
+    // through another, so search from and to every definition of it.
+    if from.trim().is_empty() || to.trim().is_empty() {
+        return Err(LainError::NotFound(
+            "get_call_chain needs non-empty `from` and `to`".to_string(),
+        ));
+    }
+    let all_named = |handle: &str| -> Result<Vec<GraphNode>, LainError> {
+        if overlay.get_node(handle).is_none() && !matches!(graph.get_node(handle), Ok(Some(_))) {
+            let mut named = graph.find_all_nodes_by_name(handle);
+            for n in overlay.find_nodes_by_name(handle) {
+                if n.name == handle && !named.iter().any(|m| m.id == n.id) {
+                    named.push(n);
+                }
+            }
+            if !named.is_empty() {
+                return Ok(named);
+            }
+        }
+        Ok(vec![resolve(handle)?])
+    };
+    let starts = all_named(from)?;
+    let end_nodes = all_named(to)?;
+    // An endpoint found only through the federation fallback lives in
+    // another repository, where this graph's call edges cannot reach.
+    // Searching anyway answered "No call path found", which reads as
+    // "they are unrelated".
+    let local = |n: &GraphNode| {
+        overlay.get_node(&n.id).is_some() || matches!(graph.get_node(&n.id), Ok(Some(_)))
+    };
+    for (handle, nodes) in [(from, &starts), (to, &end_nodes)] {
+        if !nodes.is_empty() && !nodes.iter().any(local) {
+            return Err(LainError::NotFound(format!(
+                "'{handle}' is not in this repository (found in {}); call chains are traced \
+                 within one repository — pass the repo_id that holds both ends",
+                nodes[0].path
+            )));
+        }
+    }
+    let ends: HashSet<String> = end_nodes.into_iter().map(|n| n.id).collect();
 
     let mut queue = VecDeque::new();
     let mut parents = HashMap::new();
 
-    queue.push_back(start.id.clone());
-    parents.insert(start.id.clone(), None);
+    for start in &starts {
+        queue.push_back(start.id.clone());
+        parents.insert(start.id.clone(), None);
+    }
 
-    let mut found = false;
+    let mut found = None;
     while let Some(current_id) = queue.pop_front() {
-        if current_id == end.id {
-            found = true;
+        if ends.contains(&current_id) {
+            found = Some(current_id);
             break;
         }
 
+        // Calls only: following Contains / CoChangedWith / Pattern edges
+        // reported "app.py → helper" (a file containing a function) as a
+        // call chain.
+        let is_call = |t: &EdgeType| matches!(t, EdgeType::Calls | EdgeType::CallsHttp);
         let mut targets = HashSet::new();
         if let Ok(edges) = graph.get_edges_from(&current_id) {
-            for e in edges {
+            for e in edges.into_iter().filter(|e| is_call(&e.edge_type)) {
                 targets.insert(e.target_id);
             }
         }
         let overlay_edges = overlay.get_outgoing_edges(&current_id);
-        for (target, _) in overlay_edges {
-            targets.insert(target.id);
+        for (target, edge_type) in overlay_edges {
+            if is_call(&edge_type) {
+                targets.insert(target.id);
+            }
         }
 
         for tid in targets {
@@ -132,15 +195,15 @@ pub async fn get_call_chain(
         }
     }
 
-    if !found {
+    let Some(end_id) = found else {
         return Ok(format!(
-            "No call path found from '{}' to '{}' in Merged Brain.",
+            "No call path found from '{}' to '{}' in this repository.",
             from, to
         ));
-    }
+    };
 
     let mut path = Vec::new();
-    let mut current = Some(end.id.clone());
+    let mut current = Some(end_id);
     while let Some(id) = current {
         let node = if let Some(n) = overlay.get_node(&id) {
             Some(n)
@@ -148,7 +211,14 @@ pub async fn get_call_chain(
             graph.get_node(&id)?
         };
         if let Some(n) = node {
-            path.push(n.name);
+            // Say which definition an ambiguous endpoint turned out to be.
+            let at_start = parents.get(&id).is_some_and(|p| p.is_none());
+            let at_end = path.is_empty();
+            if (at_start && starts.len() > 1) || (at_end && ends.len() > 1) {
+                path.push(format!("{} ({})", n.name, n.path));
+            } else {
+                path.push(n.name);
+            }
         }
         current = parents.get(&id).cloned().flatten();
     }
@@ -212,9 +282,17 @@ pub fn navigate_to_anchor(
         visited.insert(current.id.clone());
 
         let score = current.anchor_score.unwrap_or(0.0);
-        if best_anchor.is_none()
-            || score > best_anchor.as_ref().unwrap().anchor_score.unwrap_or(0.0)
-        {
+        // `if let` so the comparison guard is one expression and a
+        // future refactor can't strip the `is_none()` short-circuit
+        // and turn the inner `unwrap()` into a panic on the first
+        // iteration. The trailing `else` keeps the original
+        // short-circuit semantics: take the candidate only when its
+        // score strictly beats the current best.
+        let replace = match &best_anchor {
+            None => true,
+            Some(b) => score > b.anchor_score.unwrap_or(0.0),
+        };
+        if replace {
             best_anchor = Some(current.clone());
         }
 

@@ -2,8 +2,10 @@
 //!
 //! Follows SOLID and DRY principles by delegating logic to specialized handlers.
 
+pub mod capabilities;
 pub mod definitions;
 pub mod handlers;
+pub mod profile;
 #[cfg(test)]
 pub mod proptest_helpers;
 pub mod registry;
@@ -13,7 +15,7 @@ pub mod utils_tests;
 
 use crate::error::LainError;
 use crate::federation::repo_id::RepoId;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
@@ -115,7 +117,7 @@ pub struct ToolExecutorConfig {
     pub overlay: VolatileOverlay,
     pub embedder: NlpEmbedder,
     pub cross_encoder: crate::nlp::CrossEncoder,
-    pub git: Arc<Mutex<GitSensor>>,
+    pub git: Arc<AnyGitSensor>,
     pub lsp_pool: Arc<LspPool>,
     pub tuning: Arc<TuningConfig>,
     pub workspace: std::path::PathBuf,
@@ -133,6 +135,9 @@ impl ToolExecutor {
     }
     pub fn ui_sessions(&self) -> &AsyncMutex<HashMap<String, UiSession>> {
         &self.ctx.ui_sessions
+    }
+    pub fn git(&self) -> &Arc<crate::server::git::AnyGitSensor> {
+        &self.ctx.git
     }
     /// Record the port the HTTP transport is actually listening on, so
     /// tool output can link to `/ui/...` sessions. 0 (the default) means
@@ -168,7 +173,10 @@ impl ToolExecutor {
             git,
             lsp_pool,
             tuning: Arc::clone(&tuning),
-            embedding_cache: Arc::new(Mutex::new(HashMap::new())),
+            embedding_cache: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(tuning.embedding_cache_capacity.max(1))
+                    .expect("embedding_cache_capacity must be > 0"),
+            ))),
             ui_sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             jobs: Arc::clone(&jobs_registry),
             job_webhooks: Arc::clone(&webhooks),
@@ -248,10 +256,10 @@ impl ToolExecutor {
                 ),
             },
         };
-        let git = Arc::new(Mutex::new(
-            crate::git::GitSensor::new(&git_root)
+        let git = Arc::new(
+            crate::git::AnyGitSensor::from_env(&git_root)
                 .expect("sidecar git sensor must succeed after stub init"),
-        ));
+        );
         let runtime = crate::tuning::load_tuning_config(&workspace).runtime;
         let lsp_root = match crate::lsp::LspPool::new(&workspace, 1, &runtime) {
             Ok(pool) => pool,
@@ -275,7 +283,10 @@ impl ToolExecutor {
             git,
             lsp_pool,
             tuning: Arc::clone(&tuning),
-            embedding_cache: Arc::new(Mutex::new(HashMap::new())),
+            embedding_cache: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(tuning.embedding_cache_capacity.max(1))
+                    .expect("embedding_cache_capacity must be > 0"),
+            ))),
             ui_sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             jobs: Arc::clone(&jobs_registry),
             job_webhooks: Arc::clone(&webhooks),
@@ -455,14 +466,55 @@ impl ToolExecutor {
 
         // Special executor methods — not registered as ToolHandlers
         match name {
-            "get_health" => return self.get_health().await,
+            "get_health" => {
+                // With `repo_id`, the named federation repo's own health —
+                // this answered for the empty placeholder graph instead,
+                // for any id, even one not registered.
+                if let (Some(fed), Some(repo)) = (
+                    self.ctx.federation.as_ref(),
+                    args.get("repo_id").and_then(|v| v.as_str()),
+                ) {
+                    let bound = self.ctx.for_repo(repo).ok_or_else(|| {
+                        let known: Vec<String> = fed
+                            .list_repos()
+                            .into_iter()
+                            .map(|(id, _)| id.as_str().to_string())
+                            .collect();
+                        LainError::Config(format!(
+                            "unknown repo_id '{repo}'; registered: {}",
+                            known.join(", ")
+                        ))
+                    })?;
+                    return self.get_health_in(&bound).await;
+                }
+                return self.get_health().await;
+            }
             "get_capabilities" => return self.get_capabilities(),
             "get_agent_strategy" => return self.get_agent_strategy(),
             "install_language_server" => {
+                // Two arg shapes are accepted by the same tool name:
+                //   1. { "language": "rust" } — legacy single install.
+                //   2. { "extensions": ["rs", "py", "go", "auto"] } —
+                //      batched install; `"auto"` resolves to whatever
+                //      languages the tracked files use.
+                // When both are present, `extensions` wins (it's a
+                // superset of `language`). When neither is present,
+                // we report the error explicitly instead of falling
+                // back to a misleading empty install.
                 let lang = arguments
                     .and_then(|a| a.get("language").and_then(|v| v.as_str()))
                     .unwrap_or("");
-                return self.install_language_server(lang).await;
+                let exts: Option<Vec<String>> = arguments
+                    .and_then(|a| a.get("extensions").and_then(|v| v.as_array()))
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    });
+                return match exts {
+                    Some(list) if !list.is_empty() => self.install_language_servers(&list).await,
+                    _ => self.install_language_server(lang).await,
+                };
             }
             "register_job_webhook" => {
                 let url = arguments
@@ -531,6 +583,7 @@ impl ToolExecutor {
             structural: CapabilityState,
             retry_after_ms: Option<u64>,
             semantic_stub: bool,
+            embeddings_running: bool,
         ) -> Capabilities {
             let mut symbols = Capability::new(structural, false);
             let mut call_graph = Capability::new(structural, false);
@@ -540,6 +593,12 @@ impl ToolExecutor {
             }
             let semantic_search = if semantic_stub {
                 Capability::new(CapabilityState::UnavailableOptional, true)
+            } else if structural == CapabilityState::Ready && embeddings_running {
+                // Answers already, but from a partial embedding set that
+                // keeps changing until the background pass ends.
+                let mut c = Capability::new(CapabilityState::WarmingUp, true);
+                c.retry_after_ms = Some(5_000);
+                c
             } else {
                 Capability::new(structural, true)
             };
@@ -552,6 +611,12 @@ impl ToolExecutor {
         }
 
         let semantic_stub = self.ctx.embedder.is_stub();
+        let embeddings_running = self
+            .ctx
+            .readiness
+            .snapshot()
+            .embeddings
+            .is_some_and(|e| e.running);
 
         // Federation mode: each repo owns its own RepoHealth, so
         // `capabilities` (kept for backward compatibility) becomes the
@@ -587,7 +652,12 @@ impl ToolExecutor {
                         worst = structural;
                         worst_retry_after_ms = snapshot.retry_after_ms;
                     }
-                    let caps = capabilities_for(structural, snapshot.retry_after_ms, semantic_stub);
+                    let caps = capabilities_for(
+                        structural,
+                        snapshot.retry_after_ms,
+                        semantic_stub,
+                        embeddings_running,
+                    );
                     let r = readiness_by_id.get(id);
                     serde_json::json!({
                         "id": id.as_str(),
@@ -602,7 +672,12 @@ impl ToolExecutor {
                     })
                 })
                 .collect();
-            let aggregate = capabilities_for(worst, worst_retry_after_ms, semantic_stub);
+            let aggregate = capabilities_for(
+                worst,
+                worst_retry_after_ms,
+                semantic_stub,
+                embeddings_running,
+            );
 
             return serde_json::to_string(&serde_json::json!({
                 "schema_version": SCHEMA_VERSION,
@@ -616,12 +691,47 @@ impl ToolExecutor {
 
         let lifecycle = self.ctx.readiness.snapshot();
         let structural = structural_state(lifecycle.state);
-        let capabilities = capabilities_for(structural, lifecycle.retry_after_ms, semantic_stub);
+        let capabilities = capabilities_for(
+            structural,
+            lifecycle.retry_after_ms,
+            semantic_stub,
+            embeddings_running,
+        );
+        // Surface the active tool profile so an agent can self-
+        // discover whether it's running on the curated Semantic
+        // surface or the full 83-tool surface. An agent that
+        // wants the full list can either set `LAIN_TOOL_PROFILE=full`
+        // on restart, or call `get_agent_strategy` for the full
+        // enumeration (the curated surface includes it as an escape
+        // hatch).
+        let profile = crate::server::tools::profile::ToolProfile::from_env();
+        let advertised = crate::tools::registry::ToolRegistry::definitions()
+            .iter()
+            .filter(|def| {
+                use crate::server::mcp::handler::profile_allows;
+                profile_allows(&profile, def.name)
+            })
+            .count()
+            + crate::server::tools::profile::special_advertised_count(
+                &profile,
+                self.ctx.federation.is_some(),
+                // Workspace state is plumbed into ToolContext by
+                // `LainMcpServer::with_federation_and_workspaces`.
+                // Single-workspace and federation-only servers
+                // (constructed via `new` or `with_federation`) leave
+                // this at None, matching their actual surface.
+                self.ctx.workspaces.is_some(),
+            );
         serde_json::to_string(&serde_json::json!({
             "schema_version": SCHEMA_VERSION,
             "server_version": env!("CARGO_PKG_VERSION"),
             "repository": self.ctx.workspace.file_name().map(|name| name.to_string_lossy()),
             "capabilities": capabilities,
+            // New in PR3 (semantic-default tool profile).
+            "tool_profile": {
+                "name": profile.as_str(),
+                "advertised_count": advertised,
+            },
             "freshness": {
                 "head": lifecycle.target_commit,
                 "indexed_commit": lifecycle.indexed_commit,
@@ -632,19 +742,47 @@ impl ToolExecutor {
         .map_err(Into::into)
     }
 
+    /// Format the Bug #2 hang banner for `get_health`. Returns
+    /// `None` when the parking_lot `GitSensor` mutex is free (atomic
+    /// is `0`); returns the banner text with the elapsed hold time
+    /// when it's non-zero. Computed live from the bound atomic so
+    /// the output reflects whatever the watchdog last published
+    /// (CAS on free→held, clear on held→free, clear on exit).
+    fn git_busy_since_banner(busy_since_unix_nanos: u64) -> Option<String> {
+        if busy_since_unix_nanos == 0 {
+            return None;
+        }
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let elapsed_nanos = now_nanos.saturating_sub(busy_since_unix_nanos);
+        let elapsed_secs = elapsed_nanos / 1_000_000_000;
+        Some(format!(
+            "⚠ Bug #2: GitSensor held/unreachable for {elapsed_secs}s — a prior index() \
+             call may be wedged in libgit2 or sidecar process down. Inspect /proc/<pid>/wchan or run \
+             scripts/debug-hung-server.sh."
+        ))
+    }
+
     pub async fn get_health(&self) -> Result<String, LainError> {
-        let (nodes, edges) = self.ctx.graph.get_stats();
-        let last_commit = self
-            .ctx
+        self.get_health_in(&self.ctx).await
+    }
+
+    /// Health of the repository `ctx` is bound to — the server's own, or one
+    /// federation repo's (`get_health {repo_id}`).
+    async fn get_health_in(&self, ctx: &ToolContext) -> Result<String, LainError> {
+        let (nodes, edges) = ctx.graph.get_stats();
+        let last_commit = ctx
             .graph
             .get_last_commit()?
             .unwrap_or_else(|| "None".to_string());
-        let overlay_stats = self.ctx.overlay.stats();
+        let overlay_stats = ctx.overlay.stats();
 
-        let embedder_status = if self.ctx.embedder.is_stub() {
+        let embedder_status = if ctx.embedder.is_stub() {
             "Not loaded (semantic search unavailable)".to_string()
         } else {
-            format!("Loaded ({}d embeddings)", self.ctx.embedder.embedding_dim())
+            format!("Loaded ({}d embeddings)", ctx.embedder.embedding_dim())
         };
 
         // Live LSP-failure count: sum every repo's
@@ -657,7 +795,7 @@ impl ToolExecutor {
         // Falls back to the cached `outcome.lsp_failures_last_cycle`
         // when the federation isn't wired in (single-repo executor
         // without a `FederatedIndex`).
-        let live_lsp_failures: u32 = match self.ctx.federation.as_ref() {
+        let live_lsp_failures: u32 = match ctx.federation.as_ref() {
             Some(fed) => fed
                 .list_repos()
                 .into_iter()
@@ -671,14 +809,14 @@ impl ToolExecutor {
         // `--workspace auto` (or any other resolution path) picked the right
         // repo. This is the field MCP clients read back to verify the server
         // is indexing the project they expected.
-        let workspace_display = self.ctx.workspace.display().to_string();
+        let workspace_display = ctx.workspace.display().to_string();
 
         // "X commits behind HEAD" — without it the bare SHA is a
         // confident-but-meaningless number. Run `git rev-list --count`
         // against the workspace; on failure (no git, not a repo) fall
         // back to the SHA-only display.
         let commit_status = match std::process::Command::new("git")
-            .args(["-C", self.ctx.workspace.to_str().unwrap_or(".")])
+            .args(["-C", ctx.workspace.to_str().unwrap_or(".")])
             .args(["rev-list", "--count", &format!("{}..HEAD", last_commit)])
             .output()
         {
@@ -693,20 +831,41 @@ impl ToolExecutor {
             _ => last_commit.clone(),
         };
 
-        // Status reflects the last refresh outcome. Printing
-        // `Operational ✅` beside a re-index failure in the same
-        // payload is how a two-day-old graph went unnoticed.
-        let degraded = self.ctx.last_outcome.lock().is_degraded();
-        let status = if degraded {
-            "Degraded ⚠ (serving a stale graph — see the warning below)"
+        // Status reflects the last refresh outcome and git sensor responsiveness.
+        let git_healthy = ctx.git.is_alive();
+        let degraded = ctx.last_outcome.lock().is_degraded();
+        let status = if degraded || !git_healthy {
+            if !git_healthy {
+                "Degraded ⚠ (git sensor sidecar is down — see the warning below)"
+            } else {
+                "Degraded ⚠ (serving a stale graph — see the warning below)"
+            }
         } else {
             "Operational ✅"
         };
+        let git_sensor_display = match ctx.git.as_ref() {
+            crate::server::git::AnyGitSensor::InProcess(_) => "In-process (libgit2)".to_string(),
+            crate::server::git::AnyGitSensor::Sidecar(sidecar) => {
+                let sh = sidecar.health();
+                if sh.alive {
+                    format!(
+                        "Sidecar (PID {:?}, alive, respawns: {}, latency: {}µs)",
+                        sh.child_pid, sh.respawns_in_window, sh.last_call_duration_us
+                    )
+                } else {
+                    format!(
+                        "Sidecar (DEAD, consecutive failures: {}, respawns: {})",
+                        sh.consecutive_failures, sh.respawns_in_window
+                    )
+                }
+            }
+        };
         let mut output = format!(
-            "## Lain Server Health\n\n- **Workspace:** {}\n- **Build:** {}\n- **Status:** {}\n- **Static Nodes:** {}\n- **Static Edges:** {}\n- **Volatile Nodes (Overlay):** {}\n- **Last Enriched Commit:** {}\n- **NLP Model:** {}\n",
+            "## Lain Server Health\n\n- **Workspace:** {}\n- **Build:** {}\n- **Status:** {}\n- **Git Sensor:** {}\n- **Static Nodes:** {}\n- **Static Edges:** {}\n- **Volatile Nodes (Overlay):** {}\n- **Last Enriched Commit:** {}\n- **NLP Model:** {}\n",
             workspace_display,
             crate::server::build_info::summary(),
             status,
+            git_sensor_display,
             nodes,
             edges,
             overlay_stats.node_count,
@@ -714,12 +873,33 @@ impl ToolExecutor {
             embedder_status
         );
 
+        if !git_healthy {
+            output.push_str("- **⚠ GitSensor sidecar daemon is DOWN (unreachable)**\n");
+        }
+
         // Last refresh outcome (from the spawn in run_stdio / run_http).
         // Step 1 of the staleness fix: the re-index failure was previously
         // invisible because it only went to tracing::warn and stderr,
         // neither of which a stdio MCP client surfaces to the model.
         // This is the in-tool-output visibility path.
-        if let Some(line) = self.ctx.last_outcome.lock().banner_line() {
+        if let Some(line) = ctx.last_outcome.lock().banner_line() {
+            output.push_str(&format!("- **{line}**\n"));
+        }
+
+        // Bug #2 hang banner (2026-09-18 postmortem): the
+        // `IngestHandle` watchdog publishes a wall-clock nanosecond
+        // timestamp when the parking_lot `GitSensor` mutex becomes
+        // continuously held and clears it on the held→free transition.
+        // Until now this was only visible in `tracing::warn!` output,
+        // which a stdio MCP client can't surface. Compute the elapsed
+        // hold from the bound atomic and emit a banner when it's
+        // non-zero — alertmanager / dashboards can grep this from
+        // `get_health` output without log scraping.
+        if let Some(line) = Self::git_busy_since_banner(
+            self.ctx
+                .git_busy_since_unix_nanos
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ) {
             output.push_str(&format!("- **{line}**\n"));
         }
 
@@ -752,7 +932,7 @@ impl ToolExecutor {
         // a missing-data bug; the histogram makes the data
         // visible. Sorted alphabetically by EdgeType Debug name for
         // stable output across runs.
-        let edge_hist = self.ctx.graph.edge_counts_by_type();
+        let edge_hist = ctx.graph.edge_counts_by_type();
         if !edge_hist.is_empty() {
             output.push_str("\n### Edge counts by type\n");
             for (kind, count) in &edge_hist {
@@ -760,22 +940,66 @@ impl ToolExecutor {
             }
         }
 
+        // Only the languages this repository contains. Listing every server
+        // in the registry as "❌ Missing" read as "install all of these",
+        // when the built-in parsers already cover each language and a
+        // server is an optional precision layer.
         output.push_str("\n### Language Support\n");
-        let langs = {
-            let lsp = self.ctx.lsp_pool.next();
+        let available: std::collections::HashMap<String, bool> = {
+            let lsp = ctx.lsp_pool.next();
             let lsp_guard = lsp.lock().await;
-            lsp_guard.get_supported_languages()
+            lsp_guard
+                .get_supported_languages()
+                .into_iter()
+                .map(|(_, binary, ok)| (binary, ok))
+                .collect()
         };
-
-        let mut seen_binaries = std::collections::HashSet::new();
-        for (_, binary, available) in langs {
-            if seen_binaries.contains(&binary) {
+        let mut per_language: std::collections::BTreeMap<
+            &'static str,
+            (usize, Option<&'static str>),
+        > = std::collections::BTreeMap::new();
+        for file in ctx
+            .graph
+            .get_nodes_by_type(crate::schema::NodeType::File)
+            .unwrap_or_default()
+        {
+            let Some(ext) = std::path::Path::new(&file.path)
+                .extension()
+                .and_then(|e| e.to_str())
+            else {
                 continue;
+            };
+            let Some(language) = crate::server::treesitter::language_name(ext) else {
+                continue;
+            };
+            let entry = per_language.entry(language).or_insert((0, None));
+            entry.0 += 1;
+            if entry.1.is_none() {
+                entry.1 = crate::server::lsp::language_server_for(ext).map(|s| s.binary);
             }
-            seen_binaries.insert(binary.clone());
-
-            let status = if available { "✅" } else { "❌ (Missing)" };
-            output.push_str(&format!("- **{}**: {}\n", binary, status));
+        }
+        if per_language.is_empty() {
+            output.push_str("- No source files indexed yet.\n");
+        } else {
+            output.push_str(
+                "Built-in parsers cover every language below; language servers are \
+                 optional and only add precision (`lain setup` offers to install them).\n",
+            );
+        }
+        for (language, (files, server)) in &per_language {
+            let server = match server {
+                Some(binary) if available.get(*binary).copied().unwrap_or(false) => {
+                    format!("`{binary}` ✅")
+                }
+                Some(binary) if which::which(binary).is_ok() => {
+                    format!("`{binary}` installed but disabled after repeated failures (restart to retry)")
+                }
+                Some(binary) => format!("`{binary}` optional, not installed"),
+                None => "none registered".to_string(),
+            };
+            output.push_str(&format!(
+                "- **{language}** ({files} files): parser ✅ · language server {server}\n"
+            ));
         }
 
         Ok(output)
@@ -794,9 +1018,115 @@ impl ToolExecutor {
         })
     }
 
+    /// Batched LSP installation. Each entry in `extensions` runs
+    /// through [`LspMultiplexer::install_servers`] — a single
+    /// failure never blocks the rest of the batch, and the response
+    /// carries a per-entry outcome enum (`installed`,
+    /// `already_installed`, `unknown_ext`, `no_install_cmd`,
+    /// `failed`) so an agent can decide whether to retry.
+    ///
+    /// Special entry `"auto"` is resolved against the workspace's
+    /// tracked files: every distinct extension that maps to a known
+    /// language server becomes a candidate. The dedup hits the
+    /// same registry lookup `install_server` would, so an operator
+    /// running `install_language_servers(["auto"])` gets the same
+    /// set as if they had hand-listed every language their
+    /// repo uses.
+    async fn install_language_servers(&self, extensions: &[String]) -> Result<String, LainError> {
+        let needs_auto = extensions.iter().any(|e| e == "auto");
+        let explicit: Vec<String> = extensions
+            .iter()
+            .filter(|e| *e != "auto")
+            .cloned()
+            .collect();
+        let resolved: Vec<String> = if needs_auto {
+            // `auto` expands to the workspace's tracked-file extensions.
+            // We need a tracked-file list and the registry. The
+            // `install_language_server` tool was previously single-tier
+            // and not stdio-context-aware; here we go through git's
+            // `get_all_tracked_files` (which is the same path the indexer
+            // uses, so we share its git config + cache). PR-fix-2
+            // promotes git-discovery failures from silently empty to
+            // a typed `LainError::Config` so a non-git workspace
+            // caller gets a clear message instead of an empty
+            // success.
+            let auto = self.resolve_auto_extensions()?;
+            let mut merged = explicit;
+            for e in auto {
+                if !merged.contains(&e) {
+                    merged.push(e);
+                }
+            }
+            merged
+        } else {
+            explicit
+        };
+
+        info!(
+            "Requesting batched LSP install for: {:?} (after auto-resolve)",
+            resolved
+        );
+        let refs: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
+        let lsp = Arc::clone(&self.ctx.lsp_pool.next());
+        let mut lsp_guard = lsp.lock().await;
+        let results = lsp_guard.install_servers(&refs).await;
+
+        // Pretty-print: one line per entry. Operators get a quick
+        // visual scan; agents can JSON-parse if they want a structured
+        // shape (the tool envelope preserves the raw array).
+        let mut out = String::new();
+        out.push_str(&format!("Install batch ({} request(s)):\n", results.len()));
+        for r in &results {
+            out.push_str(&format!(
+                "  - {:>10}  {:?}  {}\n",
+                r.ext, r.status, r.message
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Walk git-tracked files for the workspace and return the
+    /// sorted, deduplicated set of extensions the LSP registry
+    /// recognises. Errors during git discovery (e.g. a non-git
+    /// workspace) bubble up as a typed `LainError::Config` so the
+    /// operator gets a clear message instead of a silently-empty
+    /// batch.
+    fn resolve_auto_extensions(&self) -> Result<Vec<String>, LainError> {
+        let workspace = self.ctx.workspace.clone();
+        let lsp = Arc::clone(&self.ctx.lsp_pool.next());
+        // Probe registry first (synchronous, just reads the inner HashMap).
+        let known = lsp
+            .try_lock()
+            .map(|g| g.known_extensions())
+            .unwrap_or_default();
+        let git_sensor = crate::git::GitSensor::new(&workspace);
+        let tracked = match git_sensor {
+            Ok(g) => g.get_all_tracked_files().unwrap_or_default(),
+            Err(e) => {
+                // The original PR (feat/multi-lsp-install) silently
+                // returned an empty Vec here — a real operator
+                // calling `extensions: ["auto"]` against a non-git
+                // workspace got no signal that anything went wrong.
+                // PR-fix-2 promotes this to a typed error so the
+                // tool envelope returns a clear "auto detection
+                // requires a git repository" message instead of an
+                // empty success.
+                return Err(LainError::Config(format!(
+                    "auto detection requires a git repository; \
+                     GitSensor::new({workspace_path:?}) failed: {e}. \
+                     Pass an explicit extensions list \
+                     (e.g. extensions: [\"rs\", \"py\"]) to bypass.",
+                    workspace_path = workspace.display()
+                )));
+            }
+        };
+        Ok(crate::server::lsp::detect_extensions_from_files(
+            &tracked, &known,
+        ))
+    }
+
     fn get_agent_strategy(&self) -> Result<String, LainError> {
-        // Build strategy from registered tool capabilities
-        let tools = ToolRegistry::definitions();
+        // Build strategy from the capability registry.
         let mut sections = vec![
             "# AI Agent Strategy Guide for Lain\n".to_string(),
             "Lain is a code analysis engine that maintains a graph of your codebase. Use it to understand architecture, trace dependencies, and assess impact before making changes.\n".to_string(),
@@ -804,76 +1134,21 @@ impl ToolExecutor {
             "- **Start broad, zoom deep**: Use layered maps and anchors to find the right part, then blast radius to understand ripple effects.\n".to_string(),
             "- **Pattern edges over names**: Named queries like `get_call_chain` and `semantic_search` find connections that keyword search misses.\n".to_string(),
             "- **Offline-first**: All analysis runs on local data. No LLM API needed for structural queries.\n".to_string(),
+            "\n## Tool Profiles\n\n".to_string(),
+            "Lain advertises a small surface by default and keeps the rest registered but hidden — advertising is not dispatch, so hook scripts can call hidden tools (claims, heartbeat) whether or not you see them. `get_capabilities.tool_profile` reports the active profile.\n".to_string(),
+            "- **semantic** (default): comprehension + impact — the tools listed below.\n".to_string(),
+            "- **session** (`LAIN_TOOL_PROFILE=session`): multiplayer plumbing — `register_agent`, `heartbeat`, `claim_files`, `release_files`, `list_occupancy`, `get_world_state`. Hook-driven agents do not need these; opt in to claim files manually.\n".to_string(),
+            "- **ops** (`LAIN_TOOL_PROFILE=ops`): server controls (`get_server_status`, `request_reload`, …) and federation/workspace admin reads (`list_repos`, `get_repo_info`, …).\n".to_string(),
+            "- **full** (`LAIN_TOOL_PROFILE=full`): the entire registered surface.\n".to_string(),
+            "Values compose with a comma list, e.g. `LAIN_TOOL_PROFILE=session,ops`.\n".to_string(),
             "\n## Recommended Tool Sequence\n\n".to_string(),
         ];
 
-        let mut readonly = Vec::new();
-        let mut structural = Vec::new();
-        let mut mutating = Vec::new();
-
-        let excluded = [
-            "get_health",
-            "get_agent_strategy",
-            "install_language_server",
-            "query_graph",
-        ];
-        let readonly_set = [
-            "explore_architecture",
-            "list_entry_points",
-            "compare_modules",
-            "architectural_observations",
-            "trace_dependency",
-            "get_call_chain",
-            "navigate_to_anchor",
-            "get_layered_map",
-            "get_master_map",
-            "semantic_search",
-            "find_anchors",
-            "get_anchor_score",
-            "get_context_depth",
-            "find_dead_code",
-            "explain_symbol",
-            "suggest_refactor_targets",
-            "get_context_for_prompt",
-            "get_code_snippet",
-            "get_call_sites",
-            "find_untested_functions",
-            "get_test_template",
-            "find_test_file",
-            "get_coverage_summary",
-            "get_cross_runtime_callers",
-            "describe_schema",
-        ];
-        let structural_set = [
-            "add_comment",
-            "tag_node",
-            "update_node_metadata",
-            "insert_reference_edge",
-        ];
-
-        for t in tools.iter().filter(|t| !excluded.contains(&t.name)) {
-            if readonly_set.contains(&t.name) {
-                readonly.push(t);
-            } else if structural_set.contains(&t.name) {
-                structural.push(t);
-            } else {
-                mutating.push(t);
-            }
-        }
-
-        sections.push("### Read-Only (Safe — No State Changes)\n".to_string());
-        for t in &readonly {
-            sections.push(format!("- **{}**: {}\n", t.name, t.description));
-        }
-        sections.push("\n### Structural Write (Modifies Graph)\n".to_string());
-        for t in &structural {
-            sections.push(format!("- **{}**: {}\n", t.name, t.description));
-        }
-        sections.push("\n### Mutating (Executes Commands / Side Effects)\n".to_string());
-        for t in &mutating {
-            sections.push(format!("- **{}**: {}\n", t.name, t.description));
-        }
-
+        // The package cards are generated from the capability
+        // registry, so this guide cannot describe a tool the surface
+        // does not have (or miss one it does).
+        sections.push(crate::server::tools::capabilities::all_package_cards());
+        sections.push("\n".to_string());
         sections.push("\n## Decision Flow\n\n".to_string());
         sections.push(
             "1. **Explore unknown area**: `get_layered_map` or `architectural_observations`\n"
@@ -882,8 +1157,18 @@ impl ToolExecutor {
         sections.push(
             "2. **Find specific symbol**: `trace_dependency` or `semantic_search`\n".to_string(),
         );
-        sections
-            .push("3. **Assess change risk**: `get_blast_radius` before modifying\n".to_string());
+        sections.push(
+            "3. **Assess change risk (composed)** — never trust a single tool. Run all four:\n\
+             - `get_blast_radius` (static edges from Tree-sitter + LSP)\n\
+             - `get_coupling_radar` on the touched paths (git co-change partners)\n\
+             - `find_anchors` on the file (high-fan-in hubs nearby)\n\
+             - `trace_dependency` for upstream callees + imports of any dispatcher\n\
+             If all four return empty, treat as **no static evidence** and run the smoke\n\
+             command before merging. See *Dynamic Dispatch Caveat* below. When in doubt,\n\
+             call `explain_dispatch` to get a single `verdict` (`insufficient_evidence` means\n\
+             the graph cannot see the dispatcher — do not treat as safe).\n"
+                .to_string(),
+        );
         sections.push(
             "4. **Understand coupling**: `get_coupling_radar` for hidden co-change patterns\n"
                 .to_string(),
@@ -898,6 +1183,27 @@ impl ToolExecutor {
 
         sections.push(
             "\n*Use tools incrementally (N+1 approach) to avoid context window overflow.*\n"
+                .to_string(),
+        );
+
+        sections.push("\n## Dynamic Dispatch Caveat\n\n".to_string());
+        sections.push(
+            "An empty `get_blast_radius` means **no static edges found**, not **no impact**.\n\
+             Static analysis (Tree-sitter + LSP) cannot follow dynamic dispatch:\n\n\
+             - message buses (`bus.publish`, `kafka.send`, `EventEmitter.emit`)\n\
+             - DI containers (`container.resolve`, `provider.get`, `@inject`)\n\
+             - schema-driven routers (FastAPI decorators, Express handlers, gRPC `rpc`)\n\
+             - trait objects, `Box<dyn Any>`, `serde_json::Value`, reflection\n\n\
+             Before mutating any symbol whose blast radius is empty:\n\
+             1. Run `get_coupling_radar` on the touched paths.\n\
+             2. Run `find_anchors` on the file to surface nearby high-fan-in hubs.\n\
+             3. Check the repo's `docs/dynamic-boundaries.md` for documented dispatch points.\n\
+             4. Call `explain_dispatch <symbol>` to get a single `verdict` covering static,\n\
+                heuristic, runtime, and co-change signals. `insufficient_evidence` is the\n\
+                explicit \"we don't know — do not assume safe\" signal.\n\
+             5. If the file is NOT in `dynamic-boundaries.md` AND all three queries are\n\
+                empty AND `explain_dispatch` returns `insufficient_evidence`, proceed with\n\
+                the smoke command before merging. Otherwise require a broader smoke run.\n"
                 .to_string(),
         );
 
@@ -981,11 +1287,11 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
     use std::path::{Path, PathBuf};
     let overlay = crate::overlay::VolatileOverlay::new();
     let embedder = crate::nlp::NlpEmbedder::new_stub();
-    let git = Arc::new(parking_lot::Mutex::new(
-        crate::git::GitSensor::new(Path::new(".")).unwrap_or_else(|_| {
-            crate::git::GitSensor::new(Path::new("/tmp")).expect("fallback git sensor")
+    let git = Arc::new(
+        crate::git::AnyGitSensor::from_env(Path::new(".")).unwrap_or_else(|_| {
+            crate::git::AnyGitSensor::from_env(Path::new("/tmp")).expect("fallback git sensor")
         }),
-    ));
+    );
     let lsp_pool = Arc::new(
         crate::lsp::LspPool::new(Path::new("."), 2, &crate::tuning::RuntimeConfig::default())
             .expect("lsp pool"),
@@ -1038,6 +1344,43 @@ mod tests {
             strategy.contains("federation") || strategy.contains("Federation"),
             "strategy must mention federation mode",
         );
+    }
+
+    #[test]
+    fn get_agent_strategy_teaches_composed_blast_radius_protocol() {
+        let strategy = build_test_strategy();
+        for needle in [
+            "composed",
+            "get_blast_radius",
+            "get_coupling_radar",
+            "find_anchors",
+            "trace_dependency",
+        ] {
+            assert!(
+                strategy.contains(needle),
+                "strategy must mention {} in the composed blast-radius rule:\n{}",
+                needle,
+                strategy,
+            );
+        }
+    }
+
+    #[test]
+    fn get_agent_strategy_warns_about_dynamic_dispatch_blind_spot() {
+        let strategy = build_test_strategy();
+        for needle in [
+            "Dynamic Dispatch Caveat",
+            "no static edges",
+            "dynamic-boundaries.md",
+            "smoke",
+        ] {
+            assert!(
+                strategy.contains(needle),
+                "strategy must mention {} in the dynamic dispatch caveat:\n{}",
+                needle,
+                strategy,
+            );
+        }
     }
 
     fn build_test_strategy() -> String {
@@ -1119,5 +1462,57 @@ mod tests {
         assert_eq!(repos[1]["capabilities"]["symbols"]["state"], "warming_up");
 
         drop(src_dirs);
+    }
+
+    /// Pin the Bug #2 banner contract: when the parking_lot
+    /// `GitSensor` mutex is free (`busy_since == 0`), the banner
+    /// helper returns `None` so `get_health` doesn't emit a false
+    /// alarm. The pre-fix review noted that the watchdog's
+    /// `git_busy_since_nanos` was a dead atomic; surfacing it via
+    /// `get_health` is now the operator-visible signal. This test
+    /// pins both halves of the contract.
+    #[test]
+    fn git_busy_since_banner_returns_none_when_mutex_free() {
+        assert!(
+            ToolExecutor::git_busy_since_banner(0).is_none(),
+            "atomic=0 must produce no banner; otherwise every idle \
+             server would report a phantom hang"
+        );
+    }
+
+    #[test]
+    fn git_busy_since_banner_formats_elapsed_seconds_when_held() {
+        // Pick a wall-clock timestamp 17 seconds in the past so the
+        // elapsed computation is deterministic regardless of test
+        // machine clock drift. The helper compares against
+        // `SystemTime::now()`, so the test's stability hinges on the
+        // math being `saturating_sub`, not a fixed literal.
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let busy_17s_ago = now_nanos.saturating_sub(17 * 1_000_000_000);
+        let banner = ToolExecutor::git_busy_since_banner(busy_17s_ago)
+            .expect("non-zero busy_since must produce a banner");
+        // The banner must reference Bug #2 so alertmanager can match
+        // it without parsing prose, and must include the elapsed
+        // time in seconds so dashboards can graph it.
+        assert!(
+            banner.contains("Bug #2"),
+            "banner must name Bug #2: {banner}"
+        );
+        assert!(
+            banner.contains("17s"),
+            "banner must include the 17s elapsed hold: {banner}"
+        );
+        // A future timestamp (clock skew, NTP step) must not panic or
+        // produce a negative elapsed — `saturating_sub` clamps at 0.
+        let future = now_nanos + 60 * 1_000_000_000;
+        let banner = ToolExecutor::git_busy_since_banner(future)
+            .expect("non-zero busy_since must produce a banner");
+        assert!(
+            banner.contains("0s"),
+            "future timestamp must clamp to 0s, not panic: {banner}"
+        );
     }
 }

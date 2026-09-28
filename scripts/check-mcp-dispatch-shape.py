@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Fail if `mcp::handler::dispatch_tool_call` accumulates new match arms
-without going through the inventory sub-registries.
+"""Fail if `mcp::handler::dispatch_tool_call` regains a match-arm ladder.
 
 Run: python3 scripts/check-mcp-dispatch-shape.py
 
 The audit at `docs/CONTRIBUTING_AGENTS.md` documents why the
 stringly-typed `match name` ladder in
-`src/server/mcp/handler.rs::dispatch_tool_call` is being phased out:
+`src/server/mcp/handler.rs::dispatch_tool_call` was replaced by inventory:
 each arm is a maintenance trap and a place a new agent can silently
 add a tool that bypasses the inventory registration. This check
 detects two specific drifts:
@@ -19,16 +18,10 @@ detects two specific drifts:
      `ToolRegistry::dispatch` is no longer the single source of
      truth.
 
-  2. **Match-arm growth**: the number of distinct `match name` arms
-     exceeds the documented baseline by more than 5. Today
-     `dispatch_tool_call` has 22 known arms; once Phase 3.2
-     (sub-registries for presence/federation/workspace) lands and
-     every arm migrates, the count should drop. Until then, the
-     check rejects new arms that weren't part of the original 22.
-
-The known-baseline list and the match-arm count threshold are a
-shrinking baseline. When Phase 3.2 ships, the list empties and the
-count threshold drops to 0.
+  2. **Match-arm regression**: any tool-name arm in the dispatcher is
+     rejected. Presence, audit, status, reload, federation, and workspace
+     tools all register through `McpToolEntry`; core graph tools dispatch
+     through `ToolRegistry`.
 
 Exit codes:
   0  — no new violations
@@ -47,44 +40,7 @@ REGISTRY_IMPL_PATH = os.path.join(
     "src", "server", "tools", "handlers", "registry_impl.rs"
 )
 
-# Distinct match-arm names known to live in `dispatch_tool_call` today.
-# Presence / audit / status / reload tools are already on the inventory
-# sub-registry (Phase 3.2 partial); federation and workspace arms are
-# the remaining migration target.
-KNOWN_DISPATCH_ARMS = {
-    "add_annotation",
-    "claim_files",
-    "detect_overlap",
-    "get_active_workspace",
-    "get_audit_log",
-    "get_cross_repo_blast_radius",
-    "get_cross_repo_blast_radius_for_repo",
-    "get_federation_health",
-    "get_pending_handoffs",
-    "get_recent_activity",
-    "get_reload_status",
-    "get_repo_info",
-    "get_server_status",
-    "get_workspace",
-    "get_workspace_graph",
-    "get_world_state",
-    "heartbeat",
-    "leave_handoff_note",
-    "list_active_agents",
-    "list_annotations",
-    "list_occupancy",
-    "list_recent_projects",
-    "list_repos",
-    "list_subagents",
-    "list_workspaces",
-    "my_claims",
-    "register_agent",
-    "release_files",
-    "request_reload",
-    "resolve_annotation",
-    "search_org",
-    "who_am_i",
-}
+KNOWN_DISPATCH_ARMS: set[str] = set()
 ARM_GROWTH_BUDGET = 0
 
 
@@ -155,10 +111,10 @@ def violations(root: str) -> list[str]:
             f"{HANDLER_PATH}: dispatch_tool_call has {len(new_arms)} "
             f"match arm(s) not in the known baseline: "
             f"{', '.join(sorted(new_arms))}. Each new arm should go "
-            f"through an inventory sub-registry instead — see "
+            f"through an inventory registry instead — see "
             f"docs/CONTRIBUTING_AGENTS.md#inventory-pattern. If the "
-            f"arm belongs to the migration plan (Phase 3.2), "
-            f"document it here."
+            f"core graph tools belong in ToolRegistry; server-context "
+            f"tools belong in McpToolEntry."
         )
     budget_excess = len(arms) - len(KNOWN_DISPATCH_ARMS) - ARM_GROWTH_BUDGET
     if budget_excess > 0 and not new_arms:

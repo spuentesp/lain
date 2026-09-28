@@ -20,17 +20,20 @@ use super::handles::{
     LifecycleInfo, PresenceLayer, RefreshState,
 };
 use crate::config::state_path_for_workspace;
+use crate::server::activity::ActivityTracker;
 use crate::server::annotations::AnnotationRegistry;
 use crate::server::federation::config::RepoConfig;
 use crate::server::federation::federated_index::FederatedIndex;
 use crate::server::federation::repo_id::RepoId;
 use crate::server::federation::workspace::WorkspacesFile;
+use crate::server::intent::IntentRegistry;
 use crate::server::overlay::{broadcast_overlay_diff, OverlayDiff, RevisionId};
 use crate::server::presence::{
     save_pair as save_presence_pair, AgentId, OccupancyMap, PresenceEvent, PresenceRegistry,
 };
 use crate::server::reload::ReloadBus;
 use parking_lot::RwLock;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -161,6 +164,24 @@ impl LainServer {
         self.presence.occupancy()
     }
 
+    /// Intent registry (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
+    /// Forwards to the underlying `PresenceLayer`'s intent handle.
+    /// The MCP `lain_intent` and `list_active_intents` tools consult
+    /// this; the per-agent activity feed in `who_am_i` /
+    /// `list_active_agents` reads it.
+    pub fn intent(&self) -> &Arc<IntentRegistry> {
+        self.presence.intent()
+    }
+
+    /// Activity tracker (PR 1). Forwards to the underlying
+    /// `PresenceLayer`'s activity handle. The hook ingestion
+    /// endpoint (PR 2) will record observations here; the per-agent
+    /// activity feed surfaces `recent_tools`, `focus`, and
+    /// `observed_reads` from this registry.
+    pub fn activity(&self) -> &Arc<ActivityTracker> {
+        self.presence.activity()
+    }
+
     pub fn presence_event_tx(&self) -> &broadcast::Sender<(u64, PresenceEvent)> {
         self.presence.presence_event_tx()
     }
@@ -249,6 +270,22 @@ impl LainServer {
             )
         })?;
         let port = self.port().unwrap_or(9999);
+        let bind = self.federation.bind();
+        // P0: a non-loopback HTTP listener without configured API keys
+        // would expose the unauthenticated server to anyone on the
+        // network. Refuse here with an actionable message before any
+        // bind happens — the listener never comes up in that case.
+        if matches!(transport, super::config::Transport::Http)
+            && !bind.is_loopback()
+            && self.auth_handle_inner().auth().api_keys.is_none()
+        {
+            return Err(crate::server::error::LainError::Other(format!(
+                "Refusing to bind HTTP on {bind}:{port} without authentication. \
+                 Either set LAIN_API_KEYS to a non-empty comma-separated list, or \
+                 bind to loopback with --bind 127.0.0.1 (the default)."
+            )));
+        }
+        let addr = SocketAddr::new(bind, port);
 
         let workspaces = self.federation.workspaces_handle();
         let mcp = match workspaces {
@@ -273,7 +310,7 @@ impl LainServer {
         .with_server(server_arc);
         match transport {
             super::config::Transport::Http => mcp
-                .run_http(port)
+                .run_http(addr)
                 .await
                 .map_err(|e| crate::server::error::LainError::Mcp(format!("HTTP transport: {e}"))),
             super::config::Transport::Stdio => mcp
@@ -346,6 +383,13 @@ impl LainServer {
 
     pub async fn shutdown(&self) {
         info!("Shutting down Lain server...");
+        // Cancel in-flight work so an HTTP client mid-request sees a
+        // graceful close rather than a dropped connection. The LSP pool
+        // and the background loops observe this token via
+        // `LifecycleInfo::cancel_token`; cancelling here also drops the
+        // `Drop` impl's prior `await` semantics so a future caller can
+        // rely on shutdown returning promptly.
+        self.lifecycle.cancel_token().cancel();
         self.ingest.shutdown().await;
     }
 
@@ -355,6 +399,16 @@ impl LainServer {
         } else {
             state_path_for_workspace(self.ingest.config().workspace.as_path())
         }
+    }
+
+    /// This server's key in the shared audit log: the stem of its
+    /// presence state file, which is already unique per workspace (or
+    /// per `repos.yaml` in federation mode).
+    pub fn audit_scope(&self) -> String {
+        self.state_path()
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
     }
 
     pub fn state_dir_for_audit(&self) -> PathBuf {
@@ -383,37 +437,65 @@ impl LainServer {
         self.presence.load_state()
     }
 
-    pub fn with_shared_presence<T>(&self, f: impl FnOnce() -> T) -> T {
+    pub fn with_shared_presence<T>(
+        &self,
+        f: impl FnOnce() -> T,
+    ) -> Result<T, crate::server::ingest::handles::presence::CoordinationError> {
         self.presence.with_shared_presence(f)
     }
 
+    /// Best-effort refresh for read-only listings: a failed read leaves
+    /// the in-memory view as it was, so log it rather than fail the call.
     pub fn refresh_shared_presence(&self) {
-        self.presence.refresh_shared_presence();
+        if let Err(e) = self.presence.refresh_shared_presence() {
+            tracing::warn!("presence refresh from disk failed: {e}");
+        }
     }
 
-    /// Install a persist callback on `presence` and `occupancy` that
-    /// drives `save_state` on every mutation. Called once from each
-    /// constructor, immediately after the registries are built and
-    /// after `load_state` has hydrated them.
+    /// Install a persist callback on `presence`, `occupancy`,
+    /// `intent`, and `activity` that drives `save_state` on every
+    /// mutation. Called once from each constructor, immediately
+    /// after the registries are built and after `load_state` has
+    /// hydrated them. PR 1 of
+    /// `docs/INTENT_AND_OBSERVABILITY_PLAN.md` extends the persist
+    /// surface to the intent and activity registries — every
+    /// mutation (declare intent, update intent, record tool
+    /// observation) flows through the same `save_presence_pair`
+    /// saver that presence and occupancy already use.
     pub(crate) fn install_persist_callback(&self) {
         let path = self.presence.state_path();
         let presence = Arc::clone(self.presence.presence());
         let occupancy = Arc::clone(self.presence.occupancy());
+        let intent = Arc::clone(self.presence.intent());
+        let activity = Arc::clone(self.presence.activity());
         let cb = move || {
-            if let Err(e) = save_presence_pair(&path, &presence, &occupancy) {
+            if let Err(e) = save_presence_pair(&path, &presence, &occupancy, &intent, &activity) {
                 tracing::warn!("persist failed: {e}");
             }
         };
         self.presence.presence().set_persist_callback(cb.clone());
         let presence2 = Arc::clone(self.presence.presence());
         let occupancy2 = Arc::clone(self.presence.occupancy());
+        let intent2 = Arc::clone(self.presence.intent());
+        let activity2 = Arc::clone(self.presence.activity());
         let path2 = self.presence.state_path();
         let cb2 = move || {
-            if let Err(e) = save_presence_pair(&path2, &presence2, &occupancy2) {
+            if let Err(e) =
+                save_presence_pair(&path2, &presence2, &occupancy2, &intent2, &activity2)
+            {
                 tracing::warn!("persist failed: {e}");
             }
         };
         self.presence.occupancy().set_persist_callback(cb2);
+        // Intent + activity get their own callbacks so a mutation in
+        // either triggers the same saver. The callbacks capture
+        // identical state by `Arc::clone`, so a single persist fires
+        // for every mutation regardless of which registry originated
+        // it.
+        let cb3 = cb.clone();
+        self.presence.intent().set_persist_callback(cb3);
+        let cb4 = cb.clone();
+        self.presence.activity().set_persist_callback(cb4);
         let occupancy_for_remove = Arc::clone(self.presence.occupancy());
         self.presence.presence().set_on_remove_callback(move |id| {
             occupancy_for_remove.release_all_for(id);

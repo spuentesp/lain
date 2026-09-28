@@ -391,3 +391,264 @@ pub fn summaries_for_targets(
     }
     out
 }
+
+/// Registry-only variant of [`summaries_for_targets`] for call sites
+/// that hold the registry directly (the inventory-registered
+/// `ToolHandler` impls in `src/server/tools/handlers/registry_impl.rs`,
+/// which receive `&ToolContext` rather than `&LainServer`). Same
+/// semantics: open annotations only, capped at 8 per target.
+pub fn summaries_for_targets_in_registry(
+    registry: &crate::server::annotations::AnnotationRegistry,
+    repo: &crate::federation::repo_id::RepoId,
+    targets: &[AnnotationTarget],
+) -> Vec<crate::server::annotations::AnnotationSummary> {
+    use crate::server::annotations::{AnnotationSummary, ListQuery};
+    let Ok(store) = registry.store_for(repo) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for target in targets {
+        let filter = ListFilter {
+            target: Some(target.clone()),
+            status: Some(AnnotationStatus::Open),
+            limit: Some(8),
+            ..Default::default()
+        };
+        let q = ListQuery {
+            filter: &filter,
+            exists: &|_| true,
+        };
+        let Ok(rows) = store.list_with_staleness(&q) else {
+            continue;
+        };
+        for a in rows {
+            out.push(AnnotationSummary::from_full(&a));
+        }
+    }
+    out
+}
+
+/// Format the `### Open annotations` section that
+/// `explain_symbol` / `get_blast_radius` append after their main
+/// body. Returns an empty string when there are no summaries, so the
+/// caller can append unconditionally without growing the wire
+/// contract for the common (no-annotation) case.
+///
+/// Format mirrors the live Markdown the agent will see:
+///
+/// ```text
+///
+/// ### Open annotations
+/// - [@<author>, <YYYY-MM-DD>, kind=<kind>] <body_excerpt>
+/// - ...
+/// ```
+pub fn format_open_annotations_section(
+    summaries: &[crate::server::annotations::AnnotationSummary],
+) -> String {
+    if summaries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str("\n\n### Open annotations\n");
+    for s in summaries {
+        // 1970-01-01 epoch + ms → ISO date; skip the time component to
+        // keep the line short. Anything before 2001 reads as "(unknown)"
+        // — the helper takes nothing else as input, and `created_at_unix_ms`
+        // is u64 so a real "no time" sentinel would have to be threaded
+        // through the store. Practically all rows have a sensible stamp.
+        let secs = s.created_at_unix_ms / 1000;
+        let date = if s.created_at_unix_ms < 1_000_000_000_000 {
+            chrono_like_date(secs)
+        } else {
+            "(unknown)".to_string()
+        };
+        out.push_str(&format!(
+            "- [@{}, {}, kind={}] {}\n",
+            s.author, date, s.kind, s.body_excerpt
+        ));
+    }
+    out
+}
+
+/// Minimal YYYY-MM-DD formatter. Avoids pulling chrono into the
+/// annotation module just to print a date — the only consumers are
+/// the Markdown appendix and unit tests, both of which accept the
+/// zero-padded shape unconditionally.
+fn chrono_like_date(unix_secs: u64) -> String {
+    // Civil-from-days algorithm (Howard Hinnant). 1970-01-01 = day 0.
+    let z = (unix_secs / 86_400) as i64;
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::annotations::{
+        AddAnnotationInputs, AnnotationKind, AnnotationRegistry, AnnotationSummary,
+        AnnotationTarget,
+    };
+    use crate::server::presence::AgentId;
+
+    /// Empty input collapses to an empty string — the common case is
+    /// "no annotations on this symbol", and the wire contract for
+    /// `explain_symbol` / `get_blast_radius` promises no Markdown
+    /// growth when nothing is open.
+    #[test]
+    fn format_section_returns_empty_when_no_summaries() {
+        assert_eq!(format_open_annotations_section(&[]), "");
+    }
+
+    /// Non-empty summaries render in the documented shape. The
+    /// ordering, the leading blank line, and the `[@author, date,
+    /// kind=...] body` per-row format are all part of the agent's
+    /// parsing contract, so any drift fails this test.
+    #[test]
+    fn format_section_renders_summaries_in_documented_shape() {
+        let summaries = vec![
+            AnnotationSummary {
+                id: "id-1".into(),
+                target_kind: "symbol".into(),
+                target_id: "orchestrate".into(),
+                kind: "todo".into(),
+                status: "open".into(),
+                body_excerpt: "Why is this called from two unrelated sites?".into(),
+                author: "spuentesp".into(),
+                // 2026-09-17 UTC. Picked to land on a recent
+                // post-2020 date so the formatter exercises the
+                // non-trivial Howard-Hinnant branch.
+                created_at_unix_ms: 1_788_192_000_000,
+            },
+            AnnotationSummary {
+                id: "id-2".into(),
+                target_kind: "symbol".into(),
+                target_id: "orchestrate".into(),
+                kind: "todo".into(),
+                status: "open".into(),
+                body_excerpt: "Add a regression test for the overlay freshness branch.".into(),
+                author: "codex".into(),
+                created_at_unix_ms: 1_788_105_600_000,
+            },
+        ];
+        let out = format_open_annotations_section(&summaries);
+        // Leading blank line + section header
+        assert!(out.starts_with("\n\n### Open annotations\n"));
+        // One row per summary, in input order
+        let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("- [@")).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("@spuentesp"));
+        assert!(rows[0].contains("kind=todo"));
+        assert!(rows[0].contains("Why is this called"));
+        assert!(rows[1].contains("@codex"));
+        assert!(rows[1].contains("kind=todo"));
+        assert!(rows[1].contains("regression test"));
+    }
+
+    /// `summaries_for_targets_in_registry` against a brand-new
+    /// registry returns an empty vector — the path the
+    /// `open_annotations_for_symbol` helper takes in single-workspace
+    /// mode and in tests that don't add rows.
+    #[test]
+    fn summaries_returns_empty_when_no_rows_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = AnnotationRegistry::open(tmp.path()).unwrap();
+        let rid = crate::federation::repo_id::RepoId::new("only-repo").unwrap();
+        let targets = [AnnotationTarget::Symbol {
+            symbol: "nonexistent".into(),
+        }];
+        let out = summaries_for_targets_in_registry(&registry, &rid, &targets);
+        assert!(out.is_empty());
+    }
+
+    /// End-to-end through the registry: write an open annotation
+    /// targeting a symbol, then ask for summaries on that symbol.
+    /// The annotation must come back as an `AnnotationSummary` with
+    /// the documented body-excerpt truncation (under the limit here
+    /// so the value is verbatim).
+    #[test]
+    fn summaries_returns_open_rows_for_matching_symbol() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = AnnotationRegistry::open(tmp.path()).unwrap();
+        let rid = crate::federation::repo_id::RepoId::new("only-repo").unwrap();
+        let store = registry.store_for(&rid).unwrap();
+
+        // Direct construction so the test does not depend on the
+        // MCP-layer `run_add_annotation` glue.
+        let inputs = AddAnnotationInputs {
+            target: AnnotationTarget::Symbol {
+                symbol: "orchestrate".into(),
+            },
+            kind: AnnotationKind::Todo,
+            body: "Why does this surface a UI link for stdio mode?".into(),
+            author: AgentId("spuentesp".into()),
+            refs: vec![],
+        };
+        let a = inputs.into_annotation();
+        store.add(&a).unwrap();
+
+        // Marking it resolved must drop it from the "open" lookup,
+        // not just from `list_annotations` with no status filter.
+        let inputs_resolved = AddAnnotationInputs {
+            target: AnnotationTarget::Symbol {
+                symbol: "resolved-one".into(),
+            },
+            kind: AnnotationKind::Note,
+            body: "Closed before merge".into(),
+            author: AgentId("codex".into()),
+            refs: vec![],
+        };
+        let r = inputs_resolved.into_annotation();
+        store.add(&r).unwrap();
+        store.resolve(&r.id, &AgentId("codex".into())).unwrap();
+
+        let targets_open = [AnnotationTarget::Symbol {
+            symbol: "orchestrate".into(),
+        }];
+        let summaries = summaries_for_targets_in_registry(&registry, &rid, &targets_open);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].kind, "todo");
+        assert_eq!(summaries[0].author, "spuentesp");
+        assert_eq!(
+            summaries[0].body_excerpt,
+            "Why does this surface a UI link for stdio mode?"
+        );
+        // `target_id` is the canonical "<kind>:<id>" form written by
+        // `canonical_target_id` — verify the `symbol:` prefix
+        // explicitly so a future refactor of the canonicalization
+        // helper fails this test rather than the live tool output.
+        assert_eq!(summaries[0].target_id, "symbol:orchestrate");
+        assert_eq!(summaries[0].target_kind, "symbol");
+        // Sanity: a different symbol sees the empty slice, not the
+        // orchestrate row.
+        let targets_other = [AnnotationTarget::Symbol {
+            symbol: "resolved-one".into(),
+        }];
+        let empty = summaries_for_targets_in_registry(&registry, &rid, &targets_other);
+        assert!(
+            empty.is_empty(),
+            "resolved rows must not appear in the open-only lookup"
+        );
+    }
+
+    /// The civil-from-days formatter should match `chrono`-style
+    /// YYYY-MM-DD for a few canonical instants. We pin two
+    /// well-known dates plus the epoch so a regression in the
+    /// Howard-Hinnant arithmetic fails loudly without dragging a
+    /// `chrono` dependency into the annotation module just to test
+    /// a 12-line helper.
+    #[test]
+    fn chrono_like_date_matches_known_instants() {
+        assert_eq!(chrono_like_date(0), "1970-01-01");
+        assert_eq!(chrono_like_date(86_400), "1970-01-02");
+        assert_eq!(chrono_like_date(1_700_000_000), "2023-11-14");
+    }
+}

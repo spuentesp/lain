@@ -1,19 +1,20 @@
-//! Tests for git.rs
-
 use crate::git::GitSensor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
 
 #[test]
 fn test_git_sensor_new_valid_repo() {
-    // Resolve the repo root dynamically so tests work across machines
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root);
     assert!(sensor.is_ok());
 }
 
 #[test]
 fn test_git_sensor_is_valid() {
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root).unwrap();
     assert!(sensor.is_valid());
 }
@@ -26,7 +27,7 @@ fn test_git_sensor_new_invalid_path() {
 
 #[test]
 fn test_git_sensor_get_tracked_files() {
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root).unwrap();
     let files = sensor.get_all_tracked_files();
     assert!(files.is_ok());
@@ -35,7 +36,7 @@ fn test_git_sensor_get_tracked_files() {
 
 #[test]
 fn test_git_sensor_is_ignored() {
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root).unwrap();
     // .git directory should be ignored
     let is_ignored = sensor.is_ignored(Path::new(".git"));
@@ -44,7 +45,7 @@ fn test_git_sensor_is_ignored() {
 
 #[test]
 fn test_git_sensor_is_ignored_target_dir() {
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root).unwrap();
     // target directory (rust build output) should be ignored
     let is_ignored = sensor.is_ignored(Path::new("target"));
@@ -53,7 +54,7 @@ fn test_git_sensor_is_ignored_target_dir() {
 
 #[test]
 fn test_git_sensor_is_ignored_nonexistent() {
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root).unwrap();
     // A nonexistent path may or may not be ignored depending on gitignore rules
     let result = sensor.is_ignored(Path::new("nonexistent_file_xyz123.txt"));
@@ -62,7 +63,7 @@ fn test_git_sensor_is_ignored_nonexistent() {
 
 #[test]
 fn test_git_sensor_get_uncommitted_changes_none() {
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root).unwrap();
     // Clean working tree (after sync_state)
     let changes = sensor.get_uncommitted_changes();
@@ -75,7 +76,7 @@ fn test_git_sensor_get_uncommitted_changes_none() {
 
 #[test]
 fn test_git_sensor_get_uncommitted_changes_staged() {
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root).unwrap();
     let changes = sensor.get_uncommitted_changes().unwrap();
     for change in changes {
@@ -85,7 +86,7 @@ fn test_git_sensor_get_uncommitted_changes_staged() {
 
 #[test]
 fn test_git_sensor_get_file_diff_on_clean_file() {
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root).unwrap();
     let files = sensor.get_all_tracked_files().unwrap();
     if let Some(file) = files.first() {
@@ -231,7 +232,7 @@ fn test_repo_identity_invalid() {
 
 #[test]
 fn test_git_sensor_get_repo_identity() {
-    let repo_root = std::env::current_dir().unwrap();
+    let repo_root = repo_root();
     let sensor = GitSensor::new(&repo_root).unwrap();
     let identity = sensor.get_repo_identity();
     // May be None if no origin remote or not GitHub
@@ -302,4 +303,140 @@ fn get_new_commits_since_returns_newer_commits_not_older() {
         "HEAD has no newer commits, got {} ",
         since_head.len()
     );
+}
+
+/// `get_all_tracked_files` must return tracked files even when the
+/// sensor is constructed with a *relative* workspace path.
+///
+/// The pre-2026-09-18 implementation joined the workdir-relative
+/// `entry.path` onto `self.workspace`, producing paths like
+/// `./<workspace>/crates/.../lib.rs` whenever `repos.yaml` used a
+/// relative `workspace_dir`. libgit2 could not resolve those under the
+/// workdir and treated every entry as ignored, so the indexer
+/// silently reported 0 tracked files. This regression test pins the
+/// fix: it opens the sensor via a `./`-prefixed relative path (the
+/// shape that triggers the bug) and asserts that tracked,
+/// non-ignored files appear in the result while gitignored files do
+/// not.
+#[test]
+fn get_all_tracked_files_works_with_relative_workspace_path() {
+    use std::fs;
+    use std::process::Command;
+
+    // `set_current_dir` is process-wide. Any other test that runs
+    // in parallel against the same binary and uses relative paths
+    // or `std::env::current_dir()` would race against our cwd
+    // change. The simplest defence without pulling in a `serial`
+    // harness is a process-static mutex: this test is the only
+    // caller today, but the guard makes the constraint explicit so
+    // a future test that needs cwd control can opt into the same
+    // serialization by acquiring the same mutex.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = std::env::temp_dir().join("lain_git_test_relative_workspace");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+    };
+    git(&["init"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+
+    fs::write(dir.join("keep.rs"), "fn main() {}").unwrap();
+    fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(dir.join("noise.log"), "ignored").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-m", "init"]);
+
+    // Open with a `./`-prefixed relative path so that
+    // `self.workspace.join(path)` produces paths that start with
+    // `./<workspace>/...`. That is exactly the shape that tripped up
+    // libgit2's `is_path_ignored` resolution pre-fix.
+    let cwd_parent = dir.parent().unwrap();
+    let cwd_basename = dir.file_name().unwrap();
+    let prev_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(cwd_parent).unwrap();
+
+    let cwd_basename_str = cwd_basename.to_string_lossy().into_owned();
+    let workspace_arg = format!("./{cwd_basename_str}");
+    let sensor = GitSensor::new(Path::new(&workspace_arg)).unwrap();
+    let files = sensor.get_all_tracked_files().unwrap();
+
+    std::env::set_current_dir(&prev_cwd).unwrap();
+
+    let names: Vec<String> = files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        names.iter().any(|n| n == "keep.rs"),
+        "keep.rs missing from {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "noise.log"),
+        "noise.log should have been filtered by .gitignore, got {names:?}"
+    );
+    assert!(
+        !names.is_empty(),
+        "pre-fix bug: relative workspace path produced a 0-file index"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// One entry per path: an untracked file is Added once, a staged-then-edited
+/// file once, and a deleted file is Deleted.
+#[test]
+fn uncommitted_changes_are_one_entry_per_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let repo = git2::Repository::init(root).unwrap();
+    std::fs::write(root.join("keep.txt"), "a\n").unwrap();
+    std::fs::write(root.join("gone.txt"), "b\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("keep.txt")).unwrap();
+    index.add_path(Path::new("gone.txt")).unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("t", "t@t").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "i", &tree, &[])
+        .unwrap();
+
+    std::fs::write(root.join("keep.txt"), "a2\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("keep.txt")).unwrap();
+    index.write().unwrap();
+    std::fs::write(root.join("keep.txt"), "a3\n").unwrap();
+    std::fs::remove_file(root.join("gone.txt")).unwrap();
+    std::fs::write(root.join("new.txt"), "c\n").unwrap();
+
+    let sensor = GitSensor::new(root).unwrap();
+    let changes = sensor.get_uncommitted_changes().unwrap();
+    let find = |name: &str| {
+        let hits: Vec<_> = changes.iter().filter(|c| c.path.ends_with(name)).collect();
+        assert_eq!(hits.len(), 1, "{name}: {changes:?}");
+        hits[0].clone()
+    };
+    assert!(matches!(
+        find("keep.txt").change_type,
+        crate::git::ChangeType::Modified
+    ));
+    assert!(find("keep.txt").staged);
+    assert!(matches!(
+        find("gone.txt").change_type,
+        crate::git::ChangeType::Deleted
+    ));
+    assert!(matches!(
+        find("new.txt").change_type,
+        crate::git::ChangeType::Added
+    ));
+    assert_eq!(changes.len(), 3, "{changes:?}");
 }

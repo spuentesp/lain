@@ -4,11 +4,14 @@ use crate::query::spec::*;
 
 #[test]
 fn test_depth_spec_single() {
+    // `depth: 5` is up to five hops.
     let ds = DepthSpec::Single(5);
     let range = ds.to_range();
+    assert!(range.contains(&1));
     assert!(range.contains(&5));
-    assert!(!range.contains(&4));
+    assert!(!range.contains(&0));
     assert!(!range.contains(&6));
+    assert_eq!(DepthSpec::Single(0).to_range(), 0..=0);
 }
 
 #[test]

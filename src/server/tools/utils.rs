@@ -7,8 +7,101 @@ use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::GraphNode;
 use crate::server::federation::federated_index::FederatedIndex;
+use crate::server::federation::repo_id::GlobalId;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::SystemTime;
+
+/// B2 — process-wide LRU cache of file contents, keyed on the
+/// resolved (workspace-relative or absolute) path and valued on
+/// `(mtime, lines)`. The cache is read-through: a hit with a
+/// matching mtime serves the cached lines without touching disk; a
+/// miss or mtime mismatch re-reads and repopulates. Bounded so a
+/// server watching many files doesn't grow the cache without limit.
+///
+/// Process-wide rather than per-executor because the cache value is
+/// only ever the file's lines (small, shared across queries) and
+/// duplicating one per executor would defeat the point. The
+/// federation runs in one process; the sidecar shares this cache
+/// with the owner at the OS page-cache level only — it has its own
+/// file-content cache.
+type FileContentCache = parking_lot::Mutex<lru::LruCache<PathBuf, (SystemTime, Vec<String>)>>;
+
+static FILE_CONTENT_CACHE: OnceLock<FileContentCache> = OnceLock::new();
+
+pub(crate) fn file_content_cache() -> &'static FileContentCache {
+    FILE_CONTENT_CACHE.get_or_init(|| {
+        // `.max(1)` is a defensive clamp for a hand-edited tuning.toml
+        // setting the capacity to 0; `LruCache::new` panics on a
+        // `NonZeroUsize(0)`. The default (1 000) is well above 1.
+        parking_lot::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(
+                crate::server::tuning::TuningConfig::default()
+                    .file_content_cache_capacity
+                    .max(1),
+            )
+            .expect("file_content_cache_capacity > 0 after clamp"),
+        ))
+    })
+}
+
+/// Read the full file content as a `Vec<String>` (one entry per line).
+///
+/// Reads through `FILE_CONTENT_CACHE`: a hit with matching mtime
+/// returns the cached lines; a miss or stale entry re-reads and
+/// repopulates. `None` on I/O error — the caller falls back to the
+/// non-cached path (a `read_lines`-style read) in `read_body_excerpt`.
+pub(crate) fn read_lines_cached(resolved: &Path) -> Option<Vec<String>> {
+    let cache = file_content_cache();
+    // First, peek the mtime for a fast cache hit: if a recent
+    // read populated the cache and nothing has changed, we serve
+    // the cached lines without touching the file. Drop the lock
+    // before the I/O so a slow filesystem doesn't serialise the
+    // whole cache.
+    let pre_read_mtime: Option<SystemTime> =
+        std::fs::metadata(resolved).and_then(|m| m.modified()).ok();
+    if let Some(mtime) = pre_read_mtime {
+        let mut guard = cache.lock();
+        if let Some((cached_mtime, cached_lines)) = guard.get(resolved) {
+            if *cached_mtime == mtime {
+                return Some(cached_lines.clone());
+            }
+        }
+    }
+    // Read the file (this can be slow for large files).
+    let content = std::fs::read_to_string(resolved).ok()?;
+    let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    // Capture mtime AFTER the read so the stored entry's mtime
+    // matches the file state at the moment its content was read.
+    // Without this, a write that lands between the pre-read mtime
+    // peek and the read would be cached as (old_mtime, new_content)
+    // — internally inconsistent. The next reader would notice the
+    // mtime mismatch and re-read, so this isn't a correctness leak,
+    // but the stored entry wastes a cache slot until the next miss
+    // evicts it.
+    let post_read_mtime: SystemTime = std::fs::metadata(resolved)
+        .and_then(|m| m.modified())
+        .ok()?;
+    let mut guard = cache.lock();
+    guard.put(resolved.to_path_buf(), (post_read_mtime, lines.clone()));
+    Some(lines)
+}
+
+/// A handle "looks like a path" when it has an explicit separator or
+/// root marker. Bare names like `target` return false even when they
+/// also happen to name a directory in the server's cwd.
+pub fn is_explicit_path(handle: &str) -> bool {
+    handle.starts_with('/')
+        || handle.starts_with("./")
+        || handle.starts_with("../")
+        || handle.starts_with("~/")
+        || handle.contains('/')
+        || handle.contains('\\')
+        || (handle.len() >= 3
+            && handle.as_bytes()[1] == b':'
+            && (handle.as_bytes()[2] == b'\\' || handle.as_bytes()[2] == b'/'))
+}
 
 /// Helper to resolve a handle (name, path, or ID) to a node
 pub fn resolve_node(
@@ -16,13 +109,28 @@ pub fn resolve_node(
     overlay: &VolatileOverlay,
     handle: &str,
 ) -> Result<GraphNode, LainError> {
-    // Preserve the original spelling for IDs and names. A symbol name can
-    // also be an existing directory (for example `target`), so resolving
-    // paths first can hide a valid symbol.
-    let canonical_handle = if Path::new(handle).exists() {
+    // Empty handle is almost always a caller bug, not a real symbol
+    // lookup. Reject it explicitly: before Tier 2 the empty-name
+    // lookup was always empty, so no caller tripped the new path; the
+    // Tier 2 sensor emits `File` nodes with `name=""` as the
+    // source of heuristic edges, and a future call to `find_node_by_name("")`
+    // would otherwise resolve to one of those file nodes and produce
+    // a confident, wrong "yes I found a node" answer. The structured
+    // error is what the failure-mode test (and any honest caller)
+    // expects.
+    if handle.is_empty() {
+        return Err(LainError::NotFound(
+            "Handle is empty — pass a symbol name, path, or node id".to_string(),
+        ));
+    }
+
+    // Canonical form is computed only for the path-lookup step and only
+    // when the handle is an explicit path. Steps 1-4 (id / name lookup)
+    // use the raw handle so a bare name never collides with cwd.
+    let canonical_handle = if is_explicit_path(handle) && Path::new(handle).exists() {
         dunce::canonicalize(handle)
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(handle.to_string())
+            .unwrap_or_else(|_| handle.to_string())
     } else {
         handle.to_string()
     };
@@ -31,6 +139,30 @@ pub fn resolve_node(
     if let Some(n) = overlay.get_node(handle) {
         return Ok(n);
     }
+    // 2b. A federation `GlobalId` (the id every federation tool
+    //     reports — `repo:Kind:path:name:line_start`). Per-repo graphs
+    //     key nodes by their own ids, so re-resolve through the id's
+    //     name+path components, preferring an exact line match. Ids
+    //     must round-trip: anything a tool hands back has to work as a
+    //     handle for the next tool.
+    if let Ok(gid) = GlobalId::parse(handle) {
+        if let (Some(gname), Some(gpath)) = (gid.name(), gid.path()) {
+            let by_path: Vec<GraphNode> = graph
+                .find_all_nodes_by_name(gname)
+                .into_iter()
+                .filter(|n| n.path == gpath)
+                .collect();
+            let exact = by_path
+                .iter()
+                .position(|n| gid.line_start() == n.line_start);
+            if let Some(n) = exact
+                .map(|i| by_path[i].clone())
+                .or_else(|| by_path.into_iter().next())
+            {
+                return Ok(n);
+            }
+        }
+    }
     // 2. Try Graph by ID
     if let Ok(Some(n)) = graph.get_node(handle) {
         return Ok(n);
@@ -38,7 +170,16 @@ pub fn resolve_node(
     // 3. Try Overlay by Name
     let overlay_names = overlay.find_nodes_by_name(handle);
     if let Some(n) = overlay_names.iter().find(|n| n.name == handle) {
-        return Ok(n.clone());
+        // An edited-but-uncommitted file puts a fresh copy of each of its
+        // symbols in the overlay, with new ids and no edges. Answering with
+        // that copy hid every caller of the symbol (and counted it twice)
+        // until the next commit. The committed definition of the same
+        // name, file and kind is the one the call graph knows.
+        let committed = graph
+            .find_all_nodes_by_name(handle)
+            .into_iter()
+            .find(|g| g.path == n.path && g.node_type == n.node_type);
+        return Ok(committed.unwrap_or_else(|| n.clone()));
     }
     // 4. Try Graph by Name
     if let Some(n) = graph.find_node_by_name(handle) {
@@ -56,10 +197,7 @@ pub fn resolve_node(
         return Ok(n);
     }
 
-    // An empty graph means this "not found" is not about the symbol at
-    // all — nothing would resolve, so the committed-code explanation
-    // below would be a confident, specific, wrong answer. Say what is
-    // actually true instead.
+    // Existing empty-graph + not-found error messages stay unchanged.
     if graph.node_count() == 0 && overlay.stats().node_count == 0 {
         return Err(LainError::NotFound(format!(
             "Node not found for handle: {handle} — but the graph being \
@@ -70,10 +208,6 @@ pub fn resolve_node(
              graph rather than the staging placeholder."
         )));
     }
-
-    // The graph indexes committed state, so a symbol written but not yet
-    // committed is genuinely absent rather than misplaced. Saying so turns a
-    // dead end into a next step; the bare message reads as "does not exist".
     Err(LainError::NotFound(format!(
         "Node not found for handle: {handle} — the graph indexes committed code, \
          so a symbol added since the last commit will not appear until it is \
@@ -106,7 +240,10 @@ pub fn resolve_node_federation_fallback(
     federation: &FederatedIndex,
     handle: &str,
 ) -> Option<GraphNode> {
-    let canonical_handle = if Path::new(handle).exists() {
+    // Canonical form is computed only for the path-lookup step and only
+    // when the handle is an explicit path. Steps 1-4 (id / name lookup)
+    // use the raw handle so a bare name never collides with cwd.
+    let canonical_handle = if is_explicit_path(handle) && Path::new(handle).exists() {
         dunce::canonicalize(handle)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| handle.to_string())
@@ -172,7 +309,7 @@ pub fn resolve_node_ambiguous(
     let node = resolve_node(graph, overlay, handle)?;
     // Only a bare-name lookup can be ambiguous: an id or a path already
     // names one node.
-    let others: Vec<GraphNode> = if node.name == handle {
+    let mut others: Vec<GraphNode> = if node.name == handle {
         graph
             .find_all_nodes_by_name(handle)
             .into_iter()
@@ -181,6 +318,42 @@ pub fn resolve_node_ambiguous(
     } else {
         Vec::new()
     };
+    // These tools ask about a symbol. When a container shares its name —
+    // Rust's `mod tangle;` beside `fn tangle` — answer about the symbol:
+    // "who calls the module `tangle`" has no answer.
+    let is_container = |n: &GraphNode| {
+        matches!(
+            n.node_type,
+            crate::schema::NodeType::Module
+                | crate::schema::NodeType::Namespace
+                | crate::schema::NodeType::Package
+                | crate::schema::NodeType::File
+        )
+    };
+    // Likewise a type stub (`core.pyi`, `widget.d.ts`) restates a definition
+    // that lives in the real module.
+    let is_stub = |n: &GraphNode| n.path.ends_with(".pyi") || n.path.ends_with(".d.ts");
+    if others.is_empty() {
+        return Ok((node, others));
+    }
+    // Choose the way `find_symbol` ranks its list — real symbols first,
+    // then anchor score, then path and line — so every tool answers about
+    // the definition `find_symbol` puts first. It took whichever node the
+    // name index returned first, and `get_call_sites send` answered about
+    // a different `send` than `find_symbol send` recommended.
+    others.push(node);
+    others.sort_by(|a, b| {
+        (is_container(a) || is_stub(a))
+            .cmp(&(is_container(b) || is_stub(b)))
+            .then_with(|| {
+                b.anchor_score
+                    .partial_cmp(&a.anchor_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.line_start.cmp(&b.line_start))
+    });
+    let node = others.remove(0);
     Ok((node, others))
 }
 
@@ -190,17 +363,24 @@ pub fn ambiguity_note(chosen: &GraphNode, others: &[GraphNode]) -> String {
     if others.is_empty() {
         return String::new();
     }
+    // `path:line`, 1-based: two definitions in one file were
+    // indistinguishable by path alone.
+    let at = |n: &GraphNode| match n.line_start {
+        Some(l) => format!("{}:{}", n.path, l + 1),
+        None => n.path.clone(),
+    };
     let mut note = format!(
-        "⚠ '{}' is defined {} times; this answer is about the one in {}. \
+        "⚠ '{}' is defined {} times; this answer is about the one at {} ({}). \
          Others: ",
         chosen.name,
         others.len() + 1,
-        chosen.path
+        at(chosen),
+        chosen.id
     );
     let shown: Vec<String> = others
         .iter()
         .take(5)
-        .map(|n| format!("{} ({})", n.path, n.id))
+        .map(|n| format!("{} ({})", at(n), n.id))
         .collect();
     note.push_str(&shown.join(", "));
     if others.len() > 5 {
@@ -247,12 +427,12 @@ pub fn json_type_name(v: &Value) -> &'static str {
 pub fn required_str_arg(args: &Map<String, Value>, key: &str) -> Result<String, LainError> {
     match args.get(key) {
         Some(Value::String(s)) => Ok(s.clone()),
-        Some(other) => Err(LainError::NotFound(format!(
+        Some(other) => Err(LainError::InvalidArgument(format!(
             "Argument '{}' must be a string, got {}",
             key,
             json_type_name(other)
         ))),
-        None => Err(LainError::NotFound(format!(
+        None => Err(LainError::InvalidArgument(format!(
             "Missing required argument: {}",
             key
         ))),
@@ -374,17 +554,51 @@ fn read_body_excerpt(
         workspace.join(path)
     };
     let path = resolved.as_path();
+    // B2 — try the file-content cache first. The cache hit serves
+    // the lines without an `open()` + `read_line()` loop on every
+    // call, which is the common case once a corpus has been read
+    // once. A miss or I/O error falls through to the original
+    // line-by-line read so the function's contract is preserved.
+    if let Some(lines) = read_lines_cached(path) {
+        let mut buf = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            // `lines` is 0-indexed by construction; `start` is 1-indexed.
+            let lineno = (i as u32) + 1;
+            if lineno < start {
+                continue;
+            }
+            if lineno >= end {
+                break;
+            }
+            if !buf.is_empty() {
+                buf.push(' ');
+            }
+            buf.push_str(line);
+            // Stop early if we've already collected enough tokens
+            if buf.split_whitespace().count() >= max_tokens {
+                break;
+            }
+        }
+        let trimmed: String = buf
+            .split_whitespace()
+            .take(max_tokens)
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Ok(trimmed);
+    }
+
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     let f = File::open(path)?;
     let reader = BufReader::new(f);
     let mut buf = String::new();
+    // `start`/`end` are the graph's 0-based, inclusive range.
     for (i, line) in reader.lines().enumerate() {
-        let lineno = (i as u32) + 1;
+        let lineno = i as u32;
         if lineno < start {
             continue;
         }
-        if lineno >= end {
+        if lineno > end {
             break;
         }
         let line = line?;
@@ -560,6 +774,7 @@ pub fn token_recall(query: &str, candidate: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::NodeType;
     use serde_json::json;
 
     /// A present-but-wrong-typed argument must not report as missing.
@@ -586,6 +801,36 @@ mod tests {
         assert!(
             missing.contains("Missing required argument: symbol"),
             "an absent argument should still report as missing, got: {missing}"
+        );
+    }
+
+    /// An uncommitted edit's overlay copy of a symbol does not shadow the
+    /// committed definition that carries the call edges.
+    #[test]
+    fn an_edited_files_overlay_copy_resolves_to_the_committed_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let committed = GraphNode::new(NodeType::Function, "banner".into(), "src/color.rs".into())
+            .with_location_in(10, 12, &ns);
+        let committed_id = committed.id.clone();
+        graph.upsert_node(committed).unwrap();
+        let edited = GraphNode::new(NodeType::Function, "banner".into(), "src/color.rs".into())
+            .with_location_in(11, 13, &ns);
+        assert_ne!(edited.id, committed_id, "the fixture needs a shifted copy");
+        overlay.insert_node(edited);
+        assert_eq!(
+            resolve_node(&graph, &overlay, "banner").unwrap().id,
+            committed_id
+        );
+        // A symbol that exists only in the overlay still resolves there.
+        let fresh = GraphNode::new(NodeType::Function, "brand_new".into(), "src/x.rs".into());
+        let fresh_id = fresh.id.clone();
+        overlay.insert_node(fresh);
+        assert_eq!(
+            resolve_node(&graph, &overlay, "brand_new").unwrap().id,
+            fresh_id
         );
     }
 

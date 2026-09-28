@@ -2,7 +2,7 @@ use super::blocking::offthread;
 use super::scan::{scan_file_batch, PatternRef, StaticFileRef};
 use super::LainServer;
 use crate::error::LainError;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::{graph_path, GraphDatabase};
 use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode};
@@ -20,6 +20,24 @@ impl LainServer {
     /// `Arc<Mutex<…>>` (git, lsp) — so calling it on a clone of the
     /// `LainServer` is safe and the writes are visible to the original
     /// `Arc<LainServer>` the MCP layer holds.
+    /// [`Self::build_core_memory`], repeated while each pass is partial
+    /// but leaves fewer files than the one before — a repository over
+    /// `max_files_per_scan` takes several passes. Stops at the first pass
+    /// that makes no progress (a scan timeout on the same files), which
+    /// is reported as that pass's error.
+    pub async fn build_core_memory_until_complete(&self) -> Result<(), LainError> {
+        let mut left_before = usize::MAX;
+        loop {
+            match self.build_core_memory().await {
+                Err(e) => match partial_files_left(&e) {
+                    Some(left) if left < left_before => left_before = left,
+                    _ => return Err(e),
+                },
+                ok => return ok,
+            }
+        }
+    }
+
     pub async fn build_core_memory(&self) -> Result<(), LainError> {
         // Defensive gate: sidecar processes should never call build_core_memory,
         // but if a future refactor routes them here, bail out cleanly instead
@@ -27,7 +45,7 @@ impl LainServer {
         if self.ingest().graph().is_read_only() {
             return Ok(());
         }
-        // AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md): every long-
+        // AGENT_UX_ROADMAP.md M4 follow-up: every long-
         // running phase observes the server-owned cancellation token.
         // A `Drop` on `LainServer` cancels it (via `LifecycleInfo`'s
         // `Drop` impl), so a shutdown during a cold-boot re-index
@@ -50,15 +68,25 @@ impl LainServer {
         // worker; a slow git operation (e.g. a packed-refs refresh
         // on a huge monorepo) would block the worker holding the
         // `AsyncMutex<GitSensor>` for as long as it took. The
-        // `Arc<Mutex<GitSensor>>` is cloned and the parking_lot lock
-        // is acquired *inside* the closure so no guard crosses the
-        // await boundary.
+        // `Arc<AnyGitSensor>` is cloned and the call is dispatched
+        // *inside* the closure so no lock or IPC crosses the await boundary.
+        // In InProcess mode, try_lock fails fast if another thread is holding
+        // the lock (Bug #2 mitigation). In Sidecar mode, IPC dispatches directly.
         let git_sensor = Arc::clone(self.ingest().git());
-        let (latest_commit, latest_time) = offthread(cancel.clone(), move || {
-            git_sensor.lock().get_latest_commit_info()
-        })
+        let (latest_commit, latest_time) = offthread(
+            cancel.clone(),
+            move || -> Result<(String, i64), LainError> { git_sensor.try_get_latest_commit_info() },
+        )
         .await?;
-        let last_commit = self.ingest().graph().get_last_commit()?;
+        let mut last_commit = self.ingest().graph().get_last_commit()?;
+        // A graph persisted by a Lain that minted ids under a per-process
+        // random namespace matches nothing this process derives; the
+        // "already up to date" shortcut below would keep it forever.
+        if last_commit.is_some() && self.ingest().graph().minted_in_other_namespace() {
+            info!("Persisted graph was built under a different id namespace; rebuilding it");
+            self.ingest().graph().reset()?;
+            last_commit = None;
+        }
         self.readiness().update(|snapshot| {
             snapshot.target_commit = Some(latest_commit.clone());
         });
@@ -88,16 +116,22 @@ impl LainServer {
             info!("Incremental update since {}", last);
             let last = last.clone();
             let git_sensor = Arc::clone(self.ingest().git());
-            offthread(cancel.clone(), move || {
-                git_sensor.lock().get_changed_files_since(&last)
-            })
+            offthread(
+                cancel.clone(),
+                move || -> Result<Vec<std::path::PathBuf>, LainError> {
+                    git_sensor.try_get_changed_files_since(&last)
+                },
+            )
             .await?
         } else {
             info!("Full repository scan");
             let git_sensor = Arc::clone(self.ingest().git());
-            offthread(cancel.clone(), move || {
-                git_sensor.lock().get_all_tracked_files()
-            })
+            offthread(
+                cancel.clone(),
+                move || -> Result<Vec<std::path::PathBuf>, LainError> {
+                    git_sensor.try_get_all_tracked_files()
+                },
+            )
             .await?
         };
 
@@ -110,14 +144,19 @@ impl LainServer {
             sweep_orphans(
                 &self.ingest().config().workspace,
                 self.ingest().graph(),
-                &self.ingest().git().lock(),
+                self.ingest().git(),
             );
             if cancel.is_cancelled() {
                 info!("build_core_memory: cancelled after orphan sweep");
                 return Err(LainError::Cancelled);
             }
             self.ingest().graph().set_last_commit(latest_commit)?;
-            self.ingest().graph().save_to_disk().await?;
+            // Persisting is for the next start; this process serves from memory.
+            // An unwritable `.lain` failed the whole pass, so a complete
+            // in-memory index was reported unavailable and redone every tick.
+            if let Err(e) = self.ingest().graph().save_to_disk().await {
+                warn!("could not persist the graph ({e}); serving it from memory only");
+            }
             return Ok(());
         }
 
@@ -129,11 +168,224 @@ impl LainServer {
         // Batch files into chunks to reduce task spawning overhead
         let files_per_batch = self.ingest().tuning().ingestion.files_per_batch;
         let max_files = self.ingest().tuning().ingestion.max_files_per_scan;
-        let files_to_scan: Vec<_> = files.iter().take(max_files).cloned().collect();
+        // A capped pass used to take the same first `max_files` of the list
+        // every time, so a repository over the cap never converged: every
+        // pass was partial, the marker never advanced, and the index was
+        // never ready. Now:
+        // - files a previous pass already scanned for this same target
+        //   commit (their File node carries it) are skipped, so successive
+        //   passes cover the rest and the last one completes;
+        // - only parseable source counts toward the cap — a `.json` costs a
+        //   File node, and 5,000 of them kept a one-source-file repo from
+        //   ever finishing.
+        let workspace_root = self.ingest().config().workspace.clone();
+        let done_for_target = |f: &PathBuf| {
+            self.ingest()
+                .graph()
+                .get_file_node(&crate::graph::graph_path(&workspace_root, f))
+                .is_some_and(|n| n.commit_hash.as_deref() == Some(latest_commit.as_str()))
+        };
+        let remaining: Vec<PathBuf> = files
+            .iter()
+            .filter(|f| !done_for_target(f))
+            .cloned()
+            .collect();
+        let resumed = remaining.len() < files.len();
+        let is_source = |f: &PathBuf| {
+            f.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(crate::treesitter::is_indexed_extension)
+        };
+        let mut source_taken = 0usize;
+        let files_to_scan: Vec<_> = remaining
+            .iter()
+            .filter(|f| {
+                if !is_source(f) {
+                    return true;
+                }
+                source_taken += 1;
+                source_taken <= max_files
+            })
+            .cloned()
+            .collect();
         let file_chunks: Vec<Vec<PathBuf>> = files_to_scan
             .chunks(files_per_batch)
             .map(|chunk| chunk.to_vec())
             .collect();
+
+        // LSP cold-boot prewarm: fire one `documentSymbol` request per
+        // language actually present in the scan set before we hand
+        // off to the scan batch. A blocked, in-process cold cache
+        // (rust-analyzer loading crates.io indices, clangd parsing
+        // templated headers) routinely takes 2–5 s on the first call
+        // — without this, the very first scan chunk would either
+        // time out the first real `documentSymbol` against the 1 s
+        // production boundary (PR #112) or quietly fall back to
+        // tree-sitter and miss macro-resolved symbols.
+        //
+        // Honors:
+        //   * `lsp_prewarm_opt_out` — operator-supplied escape hatch.
+        //   * the server cancel token — shutdown during prewarm
+        //     resets the readiness phase before returning, so the
+        //     agent-visible `get_capabilities.phase` doesn't get
+        //     stuck on `prewarming_lsp`.
+        //   * `lsp_prewarm_max_files` — sentinel scan is bounded.
+        //
+        // Parallelism: one task per language via `JoinSet` so a 20-
+        // language monorepo doesn't spend 20 × LSP_PREWARM_TIMEOUT
+        // serially. Multiplexer contention falls out naturally — two
+        // languages that route to the same `LspMultiplexer`
+        // serialise on its inner `AsyncMutex`, which is fine: the
+        // fast path (multiplexer already running) completes in
+        // milliseconds and the slow path is gated by
+        // `lsp_prewarm_timeout_secs` per task.
+        //
+        // `prewarm_server` uses `LSP_PREWARM_TIMEOUT` (30 s default)
+        // and never touches the runtime circuit breaker, so even a
+        // stuck cold LSP cannot promote itself to `unavailable` from
+        // this path.
+        let lsp_prewarm_opt_out = self.ingest().tuning().ingestion.lsp_prewarm_opt_out;
+        if !lsp_prewarm_opt_out && !files_to_scan.is_empty() {
+            self.readiness().update(|snapshot| {
+                snapshot.phase = crate::server::readiness::IndexPhase::PrewarmingLsp;
+                snapshot.files_total = Some(files_to_scan.len() as u64);
+            });
+            let skip_extensions: std::collections::HashSet<String> = self
+                .ingest()
+                .tuning()
+                .ingestion
+                .lsp_prewarm_skip_extensions
+                .iter()
+                .cloned()
+                .collect();
+            let unique_exts: Vec<String> = files_to_scan
+                .iter()
+                .filter_map(|p| p.extension().and_then(|e| e.to_str()))
+                .map(|e| e.to_string())
+                // Per-language opt-out: an extension listed in
+                // `lsp_prewarm_skip_extensions` is filtered out of
+                // the prewarm pass. The skip is logged so operators
+                // can audit the configuration at startup; an
+                // unconfigured `tuning.toml` filters nothing.
+                .filter(|e| {
+                    if skip_extensions.contains(e) {
+                        debug!(
+                            "build_core_memory: skipping LSP prewarm for extension {:?} \
+                             (lsp_prewarm_skip_extensions)",
+                            e
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            let prewarm_max = self.ingest().tuning().ingestion.lsp_prewarm_max_files;
+            let prewarm_timeout_secs = self.ingest().tuning().ingestion.lsp_prewarm_timeout_secs;
+            info!(
+                "build_core_memory: LSP prewarm starting for {} files ({} languages after skip-list, timeout {}s each, parallel)",
+                files_to_scan.len(),
+                unique_exts.len(),
+                prewarm_timeout_secs
+            );
+
+            let mut prewarm_set = tokio::task::JoinSet::new();
+            // Take a pool snapshot once at the boundary; each task
+            // reaches for `lsp_pool().next()` on its own and routes
+            // the result through `Arc<AsyncMutex<LspMultiplexer>>` —
+            // because the multiplexer is keyed by binary rather
+            // than by language, two tasks whose languages share a
+            // binary will serialise on the same mutex. That's the
+            // happy path for "rust + rust in two crates" and not
+            // worth special-casing for now.
+            let pool = Arc::clone(self.ingest().lsp_pool());
+            let unique_exts_for_summary = unique_exts.clone();
+            for ext in unique_exts.into_iter() {
+                if cancel.is_cancelled() {
+                    debug!("build_core_memory: cancel observed before prewarm task for {ext}");
+                    break;
+                }
+                let sentinel =
+                    crate::server::lsp::pick_prewarm_sentinel(&ext, &files_to_scan, prewarm_max);
+                let cancel_for_task = cancel.clone();
+                let pool_for_task = Arc::clone(&pool);
+                prewarm_set.spawn(async move {
+                    let mplex = pool_for_task.next();
+                    let mut lsp = mplex.lock().await;
+                    let timeout = std::time::Duration::from_secs(prewarm_timeout_secs);
+                    lsp.prewarm_server(&ext, sentinel.as_deref(), Some(timeout))
+                        .await;
+                    if cancel_for_task.is_cancelled() {
+                        tracing::debug!("LSP prewarm task for {ext} observed cancel");
+                    }
+                });
+            }
+            // Drain.
+            while let Some(res) = prewarm_set.join_next().await {
+                if cancel.is_cancelled() {
+                    // Re-check after each task. If we observe cancel
+                    // mid-drain, abort the rest so a 20-language repo
+                    // doesn't hold us for 30s × remaining.
+                    prewarm_set.abort_all();
+                    // Reset readiness to the pre-prewarm phase
+                    // (Discovering) before returning. Without this
+                    // the readiness snapshot stays pinned at
+                    // PrewarmingLsp and the operator-visible
+                    // `get_capabilities.phase` looks stuck.
+                    self.readiness().update(|snapshot| {
+                        snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
+                    });
+                    debug!("build_core_memory: cancelled during LSP prewarm drain");
+                    return Err(LainError::Cancelled);
+                }
+                // `res` is `Result<(), JoinError>`. A JoinError means
+                // the task panicked or was aborted. Aborting is a
+                // cooperative signal; panicking would indicate a bug
+                // somewhere in `prewarm_server`.
+                if let Err(e) = res {
+                    if e.is_panic() {
+                        tracing::warn!("LSP prewarm task panicked: {e}");
+                    }
+                }
+            }
+            if cancel.is_cancelled() {
+                self.readiness().update(|snapshot| {
+                    snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
+                });
+                return Err(LainError::Cancelled);
+            }
+            // Operator-facing summary. With `unique_exts.len() <=
+            // pool.multiplexers.len()` every language runs in
+            // parallel; larger language sets round-robin through
+            // the pool, so languages routed to the same multiplexer
+            // serialise on its inner `AsyncMutex`. The `max_per_mux`
+            // value is what an operator would need to bump
+            // `lsp_pool_size` past in `.lain/tuning.toml` to get
+            // full parallelism.
+            let pool_size = pool.size();
+            let n_exts = unique_exts_for_summary.len();
+            let max_per_mux = if pool_size == 0 {
+                0
+            } else {
+                n_exts.div_ceil(pool_size)
+            };
+            if max_per_mux > 1 {
+                info!(
+                    "build_core_memory: LSP prewarm done — {} languages across {} multiplexers \
+                     (~{} tasks per mux serialised on the inner mutex; bumping lsp_pool_size \
+                     past {} in .lain/tuning.toml would give every language its own parallel slot)",
+                    n_exts, pool_size, max_per_mux, n_exts,
+                );
+            } else {
+                info!(
+                    "build_core_memory: LSP prewarm done — {} languages across {} multiplexers (full parallelism)",
+                    n_exts,
+                    pool_size,
+                );
+            }
+        }
 
         // `files_total` is fixed for this attempt the moment the scan is
         // planned; it does not shrink or grow even if the scan later times
@@ -146,6 +398,10 @@ impl LainServer {
             snapshot.files_failed = 0;
         });
 
+        // B4 — one fresh LSP response cache per indexing pass.
+        // Shared (Arc-cloned) by every chunk in this batch; drops
+        // at the end of the `scan_file_batch` JoinSet drain below.
+        let lsp_cache = std::sync::Arc::new(crate::server::ingest::scan::LspScanCache::default());
         let mut set = tokio::task::JoinSet::new();
         for chunk in file_chunks {
             // AGENT_UX_ROADMAP.md M4 follow-up: cancel between batches.
@@ -165,6 +421,9 @@ impl LainServer {
             // `self`'s lifetime.
             let namespace = *self.ingest().id_namespace();
             let cancel_for_spawn = cancel.clone();
+            // B4 — Arc-clone the per-scan LSP cache into the task so
+            // every chunk shares the same cache instance.
+            let lsp_cache_for_task = std::sync::Arc::clone(&lsp_cache);
 
             set.spawn(async move {
                 scan_file_batch(
@@ -176,6 +435,7 @@ impl LainServer {
                     commit_hash,
                     &namespace,
                     cancel_for_spawn,
+                    Some(&*lsp_cache_for_task),
                 )
                 .await
             });
@@ -197,7 +457,7 @@ impl LainServer {
         // must NOT advance `set_last_commit` — otherwise the graph claims to be
         // current at HEAD while missing files, which is worse than being visibly
         // behind. See the guarded `set_last_commit` at the end of this function.
-        let mut partial = files.len() > files_to_scan.len();
+        let mut partial = remaining.len() > files_to_scan.len();
         if partial {
             warn!(
                 "Scan capped at max_files_per_scan={} of {} changed files;                  this pass is partial and will not advance the indexed-commit marker",
@@ -361,6 +621,43 @@ impl LainServer {
             "Resolving {} tree-sitter static references...",
             all_static_refs.len()
         );
+        // A pass resuming an earlier capped one is incremental too: refs
+        // from files scanned before into the files scanned now must resolve.
+        if last_commit.is_some() || resumed {
+            let git_sensor = Arc::clone(self.ingest().git());
+            let tracked_result = offthread(cancel.clone(), move || {
+                git_sensor.try_get_all_tracked_files()
+            })
+            .await;
+            // Drop deleted and moved-away paths *before* resolving. After a
+            // rename the old path's definition still sat beside the new
+            // one, so every call to it resolved to the stale node (or was
+            // dropped as ambiguous) and the later sweep deleted it with its
+            // edges: `git mv a.py lib.py` left lib.py's functions with no
+            // callers until a full re-index. Only with a complete listing —
+            // an empty one would read as "everything was deleted".
+            if let Ok(tracked_paths) = &tracked_result {
+                let tracked_keys: HashSet<String> = tracked_paths
+                    .iter()
+                    .map(|p| crate::graph::graph_path(&self.ingest().config().workspace, p))
+                    .collect();
+                if let Err(e) = self.ingest().graph().prune_orphans(&tracked_keys) {
+                    warn!("Orphan sweep before resolve failed: {e}");
+                }
+            }
+            let tracked = tracked_result.unwrap_or_default();
+            let extra = refs_into_rescanned(
+                &self.ingest().config().workspace,
+                self.ingest().graph(),
+                &files_to_scan,
+                &tracked,
+            );
+            info!(
+                "Re-resolving {} references into the rescanned files",
+                extra.len()
+            );
+            all_static_refs.extend(extra);
+        }
         let static_edges = super::resolve::resolve_static_edges(
             self.ingest().graph(),
             &all_static_refs,
@@ -421,11 +718,12 @@ impl LainServer {
             let min_pair = self.ingest().tuning().ingestion.cochange_min_pair_count;
             let max_files = self.ingest().tuning().ingestion.cochange_max_commit_files;
             let git_sensor = Arc::clone(self.ingest().git());
-            match offthread(cancel.clone(), move || {
-                git_sensor
-                    .lock()
-                    .analyze_co_changes(window, min_pair, max_files)
-            })
+            match offthread(
+                cancel.clone(),
+                move || -> Result<Vec<crate::git::CoChangePair>, LainError> {
+                    git_sensor.try_analyze_co_changes(window, min_pair, max_files)
+                },
+            )
             .await
             {
                 Ok(v) => v,
@@ -470,8 +768,12 @@ impl LainServer {
         // token never cancels its parent; cancelling the parent
         // cancels every child.
         let nlp_cancel: CancellationToken = cancel.child_token();
+        let nlp_readiness = self.readiness().clone();
         tokio::spawn(async move {
-            if nlp_cancel.is_cancelled() {
+            // Without a model there is nothing to compute: the stub returns
+            // zero vectors, and storing one per symbol cost memory and disk
+            // and marked every symbol "embedded" for when a model arrives.
+            if nlp_cancel.is_cancelled() || embedder_clone.is_stub() {
                 return;
             }
             let all_nodes = graph_clone.get_all_nodes();
@@ -487,14 +789,34 @@ impl LainServer {
             let prewarm: Vec<_> = prewarm_nodes.iter().map(|(_, n)| n.clone()).collect();
             let rest: Vec<_> = rest_nodes.iter().map(|(_, n)| n.clone()).collect();
 
+            let already = anchors
+                .iter()
+                .filter(|(_, n)| !crate::server::nlp::needs_embedding(n.embedding.as_deref()))
+                .count();
+            // `total` drops for symbols that vanish before the pass reaches
+            // them (replaced by a concurrent update): they cannot be
+            // embedded, and counting them left coverage looking short.
+            let progress = |embedded: usize, total: usize, running: bool| {
+                nlp_readiness.update(|s| {
+                    s.embeddings = Some(crate::server::readiness::EmbeddingProgress {
+                        embedded: embedded as u64,
+                        total: total as u64,
+                        running,
+                    });
+                });
+            };
+            let mut embedded = already;
+            let mut total = anchors.len();
+            progress(embedded, total, true);
+
             info!("NLP pre-warming {} anchor nodes...", prewarm.len());
             let mut count = 0;
             for node in &prewarm {
                 if nlp_cancel.is_cancelled() {
                     return;
                 }
-                if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
-                    if gn.embedding.is_none() {
+                if let Ok(Some(gn)) = graph_clone.get_node(&node.id) {
+                    if crate::server::nlp::needs_embedding(gn.embedding.as_deref()) {
                         let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                         // AGENT_UX_ROADMAP.md M4 follow-up: ONNX
                         // inference is sync CPU work — route it
@@ -529,9 +851,10 @@ impl LainServer {
                         // `semantic_search` permanently and silently.
                         match serde_json::to_string(&emb) {
                             Ok(json) => {
-                                gn.embedding = Some(json);
-                                if graph_clone.insert_node(&gn).is_ok() {
+                                if graph_clone.set_embedding(&gn.id, json).unwrap_or(false) {
                                     count += 1;
+                                    embedded += 1;
+                                    progress(embedded, total, true);
                                 }
                             }
                             Err(e) => warn!(
@@ -541,6 +864,9 @@ impl LainServer {
                             ),
                         }
                     }
+                } else {
+                    total = total.saturating_sub(1);
+                    progress(embedded, total, true);
                 }
             }
             info!(
@@ -564,8 +890,8 @@ impl LainServer {
                     if nlp_cancel.is_cancelled() {
                         return;
                     }
-                    if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
-                        if gn.embedding.is_none() {
+                    if let Ok(Some(gn)) = graph_clone.get_node(&node.id) {
+                        if crate::server::nlp::needs_embedding(gn.embedding.as_deref()) {
                             let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                             // Same offthread routing as the prewarm pass:
                             // keep ONNX off the async runtime.
@@ -592,13 +918,13 @@ impl LainServer {
                             // unparseable embedding it will never retry.
                             match serde_json::to_string(&emb) {
                                 Ok(json) => {
-                                    gn.embedding = Some(json);
-                                    // A dropped insert silently costs the
-                                    // node its embedding, which surfaces
-                                    // later as `semantic_search` missing
-                                    // code that is plainly there.
-                                    if let Err(e) = graph_clone.insert_node(&gn) {
-                                        warn!("embedding not stored for {}: {e}", gn.name);
+                                    // Only onto a node that still exists; a
+                                    // re-index may have removed it meanwhile.
+                                    if !graph_clone.set_embedding(&gn.id, json).unwrap_or(false) {
+                                        total = total.saturating_sub(1);
+                                    } else {
+                                        embedded += 1;
+                                        progress(embedded, total, true);
                                     }
                                 }
                                 Err(e) => {
@@ -606,11 +932,23 @@ impl LainServer {
                                 }
                             }
                         }
+                    } else {
+                        total = total.saturating_sub(1);
+                        progress(embedded, total, true);
                     }
                 }
                 budget = budget.saturating_sub(batch_len);
             }
+            progress(embedded, total, false);
             info!("NLP lazy enrichment pass complete.");
+            // The graph was saved before this pass ran; without a save here
+            // every restart recomputed every embedding (minutes on a large
+            // repository).
+            if embedded > already {
+                if let Err(e) = graph_clone.save_to_disk().await {
+                    warn!("embeddings computed but not saved: {e}");
+                }
+            }
         });
 
         // Orphan sweep. Reclaims nodes whose file is no longer tracked: files
@@ -624,9 +962,12 @@ impl LainServer {
                 return Err(LainError::Cancelled);
             }
             let git_sensor = Arc::clone(self.ingest().git());
-            let tracked_paths_result = offthread(cancel.clone(), move || {
-                git_sensor.lock().get_all_tracked_files()
-            })
+            let tracked_paths_result = offthread(
+                cancel.clone(),
+                move || -> Result<Vec<std::path::PathBuf>, LainError> {
+                    git_sensor.try_get_all_tracked_files()
+                },
+            )
             .await;
             match tracked_paths_result {
                 Ok(tracked_paths) => {
@@ -668,7 +1009,12 @@ impl LainServer {
         } else {
             self.ingest().graph().set_last_commit(latest_commit)?;
         }
-        self.ingest().graph().save_to_disk().await?;
+        // Persisting is for the next start; this process serves from memory.
+        // An unwritable `.lain` failed the whole pass, so a complete
+        // in-memory index was reported unavailable and redone every tick.
+        if let Err(e) = self.ingest().graph().save_to_disk().await {
+            warn!("could not persist the graph ({e}); serving it from memory only");
+        }
 
         // Bump the overlay freshness so the indexer doesn't read as
         // "stale" the moment the server comes up. The index path
@@ -696,9 +1042,10 @@ impl LainServer {
                 scanned, failed, duration
             );
             return Err(LainError::Other(format!(
-                "index pass was partial: {} of {} changed files scanned",
+                "{PARTIAL_PASS}: {} of {} changed files scanned; {} left",
                 scanned + failed,
                 files.len(),
+                remaining.len().saturating_sub(scanned + failed),
             )));
         }
 
@@ -722,7 +1069,7 @@ impl LainServer {
         // The snapshot, removals, and replacements form one reconciliation.
         // Direct process_change calls use the same lock.
         let _guard = self.ingest().process_change_lock().lock().await;
-        let changes = self.ingest().git().lock().get_uncommitted_changes()?;
+        let changes = self.ingest().git().get_uncommitted_changes()?;
         let root = &self.ingest().config().workspace;
         let current_paths: HashSet<String> = changes
             .iter()
@@ -731,7 +1078,6 @@ impl LainServer {
         let head = self
             .ingest()
             .git()
-            .lock()
             .get_latest_commit_info()
             .ok()
             .map(|(h, _)| h);
@@ -808,7 +1154,26 @@ impl LainServer {
         let key = graph_path(&self.ingest().config().workspace, path);
         if !path.is_file() {
             self.remove_owned_overlay_path(&key);
+            // The file is gone; drop its hash entry so a future
+            // re-creation starts with a clean cache.
+            self.ingest().file_content_hashes().lock().remove(path);
             return Ok(());
+        }
+        // B3 — short-circuit no-op editor saves. The watcher fires on
+        // every modify event (including metadata-only writes and
+        // editor "save" that doesn't change bytes); the LSP round
+        // trip below is the expensive part. blake3 is already a
+        // project dependency. A hit on the cache means the file's
+        // bytes are unchanged and there's nothing to re-index.
+        if let Ok(bytes) = std::fs::read(path) {
+            let hash = blake3::hash(&bytes);
+            let mut hashes = self.ingest().file_content_hashes().lock();
+            if hashes.get(path) == Some(hash.as_bytes()) {
+                // Hash unchanged — drop the read lock and skip.
+                drop(hashes);
+                return Ok(());
+            }
+            hashes.insert(path.to_path_buf(), *hash.as_bytes());
         }
         // Try the LSP path first. With rust-analyzer unavailable (CI's
         // default for this test env), the LSP request errors out —
@@ -856,6 +1221,8 @@ impl LainServer {
                 crate::treesitter::extract_definitions(path, &content)
                     .into_iter()
                     .map(|d| HierarchicalSymbol {
+                        selection_line: d.line_start,
+                        selection_col: 0,
                         node: crate::schema::GraphNode::new_in(
                             d.kind,
                             d.name.clone(),
@@ -952,7 +1319,7 @@ fn insert_edges_best_effort(db: &GraphDatabase, edges: &[GraphEdge], label: &str
     }
 }
 
-fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
+fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &AnyGitSensor) {
     match git.get_all_tracked_files() {
         Ok(tracked_paths) => {
             // Reduced with the same helper the scanner mints node paths with:
@@ -972,6 +1339,79 @@ fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
     }
 }
 
+/// Link a federation repo's calls into the other repos, once every repo's
+/// symbols are known.
+///
+/// Repos index one after another, and name-only cross-repo resolution can
+/// only find a symbol whose repo is already indexed: a repo indexed before
+/// the ones it calls into got no cross-repo edges at all (cobra, indexed
+/// before pflag, had 0 edges into it). Cross-repo edges are also not
+/// persisted per repo, so a warm restart lost them too. Running this after
+/// every repo is indexed covers both. Only edges whose target lies in
+/// another repo are added; local resolution already happened.
+pub async fn relink_cross_repo(
+    path: &Path,
+    graph: &GraphDatabase,
+    git: &Arc<AnyGitSensor>,
+    resolver: &dyn crate::federation::cross_repo::CrossRepoResolver,
+    source_repo: &crate::federation::repo_id::RepoId,
+    cancel: &CancellationToken,
+) -> Result<usize, LainError> {
+    let git_sensor = Arc::clone(git);
+    let files = offthread(cancel.clone(), move || {
+        git_sensor.try_get_all_tracked_files()
+    })
+    .await?;
+    let root = path.to_path_buf();
+    let refs = offthread(
+        cancel.clone(),
+        move || -> Result<Vec<StaticFileRef>, LainError> {
+            let mut refs = Vec::new();
+            for file in files {
+                let abs = if file.is_absolute() {
+                    file.clone()
+                } else {
+                    root.join(&file)
+                };
+                let indexed = abs
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(crate::treesitter::is_indexed_extension);
+                if !indexed {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&abs) else {
+                    continue;
+                };
+                let rel = graph_path(&root, &abs);
+                refs.extend(
+                    crate::treesitter::extract_refs(&abs, &content)
+                        .into_iter()
+                        .map(|r| StaticFileRef {
+                            file_path: rel.clone(),
+                            source_line: r.source_line,
+                            target_name: r.target_name,
+                            edge_type: r.edge_type,
+                            foreign_receiver: r.foreign_receiver,
+                            self_receiver: r.self_receiver,
+                            qualifier: r.qualifier.clone(),
+                        }),
+                );
+            }
+            Ok(refs)
+        },
+    )
+    .await?;
+    let external: Vec<GraphEdge> =
+        super::resolve::resolve_static_edges(graph, &refs, Some(resolver), Some(source_repo))
+            .into_iter()
+            .filter(|e| graph.get_node(&e.target_id).ok().flatten().is_none())
+            .collect();
+    let n = external.len();
+    graph.insert_edges_batch(&external)?;
+    Ok(n)
+}
+
 /// Inputs for one repository indexing pass. The references deliberately tie
 /// the graph, overlay, sensors, and namespace to the same call lifetime.
 ///
@@ -983,7 +1423,7 @@ pub struct IndexRequest<'a> {
     pub path: &'a Path,
     pub graph: &'a GraphDatabase,
     pub lsp_pool: &'a LspPool,
-    pub git: &'a GitSensor,
+    pub git: &'a AnyGitSensor,
     pub overlay: &'a VolatileOverlay,
     pub resolver: Option<&'a dyn crate::federation::cross_repo::CrossRepoResolver>,
     pub source_repo: Option<&'a crate::federation::repo_id::RepoId>,
@@ -1015,7 +1455,16 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         return Err(LainError::Cancelled);
     }
     let scan_start = std::time::Instant::now();
-    let (latest_commit, latest_time) = git.get_latest_commit_info()?;
+    // F2 — use the `try_*` variants so a wedged spawn_blocking thread
+    // holding the parking_lot `GitSensor` mutex fails fast (the single-
+    // workspace `build_core_memory` already does this — see lines 609
+    // et al.). Pre-fix the federation path called the blocking
+    // helpers; the outer `index_timeout()` budget was the only
+    // escape, and a wedged mutex can hold indefinitely. The same
+    // `try_lock` plumbing the watchdog comment describes at
+    // `IngestHandle::start_git_sensor_watchdog` (handles/ingest.rs:48-52)
+    // is now reachable from this path too.
+    let (latest_commit, latest_time) = git.try_get_latest_commit_info()?;
     let last_commit = graph.get_last_commit()?;
 
     // The commit-hash short-circuit exists to skip an expensive full
@@ -1052,16 +1501,16 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     // truth.
     let files = if force {
         info!("[federation] Forced full re-scan of worktree {:?}", path);
-        git.get_all_tracked_files()?
+        git.try_get_all_tracked_files()?
     } else if let Some(ref last) = last_commit {
         info!(
             "[federation] Incremental update since {} for {:?}",
             last, path
         );
-        git.get_changed_files_since(last)?
+        git.try_get_changed_files_since(last)?
     } else {
         info!("[federation] Full repository scan for {:?}", path);
-        git.get_all_tracked_files()?
+        git.try_get_all_tracked_files()?
     };
 
     if files.is_empty() {
@@ -1078,7 +1527,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         }
         sweep_orphans(path, graph, git);
         graph.set_last_commit(latest_commit)?;
-        graph.save_to_disk_sync()?;
+        if let Err(e) = graph.save_to_disk_sync() {
+            warn!("could not persist the graph ({e}); serving it from memory only");
+        }
         return Ok(());
     }
 
@@ -1127,6 +1578,12 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
                 commit_hash,
                 &namespace,
                 cancel_for_spawn,
+                // Federation path: cache is `None`. The federation
+                // re-indexes one repo at a time, and its scan
+                // batch sizes are smaller; the dedup win is the
+                // single-workspace batch. Wiring the cache here is
+                // a future-PR concern.
+                None,
             )
             .await
         });
@@ -1234,6 +1691,13 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     if cancel.is_cancelled() {
         return Err(LainError::Cancelled);
     }
+    if last_commit.is_some() && !force {
+        // Deleted and renamed-away paths go before resolving (see the
+        // single-workspace pipeline for the rename that lost its callers).
+        sweep_orphans(path, graph, git);
+        let tracked = git.get_all_tracked_files().unwrap_or_default();
+        all_static_refs.extend(refs_into_rescanned(path, graph, &files_to_scan, &tracked));
+    }
     let static_edges =
         super::resolve::resolve_static_edges(graph, &all_static_refs, resolver, source_repo);
     info!(
@@ -1276,9 +1740,12 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         );
     }
 
-    // Co-change analysis
+    // Co-change analysis — F2: use the `try_*` variant (same rationale
+    // as the rest of this federation path: a wedged spawn_blocking
+    // thread holding the GitSensor mutex would block forever
+    // otherwise).
     let co_change_pairs = git
-        .analyze_co_changes(
+        .try_analyze_co_changes(
             COCHANGE_COMMIT_WINDOW,
             COCHANGE_MIN_PAIR_COUNT,
             COCHANGE_MAX_COMMIT_FILES,
@@ -1308,7 +1775,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         return Err(LainError::Cancelled);
     }
     graph.set_last_commit(latest_commit)?;
-    graph.save_to_disk_sync()?;
+    if let Err(e) = graph.save_to_disk_sync() {
+        warn!("could not persist the graph ({e}); serving it from memory only");
+    }
 
     info!(
         "[federation] {:?}: fully indexed in {:?}",
@@ -1317,6 +1786,81 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     );
     overlay.touch();
     Ok(())
+}
+
+/// References from files an incremental pass did *not* rescan to symbols
+/// the rescanned files define.
+///
+/// A node's id includes its line, so a commit that shifts a function down a
+/// line — or moves it to another file, or adds a function others already
+/// call — gives it a new id. Edges from unchanged files were only carried
+/// over for ids that survived, and those files' references were never
+/// resolved again: the callers were gone for good (`assess_change` then
+/// reported 0 dependents, "low" risk) until a full re-index. Re-resolving
+/// just the references into the rescanned files' names makes an
+/// incremental pass agree with a fresh one.
+pub(crate) fn refs_into_rescanned(
+    root: &Path,
+    graph: &GraphDatabase,
+    rescanned: &[PathBuf],
+    tracked: &[PathBuf],
+) -> Vec<StaticFileRef> {
+    use crate::schema::NodeType;
+    let scanned: HashSet<String> = rescanned.iter().map(|p| graph_path(root, p)).collect();
+    let names: HashSet<String> = graph
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| {
+            scanned.contains(&n.path)
+                && !matches!(
+                    n.node_type,
+                    NodeType::File | NodeType::Namespace | NodeType::Module | NodeType::Package
+                )
+        })
+        .map(|n| n.name)
+        .collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for abs in tracked {
+        let rel = graph_path(root, abs);
+        if scanned.contains(&rel) {
+            continue;
+        }
+        let indexed = abs
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(crate::treesitter::is_indexed_extension);
+        if !indexed {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(abs) else {
+            continue;
+        };
+        // Cheap pre-filter: skip files that never mention one of the names.
+        let mentions = text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|w| names.contains(w));
+        if !mentions {
+            continue;
+        }
+        out.extend(
+            crate::treesitter::extract_refs(abs, &text)
+                .into_iter()
+                .filter(|r| names.contains(&r.target_name))
+                .map(|r| StaticFileRef {
+                    file_path: rel.clone(),
+                    source_line: r.source_line,
+                    target_name: r.target_name,
+                    edge_type: r.edge_type,
+                    foreign_receiver: r.foreign_receiver,
+                    self_receiver: r.self_receiver,
+                    qualifier: r.qualifier,
+                }),
+        );
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1355,6 +1899,206 @@ mod readiness_progress_tests {
             .unwrap()
             .success());
         root
+    }
+
+    /// When the server's cancel token fires during the LSP
+    /// prewarm phase, `build_core_memory` returns
+    /// `LainError::Cancelled` AND the readiness snapshot's `phase`
+    /// is reset to `Discovering` rather than left dangling on
+    /// `PrewarmingLsp`. Without this fix the operator-visible
+    /// `get_capabilities.phase` looked frozen on a successful
+    /// shutdown — the snapshot never recovered until the next
+    /// indexing pass moved it forward again.
+    ///
+    /// Pin down both halves of the contract: the return is
+    /// `Cancelled`, AND the readiness snapshot is reset.
+    #[tokio::test]
+    async fn build_core_memory_resets_readiness_on_prewarm_cancel() {
+        let root = git_fixture_with_one_file();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+
+        // Cancel before `build_core_memory` runs. The prewarm path
+        // observes the token at the top of its loop, returns
+        // `Cancelled`, and resets the readiness phase. Driving
+        // the cancel from the outside (rather than racing inside
+        // the test) makes the test deterministic on slow CI
+        // runners where prewarm would otherwise complete before
+        // the test thread could cancel.
+        server.lifecycle_handle().cancel();
+
+        let result = server.build_core_memory().await;
+        match result {
+            Err(LainError::Cancelled) => {}
+            Err(other) => {
+                panic!("expected LainError::Cancelled from a cancelled prewarm, got {other:?}")
+            }
+            Ok(()) => {
+                panic!("build_core_memory returned Ok after the cancel token fired during prewarm")
+            }
+        }
+
+        // Readiness must be Discovering, not stuck on PrewarmingLsp.
+        // The whole point of the fix in this PR is that an agent
+        // polling get_capabilities after the cancel does not see a
+        // frozen phase.
+        let snapshot = server.readiness().snapshot();
+        assert_eq!(
+            snapshot.phase,
+            crate::server::readiness::IndexPhase::Discovering,
+            "readiness.phase must reset to Discovering on prewarm cancel, got {:?}",
+            snapshot.phase
+        );
+        assert_ne!(
+            snapshot.phase,
+            crate::server::readiness::IndexPhase::PrewarmingLsp,
+            "readiness.phase must not stay on PrewarmingLsp after cancel"
+        );
+    }
+
+    /// `lsp_prewarm_skip_extensions` must actually filter languages out
+    /// of the prewarm pass. The knob-reachability test pins that the
+    /// field is *referenced* by production code; this test pins that
+    /// the filter *works*. Without it a refactor that silently breaks
+    /// the skip logic (e.g. accidentally re-including the filtered
+    /// extension after a `.collect()` dedup change) would still pass
+    /// every other test in this module.
+    ///
+    /// Fixture: a git repo with both `lib.rs` and `test.py`. Tuning
+    /// is set to `lsp_prewarm_skip_extensions = ["rs"]` via the
+    /// workspace's `.lain/tuning.toml` (which `LainServer::new`
+    /// loads via `tuning::load_tuning_config`). Both LSP binaries are
+    /// pre-marked unavailable so the post-prewarm `prewarm_state`
+    /// records a deterministic outcome per binary — `pylsp` reaches
+    /// `prewarm_server` and lands as `SkippedUnavailable`; `rust-analyzer`
+    /// never reaches `prewarm_server` because it's filtered out
+    /// before the JoinSet is built.
+    #[tokio::test]
+    async fn lsp_prewarm_skip_extensions_actually_filters_languages() {
+        use crate::server::lsp::PrewarmOutcome;
+
+        let root = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(root.path())
+            .status()
+            .unwrap()
+            .success());
+        for (k, v) in [
+            ("user.email", "readiness-test@lain"),
+            ("user.name", "readiness-test"),
+        ] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+        }
+        std::fs::create_dir_all(root.path().join(".lain")).unwrap();
+        std::fs::write(
+            root.path().join(".lain").join("tuning.toml"),
+            "[ingestion]\nlsp_prewarm_skip_extensions = [\"rs\"]\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        std::fs::write(root.path().join("test.py"), "def hello(): pass\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "fixture"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+
+        // Mark every multiplexer in the pool as unavailable for both
+        // rust-analyzer AND pylsp. The existing helper only marks
+        // rust-analyzer; for this test we need both so the post-
+        // prewarm `prewarm_state` has a known outcome per binary
+        // (SkippedUnavailable). Marking only rust-analyzer would
+        // leave pylsp eligible to actually try to spawn, which can
+        // hang on `LspProcess::Drop` per the `disable_real_lsp`
+        // helper's doc comment.
+        let pool_size = crate::tuning::load_tuning_config(root.path())
+            .ingestion
+            .lsp_pool_size;
+        for _ in 0..pool_size {
+            let mplex = server.ingest().lsp_pool().next();
+            let mut guard = mplex.lock().await;
+            guard.mark_unavailable("rust-analyzer");
+            guard.mark_unavailable("pylsp");
+        }
+
+        // Run the full indexing pipeline. The prewarm phase runs
+        // first; the scan phase that follows is what most of the
+        // test runtime pays for. We bound it with a generous
+        // timeout so CI flakiness on the scan side doesn't show up
+        // as a flake in this test.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            server.build_core_memory(),
+        )
+        .await
+        .expect("build_core_memory must complete within 60s with skip-list applied");
+
+        // Aggregate the per-multiplexer prewarm state. Every
+        // multiplexer recorded the same outcomes for the same
+        // binary, so the union is the merged answer.
+        let outcomes = server
+            .ingest()
+            .lsp_pool()
+            .aggregate_prewarm_outcomes()
+            .await;
+
+        // The whole point: rust-analyzer never reached
+        // prewarm_server because the skip-list filtered it out
+        // before the JoinSet was built. The prewarm_state hash
+        // must NOT contain a rust-analyzer key.
+        assert!(
+            !outcomes.contains_key("rust-analyzer"),
+            "rust-analyzer must be excluded from prewarm_state when \
+             lsp_prewarm_skip_extensions = [\"rs\"]; got {:?}",
+            outcomes
+        );
+
+        // The non-skipped language (pylsp) DID reach prewarm_server
+        // and landed as SkippedUnavailable (we marked pylsp
+        // unavailable above). The test would also pass if pylsp's
+        // outcome were TimedOut or Failed — the contract we're
+        // pinning is "skipped extensions are excluded, not-skipped
+        // extensions still go through prewarm_server".
+        match outcomes.get("pylsp") {
+            Some(PrewarmOutcome::SkippedUnavailable) => {}
+            Some(other) => panic!(
+                "pylsp entry must be SkippedUnavailable after the skip-list \
+                 filter; got {other:?}. outcomes={outcomes:?}"
+            ),
+            None => panic!(
+                "pylsp must appear in prewarm_state — the skip list only \
+                 excluded rust-analyzer, not pylsp; outcomes={outcomes:?}"
+            ),
+        }
+
+        // The prewarm phase must complete normally (not stuck on
+        // PrewarmingLsp after build_core_memory returns). The
+        // cancel-reset test pins the cancel path; this test pins
+        // the normal-completion path.
+        let snapshot = server.readiness().snapshot();
+        assert_ne!(
+            snapshot.phase,
+            crate::server::readiness::IndexPhase::PrewarmingLsp,
+            "readiness.phase must advance past PrewarmingLsp when \
+             prewarm completes normally; got {:?}",
+            snapshot.phase
+        );
     }
 
     /// Mark every multiplexer in the server's LSP pool unavailable so
@@ -1429,6 +2173,220 @@ mod readiness_progress_tests {
         assert_eq!(
             snapshot.state,
             crate::server::readiness::IndexState::WarmingUp
+        );
+    }
+
+    /// `git mv a.py lib.py` (committed) keeps the moved function's
+    /// callers on an incremental pass.
+    #[tokio::test]
+    async fn a_renamed_file_keeps_its_callers() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success())
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.path().join("a.py"), "def helper_hh():\n    return 1\n").unwrap();
+        std::fs::write(
+            root.path().join("b.py"),
+            "from a import helper_hh\n\ndef user_uu():\n    return helper_hh()\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "one"]);
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        server.build_core_memory().await.unwrap();
+        let callers = |server: &LainServer| {
+            let g = server.ingest().graph();
+            let target = g
+                .find_all_nodes_by_name("helper_hh")
+                .into_iter()
+                .find(|n| n.node_type == crate::schema::NodeType::Function)
+                .expect("helper_hh indexed");
+            (
+                target.path.clone(),
+                g.get_edges_to(&target.id)
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.edge_type == crate::schema::EdgeType::Calls)
+                    .count(),
+            )
+        };
+        assert_eq!(callers(&server), ("a.py".to_string(), 1));
+        git(&["mv", "a.py", "lib.py"]);
+        git(&["commit", "-qm", "move"]);
+        server.build_core_memory().await.unwrap();
+        assert_eq!(callers(&server), ("lib.py".to_string(), 1));
+    }
+
+    /// Bug #2 from the 2026-09-18 Tauri postmortem: a libgit2 call that
+    /// wedges (packed-refs read on a huge monorepo, hung filesystem)
+    /// leaves the parking_lot `GitSensor` mutex held by the stuck
+    /// `spawn_blocking` thread. Pre-fix, every subsequent
+    /// `build_core_memory` (and watcher-triggered `index_forced`)
+    /// would block forever on `git_sensor.lock()` waiting for that
+    /// stuck thread. The post-fix `build_core_memory` uses `try_lock`
+    /// inside the offthread closures and fails fast with
+    /// `LainError::Other` if the mutex is held. This test holds the
+    /// mutex externally and confirms `build_core_memory` returns the
+    /// structured error within a few hundred ms instead of hanging
+    /// on the test's outer 5 s budget.
+    ///
+    /// Would hang on pre-fix code: the spawned `offthread` closure
+    /// would call `git_sensor.lock()` and never return, the outer
+    /// `tokio::time::timeout` would fire, and the test would panic
+    /// with "build_core_memory must not hang past 5s".
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn default_mode_is_sidecar() {
+        // On Unix. The sidecar needs Unix sockets; elsewhere the default
+        // is the in-process sensor.
+        let expected = if cfg!(unix) {
+            crate::git::GitSensorMode::Sidecar
+        } else {
+            crate::git::GitSensorMode::InProcess
+        };
+        assert_eq!(crate::git::GitSensorMode::default(), expected);
+        // Ensure the sidecar binary is available before creating a server in
+        // sidecar mode.  In a fresh worktree with no prior `cargo build`,
+        // `resolve_or_build_sidecar_binary` builds it once via `cargo build
+        // --bin lain-git-sidecar` and caches the result.
+        crate::server::git::sidecar_binary_helpers::ensure_sidecar_bin_env()
+            .expect("sidecar binary must be available or buildable for this test");
+        let root = git_fixture_with_one_file();
+        let server = LainServer::with_git_sensor_mode(
+            root.path(),
+            &root.path().join("state/graph.bin"),
+            None,
+            crate::git::GitSensorMode::Sidecar,
+        )
+        .unwrap();
+        assert_eq!(server.ingest().git().mode(), expected);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn build_core_memory_fails_fast_when_git_sensor_mutex_held() {
+        let root = git_fixture_with_one_file();
+        let server = LainServer::with_git_sensor_mode(
+            root.path(),
+            &root.path().join("state/graph.bin"),
+            None,
+            crate::git::GitSensorMode::InProcess,
+        )
+        .unwrap();
+        disable_real_lsp(&server, root.path()).await;
+
+        // Externally grab the parking_lot `GitSensor` mutex to simulate
+        // a previous `index()` call's stuck libgit2 thread still
+        // holding it. parking_lot's `lock()` is infallible; the
+        // offthread closure's `try_lock` will see `None`.
+        let _held = server
+            .ingest()
+            .git()
+            .as_in_process()
+            .expect("test runs in InProcess mode")
+            .lock();
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.build_core_memory(),
+        )
+        .await
+        .expect(
+            "build_core_memory must not hang past 5s when the git sensor mutex is held externally",
+        );
+
+        assert!(
+            matches!(result, Err(LainError::Other(_))),
+            "expected LainError::Other from try_lock failure; got {result:?}"
+        );
+        // try_lock is O(1) and the offthread future resolves
+        // immediately on WouldBlock. Generous slack for slow CI.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "build_core_memory took too long to fail-fast: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Companion to `build_core_memory_fails_fast_when_git_sensor_mutex_held`:
+    /// the postmortem's actual user-visible failure was the watcher
+    /// *pile-up* — rust-analyzer fires many diagnostics in quick
+    /// succession after projection, each one triggering
+    /// `index_forced`, and every one blocked forever on the parking_lot
+    /// mutex held by the stuck thread. This test pins the concurrent
+    /// case: N parallel `build_core_memory` calls, all expected to
+    /// fail fast with `LainError::Other`. Pre-fix they would have
+    /// queued on the parking_lot mutex; post-fix they all return
+    /// within a few ms.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn build_core_memory_concurrent_calls_fail_fast_when_mutex_held() {
+        use std::sync::Arc;
+        let root = git_fixture_with_one_file();
+        let server = Arc::new(
+            LainServer::with_git_sensor_mode(
+                root.path(),
+                &root.path().join("state/graph.bin"),
+                None,
+                crate::git::GitSensorMode::InProcess,
+            )
+            .unwrap(),
+        );
+        disable_real_lsp(&server, root.path()).await;
+
+        // Hold the parking_lot mutex externally — simulates a stuck
+        // spawn_blocking thread holding the guard.
+        let _held = server
+            .ingest()
+            .git()
+            .as_in_process()
+            .expect("test runs in InProcess mode")
+            .lock();
+
+        const N: usize = 8;
+        let started = std::time::Instant::now();
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let server = server.clone();
+            handles.push(tokio::spawn(async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    server.build_core_memory(),
+                )
+                .await
+            }));
+        }
+
+        let mut other_count = 0;
+        for h in handles {
+            match h.await.expect("task panicked") {
+                Ok(Err(LainError::Other(_))) => other_count += 1,
+                Ok(Ok(())) => {
+                    panic!("expected LainError::Other from try_lock failure, got Ok")
+                }
+                Ok(Err(e)) => panic!("expected LainError::Other, got {e:?}"),
+                Err(_) => panic!("a concurrent build_core_memory hung past the 5s budget"),
+            }
+        }
+        assert_eq!(other_count, N, "every concurrent call must fail fast");
+
+        // try_lock is O(1) and the offthread futures resolve
+        // immediately on WouldBlock. Generous slack for slow CI.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "concurrent fail-fast took too long: {:?}",
+            started.elapsed()
         );
     }
 
@@ -1590,10 +2548,94 @@ mod readiness_progress_tests {
             "a capped partial pass must report failure, not Ok(()), so callers don't publish ready"
         );
         // The partial pass still persists what it scanned...
+        // One source file (the cap) plus the committed `.lain/tuning.toml`,
+        // which is not source and does not count toward it.
         let snapshot = server.readiness().snapshot();
-        assert_eq!(snapshot.files_total, Some(1));
+        assert_eq!(snapshot.files_total, Some(2));
         // ...but must not have advanced the indexed-commit marker to HEAD.
         assert_eq!(server.ingest().graph().get_last_commit().unwrap(), None);
+
+        // The next pass resumes with the file the first one skipped, and
+        // completes: a capped repository converges instead of rescanning
+        // the same first files forever.
+        server
+            .build_core_memory()
+            .await
+            .expect("second pass completes");
+        assert!(server.ingest().graph().get_last_commit().unwrap().is_some());
+        for f in ["a", "b"] {
+            assert!(
+                server.ingest().graph().find_node_by_name(f).is_some(),
+                "{f} indexed"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_errors_carry_the_files_left() {
+        let e = LainError::Other(format!(
+            "{PARTIAL_PASS}: 5 of 12 changed files scanned; 7 left"
+        ));
+        assert_eq!(partial_files_left(&e), Some(7));
+        assert_eq!(partial_files_left(&LainError::Other("boom".into())), None);
+    }
+
+    /// An unwritable state directory costs persistence, not the index.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unwritable_state_dir_still_serves_the_index() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = git_fixture_with_one_file();
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let server = LainServer::new(root.path(), &state.join("graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = server.build_core_memory().await;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        result.expect("indexing succeeds without persistence");
+        assert!(server.ingest().graph().find_node_by_name("hello").is_some());
+    }
+
+    /// Non-source files do not count toward `max_files_per_scan`.
+    #[tokio::test]
+    async fn non_source_files_do_not_use_up_the_scan_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success())
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        for i in 0..5 {
+            std::fs::write(root.path().join(format!("d{i}.json")), "{}").unwrap();
+        }
+        std::fs::write(root.path().join("only.py"), "def only_fn():\n    pass\n").unwrap();
+        std::fs::create_dir_all(root.path().join(".lain")).unwrap();
+        std::fs::write(
+            root.path().join(".lain/tuning.toml"),
+            "[ingestion]\nmax_files_per_scan = 1\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "fixture"]);
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        server
+            .build_core_memory()
+            .await
+            .expect("one source file fits the cap");
+        assert!(server
+            .ingest()
+            .graph()
+            .find_node_by_name("only_fn")
+            .is_some());
     }
 }
 
@@ -1683,4 +2725,20 @@ mod nlp_offthread_tests {
         let _t: TuningConfig = TuningConfig::default();
         let _arc: Arc<TuningConfig> = Arc::new(TuningConfig::default());
     }
+}
+
+/// How a partial pass's error begins; see [`partial_files_left`].
+const PARTIAL_PASS: &str = "index pass was partial";
+
+/// Files a partial pass left for the next one, read from its error.
+fn partial_files_left(e: &LainError) -> Option<usize> {
+    let LainError::Other(msg) = e else {
+        return None;
+    };
+    msg.strip_prefix(PARTIAL_PASS)?
+        .rsplit_once("; ")?
+        .1
+        .strip_suffix(" left")?
+        .parse()
+        .ok()
 }

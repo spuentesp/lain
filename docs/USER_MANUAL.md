@@ -1,6 +1,7 @@
 # User Manual
 
-What's not in the README. Install + quickstart + commands live there.
+The README covers installation and a first query. This manual holds the CLI
+reference, tuning options, and day-to-day operating notes.
 
 ## Concepts
 
@@ -11,6 +12,73 @@ What's not in the README. Install + quickstart + commands live there.
 | **Federation** | `lain server`'s view of N repos. Not a separate mode |
 | **Single-repo** | `lain mcp` — walks up for `.git`, no `repos.yaml` needed |
 | **Graph** | petgraph at `.lain/graph.bin`. UUID v5 ids so they round-trip across tools |
+
+## CLI reference
+
+| Command | Purpose |
+|---|---|
+| `lain mcp` | Start a single-repository MCP server on stdio. It walks up from the current directory to find `.git`; no `repos.yaml` is required. |
+| `lain setup` | Configure an MCP client and verify the connection. `--dry-run` and `--print-config` don't write files. |
+| `lain oneshot` | Start a temporary MCP server, call one tool, print the answer, and exit. Example: `lain oneshot get_blast_radius validate_token`. |
+| `lain server` | Start the federation server and, with HTTP transport, the Command Center. |
+| `lain repos` | Add, list, or remove entries in `repos.yaml`. |
+| `lain workspaces` | Create and switch named groups of repositories. |
+| `lain query` | Run a `query_graph` operation array against a saved graph. |
+| `lain init` | Create a minimal `repos.yaml` for the current Git repository. |
+| `lain ask` | PreToolUse hook handler used by `hooks/claude/lain-hook.sh`: takes the hook JSON and prints a decision. To search code from a shell, use `lain oneshot search_code "<text>"`. |
+| `lain hooks` | Claim or release files and check branch overlap from agent hooks. |
+| `lain doctor` | Check the binary, graph freshness, install paths, and MCP connection. Exit codes are 0 ready, 1 degraded, and 2 unusable. |
+| `lain capabilities` | Print readiness of symbols, the call graph, git history and semantic search. Add `--json` for scripts. |
+| `lain status` | Print repository, index, and MCP readiness. Add `--json` for scripts. |
+| `lain schema` | Write the MCP tool schema used by schema-drift CI. |
+| `lain reindex` | Rebuild the federated graph from source after a schema bump. Backs up `federated_graph.bin` first. Add `--workspace <name>` to scope the rebuild. |
+
+Run `lain <command> --help` for flags. The generated MCP tool schema lives at
+[`tool-schema.json`](tool-schema.json); the human-readable tool guide is
+[`quickstart-tools.md`](quickstart-tools.md).
+
+## Tool surface
+
+Lain advertises a small tool surface and keeps the rest registered
+but hidden — advertising is not dispatch, so hook scripts can call
+hidden tools (claims, heartbeat) whether or not the model sees them.
+Everything is organized into **capability packages** — small skills,
+each with a pitch, a level, and a "when to reach for it" per tool.
+`list_packages` renders the whole menu at runtime; `load_package`
+opts one into the session's `tools/list` (then refetch it).
+`LAIN_TOOL_PROFILE` opts packages in per process and composes as a
+comma list. Every count below is pinned by tests against the same
+registry the server filters with.
+
+| Package | Tools | Skill |
+|---|---|---|
+| `core` | 18 | Orient, understand, assess impact (always on) |
+| `arch` | 10 | Map the system: layered views, traces, module comparison |
+| `raw` | 8 | Low-level reads: graph queries, snippets, call sites |
+| `verify` | 9 | Build, test, lint, coverage, git state |
+| `session` | 7 | Multiplayer claiming: register, claim, heartbeat |
+| `social` | 6 | Agent roster, overlap detection, audit trail |
+| `notes` | 8 | Annotations, handoff notes, intents |
+| `ops` | 10 | Server health, reload, LSP install, re-enrichment |
+| `federation` | 5 | Org-wide queries (shown automatically in federation mode) |
+| `workspace` | 4 | Workspace groups (shown automatically when configured) |
+| `full` | 84 | Every registered tool |
+
+### Role recipes
+
+The reliable way to shape an agent's surface is at config time —
+`LAIN_TOOL_PROFILE` in the agent's MCP server entry (values compose):
+
+| Agent role | Profile | Why |
+|---|---|---|
+| Coding agent | *(default)* | 18-tool core: orient, understand, assess impact |
+| Reviewer / architect | `arch,verify` | layered maps, module comparison, build/test evidence |
+| Coordinator (multi-agent) | `session,social,notes` | claims, roster, handoffs |
+| Operator / setup | `ops` | reload, status, LSP install, re-enrichment |
+
+Agent-loadable skill files for these workflows ship in
+[`skills/`](../skills/README.md) — one SKILL.md per package group,
+installable into any agent's skills directory.
 
 ## Server lifecycle
 
@@ -70,15 +138,16 @@ server. `get_reload_status` reports the state (`idle` /
 `.lain/tuning.toml`. Defaults shown; only set the keys you need.
 
 ```toml
-[ingest]
-max_concurrent_indexers = 8
-ready_threshold = 0.8
-
-[nlp]
+semantic_similarity_threshold = 0.3
 query_prefix = ""                       # BGE: "Represent this sentence for searching relevant passages: "
-lex_weight = 0.3                        # hybrid score weight on stemmed token recall
-anchor_weight = 0.05                    # hybrid score weight on anchor score
-cross_encoder_top_k = 0                 # 0 = off; set to 20 to enable rerank
+lexical_weight = 0.0
+anchor_weight = 0.3
+cross_encoder_top_k = 20
+
+[ingestion]
+lsp_pool_size = 4
+files_per_batch = 50
+max_files_per_scan = 5000
 
 [presence]
 interactive_session_ttl_secs = 600      # agent doing ordinary work
@@ -87,6 +156,21 @@ inferred_claim_ttl_secs      = 120      # how long a *guessed* claim lives
 state_lock_acquire_timeout_ms = 2000    # then proceed without lock
 state_lock_retry_interval_ms  = 20      # tail latency under contention
 ```
+
+Cold language servers get one `documentSymbol` request before the main scan.
+These settings control that warm-up:
+
+```toml
+[ingestion]
+lsp_prewarm_timeout_secs = 30
+lsp_prewarm_max_files = 50
+lsp_prewarm_opt_out = false
+lsp_prewarm_skip_extensions = ["js", "css"]
+```
+
+Set `LAIN_LSP_PREWARM=false` to skip the warm-up without editing the file.
+`lain doctor --json` prints the repository's readiness report; `get_health`
+lists each language and whether its language server is installed.
 
 `state_lock_retry_interval_ms` sets the contention tail latency:
 with eight agents on one file, p99 on `claim_files` is roughly ten
@@ -125,9 +209,13 @@ Four-call dance per agent (sequence diagram in [multiplayer.md](multiplayer.md#a
 
 ```
 1. register_agent(name, kind)        → {agent_id, session_token, expires_at_unix}
-2. claim_files(path, symbols?, intent?)  → {granted, conflicts, advisories}
-3. edit
-4. release_files(path)
+2. (optional) lain_intent(goal, scopes, status) → {intent_id, coordination: {level, reason, related[]}}
+3. claim_files(path, symbols?, intent?) → {granted, conflicts, advisories}
+4. edit
+5. release_files(path)
+6. (optional) unregister_agent() — releases every claim, drops the
+   intent and activity entries. The expiry loop handles the
+   "agent crashed" case; use this when the agent knows it's done.
 ```
 
 Any authenticated call refreshes the session — no heartbeat loop
@@ -202,3 +290,56 @@ Exit 0 clean, 1 on hard failure.
 | All MCP tools | [quickstart-tools.md](quickstart-tools.md) |
 | `repos.yaml` schema | [REPOS_YAML.md](REPOS_YAML.md) |
 | Command Center | [command-center.md](command-center.md) |
+
+## Intent + activity feed
+
+The intent layer is the second-tier surface above `claim_files`.
+Agents declare goals and scopes once; hooks auto-record tool
+calls; the evaluator returns GREEN / YELLOW / RED before edits.
+
+### Quick start
+
+```bash
+# 1. Install the agent's MCP config + system-prompt snippet.
+#    Writes .lain/PROMPT.md with the three-sentence protocol;
+#    copy it into your agent's startup-context file (CLAUDE.md,
+#    .cursorrules, AGENTS.md, …).
+lain setup --agent claude
+
+# 2. (Optional) Preview the install without changing anything.
+lain setup --agent claude --print-config
+
+# 3. In the agent's session, declare an intent once:
+#    > "Before I edit, run `lain_intent` with goal='...', scopes=[...]"
+#    The hook layer does the rest automatically.
+
+# 4. The agent's per-agent activity feed is observable to peers:
+curl -X POST http://localhost:9999/mcp \
+    -H 'Content-Type: application/json' \
+    --data '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+             "params":{"name":"list_active_intents","arguments":{}}}'
+```
+
+### The three-sentence protocol
+
+The setup command writes this to `.lain/PROMPT.md`:
+
+> You are operating in a Lain-managed workspace. Lain coordinates
+> across agents via declared intent and automatic observation.
+>
+> Before a substantial code change, declare your goal and the
+> scopes you intend to modify via `lain_intent`. Update the intent
+> when your scope materially changes. Do not report individual
+> reads or commands; Lain observes those through hooks.
+
+### Hooks
+
+The hook layer (Claude Code PreToolUse, AGY pre-tool, Kimi pre-tool,
+Codex pre-tool, Cursor / Continue equivalents) POSTs observations to
+`/hook`. The wire shape and per-agent-kind mapping are documented in
+`docs/hooks.md`.
+
+For a synchronous answer before Edit fires (a YES/NO/YELLOW call),
+agents POST to `/hook/evaluate` with the target path or symbol; the
+server returns the GREEN / YELLOW / RED level + reason + related
+peer activity.

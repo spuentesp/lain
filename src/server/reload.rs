@@ -172,7 +172,12 @@ pub async fn run_rebuild(
         // is supposed to write the file before signalling, and a
         // hand-edit would be present on disk by the time the watcher
         // fires.
-        let repos_file = FederationConfig::load(&repos_yaml)?;
+        // `data_dir` relative to repos.yaml, as at startup: a hot-added
+        // `local_clone` was cloned under the server's cwd instead.
+        let repos_file = crate::server::federation::loader::resolve_data_dir(
+            FederationConfig::load(&repos_yaml)?,
+            &repos_yaml,
+        );
 
         // Resolve the workspace file (next to repos.yaml). Optional.
         let workspaces_path = workspaces_path_for(&repos_yaml);
@@ -289,6 +294,7 @@ impl ReloadSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn reload_bus_broadcasts() {
@@ -370,6 +376,7 @@ mod tests {
                 fed,
                 Transport::Http,
                 9999,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
                 Some(repos_yaml.to_path_buf()),
                 None,
             )
@@ -444,6 +451,7 @@ mod tests {
                     data_dir: data_dir.to_path_buf(),
                     max_concurrent_indexers: 1,
                     ready_threshold: 0.8,
+                    git_sensor: None,
                     repos: vec![crate::server::federation::config::RepoConfig {
                         id: (*id).to_string(),
                         source: crate::server::federation::config::SourceConfig::WorkspaceDir {
@@ -542,6 +550,7 @@ mod tests {
                 fed,
                 Transport::Http,
                 9999,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
                 Arc::new(crate::server::federation::workspace::WorkspacesFile {
                     default: None,
                     workspaces: vec![],
@@ -614,6 +623,7 @@ mod tests {
                 fed,
                 Transport::Http,
                 9999,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
                 Arc::new(crate::server::federation::workspace::WorkspacesFile {
                     default: None,
                     workspaces: vec![],

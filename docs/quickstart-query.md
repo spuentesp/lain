@@ -64,10 +64,12 @@ Prebuilt queries via `named` field:
 | `get_callers` | Who calls this function |
 | `get_callees` | What this function calls |
 | `get_file_functions` | Functions in a file |
-| `get_function_imports` | What a function imports |
 | `get_module_functions` | Functions in a module |
-| `get_test_coverage` | Tests for a function |
 | `get_deprecated_functions` | Deprecated functions |
+
+Named queries take no parameters and run over the whole graph; to aim one
+at a symbol, write `ops` (see `query-language.md`) or call the dedicated
+tool of the same name.
 
 ```json
 { "named": "get_blast_radius" }

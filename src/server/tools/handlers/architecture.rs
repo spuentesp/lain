@@ -1,16 +1,15 @@
 //! Architecture domain handlers
 
 use crate::error::LainError;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::NodeType;
 use crate::server::tools::utils::format_duration;
 use crate::server::tools::utils::resolve_node;
-use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 pub fn explore_architecture(
@@ -489,12 +488,13 @@ pub fn architectural_observations(
 /// the payload is well under 1 KB, leaving plenty of room in a
 /// agent's context for the actual question that follows.
 pub fn understand_repository(
-    workspace: &PathBuf,
+    workspace: &Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
     readiness: &crate::server::readiness::ReadinessHandle,
     budget_tokens: Option<usize>,
+    semantic_model_loaded: bool,
 ) -> Result<String, LainError> {
     // 1. Repository identity — name from workspace basename; languages
     //    from the graph's recorded NodeType population (rust, ts, py,
@@ -529,12 +529,11 @@ pub fn understand_repository(
 
     // 2. Git state — HEAD commit (short hash) + dirty flag.
     let (head, dirty) = {
-        let g = git.lock();
-        let head = g
+        let head = git
             .get_latest_commit_info()
             .ok()
             .map(|(h, _)| h.chars().take(7).collect::<String>());
-        let dirty = g
+        let dirty = git
             .get_uncommitted_changes()
             .ok()
             .map(|c| !c.is_empty())
@@ -577,7 +576,7 @@ pub fn understand_repository(
             }
         }
         let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
         ranked.into_iter().take(8).map(|(p, _)| p).collect()
     };
 
@@ -590,7 +589,7 @@ pub fn understand_repository(
         "symbols":         capability_state_json(&snap, "symbols"),
         "call_graph":      capability_state_json(&snap, "call_graph"),
         "git_history":     capability_state_json(&snap, "git_history"),
-        "semantic_search": capability_state_json(&snap, "semantic_search"),
+        "semantic_search": semantic_state_json(&snap, semantic_model_loaded),
     });
 
     // 5. Recommended actions — a static intent→tool map. Tools that
@@ -652,24 +651,7 @@ pub fn understand_repository(
 /// `repository.languages` field. Returns the empty string for unknown
 /// extensions so the caller can filter them out.
 fn language_for_ext(ext: &str) -> &'static str {
-    match ext {
-        "rs" => "Rust",
-        "ts" | "tsx" => "TypeScript",
-        "js" | "jsx" | "mjs" | "cjs" => "JavaScript",
-        "py" | "pyi" => "Python",
-        "go" => "Go",
-        "java" => "Java",
-        "rb" => "Ruby",
-        "c" | "h" => "C",
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => "C++",
-        "cs" => "C#",
-        "swift" => "Swift",
-        "kt" | "kts" => "Kotlin",
-        "scala" => "Scala",
-        "vue" => "Vue",
-        "svelte" => "Svelte",
-        _ => "",
-    }
+    crate::server::treesitter::language_name(ext).unwrap_or("")
 }
 
 /// Project one of the four canonical capability keys to a
@@ -679,7 +661,7 @@ fn language_for_ext(ext: &str) -> &'static str {
 /// `IndexLifecycleSnapshot` rather than recomputing.
 fn capability_state_json(
     snap: &crate::server::readiness::IndexLifecycleSnapshot,
-    key: &str,
+    _key: &str,
 ) -> Value {
     // The snapshot's `state` field already reflects the aggregate
     // (WarmingUp / Ready / UnavailableError); the per-capability
@@ -688,37 +670,37 @@ fn capability_state_json(
     // coarse grain: required capabilities inherit the snapshot
     // state; the optional `semantic_search` reports Ready if the
     // embedder is loaded, UnavailableOptional otherwise.
-    let (state_label, optional) = match key {
-        "semantic_search" => (
-            match snap.phase {
-                // The NLP prewarm is the only phase where the
-                // embedder is actively working; we can't tell
-                // directly from the snapshot whether a model is
-                // loaded, so report `warming_up` whenever the
-                // server is warming and `ready` once `ready` has
-                // been published. Callers that need the
-                // `Unavailable` "no model" signal should call
-                // `semantic_search` directly — that tool returns
-                // a typed `LainError::Unavailable` when no model
-                // is loaded, which is the authoritative answer.
-                crate::server::readiness::IndexPhase::Persisting => "ready",
-                _ => "ready",
-            },
-            true,
-        ),
-        _ => (
-            match snap.state {
-                crate::server::readiness::IndexState::Ready => "ready",
-                crate::server::readiness::IndexState::WarmingUp => "warming_up",
-                crate::server::readiness::IndexState::UnavailableError => "unavailable_error",
-            },
-            false,
-        ),
-    };
+    let (state_label, optional) = (
+        match snap.state {
+            crate::server::readiness::IndexState::Ready => "ready",
+            crate::server::readiness::IndexState::WarmingUp => "warming_up",
+            crate::server::readiness::IndexState::UnavailableError => "unavailable_error",
+        },
+        false,
+    );
     json!({
         "state": state_label,
         "optional": optional,
     })
+}
+
+/// `semantic_search` needs the optional embedding model. Without one it is
+/// `unavailable_optional` — `search_code` answers lexically — rather than
+/// `ready`, which this payload used to report unconditionally.
+fn semantic_state_json(
+    snap: &crate::server::readiness::IndexLifecycleSnapshot,
+    model_loaded: bool,
+) -> Value {
+    let state = if !model_loaded {
+        "unavailable_optional"
+    } else {
+        match snap.state {
+            crate::server::readiness::IndexState::Ready => "ready",
+            crate::server::readiness::IndexState::WarmingUp => "warming_up",
+            crate::server::readiness::IndexState::UnavailableError => "unavailable_error",
+        }
+    };
+    json!({ "state": state, "optional": true })
 }
 
 #[cfg(test)]
@@ -823,6 +805,7 @@ mod m5_tests {
             server.ingest().git(),
             server.readiness(),
             None,
+            false,
         )
         .unwrap();
         let _ = server;

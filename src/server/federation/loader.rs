@@ -10,8 +10,26 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+/// A relative `data_dir` (including the default `./.lain/federation`) is
+/// resolved next to the config file. Against the process's cwd, running
+/// `lain server --config ../stack/repos.yaml` from elsewhere created a
+/// fresh data directory there and re-indexed everything from cold.
+pub(crate) fn resolve_data_dir(
+    mut config: FederationConfig,
+    config_path: &Path,
+) -> FederationConfig {
+    if config.data_dir.is_relative() {
+        let base = config_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        config.data_dir = base.join(&config.data_dir);
+    }
+    config
+}
+
 pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, LainError> {
-    let config = FederationConfig::load(config_path)?;
+    let config = resolve_data_dir(FederationConfig::load(config_path)?, config_path);
     let manifest_path = config.data_dir.join("federation_manifest.bin");
     let _manifest = FederationManifest::load_or_default(&manifest_path)?;
 
@@ -26,16 +44,29 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     let sources = config.build_sources()?;
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
 
-    // Spawn per-repo indexers up to `max_concurrent_indexers` in flight, then
-    // await them all. The semaphore is acquired *before* spawn so the limit
-    // applies to the in-flight count, not the spawn count; each task holds
-    // its permit until completion (the `_permit` binding), so permits are
-    // released by drop when the task end.
+    // Cold-start orchestration (Codex finding #4). The previous
+    // parallel `project_repo` spawn dropped cross-repo `Calls` edges
+    // when a consumer repo projected its edge before the provider repo
+    // projected its target node: the target's `GlobalId` was not yet in
+    // the federated backend and the edge was skipped. Split into three
+    // phases:
+    //   Phase 0 — register every repo (parallel; semaphore-bounded).
+    //   Phase 1 — project every repo's nodes. Sequential, so the
+    //             federated backend holds every node's `GlobalId`
+    //             before any edge is touched.
+    //   Phase 2 — project every repo's edges. Sequential; every
+    //             cross-repo target is now visible, so `project_edges`
+    //             can resolve it without the placeholder fallback.
     //
     // For each source we first run `fetch()` (clones the repo if needed).
     // `WorkspaceDirSource::fetch` is a no-op so this is cheap for in-tree
     // repos; for `ShallowCloneSource` it materializes the on-disk checkout
     // that `RepoIndex::new` (via `GitSensor::new`) requires to exist.
+    //
+    // The semaphore is acquired *before* spawn so the limit applies to
+    // the in-flight count, not the spawn count; each task holds its
+    // permit until completion (the `_permit` binding), so permits are
+    // released by drop when the task ends.
     let mut handles = Vec::with_capacity(sources.len());
     for src in sources {
         let permit = semaphore
@@ -47,10 +78,24 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
         let data_dir = config.data_dir.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            src.fetch().await?;
             let repo_id = src.id().clone();
-            fed_clone.add_repo(src, &data_dir).await?;
-            fed_clone.project_repo(&repo_id).await?;
+            // One unreachable repository (a bad URL, a missing ref, no
+            // network) used to stop `lain server` from starting at all,
+            // though the docs promise it is only left out. Record it and
+            // carry on; `get_health` reports it.
+            if let Err(e) = src.fetch().await {
+                tracing::warn!("repo '{}' not loaded: {e}", repo_id.as_str());
+                fed_clone.record_load_error(repo_id.as_str(), e.to_string());
+                return Ok(());
+            }
+            if let Err(e) = fed_clone.add_repo(src, &data_dir).await {
+                tracing::warn!("repo '{}' not loaded: {e}", repo_id.as_str());
+                fed_clone.record_load_error(repo_id.as_str(), e.to_string());
+                return Ok(());
+            }
+            // Projection is not done here: Phase 1/2 below project every
+            // repo's nodes first, then edges, so a consumer-first cold
+            // pass cannot miss a provider's nodes.
             // Wire the federation as this repo's cross-repo resolver
             // (wishlist #13) so a subsequent `repo.index()` can
             // materialize cross-repo `Calls` edges.
@@ -63,6 +108,25 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     for h in handles {
         h.await
             .map_err(|e| LainError::Other(format!("join: {e}")))??;
+    }
+    // Nothing loaded at all is still an error: a server with no
+    // repositories can only mislead.
+    let errors = fed.load_errors();
+    if fed.list_repos().is_empty() && !errors.is_empty() {
+        let detail: Vec<String> = errors.iter().map(|(r, e)| format!("{r}: {e}")).collect();
+        return Err(LainError::Config(format!(
+            "no repository could be loaded: {}",
+            detail.join("; ")
+        )));
+    }
+
+    // Phase 1: project all nodes.
+    for (repo_id, _) in fed.list_repos() {
+        fed.project_nodes(&repo_id).await?;
+    }
+    // Phase 2: project all edges.
+    for (repo_id, _) in fed.list_repos() {
+        fed.project_edges(&repo_id).await?;
     }
 
     // Persist the manifest on a best-effort basis: a save failure must not
@@ -102,7 +166,7 @@ pub async fn load_federation_with_workspace(
     workspaces_path: &Path,
     workspace_name: &str,
 ) -> Result<Arc<FederatedIndex>, LainError> {
-    let config = FederationConfig::load(config_path)?;
+    let config = resolve_data_dir(FederationConfig::load(config_path)?, config_path);
     let manifest_path = config.data_dir.join("federation_manifest.bin");
     let _manifest = FederationManifest::load_or_default(&manifest_path)?;
 
@@ -128,11 +192,13 @@ pub async fn load_federation_with_workspace(
     // end-of-load save_manifest below sees the file written.
     fed.set_manifest_path(Some(manifest_path.clone()));
 
-    // Spawn per-repo indexers up to `max_concurrent_indexers` in flight, then
-    // await them all. Mirrors `load_federation`'s per-repo loop exactly —
-    // it adds each repo to the federation and projects whatever is in the
-    // per-repo DB (empty on a fresh load; populated later by the indexing
-    // pass in `run_server`).
+    // Cold-start orchestration (Codex finding #4). Same Phase 0/1/2
+    // split as `load_federation`: register every repo in parallel,
+    // then sequentially project every repo's nodes, then every repo's
+    // edges. Mirrors `load_federation`'s per-repo loop on the
+    // registration side; on a fresh load the per-repo DBs are empty
+    // (the indexing pass in `run_server` runs after this returns), so
+    // Phase 1/2 are no-ops until that pass lands.
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
     let mut handles = Vec::with_capacity(picked.len());
     for repo_config in picked {
@@ -149,13 +215,24 @@ pub async fn load_federation_with_workspace(
             source.fetch().await?;
             let repo_id = source.id().clone();
             fed_clone.add_repo(source, &data_dir).await?;
-            fed_clone.project_repo(&repo_id).await?;
+            if let Some(repo) = fed_clone.get_repo(&repo_id) {
+                repo.set_cross_repo_resolver(fed_clone.clone());
+            }
             Ok::<(), LainError>(())
         }));
     }
     for h in handles {
         h.await
             .map_err(|e| LainError::Other(format!("join: {e}")))??;
+    }
+
+    // Phase 1: project all nodes.
+    for (repo_id, _) in fed.list_repos() {
+        fed.project_nodes(&repo_id).await?;
+    }
+    // Phase 2: project all edges.
+    for (repo_id, _) in fed.list_repos() {
+        fed.project_edges(&repo_id).await?;
     }
 
     // Discarding this hid a failed save entirely: the federation came up
@@ -225,4 +302,56 @@ fn save_manifest(fed: &FederatedIndex, path: &Path) -> Result<(), LainError> {
         });
     }
     manifest.save(path)
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    /// One unreachable repository is left out and reported; the rest load.
+    #[tokio::test]
+    async fn an_unreachable_repo_does_not_stop_the_federation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tmp.path().join("good");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(good.join("a.py"), "def a():\n    pass\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .current_dir(&good)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "-A"]);
+        git(&["commit", "--quiet", "-m", "x"]);
+        let cfg = tmp.path().join("repos.yaml");
+        std::fs::write(
+            &cfg,
+            format!(
+                "data_dir: {}\nrepos:\n  - id: good\n    source: {{ type: workspace_dir, path: {} }}\n  \
+                 - id: bad\n    source: {{ type: local_clone, url: \"file://{}/nope\", ref: main }}\n",
+                tmp.path().join("data").display(),
+                good.display(),
+                // Forward slashes: a Windows path's backslashes are escapes
+                // inside a double-quoted YAML string.
+                tmp.path().display().to_string().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let fed = load_federation(&cfg)
+            .await
+            .expect("loads despite the bad repo");
+        let ids: Vec<String> = fed
+            .list_repos()
+            .into_iter()
+            .map(|(id, _)| id.as_str().to_string())
+            .collect();
+        assert_eq!(ids, vec!["good".to_string()]);
+        let errors = fed.load_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "bad");
+    }
 }

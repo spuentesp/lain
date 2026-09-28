@@ -40,6 +40,7 @@ fn main() -> Result<()> {
             config,
             transport,
             port,
+            bind,
             log_level,
             workspace,
             no_process_attribution,
@@ -69,6 +70,7 @@ fn main() -> Result<()> {
                 &lain::cli::resolve_repos_config(&config),
                 &transport,
                 port,
+                bind,
                 &log_level,
                 &workspace,
                 no_process_attribution,
@@ -100,7 +102,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Ask {
             config: _,
-            question: _,
+            question,
         }) => {
             // NOTE: `cli::ask::run_ask` is the PreToolUse hook handler
             // — it reads JSON from stdin and outputs a permission
@@ -109,7 +111,7 @@ fn main() -> Result<()> {
             // them through (likely by serializing into stdin or by
             // adding an interactive prompt). For now the args are
             // accepted for surface parity and ignored at dispatch.
-            lain::cli::ask::run_ask()
+            lain::cli::ask::run_ask(question.as_deref())
         }
         Some(Commands::Mcp {
             workspace,
@@ -209,7 +211,9 @@ fn main() -> Result<()> {
             print_config,
             yes,
             no_model,
+            lsp,
         }) => {
+            let as_json = json;
             let code = lain::cli::setup::run_setup(lain::cli::setup::SetupOptions {
                 workspace,
                 agent,
@@ -218,12 +222,36 @@ fn main() -> Result<()> {
                 print_config,
                 yes,
                 no_model,
+                lsp,
             })
             .unwrap_or_else(|error| {
-                eprintln!("setup failed: {error:#}");
+                if as_json {
+                    // `--json` promises machine-readable stdout, failures included.
+                    println!(
+                        "{}",
+                        serde_json::json!({"ready": false, "error": format!("{error:#}")})
+                    );
+                } else {
+                    eprintln!("setup failed: {error:#}");
+                }
                 2
             });
             std::process::exit(code);
+        }
+        Some(Commands::Reindex {
+            config,
+            workspace,
+            verbose,
+        }) => {
+            // `reindex` rebuilds the federation backend, which fans
+            // out into parallel per-repo indexing tasks inside the
+            // loader — same shape as `server`, so reuse the multi-thread
+            // runtime.
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("build tokio runtime for reindex subcommand")?;
+            rt.block_on(lain::cli::run_reindex(config, workspace, verbose))
         }
         None => {
             // No subcommand: print help.

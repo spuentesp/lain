@@ -196,7 +196,18 @@ pub fn parse_reindex_timeout() -> Duration {
         Ok(s) => match s.parse::<u64>() {
             Ok(secs) => Duration::from_secs(secs),
             Err(_) => {
-                eprintln!("LAIN_REINDEX_TIMEOUT={s:?} is not a valid integer; using default 300s");
+                // Use `tracing::warn!` instead of `eprintln!` — when
+                // lain is running as the stdio MCP server, anything
+                // written to stderr is delivered to the agent on the
+                // same stream as the JSON-RPC frames. A bare
+                // `eprintln!` line corrupts that stream and breaks
+                // tool-call parsing. Tracing routes through the
+                // configured subscriber (usually stderr filtered, but
+                // outside the wire stream) and matches every other
+                // diagnostic in this module.
+                tracing::warn!(
+                    "LAIN_REINDEX_TIMEOUT={s:?} is not a valid integer; using default 300s"
+                );
                 Duration::from_secs(300)
             }
         },

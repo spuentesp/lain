@@ -31,6 +31,10 @@ SUBJECT="$WORK/subject"
 URL="http://127.0.0.1:$PORT"
 MCP="$URL/mcp"
 LAIN="${LAIN:-$REPO_ROOT/target/release/lain}"
+# This suite exercises every tool, so its servers advertise the full
+# surface. The default `semantic` profile shows agents a curated subset;
+# without this the tool-count and coverage checks fail against it.
+export LAIN_TOOL_PROFILE="${LAIN_TOOL_PROFILE:-full}"
 MODEL="${LAIN_EMBEDDING_MODEL:-/tmp/lainmodel}"
 QUICK=0
 NO_BUILD=0
@@ -155,6 +159,16 @@ print(('__TOOL_ERROR__ ' if r.get('isError') else '')+t)
 }
 
 http_code() { curl -s -o /dev/null -w '%{http_code}' -m 20 "$1"; }
+# `lain server` answers at once and indexes in the background; wait until
+# no repo in /health reports `"health":"indexing"`, as a client would.
+wait_indexed() {
+  for _ in $(seq 1 "$2"); do
+    local body; body=$(curl -s -m 20 "$1/health" || true)
+    if [ -n "$body" ] && ! printf '%s' "$body" | grep -q '"health":"indexing"'; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
 
 # ── setup ─────────────────────────────────────────────────────────────
 cleanup() {
@@ -242,7 +256,11 @@ BOOT_MS=$(( (BOOT_T1 - BOOT_T0) / 1000000 ))
 if [ "$(http_code "$URL/health")" != "200" ]; then
   printf '%sserver never became healthy. log:%s\n' "$RED" "$RST"; tail -20 "$WORK/server.log"; exit 1
 fi
-printf '  healthy in %s ms (boot + index of the subject repo)\n' "$BOOT_MS"
+if ! wait_indexed "$URL" 120; then
+  printf '%ssubject repo never finished indexing. log:%s\n' "$RED" "$RST"; tail -20 "$WORK/server.log"; exit 1
+fi
+INDEX_MS=$(( ($(date +%s%N) - BOOT_T0) / 1000000 ))
+printf '  answering in %s ms, subject repo indexed in %s ms\n' "$BOOT_MS" "$INDEX_MS"
 
 # ══ 1. Server + surface ═══════════════════════════════════════════════
 section "1. Server and advertised surface"
@@ -251,10 +269,10 @@ TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['r
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "76" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "81" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "75" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "80" "$TOOL_COUNT"
 fi
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
@@ -262,6 +280,16 @@ fi
 # central readiness gate itself is built to answer even while every
 # other capability is warming up or broken.
 check_contains "get_capabilities reports the current capability snapshot" "schema_version" "$(call get_capabilities)"
+
+# Skill layer (capability packages): the menu must describe packages
+# and why they are off, and load_package must announce the tools it
+# brings and signal a tools/list change.
+MENU=$(call list_packages)
+check_contains "list_packages renders the skill menu" "why_off_by_default" "$MENU"
+check_contains "list_packages names its packages" "verify" "$MENU"
+LOAD=$(call load_package '{"package":"notes"}')
+check_contains "load_package signals a tools/list change" "tools_list_changed" "$LOAD"
+check_contains "load_package returns the tools it brings" "add_annotation" "$LOAD"
 
 H=$(call get_health)
 check_contains "get_health reports Operational" "Operational" "$H"
@@ -321,13 +349,15 @@ check_contains "vscode adapter emits `servers.lain` schema" '"servers"' \
 check_contains "vscode adapter names the server 'lain'" '"lain"' \
     "$(cat "$CLIENT_FAKE_HOME/vscode.out")"
 
-# Continue: writes ~/.continue/config.json under
-# experimental.modelContextProtocolServers.
+# Continue: legacy ~/.continue/config.json setups get the JSON edit; the
+# fake HOME here has none, which is the YAML-era path checked below.
 HOME="$CLIENT_FAKE_HOME/continue" "$LAIN" setup --workspace "$SUBJECT" \
     --agent continue --yes --no-model --print-config > "$CLIENT_FAKE_HOME/continue.out" 2>&1
-check_contains "continue adapter emits the experimental block" '"experimental"' \
+# With no ~/.continue/config.json (or with config.yaml) the adapter writes a
+# workspace block file, `.continue/mcpServers/lain.yaml`.
+check_contains "continue adapter emits a v1 block" 'schema: v1' \
     "$(cat "$CLIENT_FAKE_HOME/continue.out")"
-check_contains "continue adapter emits modelContextProtocolServers" 'modelContextProtocolServers' \
+check_contains "continue adapter emits mcpServers" 'mcpServers:' \
     "$(cat "$CLIENT_FAKE_HOME/continue.out")"
 
 # Codex: prefers `codex mcp add` when the CLI is on PATH; otherwise
@@ -379,6 +409,12 @@ check_absent  "find_dead_code excludes the hub"       "orchestrate" "$DC"
 AN=$(call find_anchors)
 TOP=$(printf '%s' "$AN" | sed -n 's/^1\. \([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' | head -1)
 check "find_anchors ranks the hub first" "orchestrate" "${TOP:-none}"
+
+# helper_a has one static caller, so dispatch analysis has evidence.
+ED=$(call explain_dispatch '{"symbol":"helper_a"}')
+check_contains "explain_dispatch reports the static caller" "static_callers" "$ED"
+check_absent  "explain_dispatch does not claim insufficient evidence" \
+  "insufficient_evidence" "$ED"
 
 CC=$(call get_call_chain '{"from":"entry","to":"helper_a"}')
 check_contains "get_call_chain links entry to helper_a" "helper_a" "$CC"
@@ -544,6 +580,15 @@ else
 
   call release_files "{\"agent_id\":\"$B_ID\",\"session_token\":\"$B_TOK\",\"files\":[\"src/core.rs\"]}" >/dev/null
   check_absent "list_subagents answers" "__RPC_ERROR__" "$(call list_subagents)"
+
+  # Intents: a goal plus the scopes it touches, shared with every agent.
+  IN=$(call lain_intent "{\"agent_id\":\"$A_ID\",\"session_token\":\"$A_TOK\",\"goal\":\"demo: refactor core\",\"scopes\":[\"src/core.rs\"]}")
+  check_contains "lain_intent declares an intent"      "intent_id"           "$IN"
+  check_contains "list_active_intents shows the goal" "demo: refactor core" "$(call list_active_intents)"
+
+  UN=$(call unregister_agent "{\"agent_id\":\"$A_ID\",\"session_token\":\"$A_TOK\"}")
+  check_contains "unregister_agent removes the session" "\"removed\":true" "$UN"
+  check_absent   "and alpha is no longer listed" "\"alpha\"" "$(call list_active_agents)"
 fi
 
 # ══ 8. Semantic search ════════════════════════════════════════════════
@@ -690,6 +735,7 @@ for _ in $(seq 1 60); do
   [ "$(http_code "http://127.0.0.1:$FED_PORT/health")" = "200" ] && break
   sleep 1
 done
+wait_indexed "http://127.0.0.1:$FED_PORT" 120 || true
 
 fcall() {
   local fargs="${2:-}"; [ -z "$fargs" ] && fargs='{}'
@@ -713,9 +759,10 @@ if [ "$(http_code "http://127.0.0.1:$FED_PORT/health")" = "200" ]; then
   check_contains "get_code_snippet reads beta's own checkout" "beta_only_helper" "$SNIP_B"
   XR=$(fcall get_cross_repo_blast_radius '{"symbol":"alpha_inner","depth":"1..3"}')
   check_contains "cross-repo blast radius groups by repo" "alpha" "$XR"
-  # depth is a range string; a number must say so, not "missing".
-  XE=$(fcall get_cross_repo_blast_radius '{"symbol":"alpha_inner","depth":2}')
-  check_contains "a wrong-typed arg names the type, not 'missing'" "must be a string" "$XE"
+  # depth accepts a range string or a number; a genuinely wrong type
+  # must name the type, not report "missing".
+  XE=$(fcall get_cross_repo_blast_radius '{"symbol":"alpha_inner","depth":true}')
+  check_contains "a wrong-typed arg names the type, not 'missing'" "boolean" "$XE"
 else
   skip "federation" "second server never became healthy"
 fi
@@ -879,7 +926,7 @@ print('  %-30s n=%-3d  p50 %5d ms   p95 %5d ms   max %5d ms%s'
   printf '  %-30s 20 concurrent get_health in %s ms\n' "parallel throughput" "$CMS"
 
   printf '\n  %sindexing%s\n' "$DIM" "$RST"
-  printf '  %-30s %s ms (boot + full index, %s nodes)\n' "cold start (subject)" "$BOOT_MS" "${NODES:-?}"
+  printf '  %-30s %s ms (boot + full index, %s nodes)\n' "cold start (subject)" "$INDEX_MS" "${NODES:-?}"
 
   # The fixture is deliberately tiny so its call graph can be reasoned
   # about by hand. Timings on 24 nodes say nothing about scale, so run
@@ -974,7 +1021,7 @@ if [ -s "$TIMES_TSV" ]; then
 fi
 
 if [ -n "$JSON_OUT" ]; then
-  python3 - "$RESULTS_TSV" "$TIMES_TSV" "$JSON_OUT" "$PASS" "$FAIL" "$SKIP" "$BOOT_MS" <<'PY'
+  python3 - "$RESULTS_TSV" "$TIMES_TSV" "$JSON_OUT" "$PASS" "$FAIL" "$SKIP" "$INDEX_MS" <<'PY'
 import json, sys, collections
 res_p, times_p, out_p, npass, nfail, nskip, boot = sys.argv[1:8]
 checks=[]

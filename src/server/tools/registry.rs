@@ -8,17 +8,18 @@
 //! No central edit required.
 
 use crate::error::LainError;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
+use crate::server::annotations::AnnotationRegistry;
 use crate::server::presence::{OccupancyMap, PresenceRegistry};
 use crate::server::tools::UiSession;
 use crate::tuning::TuningConfig;
 use async_trait::async_trait;
 use inventory::iter;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,10 +32,10 @@ pub struct ToolContextDeps {
     pub overlay: VolatileOverlay,
     pub embedder: NlpEmbedder,
     pub cross_encoder: crate::nlp::CrossEncoder,
-    pub git: Arc<Mutex<GitSensor>>,
+    pub git: Arc<AnyGitSensor>,
     pub lsp_pool: Arc<LspPool>,
     pub tuning: Arc<TuningConfig>,
-    pub embedding_cache: Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    pub embedding_cache: Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     pub ui_sessions: crate::server::tools::UiSessionStore,
     pub jobs: Arc<Mutex<HashMap<String, crate::server::tools::JobInfo>>>,
     pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
@@ -47,10 +48,10 @@ pub struct ToolContext {
     pub overlay: VolatileOverlay,
     pub embedder: NlpEmbedder,
     pub cross_encoder: crate::nlp::CrossEncoder,
-    pub git: Arc<Mutex<GitSensor>>,
+    pub git: Arc<AnyGitSensor>,
     pub lsp_pool: Arc<LspPool>,
     pub tuning: Arc<TuningConfig>,
-    pub embedding_cache: Arc<Mutex<std::collections::HashMap<String, Vec<f32>>>>,
+    pub embedding_cache: Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     pub ui_sessions: Arc<AsyncMutex<std::collections::HashMap<String, UiSession>>>,
     pub jobs: Arc<Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
     pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
@@ -85,6 +86,20 @@ pub struct ToolContext {
     /// swaps in the live `Arc<Mutex<RefreshOutcome>>` from the
     /// constructed `LainServer`.
     pub last_outcome: Arc<parking_lot::Mutex<crate::server::refresh::RefreshOutcome>>,
+    /// Wall-clock nanosecond timestamp at which the parking_lot
+    /// `GitSensor` mutex became continuously held (Bug #2 from the
+    /// 2026-09-18 postmortem), or `0` if the mutex is free. The
+    /// watchdog spawned by [`crate::server::ingest::handles::IngestHandle::start_git_sensor_watchdog`]
+    /// publishes this on the free→held transition (CAS, so only the
+    /// first observer wins) and clears it on the held→free
+    /// transition. `get_health` reads it to surface the hang to
+    /// operator tooling (alertmanager, dashboards) without requiring
+    /// log scraping. Initialized to a fresh zero atomic so standalone
+    /// / sidecar executors that never wire a `LainServer` keep
+    /// constructing successfully; `LainMcpServer::with_server`
+    /// replaces this with the live atomic from the constructed
+    /// `LainServer`'s `IngestHandle`.
+    pub git_busy_since_unix_nanos: Arc<std::sync::atomic::AtomicU64>,
     /// Single owner for startup indexing state. Health, discovery, and the
     /// readiness gate read snapshots from this handle.
     pub readiness: crate::server::readiness::ReadinessHandle,
@@ -112,6 +127,27 @@ pub struct ToolContext {
     /// in single-workspace mode and in tests that don't wire a
     /// federation — the dispatcher's wait is then a no-op.
     pub indexed_signal: Option<Arc<tokio::sync::Notify>>,
+    /// Per-repo annotation store shared with the `LainServer` orchestrator.
+    /// Tools that surface architectural context (`explain_symbol`,
+    /// `get_blast_radius`) read this to append an `### Open annotations`
+    /// section so an agent's first call about a symbol surfaces the
+    /// human notes left there. Initialized to a temp-dir-backed
+    /// best-effort registry so standalone / sidecar executors that don't
+    /// carry a `LainServer` still construct successfully; `with_server`
+    /// (or `with_annotations`) swaps in the live registry once the
+    /// orchestrator is built. Annotations are read-only here — write
+    /// paths stay on the dedicated MCP tools so the dispatcher gate
+    /// still applies.
+    pub annotations: Arc<AnnotationRegistry>,
+    /// Workspace handle shared with the running `LainServer`. None
+    /// for standalone / sidecar executors that never wire a
+    /// `LainMcpServer`; the dispatcher routes workspace tools off
+    /// this when present. PR-fix-Item-1 also reads it from
+    /// `get_capabilities` so the advertised tool count is exact
+    /// under workspace mode (the previous PR shipped the helper
+    /// signature with `workspace_active` but the call sites
+    /// hard-coded `false`).
+    pub workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
 }
 
 impl ToolContext {
@@ -158,6 +194,11 @@ impl ToolContext {
             last_outcome: Arc::new(parking_lot::Mutex::new(
                 crate::server::refresh::RefreshOutcome::skipped(),
             )),
+            // Default to a fresh zero atomic. `LainMcpServer::with_server`
+            // swaps in the live atomic from the constructed
+            // `LainServer`'s `IngestHandle` once the orchestrator is
+            // built; until then `get_health` reads 0 ("mutex free").
+            git_busy_since_unix_nanos: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             readiness: crate::server::readiness::ReadinessHandle::default(),
             // Set by `with_federation` when the server runs in
             // federation mode; single-workspace executors leave it None
@@ -167,7 +208,43 @@ impl ToolContext {
             // single-workspace executors leave it None and the
             // dispatcher's cold-boot wait is then a no-op.
             indexed_signal: None,
+            // Default to a temp-dir-backed best-effort registry so a
+            // standalone executor (one that never wires a `LainServer`)
+            // can still construct without panicking. `with_annotations`
+            // and `LainMcpServer::with_server` swap this for the live
+            // registry once the orchestrator is built. No annotation
+            // data lives in the temp dir for the default case —
+            // `summaries_for_targets` walks an empty store and returns
+            // an empty vector, so the appended `### Open annotations`
+            // section is suppressed by the same `is_empty()` guard the
+            // followup tests pin.
+            annotations: AnnotationRegistry::open_best_effort(&std::env::temp_dir()),
+            // Default to `None` so standalone / sidecar executors
+            // (which never wire a `LainMcpServer`) construct
+            // successfully. `LainMcpServer` sets this from its
+            // constructor before the executor reaches any tool.
+            workspaces: None,
         }
+    }
+
+    /// Install the workspace handle shared with `LainMcpServer`.
+    /// Used by the MCP dispatcher to expose workspace tools and
+    /// (since PR-fix-Item-1) by `get_capabilities` to report an
+    /// exact `tool_profile.advertised_count` under workspace mode.
+    pub fn with_workspaces(
+        mut self,
+        workspaces: Arc<RwLock<crate::federation::workspace::WorkspacesFile>>,
+    ) -> Self {
+        self.workspaces = Some(workspaces);
+        self
+    }
+
+    /// Install a live annotation registry. `LainMcpServer::with_server`
+    /// uses this when it has the orchestrator in hand; tests construct
+    /// one off a tempdir directly.
+    pub fn with_annotations(mut self, registry: Arc<AnnotationRegistry>) -> Self {
+        self.annotations = registry;
+        self
     }
 
     /// Attach the federation so per-repo tools can be rebound per call.
@@ -211,13 +288,9 @@ impl ToolContext {
         bound.indexed_signal = Some(repo.indexed_signal());
         let root = repo.source().local_path().to_path_buf();
         // Git-backed tools (history, diff, branch status) read through
-        // `git`, so it has to follow the repo too — otherwise they keep
-        // answering from whichever checkout the server was built
-        // against. A repo whose checkout is not a git work tree keeps
-        // the existing sensor rather than failing the call.
-        if let Ok(sensor) = GitSensor::new(&root) {
-            bound.git = Arc::new(Mutex::new(sensor));
-        }
+        // `git`, so it has to follow the repo too. Rebind to the repo's
+        // own AnyGitSensor.
+        bound.git = Arc::clone(repo.git());
         bound.workspace = root;
         Some(bound)
     }
@@ -352,26 +425,39 @@ impl ToolRegistry {
                 return entry.0.call(ctx, args).await;
             }
         }
-        Err(LainError::NotFound(format!("Unknown tool: {}", name)))
+        Err(LainError::InvalidArgument(format!(
+            "Unknown tool: {}",
+            name
+        )))
     }
 
     /// Collect all tool definitions for MCP schema registration.
+    ///
+    /// Sorted alphabetically by tool name so the inventory iteration
+    /// order — which is non-deterministic across linker layouts and
+    /// rebuilds — doesn't leak into the wire surface. The
+    /// `lain schema dump` artifact (docs/tool-schema.json) and the
+    /// live `tools/list` response both flow through this method, so
+    /// sorting here pins both sides to the same byte-order contract
+    /// (`tests/schema_dump_smoke::live_tools_list_byte_matches_on_disk_schema_dump`).
     pub fn definitions() -> Vec<crate::server::tools::definitions::ToolDefinition> {
-        iter::<ToolHandlerEntry>()
-            .map(|entry| {
-                let schema: Value = serde_json::from_str(entry.0.input_schema())
-                    .unwrap_or_else(|_| serde_json::json!({}));
-                crate::server::tools::definitions::ToolDefinition {
-                    name: entry.0.name(),
-                    description: entry.0.description(),
-                    input_schema: schema,
-                    readiness: crate::server::tools::definitions::readiness_requirement(
-                        entry.0.name(),
-                    )
+        let mut defs: Vec<crate::server::tools::definitions::ToolDefinition> = iter::<
+            ToolHandlerEntry,
+        >()
+        .map(|entry| {
+            let schema: Value = serde_json::from_str(entry.0.input_schema())
+                .unwrap_or_else(|_| serde_json::json!({}));
+            crate::server::tools::definitions::ToolDefinition {
+                name: entry.0.name(),
+                description: entry.0.description(),
+                input_schema: schema,
+                readiness: crate::server::tools::definitions::readiness_requirement(entry.0.name())
                     .expect("every registered tool must declare a readiness requirement"),
-                }
-            })
-            .collect()
+            }
+        })
+        .collect();
+        defs.sort_by(|a, b| a.name.cmp(b.name));
+        defs
     }
 }
 
@@ -433,12 +519,17 @@ mod federation_binding_tests {
             overlay: crate::overlay::VolatileOverlay::new(),
             embedder: crate::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
             cross_encoder: crate::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
-            git: Arc::new(Mutex::new(GitSensor::new(&roots[0].1).expect("git sensor"))),
+            git: Arc::new(AnyGitSensor::from_env(&roots[0].1).expect("git sensor")),
             lsp_pool: Arc::new(
                 LspPool::new(&roots[0].1, 1, &crate::tuning::RuntimeConfig::default()).unwrap(),
             ),
             tuning: Arc::new(TuningConfig::default()),
-            embedding_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            embedding_cache: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(
+                    crate::server::tuning::TuningConfig::default().embedding_cache_capacity,
+                )
+                .expect("default capacity > 0"),
+            ))),
             ui_sessions: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
             jobs: Arc::new(Mutex::new(std::collections::HashMap::new())),
             job_webhooks: Arc::new(AsyncMutex::new(Vec::new())),
@@ -478,5 +569,35 @@ mod federation_binding_tests {
             ctx.for_repo("no-such-repo").is_none(),
             "an unknown repo leaves the caller's context alone"
         );
+    }
+
+    /// B1 — the bounded embedding cache evicts the oldest entry once
+    /// capacity is exceeded. A long-running server with many distinct
+    /// queries must not grow the cache without limit; with a small
+    /// capacity the LRU policy keeps the working set bounded and a
+    /// known-old entry is dropped before a known-new one is added.
+    #[test]
+    fn embedding_cache_evicts_oldest_when_full() {
+        use lru::LruCache;
+        use std::num::NonZeroUsize;
+
+        let cache: parking_lot::Mutex<LruCache<String, Vec<f32>>> =
+            parking_lot::Mutex::new(LruCache::new(NonZeroUsize::new(2).unwrap()));
+
+        // Fill to capacity.
+        cache.lock().put("a".into(), vec![1.0]);
+        cache.lock().put("b".into(), vec![2.0]);
+        assert_eq!(cache.lock().len(), 2);
+
+        // A third put evicts the least-recently-used entry (`a`).
+        cache.lock().put("c".into(), vec![3.0]);
+        assert_eq!(cache.lock().len(), 2);
+        assert!(
+            cache.lock().get("a").is_none(),
+            "the oldest entry must be evicted; got {:?}",
+            cache.lock().get("a")
+        );
+        assert!(cache.lock().get("b").is_some(), "b survives");
+        assert!(cache.lock().get("c").is_some(), "c survives");
     }
 }

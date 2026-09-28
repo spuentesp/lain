@@ -85,3 +85,15 @@ fn all_versions_match() {
         }
     }
 }
+
+#[test]
+fn sidecar_binary_version_matches() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lain-git-sidecar"))
+        .arg("--version")
+        .output()
+        .expect("run lain-git-sidecar --version");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("lain-git-sidecar {}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(stdout.trim(), expected);
+}

@@ -1,136 +1,56 @@
 # Follow-ups
 
-Tracked work that comes out of PRs already merged to `dev` but
-was deliberately deferred to keep those PRs small. Each entry
-points at the source PR, the section of the plan it came from,
-and a one-line scope summary.
+Current work deliberately deferred from changes already merged to `dev`.
+Completed plans, audits, and implementation notes live in Git history rather
+than this file.
 
-Last update: 2026-09-16, refreshed against HEAD (past PR #66, #72,
-#74, #75, #77, #88, plus PR A's cancellation work on
-`feat/m4-cancellation-token`, PR B's spawn-blocking work on
-`feat/m4-spawn-blocking`, PR E's tree-sitter+ONNX migration on
-`feat/m4-spawn-blocking-followup`, and the LSP cancel-aware
-work on `feat/m4-lsp-cancel-aware`). Stays on `0.7.4-rc1`;
-release cut is separate scope.
+Last verified against `dev` on 2026-09-21.
 
-Five items originally logged here have been resolved and removed
-from this file:
+## Distribution: Windows clean-room install
 
-- **Cross-repo annotation routing** — fixed in `33f9373
-  fix(annotations+readiness): address Copilot review findings`.
-- **Cold repo `last_indexed_commit` serializing as `Some("0")`** —
-  fixed in `6db4354 fix(federation): null last_indexed_commit until a
-  successful index pass`. `FederatedIndex::per_repo_readiness` now
-  gates `last_indexed_commit` and the wall-clock stamp on
-  `indexed_signal`, returning `None` until a real index pass lands —
-  see the comment at `src/server/federation/federated_index.rs:304`,
-  which cites this file's old entry #6 as its acceptance criterion.
-- **Cooperative cancellation token** — fixed in PR A
-  (`feat/m4-cancellation-token`, #88). Server-owned
-  `CancellationToken` in `LifecycleInfo`; plumbed through every
-  long-running phase; `await_startup_reindex` `select!`s
-  `build_core_memory` against the token; stdio startup uses
-  `cancel() + JoinHandle::await` within the existing 5-second
-  budget; HTTP startup now retains its `JoinHandle`. New
-  `index_cancelled` problem code.
-- **`spawn_blocking` isolation (libgit2 portion)** — fixed in PR B
-  (`feat/m4-spawn-blocking`). New `src/server/ingest/blocking.rs`
-  with `offthread(cancel, f)`. Libgit2 calls in
-  `build_core_memory` (`get_latest_commit_info`,
-  `get_changed_files_since`, `get_all_tracked_files`,
-  `analyze_co_changes`) routed through the blocking-thread pool;
-  `PerRepoReadiness::outstanding_files` wired through the
-  federation watcher's receiver loop (inotify callback
-  `fetch_add`s, receiver loop `fetch_sub`s).
-- **Tree-sitter + ONNX migration** — fixed in PR E
-  (`feat/m4-spawn-blocking-followup`). `scan_file_structure`
-  batches the four tree-sitter calls into one
-  `extract_tree_sitter_file` wrapped in `offthread`; the NLP
-  prewarm and lazy-enrichment loops both route
-  `NlpEmbedder::embed` through `offthread`. 6 new unit tests.
+- **Status:** fix landed in tree; awaiting the next release tag.
+- **Evidence:** `release.yml::build-windows` packages every
+  `*.dll` from `target/x86_64-pc-windows-msvc/release/` alongside
+  `lain.exe`, and the build fails loudly if `DirectML.dll` is
+  missing. `npm-shim/scripts/install.test.js` has the
+  `Windows install fails clearly when DirectML.dll is absent`
+  regression fixture. The published artifact is still the
+  pre-fix `lain.exe`-only archive until the next tag carries the
+  corrected packaging.
+- **Work:** ship the corrected archive in the next release and
+  verify it from a clean Windows runner.
+- **Acceptance:** all six scheduled user/automation lanes pass and
+  the release gate remains green for all three release targets.
 
-The only remaining M4 work is the LSP subprocess calls:
+## Indexing: LSP subprocess isolation
 
-### LSP subprocess calls (deferred — upstream blocker)
+- **Status:** blocked on the upstream `lsp-bridge` API.
+- **Background:** libgit2, tree-sitter, and ONNX work has moved off Tokio
+  worker threads. LSP round trips remain async-only but are cancellation-aware.
+- **Work:** migrate local call sites once upstream `lsp-bridge` exposes
+  blocking entry points or raw stdio transport.
+- **Acceptance:** hot LSP calls run outside Tokio worker threads while retaining
+  cancellation and timeout behavior.
 
-- **Source:** AGENT_UX_ROADMAP.md Milestone 4 design §"Index
-  execution and consistency" calls for routing the LSP
-  subprocess calls (`scan.rs:108,119`, `ingestion.rs:639-657`)
-  through `spawn_blocking`.
-- **Status:** **deferred — upstream blocker.** `lsp-bridge`
-  0.2's `LspMultiplexer::get_references` /
-  `get_document_symbols_hierarchical` are `async fn` returning
-  futures; the only way to expose a sync subprocess entry
-  point is upstream in `lsp-bridge`. Wrapping the async call
-  in `Handle::block_on` from inside `spawn_blocking` is the
-  anti-pattern this whole initiative was designed to avoid
-  (it would block a blocking-thread on the async runtime).
-- **What we did from this repo:** PR
-  `feat/m4-lsp-cancel-aware` adds a `tokio::select!` race
-  between the LSP `await` and the cancel token. When shutdown
-  lands mid-scan, the LSP round-trip is abandoned promptly
-  instead of waiting for the child to answer. That's a real
-  cancellation-latency improvement — `RUST_LOG=trace` shows
-  the LSP child stops being driven as soon as the token
-  fires — but it does NOT move LSP onto the blocking-thread
-  pool.
-- **Where to land:** separate upstream PR in `lsp-bridge`
-  adding a sync `get_references_blocking` /
-  `get_document_symbols_blocking` API on `LspMultiplexer`.
-  Once that's released, this repo's migration is a small
-  call-site change. Until then, the LSP calls stay on the
-  Tokio runtime, gated by the cancel-aware `tokio::select!`.
+## Planned capability expansions
 
-## From the annotation layer (PR #66 deferred)
+- **Hybrid LSP expansion:** LSP implementation, type-definition, and call-hierarchy edges.
+- **OTLP gRPC ingest:** optional OTLP gRPC/protobuf ingest alongside the existing lightweight HTTP/JSON path.
 
-### Auto-include in `explain_symbol` / `get_blast_radius` markdown
-- **Source:** PR #66 deferred items. The `summaries_for_targets`
-  helper at `src/server/mcp/annotation_tools.rs` is in place; the
-  wiring into the existing markdown bodies is the missing piece.
-- **Still not started:** confirmed 2026-09-16, no `Open annotations`
-  / `open_annotations` text anywhere in `src/`.
-- **Why deferred:** the existing markdown bodies have many
-  callers (the human-facing UI + several test fixtures pinning
-  the prose shape); a follow-up that just adds the new section
-  preserves the existing wire contract.
-- **Acceptance:** `explain_symbol` markdown grows an
-  `### Open annotations` section when any open annotation exists
-  for the resolved symbol; `get_blast_radius` includes
-  `open_annotations: [AnnotationSummary]` for visited symbols;
-  existing UI tests still pass (the new section is appended,
-  not inserted into the middle).
+## Trust and release work
 
-### `tests/annotations_e2e.rs` and `tests/handoff_e2e.rs`
-- **Source:** PR #66 deferred items. The unit tests in
-  `src/server/annotations.rs` cover storage round-trip, body
-  validation, filter, staleness, UTF-8 boundary truncation.
-  The e2e tests ride on the same dispatcher wiring and were
-  dropped as a smaller marginal addition.
-- **Still not started:** confirmed 2026-09-16, neither file
-  exists under `tests/`.
-- **Acceptance:** write→read→resolve→stale-detection flows
-  exercised through the MCP dispatcher end-to-end (not just the
-  storage layer); handoff flow exercised through
-  register_agent → leave_handoff_note → unregister →
-  re-register → get_pending_handoffs.
+- **Dependency advisories:** keep the current actions in
+  [`VULNS.md`](VULNS.md).
+- **OpenSSF gaps:** keep the current measurements and process decisions in
+  [`SCORECARD.md`](SCORECARD.md).
+- **Agent-contract badge:** optional polish. The commit status is live and used
+  by branch protection, but there is no distinct badge endpoint. Only build one
+  if the README needs a separate signal from the ordinary CI badge.
+- **Next release:** `dev` is ahead of `main`; choose the next version, create a
+  `release/v0.x.y` branch from `dev`, update all release metadata, and open the
+  release PR against `main` as described in [`BRANCHING.md`](BRANCHING.md).
 
-## Release flow
+## Maintenance rule
 
-### Next release cut (separate scope)
-- **Source:** `AGENTS.md` release policy. Per
-  `docs/BRANCHING.md`, `dev → main` is release-only.
-- **Trigger:** user decision. Either cut `v0.7.4` (rc1 is
-  already solid on dev — only one PR has landed since) or jump
-  straight to `v0.8.0` given the M4 step 8 + annotations + CI
-  enrichment surface area.
-- **Acceptance:** branch `release/v0.x.y` off dev; PR against
-  main with admin bypass + green agent-contract; tag push
-  triggers `release.yml`; fast-forward dev to main after
-  merge.
-
-## How to use this file
-
-When a follow-up is taken on, cut a branch from `dev`, link it
-back to the relevant entry above in the PR body, and update the
-status line ("pending" → "in flight" → "done" with PR link) when
-the work lands.
+Add only concrete unfinished work with evidence and acceptance criteria. Remove
+an entry when it lands; the PR and Git history are the archive.

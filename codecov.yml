@@ -1,29 +1,29 @@
 # codecov.yml — LAIN coverage configuration.
 #
-# Coverage target is intentionally zero until a deliberate baseline PR
-# is opened. The CI upload step also sets `fail_ci_if_error: false`
-# (.github/workflows/ci.yml job `coverage`) so that any upload-time
-# problem (network, missing token, drift in the action) does not
-# block merges while the baseline is being established.
+# Coverage regressions fail CI: `target: auto` compares against the base
+# commit and `threshold: 1%` tolerates noise up to one percentage point.
+# The CI upload step sets `fail_ci_if_error: true`
+# (.github/workflows/ci.yml job `coverage`) so a broken upload is visible
+# instead of silently leaving the badge dark.
 #
-# To set a real baseline:
-#   1. Land one PR with these settings unchanged.
-#   2. Read the resulting coverage % from the codecov.io dashboard.
-#   3. Open a follow-up PR that tightens `target` and `threshold` to
-#      something defensible (e.g., target: 70%, threshold: 1%).
-#   4. Only then add the Codecov badge to README.md.
+# Coverage runs on the main line (push/PR-to-main) only — the fast lane
+# deliberately skips the llvm-cov build to keep PR turnaround short; see
+# the comment on the `coverage` job in ci.yml.
+#
+# To raise the floor later: read the current % from codecov.io and switch
+# `target: auto` to a fixed value (e.g. target: 70%).
 codecov:
-  require_ci_to_pass: false
+  require_ci_to_pass: true
   status:
     project:
       default:
-        target: 0%
-        threshold: 0%
+        target: auto
+        threshold: 1%
         if_ci_failed: error
     patch:
       default:
-        target: 0%
-        threshold: 0%
+        target: auto
+        threshold: 1%
         if_ci_failed: error
 
 # Skip the noisy-comment forest by default. Anything not listed here

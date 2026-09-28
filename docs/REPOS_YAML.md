@@ -22,7 +22,7 @@ whenever they change, this file must change too.
 lain server --config /etc/lain/repos.yaml --transport http --port 9999
 ```
 
-- `--config <path>` (required) — path to a `repos.yaml` file
+- `--config <path>` — path to a `repos.yaml` file (default `./repos.yaml`)
 - `--transport http|stdio` (default `stdio`; set to `http` for the Command Center)
 - `--port <u16>` (default `9999`)
 - `--log-level <EnvFilter>` (default `info`)
@@ -41,7 +41,7 @@ block startup.
 ## Schema (top-level `FederationConfig`)
 
 ```yaml
-data_dir: <path>                    # optional, default: ./.lain/federation
+data_dir: <path>                    # optional, default: ./.lain/federation (relative to this file)
 max_concurrent_indexers: <usize>    # optional, default: 8
 ready_threshold: <float 0.0..1.0>   # optional, default: 0.8
 repos:
@@ -123,7 +123,7 @@ runs. Higher disk cost but you can browse history with any git tool.
 | Field | Type   | Required | Default  | Notes |
 |-------|--------|----------|----------|-------|
 | `url` | string | yes      | —        | Any URL `git clone` accepts (https, ssh, file://). Must be non-empty. |
-| `ref` | string | no       | `"main"` | Branch, tag, or remote-tracking branch. lain resets `HEAD` to `origin/<ref>`. |
+| `ref` | string | no       | `"main"` | Branch, tag, or remote-tracking branch. lain resets `HEAD` to `origin/<ref>`. `lain repos add` writes the remote's default branch here (`master` for tokio-rs repos); set it yourself when writing the file by hand for a repo whose default branch is not `main`. |
 
 **Use when:** you need full git history (e.g. co-change mining across
 many commits) or you want operators to inspect the cloned repo
@@ -154,7 +154,7 @@ is shallow.
 |-------------------------|--------|----------|---------|-------|
 | `url`                   | string | yes      | —       | Same rules as `local_clone`. |
 | `ref`                   | string | no       | `"main"` | Same rules as `local_clone`. |
-| `refresh_interval_secs` | u64    | no       | `300`   | Captured and exposed via `source.refresh_interval()`; the loader does not currently throttle fetches based on this value. (Future enhancement.) |
+| `refresh_interval_secs` | u64    | no       | `300`   | How often a running `lain server` fetches the repo (minimum 30). A fetch that moves the checkout is re-indexed. `local_clone` repos are fetched every 300 s. |
 
 **Use when:** the repo is large, you only need the latest commit's
 nodes/edges, and disk matters. The default 5-minute refresh interval

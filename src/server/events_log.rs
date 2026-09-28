@@ -16,7 +16,11 @@
 //! rotation is acceptable.
 //!
 //! File format: one JSON object per line, `event_id: u64` and the
-//! `PresenceEvent` value as a tagged enum (`{"event_id": N, "event": {...}}`).
+//! `PresenceEventPublic` value as a tagged enum
+//! (`{"event_id": N, "event": {...}}`). The internal `PresenceEvent` is
+//! converted to the public DTO at the write boundary so the durable
+//! replay cache never persists a `session_token` (which lives on
+//! `AgentSession` and never reaches the public wire).
 //! Malformed lines are skipped silently (same policy as the audit log
 //! reader) so a single bad write doesn't poison the entire replay.
 
@@ -26,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 
-use crate::server::presence::PresenceEvent;
+use crate::server::presence::{PresenceEvent, PresenceEventPublic};
 
 pub const EVENTS_LOG_FILENAME: &str = "events.jsonl";
 pub const EVENTS_LOG_ROTATED: &str = "events.jsonl.1";
@@ -65,6 +69,12 @@ impl EventsLog {
     /// counter is still incremented (the in-memory state is the
     /// authoritative id for the live bus; the file is just a
     /// durability layer).
+    ///
+    /// Converts to `PresenceEventPublic` at the boundary so the
+    /// durable replay cache never persists `session_token`. The
+    /// public DTO is the same shape `sse::frame_for` consumes for
+    /// live frames, so the replay path produces identical SSE
+    /// frames.
     pub fn append(&self, event: &PresenceEvent) -> u64 {
         let id = {
             let mut counter = self.next_id.lock();
@@ -72,7 +82,8 @@ impl EventsLog {
             *counter += 1;
             id
         };
-        let payload = match serde_json::to_string(event) {
+        let public = PresenceEventPublic::from(event.clone());
+        let payload = match serde_json::to_string(&public) {
             Ok(s) => s,
             Err(_) => return id, // skip persistence on serialize failure
         };
@@ -105,8 +116,8 @@ impl EventsLog {
     /// Iterate over events with `event_id > last_id`, in id order.
     /// Reads from `events.jsonl` and `events.jsonl.1` (rotation order).
     /// Skips malformed lines.
-    pub fn replay_after(&self, last_id: u64) -> impl Iterator<Item = (u64, PresenceEvent)> {
-        let mut out: Vec<(u64, PresenceEvent)> = Vec::new();
+    pub fn replay_after(&self, last_id: u64) -> impl Iterator<Item = (u64, PresenceEventPublic)> {
+        let mut out: Vec<(u64, PresenceEventPublic)> = Vec::new();
         for name in [EVENTS_LOG_FILENAME, EVENTS_LOG_ROTATED] {
             let path = self.state_dir.join(name);
             if !path.exists() {
@@ -130,11 +141,11 @@ impl EventsLog {
                     Some((id, rest.to_string()))
                 })
                 .collect();
-            // `PresenceEvent` is fully owned (PathBuf/String fields), so the
-            // deserialized value doesn't borrow from `payload` and can be
-            // moved into `out` directly.
+            // `PresenceEventPublic` is fully owned (PathBuf/String fields),
+            // so the deserialized value doesn't borrow from `payload` and
+            // can be moved into `out` directly.
             for (id, payload) in entries {
-                if let Ok(ev) = serde_json::from_str::<PresenceEvent>(&payload) {
+                if let Ok(ev) = serde_json::from_str::<PresenceEventPublic>(&payload) {
                     out.push((id, ev));
                 }
             }

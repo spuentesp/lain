@@ -6,7 +6,7 @@ Two-branch model:
 
 - **`dev`** — integration. Default branch. PRs target `dev`.
   CI: fast lane (Ubuntu tests, lint, npm-shim, schema-drift,
-  health-badge). ~5 min.
+  health-badge, capability suite). ~5 min.
 - **`main`** — release line. Receives changes only via reviewed
   PRs from `dev`, and only when cutting a new release.
   CI: full hardened battery (all OSes, capability suite, coverage,
@@ -61,7 +61,8 @@ cancels superseded runs for the same ref.
 | `test` (Ubuntu) | ✓ | ✓ |
 | `test-cross` (macOS + Windows) | — | ✓ |
 | `lint`, `npm-shim`, `schema-drift`, `health-badge` | ✓ | ✓ |
-| `capability` (demo.sh), `coverage`, `version-drift`, `action-contracts` | — | ✓ |
+| `capability` (demo.sh) | ✓ | ✓ |
+| `coverage`, `version-drift`, `action-contracts` | — | ✓ |
 
 ## Conventions for AI agents
 
@@ -80,3 +81,14 @@ a v0.7.0 incident where the upstream tarball shipped a binary
 whose `--version` reported `0.6.1` (a missed `Cargo.toml` bump).
 That incident was resolved by PR #43. This file now supersedes
 that note with the current branching, CI, and release policy.
+
+## Federation schema bumps (2026-09-07 onwards)
+
+The federation graph on disk has an explicit version header (`FEDERATION_GRAPH_VERSION` in `src/server/federation/graph_backend.rs`). When the on-disk format changes in a non-backward-compatible way:
+
+1. Bump `FEDERATION_GRAPH_VERSION` in the same commit that introduces the change.
+2. The loader refuses to read graphs with a different header, returning `LainError::FederationSchemaMismatch`.
+3. The operator's recovery path is `lain reindex`, which backs up the old graph and rebuilds.
+4. CHANGELOG entry must name the schema bump and the recovery command.
+
+Do not silently migrate. The federated graph is regenerable from per-repo graphs, and silent migration risks hiding real corruption.

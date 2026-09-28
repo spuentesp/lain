@@ -4,6 +4,7 @@ pub mod architecture;
 pub mod decoration;
 pub mod enrichment;
 pub mod execution;
+pub mod explain_dispatch;
 pub mod impact;
 pub mod metrics;
 pub mod navigation;

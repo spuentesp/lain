@@ -8,7 +8,7 @@
 .PHONY: schema record-demo record-demo-small
 
 schema:
-	cargo run --quiet -- schema dump --out docs/tool-schema.json
+	cargo run --quiet --bin lain -- schema dump --out docs/tool-schema.json
 
 record-demo:
 	./scripts/record-spa-demo.sh            # default: --fixture real (bytes + tokio)

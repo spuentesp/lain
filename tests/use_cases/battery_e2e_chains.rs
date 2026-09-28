@@ -86,8 +86,10 @@ fn chain_search_to_anchors_to_blast_to_trace() {
     );
 
     // Step 3: get_blast_radius(real_hub) — confirm callers are listed.
-    let blast_text = tokio_test_run(get_blast_radius(&db, &overlay, "real_hub", false, None))
-        .expect("blast radius step");
+    let blast_text = tokio_test_run(get_blast_radius(
+        &db, &overlay, "real_hub", false, false, None,
+    ))
+    .expect("blast radius step");
     assert!(
         blast_text.contains("caller_zero"),
         "blast chain step: must list caller_zero as caller of real_hub; got: {blast_text}"
@@ -126,7 +128,12 @@ fn chain_dead_to_call_sites_to_explain() {
         &overlay,
         None,
         &lain::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
-        &std::sync::Arc::new(parking_lot::Mutex::new(Default::default())),
+        &std::sync::Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(
+                lain::server::tuning::TuningConfig::default().embedding_cache_capacity,
+            )
+            .expect("default capacity > 0"),
+        ))),
     )
     .expect("find_dead_code");
     assert!(

@@ -195,7 +195,7 @@ async fn search_org_handles_empty_query() {
 #[tokio::test]
 async fn get_cross_repo_blast_radius_works_on_indexed_symbol() {
     let (_project, _cfg, _a, _b, fed) = boot_federation().await;
-    let br = get_cross_repo_blast_radius(&fed, "shared_helper", 0..10);
+    let br = get_cross_repo_blast_radius(&fed, "shared_helper", 0..10, None);
     // Cross-repo blast radius is Ok if there are callers, Err otherwise;
     // either way, no panic. The contract: doesn't blow up on indexed input.
     assert!(
@@ -207,7 +207,7 @@ async fn get_cross_repo_blast_radius_works_on_indexed_symbol() {
 #[tokio::test]
 async fn get_cross_repo_blast_radius_rejects_unknown_symbol() {
     let (_project, _cfg, _a, _b, fed) = boot_federation().await;
-    let br = get_cross_repo_blast_radius(&fed, "no_such_symbol", 0..10);
+    let br = get_cross_repo_blast_radius(&fed, "no_such_symbol", 0..10, None);
     // Either returns empty result or errors; either is acceptable.
     assert!(br.is_ok() || br.is_err());
 }

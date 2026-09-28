@@ -329,10 +329,10 @@ impl AttributionWatcher {
             // `.gitignore` decide what is build output instead of a
             // hardcoded list that drifts per project. A root that is
             // not a git repo simply gets no opinion.
-            let ignore_sensors: Vec<(PathBuf, crate::server::git::GitSensor)> = roots
+            let ignore_sensors: Vec<(PathBuf, crate::server::git::AnyGitSensor)> = roots
                 .iter()
                 .filter_map(|r| {
-                    crate::server::git::GitSensor::new(r)
+                    crate::server::git::AnyGitSensor::from_env(r)
                         .ok()
                         .map(|g| (r.clone(), g))
                 })

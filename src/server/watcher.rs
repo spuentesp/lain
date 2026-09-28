@@ -2,18 +2,24 @@
 //!
 //! Watches for file changes and updates the volatile overlay via LSP symbol extraction.
 
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::LainServer;
 use notify::{
     event::CreateKind, Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
+
+/// Extensions for files the watcher considers relevant.
+/// Mirrors the set recognized by the treesitter module.
+const WATCHED_EXTENSIONS: &[&str] = &[
+    "rs", "toml", "lock", "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "pyi", "go", "java", "cpp",
+    "cc", "cxx", "c", "h", "hpp", "cs", "rb", "php", "swift", "kt", "kts",
+];
 
 /// Return the set of paths the reload-aware watcher should watch given
 /// the path to `repos.yaml`. Always includes `repos.yaml`; adds
@@ -33,8 +39,10 @@ pub fn watch_paths_for_config(repos_yaml: &Path) -> Vec<PathBuf> {
 /// (`repos.yaml` + `workspaces.yaml`). On any Modify/Create/Remove
 /// event against those exact paths, calls `bus.request_reload()`.
 ///
-/// Returns a `JoinHandle` for the watcher thread. Tests can drop it
-/// to terminate; production drops it at server shutdown.
+/// Returns `(join, handle)` where `join` is the spawned thread's
+/// `JoinHandle` and `handle` is a `ConfigWatcherHandle`. Dropping
+/// `handle` sends a shutdown signal and the thread exits promptly,
+/// releasing the OS watch handles.
 ///
 /// Implementation note: this is a separate watcher from
 /// `FileWatcher::start` (which watches source files for the volatile
@@ -43,12 +51,13 @@ pub fn watch_paths_for_config(repos_yaml: &Path) -> Vec<PathBuf> {
 pub fn spawn_config_watcher(
     repos_yaml: &Path,
     bus: Arc<crate::server::reload::ReloadBus>,
-) -> std::thread::JoinHandle<()> {
+) -> (std::thread::JoinHandle<()>, ConfigWatcherHandle) {
     use crate::server::reload::ReloadBus;
 
     let targets: HashSet<PathBuf> = watch_paths_for_config(repos_yaml).into_iter().collect();
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
-    std::thread::spawn(move || {
+    let join = std::thread::spawn(move || {
         let bus_clone: Arc<ReloadBus> = Arc::clone(&bus);
         let targets_clone = targets.clone();
 
@@ -104,20 +113,57 @@ pub fn spawn_config_watcher(
             );
         }
 
-        // Block forever; the watcher is dropped when this thread exits
-        // (i.e. when the JoinHandle is dropped by the server shutdown
-        // path).
+        // Block on either the shutdown signal or the next 1-hour
+        // heartbeat. Pre-fix this was an unbounded `sleep(3600s)`
+        // loop with no shutdown path; dropping the JoinHandle left
+        // the thread and its OS watch handles alive for the rest of
+        // the process lifetime. The shutdown channel makes a clean
+        // exit reachable from any caller.
         loop {
-            std::thread::sleep(Duration::from_secs(3600));
+            match shutdown_rx.recv_timeout(Duration::from_secs(3600)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            }
         }
-    })
+        // `watcher` (the `RecommendedWatcher`) drops here, which
+        // signals its inner notify thread to exit and releases the
+        // OS watch handles.
+    });
+
+    (join, ConfigWatcherHandle { tx: shutdown_tx })
 }
 
-/// File extensions to watch (source code files)
-const WATCHED_EXTENSIONS: &[&str] = &[
-    "rs", "py", "ts", "tsx", "js", "jsx", "go", "java", "c", "cpp", "h", "hpp", "cs", "rb",
-    "swift", "kt", "scala", "vue", "svelte",
-];
+/// Shutdown signal for `spawn_config_watcher`. Dropping the handle
+/// signals the watcher thread to exit; the caller can also call
+/// `stop()` for an explicit shutdown point. The watcher thread's
+/// `RecommendedWatcher` drops when the thread exits, releasing the
+/// OS watch handles.
+pub struct ConfigWatcherHandle {
+    tx: std::sync::mpsc::Sender<()>,
+}
+
+impl ConfigWatcherHandle {
+    /// Signal the watcher thread to exit and join it. `Drop` calls
+    /// this, so manual invocation is only needed when the caller
+    /// wants a deterministic shutdown point.
+    pub fn stop(self, join: std::thread::JoinHandle<()>) {
+        let _ = self.tx.send(());
+        let _ = join.join();
+    }
+}
+
+impl Drop for ConfigWatcherHandle {
+    fn drop(&mut self) {
+        // Send is infallible; the only way it fails is if the
+        // receiver has already been dropped, which means the thread
+        // is gone — in that case the next `join` (if the JoinHandle
+        // outlives us) will observe `Err(JoinError)`. We can't
+        // access the JoinHandle from `Drop` because the caller owns
+        // it; the caller is responsible for either holding both
+        // alive together or joining explicitly.
+        let _ = self.tx.send(());
+    }
+}
 
 /// Debounce window for rapid file changes
 const DEBOUNCE_MS: u64 = 100;
@@ -153,31 +199,42 @@ impl FileWatcher {
         Self { sender, receiver }
     }
 
-    /// Start watching the workspace directory. Returns a one-shot
-    /// receiver that fires once the initial `notify` registration
-    /// completes (the same barrier tests already used internally via
-    /// `WatcherTestHooks::ready_signal`, now also wired for production
-    /// callers that need to sequence startup against it — see
-    /// `start_source_watcher`).
+    /// Start watching the workspace directory.
+    ///
+    /// Returns a `(ready, handle)` pair:
+    ///
+    /// - `ready: oneshot::Receiver<usize>` fires once the initial
+    ///   `notify` registration completes.
+    /// - `handle: WatcherHandle` owns the watcher's `JoinHandle` and
+    ///   the shutdown channel. Dropping the handle sends
+    ///   `WatchCommand::Shutdown` and joins the thread (with a short
+    ///   deadline) so the OS watch handles are released promptly.
     pub fn start(
         self,
         workspace: PathBuf,
         server: LainServer,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> oneshot::Receiver<usize> {
+    ) -> (oneshot::Receiver<usize>, WatcherHandle) {
         let file_sender = self.sender.clone();
         let receiver = self.receiver;
         let git = Arc::clone(server.ingest().git());
 
-        // The watcher thread body lives in `run_watcher_thread` so
-        // production *and* tests share one closure and one command
-        // dispatch path. `command_done` has no production use, so only
-        // `ready_signal` is wired here.
-        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();
+        // `cmd_tx` is wrapped in `Arc` so the notify closure (which
+        // captures it for `WatchCommand::AddDirectory`) and the
+        // returned `WatcherHandle` (which sends `Shutdown`) can both
+        // hold a clone. The thread keeps its end via `cmd_rx`.
+        let (cmd_tx_inner, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();
+        let cmd_tx = Arc::new(cmd_tx_inner);
+        let cmd_tx_for_thread = Arc::clone(&cmd_tx);
         let (ready_tx, ready_rx) = oneshot::channel::<usize>();
-        let mut args = WatcherThreadArgs::production(workspace, file_sender, git, (cmd_tx, cmd_rx));
+        let mut args = WatcherThreadArgs::production(
+            workspace,
+            file_sender,
+            git,
+            (cmd_tx_for_thread.as_ref().clone(), cmd_rx),
+        );
         args.test_hooks.ready_signal = Some(ready_tx);
-        let _join = run_watcher_thread(args);
+        let join = run_watcher_thread(args);
 
         // Spawn the event processor task
         tokio::spawn(async move {
@@ -264,7 +321,11 @@ impl FileWatcher {
             }
         });
 
-        ready_rx
+        let handle = WatcherHandle {
+            join: Some(join),
+            cmd_tx: Arc::clone(&cmd_tx),
+        };
+        (ready_rx, handle)
     }
 }
 
@@ -284,6 +345,63 @@ fn take_batch(pending: &mut HashSet<PathBuf>, limit: usize) -> Vec<PathBuf> {
     batch
 }
 
+/// Owns the watcher's `JoinHandle` and shutdown channel. Dropping the
+/// handle sends `WatchCommand::Shutdown` to the watcher thread and
+/// joins it (with a short deadline) so the OS watch handles are
+/// released promptly. The pre-fix code discarded the `JoinHandle`
+/// and moved the only `cmd_tx` into the notify closure, leaving the
+/// thread permanently detached — keep this handle alive for the
+/// lifetime of the watcher to avoid that leak.
+pub struct WatcherHandle {
+    join: Option<std::thread::JoinHandle<()>>,
+    cmd_tx: Arc<std::sync::mpsc::Sender<WatchCommand>>,
+}
+
+impl WatcherHandle {
+    /// Explicitly send `WatchCommand::Shutdown` and join the thread.
+    /// `Drop` calls this, so manual invocation is only needed when
+    /// the caller wants a deterministic shutdown point.
+    pub fn stop(mut self) {
+        self.shutdown_and_join();
+    }
+
+    fn shutdown_and_join(&mut self) {
+        // `send` is infallible on the producer side; the only way it
+        // can fail is if the receiver has already been dropped, which
+        // means the thread is gone — in that case the join returns
+        // immediately. Either path is fine.
+        let _ = self.cmd_tx.send(WatchCommand::Shutdown);
+        if let Some(join) = self.join.take() {
+            // Bound the join so a stuck thread doesn't deadlock the
+            // drop path. The thread breaks out of its command loop
+            // on `Shutdown` and the watcher `Drop` releases the OS
+            // handles; a hung thread is a real bug but should not
+            // stall the test or server teardown.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if join.is_finished() {
+                    let _ = join.join();
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        "FileWatcher: thread did not exit within 5s of Stop; \
+                         abandoning it (OS watch handles may leak until process exit)"
+                    );
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+impl Drop for WatcherHandle {
+    fn drop(&mut self) {
+        self.shutdown_and_join();
+    }
+}
+
 impl Default for FileWatcher {
     fn default() -> Self {
         Self::new()
@@ -297,7 +415,7 @@ impl Default for FileWatcher {
 /// the same exclusions the rest of the indexer applies. Every candidate is
 /// additionally probed with `read_dir` so a directory we cannot actually
 /// list is dropped here rather than failing later inside `notify`.
-fn discover_watch_directories(workspace: &Path) -> Vec<PathBuf> {
+pub(crate) fn discover_watch_directories(workspace: &Path) -> Vec<PathBuf> {
     let walker = ignore::WalkBuilder::new(workspace)
         .hidden(true)
         .git_ignore(true)
@@ -415,7 +533,7 @@ pub(crate) struct WatcherTestHooks {
 pub(crate) struct WatcherThreadArgs {
     pub workspace: PathBuf,
     pub file_sender: mpsc::Sender<PathBuf>,
-    pub git: Arc<Mutex<GitSensor>>,
+    pub git: Arc<AnyGitSensor>,
     pub command_pair: (
         std::sync::mpsc::Sender<WatchCommand>,
         std::sync::mpsc::Receiver<WatchCommand>,
@@ -429,7 +547,7 @@ impl WatcherThreadArgs {
     pub fn production(
         workspace: PathBuf,
         file_sender: mpsc::Sender<PathBuf>,
-        git: Arc<Mutex<GitSensor>>,
+        git: Arc<AnyGitSensor>,
         command_pair: (
             std::sync::mpsc::Sender<WatchCommand>,
             std::sync::mpsc::Receiver<WatchCommand>,
@@ -449,7 +567,7 @@ impl WatcherThreadArgs {
     pub fn for_test(
         workspace: PathBuf,
         file_sender: mpsc::Sender<PathBuf>,
-        git: Arc<Mutex<GitSensor>>,
+        git: Arc<AnyGitSensor>,
         command_pair: (
             std::sync::mpsc::Sender<WatchCommand>,
             std::sync::mpsc::Receiver<WatchCommand>,
@@ -481,17 +599,27 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let cb_command_sender = command_sender;
         let cb_git = Arc::clone(&git);
+        let cb_workspace = workspace.clone();
 
-        let mut watcher = RecommendedWatcher::new(
+        let mut watcher = match RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| match res {
                 Ok(event) => {
                     for path in &event.paths {
-                        if is_created_directory_event(&event, path) {
+                        if is_created_directory_event(&event, path, &cb_workspace) {
                             let _ =
                                 cb_command_sender.send(WatchCommand::AddDirectory(path.clone()));
                         }
                     }
-                    if let Some(file) = filter_event(&event, &cb_git) {
+                    // PR-5 — emit one `process_file` per watched path.
+                    // Pre-fix `find_map` collapsed multi-path events to
+                    // the FIRST watched sibling; FSEvents and Windows
+                    // notify can deliver one event for multiple watched
+                    // files in the same batch (a save that touches N
+                    // files yields N paths in one event). A second
+                    // watched sibling only got noticed if the OS
+                    // separately emitted an event for it, which is
+                    // backend-dependent.
+                    for file in filter_event(&event, &cb_git) {
                         if let Err(error) = file_sender.blocking_send(file) {
                             debug!("FileWatcher: failed to send path: {}", error);
                         }
@@ -502,8 +630,31 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
                 }
             },
             Config::default(),
-        )
-        .expect("Failed to create file watcher");
+        ) {
+            Ok(w) => w,
+            // PR-5 — `RecommendedWatcher::new` returns
+            // `Err(notify::Error)` on backend init failure (notably
+            // `ENOSPC` from `inotify_init1` when the per-user watch
+            // limit is exhausted, or `EMFILE` when the process is at
+            // its open-file cap). Pre-fix the thread `.expect()`ed on
+            // success; a panicked std::thread aborts the process when
+            // its JoinHandle has been dropped, which is the
+            // production path here (the handle is held by the
+            // `WatcherHandle` and dropped on shutdown — but a startup
+            // failure is a different story, and panicking there kills
+            // the server before it can serve any request). The
+            // sibling config-watcher returns `Result` from a similar
+            // constructor; mirror that here and exit the thread
+            // cleanly on init failure.
+            Err(e) => {
+                warn!(
+                    "FileWatcher: failed to create notify backend: {e}; \
+                     watcher thread exiting. The server will continue \
+                     without filesystem-driven reindexes."
+                );
+                return;
+            }
+        };
 
         // Each directory is registered non-recursively so the watcher
         // thread can add new subdirectories on demand without a
@@ -544,7 +695,7 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
         while let Ok(command) = command_receiver.recv() {
             match command {
                 WatchCommand::AddDirectory(path) => {
-                    handle_watch_command(path, &mut watcher, &mut watched, &git);
+                    handle_watch_command(path, &mut watcher, &mut watched, &git, &workspace);
                     if let Some(ref done) = command_done {
                         // Best-effort: the test may have already
                         // dropped its receiver after asserting. A
@@ -571,14 +722,11 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
 /// imprecise (`Any`/`Other`), and on Linux inotify the syscall
 /// ordering means `is_dir()` is always true by the time the callback
 /// runs.
-fn is_created_directory_event(event: &Event, path: &Path) -> bool {
+fn is_created_directory_event(event: &Event, path: &Path, workspace: &Path) -> bool {
     if !matches!(event.kind, EventKind::Create(_)) {
         return false;
     }
-    if path
-        .components()
-        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-    {
+    if hidden_below(workspace, path) {
         return false;
     }
     match event.kind {
@@ -600,16 +748,14 @@ fn handle_watch_command(
     path: PathBuf,
     watcher: &mut RecommendedWatcher,
     watched: &mut HashSet<PathBuf>,
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
+    workspace: &Path,
 ) {
     if !path.is_dir() {
         debug!("FileWatcher: ignoring non-directory command {:?}", path);
         return;
     }
-    if path
-        .components()
-        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-    {
+    if hidden_below(workspace, &path) {
         debug!("FileWatcher: ignoring hidden directory {:?}", path);
         return;
     }
@@ -620,20 +766,21 @@ fn handle_watch_command(
     register_directory(watcher, watched, path);
 }
 
-/// Filter notify events to only relevant file changes
-fn filter_event(event: &Event, git: &Arc<Mutex<GitSensor>>) -> Option<PathBuf> {
+/// Filter notify events to only relevant file changes.
+///
+/// Returns all watched, non-git-ignored paths from the event's path
+/// list. FSEvents and Windows can deliver one event covering multiple
+/// watched files in the same batch; this returns each one instead of
+/// collapsing to the first match.
+fn filter_event(event: &Event, git: &Arc<AnyGitSensor>) -> Vec<PathBuf> {
     match event.kind {
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-            // Get the first path from the event
-            event.paths.iter().find_map(|p| {
-                if is_watched_file(p) && !is_git_ignored(p, git) {
-                    Some(p.clone())
-                } else {
-                    None
-                }
-            })
-        }
-        _ => None,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => event
+            .paths
+            .iter()
+            .filter(|p| is_watched_file(p) && !is_git_ignored(p, git))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -642,8 +789,8 @@ fn filter_event(event: &Event, git: &Arc<Mutex<GitSensor>>) -> Option<PathBuf> {
 /// A failed ignore check is treated as *not* ignored: a transient Git
 /// metadata problem should degrade into extra work, never into silently
 /// dropped live updates.
-fn is_git_ignored(path: &Path, git: &Arc<Mutex<GitSensor>>) -> bool {
-    match git.lock().is_ignored(path) {
+fn is_git_ignored(path: &Path, git: &Arc<AnyGitSensor>) -> bool {
+    match git.is_ignored(path) {
         Ok(ignored) => ignored,
         Err(error) => {
             debug!(
@@ -656,8 +803,31 @@ fn is_git_ignored(path: &Path, git: &Arc<Mutex<GitSensor>>) -> bool {
 }
 
 /// Check if a path is a watched source file
+/// A hidden component *below* the workspace (`.git/…`, `.venv/…`). The
+/// workspace's own path may contain one (`~/.local/src/app`, a
+/// `.claude/worktrees/…` checkout); testing the absolute path made the
+/// watcher drop every event in such a workspace.
+fn hidden_below(workspace: &Path, path: &Path) -> bool {
+    let rel: PathBuf = match path.strip_prefix(workspace) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => {
+            let canon = |p: &Path| dunce::canonicalize(p).ok();
+            match (canon(workspace), canon(path)) {
+                (Some(ws), Some(p)) => p.strip_prefix(&ws).map(Path::to_path_buf).unwrap_or(p),
+                _ => path.to_path_buf(),
+            }
+        }
+    };
+    rel.components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+}
+
+/// Check if a path is a watched source file (non-hidden, non-directory,
+/// with a watched extension).
 fn is_watched_file(path: &Path) -> bool {
-    // Skip hidden files and directories
+    // Skip hidden files and directories — any dot-prefixed component
+    // (`.git/`, `.venv/`, `.claude/`, etc.) means the path is managed
+    // by a tool, not a source file the graph should track.
     if path
         .components()
         .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
@@ -693,8 +863,7 @@ mod tests {
     //! registration and command-channel behavior added in task 3.
 
     use super::*;
-    use crate::git::GitSensor;
-    use parking_lot::Mutex;
+    use crate::git::AnyGitSensor;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -949,32 +1118,69 @@ mod tests {
             attrs: notify::event::EventAttributes::default(),
         };
 
-        // Git-aware signature:
-        //   filter_event(&Event, &Arc<parking_lot::Mutex<GitSensor>>)
-        //       -> Option<PathBuf>
-        // GitSensor is the production sensor type — we wrap it in the
-        // Arc<Mutex<_>> handle production code already uses elsewhere.
-        let sensor = Arc::new(Mutex::new(
-            GitSensor::new(&repo_path).expect("GitSensor::new"),
-        ));
+        //   filter_event(&Event, &Arc<AnyGitSensor>) -> Vec<PathBuf>
+        let sensor = Arc::new(AnyGitSensor::from_env(&repo_path).expect("AnyGitSensor::from_env"));
 
         let kept = filter_event(&visible_event, &sensor);
         let dropped = filter_event(&ignored_event, &sensor);
 
         assert_eq!(
             kept,
-            Some(visible_path.clone()),
+            vec![visible_path.clone()],
             "non-ignored source event should be kept as the visible path",
         );
-        assert_eq!(
-            dropped, None,
-            "Git-ignored source event must be filtered out",
+        assert!(
+            dropped.is_empty(),
+            "Git-ignored source event must be filtered out"
         );
 
         // Drop the GitSensor handle before TempDir so any in-memory state
         // referencing the repo path is gone before auto-cleanup runs.
         drop(sensor);
         drop(tmp);
+    }
+
+    /// PR-5 — multi-path events emit each watched sibling.
+    ///
+    /// Pre-fix `filter_event` used `find_map` and returned only the
+    /// first watched path, silently dropping the rest. This test
+    /// pins that an event carrying two watched files in `event.paths`
+    /// produces two entries — both get sent through the watcher
+    /// processor.
+    #[test]
+    fn multi_path_event_emits_each_watched_sibling() {
+        let repo_path = tempfile::Builder::new()
+            .prefix("lain-watcher-multipath-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(repo_path.path()).unwrap();
+        let sensor =
+            Arc::new(AnyGitSensor::from_env(repo_path.path()).expect("AnyGitSensor::from_env"));
+
+        let alpha = repo_path.path().join("alpha.rs");
+        let beta = repo_path.path().join("beta.rs");
+        let mut event_paths = vec![alpha.clone(), beta.clone()];
+        event_paths.sort();
+
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![alpha.clone(), beta.clone()],
+            attrs: notify::event::EventAttributes::default(),
+        };
+
+        let kept = filter_event(&event, &sensor);
+        let mut kept_sorted = kept.clone();
+        kept_sorted.sort();
+        assert_eq!(
+            kept_sorted, event_paths,
+            "every watched sibling in a multi-path event must surface"
+        );
+        assert_eq!(
+            kept.len(),
+            2,
+            "two watched siblings must yield two entries; got {}",
+            kept.len()
+        );
     }
 
     /// Step 4: a readable sibling directory must keep emitting events
@@ -1008,7 +1214,7 @@ mod tests {
             return;
         }
 
-        let git = Arc::new(Mutex::new(GitSensor::new(&repo).expect("GitSensor::new")));
+        let git = Arc::new(AnyGitSensor::from_env(&repo).expect("AnyGitSensor::from_env"));
 
         // Production-shape channels:
         // - file events flow through a Tokio mpsc (same type as the
@@ -1208,7 +1414,7 @@ mod tests {
     async fn newly_created_directory_is_registered() {
         let (_tmp, repo) = build_repo_layout();
 
-        let git = Arc::new(Mutex::new(GitSensor::new(&repo).expect("GitSensor::new")));
+        let git = Arc::new(AnyGitSensor::from_env(&repo).expect("AnyGitSensor::from_env"));
 
         let (file_tx, mut file_rx) = tokio::sync::mpsc::channel::<PathBuf>(16);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();
@@ -1283,5 +1489,268 @@ mod tests {
             .expect("watcher thread should exit cleanly");
 
         drop(git);
+    }
+
+    /// B3 — `process_change` hashes the file with blake3 and short-
+    /// circuits on unchanged content. A no-op editor save (touch,
+    /// metadata-only write, save without edits) fires the watcher
+    /// but the file's bytes are unchanged; the LSP round trip is
+    /// the expensive part and must be skipped on a hash hit.
+    ///
+    /// The first call populates the cache and processes normally
+    /// (overlay gains a node). The second call on the same bytes
+    /// hits the cache, returns early, and the overlay is unchanged
+    /// from the first call's state — proving the LSP path was
+    /// skipped. A subsequent write with different bytes misses
+    /// the cache, re-processes, and the overlay reflects the new
+    /// symbol.
+    #[tokio::test]
+    async fn process_change_short_circuits_on_unchanged_content() {
+        let root = tempfile::Builder::new()
+            .prefix("lain-watcher-b3-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        for _ in 0..4 {
+            server
+                .ingest()
+                .lsp_pool()
+                .next()
+                .lock()
+                .await
+                .mark_unavailable("rust-analyzer");
+        }
+        let path = root.path().join("lib.rs");
+        fs::write(&path, "pub fn hello() {}\n").unwrap();
+
+        // First call: populates the hash cache, processes normally.
+        process_file(&server, &path).await.unwrap();
+        let first_overlay = server.overlay().get_all_nodes();
+        assert_eq!(
+            first_overlay.len(),
+            1,
+            "first call processes the LSP path and inserts the symbol"
+        );
+
+        // Second call: same bytes. The hash matches; process_change
+        // returns Ok(()) without re-running the LSP round trip.
+        // We can't observe the LSP round trip directly, but the
+        // overlay state matches the first call — proving no second
+        // insert happened (which a non-cached path would produce
+        // because it goes through the same insert path as the first
+        // call and the test fixture has its own LSP marked
+        // unavailable so the tree-sitter fallback would mint a
+        // different id under different mtimes).
+        process_file(&server, &path).await.unwrap();
+        let second_overlay = server.overlay().get_all_nodes();
+        assert_eq!(
+            second_overlay.len(),
+            1,
+            "second call on the same bytes must not insert a duplicate"
+        );
+        assert_eq!(
+            second_overlay[0].id, first_overlay[0].id,
+            "the surviving node must be the original, not a duplicate"
+        );
+
+        // Third call: different bytes. Hash miss; the LSP path runs
+        // and inserts the new symbol (retracting the old one).
+        fs::write(&path, "pub fn world() {}\n").unwrap();
+        process_file(&server, &path).await.unwrap();
+        let third_overlay = server.overlay().get_all_nodes();
+        assert_eq!(
+            third_overlay.len(),
+            1,
+            "third call processes the new content"
+        );
+        assert_ne!(
+            third_overlay[0].id, first_overlay[0].id,
+            "the new symbol must have a different node id from the old one"
+        );
+    }
+
+    /// B3 — deletion drops the cached hash. Re-creating the file
+    /// starts with a clean cache entry (the mtime changed anyway,
+    /// but verifying the explicit drop pin keeps the
+    /// `if !path.is_file()` branch's contract intact).
+    #[tokio::test]
+    async fn process_change_drops_cached_hash_on_deletion() {
+        let root = tempfile::Builder::new()
+            .prefix("lain-watcher-b3-del-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        for _ in 0..4 {
+            server
+                .ingest()
+                .lsp_pool()
+                .next()
+                .lock()
+                .await
+                .mark_unavailable("rust-analyzer");
+        }
+        let path = root.path().join("lib.rs");
+        fs::write(&path, "pub fn hello() {}\n").unwrap();
+        process_file(&server, &path).await.unwrap();
+
+        // Delete the file: cached hash must be dropped so a future
+        // re-creation starts clean.
+        fs::remove_file(&path).unwrap();
+        process_file(&server, &path).await.unwrap();
+        let hashes = server.ingest().file_content_hashes().lock();
+        assert!(
+            hashes.get(&path).is_none(),
+            "deleted path's hash must be dropped from the cache"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hidden_path_tests {
+    use super::*;
+
+    /// Only components below the workspace count as hidden for the
+    /// `hidden_below` helper. `is_watched_file` uses a simpler
+    /// absolute-dot-component check that is intentionally more
+    /// conservative (any dot-prefixed component in the full path
+    /// causes exclusion).
+    #[test]
+    fn a_dot_directory_above_the_workspace_is_not_hidden() {
+        let ws = Path::new("/home/me/.local/src/app");
+        assert!(!hidden_below(ws, &ws.join("src/lib.rs")));
+        assert!(hidden_below(ws, &ws.join(".git/index")));
+        assert!(hidden_below(ws, &ws.join("pkg/.venv/x.py")));
+    }
+}
+#[allow(unused_imports)]
+mod handle_lifecycle_tests {
+    //! PR-1 regression tests for `WatcherHandle`.
+
+    use super::{WatcherHandle, WatcherThreadArgs};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// `WatcherHandle::stop` must send `WatchCommand::Shutdown` and
+    /// join the watcher thread. Pre-fix the only `cmd_tx` was moved
+    /// into the notify closure so no caller could ever signal
+    /// shutdown — this test pins that the handle actually does.
+    #[tokio::test]
+    async fn handle_stop_signals_shutdown_and_joins() {
+        let dir = tempfile::Builder::new()
+            .prefix("lain-watcher-handle-stop-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let (tx, _rx) = mpsc::channel::<PathBuf>(16);
+        let git = Arc::new(crate::git::AnyGitSensor::from_env(dir.path()).unwrap());
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<super::WatchCommand>();
+        let mut args = WatcherThreadArgs::production(
+            dir.path().to_path_buf(),
+            tx,
+            git,
+            (cmd_tx.clone(), cmd_rx),
+        );
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<usize>();
+        args.test_hooks.ready_signal = Some(ready_tx);
+        let join = super::run_watcher_thread(args);
+
+        ready_rx.await.expect("watcher ready signal");
+
+        let handle = WatcherHandle {
+            join: Some(join),
+            cmd_tx: Arc::new(cmd_tx),
+        };
+
+        // Stop must complete within a generous deadline; a stuck
+        // thread would deadlock Drop (and `stop`) without the poll
+        // loop in `shutdown_and_join`.
+        tokio::task::spawn_blocking(move || {
+            handle.stop();
+        })
+        .await
+        .expect("stop task panicked");
+    }
+
+    /// `WatcherHandle`'s `Drop` must also send `Shutdown` and join —
+    /// the default shutdown path when a caller drops the handle
+    /// without an explicit `stop`.
+    #[tokio::test]
+    async fn handle_drop_signals_shutdown_and_joins() {
+        let dir = tempfile::Builder::new()
+            .prefix("lain-watcher-handle-drop-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let (tx, _rx) = mpsc::channel::<PathBuf>(16);
+        let git = Arc::new(crate::git::AnyGitSensor::from_env(dir.path()).unwrap());
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<super::WatchCommand>();
+        let mut args = WatcherThreadArgs::production(
+            dir.path().to_path_buf(),
+            tx,
+            git,
+            (cmd_tx.clone(), cmd_rx),
+        );
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<usize>();
+        args.test_hooks.ready_signal = Some(ready_tx);
+        let join = super::run_watcher_thread(args);
+
+        ready_rx.await.expect("watcher ready signal");
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let dropped_clone = dropped.clone();
+        let handle = WatcherHandle {
+            join: Some(join),
+            cmd_tx: Arc::new(cmd_tx),
+        };
+
+        tokio::task::spawn_blocking(move || {
+            drop(handle);
+            // The Drop must have completed (and the thread joined) by
+            // the time control returns here.
+            dropped_clone.store(1, Ordering::SeqCst);
+        })
+        .await
+        .expect("drop task panicked");
+
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "drop task did not record completion"
+        );
+    }
+
+    /// Config-watcher shutdown: dropping the `ConfigWatcherHandle`
+    /// must cause the thread to exit (the thread was an unbounded
+    /// `sleep(3600s)` loop pre-fix). PR-1 regression test.
+    #[tokio::test(flavor = "current_thread")]
+    async fn config_watcher_thread_exits_when_handle_drops() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repos = tmp.path().join("repos.yaml");
+        std::fs::write(&repos, "repos: []\n").expect("write fixture");
+        let bus = Arc::new(crate::server::reload::ReloadBus::new());
+        let (join, handle) = super::spawn_config_watcher(&repos, bus);
+
+        // Give the thread a moment to register watches.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Drop the handle; the thread must see the shutdown signal
+        // and exit. Bounded wait so a regression fails loudly
+        // instead of hanging the test.
+        drop(handle);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if join.is_finished() {
+                join.join().expect("config watcher thread panicked");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("config watcher thread did not exit within 2s of handle drop");
     }
 }

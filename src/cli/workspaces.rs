@@ -50,7 +50,8 @@ pub enum WorkspacesAction {
         name: String,
         #[arg(long)]
         from: String,
-        #[arg(long, default_value = "main")]
+        /// Branch or tag. Defaults to the remote's default branch.
+        #[arg(long)]
         ref_: Option<String>,
     },
     /// List all known workspaces.
@@ -70,7 +71,8 @@ pub enum WorkspacesAction {
 /// individual `run_*` helpers each take `Option<&Path>` and resolve
 /// from there.
 pub async fn run(action: WorkspacesAction, config: &Path) -> Result<()> {
-    let config = Some(config);
+    let workspaces_file = workspaces_file_for(config);
+    let config = Some(workspaces_file.as_path());
     match action {
         WorkspacesAction::Create {
             name,
@@ -86,6 +88,23 @@ pub async fn run(action: WorkspacesAction, config: &Path) -> Result<()> {
         WorkspacesAction::Use { name } => run_use(&name, config),
         WorkspacesAction::Current => run_current(),
         WorkspacesAction::Forget { name } => run_forget(&name, config),
+    }
+}
+
+/// `--config` names the project's `repos.yaml` (the flag and its default
+/// are shared with `lain repos`); workspaces live beside it in
+/// `workspaces.yaml`, which is where `lain server` reads them. Writing the
+/// workspaces file *to* the `repos.yaml` path replaced every registered
+/// repo with the workspace list. A path already naming a workspaces file
+/// is used as given.
+fn workspaces_file_for(config: &Path) -> PathBuf {
+    if config
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().ends_with("workspaces.yaml"))
+    {
+        config.to_path_buf()
+    } else {
+        config.with_file_name("workspaces.yaml")
     }
 }
 
@@ -138,6 +157,38 @@ fn err_not_found(name: &str) -> LainError {
 }
 
 /// `lain workspaces create <name> [--description <text>] [--members repo,repo,...]`
+/// Trimmed member ids, checked against the `repos.yaml` beside the
+/// workspaces file when there is one. `--members "bytes, tokio"` stored
+/// `" tokio"`, and a typo such as `bytess` was accepted and only failed
+/// later, at server start.
+fn checked_members(workspaces_path: &Path, members: Vec<String>) -> Result<Vec<String>> {
+    let members: Vec<String> = members
+        .into_iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
+    let repos_path = workspaces_path.with_file_name("repos.yaml");
+    if !repos_path.is_file() {
+        return Ok(members);
+    }
+    let repos = crate::server::federation::config::FederationConfig::load(&repos_path)
+        .map_err(|e| anyhow!("load {}: {e}", repos_path.display()))?;
+    let known: Vec<String> = repos.repos.iter().map(|r| r.id.to_string()).collect();
+    let unknown: Vec<&String> = members.iter().filter(|m| !known.contains(m)).collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "unknown repo id(s) {unknown:?}; {} registers: {}",
+            repos_path.display(),
+            if known.is_empty() {
+                "none".to_string()
+            } else {
+                known.join(", ")
+            }
+        );
+    }
+    Ok(members)
+}
+
 pub fn run_create(
     name: &str,
     description: Option<String>,
@@ -148,6 +199,7 @@ pub fn run_create(
         anyhow::bail!("workspace name cannot be empty");
     }
     let path = resolve_config_path(config);
+    let members = checked_members(&path, members)?;
     let mut f = load_or_default(&path)?;
     if f.workspaces.iter().any(|w| w.name == name) {
         return Err(err_already_exists(name).into());
@@ -169,6 +221,10 @@ pub fn run_create(
 /// `lain workspaces add <name> --repo <repo-id>`
 pub fn run_add(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config);
+    let repo = checked_members(&path, vec![repo.to_string()])?
+        .pop()
+        .ok_or_else(|| anyhow!("repo id cannot be empty"))?;
+    let repo = repo.as_str();
     let mut f = WorkspacesFile::load(&path).map_err(|e| anyhow!("load {}: {e}", path.display()))?;
     let ws = f
         .workspaces
@@ -195,6 +251,13 @@ pub fn run_remove(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
         .iter_mut()
         .find(|w| w.name == name)
         .ok_or_else(|| anyhow!("{}", err_not_found(name)))?;
+    let repo = repo.trim();
+    if !ws.members.iter().any(|m| m == repo) {
+        anyhow::bail!(
+            "'{repo}' is not a member of workspace '{name}' (members: {})",
+            ws.members.join(", ")
+        );
+    }
     ws.members.retain(|m| m != repo);
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
@@ -244,6 +307,9 @@ pub async fn run_init(
     if from_url.is_empty() {
         anyhow::bail!("--from url cannot be empty");
     }
+    // Ask the remote, as `repos add` does: a hardcoded `main` broke every
+    // definition repo whose default branch is `master`.
+    let ref_ = ref_.or_else(|| crate::cli::repos::remote_default_branch(from_url));
     let path = resolve_config_path(config);
     let local_root = std::env::var_os("LAIN_HOME")
         .map(PathBuf::from)
@@ -354,9 +420,12 @@ pub fn run_use(name: &str, config: Option<&Path>) -> Result<()> {
             ))
         ));
     }
+    // Absolute: the pointer is global, and `lain server` compares it with
+    // its own project's workspaces file to know whether it applies.
+    let absolute = dunce::canonicalize(&path).unwrap_or_else(|_| path.clone());
     ActiveWorkspace {
         name: name.to_string(),
-        config_path: Some(path.clone()),
+        config_path: Some(absolute),
     }
     .save()
     .map_err(|e| anyhow!("save active workspace: {e}"))?;
@@ -392,4 +461,71 @@ pub fn run_forget(name: &str, config: Option<&Path>) -> Result<()> {
     save(&path, &f)?;
     println!("Forgot workspace '{name}'");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `lain workspaces create` with the default `--config ./repos.yaml`
+    /// must leave the repos alone and write `workspaces.yaml` beside it.
+    #[tokio::test]
+    async fn create_with_the_repos_config_writes_the_sibling_workspaces_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repos = dir.path().join("repos.yaml");
+        let original = "data_dir: ./.lain/federation\nrepos:\n- id: pflag\n  source:\n    type: local_clone\n    url: https://example.invalid/pflag.git\n    ref: main\n";
+        std::fs::write(&repos, original).unwrap();
+        let action = WorkspacesAction::Create {
+            name: "spf13".into(),
+            description: None,
+            members: vec!["pflag".into()],
+        };
+        // The reload signal may fail with no server listening; the files
+        // are what matter here.
+        let _ = run(action, &repos).await;
+        assert_eq!(
+            std::fs::read_to_string(&repos).unwrap(),
+            original,
+            "repos.yaml untouched"
+        );
+        let ws = std::fs::read_to_string(dir.path().join("workspaces.yaml")).unwrap();
+        assert!(
+            ws.contains("spf13"),
+            "workspace written beside it; got {ws}"
+        );
+    }
+
+    #[test]
+    fn members_are_trimmed_and_checked_against_repos_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        // No repos.yaml beside it: trimmed, not checked.
+        assert_eq!(
+            checked_members(&ws, vec!["a".into(), " b ".into(), "".into()]).unwrap(),
+            vec!["a", "b"]
+        );
+        std::fs::write(
+            dir.path().join("repos.yaml"),
+            "repos:\n- id: bytes\n  source:\n    type: local_clone\n    url: https://example.invalid/b.git\n    ref: main\n",
+        )
+        .unwrap();
+        assert_eq!(
+            checked_members(&ws, vec![" bytes".into()]).unwrap(),
+            vec!["bytes"]
+        );
+        let err = checked_members(&ws, vec!["bytess".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bytess") && err.contains("bytes"), "{err}");
+    }
+
+    #[test]
+    fn an_explicit_workspaces_path_is_used_as_given() {
+        let p = Path::new("/x/team-workspaces.yaml");
+        assert_eq!(workspaces_file_for(p), p);
+        assert_eq!(
+            workspaces_file_for(Path::new("./repos.yaml")),
+            Path::new("./workspaces.yaml")
+        );
+    }
 }

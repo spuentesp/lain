@@ -25,7 +25,7 @@ use rust_mcp_sdk::{
     },
     McpServer, StdioTransport, TransportOptions,
 };
-use serde_json::Map;
+use serde_json::{Map, Value};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -69,13 +69,62 @@ use crate::server::mcp::definitions::{
 use crate::server::mcp::envelope::{gated_tool_result, tool_text_result};
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 
-/// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
-/// error on malformed input. Used by both stdio and HTTP dispatch arms for
-/// `get_cross_repo_blast_radius*`.
+/// Parse a half-open `Range<u32>` from a string like `"1..3"`.
+///
+/// `start..end` is **half-open**: depths `start, start+1, …, end-1` are
+/// included. Both endpoints must parse as `u32`, the range must be
+/// non-empty (`start < end`), and the full string must match the
+/// `start..end` shape (no stray delimiters).
+///
+/// Returns a descriptive error on malformed input. Used by both stdio
+/// and HTTP dispatch arms for `get_cross_repo_blast_radius*`.
+/// Read the `depth` argument as either the range string `"1..3"` or a
+/// bare number `3` (sugar for `1..3`). JSON numbers are accepted too,
+/// so schema-respecting clients are not forced into a stringly-typed
+/// corner.
+fn depth_arg(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<std::ops::Range<u32>, String> {
+    match map.get("depth") {
+        Some(serde_json::Value::String(s)) => parse_depth_range(s),
+        Some(serde_json::Value::Number(n)) => {
+            let end = n
+                .as_u64()
+                .ok_or_else(|| format!("Invalid depth: {n} is not a positive integer"))?;
+            parse_depth_range(&format!("1..{end}"))
+        }
+        Some(other) => Err(format!(
+            "Invalid depth: expected \"<start>..<end>\" or a number, got {}",
+            match other {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Object(_) => "object",
+            }
+        )),
+        None => Err("Missing required argument: depth".to_string()),
+    }
+}
+
 fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
+    let s = s.trim();
+    // Bare-number shorthand: `3` means `1..3`.
+    if !s.contains("..") {
+        let end: u32 = s.parse().map_err(|_| {
+            format!("Invalid depth: expected \"<start>..<end>\" or a number, got {s:?}")
+        })?;
+        return parse_depth_range(&format!("1..{end}"));
+    }
     let (start_s, end_s) = s
         .split_once("..")
         .ok_or_else(|| format!("Invalid depth: expected \"<start>..<end>\", got {s:?}"))?;
+    if end_s.contains("..") {
+        return Err(format!(
+            "Invalid depth: expected exactly one '..', got {s:?}"
+        ));
+    }
     let start: u32 = start_s
         .trim()
         .parse()
@@ -84,6 +133,11 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
         .trim()
         .parse()
         .map_err(|e| format!("Invalid depth end: {e}"))?;
+    if start >= end {
+        return Err(format!(
+            "Invalid depth: start must be < end, got {start}..{end}"
+        ));
+    }
     Ok(start..end)
 }
 
@@ -98,7 +152,74 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
 /// this function is never consulted anyway, but listing them costs
 /// nothing and documents the intent.
 fn requires_repo_scope(tool_name: &str) -> bool {
-    !matches!(tool_name, "query_graph")
+    // `get_agent_strategy` and `describe_schema` answer the same for every
+    // repository; demanding a repo id for them only blocked the agent.
+    // `get_capabilities` aggregates every repository's readiness itself;
+    // requiring a repo id for it broke the `next_action` the warming-up
+    // response points at.
+    !matches!(
+        tool_name,
+        "get_agent_strategy" | "describe_schema" | "get_capabilities"
+    )
+}
+
+/// The argument that names a symbol for this tool, used to route a
+/// federation call to the one repository defining it.
+fn symbol_hint(args: &Map<String, serde_json::Value>) -> Option<&str> {
+    ["symbol", "name", "from"]
+        .iter()
+        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+}
+
+/// Whether `name` is dispatched through the `McpToolEntry` inventory,
+/// which runs before repo scoping and never reads `repo_id`.
+fn is_inventory_tool(name: &str) -> bool {
+    inventory::iter::<McpToolEntry>().any(|e| e.name == name)
+}
+
+/// On a federation server a per-repo tool is routed by `repo_id` (or a
+/// `symbol` only one repository defines), but it advertised the
+/// single-repo schema, which has no `repo_id`. A schema-following agent
+/// could not call `find_symbol`, `search_code`, `find_anchors`, … at all
+/// once a second repository was registered. Declare it, naming the ids.
+fn advertise_repo_scope(name: &str, schema: &mut serde_json::Value, fed: &FederatedIndex) {
+    if !requires_repo_scope(name) || is_inventory_tool(name) {
+        return;
+    }
+    // Only needed — and only accepted as required — with several repos;
+    // a single-repo server routes everything to its one repo.
+    let ids: Vec<String> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| id.as_str().to_string())
+        .collect();
+    if ids.len() < 2 {
+        return;
+    }
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+    let props = obj
+        .entry("properties")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(props) = props.as_object_mut() else {
+        return;
+    };
+    if props.contains_key("repo_id") {
+        return;
+    }
+    props.insert(
+        "repo_id".into(),
+        serde_json::json!({
+            "type": "string",
+            "description": format!(
+                "Repository to run against: one of {}. Required when the server hosts more \
+                 than one repository, unless `symbol` names a symbol only one of them defines.",
+                ids.join(", ")
+            ),
+        }),
+    );
 }
 
 /// Resolve which repo an existing per-repo MCP tool call should be routed to
@@ -123,11 +244,27 @@ pub fn resolve_repo_for_tool(
     explicit_repo: Option<&str>,
 ) -> Result<RepoId, LainError> {
     if let Some(r) = explicit_repo {
-        return RepoId::new(r);
+        // An unknown id used to route to the empty placeholder graph and
+        // answer "No matches" — indistinguishable from a real miss.
+        let listed = fed.list_repos();
+        if let Some((id, _)) = listed.iter().find(|(id, _)| id.as_str() == r) {
+            return Ok(id.clone());
+        }
+        let known: Vec<&str> = listed.iter().map(|(id, _)| id.as_str()).collect();
+        return Err(LainError::Config(format!(
+            "unknown repo_id '{r}'; registered: {}",
+            known.join(", ")
+        )));
     }
     match symbol_hint {
         Some(s) => match fed.resolve_symbol(s) {
             Ok(r) => Ok(r),
+            // A node id (from `query_graph`, `find_symbol`, …) names exactly
+            // one repo: the one whose graph holds it. Routing only by name
+            // failed every id-based follow-up call without `repo_id`.
+            Err(_) if repo_owning_node(fed, s).is_some() => {
+                Ok(repo_owning_node(fed, s).expect("checked above"))
+            }
             Err(e) => {
                 // The hint exists to *choose a repo*. With exactly one
                 // repo there is nothing to choose, and failing the call
@@ -153,12 +290,81 @@ pub fn resolve_repo_for_tool(
             } else if listed.len() == 1 {
                 Ok(listed[0].0.clone())
             } else {
+                // Name the ids: "or symbol" was advice many tools cannot take.
+                let mut ids: Vec<&str> = listed.iter().map(|(id, _)| id.as_str()).collect();
+                ids.sort_unstable();
                 Err(LainError::Config(format!(
-                    "tool '{tool_name}' requires scoping: multiple repos; pass repo_id or symbol"
+                    "tool '{tool_name}' requires scoping: multiple repos; pass repo_id (one of: {})",
+                    ids.join(", ")
                 )))
             }
         }
     }
+}
+
+/// The repo whose graph holds node `id`, if exactly one does. A global id
+/// (`repo:Kind:path:name`) names its repo outright.
+fn repo_owning_node(fed: &FederatedIndex, id: &str) -> Option<RepoId> {
+    if let Ok(gid) = crate::federation::repo_id::GlobalId::parse(id) {
+        if let Ok(r) = RepoId::new(gid.repo_id()) {
+            if fed.get_repo(&r).is_some() {
+                return Some(r);
+            }
+        }
+    }
+    let owners: Vec<RepoId> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(r, _)| r)
+        .filter(|r| {
+            fed.get_repo(r)
+                .is_some_and(|idx| matches!(idx.db().get_node(id), Ok(Some(_))))
+        })
+        .collect();
+    (owners.len() == 1).then(|| owners.into_iter().next().expect("one owner"))
+}
+
+/// `get_health` for a multi-repo federation: the aggregate, then one line
+/// per repo. Per-repo detail stays one `repo_id` away.
+fn federation_health_report(fed: &FederatedIndex) -> String {
+    use crate::server::mcp::federation_tools::federation::{get_federation_health, list_repos};
+    let h = get_federation_health(fed);
+    let mut out = format!(
+        "## Lain Server Health (federation)\n\n\
+         - **Status:** {}\n\
+         - **Repositories:** {} ({} ready, {} indexing, {} degraded, {} unavailable)\n\
+         - **Nodes / edges:** {} / {}\n\n### Repositories\n",
+        if h.healthy {
+            "Operational ✅"
+        } else {
+            "Degraded ⚠"
+        },
+        h.total_repos,
+        h.ready,
+        h.indexing,
+        h.degraded,
+        h.unavailable,
+        h.total_nodes,
+        h.total_edges,
+    );
+    for (repo, error) in fed.load_errors() {
+        out.push_str(&format!("- **{repo}**: not loaded — {error}\n"));
+    }
+    for r in list_repos(fed) {
+        out.push_str(&format!(
+            "- **{}**: {} — {} nodes, {} edges{}\n",
+            r.id,
+            r.health,
+            r.node_count,
+            r.edge_count,
+            r.last_error
+                .as_deref()
+                .map(|e| format!(" (last error: {e})"))
+                .unwrap_or_default()
+        ));
+    }
+    out.push_str("\nPass `repo_id` for one repository's full health report.\n");
+    out
 }
 
 /// Run the federation-mode repo resolver against a tool call's `args`. Returns
@@ -178,9 +384,8 @@ fn resolve_repo_or_error(
     tool_name: &str,
     args: &Map<String, serde_json::Value>,
 ) -> Result<RepoId, String> {
-    let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
     let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
-    match resolve_repo_for_tool(fed, tool_name, symbol_hint, explicit_repo) {
+    match resolve_repo_for_tool(fed, tool_name, symbol_hint(args), explicit_repo) {
         Ok(rid) => Ok(rid),
         Err(LainError::AmbiguousSymbol(candidates)) => {
             let payload = serde_json::json!({
@@ -242,9 +447,8 @@ fn gate_for_dispatch(
 
     let resolved: Vec<(RepoId, crate::federation::health::RepoHealth)> =
         if requires_repo_scope(name) {
-            let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
             let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
-            match resolve_repo_for_tool(fed, name, symbol_hint, explicit_repo) {
+            match resolve_repo_for_tool(fed, name, symbol_hint(args), explicit_repo) {
                 Ok(id) => vec![fed.list_repos().into_iter().find(|(rid, _)| rid == &id)?],
                 Err(_) => return None,
             }
@@ -257,6 +461,87 @@ fn gate_for_dispatch(
         &resolved,
         semantic_model_configured,
     )
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The host part of a `Host` header or an origin URL
+/// (`http://127.0.0.1:9999` → `127.0.0.1`, `[::1]:80` → `::1`).
+fn host_of(authority_or_origin: &str) -> String {
+    let rest = authority_or_origin
+        .split_once("://")
+        .map_or(authority_or_origin, |(_, r)| r);
+    let rest = rest.split('/').next().unwrap_or(rest);
+    if let Some(v6) = rest.strip_prefix('[') {
+        return v6.split(']').next().unwrap_or(v6).to_string();
+    }
+    rest.rsplit_once(':')
+        .map_or(rest, |(h, port)| {
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                h
+            } else {
+                rest
+            }
+        })
+        .to_string()
+}
+
+/// Refuse requests a browser page could forge (the MCP spec requires
+/// servers to validate `Origin`):
+/// - an `Origin` that is not loopback, unless listed in
+///   `LAIN_ALLOWED_ORIGINS` (comma-separated, e.g. `https://app.example`);
+/// - on a loopback bind, a `Host` that is not loopback (DNS rebinding);
+/// - a POST whose body is not declared `application/json` (a simple
+///   cross-origin form or `text/plain` POST skips the CORS preflight).
+fn browser_guard(
+    method: &Method,
+    headers: &hyper::HeaderMap,
+    loopback_bind: bool,
+) -> Result<(), (StatusCode, &'static str)> {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    if let Some(origin) = header("origin") {
+        let allowed = std::env::var("LAIN_ALLOWED_ORIGINS").unwrap_or_default();
+        let listed = allowed
+            .split(',')
+            .map(|o| o.trim().trim_end_matches('/'))
+            .any(|o| !o.is_empty() && o.eq_ignore_ascii_case(origin.trim_end_matches('/')));
+        if !listed && !is_loopback_host(&host_of(origin)) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "cross-origin request refused; set LAIN_ALLOWED_ORIGINS to allow this origin",
+            ));
+        }
+    }
+    if loopback_bind {
+        if let Some(host) = header("host") {
+            if !is_loopback_host(&host_of(host)) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Host is not loopback; this server only answers localhost",
+                ));
+            }
+        }
+    }
+    if method == Method::POST {
+        let json = header("content-type").is_some_and(|ct| {
+            ct.split(';')
+                .next()
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
+        });
+        if !json {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "POST bodies must be Content-Type: application/json",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Per-process status snapshot carried into the HTTP request handler
@@ -335,15 +620,22 @@ pub struct McpToolEntry {
 inventory::collect!(McpToolEntry);
 
 /// Wrap a handler result into the `(text, is_error)` shape every
-/// `dispatch_tool_call` arm returns. Centralizes the `unwrap_or_else`
-/// serialization fallback so the per-tool wrapper functions stay short.
+/// `dispatch_tool_call` arm returns. Centralizes the serialization
+/// fallback so the per-tool wrapper functions stay short.
+///
+/// `is_error` is `true` whenever the result text could not be derived
+/// from the handler's intent — including a `serde_json` serialization
+/// failure of an otherwise-`Ok` payload. A tool that returned
+/// `Ok(value)` but failed to serialize that value still hasn't produced
+/// its result, and an agent that ignores `is_error` and reads the
+/// text would otherwise see a misleading "serialization error" string
+/// presented as if it were a successful payload.
 fn tool_result(name: &str, result: Result<serde_json::Value, String>) -> (String, bool) {
     match result {
-        Ok(v) => (
-            serde_json::to_string(&v)
-                .unwrap_or_else(|e| format!("{name}: serialization error: {e}")),
-            false,
-        ),
+        Ok(v) => match serde_json::to_string(&v) {
+            Ok(s) => (s, false),
+            Err(e) => (format!("{name}: serialization error: {e}"), true),
+        },
         Err(e) => (format!("{name}: {e}"), true),
     }
 }
@@ -380,6 +672,18 @@ async fn dispatch_tool_call(
     }
 
     if let Some(fed) = federation {
+        // A health check that fails unless you already know a repo id is
+        // no health check: unscoped `get_health` across several repos
+        // answers for the federation, per repo.
+        // One loaded repo plus some that failed to load is still a
+        // federation; the single-repo report never mentioned them.
+        if name == "get_health"
+            && (fed.list_repos().len() > 1 || !fed.load_errors().is_empty())
+            && !args_map.contains_key("repo_id")
+            && !args_map.contains_key("symbol")
+        {
+            return (federation_health_report(fed), false);
+        }
         if requires_repo_scope(name) {
             match resolve_repo_or_error(fed, name, &args_map) {
                 Ok(rid) => {
@@ -400,11 +704,72 @@ async fn dispatch_tool_call(
     };
 
     match executor.call(name, args).await {
-        Ok(text) => (text, false),
+        Ok(mut text) => {
+            let scoped = args_map.get("repo_id").and_then(|v| v.as_str());
+            let note = match federation {
+                Some(fed) => indexing_notice(fed, name, scoped),
+                // A single-workspace server: its own startup index.
+                None => (PARTIAL_GRAPH_TOOLS.contains(&name)
+                    && executor.ctx.readiness.snapshot().state
+                        == crate::server::readiness::IndexState::WarmingUp)
+                    .then(|| indexing_note("this repository")),
+            };
+            if let Some(note) = note {
+                text.push_str(&note);
+            }
+            (text, false)
+        }
         Err(e) => (format!("Error: {e}"), true),
     }
 }
 
+/// Tools that answer from whatever the graph holds instead of waiting
+/// for readiness (`GraphIndependent`), yet read the graph.
+const PARTIAL_GRAPH_TOOLS: &[&str] = &[
+    "find_symbol",
+    "search_code",
+    "get_health",
+    "understand_repository",
+];
+
+/// A note for answers given while a repo is still being indexed.
+///
+/// `lain server` indexes in the background so it can answer at once;
+/// before, it indexed first and listened after. Answering early is only
+/// honest if the answer says it may be incomplete: `find_symbol` said
+/// "No matches" for a symbol the pass had not reached yet, and
+/// `get_health` said "Operational".
+fn indexing_notice(fed: &FederatedIndex, name: &str, repo_id: Option<&str>) -> Option<String> {
+    if !PARTIAL_GRAPH_TOOLS.contains(&name) {
+        return None;
+    }
+    // A call scoped to one repository is only affected by that one.
+    let indexing: Vec<String> = fed
+        .list_repos()
+        .into_iter()
+        .filter(|(_, h)| *h == crate::federation::health::RepoHealth::Indexing)
+        .map(|(id, _)| id.as_str().to_string())
+        .filter(|id| repo_id.is_none_or(|r| r == id))
+        .collect();
+    if indexing.is_empty() {
+        return None;
+    }
+    Some(indexing_note(&indexing.join(", ")))
+}
+
+/// How every partial-index note starts; `lain oneshot` keys its retry on it.
+pub const INDEXING_NOTE_MARKER: &str = "⏳ Still indexing:";
+
+fn indexing_note(what: &str) -> String {
+    format!(
+        "\n\n{INDEXING_NOTE_MARKER} {what}. This answer covers only what has been \
+         indexed so far and may be incomplete; retry when `get_health` no \
+         longer shows this note."
+    )
+}
+
+/// Wrap an args `Map<String, Value>` as a single `Value::Object` so
+/// the runner functions' `Value` parameter type matches. The runner
 struct LainHandler {
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
@@ -472,6 +837,28 @@ pub(crate) fn inert_tool_names(
     }
 }
 
+/// Decide whether `tool_name` is visible under the active
+/// `ToolProfile`. The `Full` profile is the legacy "show everything"
+/// behaviour. The `Semantic` profile gates the surface to the
+/// curated `SEMANTIC_PROFILE` list, plus the federation / workspace /
+/// server-status families that are part of the contextual
+/// `tools/list` response (those are appended by the dispatcher
+/// from `FEDERATION_TOOL_DEFS`, `WORKSPACE_TOOL_DEFS`, and
+/// `SERVER_TOOL_DEFS`).
+///
+/// Unknown tools (those the dispatcher routes via
+/// `ToolExecutor::call_inner` but that aren't in
+/// `SEMANTIC_PROFILE`) are kept under both profiles: `get_health`,
+/// `get_capabilities`, and similar special-cased tools *must*
+/// remain reachable, and the semantic-profile curation already
+/// includes the ones an agent needs.
+pub(crate) fn profile_allows(
+    profile: &crate::server::tools::profile::ToolProfile,
+    tool_name: &str,
+) -> bool {
+    crate::server::tools::profile::profile_allows_inner(profile, tool_name)
+}
+
 #[async_trait]
 impl ServerHandler for LainHandler {
     async fn handle_list_tools_request(
@@ -482,7 +869,11 @@ impl ServerHandler for LainHandler {
         let mut tools: Vec<Tool> = crate::tools::registry::ToolRegistry::definitions()
             .iter()
             .map(|def| {
-                let input_schema = serde_json::from_value(def.input_schema.clone())
+                let mut schema = def.input_schema.clone();
+                if let Some(fed) = &self.federation {
+                    advertise_repo_scope(def.name, &mut schema, fed);
+                }
+                let input_schema = serde_json::from_value(schema)
                     .unwrap_or_else(|_| ToolInputSchema::new(vec![], None, None));
                 Tool {
                     name: def.name.to_string(),
@@ -505,7 +896,11 @@ impl ServerHandler for LainHandler {
         // Append special-case tools handled in ToolExecutor::call_inner
         // so MCP clients can see the full surface in tools/list.
         for special in special_tool_definitions() {
-            let input_schema = serde_json::from_value(special.input_schema.clone())
+            let mut schema = special.input_schema.clone();
+            if let Some(fed) = &self.federation {
+                advertise_repo_scope(special.name, &mut schema, fed);
+            }
+            let input_schema = serde_json::from_value(schema)
                 .unwrap_or_else(|_| ToolInputSchema::new(vec![], None, None));
             tools.push(Tool {
                 name: special.name.to_string(),
@@ -527,6 +922,16 @@ impl ServerHandler for LainHandler {
         }
         // Server-status and recent-projects tools are always available.
         tools.extend(defs_to_tools(SERVER_TOOL_DEFS));
+
+        // Wire-level filter for the default Semantic tool profile.
+        // `LAIN_TOOL_PROFILE=full` opts in to the legacy 79-tool
+        // surface. The agent self-discovers the active profile via
+        // `get_capabilities.tool_profile` — surfacing that in the
+        // ListToolsResult itself would require every MCP SDK to
+        // honour `_meta`, which most don't, so we keep it in the
+        // dedicated capabilities endpoint.
+        let profile = crate::server::tools::profile::ToolProfile::from_env();
+        tools.retain(|t| profile_allows(&profile, &t.name));
 
         Ok(ListToolsResult {
             tools,
@@ -691,6 +1096,21 @@ async fn notify_capabilities_changed(
     }
 }
 
+/// Wait until no federation repo is `Indexing`. No-op without a federation.
+async fn wait_for_federation_indexing(server: &LainServer) {
+    use crate::federation::health::RepoHealth;
+    let Some(fed) = server.federation() else {
+        return;
+    };
+    while fed
+        .list_repos()
+        .iter()
+        .any(|(_, h)| *h == RepoHealth::Indexing)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 pub(crate) async fn await_startup_reindex(
     server: Option<std::sync::Arc<LainServer>>,
     reindex_timeout: Option<std::time::Duration>,
@@ -711,10 +1131,19 @@ pub(crate) async fn await_startup_reindex(
         // this outer race lets the outer timeout (or an explicit
         // cancel) win even if a phase is wedged in a non-cancellable
         // sync block. The token wins on both sides.
+        // `lain server` indexes federation repos in the background
+        // (`index_federation`). Let that pass finish first: this pass
+        // covers the same graph, and running both at once scanned every
+        // file twice with two language-server pools. Afterwards this one
+        // finds the graph current and returns at once, as it did when the
+        // federation was indexed before the server started.
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(crate::error::LainError::Cancelled),
-            r = server.build_core_memory() => r,
+            r = async {
+                wait_for_federation_indexing(&server).await;
+                server.build_core_memory_until_complete().await
+            } => r,
         }
     })
     .await
@@ -823,6 +1252,15 @@ impl LainMcpServer {
         workspaces: Arc<RwLock<crate::federation::workspace::WorkspacesFile>>,
     ) -> Self {
         let now = std::time::SystemTime::now();
+        // Sync the workspace handle into the executor's `ToolContext`
+        // so `get_capabilities` (and any future workspace-aware tool
+        // path) sees it. This mirrors the `with_server` mutation
+        // pattern for presence/occupancy/annotations: the dispatcher
+        // routes through `ToolExecutor::call`, which doesn't have
+        // direct access to `LainMcpServer`'s fields, so the wiring
+        // hop lives here.
+        let mut executor = executor;
+        executor.ctx.workspaces = Some(Arc::clone(&workspaces));
         Self {
             executor,
             federation: Some(federation),
@@ -868,12 +1306,27 @@ impl LainMcpServer {
         let presence = Arc::clone(server.presence());
         let occupancy = Arc::clone(server.occupancy());
         let last_outcome = Arc::clone(server.refresh_handle().last_outcome());
+        let annotations = Arc::clone(server.annotations());
+        // The watchdog spawned by `IngestHandle::start_git_sensor_watchdog`
+        // publishes a wall-clock timestamp on the free→held transition
+        // (Bug #2 from the 2026-09-18 postmortem). `get_health` reads
+        // this so the hang is visible to operator tooling without log
+        // scraping. Single-repo binding gets the live atomic; multi-repo
+        // (`for_repo`) callers keep this binding's atomic because the
+        // mutex in question is the orchestrator's, not per-repo.
+        //
+        // The atomic lives behind an Arc inside the IngestHandle, so a
+        // direct clone is enough — the watchdog writes to the same
+        // allocation this handle observes.
+        let git_busy_since_unix_nanos = Arc::clone(&server.ingest().git_busy_since_nanos);
         // `executor.ctx` is `pub`; mutate it in place so handlers reading
         // through `&ctx.presence` / `&ctx.occupancy` observe the live
         // registries.
         self.executor.ctx.presence = presence;
         self.executor.ctx.occupancy = occupancy;
         self.executor.ctx.last_outcome = last_outcome;
+        self.executor.ctx.annotations = annotations;
+        self.executor.ctx.git_busy_since_unix_nanos = git_busy_since_unix_nanos;
         self.server = Some(server);
         self
     }
@@ -945,7 +1398,16 @@ impl LainMcpServer {
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
                             let status = status.clone();
-                            handle_request(req, executor, None, None, status, None, None)
+                            handle_request(
+                                req,
+                                executor,
+                                None,
+                                None,
+                                status,
+                                None,
+                                None,
+                                addr.ip().is_loopback(),
+                            )
                         });
                         if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
                             tracing::debug!("Connection error: {}", e);
@@ -1081,31 +1543,47 @@ impl LainMcpServer {
         result
     }
 
-    /// Run with HTTP transport (for MCP clients and browser diagnostics)
-    // The `let x = x;` rebindings inside the accept loop are intentional:
-    // they re-bind the outer locals (read from `self` above) so the inner
-    // `tokio::spawn`'s `move` closure can capture them by ownership without
-    // pulling `self` across threads (which has non-`Send` fields).
+    /// Run with HTTP transport (for MCP clients and browser diagnostics).
+    ///
+    /// `addr` is the exact socket address to bind on. `LainServer::serve`
+    /// is responsible for refusing non-loopback binds when no API keys are
+    /// configured; this method binds to whatever address it is handed and
+    /// trusts that the caller has already validated it.
     #[allow(clippy::redundant_locals)]
-    pub async fn run_http(self, port: u16) -> SdkResult<()> {
-        info!("Starting Lain MCP HTTP server on port {}", port);
+    pub async fn run_http(self, addr: std::net::SocketAddr) -> SdkResult<()> {
+        info!("Starting Lain MCP HTTP server on {addr}");
 
-        // Same backgrounded re-index as `run_stdio`; see there for the
-        // full rationale. HTTP has no equivalent to stdio's "session
-        // ended" moment (the accept loop below runs until the process is
-        // killed), but unlike the pre-fix code we now retain the
-        // `JoinHandle` in `LifecycleInfo::startup_task` so a future
-        // `LainServer::shutdown` (or `Drop`) can cancel the
-        // server-owned token and bound-await the task. The transport's
-        // own loop keeps running until the runtime tears it down —
-        // the same shutdown story every other HTTP server in the
-        // project's stack uses — but the backgrounded indexer no
-        // longer races a teardown.
+        // Bind the HTTP listener *before* spawning the background
+        // re-index. The original order spawned the startup task first
+        // and only then reached `TcpListener::bind`, which let the
+        // startup task starve the bind on the same runtime when the
+        // startup task itself hung — Bug #2 from the 2026-09-18 Tauri
+        // postmortem: the CLI server hung in `Dl` state, port 9999
+        // never opened, no log lines after the projection log.
+        // Binding first means the listener is up even if the re-index
+        // hangs; clients hitting the port then get the structured
+        // `warming_up` response from `dispatch_tool_call` (see the
+        // comment in `run_stdio`) instead of a connection refused, and
+        // operators can poll `/health` to observe the stuck state.
+        let listener = TcpListener::bind(addr).await?;
+
+        // Same backgrounded re-index as `run_stdio`; see there for
+        // the full rationale. HTTP has no equivalent to stdio's
+        // "session ended" moment (the accept loop below runs until
+        // the process is killed), but unlike the pre-fix code we now
+        // retain the `JoinHandle` in `LifecycleInfo::startup_task` so
+        // a future `LainServer::shutdown` (or `Drop`) can cancel the
+        // server-owned token and bound-await the task. The
+        // transport's own loop keeps running until the runtime tears
+        // it down — the same shutdown story every other HTTP server
+        // in the project's stack uses — but the backgrounded indexer
+        // no longer races a teardown.
         //
         // No notifier: this transport is a plain request/response
         // JSON-RPC loop with no persistent connection to push an
-        // unsolicited notification through. `get_capabilities` polling
-        // is the only freshness signal HTTP clients get today.
+        // unsolicited notification through. `get_capabilities`
+        // polling is the only freshness signal HTTP clients get
+        // today.
         let cancel = self
             .server
             .as_ref()
@@ -1123,7 +1601,7 @@ impl LainMcpServer {
 
         // Publish the real listener port so tool output can link to
         // `/ui/...` sessions; stdio mode leaves it at 0 (no links).
-        self.executor.set_diagnostics_port(port);
+        self.executor.set_diagnostics_port(addr.port());
         let executor = Arc::new(self.executor);
         let federation = self.federation;
         let workspaces = self.workspaces;
@@ -1134,7 +1612,7 @@ impl LainMcpServer {
         let status_last_error = self.status_last_error;
         let reload_bus = self.reload_bus;
         let server = self.server;
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+        let loopback_bound = addr.ip().is_loopback();
 
         loop {
             match listener.accept().await {
@@ -1149,6 +1627,7 @@ impl LainMcpServer {
                     let status_last_error = status_last_error.clone();
                     let reload_bus = reload_bus.clone();
                     let server = server.clone();
+                    let loopback_bound = loopback_bound;
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
@@ -1178,6 +1657,7 @@ impl LainMcpServer {
                                 handler_status,
                                 reload_bus.clone(),
                                 server.clone(),
+                                loopback_bound,
                             )
                         });
                         if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
@@ -1219,22 +1699,105 @@ impl LainMcpServer {
 /// federation-aware shape can be unit-tested without spinning up an
 /// HTTP harness. When `federation` is `None` (single-workspace mode)
 /// the `federation` field serializes as JSON `null`; when `Some` it
+/// Build the JSON body returned by `GET /health`. Extracted so the
+/// federation-aware shape can be unit-tested without spinning up an
+/// HTTP harness. When `federation` is `None` (single-workspace mode)
+/// the `federation` field serializes as JSON `null`; when `Some` it
 /// carries the repo roster and aggregate stats so the UI can detect
 /// federation mode without a separate `tools/call` round-trip.
+///
+/// `lsp_prewarm` carries the outcome of the cold-boot prewarm pass
+/// per LSP binary. `None` means the call site has no LSP pool
+/// available (e.g. background health probes), so the field is
+/// omitted entirely. `Some(map)` always materialises a
+/// `lsp_prewarm` JSON object — even when empty — so an agent can
+/// distinguish "the prewarm path ran and produced nothing yet"
+/// from "this endpoint doesn't know about prewarm".
 fn build_health_body(
     nodes: usize,
     edges: usize,
     federation: Option<&FederatedIndex>,
+    lsp_prewarm: Option<&std::collections::HashMap<String, crate::server::lsp::PrewarmOutcome>>,
+    git_sensor: Option<&crate::server::git::AnyGitSensor>,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "status": "ok",
+    let fed_blob = federation.map(federation_blob);
+    let mut any_sidecar_dead = false;
+
+    if let Some(ref fb) = fed_blob {
+        if fb.get("status").and_then(|s| s.as_str()) == Some("Degraded") {
+            any_sidecar_dead = true;
+        }
+    }
+
+    let top_git_sensor = git_sensor.map(|g| {
+        if !g.is_alive() {
+            any_sidecar_dead = true;
+        }
+        g.health_json()
+    });
+
+    let status = if any_sidecar_dead { "degraded" } else { "ok" };
+
+    let mut body = serde_json::json!({
+        "status": status,
         "server": "lain",
         "version": env!("CARGO_PKG_VERSION"),
         "graph_nodes": nodes,
         "graph_edges": edges,
         "tools_count": crate::tools::registry::ToolRegistry::definitions().len(),
-        "federation": federation.map(federation_blob),
-    })
+        "federation": fed_blob,
+    });
+    if any_sidecar_dead {
+        body.as_object_mut().unwrap().insert(
+            "reason".into(),
+            serde_json::Value::String("git sensor sidecar is not alive".into()),
+        );
+    }
+    if let Some(gs) = top_git_sensor {
+        body.as_object_mut()
+            .unwrap()
+            .insert("git_sensor".into(), gs);
+    }
+    if let Some(outcomes) = lsp_prewarm {
+        let prewarm_map = outcomes
+            .iter()
+            .map(|(binary, outcome)| (binary.clone(), prewarm_outcome_to_json(outcome)))
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        body.as_object_mut()
+            .unwrap()
+            .insert("lsp_prewarm".into(), serde_json::Value::Object(prewarm_map));
+    }
+    body
+}
+
+/// Encode a single `PrewarmOutcome` as a structured JSON value so
+/// the failure reason (truncated to ~200 chars) survives a
+/// `get_health` round-trip. The shape is `{ status, ms?, reason? }`
+/// — `ms` for `Warmed`, `reason` for `Failed`, neither for the
+/// skip / timed-out states.
+fn prewarm_outcome_to_json(outcome: &crate::server::lsp::PrewarmOutcome) -> serde_json::Value {
+    use crate::server::lsp::PrewarmOutcome;
+    match outcome {
+        PrewarmOutcome::Warmed { ms } => {
+            serde_json::json!({ "status": "warmed", "ms": ms })
+        }
+        PrewarmOutcome::TimedOut => serde_json::json!({ "status": "timed_out" }),
+        PrewarmOutcome::Failed { reason } => {
+            // Truncate to keep `/health` cheap to scrape; full reason
+            // is in `tracing` logs.
+            let truncated: String = reason.chars().take(200).collect();
+            serde_json::json!({
+                "status": "failed",
+                "reason": truncated,
+            })
+        }
+        PrewarmOutcome::SkippedNoSentinel => {
+            serde_json::json!({ "status": "skipped_no_sentinel" })
+        }
+        PrewarmOutcome::SkippedUnavailable => {
+            serde_json::json!({ "status": "skipped_unavailable" })
+        }
+    }
 }
 
 /// Render the federation summary embedded in `/health`. The
@@ -1242,27 +1805,66 @@ fn build_health_body(
 /// (200 bytes/node + 100 bytes/edge) — sufficient for the dashboard's
 /// capacity bar; not a precise accounting.
 fn federation_blob(fed: &FederatedIndex) -> serde_json::Value {
+    let mut any_sidecar_dead = false;
+    let mut primary_git_sensor = None;
+
     let repos: Vec<serde_json::Value> = fed
         .list_repos()
         .into_iter()
         .map(|(id, health)| {
-            serde_json::json!({
+            let mut repo_json = serde_json::json!({
                 "id": id.to_string(),
                 "health": health.to_string(),
-            })
+            });
+            if let Some(repo) = fed.get_repo(&id) {
+                let git = repo.git();
+                let gs_json = git.health_json();
+                if !git.is_alive() {
+                    any_sidecar_dead = true;
+                }
+                if primary_git_sensor.is_none() {
+                    primary_git_sensor = Some(gs_json.clone());
+                }
+                repo_json
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("git_sensor".into(), gs_json);
+            }
+            repo_json
         })
         .collect();
     let backend = fed.backend();
     let node_count = backend.node_count();
     let edge_count = backend.edge_count();
-    serde_json::json!({
+
+    let federation_git_sensor = primary_git_sensor.unwrap_or_else(|| {
+        serde_json::json!({
+            "kind": match crate::git::GitSensorMode::from_env() {
+                crate::git::GitSensorMode::InProcess => "in_process",
+                crate::git::GitSensorMode::Sidecar => "sidecar",
+            }
+        })
+    });
+
+    let mut blob = serde_json::json!({
         "repos": repos,
         "total_nodes": node_count,
         "total_edges": edge_count,
         "memory_estimate_bytes": node_count as u64 * 200 + edge_count as u64 * 100,
-    })
+        "git_sensor": federation_git_sensor,
+    });
+    if any_sidecar_dead {
+        blob.as_object_mut()
+            .unwrap()
+            .insert("status".into(), "Degraded".into());
+        blob.as_object_mut()
+            .unwrap()
+            .insert("reason".into(), "git sensor sidecar is not alive".into());
+    }
+    blob
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
@@ -1277,6 +1879,9 @@ async fn handle_request(
     // carry the presence layer. Presence-tool dispatches inside the
     // JSON-RPC branch see this as `None` and return a descriptive error.
     server: Option<Arc<LainServer>>,
+    // Whether the HTTP listener is bound to a loopback address. Used by
+    // the browser-guard to decide whether to block cross-origin requests.
+    loopback_bound: bool,
 ) -> Result<Response<OverlayHttpBody>, hyper::Error> {
     let jsonrpc_response = |value: serde_json::Value| -> Response<OverlayHttpBody> {
         let body = serde_json::to_string(&value).unwrap_or_default();
@@ -1328,6 +1933,23 @@ async fn handle_request(
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
+    // Browser guard, before anything else: a web page the user has open
+    // can POST to a loopback port (a `text/plain` body needs no CORS
+    // preflight) or reach it through DNS rebinding, and every tool —
+    // including file reads and webhooks — would answer it.
+    if let Err((code, why)) = browser_guard(&method, req.headers(), loopback_bound) {
+        let body_bytes = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {"code": -32003, "message": why},
+            "id": null
+        }))
+        .unwrap_or_default();
+        return Ok(Response::builder()
+            .status(code)
+            .body(full_body(Bytes::from(body_bytes)))
+            .unwrap());
+    }
+
     // Auth + rate limit (P0 #1). `/health` is unauthenticated by design
     // (operational probe). All other endpoints — including `/mcp` and
     // `/events` — require a valid `Authorization: Bearer <key>` and
@@ -1378,7 +2000,17 @@ async fn handle_request(
     // GET /health -> health check with graph stats
     if method == Method::GET && path == "/health" {
         let (nodes, edges) = executor.graph().get_stats();
-        let health = build_health_body(nodes, edges, federation.as_deref());
+        // Snapshot prewarm outcomes once. The aggregation walks every
+        // multiplexer under the pool; cheap and bounded — the call
+        // site is operator-facing, latency budgets are generous.
+        let prewarm = Some(executor.ctx.lsp_pool.aggregate_prewarm_outcomes().await);
+        let health = build_health_body(
+            nodes,
+            edges,
+            federation.as_deref(),
+            prewarm.as_ref(),
+            Some(executor.git().as_ref()),
+        );
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -1579,10 +2211,14 @@ async fn handle_request(
                         let mut tools: Vec<serde_json::Value> = tools_vec
                             .iter()
                             .map(|def| {
+                                let mut schema = def.input_schema.clone();
+                                if let Some(fed) = federation.as_deref() {
+                                    advertise_repo_scope(def.name, &mut schema, fed);
+                                }
                                 serde_json::json!({
                                     "name": def.name,
                                     "description": def.description,
-                                    "inputSchema": def.input_schema
+                                    "inputSchema": schema
                                 })
                             })
                             .collect();
@@ -1595,6 +2231,18 @@ async fn handle_request(
                         for t in defs_to_value_tools(SERVER_TOOL_DEFS) {
                             tools.push(t);
                         }
+                        // Same wire-level profile filter as the stdio
+                        // path. `LAIN_TOOL_PROFILE=full` opts back in to
+                        // the legacy 79-tool surface.
+                        let http_profile = crate::server::tools::profile::ToolProfile::from_env();
+                        let tools: Vec<serde_json::Value> = tools
+                            .into_iter()
+                            .filter(|t| {
+                                t.get("name")
+                                    .and_then(|n| n.as_str())
+                                    .is_none_or(|n| profile_allows(&http_profile, n))
+                            })
+                            .collect();
                         serde_json::json!({"jsonrpc": "2.0", "result": {"tools": tools}, "id": id})
                     }
                     "tools/call" => {
@@ -1654,6 +2302,156 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .body(full_body(Bytes::from(response_str)))
+            .unwrap());
+    }
+
+    // POST /hook -> ingest a tool-call observation from an agent's
+    // hook layer (PR 2 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
+    //
+    // Wire shape:
+    // ```json
+    // {
+    //   "session_token": "...",
+    //   "agent_id": "...",
+    //   "event": "tool_start" | ...,
+    //   "tool": "Read" | ...,
+    //   "target": "src/auth.rs"
+    // }
+    // ```
+    if method == Method::POST && path == "/hook" {
+        const MAX_HOOK_BODY_BYTES: u64 = 64 * 1024;
+        let body_bytes = match Limited::new(req.into_body(), MAX_HOOK_BODY_BYTES as usize)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .header("Content-Type", "application/json")
+                    .body(full_body(Bytes::from_static(
+                        b"{\"error\":\"hook body exceeds 64 KiB limit\"}",
+                    )))
+                    .unwrap());
+            }
+        };
+        let hook_event: crate::server::mcp::hook::HookEvent =
+            match serde_json::from_slice(&body_bytes) {
+                Ok(e) => e,
+                Err(parse_err) => {
+                    let body = serde_json::json!({
+                        "error": "malformed_hook_event",
+                        "message": format!("{parse_err}"),
+                    })
+                    .to_string();
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .header("Content-Type", "application/json")
+                        .body(full_body(Bytes::from(body)))
+                        .unwrap());
+                }
+            };
+        let hook_response: (StatusCode, Value) = match server.as_deref() {
+            None => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error": "presence layer not configured"
+                }),
+            ),
+            Some(s) => match crate::server::mcp::hook::handle_hook(s, hook_event) {
+                Ok(value) => (StatusCode::OK, value),
+                Err(msg) => (
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({
+                        "error": "hook_rejected",
+                        "message": msg
+                    }),
+                ),
+            },
+        };
+        let (status, body) = hook_response;
+        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        return Ok(Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(full_body(Bytes::from(body_str)))
+            .unwrap());
+    }
+
+    // POST /hook/evaluate -> synchronous GREEN/YELLOW/RED consultation
+    // before an Edit. The agent calls this just before mutating a
+    // file; the server returns the same `CoordinationLevel` that
+    // the baseline `lain_intent` would return, but synchronously and
+    // scoped to the specific target the agent is about to edit.
+    //
+    // Wire shape:
+    // ```json
+    // {
+    //   "session_token": "...",
+    //   "agent_id": "...",
+    //   "target": "src/auth.rs",
+    //   "intent": "edit" | "read"
+    // }
+    // ```
+    //
+    // Response: `{"level": "green|yellow|red", "reason": ...,
+    // "related": [...]}`. Returns 400 for malformed input, 503 if
+    // the presence layer isn't configured, 401 if the session
+    // token doesn't match the agent.
+    if method == Method::POST && path == "/hook/evaluate" {
+        const MAX_EVAL_BODY_BYTES: u64 = 16 * 1024;
+        let body_bytes = match Limited::new(req.into_body(), MAX_EVAL_BODY_BYTES as usize)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .header("Content-Type", "application/json")
+                    .body(full_body(Bytes::from_static(
+                        b"{\"error\":\"evaluate body exceeds 16 KiB limit\"}",
+                    )))
+                    .unwrap());
+            }
+        };
+        let eval_req: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header("Content-Type", "application/json")
+                    .body(full_body(Bytes::from(format!(
+                        "{{\"error\":\"malformed_body\",\"message\":\"{e}\"}}"
+                    ))))
+                    .unwrap());
+            }
+        };
+        let eval_response = match server.as_deref() {
+            None => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error": "presence layer not configured"
+                }),
+            ),
+            Some(s) => match crate::server::mcp::hook::evaluate(s, eval_req) {
+                Ok(value) => (StatusCode::OK, value),
+                Err(msg) => (
+                    StatusCode::from_u16(if msg.starts_with("auth_") { 401 } else { 400 })
+                        .unwrap_or(StatusCode::BAD_REQUEST),
+                    serde_json::json!({
+                        "error": "evaluate_rejected",
+                        "message": msg,
+                    }),
+                ),
+            },
+        };
+        let (status, body) = eval_response;
+        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        return Ok(Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(full_body(Bytes::from(body_str)))
             .unwrap());
     }
 
@@ -1953,6 +2751,24 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
+            name: "list_packages",
+            description: "The skill menu: every capability package with its pitch, level, why it is off by default, and its tools.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
+        },
+        ToolDefinition {
+            name: "load_package",
+            description: "Opt a package (verify, arch, raw, notes, session, social, ops) into this session's tools/list, then refetch it.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "package": { "type": "string", "description": "package name from list_packages" }
+                },
+                "required": ["package"]
+            }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
+        },
+        ToolDefinition {
             name: "get_agent_strategy",
             description: "Return the recommended tool sequence and quick-reference for working with Lain.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
@@ -1960,11 +2776,17 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
         },
         ToolDefinition {
             name: "install_language_server",
-            description: "Install the language server for the given file extension (e.g. 'rs', 'py') or language name (e.g. 'rust').",
+            description: "Install one or more language servers. Pass a single `{language}` to install one extension, or `extensions: ['rs','py','go',...,'auto']` to install in a batch. The string `'auto'` resolves to every language the workspace's tracked files use.",
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": { "language": { "type": "string", "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'." } },
-                "required": ["language"]
+                "properties": {
+                    "language": { "type": "string", "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'. Single-install path." },
+                    "extensions": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Batched install. Each entry is an extension or language name; 'auto' expands to the workspace's tracked-file languages. When present, takes precedence over `language`."
+                    }
+                }
             }),
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
@@ -2054,7 +2876,7 @@ mod tests {
     /// normally otherwise, so hiding it would remove a working tool.
     #[test]
     fn only_fully_inert_tools_are_filtered_from_tools_list() {
-        let stub = crate::server::nlp::NlpEmbedder::new_with_threads(0).expect("stub embedder");
+        let stub = crate::server::nlp::NlpEmbedder::new_stub();
         assert!(stub.is_stub(), "fixture must be a stub embedder");
 
         let inert = inert_tool_names(&stub);
@@ -2089,10 +2911,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explicit_repo_wins() {
+    #[tokio::test]
+    async fn explicit_repo_wins() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _a = add_test_repo(&fed, tmp.path(), "repo-a").await;
+        let _b = add_test_repo(&fed, tmp.path(), "repo-b").await;
         let rid = resolve_repo_for_tool(&fed, "", None, Some("repo-a")).unwrap();
         assert_eq!(rid.as_str(), "repo-a");
     }
@@ -2150,7 +2974,7 @@ mod tests {
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         fed.backend()
             .upsert_node_global(
-                "repo-x:Function:src/lib.rs:only_one",
+                "repo-x:Function:src/lib.rs:only_one:0",
                 NodeType::Function,
                 "src/lib.rs",
                 "only_one",
@@ -2191,7 +3015,7 @@ mod tests {
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         fed.backend()
             .upsert_node_global(
-                "repo-a:Function:src/lib.rs:shared",
+                "repo-a:Function:src/lib.rs:shared:0",
                 NodeType::Function,
                 "src/lib.rs",
                 "shared",
@@ -2199,7 +3023,7 @@ mod tests {
             .unwrap();
         fed.backend()
             .upsert_node_global(
-                "repo-b:Function:src/lib.rs:shared",
+                "repo-b:Function:src/lib.rs:shared:0",
                 NodeType::Function,
                 "src/lib.rs",
                 "shared",
@@ -2234,10 +3058,12 @@ mod tests {
     /// hint is ignored — `resolve_repo_or_error` short-circuits to the
     /// explicit id. This is the priority ordering documented on
     /// `resolve_repo_for_tool`: explicit > symbol > single-repo fallback.
-    #[test]
-    fn explicit_repo_id_overrides_symbol_hint() {
+    #[tokio::test]
+    async fn explicit_repo_id_overrides_symbol_hint() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _r = add_test_repo(&fed, tmp.path(), "explicit-repo").await;
+        let _o = add_test_repo(&fed, tmp.path(), "other-repo").await;
         let mut args = Map::new();
         args.insert(
             "repo_id".into(),
@@ -2250,6 +3076,184 @@ mod tests {
         let rid = resolve_repo_or_error(&fed, "", &args)
             .expect("explicit repo_id must short-circuit past the symbol hint");
         assert_eq!(rid.as_str(), "explicit-repo");
+    }
+
+    #[test]
+    fn browser_guard_refuses_forgeable_requests() {
+        use hyper::header::{HeaderMap, HeaderValue};
+        let h = |pairs: &[(&'static str, &str)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(*k, HeaderValue::from_str(v).unwrap());
+            }
+            m
+        };
+        let json = ("content-type", "application/json");
+        // A normal agent/CLI request.
+        assert!(
+            browser_guard(&Method::POST, &h(&[json, ("host", "127.0.0.1:9999")]), true).is_ok()
+        );
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[
+                json,
+                ("host", "localhost:9999"),
+                ("origin", "http://localhost:9999")
+            ]),
+            true
+        )
+        .is_ok());
+        assert!(browser_guard(&Method::POST, &h(&[json, ("host", "[::1]:9999")]), true).is_ok());
+        // A page elsewhere.
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[json, ("origin", "http://evil.example.com")]),
+            true
+        )
+        .is_err());
+        // DNS rebinding: loopback socket, foreign Host.
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[json, ("host", "evil.example.com:9999")]),
+            true
+        )
+        .is_err());
+        // Exposed on purpose: any Host is fine.
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[json, ("host", "lain.internal:9999")]),
+            false
+        )
+        .is_ok());
+        // Preflight-free bodies.
+        assert!(browser_guard(&Method::POST, &h(&[("content-type", "text/plain")]), true).is_err());
+        assert!(browser_guard(&Method::POST, &h(&[]), true).is_err());
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[("content-type", "application/json; charset=utf-8")]),
+            true
+        )
+        .is_ok());
+        assert!(browser_guard(&Method::GET, &h(&[("host", "127.0.0.1:1")]), true).is_ok());
+        assert_eq!(host_of("http://evil.example.com:80/x"), "evil.example.com");
+        assert_eq!(host_of("[::1]:9"), "::1");
+    }
+
+    /// A node id handed back by one repo's tool routes a follow-up call to
+    /// that repo without `repo_id`.
+    #[tokio::test]
+    async fn a_node_id_routes_to_the_repo_that_holds_it() {
+        use crate::schema::{GraphNode, NodeType};
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _a = add_test_repo(&fed, tmp.path(), "ra").await;
+        let _b = add_test_repo(&fed, tmp.path(), "rb").await;
+        let node = GraphNode::new(NodeType::Function, "f".into(), "x.py".into());
+        let id = node.id.clone();
+        let rb = fed.get_repo(&RepoId::new("rb").unwrap()).unwrap();
+        rb.db().upsert_node(node).unwrap();
+        let rid = resolve_repo_for_tool(&fed, "get_call_sites", Some(&id), None).unwrap();
+        assert_eq!(rid.as_str(), "rb");
+        // An id no repo holds still fails with the scoping error.
+        assert!(resolve_repo_for_tool(&fed, "get_call_sites", Some("no-such-id"), None).is_err());
+    }
+
+    /// On a federation server, tools routed by `repo_id` declare it; tools
+    /// that never read it (inventory-dispatched, repo-independent) do not.
+    #[tokio::test]
+    async fn federation_schemas_declare_repo_id_where_it_is_needed() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let mut dirs = Vec::new();
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+            dirs.push(src_dir);
+        }
+        let schema_for = |name: &str| {
+            let mut schema = crate::tools::registry::ToolRegistry::definitions()
+                .into_iter()
+                .find(|d| d.name == name)
+                .map(|d| d.input_schema)
+                .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+            advertise_repo_scope(name, &mut schema, &fed);
+            schema
+        };
+        let find = schema_for("find_symbol");
+        let desc = find["properties"]["repo_id"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(desc.contains("repo-a") && desc.contains("repo-b"), "{find}");
+        assert!(schema_for("get_agent_strategy")["properties"]
+            .get("repo_id")
+            .is_none());
+        assert!(schema_for("claim_files")["properties"]
+            .get("repo_id")
+            .is_none());
+
+        // One repository: nothing to choose, so the schema is unchanged.
+        let single = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new("only").unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        single.add_repo(src, tmp.path()).await.unwrap();
+        let mut schema = serde_json::json!({"type": "object", "properties": {}});
+        advertise_repo_scope("find_symbol", &mut schema, &single);
+        assert!(schema["properties"].get("repo_id").is_none(), "{schema}");
+    }
+
+    /// Annotation `kind` is an annotation kind, not an agent kind, and
+    /// `refs` is self-contained (it used to `$ref` a `target` that
+    /// `leave_handoff_note` does not have).
+    #[test]
+    fn annotation_schemas_describe_their_own_arguments() {
+        use crate::server::mcp::envelope::tool_arg_property_schema;
+        let kind = tool_arg_property_schema("add_annotation", "kind");
+        assert_eq!(kind["enum"][0], "note");
+        let agent_kind = tool_arg_property_schema("register_agent", "kind");
+        assert!(agent_kind.get("enum").is_none());
+        let refs = tool_arg_property_schema("leave_handoff_note", "refs");
+        assert!(refs["items"].get("$ref").is_none());
+        assert_eq!(refs["items"]["required"][0], "kind");
+    }
+
+    /// `get_health` without scoping, across several repos, reports the
+    /// federation and each repo instead of demanding a repo id.
+    #[tokio::test]
+    async fn unscoped_get_health_reports_every_repo() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let mut dirs = Vec::new();
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+            dirs.push(src_dir);
+        }
+        let report = federation_health_report(&fed);
+        assert!(report.contains("Repositories:** 2"), "{report}");
+        assert!(
+            report.contains("**repo-a**") && report.contains("**repo-b**"),
+            "{report}"
+        );
     }
 
     /// D-H4 Part A: the multi-repo Config error must name the tool that
@@ -2326,7 +3330,7 @@ mod tests {
         let backend = fed.backend();
         backend
             .upsert_node_global(
-                "repo-a:Function:src/x.rs:shared",
+                "repo-a:Function:src/x.rs:shared:0",
                 NodeType::Function,
                 "src/x.rs",
                 "shared",
@@ -2334,7 +3338,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-b:Function:src/x.rs:shared",
+                "repo-b:Function:src/x.rs:shared:0",
                 NodeType::Function,
                 "src/x.rs",
                 "shared",
@@ -2342,7 +3346,7 @@ mod tests {
             .unwrap();
         backend
             .upsert_node_global(
-                "repo-b:Function:src/y.rs:caller",
+                "repo-b:Function:src/y.rs:caller:0",
                 NodeType::Function,
                 "src/y.rs",
                 "caller",
@@ -2351,19 +3355,19 @@ mod tests {
         backend
             .upsert_edge(GraphEdge::new(
                 EdgeType::Calls,
-                "repo-b:Function:src/y.rs:caller".into(),
-                "repo-a:Function:src/x.rs:shared".into(),
+                "repo-b:Function:src/y.rs:caller:0".into(),
+                "repo-a:Function:src/x.rs:shared:0".into(),
             ))
             .unwrap();
         backend
             .upsert_edge(GraphEdge::new(
                 EdgeType::Calls,
-                "repo-b:Function:src/y.rs:caller".into(),
-                "repo-b:Function:src/x.rs:shared".into(),
+                "repo-b:Function:src/y.rs:caller:0".into(),
+                "repo-b:Function:src/x.rs:shared:0".into(),
             ))
             .unwrap();
 
-        let body = build_health_body(0, 0, Some(&fed));
+        let body = build_health_body(0, 0, Some(&fed), None, None);
 
         // Top-level keys are preserved.
         assert_eq!(body["status"], "ok");
@@ -2414,7 +3418,15 @@ mod tests {
                 Some("indexing"),
                 "every repo entry must carry the default Indexing health until projection, got {r:?}",
             );
+            assert!(
+                r.get("git_sensor").is_some(),
+                "each repo must carry git_sensor telemetry, got {r:?}",
+            );
         }
+        assert!(
+            fed_blob.get("git_sensor").is_some(),
+            "federation blob must carry top-level git_sensor, got {fed_blob}",
+        );
 
         // Exact aggregate counts: 3 nodes upserted above, 2 edges.
         assert_eq!(
@@ -2442,12 +3454,189 @@ mod tests {
     /// `null` so the UI knows to render single-repo chrome.
     #[test]
     fn health_response_has_null_federation_when_unset() {
-        let body = build_health_body(0, 0, None);
+        let body = build_health_body(0, 0, None, None, None);
         assert!(
             body.get("federation").map(|v| v.is_null()).unwrap_or(false),
             "federation field must serialize as null when no federation is set, got {:?}",
             body.get("federation"),
         );
+    }
+
+    // ------------------------------------------------------------------
+    // LSP prewarm visibility (PR-fix-1).
+    //
+    // The cold-boot prewarm pass records an outcome per LSP binary
+    // (`Warmed { ms }`, `TimedOut`, `Failed { reason }`,
+    // `SkippedNoSentinel`, `SkippedUnavailable`). Until this PR the
+    // state lived on `LspMultiplexer::prewarm_state` and was only
+    // visible via `tracing` logs. These tests pin the wire shape so
+    // an operator hitting `GET /health` (or `lain doctor --json`) sees
+    // the actual cold-boot state.
+
+    #[test]
+    fn health_response_omits_lsp_prewarm_when_pool_unavailable() {
+        // Tests where the LSP pool isn't reachable pass `None` — the
+        // `lsp_prewarm` field is omitted entirely. An agent that sees
+        // the field is missing can interpret it as "this endpoint
+        // doesn't know about prewarm" (e.g. background probes) rather
+        // than "prewarm produced nothing."
+        let body = build_health_body(0, 0, None, None, None);
+        assert!(
+            body.get("lsp_prewarm").is_none(),
+            "lsp_prewarm must be omitted when None, got {:?}",
+            body.get("lsp_prewarm"),
+        );
+    }
+
+    #[test]
+    fn health_response_serializes_prewarm_outcomes_per_binary() {
+        // Build a synthetic prewarm map and confirm the wire shape
+        // pins down to `{ binary: {status, ms?} }`. `ms` only appears
+        // for `Warmed`; `reason` only for `Failed`.
+        use crate::server::lsp::PrewarmOutcome;
+        use std::collections::HashMap;
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            "rust-analyzer".to_string(),
+            PrewarmOutcome::Warmed { ms: 1247 },
+        );
+        outcomes.insert("clangd".to_string(), PrewarmOutcome::TimedOut);
+        outcomes.insert(
+            "jdtls".to_string(),
+            PrewarmOutcome::Failed {
+                reason: "binary not on PATH".to_string(),
+            },
+        );
+        outcomes.insert("pylsp".to_string(), PrewarmOutcome::SkippedNoSentinel);
+        outcomes.insert("gopls".to_string(), PrewarmOutcome::SkippedUnavailable);
+
+        let body = build_health_body(0, 0, None, Some(&outcomes), None);
+        let prewarm = body
+            .get("lsp_prewarm")
+            .expect("lsp_prewarm must be present");
+
+        let rust = prewarm.get("rust-analyzer").expect("rust-analyzer entry");
+        assert_eq!(rust.get("status"), Some(&serde_json::json!("warmed")));
+        assert_eq!(rust.get("ms"), Some(&serde_json::json!(1247)));
+
+        let clangd = prewarm.get("clangd").expect("clangd entry");
+        assert_eq!(clangd.get("status"), Some(&serde_json::json!("timed_out")));
+        assert!(clangd.get("ms").is_none(), "timed_out has no ms field");
+
+        let jdtls = prewarm.get("jdtls").expect("jdtls entry");
+        assert_eq!(jdtls.get("status"), Some(&serde_json::json!("failed")));
+        assert_eq!(
+            jdtls.get("reason"),
+            Some(&serde_json::json!("binary not on PATH"))
+        );
+
+        let pylsp = prewarm.get("pylsp").expect("pylsp entry");
+        assert_eq!(
+            pylsp.get("status"),
+            Some(&serde_json::json!("skipped_no_sentinel"))
+        );
+
+        let gopls = prewarm.get("gopls").expect("gopls entry");
+        assert_eq!(
+            gopls.get("status"),
+            Some(&serde_json::json!("skipped_unavailable"))
+        );
+    }
+
+    #[test]
+    fn health_response_truncates_long_failure_reasons() {
+        // The `reason` field is capped at ~200 chars to keep `/health`
+        // cheap for an agent that scrapes it. The full reason
+        // remains in `tracing::debug!` log lines that retain the raw
+        // text.
+        use crate::server::lsp::PrewarmOutcome;
+        use std::collections::HashMap;
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            "rust-analyzer".to_string(),
+            PrewarmOutcome::Failed {
+                reason: "x".repeat(2000),
+            },
+        );
+        let body = build_health_body(0, 0, None, Some(&outcomes), None);
+        let rust = body
+            .get("lsp_prewarm")
+            .and_then(|p| p.get("rust-analyzer"))
+            .expect("rust-analyzer entry");
+        let reason = rust
+            .get("reason")
+            .and_then(|r| r.as_str())
+            .expect("reason should serialise as a string");
+        assert!(
+            reason.chars().count() <= 200,
+            "reason truncated to 200 chars, got {}",
+            reason.chars().count()
+        );
+    }
+
+    #[test]
+    fn health_response_surfaces_git_sensor_telemetry_and_sidecar_degraded_state() {
+        use crate::server::git::{sidecar_binary_helpers, AnyGitSensor, GitSensorMode};
+
+        let repo_root = std::env::current_dir().unwrap();
+        let in_proc_sensor = AnyGitSensor::new(&repo_root, GitSensorMode::InProcess).unwrap();
+
+        // 1. In-process mode reports ok status and in_process kind.
+        let body = build_health_body(0, 0, None, None, Some(&in_proc_sensor));
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["git_sensor"]["kind"], "in_process");
+
+        // 2. The default mode reports ok status and its kind: the sidecar
+        //    on Unix, the in-process sensor where there are no Unix sockets.
+        //    Ensure the sidecar binary is available before constructing a sidecar
+        //    sensor — same resolution as `default_mode_is_sidecar`.
+        sidecar_binary_helpers::ensure_sidecar_bin_env()
+            .expect("sidecar binary must be available or buildable for this test");
+        std::env::set_var("LAIN_GIT_SENSOR", "sidecar");
+        let (mode, kind) = if cfg!(unix) {
+            (GitSensorMode::Sidecar, "sidecar")
+        } else {
+            (GitSensorMode::InProcess, "in_process")
+        };
+        let default_sensor = AnyGitSensor::from_env(&repo_root).unwrap();
+        assert_eq!(default_sensor.mode(), mode);
+        let default_body = build_health_body(0, 0, None, None, Some(&default_sensor));
+        assert_eq!(default_body["status"], "ok");
+        assert_eq!(default_body["git_sensor"]["kind"], kind);
+
+        // 3. Dead sidecar reports degraded status and reason.
+        let dead_sidecar_json = serde_json::json!({
+            "status": "Degraded",
+            "reason": "git sensor sidecar is not alive",
+            "repos": [],
+            "total_nodes": 0,
+            "total_edges": 0,
+            "memory_estimate_bytes": 0,
+            "git_sensor": {
+                "kind": "sidecar",
+                "alive": false,
+                "child_pid": serde_json::Value::Null,
+                "respawn_count": 3,
+                "respawns_in_window": 3,
+                "consecutive_failures": 5,
+                "last_call_duration_us": 0
+            }
+        });
+        let mut body_dead = serde_json::json!({
+            "status": "ok",
+            "server": "lain",
+            "version": env!("CARGO_PKG_VERSION"),
+            "graph_nodes": 0,
+            "graph_edges": 0,
+            "tools_count": 10,
+            "federation": dead_sidecar_json,
+        });
+        if body_dead["federation"]["status"] == "Degraded" {
+            body_dead["status"] = serde_json::json!("degraded");
+            body_dead["reason"] = body_dead["federation"]["reason"].clone();
+        }
+        assert_eq!(body_dead["status"], "degraded");
+        assert_eq!(body_dead["reason"], "git sensor sidecar is not alive");
     }
 
     // ------------------------------------------------------------------
@@ -2658,11 +3847,11 @@ mod tests {
     /// casualty — it takes no `symbol` or `repo_id`, so the resolver had
     /// nothing to work with and surfaced "multiple repos" on every call.
     #[test]
-    fn query_graph_does_not_require_repo_scope() {
-        assert!(
-            !requires_repo_scope("query_graph"),
-            "query_graph is federation-wide; the resolver must be skipped",
-        );
+    fn query_graph_is_routed_to_a_repo() {
+        // It runs against one repository's graph; unscoped on a federation
+        // it ran against the empty placeholder and always returned 0.
+        assert!(requires_repo_scope("query_graph"));
+        assert!(!requires_repo_scope("get_capabilities"));
     }
 
     /// Default is `true`: every tool that isn't explicitly classified must
@@ -2693,7 +3882,7 @@ mod tests {
     ///
     /// Pins the entire wrapped message byte-exactly — both the
     /// `LainError::Config` "Config error: " prefix and the agreed
-    /// `tool '<name>' requires scoping: multiple repos; pass repo_id or symbol`
+    /// `tool '<name>' requires scoping: multiple repos; pass repo_id (one of: …)`
     /// body. Drift in either layer (e.g. someone rewording the body,
     /// dropping the tool-name prefix, or changing how `LainError`
     /// formats `Config`) fails this test loudly.
@@ -2720,7 +3909,7 @@ mod tests {
 
         assert_eq!(
             text,
-            "Config error: tool 'explain_symbol' requires scoping: multiple repos; pass repo_id or symbol",
+            "Config error: tool 'explain_symbol' requires scoping: multiple repos; pass repo_id (one of: repo-a, repo-b)",
             "scoping error format drift — bare 'multiple repos; ...' string reappeared or wrapper changed",
         );
     }
@@ -2793,18 +3982,9 @@ mod tests {
             );
         }
 
-        // Federation-wide tool — must NOT pass through the resolver.
-        // The Part B fix added `query_graph` to the
-        // `requires_repo_scope` exclusion list; the dispatcher checks
-        // that list before calling `resolve_repo_or_error`, so the
-        // resolver is never invoked for these tools. A regression that
-        // sends `query_graph` through the resolver would re-surface the
-        // original "multiple repos" message on every call, so we pin
-        // the classifier here.
-        assert!(
-            !requires_repo_scope("query_graph"),
-            "query_graph must not require scope; the resolver should be skipped before it sees the call",
-        );
+        // `query_graph` is routed like the others now: it answers from
+        // one repository's graph.
+        assert!(requires_repo_scope("query_graph"));
     }
 
     async fn add_test_repo(
@@ -2828,6 +4008,53 @@ mod tests {
         let graph = crate::graph::GraphDatabase::empty_read_only();
         let overlay = crate::overlay::VolatileOverlay::new();
         ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."))
+    }
+
+    /// An unregistered `repo_id` is an error naming the real ones, not a
+    /// silent query of the empty placeholder graph.
+    #[tokio::test]
+    async fn unknown_repo_id_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _a = add_test_repo(&fed, tmp.path(), "ra").await;
+        let _b = add_test_repo(&fed, tmp.path(), "rb").await;
+        assert_eq!(
+            resolve_repo_for_tool(&fed, "find_symbol", None, Some("rb"))
+                .unwrap()
+                .as_str(),
+            "rb"
+        );
+        let err = resolve_repo_for_tool(&fed, "find_symbol", None, Some("zz")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown repo_id 'zz'") && msg.contains("ra") && msg.contains("rb"),
+            "{msg}"
+        );
+        assert!(resolve_repo_for_tool(&fed, "find_symbol", None, Some("rb ")).is_err());
+    }
+
+    /// Tools that answer from a partial graph say so while a repo is
+    /// still indexing, and stop saying so once it is ready.
+    #[tokio::test]
+    async fn partial_answers_carry_an_indexing_notice() {
+        use crate::server::federation::health::RepoHealth;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _src = add_test_repo(&fed, tmp.path(), "busy").await;
+        let repo = fed.get_repo(&RepoId::new("busy").unwrap()).unwrap();
+
+        repo.set_health(RepoHealth::Indexing);
+        let note = indexing_notice(&fed, "find_symbol", None).expect("indexing must be noted");
+        assert!(note.contains("busy"), "{note}");
+        assert!(indexing_notice(&fed, "claim_files", None).is_none());
+        assert!(
+            indexing_notice(&fed, "find_symbol", Some("other")).is_none(),
+            "scoped to another repo"
+        );
+
+        repo.set_health(RepoHealth::Ready);
+        assert!(indexing_notice(&fed, "find_symbol", None).is_none());
     }
 
     /// M4 step 8: a repo-scoped tool call must gate only on the repo it
@@ -2871,12 +4098,10 @@ mod tests {
         assert_eq!(gated.blocking_repos, vec!["broken-repo"]);
     }
 
-    /// M4 step 8: a federation-wide tool (`requires_repo_scope` ==
-    /// false) gates against every loaded repo and reports every blocking
-    /// repo id, sorted, regardless of `FederatedIndex::list_repos`'s
-    /// iteration order or which repo was added first.
+    /// A repo-scoped graph tool gates only on the repository it is routed
+    /// to, not on others that are indexing or degraded.
     #[tokio::test]
-    async fn federation_wide_tool_call_reports_every_blocking_repo_sorted() {
+    async fn scoped_query_gates_only_on_its_repo() {
         use crate::server::federation::health::RepoHealth;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2894,10 +4119,18 @@ mod tests {
             .unwrap()
             .set_health(RepoHealth::Ready);
 
+        // `query_graph` is routed to one repository: it gates on that one.
         let executor = test_executor();
-        let gated = gate_for_dispatch(&executor, Some(&fed), "query_graph", &Map::new())
-            .expect("query_graph must gate while alpha/zeta are not ready");
-        assert_eq!(gated.blocking_repos, vec!["alpha", "zeta"]);
+        let mut args = Map::new();
+        args.insert("repo_id".into(), serde_json::Value::String("alpha".into()));
+        let gated = gate_for_dispatch(&executor, Some(&fed), "query_graph", &args)
+            .expect("query_graph on alpha must gate while alpha is indexing");
+        assert_eq!(gated.blocking_repos, vec!["alpha"]);
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String("ready-repo".into()),
+        );
+        assert!(gate_for_dispatch(&executor, Some(&fed), "query_graph", &args).is_none());
     }
 
     /// AGENT_UX_ROADMAP.md M4 step 10: structural pin so a future change
@@ -2936,7 +4169,12 @@ mod tests {
              its call to the coordinator."
         );
 
-        let direct_build_core_memory_calls = source.matches(".build_core_memory()").count();
+        // The coordinator calls the looping form (a capped repository takes
+        // several passes); either spelling counts as the one entry point.
+        let direct_build_core_memory_calls = source.matches(".build_core_memory()").count()
+            + source
+                .matches(".build_core_memory_until_complete()")
+                .count();
         assert_eq!(
             direct_build_core_memory_calls, 1,
             "expected exactly one direct `.build_core_memory()` call in this file's \
@@ -2986,6 +4224,71 @@ fn invoke_inventory(
     }
     None
 }
+
+/// The skill menu: every capability package with its pitch, level,
+/// why it is off by default, its tools, and whether it is loaded.
+fn list_packages_handler(
+    _ctx: &McpContext,
+    _args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::server::tools::capabilities as caps;
+    use crate::server::tools::capabilities::Package;
+    let loaded = caps::loaded_packages();
+    let cards: Vec<serde_json::Value> = Package::ALL
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name(),
+                "level": p.level().label(),
+                "pitch": p.pitch(),
+                "why_off_by_default": p.why_off_by_default(),
+                "tools": caps::package_tools(*p),
+                "loaded": *p == Package::Core || loaded.contains(p),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "packages": cards,
+        "profile": crate::server::tools::profile::ToolProfile::from_env().as_str(),
+        "how_to_load": "call load_package with a package name, then refetch tools/list",
+    }))
+}
+inventory::submit!(McpToolEntry {
+    name: "list_packages",
+    handler: list_packages_handler,
+});
+
+/// Opt a package into this session's `tools/list`. Advertising is
+/// not dispatch — the tools were always callable; this only makes
+/// them visible, and the response tells the client to refetch
+/// `tools/list` (the MCP `notifications/tools/list_changed` signal).
+fn load_package_handler(
+    _ctx: &McpContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::server::tools::capabilities as caps;
+    use crate::server::tools::capabilities::Package;
+    let map = args_map(&args)?;
+    let name =
+        crate::server::tools::utils::required_str_arg(map, "package").map_err(|e| e.to_string())?;
+    let package = Package::parse(&name)
+        .ok_or_else(|| format!("unknown package {name:?} — run `list_packages` for the menu"))?;
+    let already = !caps::load_package(package);
+    let tools = caps::package_tools(package);
+    Ok(serde_json::json!({
+        "package": package.name(),
+        "pitch": package.pitch(),
+        "loaded": true,
+        "already_loaded": already,
+        "tools": tools,
+        "tools_list_changed": true,
+        "hint": "refetch tools/list to see the new tools (MCP: notifications/tools/list_changed). If they still do not appear, reconnect the client — most refetch on the notification, a few cache tools/list for the session.",
+    }))
+}
+inventory::submit!(McpToolEntry {
+    name: "load_package",
+    handler: load_package_handler,
+});
 
 fn server_status_handler(
     ctx: &McpContext,
@@ -3132,6 +4435,36 @@ declare_presence_tool!(
     get_pending_handoffs_handler,
     "get_pending_handoffs",
     crate::server::mcp::annotation_tools::run_get_pending_handoffs
+);
+
+// Intent-layer tools. Same shape as the presence tools — the
+// runner signature is `fn(&LainServer, Value) -> Result<Value,
+// String>` — so they register through `declare_presence_tool!`
+// and reach `tools/call` via the inventory iteration in
+// `dispatch_tool_call`. Before this commit the three tools
+// `lain_intent`, `list_active_intents`, and `unregister_agent`
+// were matched in a direct-dispatch arm because the inventory
+// section reportedly didn't reach the production binary. That
+// turned the dispatcher back into a stringly-typed match ladder
+// and tripped `scripts/check-mcp-dispatch-shape.py`, which is
+// the load-bearing guardrail from
+// `docs/CONTRIBUTING_AGENTS.md#inventory-pattern`. Routing them
+// through the same macro as the other presence tools removes
+// the match arms and the guardrail violation in one move.
+declare_presence_tool!(
+    lain_intent_handler,
+    "lain_intent",
+    crate::server::mcp::intent_tools::run_lain_intent
+);
+declare_presence_tool!(
+    list_active_intents_handler,
+    "list_active_intents",
+    crate::server::mcp::intent_tools::run_list_active_intents
+);
+declare_presence_tool!(
+    unregister_agent_handler,
+    "unregister_agent",
+    crate::server::mcp::presence_tools::run_unregister_agent
 );
 
 /// Same shape for the audit tools; the runner signature differs only
@@ -3310,8 +4643,14 @@ fn cross_repo_blast_radius_common(
 ) -> Result<crate::server::mcp::federation_tools::CrossRepoBlastRadius, String> {
     let symbol =
         crate::server::tools::utils::required_str_arg(map, "symbol").map_err(|e| e.to_string())?;
-    crate::server::mcp::federation_tools::get_cross_repo_blast_radius(fed, &symbol, depth_range)
-        .map_err(|e| e.to_string())
+    let repo_id = map.get("repo_id").and_then(|v| v.as_str());
+    crate::server::mcp::federation_tools::get_cross_repo_blast_radius(
+        fed,
+        &symbol,
+        depth_range,
+        repo_id,
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn get_cross_repo_blast_radius_handler(
@@ -3320,10 +4659,7 @@ fn get_cross_repo_blast_radius_handler(
 ) -> Result<serde_json::Value, String> {
     let fed = fed_required(ctx)?;
     let map = args_map(&args)?;
-    let depth_str =
-        crate::server::tools::utils::required_str_arg(map, "depth").map_err(|e| e.to_string())?;
-    let depth =
-        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e.to_string())?;
+    let depth = depth_arg(map)?;
     let result = cross_repo_blast_radius_common(fed, map, depth)?;
     serde_json::to_value(result).map_err(|e| e.to_string())
 }
@@ -3338,10 +4674,7 @@ fn get_cross_repo_blast_radius_for_repo_handler(
 ) -> Result<serde_json::Value, String> {
     let fed = fed_required(ctx)?;
     let map = args_map(&args)?;
-    let depth_str =
-        crate::server::tools::utils::required_str_arg(map, "depth").map_err(|e| e.to_string())?;
-    let depth =
-        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e.to_string())?;
+    let depth = depth_arg(map)?;
     let symbol =
         crate::server::tools::utils::required_str_arg(map, "symbol").map_err(|e| e.to_string())?;
     let repo_id_str = map

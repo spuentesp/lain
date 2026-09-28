@@ -175,7 +175,7 @@ async fn get_blast_radius_actually_lists_known_callers() {
     use lain::server::tools::handlers::impact::get_blast_radius;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let text = get_blast_radius(&db, &overlay, "helper_a", false, None)
+    let text = get_blast_radius(&db, &overlay, "helper_a", false, false, None)
         .await
         .unwrap();
     // Success metric: response names the two known callers.
@@ -194,7 +194,7 @@ async fn get_blast_radius_response_lists_callers_not_callees() {
     use lain::server::tools::handlers::impact::get_blast_radius;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let text = get_blast_radius(&db, &overlay, "helper_a", false, None)
+    let text = get_blast_radius(&db, &overlay, "helper_a", false, false, None)
         .await
         .unwrap();
     // Success metric: response is non-empty AND names the callers
@@ -221,7 +221,7 @@ async fn get_blast_radius_for_unused_function_is_empty_or_zero() {
     use lain::server::tools::handlers::impact::get_blast_radius;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let text = get_blast_radius(&db, &overlay, "caller_zero", false, None)
+    let text = get_blast_radius(&db, &overlay, "caller_zero", false, false, None)
         .await
         .unwrap();
     // Success metric: 0 callers — surface as "0" or "no callers".
@@ -293,7 +293,12 @@ fn find_dead_code_actually_lists_dead_symbols() {
         &overlay,
         None,
         &lain::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
-        &std::sync::Arc::new(parking_lot::Mutex::new(Default::default())),
+        &std::sync::Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(
+                lain::server::tuning::TuningConfig::default().embedding_cache_capacity,
+            )
+            .expect("default capacity > 0"),
+        ))),
     );
     let text = result.expect("find_dead_code must succeed on a known fixture");
     // Success metric: response names the truly dead symbols.

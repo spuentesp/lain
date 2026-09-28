@@ -217,16 +217,23 @@ fn rerunning_setup_is_idempotent_and_backs_up() {
         "re-running setup must not duplicate the lain entry: {written}"
     );
 
-    let backups: Vec<_> = std::fs::read_dir(fixture.path())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().contains(".mcp.json.bak-"))
-        .collect();
-    assert_eq!(
-        backups.len(),
-        1,
-        "exactly one backup expected after one re-run"
-    );
+    // Nothing changed, so nothing was rewritten and no backup was made:
+    // every identical re-run used to leave another `.mcp.json.bak-*`.
+    let backups = || {
+        std::fs::read_dir(fixture.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".mcp.json.bak-"))
+            .count()
+    };
+    assert_eq!(backups(), 0, "an unchanged re-run makes no backup");
+
+    // A change is backed up before it is written.
+    let mut edited = written.clone();
+    edited["mcpServers"]["lain"]["args"] = serde_json::json!(["old"]);
+    std::fs::write(&config_path, edited.to_string()).unwrap();
+    assert!(run().status.success(), "third setup run must succeed");
+    assert_eq!(backups(), 1, "exactly one backup after a changing re-run");
 }
 
 #[test]

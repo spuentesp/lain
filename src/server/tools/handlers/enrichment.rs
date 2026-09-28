@@ -1,7 +1,7 @@
 //! Enrichment and sync domain handlers
 
 use crate::error::LainError;
-use crate::git::{CommitInfo, GitSensor};
+use crate::git::{AnyGitSensor, CommitInfo};
 use crate::graph::GraphDatabase;
 use crate::tuning::IngestionConfig;
 use parking_lot::Mutex;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 pub fn run_enrichment(
     graph: &GraphDatabase,
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
     ingestion: &IngestionConfig,
 ) -> Result<String, LainError> {
     let graph_clone = graph.clone();
@@ -25,8 +25,7 @@ pub fn run_enrichment(
 
         // 1. Analyze git history for co-change pairs
         let (co_change_pairs, latest_commit) = {
-            let git_guard = git_clone.lock();
-            let pairs = match git_guard.analyze_co_changes(
+            let pairs = match git_clone.analyze_co_changes(
                 cochange_commit_window,
                 cochange_min_pair_count,
                 cochange_max_commit_files,
@@ -37,7 +36,7 @@ pub fn run_enrichment(
                     Vec::new()
                 }
             };
-            let commit = git_guard.get_latest_commit().unwrap_or_default();
+            let commit = git_clone.get_latest_commit().unwrap_or_default();
             (pairs, commit)
         };
 
@@ -93,14 +92,14 @@ pub fn run_enrichment(
 /// the health banner.
 pub fn sync_state(
     graph: &GraphDatabase,
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
     ingestion: &IngestionConfig,
     jobs: &Arc<Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
     last_outcome: &Arc<Mutex<crate::server::refresh::RefreshOutcome>>,
     fed: Option<&Arc<crate::federation::federated_index::FederatedIndex>>,
 ) -> Result<String, LainError> {
     let last_commit = graph.get_last_commit()?;
-    let latest_commit = git.lock().get_latest_commit().unwrap_or_default();
+    let latest_commit = git.get_latest_commit().unwrap_or_default();
     // Whether HEAD has moved does NOT gate the overlay-refresh phase —
     // a brand-new untracked file with no new commit must still become
     // visible. We log the no-op commit case so callers reading the
@@ -184,12 +183,9 @@ pub fn sync_state(
             }
         };
 
-        // Scoped: a `parking_lot` guard live across an `.await` makes
-        // the spawned future non-`Send`.
         let (new_commits, latest_commit): (Vec<CommitInfo>, String) = {
-            let git_guard = git_clone.lock();
             let new_commits = if let Some(ref last) = last_commit {
-                match git_guard.get_new_commits_since(last) {
+                match git_clone.get_new_commits_since(last) {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!("Failed to get new commits: {}, doing full refresh", e);
@@ -199,7 +195,7 @@ pub fn sync_state(
             } else {
                 Vec::new()
             };
-            let latest = git_guard.get_latest_commit().unwrap_or_default();
+            let latest = git_clone.get_latest_commit().unwrap_or_default();
             (new_commits, latest)
         };
 

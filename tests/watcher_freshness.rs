@@ -564,9 +564,7 @@ async fn sync_state_refreshes_overlay_for_new_file() {
     // Build the args sync_state takes. Many of them are zero-value
     // because this test exercises only the overlay-refresh path.
     let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
-    let git = std::sync::Arc::new(parking_lot::Mutex::new(
-        lain::git::GitSensor::new(&repo_dir).unwrap(),
-    ));
+    let git = std::sync::Arc::new(lain::git::AnyGitSensor::from_env(&repo_dir).unwrap());
     let ingestion = IngestionConfig::default();
     let jobs = std::sync::Arc::new(parking_lot::Mutex::new(HashMap::<
         String,
@@ -710,9 +708,7 @@ async fn sync_state_refreshes_overlay_for_multiple_repos() {
     // Build the sync_state args. Each repo's `GitSensor` is independent
     // (we only need one for the test; both repos are git-tracked).
     let primary_repo_dir = &repo_paths[0].1;
-    let git = std::sync::Arc::new(parking_lot::Mutex::new(
-        lain::git::GitSensor::new(primary_repo_dir).unwrap(),
-    ));
+    let git = std::sync::Arc::new(lain::git::AnyGitSensor::from_env(primary_repo_dir).unwrap());
     let ingestion = IngestionConfig::default();
     let jobs = std::sync::Arc::new(parking_lot::Mutex::new(HashMap::<
         String,

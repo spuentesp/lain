@@ -1,11 +1,31 @@
 [
   {
-    "description": "One-call dossier for a symbol: definition, callers, callees, and source body excerpt. Use this when an agent says 'explain X' or 'what is X?' and the goal is a single Markdown payload the agent can quote back. Cost: medium; scales with `depth`. Low-level alternative: call each of explain_symbol / get_call_sites / trace_dependency individually.",
+    "description": "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules",
+    "inputSchema": {
+      "properties": {
+        "min_fan_out": {
+          "type": "integer"
+        },
+        "min_pattern_files": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "architectural_observations"
+  },
+  {
+    "description": "Pre-edit impact assessment: direct + transitive dependents, untested dependents, co-change partners, and a one-line risk verdict (low / medium / high). Use this when an agent says 'what breaks if I change X?' or wants to evaluate a change before editing. Cost: medium; scales with the depth of the call graph.",
     "inputSchema": {
       "properties": {
         "depth": {
-          "maximum": 3,
-          "minimum": 0,
+          "type": "string"
+        },
+        "include_tests": {
+          "type": "boolean"
+        },
+        "limit": {
           "type": "integer"
         },
         "symbol": {
@@ -17,7 +37,126 @@
       ],
       "type": "object"
     },
-    "name": "get_context"
+    "name": "assess_change"
+  },
+  {
+    "description": "Compares stability and coupling metrics between two modules",
+    "inputSchema": {
+      "properties": {
+        "module_a": {
+          "type": "string"
+        },
+        "module_b": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "module_a",
+        "module_b"
+      ],
+      "type": "object"
+    },
+    "name": "compare_modules"
+  },
+  {
+    "description": "Returns the graph schema (node types, edge types, example queries) for LLM session initialization",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "describe_schema"
+  },
+  {
+    "description": "Synthesises static callers, heuristic edges, runtime edges, and co-change partners for a symbol and returns a single verdict. Use this instead of `get_blast_radius` when an empty blast radius might mean 'static graph cannot see the dispatcher' rather than 'no callers'. The verdict field is `insufficient_evidence` exactly when every signal is empty — that is the case Tier 1 teaches agents to refuse to treat as safe.",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "explain_dispatch"
+  },
+  {
+    "description": "Combines signatures, docstrings, and metrics into a human-readable architectural summary",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "explain_symbol"
+  },
+  {
+    "description": "Returns a high-level tree of files and modules up to a specific depth",
+    "inputSchema": {
+      "properties": {
+        "max_depth": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "explore_architecture"
+  },
+  {
+    "description": "Use this when asking 'what should I read first?': the most foundational, stable components by corpus-wide anchor score.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "find_anchors"
+  },
+  {
+    "description": "Use this when asking 'what is unused?': nodes with zero incoming callers, test code excluded.",
+    "inputSchema": {
+      "properties": {
+        "like": {
+          "description": "Filter dead code semantically (e.g., \"auth handler\")",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "find_dead_code"
+  },
+  {
+    "description": "Graph neighbors, co-change partners, and (optional) semantic neighbors for a symbol in one call. Use this when an agent says 'what is connected to X?' or wants to understand blast radius without committing to a single change yet. The semantic section is omitted when no embedding model is loaded; the co-change section is gated by `include_coupling=false`. Cost: medium.",
+    "inputSchema": {
+      "properties": {
+        "include_coupling": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "find_related"
   },
   {
     "description": "Returns every graph node matching `name`, optionally narrowed by `path_hint` (substring) and `type_filter` (function / struct / trait / module / file). Use this when an agent says 'where is X?' and the low-level tools would otherwise force a per-name lookup per match. Cost: cheap (graph index hit).",
@@ -30,6 +169,17 @@
           "type": "string"
         },
         "type_filter": {
+          "enum": [
+            "function",
+            "method",
+            "class",
+            "struct",
+            "interface",
+            "trait",
+            "enum",
+            "module",
+            "file"
+          ],
           "type": "string"
         }
       },
@@ -39,34 +189,6 @@
       "type": "object"
     },
     "name": "find_symbol"
-  },
-  {
-    "description": "Provides a structural estimate of code coverage based on call graph connectivity",
-    "inputSchema": {
-      "properties": {
-        "module_path": {
-          "type": "string"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "get_coverage_summary"
-  },
-  {
-    "description": "Generates a test scaffold for a given function or type",
-    "inputSchema": {
-      "properties": {
-        "function_name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "function_name"
-      ],
-      "type": "object"
-    },
-    "name": "get_test_template"
   },
   {
     "description": "Identifies functions that may lack test coverage based on call graph analysis",
@@ -82,6 +204,43 @@
     "name": "find_untested_functions"
   },
   {
+    "description": "Returns the architectural stability score for a specific symbol",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_anchor_score"
+  },
+  {
+    "description": "Use this when you want to know what breaks if you change a symbol: direct and transitive dependents. For an exact A-to-B call path use `get_call_chain`; for a pre-edit risk verdict use `assess_change`; for call-site dispatch honesty use `explain_dispatch`.",
+    "inputSchema": {
+      "properties": {
+        "include_coupling": {
+          "type": "boolean"
+        },
+        "include_weak_edges": {
+          "description": "Include heuristic callers (dynamic dispatch / bus / router) with confidence >= LAIN_HEURISTIC_MIN_CONFIDENCE. Default false.",
+          "type": "boolean"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_blast_radius"
+  },
+  {
     "description": "Shows current branch and git status",
     "inputSchema": {
       "properties": {},
@@ -91,30 +250,25 @@
     "name": "get_branch_status"
   },
   {
-    "description": "Shows recent commit history with author and message",
+    "description": "Use this when you need the exact call path between two symbols (`from` to `to`). Traces within one repository — pass `repo_id` when a federation holds both ends. For what-breaks impact use `get_blast_radius`.",
     "inputSchema": {
       "properties": {
-        "limit": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "get_commit_history"
-  },
-  {
-    "description": "Shows uncommitted changes (staged and unstaged)",
-    "inputSchema": {
-      "properties": {
-        "path": {
+        "from": {
+          "description": "symbol name the path starts at (the caller)",
+          "type": "string"
+        },
+        "to": {
+          "description": "symbol name the path ends at (the callee)",
           "type": "string"
         }
       },
-      "required": [],
+      "required": [
+        "from",
+        "to"
+      ],
       "type": "object"
     },
-    "name": "get_file_diff"
+    "name": "get_call_chain"
   },
   {
     "description": "Finds all callers of a given symbol",
@@ -153,6 +307,54 @@
     "name": "get_code_snippet"
   },
   {
+    "description": "Shows recent commit history with author and message",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_commit_history"
+  },
+  {
+    "description": "One-call dossier for a symbol: definition, callers, callees, and source body excerpt. Use this when an agent says 'explain X' or 'what is X?' and the goal is a single Markdown payload the agent can quote back. Cost: medium; scales with `depth`. Low-level alternative: call each of explain_symbol / get_call_sites / trace_dependency individually. Repo-level orientation is `understand_repository`; call-site dispatch honesty is `explain_dispatch`.",
+    "inputSchema": {
+      "properties": {
+        "depth": {
+          "maximum": 3,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_context"
+  },
+  {
+    "description": "Calculates layers of abstraction from the entry point for a symbol",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_context_depth"
+  },
+  {
     "description": "Builds LLM-optimized context for a symbol with signature, docstring, and relationships",
     "inputSchema": {
       "properties": {
@@ -171,6 +373,155 @@
     "name": "get_context_for_prompt"
   },
   {
+    "description": "Use this when asking 'what changes together?': hidden coupling between files from historical git co-change. `find_related` adds graph and semantic neighbours to the same question.",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_coupling_radar"
+  },
+  {
+    "description": "Provides a structural estimate of code coverage based on call graph connectivity",
+    "inputSchema": {
+      "properties": {
+        "module_path": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_coverage_summary"
+  },
+  {
+    "description": "Find all protocol-level callers for a symbol (HTTP routes, gRPC services, GraphQL resolvers)",
+    "inputSchema": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "type": "object"
+    },
+    "name": "get_cross_runtime_callers"
+  },
+  {
+    "description": "Shows uncommitted changes (staged and unstaged)",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_file_diff"
+  },
+  {
+    "description": "Returns a 'slice' of the architecture at a specific depth from the entry point",
+    "inputSchema": {
+      "properties": {
+        "granularity": {
+          "type": "string"
+        },
+        "layer": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_layered_map"
+  },
+  {
+    "description": "Get a high-level Staleness Report showing when each module was last synced from LSP and Git",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_master_map"
+  },
+  {
+    "description": "Generates a test scaffold for a given function or type",
+    "inputSchema": {
+      "properties": {
+        "function_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "function_name"
+      ],
+      "type": "object"
+    },
+    "name": "get_test_template"
+  },
+  {
+    "description": "Use this when asking 'where does execution start?': main/App-style entry points and top-level routes.",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_entry_points"
+  },
+  {
+    "description": "Finds the most foundational 'Anchor' node that controls a given leaf function",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "navigate_to_anchor"
+  },
+  {
+    "description": "Execute a query against the graph using a JSON ops array",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "type": "object"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "query_graph"
+  },
+  {
+    "description": "Runs cargo build (optionally release) and returns build output and status",
+    "inputSchema": {
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "release": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "run_build"
+  },
+  {
     "description": "Runs cargo clippy with optional auto-fix and returns lint results with architectural context on failure",
     "inputSchema": {
       "properties": {
@@ -185,6 +536,15 @@
       "type": "object"
     },
     "name": "run_clippy"
+  },
+  {
+    "description": "Triggers a full architectural scan and enrichment pass",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "run_enrichment"
   },
   {
     "description": "Runs cargo test with optional filter and returns test results",
@@ -204,186 +564,6 @@
       "type": "object"
     },
     "name": "run_tests"
-  },
-  {
-    "description": "Runs cargo build (optionally release) and returns build output and status",
-    "inputSchema": {
-      "properties": {
-        "cwd": {
-          "type": "string"
-        },
-        "release": {
-          "type": "boolean"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "run_build"
-  },
-  {
-    "description": "Forces a re-sync of the graph with the current Git HEAD state",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "sync_state"
-  },
-  {
-    "description": "Triggers a full architectural scan and enrichment pass",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "run_enrichment"
-  },
-  {
-    "description": "Find all protocol-level callers for a symbol (HTTP routes, gRPC services, GraphQL resolvers)",
-    "inputSchema": {
-      "properties": {
-        "node_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "node_id"
-      ],
-      "type": "object"
-    },
-    "name": "get_cross_runtime_callers"
-  },
-  {
-    "description": "Returns the graph schema (node types, edge types, example queries) for LLM session initialization",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "describe_schema"
-  },
-  {
-    "description": "Execute a query against the graph using a JSON ops array",
-    "inputSchema": {
-      "properties": {
-        "query": {
-          "type": "object"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "query_graph"
-  },
-  {
-    "description": "Identifies 'God Objects' and high-debt refactor targets based on complexity and stability",
-    "inputSchema": {
-      "properties": {
-        "limit": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "suggest_refactor_targets"
-  },
-  {
-    "description": "Combines signatures, docstrings, and metrics into a human-readable architectural summary",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "explain_symbol"
-  },
-  {
-    "description": "Identifies reachable nodes with zero incoming callers or usages",
-    "inputSchema": {
-      "properties": {
-        "like": {
-          "description": "Filter dead code semantically (e.g., \"auth handler\")",
-          "type": "string"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "find_dead_code"
-  },
-  {
-    "description": "Calculates layers of abstraction from the entry point for a symbol",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_context_depth"
-  },
-  {
-    "description": "Returns the architectural stability score for a specific symbol",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_anchor_score"
-  },
-  {
-    "description": "Lists the top 10 most foundational/stable components in the codebase",
-    "inputSchema": {
-      "properties": {
-        "limit": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "find_anchors"
-  },
-  {
-    "description": "Identifies 'Hidden Coupling' between files based on historical Git co-change patterns",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_coupling_radar"
-  },
-  {
-    "description": "Identifies the architectural hearts of the system (main, App, etc.)",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "list_entry_points"
   },
   {
     "description": "Find code by name, intent, or pattern. `mode=lexical` (default) uses the graph name index and works without an embedding model; `mode=semantic` uses local ONNX embeddings and requires a loaded model (`install.sh --download-model`). `mode=auto` (the default) tries semantic first and falls back to lexical; the response records `fell_back=true` so the agent can tell. Cost: cheap for lexical, medium for semantic.",
@@ -412,126 +592,26 @@
     "name": "search_code"
   },
   {
-    "description": "Pre-edit impact assessment: direct + transitive dependents, untested dependents, co-change partners, and a one-line risk verdict (low / medium / high). Use this when an agent says 'what breaks if I change X?' or wants to evaluate a change before editing. Cost: medium; scales with the depth of the call graph.",
+    "description": "Identifies 'God Objects' and high-debt refactor targets based on complexity and stability",
     "inputSchema": {
       "properties": {
-        "depth": {
-          "type": "string"
-        },
-        "include_tests": {
-          "type": "boolean"
-        },
         "limit": {
           "type": "integer"
-        },
-        "symbol": {
-          "type": "string"
         }
       },
-      "required": [
-        "symbol"
-      ],
+      "required": [],
       "type": "object"
     },
-    "name": "assess_change"
+    "name": "suggest_refactor_targets"
   },
   {
-    "description": "Graph neighbors, co-change partners, and (optional) semantic neighbors for a symbol in one call. Use this when an agent says 'what is connected to X?' or wants to understand blast radius without committing to a single change yet. The semantic section is omitted when no embedding model is loaded; the co-change section is gated by `include_coupling=false`. Cost: medium.",
-    "inputSchema": {
-      "properties": {
-        "include_coupling": {
-          "type": "boolean"
-        },
-        "limit": {
-          "type": "integer"
-        },
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "find_related"
-  },
-  {
-    "description": "Calculates the transitive impact and ripple effect of changing a symbol",
-    "inputSchema": {
-      "properties": {
-        "include_coupling": {
-          "type": "boolean"
-        },
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_blast_radius"
-  },
-  {
-    "description": "Get a high-level Staleness Report showing when each module was last synced from LSP and Git",
+    "description": "Forces a re-sync of the graph with the current Git HEAD state",
     "inputSchema": {
       "properties": {},
       "required": [],
       "type": "object"
     },
-    "name": "get_master_map"
-  },
-  {
-    "description": "Returns a 'slice' of the architecture at a specific depth from the entry point",
-    "inputSchema": {
-      "properties": {
-        "granularity": {
-          "type": "string"
-        },
-        "layer": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "get_layered_map"
-  },
-  {
-    "description": "Finds the most foundational 'Anchor' node that controls a given leaf function",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "navigate_to_anchor"
-  },
-  {
-    "description": "Finds the exact path of function calls between two points",
-    "inputSchema": {
-      "properties": {
-        "from": {
-          "type": "string"
-        },
-        "to": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "from",
-        "to"
-      ],
-      "type": "object"
-    },
-    "name": "get_call_chain"
+    "name": "sync_state"
   },
   {
     "description": "Recursively finds everything a symbol depends on",
@@ -549,7 +629,7 @@
     "name": "trace_dependency"
   },
   {
-    "description": "One-call bootstrap context: repository identity, top anchors, entry points, capability states, and the intent->tool mapping the agent should reach for first. AGENT_UX_ROADMAP.md Milestone 5. Useful when an agent just connected and hasn't yet explored the codebase.",
+    "description": "One-call bootstrap context: repository identity, top anchors, entry points, capability states, and the intent->tool mapping the agent should reach for first. AGENT_UX_ROADMAP.md Milestone 5. Useful when an agent just connected and hasn't yet explored the codebase. Symbol-level detail is `get_context`.",
     "inputSchema": {
       "properties": {
         "budget_tokens": {
@@ -561,54 +641,6 @@
       "type": "object"
     },
     "name": "understand_repository"
-  },
-  {
-    "description": "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules",
-    "inputSchema": {
-      "properties": {
-        "min_fan_out": {
-          "type": "integer"
-        },
-        "min_pattern_files": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "architectural_observations"
-  },
-  {
-    "description": "Compares stability and coupling metrics between two modules",
-    "inputSchema": {
-      "properties": {
-        "module_a": {
-          "type": "string"
-        },
-        "module_b": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "module_a",
-        "module_b"
-      ],
-      "type": "object"
-    },
-    "name": "compare_modules"
-  },
-  {
-    "description": "Returns a high-level tree of files and modules up to a specific depth",
-    "inputSchema": {
-      "properties": {
-        "max_depth": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "explore_architecture"
   },
   {
     "description": "Return server health, node/edge counts, last enriched commit, and language-server availability.",
@@ -627,6 +659,30 @@
     "name": "get_capabilities"
   },
   {
+    "description": "The skill menu: every capability package with its pitch, level, why it is off by default, and its tools.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "list_packages"
+  },
+  {
+    "description": "Opt a package (verify, arch, raw, notes, session, social, ops) into this session's tools/list, then refetch it.",
+    "inputSchema": {
+      "properties": {
+        "package": {
+          "description": "package name from list_packages",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package"
+      ],
+      "type": "object"
+    },
+    "name": "load_package"
+  },
+  {
     "description": "Return the recommended tool sequence and quick-reference for working with Lain.",
     "inputSchema": {
       "properties": {},
@@ -635,17 +691,21 @@
     "name": "get_agent_strategy"
   },
   {
-    "description": "Install the language server for the given file extension (e.g. 'rs', 'py') or language name (e.g. 'rust').",
+    "description": "Install one or more language servers. Pass a single `{language}` to install one extension, or `extensions: ['rs','py','go',...,'auto']` to install in a batch. The string `'auto'` resolves to every language the workspace's tracked files use.",
     "inputSchema": {
       "properties": {
+        "extensions": {
+          "description": "Batched install. Each entry is an extension or language name; 'auto' expands to the workspace's tracked-file languages. When present, takes precedence over `language`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "language": {
-          "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'.",
+          "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'. Single-install path.",
           "type": "string"
         }
       },
-      "required": [
-        "language"
-      ],
       "type": "object"
     },
     "name": "install_language_server"
@@ -707,7 +767,7 @@
     "inputSchema": {
       "properties": {
         "repo_id": {
-          "description": "repo_id",
+          "description": "pin the repo that owns the symbol when the name exists in multiple repos",
           "type": "string"
         }
       },
@@ -749,11 +809,25 @@
     "name": "search_org"
   },
   {
-    "description": "Resolve a symbol across the federation, traverse INCOMING Calls edges (the symbol's callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit.",
+    "description": "Use this when you want to know what breaks across repositories: resolve a symbol, traverse INCOMING Calls edges (its callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit. When the symbol matches several repos, pass repo_id to choose one.",
     "inputSchema": {
       "properties": {
         "depth": {
-          "description": "depth",
+          "description": "Traversal depth range: \"1..3\" (string) or a single integer N (shorthand for 1..N, capped at 3).",
+          "oneOf": [
+            {
+              "description": "range string e.g. \"1..3\"",
+              "type": "string"
+            },
+            {
+              "description": "shorthand: integer N means 1..N (capped at 3)",
+              "maximum": 3,
+              "type": "integer"
+            }
+          ]
+        },
+        "repo_id": {
+          "description": "pin the repo that owns the symbol when the name exists in multiple repos",
           "type": "string"
         },
         "symbol": {
@@ -768,32 +842,6 @@
       "type": "object"
     },
     "name": "get_cross_repo_blast_radius"
-  },
-  {
-    "description": "Same as get_cross_repo_blast_radius but the caller disambiguates the repo explicitly via repo_id, bypassing symbol resolution. Args: repo_id, symbol, depth (string range like \"1..3\", not a number). Traverses incoming Calls edges (callers), same as get_cross_repo_blast_radius. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}.",
-    "inputSchema": {
-      "properties": {
-        "depth": {
-          "description": "depth",
-          "type": "string"
-        },
-        "repo_id": {
-          "description": "repo_id",
-          "type": "string"
-        },
-        "symbol": {
-          "description": "symbol",
-          "type": "string"
-        }
-      },
-      "required": [
-        "repo_id",
-        "symbol",
-        "depth"
-      ],
-      "type": "object"
-    },
-    "name": "get_cross_repo_blast_radius_for_repo"
   },
   {
     "description": "List all known workspaces from workspaces.yaml. Returns [{name, description?, source?, member_count, is_active}].",
@@ -1141,9 +1189,22 @@
     "name": "detect_overlap"
   },
   {
-    "description": "Read the server's audit log (per-write events appended by the claim_files handler when a claim is granted). Args: since_unix (drop events whose ts_unix is strictly less than this), path_glob (filter to events whose path matches this glob — see src/server/glob_match.rs for the supported subset). Returns an array of AuditEvent objects (ts_unix, agent_id, path, claim_set, racers, plan_revision, landed_revision). The on-disk file is `<state_dir>/audit.jsonl`, rotation-capped at 50 MB.",
+    "description": "Read the server's audit log (per-write events appended by the claim_files handler when a claim is granted). Args: since_unix (drop events whose ts_unix is strictly less than this), path_glob (filter to events whose path matches this glob — see src/server/glob_match.rs for the supported subset), limit (the most recent N matching events, default 200). Returns an array of AuditEvent objects, oldest first (ts_unix, agent_id, path, claim_set, racers, plan_revision, landed_revision). The on-disk file is `<state_dir>/audit.jsonl`, rotation-capped at 50 MB.",
     "inputSchema": {
-      "properties": {},
+      "properties": {
+        "limit": {
+          "description": "max results",
+          "type": "integer"
+        },
+        "path_glob": {
+          "description": "path_glob",
+          "type": "string"
+        },
+        "since_unix": {
+          "description": "Drop events with ts_unix < this (Unix seconds).",
+          "type": "number"
+        }
+      },
       "required": [],
       "type": "object"
     },
@@ -1161,7 +1222,24 @@
   {
     "description": "Compact digest of the audit log: groups recent edit_landed events by path (default), agent, or hour and returns a count + sample per group. Designed for LLM session compaction — instead of re-reading every audit.jsonl line, the agent gets a navigable summary and can call get_audit_log with a specific path_glob for full detail. Args: since_unix (filter by ts_unix), group_by ('path' (default) | 'agent' | 'hour'), path_glob (pre-filter by path before grouping), limit (max groups returned, default 20). Returns { groups: [{ key, count, first_ts, last_ts, sample_event }], total_events, total_groups, truncated, group_by }. truncated=true when total_groups > limit.",
     "inputSchema": {
-      "properties": {},
+      "properties": {
+        "group_by": {
+          "description": "group_by",
+          "type": "string"
+        },
+        "limit": {
+          "description": "max results",
+          "type": "integer"
+        },
+        "path_glob": {
+          "description": "path_glob",
+          "type": "string"
+        },
+        "since_unix": {
+          "description": "Drop events with ts_unix < this (Unix seconds).",
+          "type": "number"
+        }
+      },
       "required": [],
       "type": "object"
     },
@@ -1180,13 +1258,50 @@
           "type": "string"
         },
         "kind": {
-          "description": "agent kind, e.g. claude-code | codex | kimi | agy (any string is accepted)",
+          "description": "annotation kind (default: note)",
+          "enum": [
+            "note",
+            "warning",
+            "todo",
+            "investigation",
+            "fix"
+          ],
           "type": "string"
         },
         "refs": {
           "description": "Cross-references to other annotation targets.",
           "items": {
-            "$ref": "#/properties/target"
+            "description": "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "symbol",
+                  "file",
+                  "repo",
+                  "edge"
+                ],
+                "type": "string"
+              },
+              "repo_id": {
+                "type": "string"
+              },
+              "symbol": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           },
           "type": "array"
         },
@@ -1222,6 +1337,9 @@
               "type": "string"
             }
           },
+          "required": [
+            "kind"
+          ],
           "type": "object"
         }
       },
@@ -1243,7 +1361,14 @@
           "type": "string"
         },
         "kind": {
-          "description": "agent kind, e.g. claude-code | codex | kimi | agy (any string is accepted)",
+          "description": "annotation kind (default: note)",
+          "enum": [
+            "note",
+            "warning",
+            "todo",
+            "investigation",
+            "fix"
+          ],
           "type": "string"
         },
         "limit": {
@@ -1286,6 +1411,9 @@
               "type": "string"
             }
           },
+          "required": [
+            "kind"
+          ],
           "type": "object"
         }
       },
@@ -1295,7 +1423,7 @@
     "name": "list_annotations"
   },
   {
-    "description": "Mark an open annotation as resolved by the calling agent (or by `resolved_by`). Returns { resolved: Annotation }. Annotations already resolved return an error so a typo'd id is loud.",
+    "description": "Mark an open annotation as resolved by the calling agent (or by `resolved_by`). Returns { resolved: Annotation }. Annotations already resolved return an error so a typo'd id is loud. `session_token` is optional — omit unless you have one from register_agent.",
     "inputSchema": {
       "properties": {
         "id": {
@@ -1319,7 +1447,7 @@
     "name": "resolve_annotation"
   },
   {
-    "description": "Leave a workspace-scoped note for the next agent that registers. Stored as an open Note annotation; expires after 24h. Body may carry a `[scope:<s>]` prefix for filtering on the read side. Returns { id, expires_at_unix_ms }. Single-repo mode only for now.",
+    "description": "Leave a workspace-scoped note for the next agent that registers. Stored as an open Note annotation; expires after 24h. Body may carry a `[scope:<s>]` prefix for filtering on the read side. Returns { id, expires_at_unix_ms }. Single-repo mode only for now. `session_token` is optional — omit unless you have one from register_agent.",
     "inputSchema": {
       "properties": {
         "author": {
@@ -1333,7 +1461,37 @@
         "refs": {
           "description": "Cross-references to other annotation targets.",
           "items": {
-            "$ref": "#/properties/target"
+            "description": "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "symbol",
+                  "file",
+                  "repo",
+                  "edge"
+                ],
+                "type": "string"
+              },
+              "repo_id": {
+                "type": "string"
+              },
+              "symbol": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           },
           "type": "array"
         },
@@ -1370,5 +1528,98 @@
       "type": "object"
     },
     "name": "get_pending_handoffs"
+  },
+  {
+    "description": "Tear down an agent session: releases every claim, drops intent + activity entries, removes the presence session.",
+    "inputSchema": {
+      "properties": {
+        "agent_id": {
+          "description": "agent_id",
+          "type": "string"
+        },
+        "session_token": {
+          "description": "session_token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "session_token"
+      ],
+      "type": "object"
+    },
+    "name": "unregister_agent"
+  },
+  {
+    "description": "Declare or update an intent (goal + scopes + status). The response carries the live coordination level (GREEN / YELLOW / RED) and a `coordination` block with related activity. Returns {intent_id, revision, coordination, intent}.",
+    "inputSchema": {
+      "properties": {
+        "add_scopes": {
+          "description": "paths or symbols the intent covers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "agent_id": {
+          "description": "agent_id",
+          "type": "string"
+        },
+        "goal": {
+          "description": "goal",
+          "type": "string"
+        },
+        "intent_id": {
+          "description": "intent_id",
+          "type": "string"
+        },
+        "remove_scopes": {
+          "description": "paths or symbols the intent covers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scopes": {
+          "description": "paths or symbols the intent covers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "session_token": {
+          "description": "session_token",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "resolved",
+            "stale"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "session_token"
+      ],
+      "type": "object"
+    },
+    "name": "lain_intent"
+  },
+  {
+    "description": "Per-agent activity feed: for each connected agent, returns intent {goal, scopes, status}, focus (most-recent observation target), observed_reads (deduped), and last_tool {tool, target, at_unix}. Optional `agent_id` filters to one agent.",
+    "inputSchema": {
+      "properties": {
+        "agent_id": {
+          "description": "agent_id",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_active_intents"
   }
 ]

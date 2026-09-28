@@ -17,10 +17,51 @@ enum EmbedInner {
         session: Arc<Mutex<Session>>,
         tokenizer: Arc<Tokenizer>,
         embedding_dim: usize,
+        /// Per-model sequence-length cap. Read from the tokenizer's own
+        /// `truncation.max_length` when available (BGE = 512,
+        /// all-MiniLM-L6-v2 = 256); falls back to a safe default if the
+        /// tokenizer doesn't publish one. Used to right-truncate inputs
+        /// before tokenization so the model never sees more tokens than
+        /// it was trained on — passing longer sequences is silently
+        /// truncated by the runtime, which can corrupt the position-id
+        /// embeddings and degrade the output.
+        max_seq_len: usize,
     },
     Stub {
         embedding_dim: usize,
     },
+}
+
+/// Default sequence-length cap when the tokenizer doesn't publish one.
+/// 512 covers BGE-large and any model trained for
+/// `max_position_embeddings >= 512`. MiniLM-L6-v2's published cap is
+/// 256; the model itself silently clamps, so this only matters for the
+/// quality of the truncation we apply before sending.
+const DEFAULT_MAX_SEQ_LEN: usize = 512;
+
+/// Probe the tokenizer's `truncation.max_length` (the field the
+/// `tokenizers` crate populates when the model was exported with a
+/// `--max_length` flag). Returns `DEFAULT_MAX_SEQ_LEN` when the value
+/// is missing, zero, or unparseable.
+///
+/// The previous implementation hardcoded `512` for every model — which
+/// silently truncated MiniLM inputs past 256 tokens, exactly the
+/// comment's promise. Reading from the tokenizer restores the
+/// per-model cap.
+fn detect_max_seq_len(tokenizer: &Tokenizer) -> usize {
+    let Ok(value) = serde_json::to_value(tokenizer) else {
+        return DEFAULT_MAX_SEQ_LEN;
+    };
+    let len = value
+        .get("truncation")
+        .and_then(|t| t.get("max_length"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if len > 0 {
+        len as usize
+    } else {
+        DEFAULT_MAX_SEQ_LEN
+    }
 }
 
 /// Compose the text actually embedded for a query.
@@ -64,7 +105,32 @@ impl NlpEmbedder {
     /// `lain mcp` treated the value as a file — both go through here now.
     pub fn resolve_model_paths(p: &Path) -> (PathBuf, PathBuf) {
         if p.is_dir() {
-            (p.join("model.onnx"), p.join("tokenizer.json"))
+            // `model.onnx`, or else the one `.onnx` the installers put there
+            // (`install.sh` and `lain setup` both write
+            // `all-MiniLM-L6-v2.onnx`, and the docs say to pass the dir).
+            let model = if p.join("model.onnx").exists() {
+                p.join("model.onnx")
+            } else {
+                let mut onnx: Vec<PathBuf> = std::fs::read_dir(p)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|e| e.path())
+                            .filter(|f| f.extension().is_some_and(|x| x == "onnx"))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                onnx.sort();
+                let preferred = p.join("all-MiniLM-L6-v2.onnx");
+                if onnx.contains(&preferred) {
+                    preferred
+                } else if onnx.len() == 1 {
+                    onnx.remove(0)
+                } else {
+                    p.join("model.onnx")
+                }
+            };
+            (model, p.join("tokenizer.json"))
         } else {
             let tokenizer = p
                 .parent()
@@ -72,6 +138,24 @@ impl NlpEmbedder {
                 .unwrap_or_else(|| PathBuf::from("tokenizer.json"));
             (p.to_path_buf(), tokenizer)
         }
+    }
+
+    /// The embedder for `model` (or `LAIN_EMBEDDING_MODEL` when `None`),
+    /// or the stub when it cannot load. Semantic search is optional: a
+    /// wrong path or a corrupt model file used to stop `lain mcp` from
+    /// starting at all, taking every other tool down with it.
+    pub fn load_or_stub(model: Option<&Path>, max_threads: usize) -> Self {
+        let loaded = match model {
+            Some(p) => {
+                let (model, tokenizer) = Self::resolve_model_paths(p);
+                Self::with_max_threads(&model, &tokenizer, max_threads)
+            }
+            None => Self::new_with_threads(max_threads),
+        };
+        loaded.unwrap_or_else(|e| {
+            tracing::warn!("embedding model not loaded ({e}); semantic search is unavailable");
+            Self::new_stub()
+        })
     }
 
     /// Initialize with default paths (models/all-MiniLM-L6-v2.onnx).
@@ -148,6 +232,11 @@ impl NlpEmbedder {
             .with_intra_threads(threads)?
             .commit_from_file(model_path)?;
         let embedding_dim = Self::detect_embedding_dim(&mut session)?;
+        let max_seq_len = detect_max_seq_len(&tokenizer);
+        tracing::info!(
+            "NLP embedder: truncating inputs to {} tokens (from tokenizer config)",
+            max_seq_len
+        );
 
         Ok(Self {
             query_prefix: String::new(),
@@ -155,6 +244,7 @@ impl NlpEmbedder {
                 session: Arc::new(Mutex::new(session)),
                 tokenizer: Arc::new(tokenizer),
                 embedding_dim,
+                max_seq_len,
             },
         })
     }
@@ -261,7 +351,7 @@ impl NlpEmbedder {
         if n == 0 {
             return Ok(Vec::new());
         }
-        let (session, tokenizer, embedding_dim) = match &self.inner {
+        let (session, tokenizer, embedding_dim, max_len) = match &self.inner {
             EmbedInner::Stub { embedding_dim } => {
                 return Ok((0..n).map(|_| vec![0.0f32; *embedding_dim]).collect());
             }
@@ -269,10 +359,9 @@ impl NlpEmbedder {
                 session,
                 tokenizer,
                 embedding_dim,
-            } => (session, tokenizer, *embedding_dim),
+                max_seq_len,
+            } => (session, tokenizer, *embedding_dim, *max_seq_len),
         };
-
-        let max_len: usize = 512;
         let pad_id: i64 = tokenizer
             .token_to_id("[PAD]")
             .map(|v| v as i64)
@@ -559,6 +648,19 @@ pub fn resolve_intra_threads(max_threads: usize) -> usize {
     }
 }
 
+/// A stored embedding that carries no meaning: missing, unparsable, or the
+/// all-zero vector the stub embedder returns. Graphs indexed without a model
+/// hold zero vectors; treated as real they were never re-embedded once a
+/// model was installed, and semantic search stayed blind to those symbols.
+pub fn needs_embedding(stored: Option<&str>) -> bool {
+    match stored {
+        None => true,
+        Some(json) => {
+            serde_json::from_str::<Vec<f32>>(json).map_or(true, |v| v.iter().all(|x| *x == 0.0))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// `resolve_model_paths` accepts the documented directory form
@@ -590,6 +692,14 @@ mod query_prefix_tests {
     //! call sites had already broken. These pin the contract at the
     //! embedder, where it now lives.
     use super::*;
+
+    #[test]
+    fn zero_or_missing_embeddings_need_embedding() {
+        assert!(needs_embedding(None));
+        assert!(needs_embedding(Some("not json")));
+        assert!(needs_embedding(Some("[0.0,0.0,0.0]")));
+        assert!(!needs_embedding(Some("[0.0,0.5,0.0]")));
+    }
 
     #[test]
     fn default_is_no_prefix_so_mini_lm_behaviour_is_unchanged() {
@@ -643,5 +753,34 @@ mod query_prefix_tests {
         // Verified structurally: `embed` does not consult query_prefix.
         assert_eq!(e.query_prefix(), "PREFIX: ");
         assert!(e.embed("fn login()").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod model_path_tests {
+    use super::*;
+
+    #[test]
+    fn a_model_directory_accepts_the_installers_file_name() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("all-MiniLM-L6-v2.onnx"), b"x").unwrap();
+        let (model, tok) = NlpEmbedder::resolve_model_paths(d.path());
+        assert_eq!(model, d.path().join("all-MiniLM-L6-v2.onnx"));
+        assert_eq!(tok, d.path().join("tokenizer.json"));
+        std::fs::write(d.path().join("model.onnx"), b"x").unwrap();
+        assert_eq!(
+            NlpEmbedder::resolve_model_paths(d.path()).0,
+            d.path().join("model.onnx")
+        );
+    }
+
+    /// A missing or broken model is a warning, not a startup failure.
+    #[test]
+    fn a_bad_model_falls_back_to_the_stub() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(NlpEmbedder::load_or_stub(Some(&d.path().join("nope.onnx")), 1).is_stub());
+        std::fs::write(d.path().join("m.onnx"), b"not a model").unwrap();
+        std::fs::write(d.path().join("tokenizer.json"), b"{").unwrap();
+        assert!(NlpEmbedder::load_or_stub(Some(&d.path().join("m.onnx")), 1).is_stub());
     }
 }

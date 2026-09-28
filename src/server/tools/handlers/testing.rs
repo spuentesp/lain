@@ -15,7 +15,7 @@ pub fn find_untested_functions(
 
     let untested: Vec<_> = all_functions
         .into_iter()
-        .filter(|f| f.fan_in.unwrap_or(0) == 0)
+        .filter(|f| f.calls_in.unwrap_or(0) == 0 && f.label.as_deref() != Some("test"))
         .collect();
 
     if untested.is_empty() {
@@ -192,7 +192,7 @@ pub fn get_coverage_summary(
             .collect();
         let untested = module_funcs
             .iter()
-            .filter(|f| f.fan_in.unwrap_or(0) == 0)
+            .filter(|f| f.calls_in.unwrap_or(0) == 0 && f.label.as_deref() != Some("test"))
             .count();
         (module_funcs.len(), untested)
     } else {
@@ -200,7 +200,10 @@ pub fn get_coverage_summary(
             .iter()
             .filter(|n| n.node_type == NodeType::Function)
             .collect();
-        let untested = funcs.iter().filter(|f| f.fan_in.unwrap_or(0) == 0).count();
+        let untested = funcs
+            .iter()
+            .filter(|f| f.calls_in.unwrap_or(0) == 0 && f.label.as_deref() != Some("test"))
+            .count();
         (funcs.len(), untested)
     };
 
@@ -237,12 +240,12 @@ pub fn get_coverage_summary(
     };
 
     // Entry-point coverage: fraction of declared entry points (e.g. `main`,
-    // `App`) that have fan_in > 0 — i.e., exercised by at least one caller
+    // `App`) that have calls_in > 0 — i.e., exercised by at least one caller
     // or test. Vacuously 1.0 when the codebase declares no entry points.
     let total_eps = entry_points.len();
     let reached_eps = entry_points
         .iter()
-        .filter(|ep| ep.fan_in.unwrap_or(0) > 0)
+        .filter(|ep| ep.calls_in.unwrap_or(0) > 0)
         .count();
     let entrypoint_coverage = if total_eps > 0 {
         reached_eps as f64 / total_eps as f64

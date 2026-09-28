@@ -5,6 +5,7 @@
 //! Mirrors the spec's "what is hot-reloaded" promise in Task 6.6.
 
 use lain::server::reload::ReloadState;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +34,7 @@ async fn add_repo_to_workspace_is_visible_to_list_repos() {
         Arc::clone(&fed),
         lain::server::Transport::Http,
         9999,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         Some(repos_yaml.clone()),
         None, // no embedding model in tests
     )
@@ -143,6 +145,7 @@ async fn lain_server_reload_bus_returns_same_handle() {
         fed,
         lain::server::Transport::Http,
         9999,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         Some(repos_yaml.clone()),
         None, // no embedding model in tests
     )
@@ -229,6 +232,7 @@ async fn set_workspace_stress_visible_to_shared_lock() {
         Arc::clone(&fed),
         lain::server::Transport::Http,
         9999,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         Arc::clone(&initial_ws),
         Some(repos_yaml.clone()),
         None, // no embedding model in tests
@@ -434,6 +438,7 @@ async fn set_workspace_publishes_to_shared_workspaces_handle() {
         Arc::clone(&fed),
         lain::server::Transport::Http,
         9999,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         Arc::clone(&initial),
         Some(repos_yaml.clone()),
         None, // no embedding model in tests

@@ -71,6 +71,39 @@ impl ToolHandler for ExploreArchitectureHandler {
         handlers::architecture::explore_architecture(&ctx.graph, &ctx.overlay, max_depth)
     }
 }
+// ─── Explain Dispatch (Tier 3 — dynamic-dispatch mitigation) ──────────────
+
+pub struct ExplainDispatchHandler;
+#[async_trait]
+impl ToolHandler for ExplainDispatchHandler {
+    fn name(&self) -> &'static str {
+        "explain_dispatch"
+    }
+    fn description(&self) -> &'static str {
+        "Synthesises static callers, heuristic edges, runtime edges, and co-change \
+         partners for a symbol and returns a single verdict. Use this instead of \
+         `get_blast_radius` when an empty blast radius might mean 'static graph \
+         cannot see the dispatcher' rather than 'no callers'. The verdict field \
+         is `insufficient_evidence` exactly when every signal is empty — that \
+         is the case Tier 1 teaches agents to refuse to treat as safe."
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
+    }
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<String, LainError> {
+        let symbol = required_str_arg(args, "symbol")?;
+        handlers::explain_dispatch::explain_dispatch(&ctx.graph, &ctx.overlay, &symbol).await
+    }
+}
+inventory::submit!(ToolHandlerEntry(&ExplainDispatchHandler));
+
 inventory::submit!(ToolHandlerEntry(&ExploreArchitectureHandler));
 
 pub struct ListEntryPointsHandler;
@@ -80,7 +113,8 @@ impl ToolHandler for ListEntryPointsHandler {
         "list_entry_points"
     }
     fn description(&self) -> &'static str {
-        "Identifies the architectural hearts of the system (main, App, etc.)"
+        "Use this when asking 'where does execution start?': main/App-style entry \
+         points and top-level routes."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{},"required":[]}"#
@@ -172,7 +206,7 @@ impl ToolHandler for UnderstandRepositoryHandler {
         "One-call bootstrap context: repository identity, top anchors, entry points, \
          capability states, and the intent->tool mapping the agent should reach for \
          first. AGENT_UX_ROADMAP.md Milestone 5. Useful when an agent just connected and \
-         hasn't yet explored the codebase."
+         hasn't yet explored the codebase. Symbol-level detail is `get_context`."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"budget_tokens":{"type":"integer","description":"Soft token budget for the payload; default 3000."}},"required":[]}"#
@@ -193,6 +227,7 @@ impl ToolHandler for UnderstandRepositoryHandler {
             &ctx.git,
             &ctx.readiness,
             budget_tokens,
+            !ctx.embedder.is_stub(),
         )
     }
 }
@@ -233,10 +268,12 @@ impl ToolHandler for GetCallChainHandler {
         "get_call_chain"
     }
     fn description(&self) -> &'static str {
-        "Finds the exact path of function calls between two points"
+        "Use this when you need the exact call path between two symbols (`from` to \
+         `to`). Traces within one repository — pass `repo_id` when a federation \
+         holds both ends. For what-breaks impact use `get_blast_radius`."
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}"#
+        r#"{"type":"object","properties":{"from":{"type":"string","description":"symbol name the path starts at (the caller)"},"to":{"type":"string","description":"symbol name the path ends at (the callee)"}},"required":["from","to"]}"#
     }
     fn capability(&self) -> ToolCapability {
         ToolCapability::ReadOnly
@@ -401,10 +438,13 @@ impl ToolHandler for GetBlastRadiusHandler {
         "get_blast_radius"
     }
     fn description(&self) -> &'static str {
-        "Calculates the transitive impact and ripple effect of changing a symbol"
+        "Use this when you want to know what breaks if you change a symbol: direct \
+         and transitive dependents. For an exact A-to-B call path use \
+         `get_call_chain`; for a pre-edit risk verdict use `assess_change`; for \
+         call-site dispatch honesty use `explain_dispatch`."
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"}},"required":["symbol"]}"#
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"},"include_weak_edges":{"type":"boolean","description":"Include heuristic callers (dynamic dispatch / bus / router) with confidence >= LAIN_HEURISTIC_MIN_CONFIDENCE. Default false."}},"required":["symbol"]}"#
     }
     fn capability(&self) -> ToolCapability {
         ToolCapability::ReadOnly
@@ -416,14 +456,18 @@ impl ToolHandler for GetBlastRadiusHandler {
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
         let include_coupling = bool_arg(args, "include_coupling").unwrap_or(false);
-        handlers::impact::get_blast_radius(
+        let include_weak_edges = bool_arg(args, "include_weak_edges").unwrap_or(false);
+        let mut out = handlers::impact::get_blast_radius(
             &ctx.graph,
             &ctx.overlay,
             &symbol,
             include_coupling,
+            include_weak_edges,
             ui_link(ctx),
         )
-        .await
+        .await?;
+        out.push_str(&open_annotations_for_symbol(ctx, &symbol));
+        Ok(out)
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetBlastRadiusHandler));
@@ -435,7 +479,9 @@ impl ToolHandler for GetCouplingRadarHandler {
         "get_coupling_radar"
     }
     fn description(&self) -> &'static str {
-        "Identifies 'Hidden Coupling' between files based on historical Git co-change patterns"
+        "Use this when asking 'what changes together?': hidden coupling between files \
+         from historical git co-change. `find_related` adds graph and semantic \
+         neighbours to the same question."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
@@ -463,7 +509,8 @@ impl ToolHandler for FindAnchorsHandler {
         "find_anchors"
     }
     fn description(&self) -> &'static str {
-        "Lists the top 10 most foundational/stable components in the codebase"
+        "Use this when asking 'what should I read first?': the most foundational, \
+         stable components by corpus-wide anchor score."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#
@@ -541,7 +588,8 @@ impl ToolHandler for FindDeadCodeHandler {
         "find_dead_code"
     }
     fn description(&self) -> &'static str {
-        "Identifies reachable nodes with zero incoming callers or usages"
+        "Use this when asking 'what is unused?': nodes with zero incoming callers, \
+         test code excluded."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"like":{"type":"string","description":"Filter dead code semantically (e.g., \"auth handler\")"}},"required":[]}"#
@@ -588,13 +636,15 @@ impl ToolHandler for ExplainSymbolHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::metrics::explain_symbol(
+        let mut out = handlers::metrics::explain_symbol(
             &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
             &ctx.occupancy,
             &symbol,
-        )
+        )?;
+        out.push_str(&open_annotations_for_symbol(ctx, &symbol));
+        Ok(out)
     }
 }
 inventory::submit!(ToolHandlerEntry(&ExplainSymbolHandler));
@@ -791,13 +841,7 @@ impl ToolHandler for RunBuildHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        // Default cwd to the workspace so the tool works without an explicit
-        // `cwd` argument.
-        let cwd = if str_arg(args, "cwd").is_empty() {
-            ctx.workspace.to_string_lossy().to_string()
-        } else {
-            str_arg(args, "cwd")
-        };
+        let cwd = run_cwd(ctx, args)?;
         let release = bool_arg(args, "release").unwrap_or(false);
         handlers::execution::run_build(
             &ctx.graph,
@@ -831,11 +875,7 @@ impl ToolHandler for RunTestsHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        let cwd = if str_arg(args, "cwd").is_empty() {
-            ctx.workspace.to_string_lossy().to_string()
-        } else {
-            str_arg(args, "cwd")
-        };
+        let cwd = run_cwd(ctx, args)?;
         let filter = if str_arg(args, "filter").is_empty() {
             None
         } else {
@@ -875,11 +915,7 @@ impl ToolHandler for RunClippyHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        let cwd = if str_arg(args, "cwd").is_empty() {
-            ctx.workspace.to_string_lossy().to_string()
-        } else {
-            str_arg(args, "cwd")
-        };
+        let cwd = run_cwd(ctx, args)?;
         let fix = bool_arg(args, "fix").unwrap_or(false);
         handlers::execution::run_clippy(
             &ctx.graph,
@@ -1173,7 +1209,7 @@ impl ToolHandler for FindSymbolHandler {
          a per-name lookup per match. Cost: cheap (graph index hit)."
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"path_hint":{"type":"string"},"type_filter":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"path_hint":{"type":"string"},"type_filter":{"type":"string","enum":["function","method","class","struct","interface","trait","enum","module","file"]}},"required":["name"]}"#
     }
     fn capability(&self) -> ToolCapability {
         ToolCapability::ReadOnly
@@ -1207,7 +1243,8 @@ impl ToolHandler for GetContextHandler {
          Markdown payload the agent can quote back. Cost: medium; \
          scales with `depth`. Low-level alternative: call each of \
          explain_symbol / get_call_sites / trace_dependency \
-         individually."
+         individually. Repo-level orientation is `understand_repository`; \
+         call-site dispatch honesty is `explain_dispatch`."
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"integer","minimum":0,"maximum":3}},"required":["symbol"]}"#
@@ -1355,7 +1392,7 @@ impl ToolHandler for SearchCodeHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::semantic::search_code(
+        let mut text = handlers::semantic::search_code(
             &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
@@ -1364,7 +1401,88 @@ impl ToolHandler for SearchCodeHandler {
             &ctx.embedding_cache,
             &ctx.tuning,
             args,
-        )
+        )?;
+        // Semantic answers come from whatever the background pass has
+        // embedded so far; say so while it runs, or an agent takes a
+        // partial ranking as final.
+        if text.contains("mode=semantic") {
+            if let Some(e) = ctx.readiness.snapshot().embeddings.filter(|e| e.running) {
+                text.push_str(&format!(
+                    "\n\n⏳ Semantic index still building: {} of {} symbols embedded. \
+                     Rankings may change until it finishes; `get_capabilities` shows \
+                     semantic_search as warming_up until then.",
+                    e.embedded, e.total
+                ));
+            }
+        }
+        Ok(text)
     }
 }
 inventory::submit!(ToolHandlerEntry(&SearchCodeHandler));
+
+// ─── Cross-cutting: open-annotations appendix for explain/blast ────────────
+//
+// `explain_symbol` and `get_blast_radius` both surface an
+// `### Open annotations` section so the agent's first call about a
+// symbol surfaces the human notes left there ("Auto-include in `explain_symbol` / `get_blast_radius` markdown").
+// This helper does the lookup against the live annotation registry
+// attached to the executor's `ToolContext` and formats the appendix
+// the way `annotation_tools::format_open_annotations_section` lays it
+// out. Returning an empty string when no annotations match keeps the
+// wire contract unchanged for the common case.
+
+/// Render the `### Open annotations` section to append to
+/// `explain_symbol` / `get_blast_radius` output for the given
+/// symbol. Returns an empty string when:
+/// - the executor has no live annotation registry wired (default
+///   temp-dir backend has no rows for any repo), OR
+/// - the active federation has no repos to attribute annotations to
+///   (single-workspace mode without a federation), OR
+/// - the lookup itself finds no open annotations on the symbol.
+///
+/// Lookups happen by `AnnotationTarget::Symbol { symbol }`. The
+/// target filter inside the annotation store is exact-match by
+/// `(kind, target)`, so a caller asking about `orchestrate` will
+/// only see annotations whose target was explicitly `Symbol
+/// { "orchestrate" }`. That is intentional — auto-including
+/// annotations on file- or repo-typed targets would change the
+/// semantic of "what is this symbol about" in surprising ways.
+fn open_annotations_for_symbol(ctx: &ToolContext, symbol: &str) -> String {
+    use crate::federation::repo_id::RepoId;
+    use crate::server::annotations::AnnotationTarget;
+    use crate::server::mcp::annotation_tools::{
+        format_open_annotations_section, summaries_for_targets_in_registry,
+    };
+
+    // Federation-mode only: a single-repo federation or a multi-repo
+    // one with the dispatcher's `repo_id` injection lands here with
+    // `ctx.federation = Some(_)`. Single-workspace executors carry
+    // `federation = None` and have no per-repo store to attribute
+    // annotations to, so the lookup is skipped — the same trade-off
+    // the dedicated annotation MCP tools already make via
+    // `target_to_repo`.
+    let Some(fed) = ctx.federation.as_ref() else {
+        return String::new();
+    };
+    let Some((rid, _)) = fed.list_repos().first().cloned() else {
+        return String::new();
+    };
+    let repo = RepoId::new(rid.as_str()).unwrap_or(rid);
+    let targets = [AnnotationTarget::Symbol {
+        symbol: symbol.to_string(),
+    }];
+    let summaries = summaries_for_targets_in_registry(&ctx.annotations, &repo, &targets);
+    format_open_annotations_section(&summaries)
+}
+
+/// The directory a build/test/lint tool runs in: the workspace, or a
+/// `cwd` inside it. A `cwd` elsewhere (`../other-project`, `/tmp/x`) ran
+/// that directory's build and test scripts — arbitrary commands, reachable
+/// by any MCP caller.
+fn run_cwd(ctx: &ToolContext, args: &Map<String, Value>) -> Result<String, LainError> {
+    let cwd = str_arg(args, "cwd");
+    if cwd.is_empty() {
+        return Ok(ctx.workspace.to_string_lossy().to_string());
+    }
+    crate::server::tools::handlers::context::resolve_against_workspace(&ctx.workspace, &cwd)
+}

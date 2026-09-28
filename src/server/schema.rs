@@ -26,6 +26,12 @@ pub enum NodeType {
     Topic,     // Message queue topic (Kafka, RabbitMQ)
     Resource,  // IaC resource (Terraform, k8s)
     Schema,    // Data schema (OpenAPI, Protobuf, JSON Schema)
+    // Synthetic node produced by a heuristic detector. The naming
+    // convention is `Hub:<detector>` (e.g. `Hub:message_bus_publisher`)
+    // and the node carries no source location — it stands in for every
+    // receiver the static graph cannot resolve. Tag any query that
+    // pulls these in with a confidence filter, or skip them entirely.
+    Synthetic,
 }
 
 impl NodeType {
@@ -57,6 +63,7 @@ impl NodeType {
             NodeType::Topic,
             NodeType::Resource,
             NodeType::Schema,
+            NodeType::Synthetic,
         ]
     }
 
@@ -95,11 +102,19 @@ impl NodeType {
             // Emitted by `http_sensor` and `openapi_sensor`, which
             // `sensors::run_all` now runs from both ingest pipelines.
             | NodeType::HttpRoute => true,
+            // `dynamic_dispatch_sensor` emits one `Hub:<detector>`
+            // node per detector that fires; the receiver type is
+            // unknowable from the static graph alone, so the
+            // synthetic node is the only honest indexer-side
+            // representation. Confidence is propagated via
+            // `EdgeProvenance::Heuristic` rather than this type.
+            | NodeType::Synthetic
             // No producer anywhere in the codebase. The sensors cover
             // HTTP, OpenAPI, proto, GraphQL and WebSocket; none of them
             // emits a queue topic, an IaC resource, or a standalone
             // schema node. Writing an indexer is the prerequisite for
             // advertising these, not wiring one up.
+            => true,
             NodeType::Topic | NodeType::Resource | NodeType::Schema => false,
         }
     }
@@ -130,6 +145,13 @@ impl NodeType {
             NodeType::Topic => "A message queue topic (Kafka, RabbitMQ)",
             NodeType::Resource => "An IaC resource (Terraform, k8s)",
             NodeType::Schema => "A data schema (OpenAPI, Protobuf, JSON Schema)",
+            NodeType::Synthetic => {
+                "A synthetic node produced by a heuristic detector (e.g. \
+                 Hub:message_bus_publisher). Carries no source location and \
+                 stands in for a receiver the static graph cannot resolve. \
+                 Filter to confidence-bearing edges only — see \
+                 `EdgeProvenance::Heuristic`."
+            }
         }
     }
 
@@ -162,7 +184,7 @@ impl std::fmt::Display for NodeType {
 }
 
 /// Edge types in the Lain graph
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EdgeType {
     Contains,      // File -> Symbol
     Calls,         // Function -> Function
@@ -177,6 +199,17 @@ pub enum EdgeType {
     Consumes,            // Consumer -> Topic (Kafka consumer, queue listener)
     DeployedTo,          // IaC resource -> cloud resource (k8s, AWS, etc.)
     CrossRepoSameSymbol, // Federation-only: same symbol across different repos (added Task 10)
+    // Heuristic edges emitted by `dynamic_dispatch_sensor`. Static
+    // analysis cannot resolve these receivers; the edge carries a
+    // confidence score via `GraphEdge::provenance` so downstream tools
+    // can downweight them or require explicit acknowledgement.
+    DynamicDispatch, // Receiver type not statically known (bus.publish, container.resolve, etc.)
+    BusTopic,        // Producer/consumer of a named topic/event bus
+    RouteMatches,    // Path/pattern routed to handler via schema-driven router
+    // Runtime-observed edge from the OTLP ingest path (Tier 3). Created
+    // when a span produced by the running application maps to two
+    // graph nodes. Carries a TTL via `EdgeProvenance::Runtime.last_seen_unix`.
+    RuntimeCall,
 }
 
 impl EdgeType {
@@ -204,6 +237,10 @@ impl EdgeType {
             EdgeType::Consumes,
             EdgeType::DeployedTo,
             EdgeType::CrossRepoSameSymbol,
+            EdgeType::DynamicDispatch,
+            EdgeType::BusTopic,
+            EdgeType::RouteMatches,
+            EdgeType::RuntimeCall,
         ]
     }
 
@@ -221,7 +258,17 @@ impl EdgeType {
             // `openapi_sensor` emit CallsHttp. `sensors::run_all` now
             // runs from both ingest pipelines, so both reach a real graph.
             | EdgeType::Implements
-            | EdgeType::CallsHttp => true,
+            | EdgeType::CallsHttp
+            // `dynamic_dispatch_sensor` emits the three heuristic
+            // edge types. They are real indexed data; consumers must
+            // read `GraphEdge::provenance` to learn they are heuristic.
+            | EdgeType::DynamicDispatch
+            | EdgeType::BusTopic
+            | EdgeType::RouteMatches
+            // Runtime trace ingest populates this when enabled.
+            // Indexed so consumers can build queries even before any
+            // spans have arrived; they just see an empty result.
+            | EdgeType::RuntimeCall => true,
             // No producer anywhere in the codebase. `Imports` in
             // particular reads like a core relationship and has never
             // been emitted by any indexer.
@@ -251,6 +298,20 @@ impl EdgeType {
             EdgeType::CrossRepoSameSymbol => {
                 "Federation-only: the same symbol found in two different repos"
             }
+            EdgeType::DynamicDispatch => {
+                "Heuristic edge: receiver type not statically known \
+                 (bus.publish, container.resolve, reflection)"
+            }
+            EdgeType::BusTopic => {
+                "Heuristic edge: producer or consumer of a named topic / event bus"
+            }
+            EdgeType::RouteMatches => {
+                "Heuristic edge: path or pattern routed to a handler via \
+                 a schema-driven router (FastAPI decorators, gRPC rpc, OpenAPI x-router)"
+            }
+            EdgeType::RuntimeCall => {
+                "Runtime edge: caller-callee relationship observed in an OpenTelemetry span"
+            }
         }
     }
 
@@ -266,6 +327,20 @@ impl EdgeType {
             EdgeType::Produces | EdgeType::Consumes => &[NodeType::Function, NodeType::Method],
             EdgeType::DeployedTo => &[NodeType::Resource],
             EdgeType::CrossRepoSameSymbol => &[NodeType::Function, NodeType::Method],
+            // Heuristic edges start from the call-site function or
+            // method when the detector can locate it; otherwise from
+            // the enclosing file. Producers/consumers are functions;
+            // router edges originate from the route node.
+            EdgeType::DynamicDispatch | EdgeType::BusTopic => &[
+                NodeType::Function,
+                NodeType::Method,
+                NodeType::File,
+                NodeType::Module,
+            ],
+            EdgeType::RouteMatches => &[NodeType::HttpRoute],
+            // Runtime edges always come from a function/method symbol
+            // because that's what spans describe.
+            EdgeType::RuntimeCall => &[NodeType::Function, NodeType::Method],
         }
     }
 
@@ -294,6 +369,14 @@ impl EdgeType {
             EdgeType::Produces | EdgeType::Consumes => &[NodeType::Topic],
             EdgeType::DeployedTo => &[NodeType::Resource],
             EdgeType::CrossRepoSameSymbol => &[NodeType::Function, NodeType::Method],
+            // Heuristic edges target the receiver when resolvable
+            // (function/method); otherwise the synthetic "Hub" node
+            // emitted by the sensor, which the schema models as a
+            // Function so `get_blast_radius` continues to traverse.
+            EdgeType::DynamicDispatch => &[NodeType::Function, NodeType::Method],
+            EdgeType::BusTopic => &[NodeType::Topic, NodeType::Function, NodeType::Method],
+            EdgeType::RouteMatches => &[NodeType::Function, NodeType::Method],
+            EdgeType::RuntimeCall => &[NodeType::Function, NodeType::Method],
         }
     }
 }
@@ -366,6 +449,11 @@ pub struct GraphNode {
     /// `signature` with a structured payload.
     #[serde(default)]
     pub label: Option<String>,
+    /// The type, class, module, or namespace a method or property belongs to.
+    /// Used by `definitions_know_their_container` tests and by the resolve
+    /// phase to distinguish `util.parse()` from a free `parse()`.
+    #[serde(default)]
+    pub container: Option<String>,
     // Staleness Metadata
     #[serde(default)]
     pub last_lsp_sync: Option<i64>,
@@ -406,7 +494,7 @@ pub struct GraphNode {
 /// the node identity; library code (tests, sensor backends) goes
 /// through `RepoNamespace::for_test()` which returns a stable
 /// non-production namespace so tests don't have to thread state.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RepoNamespace(pub(crate) uuid::Uuid);
 
 impl RepoNamespace {
@@ -450,6 +538,20 @@ impl RepoNamespace {
         Self(uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_URL,
             repo_id.as_str().as_bytes(),
+        ))
+    }
+
+    /// Stable namespace for a single-repository server (`lain mcp`),
+    /// derived from the canonical workspace path. The per-process random
+    /// namespace it replaces changed every node id on every restart — ids
+    /// an agent was handed stopped resolving — and was never given to the
+    /// graph, so co-change edges were minted against the test namespace
+    /// and silently dropped.
+    pub fn from_workspace(workspace: &std::path::Path) -> Self {
+        let canonical = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        Self(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            format!("lain-workspace:{}", canonical.display()).as_bytes(),
         ))
     }
 
@@ -523,6 +625,7 @@ impl GraphNode {
             co_change_count: None,
             is_deprecated: false,
             label: None,
+            container: None,
             last_lsp_sync: None,
             last_git_sync: None,
             commit_hash: None,
@@ -584,6 +687,38 @@ impl GraphNode {
     }
 }
 
+/// How an edge was produced. Static edges (Tree-sitter, LSP) carry no
+/// provenance by default; heuristic and runtime edges must, so
+/// downstream consumers can distinguish a confident call from a
+/// pattern-guessed one.
+///
+/// Externally tagged (the default serde representation) so the
+/// bincode 2.x legacy codec used by `graph.bin` round-trips
+/// cleanly. `#[serde(default)]` on `GraphEdge::provenance` keeps
+/// binaries written before this commit readable without migration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum EdgeProvenance {
+    /// Resolved by Tree-sitter or a language server. Highest confidence.
+    Static { source: StaticSource },
+    /// Resolved by a convention/heuristic detector. `confidence` is in
+    /// `[0.0, 1.0]`. `detector` is the snake_case name of the detector
+    /// that emitted the edge (e.g. `message_bus_publisher`).
+    Heuristic { detector: String, confidence: f32 },
+    /// Observed at runtime via OpenTelemetry ingest (Tier 3). The
+    /// `last_seen_unix` timestamp tracks freshness so callers can
+    /// weight recent spans higher.
+    Runtime {
+        trace_id: String,
+        last_seen_unix: i64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StaticSource {
+    TreeSitter,
+    Lsp,
+}
+
 /// An edge in the knowledge graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphEdge {
@@ -595,6 +730,11 @@ pub struct GraphEdge {
     /// different repos. `false` (default) for single-workspace graphs.
     #[serde(default)]
     pub cross_repo: bool,
+    /// How this edge was produced. `None` for legacy/static edges
+    /// emitted before this field existed; consumers should treat that
+    /// as `Some(Static { source: TreeSitter })`.
+    #[serde(default)]
+    pub provenance: Option<EdgeProvenance>,
 }
 
 impl GraphEdge {
@@ -605,6 +745,29 @@ impl GraphEdge {
             target_id,
             weight: None,
             cross_repo: false,
+            provenance: None,
+        }
+    }
+
+    /// Builder for a heuristic edge with explicit confidence. Use this
+    /// from sensors; the bare `new` keeps backward compatibility.
+    pub fn new_heuristic(
+        edge_type: EdgeType,
+        source_id: String,
+        target_id: String,
+        detector: impl Into<String>,
+        confidence: f32,
+    ) -> Self {
+        Self {
+            edge_type,
+            source_id,
+            target_id,
+            weight: Some(confidence),
+            cross_repo: false,
+            provenance: Some(EdgeProvenance::Heuristic {
+                detector: detector.into(),
+                confidence,
+            }),
         }
     }
 }

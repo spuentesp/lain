@@ -10,6 +10,7 @@
 //! `dispatch_tool_call`-style match ladder to grow. See
 //! [`docs/CONTRIBUTING_AGENTS.md`](../../../docs/CONTRIBUTING_AGENTS.md#sensor-pattern-one-concern-per-file-one-trait-shared).
 
+pub mod dynamic_dispatch_sensor;
 pub mod graphql_sensor;
 pub mod http_sensor;
 pub mod openapi_sensor;
@@ -35,11 +36,17 @@ pub struct SensorCounts {
     pub proto: usize,
     pub graphql: usize,
     pub websocket: usize,
+    pub dynamic_dispatch: usize,
 }
 
 impl SensorCounts {
     pub fn total(&self) -> usize {
-        self.http_routes + self.openapi + self.proto + self.graphql + self.websocket
+        self.http_routes
+            + self.openapi
+            + self.proto
+            + self.graphql
+            + self.websocket
+            + self.dynamic_dispatch
     }
 
     fn add(&mut self, field: SensorCountField, n: usize) {
@@ -49,6 +56,7 @@ impl SensorCounts {
             SensorCountField::Proto => self.proto += n,
             SensorCountField::Graphql => self.graphql += n,
             SensorCountField::Websocket => self.websocket += n,
+            SensorCountField::DynamicDispatch => self.dynamic_dispatch += n,
         }
     }
 }
@@ -63,6 +71,7 @@ pub enum SensorCountField {
     Proto,
     Graphql,
     Websocket,
+    DynamicDispatch,
 }
 
 /// A registered protocol sensor. Each impl contributes its `scan`

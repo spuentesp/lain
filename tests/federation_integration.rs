@@ -6,11 +6,14 @@
 //! `GraphDatabase`. Full LSP hydration is best-effort: if no language
 //! server is on `PATH`, the file/module hierarchy still lands in the
 //! graph, which is what the smoke test asserts.
+#[path = "support/isolated_state.rs"]
+mod isolated_state;
 
 use lain::federation::health::RepoHealth;
 use lain::federation::repo_id::RepoId;
 use lain::federation::repo_index::RepoIndex;
 use lain::federation::repo_source::WorkspaceDirSource;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -319,7 +322,9 @@ async fn cross_repo_calls_edges_materialize_via_real_lsp_pipeline() {
     );
     std::fs::write(&cfg_path, repos_yaml).unwrap();
 
-    let fed = load_federation(&cfg_path).await.expect("load_federation");
+    let fed = isolated_state::load_federation(&cfg_path)
+        .await
+        .expect("load_federation");
     let repo_a = fed
         .get_repo(&RepoId::new("a").unwrap())
         .expect("repo a registered");
@@ -381,23 +386,44 @@ async fn cross_repo_calls_edges_materialize_via_real_lsp_pipeline() {
     // THE PROOF. The cross-repo `Calls` edge must survive the round
     // trip: caller rewritten to global form by `project_repo`, target
     // passed through unchanged because it was already global.
-    let expected_target = GlobalId::new(
+    // Derive both endpoint ids from the nodes the scanner actually
+    // produced. `line_start` is populated by the LSP path and may be
+    // None on the tree-sitter fallback, so hard-coding a line segment
+    // made this assertion pipeline-dependent; the contract is "the
+    // edge carries the real global ids", not a fixed line number.
+    let a_verify = a_nodes
+        .iter()
+        .find(|n| n.name == "verify_token")
+        .expect("repo a defines verify_token");
+    let expected_target_str = GlobalId::new(
         &RepoId::new("a").unwrap(),
-        NodeType::Function,
-        "src/lib.rs",
-        "verify_token",
-    );
-    let expected_target_str = expected_target.as_str().to_string();
+        a_verify.node_type.clone(),
+        &a_verify.path,
+        &a_verify.name,
+        a_verify.line_start,
+    )
+    .as_str()
+    .to_string();
+    let b_caller = b_nodes
+        .iter()
+        .find(|n| n.name == "charge_invoice")
+        .expect("repo b defines charge_invoice");
+    let expected_caller_str = GlobalId::new(
+        &RepoId::new("b").unwrap(),
+        b_caller.node_type.clone(),
+        &b_caller.path,
+        &b_caller.name,
+        b_caller.line_start,
+    )
+    .as_str()
+    .to_string();
 
     let backend_edges = fed.backend().all_edges().expect("all_edges");
     let cross_edge = backend_edges.iter().any(|e| {
-        // Caller side: rewritten from b's local
-        // `Function:src/lib.rs:charge_invoice` to global
-        // `b:Function:src/lib.rs:charge_invoice`.
-        e.source_id.starts_with("b:")
-            && e.source_id.ends_with(":charge_invoice")
-            // Target side: preserved verbatim as the global id the
-            // resolver returned. (The whole point of the fix.)
+        // Caller rewritten to global form; target preserved verbatim
+        // as the global id the resolver returned. (The whole point of
+        // the fix.)
+        e.source_id == expected_caller_str
             && e.target_id == expected_target_str
             && e.edge_type == EdgeType::Calls
     });
@@ -479,7 +505,6 @@ async fn repo_index_start_watcher_does_not_panic() {
 
 use lain::federation::federated_index::FederatedIndex;
 use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
-use lain::federation::loader::load_federation;
 use lain::federation::repo_source::RepoSource;
 
 /// Write a minimal two-file Rust crate (`Cargo.toml` + `src/lib.rs`) into
@@ -527,7 +552,7 @@ async fn five_repos_indexed_and_queried() {
     }
     std::fs::write(&cfg_path, yaml).unwrap();
 
-    let fed = load_federation(&cfg_path).await.unwrap();
+    let fed = isolated_state::load_federation(&cfg_path).await.unwrap();
     let listed = fed.list_repos();
     assert_eq!(listed.len(), 5);
     // (Real MCP-equivalent queries are exercised by the e2e script in Task 23.)
@@ -619,13 +644,13 @@ async fn cold_restart_reloads_all_repos() {
 
     // First load: builds the federation and persists per-repo state.
     {
-        let _first = load_federation(&cfg_path).await.unwrap();
+        let _first = isolated_state::load_federation(&cfg_path).await.unwrap();
         assert_eq!(_first.list_repos().len(), 3);
     }
 
     // Second load: simulates a cold restart against the same on-disk config
     // and shared data dir. The repo set must come back unchanged.
-    let second = load_federation(&cfg_path).await.unwrap();
+    let second = isolated_state::load_federation(&cfg_path).await.unwrap();
     assert_eq!(second.list_repos().len(), 3);
 }
 
@@ -673,10 +698,12 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
             members: vec!["repo-a".into(), "repo-b".into()],
         }],
     });
+    isolated_state::isolate();
     let server = LainServer::with_federation_and_workspaces(
         Arc::clone(&fed),
         Transport::Stdio,
         0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         Arc::clone(&ws_a),
         None,
         None, // no embedding model in tests
@@ -829,10 +856,12 @@ async fn detect_overlap_reports_shared_symbols() {
             members: vec!["auth-svc".into()],
         }],
     });
+    isolated_state::isolate();
     let server = LainServer::with_federation_and_workspaces(
         Arc::clone(&fed),
         Transport::Stdio,
         0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         workspaces,
         None,
         None, // no embedding model in tests
@@ -925,10 +954,12 @@ async fn detect_overlap_rejects_unknown_workspace() {
             members: vec!["solo".into()],
         }],
     });
+    isolated_state::isolate();
     let server = LainServer::with_federation_and_workspaces(
         Arc::clone(&fed),
         Transport::Stdio,
         0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         workspaces,
         None,
         None, // no embedding model in tests
@@ -993,10 +1024,12 @@ async fn detect_overlap_two_shared_functions_is_high() {
             members: vec!["auth-svc".into()],
         }],
     });
+    isolated_state::isolate();
     let server = LainServer::with_federation_and_workspaces(
         Arc::clone(&fed),
         Transport::Stdio,
         0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         workspaces,
         None,
         None, // no embedding model in tests
@@ -1046,11 +1079,11 @@ async fn detect_overlap_two_shared_functions_is_high() {
 // federation-level tools (`list_repos`, `search_org`) reported a
 // fully-populated graph. Confident false negatives.
 //
-// The fix: when the federation has exactly one repo, the executor's
-// graph is that repo's indexed `GraphDatabase`. Multi-repo
-// federations still bind to the placeholder and need the round-2
-// federation-aware handler refactor; this test pins the single-repo
-// case so the regression can't reappear silently.
+// The fix initially bound a single-repo federation directly to that
+// repo's indexed `GraphDatabase`. Multi-repo executors retain the
+// placeholder as their default, but normal MCP dispatch now injects a
+// resolved `repo_id` and the tool registry rebinds per call. This test
+// pins the direct single-repo binding so that fast path cannot regress.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1094,7 +1127,7 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
         cfg_dir.path().join("data").display(),
     );
     std::fs::write(&cfg_path, yaml).unwrap();
-    let fed = load_federation(&cfg_path).await.unwrap();
+    let fed = isolated_state::load_federation(&cfg_path).await.unwrap();
     assert_eq!(
         fed.list_repos().len(),
         1,
@@ -1120,8 +1153,15 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
     // indexed repo graph. Clone the Arc so we can still read
     // `fed.get_repo(...).db()` below to compare against the
     // executor's view.
-    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
-        .expect("with_federation");
+    let server = LainServer::with_federation(
+        Arc::clone(&fed),
+        Transport::Stdio,
+        0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        None,
+        None,
+    )
+    .expect("with_federation");
 
     // The per-repo tool's view of the world. `find_anchors` calls
     // `graph.find_anchors(limit)` which is the very first read of
@@ -1163,10 +1203,10 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
 #[tokio::test]
 async fn multi_repo_federation_falls_back_to_placeholder() {
     // Two repos → multi-repo federation → the placeholder graph
-    // still binds the executor. Per-repo tools still won't work,
-    // but the executor must construct cleanly and the placeholder
-    // must be the SAME empty DB regardless of repo count. This
-    // pins the "only the single-repo path got the fix" contract.
+    // remains the executor's default. MCP tool calls do work because
+    // dispatch resolves a repo and `ToolRegistry::dispatch` rebinds the
+    // context; this lower-level constructor test only pins the neutral
+    // default used before a request has selected a repo.
     let ws_a = tempfile::tempdir().unwrap();
     let ws_b = tempfile::tempdir().unwrap();
     init_bare_git_repo(ws_a.path());
@@ -1181,19 +1221,26 @@ async fn multi_repo_federation_falls_back_to_placeholder() {
         cfg_dir.path().join("data").display(),
     );
     std::fs::write(&cfg_path, yaml).unwrap();
-    let fed = load_federation(&cfg_path).await.unwrap();
+    let fed = isolated_state::load_federation(&cfg_path).await.unwrap();
     assert_eq!(fed.list_repos().len(), 2);
 
-    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
-        .expect("with_federation");
+    let server = LainServer::with_federation(
+        Arc::clone(&fed),
+        Transport::Stdio,
+        0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        None,
+        None,
+    )
+    .expect("with_federation");
 
     // The placeholder path: the executor's graph is fresh and
     // empty (0 nodes), not bound to either repo. This is the
-    // known limitation the next round-2 refactor will address.
+    // intentional neutral default; request dispatch must rebind it.
     assert_eq!(
         server.ingest().graph().node_count(),
         0,
-        "multi-repo federation still binds the placeholder; round-2 will fix this"
+        "multi-repo federation should keep a neutral placeholder default"
     );
 }
 
@@ -1238,7 +1285,7 @@ fn build_pr1_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<d
     let backend: Arc<dyn GraphBackend> =
         Arc::new(PetgraphBackend::new(tmp).expect("PetgraphBackend::new"));
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
-    let server = LainServer::with_federation(fed, Transport::Stdio, 0, None, None)
+    let server = isolated_state::with_federation(fed, Transport::Stdio, 0, None, None)
         .expect("LainServer::with_federation");
     (Arc::new(server), backend)
 }
@@ -1249,7 +1296,7 @@ fn build_pr1_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<d
 /// (Task 1.6) sees the symbol as present in the static graph.
 fn seed_static_graph(backend: &dyn GraphBackend, repo_id: &str, name: &str) {
     let repo = RepoId::new(repo_id).expect("RepoId::new");
-    let gid = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", name);
+    let gid = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", name, None);
     backend
         .upsert_node_global(gid.as_str(), NodeType::Function, "src/auth.rs", name)
         .expect("upsert_node_global");
@@ -1569,5 +1616,1088 @@ async fn resolve_node_ambiguous_returns_other_definitions() {
     assert_ne!(
         others[0].path, chosen.path,
         "alternative should be a different path"
+    );
+}
+
+/// End-to-end counterpart to
+/// `petgraph_backend_rejects_pre_bump_version_header`: a federated_graph.bin
+/// written with the legacy `LNF2` + version-1 header must be rejected at
+/// the federation level with a clear `FederationSchemaMismatch` error
+/// that carries the found and required versions. The `LNF2` magic +
+/// 4-byte version header is the on-disk envelope since the v2 bump; a
+/// headerless payload, an unknown magic, or a version mismatch all
+/// surface through the same error variant.
+#[test]
+fn federation_schema_version_mismatch_errors_with_clear_message() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{PetgraphBackend, FEDERATION_GRAPH_VERSION};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"LNF2");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 16]);
+    std::fs::write(&bin_path, &bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationSchemaMismatch { found, required } => {
+            assert_eq!(found, 1);
+            assert_eq!(required, FEDERATION_GRAPH_VERSION);
+        }
+        other => panic!("expected FederationSchemaMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn federation_rejects_corrupt_payload_under_valid_header() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{PetgraphBackend, FEDERATION_GRAPH_VERSION};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::from(&b"LNF2"[..]);
+    bytes.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
+    bytes.extend_from_slice(b"corrupt bincode payload");
+    std::fs::write(&bin_path, bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected corrupt federation payload to be rejected"),
+        Err(e) => e,
+    };
+    // `FederationPayloadCorrupt` distinguishes a header that *looks* valid
+    // from a payload that cannot be decoded — `FederationSchemaMismatch`
+    // would be a contradiction ("written by v{required}, this build
+    // expects v{required}") and the previous render swallowed the real
+    // bincode reason into a tracing::warn.
+    match err {
+        LainError::FederationPayloadCorrupt { reason } => {
+            assert!(
+                !reason.is_empty(),
+                "FederationPayloadCorrupt must carry a non-empty reason, got {reason:?}"
+            );
+        }
+        other => panic!("expected FederationPayloadCorrupt, got {other:?}"),
+    }
+    let _ = FEDERATION_GRAPH_VERSION;
+}
+
+/// A zero-byte `federated_graph.bin` is *truncated*, not "no graph yet".
+/// The envelope is mandatory (8 bytes: `LNF2` magic + u32 version), so a
+/// file that exists but is empty is the same class of failure as a
+/// short file: a torn write or a hand-crafted sentinel. The loader must
+/// refuse with `FederationSchemaMismatch` and never silently fall through
+/// to `GraphDatabase::new`, which would load whatever stale sidecar
+/// happens to be sitting next to it.
+#[test]
+fn federation_rejects_zero_byte_file_as_truncated() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{PetgraphBackend, FEDERATION_GRAPH_VERSION};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    std::fs::write(&bin_path, b"").unwrap();
+    // Plant a corrupt sidecar so a fall-through path that *did* load the
+    // sidecar would have the chance to silently accept it. The loader
+    // must reject before that path runs.
+    std::fs::write(
+        bin_path.with_extension("bin.payload"),
+        b"definitely-not-bincode",
+    )
+    .unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("zero-byte federated_graph.bin must be rejected"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationSchemaMismatch { found, required } => {
+            assert_eq!(found, 0);
+            assert_eq!(required, FEDERATION_GRAPH_VERSION);
+        }
+        other => panic!("expected FederationSchemaMismatch, got {other:?}"),
+    }
+}
+
+/// A valid payload with extra trailing bytes must be rejected too.
+/// `validate_persisted_payload` is configured with
+/// `bincode::DefaultOptions::reject_trailing_bytes()`, so the loader
+/// sees the byte count mismatch as a deserialize failure and surfaces
+/// `FederationPayloadCorrupt`. Without that, the loader would accept
+/// the leading valid frame and silently discard the trailing junk —
+/// which is the kind of corruption that escapes the schema header and
+/// only shows up as a corrupted node count downstream.
+#[test]
+fn federation_rejects_payload_with_trailing_bytes() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{PetgraphBackend, FEDERATION_GRAPH_VERSION};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+
+    // Build a real, round-trippable GraphState payload by writing through
+    // the loader, then capture those bytes and append garbage after them.
+    // The next load must reject the trailing bytes even though the
+    // leading payload is well-formed.
+    let seed = PetgraphBackend::new(dir.path()).expect("seed empty backend");
+    seed.upsert_node_global(
+        "repot:Function:src/lib.rs:alpha:0",
+        lain::schema::NodeType::Function,
+        "src/lib.rs",
+        "alpha",
+    )
+    .expect("seed node");
+    let valid_bytes = std::fs::read(&bin_path).expect("read seeded bytes");
+    assert!(
+        valid_bytes.starts_with(b"LNF2"),
+        "seed must produce a v2-envelope file, got {:02x?}",
+        &valid_bytes[..valid_bytes.len().min(8)]
+    );
+    let mut tampered = valid_bytes.clone();
+    tampered.extend_from_slice(b"\xde\xad\xbe\xefgarbage-after-valid-payload");
+    std::fs::write(&bin_path, &tampered).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("federated_graph.bin with trailing bytes must be rejected"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationPayloadCorrupt { reason } => {
+            assert!(
+                !reason.is_empty(),
+                "FederationPayloadCorrupt must carry a non-empty reason, got {reason:?}"
+            );
+        }
+        other => panic!("expected FederationPayloadCorrupt, got {other:?}"),
+    }
+    let _ = FEDERATION_GRAPH_VERSION;
+}
+
+// ─── cold_start_projects_edges_in_one_pass (Task 4 / Codex finding #4) ───
+//
+// Regression for the cold-start cross-repo edge miss: the loader used to
+// project per-repo in parallel, so when a consumer repo projected its
+// `Calls` edge before the provider repo projected its target node, the
+// target's `GlobalId` did not yet exist in the federated backend and the
+// edge was dropped. Phase 1/2 orchestration fixes this — project every
+// repo's nodes first, then every repo's edges.
+//
+// Note: this test mirrors the production resolve-phase path. Cross-repo
+// `Calls` edges are stashed in the consumer's per-repo
+// `pending_external_edges` via `insert_edges_batch` (which handles
+// foreign targets) and use the target's *global* id (e.g.
+// "provider:Function:src/lib.rs:verify_token:1"), not the foreign local
+// UUID. The federation's `project_edges` drains that stash and writes
+// the edge to the federated backend with the global target id intact.
+#[tokio::test]
+async fn cold_start_projects_edges_in_one_pass() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    // Two repos. Consumer imports Provider's function.
+    let consumer_path = tmp.path().join("consumer");
+    let provider_path = tmp.path().join("provider");
+    std::fs::create_dir_all(&consumer_path).unwrap();
+    std::fs::create_dir_all(&provider_path).unwrap();
+    git2::Repository::init(&consumer_path).unwrap();
+    git2::Repository::init(&provider_path).unwrap();
+
+    let consumer_id = RepoId::new("consumer").unwrap();
+    let provider_id = RepoId::new("provider").unwrap();
+
+    for (id, path) in [
+        (&consumer_id, &consumer_path),
+        (&provider_id, &provider_path),
+    ] {
+        let source = WorkspaceDirSource::new(id.clone(), path.clone()).unwrap();
+        fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+    }
+
+    // Inject symbols + a cross-repo Calls edge that targets the provider's
+    // function. After Phase 1/2 orchestration, the edge must resolve.
+    let provider_fn = GraphNode::new(
+        NodeType::Function,
+        "verify_token".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(1, 3);
+    let consumer_caller = GraphNode::new(NodeType::Function, "charge".into(), "src/lib.rs".into())
+        .with_location(1, 5);
+
+    fed.get_repo(&provider_id)
+        .unwrap()
+        .db()
+        .insert_node(&provider_fn)
+        .unwrap();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_node(&consumer_caller)
+        .unwrap();
+
+    // Cross-repo edges are inserted with the target's *global* id (the
+    // resolve phase produces them this way). `insert_edges_batch`
+    // detects the foreign target and stashes the edge in the consumer's
+    // `pending_external_edges` for the federation's `project_edges` to
+    // drain.
+    let provider_global_id = fed
+        .global_id(
+            &provider_id,
+            NodeType::Function,
+            "src/lib.rs",
+            "verify_token",
+            Some(1),
+        )
+        .as_str()
+        .to_string();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_edges_batch(&[GraphEdge::new(
+            EdgeType::Calls,
+            consumer_caller.id.clone(),
+            provider_global_id,
+        )])
+        .unwrap();
+
+    // Cold-start: register both repos, then orchestrate Phase 1 (nodes)
+    // for both, then Phase 2 (edges) for both. This mirrors the
+    // loader's orchestration post-fix.
+    fed.project_nodes(&provider_id).await.unwrap();
+    fed.project_nodes(&consumer_id).await.unwrap();
+    fed.project_edges(&provider_id).await.unwrap();
+    fed.project_edges(&consumer_id).await.unwrap();
+
+    let edges = backend.all_edges().unwrap();
+    let cross = edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls && e.target_id.starts_with("provider:"))
+        .count();
+    assert_eq!(
+        cross, 1,
+        "the consumer's Calls edge must resolve to the provider's node"
+    );
+}
+
+// ─── loader_path_resolves_cross_repo_edges (Task 4 fix review / Finding B) ───
+//
+// Loader-path regression for the placeholder-corruption bug. The previous
+// test (`cold_start_projects_edges_in_one_pass`) orchestrates Phase 1/2 by
+// calling `project_nodes` / `project_edges` directly on a manually-built
+// `FederatedIndex`. That makes it pass right after the API split, even if
+// the loader's orchestration regresses to parallel `project_repo` spawns.
+//
+// These two tests go through `load_federation_with_workspace` so a
+// regression inside the loader (the actual production entry point) is
+// caught. After the loader returns, we populate per-repo DBs with a
+// cross-repo `Calls` edge and project via the same `project_repo`
+// wrapper the loader uses internally — `project_repo` is what the
+// per-repo index loop calls post-load, so this mirrors the production
+// flow exactly.
+//
+// The two tests cover both projection orderings:
+//
+//   * `loader_path_resolves_cross_repo_edges` projects consumer first
+//     then provider. The cross-repo `Calls` edge is the contract; the
+//     provider's metadata is intact because the real projection lands
+//     after the consumer's placeholder (the placeholder upsert has the
+//     wrong `path` / `name` but the real node's `upsert_nodes_batch`
+//     overwrites it).
+//
+//   * `loader_path_resolves_cross_repo_edges_provider_first` projects
+//     provider first then consumer. THIS is the ordering that
+//     specifically pins the `has_node` gate on the placeholder
+//     upsert. Without the gate, the consumer's `project_edges` would
+//     see `target_already_present = false` (no, with provider-first
+//     the real node IS present) — to be precise: without the gate
+//     the consumer's `project_edges` blindly upserts a placeholder
+//     node whose `path` / `name` come from the `GlobalId`'s
+//     `path:name:line` tail, overwriting the real provider node. With
+//     the gate, `has_node(target_id)?` returns `true` and the
+//     placeholder upsert is skipped. If someone removes the gate in
+//     the future, this test fails.
+#[tokio::test]
+async fn loader_path_resolves_cross_repo_edges() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::loader::load_federation_with_workspace;
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::workspace::{WorkspaceSpec, WorkspacesFile};
+    use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Build a two-repo workspace: consumer + provider. The repos must
+    // be real git repos so `RepoIndex::new` -> `GitSensor::new` succeeds.
+    let consumer_path = tmp.path().join("consumer");
+    let provider_path = tmp.path().join("provider");
+    std::fs::create_dir_all(&consumer_path).unwrap();
+    std::fs::create_dir_all(&provider_path).unwrap();
+    git2::Repository::init(&consumer_path).unwrap();
+    git2::Repository::init(&provider_path).unwrap();
+
+    // Write repos.yaml + workspaces.yaml for the loader.
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let repos_yaml = tmp.path().join("repos.yaml");
+    let repos_body = format!(
+        "data_dir: {}\nrepos:\n  - id: consumer\n    source: {{ type: workspace_dir, path: {} }}\n  - id: provider\n    source: {{ type: workspace_dir, path: {} }}\n",
+        data_dir.display(),
+        consumer_path.display(),
+        provider_path.display(),
+    );
+    std::fs::write(&repos_yaml, repos_body).unwrap();
+
+    let workspaces_yaml = tmp.path().join("workspaces.yaml");
+    let ws = WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "two-repo".into(),
+            description: None,
+            source: None,
+            members: vec!["consumer".into(), "provider".into()],
+        }],
+    };
+    std::fs::write(&workspaces_yaml, serde_yaml::to_string(&ws).unwrap()).unwrap();
+
+    // Loader-path: this is the production entry point. A regression
+    // that re-introduced parallel `project_repo` spawns inside the
+    // loader's Phase 0 task would compile and run fine here, but would
+    // race the per-repo projections below.
+    let fed: Arc<FederatedIndex> =
+        load_federation_with_workspace(&repos_yaml, &workspaces_yaml, "two-repo")
+            .await
+            .expect("load_federation_with_workspace");
+
+    let consumer_id = RepoId::new("consumer").unwrap();
+    let provider_id = RepoId::new("provider").unwrap();
+
+    // Populate the per-repo DBs with a node + a cross-repo Calls edge.
+    // `insert_edges_batch` stashes the foreign-target edge in the
+    // consumer's `pending_external_edges`, exactly as `repo.index()`
+    // does in production after the resolve phase rewrites the target
+    // to the global id.
+    let provider_fn = GraphNode::new(
+        NodeType::Function,
+        "verify_token".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(1, 3);
+    let consumer_caller = GraphNode::new(NodeType::Function, "charge".into(), "src/lib.rs".into())
+        .with_location(1, 5);
+
+    fed.get_repo(&provider_id)
+        .unwrap()
+        .db()
+        .insert_node(&provider_fn)
+        .unwrap();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_node(&consumer_caller)
+        .unwrap();
+
+    let provider_global_id = fed
+        .global_id(
+            &provider_id,
+            NodeType::Function,
+            "src/lib.rs",
+            "verify_token",
+            Some(1),
+        )
+        .as_str()
+        .to_string();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_edges_batch(&[GraphEdge::new(
+            EdgeType::Calls,
+            consumer_caller.id.clone(),
+            provider_global_id.clone(),
+        )])
+        .unwrap();
+
+    // Project the consumer first then the provider. The critical
+    // assertion is that the provider's metadata is intact after
+    // both projections — the consumer-first ordering makes the
+    // real node win the hydration tiebreaker because
+    // `upsert_nodes_batch` overwrites the placeholder last.
+    fed.project_repo(&consumer_id)
+        .await
+        .expect("project_repo consumer");
+    fed.project_repo(&provider_id)
+        .await
+        .expect("project_repo provider");
+
+    // Assert the cross-repo edge landed in the federated backend.
+    let backend = fed.backend();
+    let edges = backend.all_edges().unwrap();
+    let cross = edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls && e.target_id == provider_global_id)
+        .count();
+    assert_eq!(
+        cross, 1,
+        "cross-repo Calls edge must resolve to the provider's global id"
+    );
+
+    // Assert the provider's node is intact: path and name are NOT
+    // the placeholder's corrupted concatenation. Under
+    // consumer-first ordering the real projection lands last and
+    // overwrites the placeholder; under provider-first ordering
+    // (next test) the placeholder upsert would clobber the real
+    // node WITHOUT the gate, which is exactly what the gate
+    // prevents.
+    let provider_node = backend
+        .get_node(&provider_global_id)
+        .expect("get_node")
+        .expect("provider node must exist after projection");
+    assert_eq!(
+        provider_node.path, "src/lib.rs",
+        "path must not be corrupted by placeholder upsert"
+    );
+    assert_eq!(
+        provider_node.name, "verify_token",
+        "name must not be corrupted by placeholder upsert"
+    );
+    assert_eq!(provider_node.node_type, NodeType::Function);
+}
+
+/// Provider-first projection ordering — pins the `has_node` gate on the
+/// placeholder upsert (`src/server/federation/federated_index.rs`).
+///
+/// Same fixture as the consumer-first test above, but the projection
+/// order is reversed: provider first, then consumer. With the gate in
+/// place, the consumer's `project_edges` sees `has_node(target_id) ==
+/// true` and skips the placeholder upsert, leaving the provider's
+/// metadata intact. WITHOUT the gate, the consumer's `project_edges`
+/// would blindly upsert a placeholder node whose `path` / `name` come
+/// from the `GlobalId`'s `path:name:line` tail, clobbering the real
+/// provider node. Removing the gate would fail this test.
+#[tokio::test]
+async fn loader_path_resolves_cross_repo_edges_provider_first() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::loader::load_federation_with_workspace;
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::workspace::{WorkspaceSpec, WorkspacesFile};
+    use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    let consumer_path = tmp.path().join("consumer");
+    let provider_path = tmp.path().join("provider");
+    std::fs::create_dir_all(&consumer_path).unwrap();
+    std::fs::create_dir_all(&provider_path).unwrap();
+    git2::Repository::init(&consumer_path).unwrap();
+    git2::Repository::init(&provider_path).unwrap();
+
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let repos_yaml = tmp.path().join("repos.yaml");
+    let repos_body = format!(
+        "data_dir: {}\nrepos:\n  - id: consumer\n    source: {{ type: workspace_dir, path: {} }}\n  - id: provider\n    source: {{ type: workspace_dir, path: {} }}\n",
+        data_dir.display(),
+        consumer_path.display(),
+        provider_path.display(),
+    );
+    std::fs::write(&repos_yaml, repos_body).unwrap();
+
+    let workspaces_yaml = tmp.path().join("workspaces.yaml");
+    let ws = WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "two-repo".into(),
+            description: None,
+            source: None,
+            members: vec!["consumer".into(), "provider".into()],
+        }],
+    };
+    std::fs::write(&workspaces_yaml, serde_yaml::to_string(&ws).unwrap()).unwrap();
+
+    let fed: Arc<FederatedIndex> =
+        load_federation_with_workspace(&repos_yaml, &workspaces_yaml, "two-repo")
+            .await
+            .expect("load_federation_with_workspace");
+
+    let consumer_id = RepoId::new("consumer").unwrap();
+    let provider_id = RepoId::new("provider").unwrap();
+
+    let provider_fn = GraphNode::new(
+        NodeType::Function,
+        "verify_token".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(1, 3);
+    let consumer_caller = GraphNode::new(NodeType::Function, "charge".into(), "src/lib.rs".into())
+        .with_location(1, 5);
+
+    fed.get_repo(&provider_id)
+        .unwrap()
+        .db()
+        .insert_node(&provider_fn)
+        .unwrap();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_node(&consumer_caller)
+        .unwrap();
+
+    let provider_global_id = fed
+        .global_id(
+            &provider_id,
+            NodeType::Function,
+            "src/lib.rs",
+            "verify_token",
+            Some(1),
+        )
+        .as_str()
+        .to_string();
+    fed.get_repo(&consumer_id)
+        .unwrap()
+        .db()
+        .insert_edges_batch(&[GraphEdge::new(
+            EdgeType::Calls,
+            consumer_caller.id.clone(),
+            provider_global_id.clone(),
+        )])
+        .unwrap();
+
+    // Provider-first: the real node lands first, then the consumer's
+    // project_edges fires. Without the `has_node` gate the placeholder
+    // upsert would corrupt the provider's `path` / `name`; with the
+    // gate the placeholder upsert is skipped because the real node is
+    // already present.
+    fed.project_repo(&provider_id)
+        .await
+        .expect("project_repo provider");
+    fed.project_repo(&consumer_id)
+        .await
+        .expect("project_repo consumer");
+
+    let backend = fed.backend();
+    let edges = backend.all_edges().unwrap();
+    let cross = edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls && e.target_id == provider_global_id)
+        .count();
+    assert_eq!(
+        cross, 1,
+        "cross-repo Calls edge must resolve to the provider's global id"
+    );
+
+    let provider_node = backend
+        .get_node(&provider_global_id)
+        .expect("get_node")
+        .expect("provider node must exist after projection");
+    assert_eq!(
+        provider_node.path, "src/lib.rs",
+        "provider path must survive the consumer's placeholder branch — gate check"
+    );
+    assert_eq!(
+        provider_node.name, "verify_token",
+        "provider name must survive the consumer's placeholder branch — gate check"
+    );
+    assert_eq!(provider_node.node_type, NodeType::Function);
+}
+
+// ─── Task 6 / Codex probe regressions ───────────────────────────────────────
+//
+// Three integration tests that pin the post-fix behaviour end-to-end. Each
+// corresponds to a Codex probe originally in `tests/review_probe.rs` whose
+// regression test now lives in the proper test file.
+
+/// Regression test for Codex's `federation_collapses_same_named_methods`
+/// probe: two `fn new` methods at distinct line ranges must remain
+/// distinct nodes in the federated backend (the fix re-keys every
+/// per-repo node to its global id `repo:Kind:path:name:line_start`
+/// before projection, so collisions on `(name, path)` no longer collapse).
+#[tokio::test]
+async fn federation_keeps_same_named_methods_at_different_lines_distinct() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    let repo_path = tmp.path().join("one");
+    std::fs::create_dir_all(&repo_path).unwrap();
+    git2::Repository::init(&repo_path).unwrap();
+    let id = RepoId::new("one").unwrap();
+    let source = WorkspaceDirSource::new(id.clone(), repo_path).unwrap();
+    fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+
+    let repo = fed.get_repo(&id).unwrap();
+    let db = repo.db();
+    let a = GraphNode::new(NodeType::Method, "new".into(), "src/lib.rs".into()).with_location(2, 4);
+    let b =
+        GraphNode::new(NodeType::Method, "new".into(), "src/lib.rs".into()).with_location(12, 14);
+    assert_ne!(
+        a.id, b.id,
+        "precondition: distinct line ranges → distinct local ids"
+    );
+    db.insert_nodes_batch(&[a.clone(), b.clone()]).unwrap();
+    fed.project_nodes(&id).await.unwrap();
+    fed.project_edges(&id).await.unwrap();
+
+    assert_eq!(
+        backend.node_count(),
+        2,
+        "two distinct same-named methods must not collapse to one"
+    );
+}
+
+/// End-to-end coverage for the signature-synthesis gate introduced in
+/// Task 3: two repos each declare a Rust function `verify_token` whose
+/// LSP signature field is empty. Setting the synthesized signature
+/// (what the ingest path's `derive_signature` does in production) must
+/// let `find_cross_repo_matches` pair the two definitions with
+/// `MatchConfidence::Signature` — the pre-fix behaviour was that
+/// empty signatures prevented the cross-repo match entirely.
+#[tokio::test]
+async fn cross_repo_matches_with_synthesized_signatures_finds_real_overlap() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::matching::{find_cross_repo_matches, MatchConfidence};
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        (
+            "alpha",
+            "pub fn verify_token(t: &str) -> bool {\n    !t.is_empty()\n}\n",
+        ),
+        (
+            "bravo",
+            "pub fn verify_token(s: &str) -> bool {\n    !s.is_empty()\n}\n",
+        ),
+    ] {
+        let path = tmp.path().join(name).join("src").join("lib.rs");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        let repo_root = tmp.path().join(name);
+        git2::Repository::init(&repo_root).unwrap();
+    }
+
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    for name in ["alpha", "bravo"] {
+        let id = RepoId::new(name).unwrap();
+        let source = WorkspaceDirSource::new(id.clone(), tmp.path().join(name)).unwrap();
+        fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+    }
+
+    let alpha_id = RepoId::new("alpha").unwrap();
+    let bravo_id = RepoId::new("bravo").unwrap();
+
+    // Inject nodes with empty signatures (LSP did not populate detail).
+    for id in [&alpha_id, &bravo_id] {
+        let repo = fed.get_repo(id).unwrap();
+        let mut n = GraphNode::new(
+            NodeType::Function,
+            "verify_token".into(),
+            "src/lib.rs".into(),
+        )
+        .with_location(1, 3);
+        n.signature = None;
+        repo.db().insert_node(&n).unwrap();
+    }
+
+    fed.project_nodes(&alpha_id).await.unwrap();
+    fed.project_nodes(&bravo_id).await.unwrap();
+
+    // Use the federated backend's projected nodes — these carry global
+    // ids (e.g. `alpha:Function:src/lib.rs:verify_token:1`), which is
+    // what `find_cross_repo_matches` parses to determine repo
+    // membership and filter same-repo candidates.
+    let projected = backend.find_nodes_by_name("verify_token").unwrap();
+    let new_node = projected
+        .iter()
+        .find(|n| n.id.starts_with("alpha:"))
+        .expect("alpha's verify_token must be in the federated backend")
+        .clone();
+    let candidates: Vec<GraphNode> = projected
+        .iter()
+        .filter(|n| n.id.starts_with("bravo:"))
+        .cloned()
+        .collect();
+
+    // Simulate signature synthesis by setting the field before matching.
+    // (In production the ingest path sets this via derive_signature.)
+    let mut new_node_with_sig = new_node.clone();
+    new_node_with_sig.signature = Some("pub fn verify_token(t: &str) -> bool".into());
+    let mut candidates_with_sig = candidates.clone();
+    for c in &mut candidates_with_sig {
+        c.signature = Some("pub fn verify_token(s: &str) -> bool".into());
+    }
+
+    let matches = find_cross_repo_matches(&new_node_with_sig, &candidates_with_sig, 5, 0.5, false);
+    assert_eq!(
+        matches.len(),
+        1,
+        "synthesized signatures should match, got {matches:?}"
+    );
+    assert_eq!(matches[0].2, MatchConfidence::Signature);
+}
+
+// ---------------------------------------------------------------------------
+// F10 — federation edge reconciliation (Codex review wave-2 contract
+// `reconciliation_removes_obsolete_calls_between_live_nodes`).
+//
+// Repro: a repo drops a `Calls` edge from its per-repo DB while the
+// caller and callee are still indexed. Before the fix, `project_edges`
+// only upserted, so the federated edge persisted until the node itself
+// went away — `search_org` and blast-radius queries kept reporting a
+// dependency that no longer existed.
+//
+// The reconciliation pass keys edge ownership off the
+// `source_id` prefix: every edge `project_edges` writes has its
+// `source_id` rewritten to the calling repo's global-id form, so the
+// prefix `<repo>:` is unambiguous and stable. On every projection the
+// pass computes the diff between the backend's current set of
+// repo-owned edges and the set the current projection would produce,
+// and removes the difference.
+//
+// `CrossRepoSameSymbol` peer edges and cross-repo `Calls` follow the
+// same rule — the source prefix is the calling repo's id, and that
+// repo's `project_edges` is the only writer that knows when the edge
+// should be retracted.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reconciliation_removes_obsolete_calls_between_live_nodes() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("svc");
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    std::fs::write(
+        repo_root.join("src/lib.rs"),
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )
+    .unwrap();
+    git2::Repository::init(&repo_root).unwrap();
+
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    let id = RepoId::new("svc").unwrap();
+    let source = WorkspaceDirSource::new(id.clone(), repo_root).unwrap();
+    fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+
+    let repo = fed.get_repo(&id).expect("repo registered");
+
+    // Seed two function nodes directly into the per-repo DB. We bypass
+    // `RepoIndex::index()` because the regression is about what
+    // `project_edges` does with whatever the per-repo DB reports, not
+    // about how the ingest pipeline produces it. The local node ids
+    // match what `upsert_node` mints deterministically from
+    // (kind, path, name, line).
+    let caller_local = GraphNode::new(NodeType::Function, "caller".into(), "src/lib.rs".into())
+        .with_location(1, 3);
+    let callee_local = GraphNode::new(NodeType::Function, "callee".into(), "src/lib.rs".into())
+        .with_location(2, 4);
+    repo.db().insert_node(&caller_local).unwrap();
+    repo.db().insert_node(&callee_local).unwrap();
+
+    // The intra-repo `Calls` edge from caller to callee.
+    let edge = GraphEdge::new(
+        EdgeType::Calls,
+        caller_local.id.clone(),
+        callee_local.id.clone(),
+    );
+    repo.db().insert_edge(&edge).unwrap();
+
+    // First projection: the federated backend should now carry the
+    // `Calls` edge in global-id form.
+    fed.project_nodes(&id).await.unwrap();
+    fed.project_edges(&id).await.unwrap();
+
+    let global_caller = format!(
+        "svc:Function:src/lib.rs:caller:{}",
+        caller_local.line_start.unwrap_or(0)
+    );
+    let global_callee = format!(
+        "svc:Function:src/lib.rs:callee:{}",
+        callee_local.line_start.unwrap_or(0)
+    );
+    let after_first: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == global_caller
+                && e.target_id == global_callee
+        })
+        .collect();
+    assert_eq!(
+        after_first.len(),
+        1,
+        "first projection must materialize the Calls edge in the federated backend; \
+         backend edges: {:?}",
+        backend.all_edges().unwrap()
+    );
+
+    // The defect: drop the `Calls` edge from the per-repo DB while
+    // both nodes remain. Pre-fix the next projection was a no-op for
+    // this edge, and `all_edges()` kept returning it.
+    repo.db()
+        .remove_edges(std::slice::from_ref(&edge))
+        .expect("remove_edges on per-repo db");
+    assert!(
+        repo.db().all_edges().is_empty(),
+        "per-repo DB should have no edges after the Calls edge is dropped, \
+         got {:?}",
+        repo.db().all_edges()
+    );
+
+    // Re-project nodes (re-asserts endpoints are still live) and edges.
+    // The reconciliation pass should retract the stale federated edge.
+    fed.project_nodes(&id).await.unwrap();
+    fed.project_edges(&id).await.unwrap();
+
+    let after_second: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == global_caller
+                && e.target_id == global_callee
+        })
+        .collect();
+    assert!(
+        after_second.is_empty(),
+        "F10 reconciliation: dropping the per-repo Calls edge must retract \
+         the federated edge too; backend edges: {:?}",
+        backend.all_edges().unwrap()
+    );
+
+    // Both endpoints survive. The retraction is edge-only — the
+    // defect description is explicit that the nodes remain.
+    assert!(
+        backend.has_node(&global_caller).unwrap(),
+        "caller node must survive edge retraction"
+    );
+    assert!(
+        backend.has_node(&global_callee).unwrap(),
+        "callee node must survive edge retraction"
+    );
+
+    // Re-adding the same edge locally must re-materialize it in the
+    // backend. Reconciliation is idempotent and symmetric with upsert.
+    repo.db().insert_edge(&edge).unwrap();
+    fed.project_edges(&id).await.unwrap();
+    let after_third: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == global_caller
+                && e.target_id == global_callee
+        })
+        .collect();
+    assert_eq!(
+        after_third.len(),
+        1,
+        "re-adding the per-repo edge must re-materialize it in the \
+         federated backend; got {:?}",
+        backend.all_edges().unwrap()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F10 REWORK (Codex re-check 2026-09-08 H2) — cross-repo `Calls` edges
+// must survive repeated `project_edges` calls even when the resolve-phase
+// external-edge stash is empty.
+//
+// Repro: project_edges reconciles repo-owned edges against the new batch.
+// Cross-repo outgoing `Calls` edges come from the one-shot
+// `take_pending_external_edges()` drain; on the next projection the stash
+// is empty, so without the rework the reconciliation diff treats the
+// still-live cross-repo edge as stale and removes it.
+//
+// The fix excludes cross-repo outgoing `Calls` edges from the stale
+// filter. They survive until either the foreign target node is removed
+// (petgraph's `remove_node` takes incident edges with it) or the entire
+// source repo is removed.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cross_repo_calls_survive_repeated_projection() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let svc_root = tmp.path().join("svc");
+    std::fs::create_dir_all(svc_root.join("src")).unwrap();
+    std::fs::write(
+        svc_root.join("src/lib.rs"),
+        "pub fn caller() { callee(); }\n",
+    )
+    .unwrap();
+    git2::Repository::init(&svc_root).unwrap();
+
+    let lib_root = tmp.path().join("lib");
+    std::fs::create_dir_all(lib_root.join("src")).unwrap();
+    std::fs::write(lib_root.join("src/lib.rs"), "pub fn callee() {}\n").unwrap();
+    git2::Repository::init(&lib_root).unwrap();
+
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    let svc_id = RepoId::new("svc").unwrap();
+    let lib_id = RepoId::new("lib").unwrap();
+    let svc_source = WorkspaceDirSource::new(svc_id.clone(), svc_root).unwrap();
+    let lib_source = WorkspaceDirSource::new(lib_id.clone(), lib_root).unwrap();
+    fed.add_repo(Box::new(svc_source), tmp.path())
+        .await
+        .unwrap();
+    fed.add_repo(Box::new(lib_source), tmp.path())
+        .await
+        .unwrap();
+
+    let svc_repo = fed.get_repo(&svc_id).expect("svc registered");
+    let lib_repo = fed.get_repo(&lib_id).expect("lib registered");
+
+    let caller_local = GraphNode::new(NodeType::Function, "caller".into(), "src/lib.rs".into())
+        .with_location(1, 1);
+    let callee_local = GraphNode::new(NodeType::Function, "callee".into(), "src/lib.rs".into())
+        .with_location(1, 1);
+    svc_repo.db().insert_node(&caller_local).unwrap();
+    lib_repo.db().insert_node(&callee_local).unwrap();
+
+    let callee_global = format!(
+        "lib:Function:src/lib.rs:callee:{}",
+        callee_local.line_start.unwrap_or(0)
+    );
+    let cross_edge = GraphEdge::new(
+        EdgeType::Calls,
+        caller_local.id.clone(),
+        callee_global.clone(),
+    );
+    // `insert_edges_batch` routes to `pending_external_edges` when the
+    // target is not in the local index — exactly the path the resolve
+    // phase takes for genuine cross-repo calls.
+    let dropped = svc_repo
+        .db()
+        .insert_edges_batch(std::slice::from_ref(&cross_edge))
+        .unwrap();
+    assert_eq!(dropped, 0, "cross-repo edge must reach the external stash");
+
+    // First projection: drains the stash, materializes the cross-repo
+    // `Calls` edge in the federated backend.
+    fed.project_nodes(&svc_id).await.unwrap();
+    fed.project_nodes(&lib_id).await.unwrap();
+    fed.project_edges(&svc_id).await.unwrap();
+    fed.project_edges(&lib_id).await.unwrap();
+
+    let caller_global = format!(
+        "svc:Function:src/lib.rs:caller:{}",
+        caller_local.line_start.unwrap_or(0)
+    );
+    let after_first: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == caller_global
+                && e.target_id == callee_global
+        })
+        .collect();
+    assert_eq!(
+        after_first.len(),
+        1,
+        "first projection must materialize the cross-repo Calls edge; \
+         backend edges: {:?}",
+        backend.all_edges().unwrap()
+    );
+
+    // Defect scenario: second projection WITHOUT any new cross-repo
+    // edges in the stash (simulating a no-op reproject or a reindex
+    // where the resolve phase didn't re-detect the call). Pre-fix the
+    // reconciliation diff treated the cross-repo edge as stale and
+    // deleted it.
+    fed.project_edges(&svc_id).await.unwrap();
+
+    let after_second: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == caller_global
+                && e.target_id == callee_global
+        })
+        .collect();
+    assert_eq!(
+        after_second.len(),
+        1,
+        "F10 REWORK: cross-repo Calls edge must survive repeated \
+         projection; backend edges: {:?}",
+        backend.all_edges().unwrap()
+    );
+
+    // Both endpoints survive — the rework retracts only the edge, not
+    // the nodes, mirroring the intra-repo F10 contract.
+    assert!(
+        backend.has_node(&caller_global).unwrap(),
+        "caller node must survive"
+    );
+    assert!(
+        backend.has_node(&callee_global).unwrap(),
+        "callee node must survive"
+    );
+
+    // A third back-to-back reproject is still a no-op for the cross-repo
+    // edge (idempotency check).
+    fed.project_edges(&svc_id).await.unwrap();
+    let after_third: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == caller_global
+                && e.target_id == callee_global
+        })
+        .collect();
+    assert_eq!(
+        after_third.len(),
+        1,
+        "third projection must still report the cross-repo Calls edge; \
+         backend edges: {:?}",
+        backend.all_edges().unwrap()
     );
 }

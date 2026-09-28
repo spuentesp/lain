@@ -19,7 +19,7 @@ use std::time::Instant;
 /// The three collections produced by a graph traversal. A named result keeps
 /// traversal APIs readable and gives callers one stable shape to extend.
 pub type TraversalResult = (Vec<GraphNodeRef>, Vec<GraphEdgeRef>, Vec<GraphPath>);
-pub type EmbeddingCache = Arc<Mutex<HashMap<String, Vec<f32>>>>;
+pub type EmbeddingCache = Arc<Mutex<lru::LruCache<String, Vec<f32>>>>;
 type TraversalQueueItem = (String, Vec<String>, Vec<(String, String)>);
 
 /// Executor for running queries against the graph
@@ -89,7 +89,7 @@ impl<'a> Executor<'a> {
             // mistake worth reporting rather than quietly running the ops.
             QueryMode::Tool => {
                 let Some(name) = &spec.named else {
-                    return Err(LainError::Mcp(
+                    return Err(LainError::InvalidArgument(
                         "mode \"tool\" runs a named query, but no `named` was given; \
                          set `named`, or use mode \"query\" to run the ops array"
                             .to_string(),
@@ -100,7 +100,7 @@ impl<'a> Executor<'a> {
             // Ops only. `named` alongside it is contradictory input.
             QueryMode::Query => {
                 if spec.named.is_some() {
-                    return Err(LainError::Mcp(
+                    return Err(LainError::InvalidArgument(
                         "mode \"query\" runs the ops array, but `named` was also given; \
                          drop one of them, or use mode \"auto\""
                             .to_string(),
@@ -201,6 +201,7 @@ impl<'a> Executor<'a> {
     }
 
     fn execute_find(&mut self, find: &FindOp) -> Result<Vec<GraphNodeRef>, LainError> {
+        check_node_types(find)?;
         let nodes = self.graph.query_nodes(
             find.type_selector.as_ref(),
             find.name.as_ref(),
@@ -266,6 +267,24 @@ impl<'a> Executor<'a> {
         let mut unique_ids = HashMap::new();
         found_nodes.retain(|n| unique_ids.insert(n.id.clone(), true).is_none());
 
+        // `target`: keep only the reached nodes it selects.
+        if let Some(target) = connect.target.as_deref() {
+            check_node_types(target)?;
+            let allowed: std::collections::HashSet<String> = self
+                .graph
+                .query_nodes(
+                    target.type_selector.as_ref(),
+                    target.name.as_ref(),
+                    target.label_selector.as_ref(),
+                    target.path.as_deref(),
+                )
+                .into_iter()
+                .map(|n| n.id.clone())
+                .filter(|id| target.id.as_ref().is_none_or(|want| want == id))
+                .collect();
+            found_nodes.retain(|n| allowed.contains(&n.id));
+        }
+
         self.nodes_visited += found_nodes.len();
 
         Ok((found_nodes, found_edges, found_paths))
@@ -289,7 +308,7 @@ impl<'a> Executor<'a> {
                 .map(|e| e.to_string())
                 .collect();
             valid.sort();
-            return Err(LainError::Mcp(format!(
+            return Err(LainError::InvalidArgument(format!(
                 "unknown edge type(s) {}: valid edge types are {}",
                 unknown.join(", "),
                 valid.join(", ")
@@ -436,7 +455,7 @@ impl<'a> Executor<'a> {
             if let Ok(emb) = serde_json::from_str::<Vec<f32>>(e_json) {
                 self.embedding_cache
                     .lock()
-                    .insert(node.id.clone(), emb.clone());
+                    .put(node.id.clone(), emb.clone());
                 return Some(emb);
             }
         }
@@ -446,7 +465,7 @@ impl<'a> Executor<'a> {
         self.embedder.embed(&text).ok().inspect(|emb| {
             self.embedding_cache
                 .lock()
-                .insert(node.id.clone(), emb.clone());
+                .put(node.id.clone(), emb.clone());
         })
     }
 
@@ -525,4 +544,23 @@ impl From<Direction> for PetDirection {
             Direction::Both => PetDirection::Outgoing,
         }
     }
+}
+
+/// Reject node type names that do not exist instead of matching nothing.
+fn check_node_types(find: &FindOp) -> Result<(), LainError> {
+    let Some(sel) = find.type_selector.as_ref() else {
+        return Ok(());
+    };
+    let unknown = sel.unknown_types();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let valid: Vec<String> = crate::server::schema::NodeType::all()
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+    Err(LainError::InvalidArgument(format!(
+        "unknown node type(s) {unknown:?}; valid types: {}",
+        valid.join(", ")
+    )))
 }

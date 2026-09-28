@@ -47,6 +47,22 @@ pub struct TuningConfig {
     /// Ingestion: ceiling on cross-boundary coupling edges.
     /// Set to 0 to disable pattern edges.
     pub max_pattern_edges: usize,
+    /// B1 — capacity of the per-tool-executor embedding cache
+    /// (`Arc<Mutex<LruCache<…>>>` in `tools/registry.rs`). Bounded so a
+    /// long-running server with many distinct queries doesn't grow the
+    /// cache without limit. At 384 dims × 4 bytes per `f32`, the default
+    /// 10 000 entries is ~15 MB worst case per executor; a corpus of
+    /// 10 k nodes fills it exactly once, and any query hitting a node
+    /// outside the working set still pays the read-through cost (a
+    /// single ONNX forward pass) before the cache repopulates.
+    pub embedding_cache_capacity: usize,
+    /// B2 — capacity of the process-wide file-content cache
+    /// (`FILE_CONTENT_CACHE` in `tools/utils.rs`). Bounded so a
+    /// long-running server with many watched files doesn't grow the
+    /// cache without limit. 1 000 files × ~50 KB average is ~50 MB
+    /// worst case; mtime invalidation means a stale entry never
+    /// survives a write to its file.
+    pub file_content_cache_capacity: usize,
     /// Ingestion: controls parallel scanning and memory usage.
     pub ingestion: IngestionConfig,
     /// Execution: timeouts for command/tool execution.
@@ -65,6 +81,8 @@ impl Default for TuningConfig {
             query_prefix: String::new(),
             cross_encoder_top_k: 20,
             max_pattern_edges: 200,
+            embedding_cache_capacity: 10_000,
+            file_content_cache_capacity: 1_000,
             ingestion: IngestionConfig::default(),
             runtime: RuntimeConfig::default(),
             presence: PresenceConfig::default(),
@@ -99,7 +117,11 @@ pub struct IngestionConfig {
     pub nlp_prewarm_count: usize,
     /// NLP background: nodes embedded per batch chunk.
     pub nlp_batch_size: usize,
-    /// NLP background: max nodes embedded per interval pass (backpressure).
+    /// NLP background: max nodes embedded by the pass that follows each
+    /// index build. The default covers every symbol. It used to be 20,
+    /// and since there is one pass per build, not one per interval, the
+    /// rest were embedded only as a side effect of queries (200 per call):
+    /// semantic search ranked a history-dependent subset of the code.
     pub nlp_budget_per_pass: usize,
     /// NLP: cap on intra-op threads per embedding call. 0 = auto-detect
     /// (uses min(system cores, 4) — 4 is enough for bge-small/bge-base
@@ -107,6 +129,41 @@ pub struct IngestionConfig {
     /// Higher values help on machines with many idle cores; lower values
     /// help when sharing the box with other workloads.
     pub nlp_max_threads: usize,
+    /// LSP prewarm: per-language timeout for the cold-boot warm-up
+    /// `documentSymbol` call against a sentinel file. This is separate
+    /// from `lsp_symbol_poll_timeout_secs` (which gates polling inside
+    /// an active LSP round-trip) and the runtime `LSP_REQUEST_TIMEOUT`
+    /// in `src/server/lsp.rs` (1 s, intentionally short so a stuck
+    /// round-trip doesn't tie up the Tokio worker). The prewarm pass
+    /// is allowed a longer budget on purpose: cold caches on large
+    /// Rust / C++ projects routinely take 2–5 s on the first call,
+    /// which would otherwise trip the circuit breaker.
+    pub lsp_prewarm_timeout_secs: u64,
+    /// LSP prewarm: maximum number of files inspected when picking a
+    /// sentinel for a given language. Larger workspaces pay slightly
+    /// more for a sentinel pick but get a warmer LSP up front.
+    pub lsp_prewarm_max_files: usize,
+    /// LSP prewarm: opt out of the cold-boot warm-up step entirely.
+    /// When `true`, `build_core_memory` skips prewarm and proceeds
+    /// straight to scanning; the runtime circuit breaker still applies
+    /// to every later call, so cold-cache startups that happen to
+    /// hit the 1 s boundary can still mark a binary unavailable.
+    pub lsp_prewarm_opt_out: bool,
+    /// LSP prewarm: per-language opt-out list. Any extension in
+    /// this set is filtered out of the prewarm pass before its
+    /// sentinel selection. Useful when a monorepo mixes languages
+    /// whose LSPs are intentionally unavailable (e.g. generated
+    /// `.js` under `.gitignore_info`) — skipping the prewarm for
+    /// those means the warm-up phase completes faster and the
+    /// runtime 1 s boundary isn't tripped trying to talk to an LSP
+    /// the workspace has explicitly opted out of. Empty by default;
+    /// operators can list languages via `.lain/tuning.toml`:
+    ///
+    /// ```toml
+    /// [ingestion]
+    /// lsp_prewarm_skip_extensions = ["js", "css"]
+    /// ```
+    pub lsp_prewarm_skip_extensions: Vec<String>,
     /// UI session time-to-live in seconds.
     pub ui_session_ttl_secs: u64,
     /// Default query result limit when not specified.
@@ -126,8 +183,12 @@ impl Default for IngestionConfig {
             cochange_min_pair_count: 2,
             nlp_prewarm_count: 20,
             nlp_batch_size: 50,
-            nlp_budget_per_pass: 20,
+            nlp_budget_per_pass: 1_000_000,
             nlp_max_threads: 0, // 0 = auto-detect (min(cores, 4))
+            lsp_prewarm_timeout_secs: 30,
+            lsp_prewarm_max_files: 50,
+            lsp_prewarm_opt_out: false,
+            lsp_prewarm_skip_extensions: Vec::new(),
             ui_session_ttl_secs: 600,
             default_query_limit: 100,
         }
@@ -169,6 +230,17 @@ pub struct PresenceConfig {
     /// A state lock older than this is presumed abandoned by a dead
     /// holder and may be taken over.
     pub state_lock_stale_after_secs: u64,
+    /// Threshold for the federation-mode cold-start cycle detection:
+    /// `RepoIndex::index_forced` is suppressed when the previous
+    /// successful index completed within this many seconds AND no
+    /// commit moved AND no uncommitted changes exist. The check breaks
+    /// the `index → topology → re-scan → index → …` loop observed
+    /// during 2026-09-21 cold-start runs (every cycle was 30 s – 3
+    /// min, never converged). Default 30 s matches the longest
+    /// observed cycle; lower it for faster break-out in CI, raise it
+    /// for larger monorepos where legitimate reindexes routinely
+    /// happen within the window.
+    pub repo_cycle_threshold_secs: u64,
 }
 
 impl Default for PresenceConfig {
@@ -180,6 +252,7 @@ impl Default for PresenceConfig {
             state_lock_acquire_timeout_ms: 2000,
             state_lock_retry_interval_ms: 20,
             state_lock_stale_after_secs: 10,
+            repo_cycle_threshold_secs: 30,
         }
     }
 }
@@ -379,9 +452,18 @@ mod knob_reachability_tests {
             ("lsp_symbol_poll_interval_ms", "tuning.rs"),
             ("lsp_pool_size", "tuning.rs"),
             ("nlp_max_threads", "tuning.rs"),
+            ("embedding_cache_capacity", "tuning.rs"),
+            ("file_content_cache_capacity", "tuning.rs"),
             ("cochange_commit_window", "tuning.rs"),
             ("cochange_min_pair_count", "tuning.rs"),
             ("cochange_max_commit_files", "tuning.rs"),
+            // LSP prewarm tunables (this PR). The reachability is
+            // `src/server/ingest/ingestion.rs`, where
+            // `build_core_memory` reads them before the scan batch.
+            ("lsp_prewarm_timeout_secs", "tuning.rs"),
+            ("lsp_prewarm_max_files", "tuning.rs"),
+            ("lsp_prewarm_opt_out", "tuning.rs"),
+            ("lsp_prewarm_skip_extensions", "tuning.rs"),
             // Lives in `federation/config.rs`, same failure mode.
             ("ready_threshold", "federation/config.rs"),
             ("max_concurrent_indexers", "federation/config.rs"),

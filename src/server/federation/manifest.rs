@@ -77,9 +77,13 @@ impl FederationManifest {
         }
         let bytes =
             std::fs::read(path).map_err(|e| LainError::Io(format!("read manifest: {e}")))?;
-        let m: Self = bincode::serde::decode_from_slice(&bytes, bincode::config::legacy())
-            .map(|(m, _)| m)
-            .map_err(|e| LainError::Serialization(format!("bincode: {e}")))?;
+        let m: Self = bincode::serde::decode_from_slice(
+            &bytes,
+            bincode::config::legacy()
+                .with_limit::<{ crate::server::graph::persist::DECODE_LIMIT }>(),
+        )
+        .map(|(m, _)| m)
+        .map_err(|e| LainError::Serialization(format!("bincode: {e}")))?;
         if m.version > CURRENT_VERSION {
             return Err(LainError::UnsupportedManifestVersion(m.version));
         }

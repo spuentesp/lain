@@ -4,8 +4,7 @@
 //! Extracted from `LainServer` in PR 3.7a. `LainServer` holds an
 //! `Arc<LifecycleInfo>` in PR 3.7b and forwards every accessor through.
 //!
-//! AGENT_UX_ROADMAP.md Milestone 4 follow-up (FOLLOWUPS.md
-//! §"Cooperative cancellation token"): the single
+//! AGENT_UX_ROADMAP.md Milestone 4 follow-up ("Cooperative
 //! `startup_cancel: CancellationToken` created here is the one
 //! cooperative shutdown signal shared by every long-running indexing
 //! phase (`build_core_memory`, `index_one_repo`, the detached NLP

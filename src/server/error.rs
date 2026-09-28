@@ -35,6 +35,10 @@ pub enum LainError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// A tool argument that is missing, mistyped or out of range.
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+
     #[error("Not found: {0}")]
     NotFound(String),
 
@@ -70,8 +74,17 @@ pub enum LainError {
     #[error("Other error: {0}")]
     Other(String),
 
-    #[error("Ambiguous symbol: matches repos {0:?}")]
+    #[error(
+        "Ambiguous symbol: matches repos {0:?}. Pass `repo_id` to choose one \
+         (for a cross-repo blast radius: `get_cross_repo_blast_radius_for_repo`)."
+    )]
     AmbiguousSymbol(Vec<crate::federation::repo_id::RepoId>),
+
+    #[error("federation graph was written by schema v{found}; this build expects schema v{required}. Run `lain reindex` to rebuild.")]
+    FederationSchemaMismatch { found: u32, required: u32 },
+
+    #[error("federation graph payload is corrupt: {reason}. Run `lain reindex` to rebuild.")]
+    FederationPayloadCorrupt { reason: String },
 }
 
 impl From<git2::Error> for LainError {

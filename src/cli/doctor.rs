@@ -44,6 +44,34 @@ pub struct InstallationReport {
     pub hook_script: Option<PathBuf>,
 }
 
+/// Active wire-level tool profile. Surfaced in `doctor --json` so an
+/// operator checking an offline server can see whether `tools/list`
+/// will return the curated 15-tool semantic surface or the full
+/// 83-tool surface. The advertised count is what the next
+/// `tools/list` round-trip will report — lower than the registry
+/// total under `semantic`, equal to the registry total under
+/// `full`.
+#[derive(Debug, Serialize)]
+pub struct ToolProfileReport {
+    pub name: String,
+    pub advertised_count: usize,
+}
+
+/// LSP cold-boot prewarm knobs. Defaulted from
+/// `IngestionConfig::default()`; the operator can override per-server
+/// via `.lain/tuning.toml` (not currently read by `doctor` — the
+/// snapshot stays default-only so a non-workspace `doctor`
+/// invocation is meaningful). The `env_opt_out` line tells the
+/// operator whether `LAIN_LSP_PREWARM=false` has disabled the
+/// prewarm entirely.
+#[derive(Debug, Serialize)]
+pub struct LspPrewarmKnobs {
+    pub timeout_secs: u64,
+    pub max_files: usize,
+    pub opt_out: bool,
+    pub env_opt_out: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
     pub schema_version: u32,
@@ -55,6 +83,8 @@ pub struct DoctorReport {
     pub capabilities: Capabilities,
     pub transport: TransportReport,
     pub installation: InstallationReport,
+    pub tool_profile: ToolProfileReport,
+    pub lsp_prewarm: LspPrewarmKnobs,
     pub problems: Vec<Problem>,
 }
 
@@ -86,6 +116,160 @@ impl DoctorReport {
         capability.remediation = Some(remediation.into());
         self.capabilities.symbols = capability.clone();
         self.capabilities.call_graph = capability;
+    }
+}
+
+/// Read the same on-disk signals the live server uses to decide
+/// whether federation / workspace tools are wired into the
+/// dispatcher. Returns `(federation_active, workspace_active)`.
+///
+/// * Federation mode is `true` when `<root>/repos.yaml` parses as a
+///   `repos:` list with **more than one entry**. A single-repo
+///   file is single-workspace mode and doesn't add the federation
+///   family to the advertised surface.
+///
+/// * Workspace mode is `true` when `<root>/workspaces.yaml` exists
+///   and parses as a `WorkspacesFile`. A missing or unparseable
+///   file maps to `false` — server-mode errors don't block offline
+///   diagnostics.
+fn detect_server_modes(root: &Path) -> (bool, bool) {
+    let federation_active = read_repos_yaml(root).map(|r| r.len() > 1).unwrap_or(false);
+    let workspace_active =
+        crate::server::federation::workspace::WorkspacesFile::load(&root.join("workspaces.yaml"))
+            .is_ok();
+    (federation_active, workspace_active)
+}
+
+/// Read `repos.yaml` next to `root` and return the parsed repo list
+/// length. `None` means the file is absent or failed to parse — both
+/// collapse to "no federation signal" in `detect_server_modes`.
+fn read_repos_yaml(root: &Path) -> Option<Vec<String>> {
+    let path = root.join("repos.yaml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let parsed: serde_json::Value = serde_yaml::from_str(&text).ok()?;
+    parsed.get("repos")?.as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(String::from))
+            .collect()
+    })
+}
+
+#[cfg(test)]
+mod detect_server_modes_tests {
+    use super::*;
+
+    /// `detect_server_modes` must return `(false, false)` when the
+    /// root has no `repos.yaml` and no `workspaces.yaml`. This is
+    /// the single-repo default — every doctor report falls back
+    /// to this when neither file is present.
+    #[test]
+    fn detect_server_modes_returns_false_false_with_no_files() {
+        let root = tempfile::tempdir().unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(!fed, "no repos.yaml => federation_active must be false");
+        assert!(!ws, "no workspaces.yaml => workspace_active must be false");
+    }
+
+    /// Single-repo `repos.yaml` must NOT trigger federation mode.
+    /// Federation is "more than one repo"; a single-repo file is
+    /// the same as no file at the wire level (single-workspace
+    /// server). Federation tools only register when the operator
+    /// has explicitly configured multiple repos.
+    #[test]
+    fn detect_server_modes_single_repo_is_not_federation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("repos.yaml"),
+            "repos:\n  - id: only-repo\n    source:\n      type: workspace_dir\n      path: /tmp\n",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(
+            !fed,
+            "single-repo repos.yaml => federation_active must be false"
+        );
+        assert!(
+            !ws,
+            "single-repo repos.yaml doesn't affect workspace_active"
+        );
+    }
+
+    /// Multi-repo `repos.yaml` (≥ 2 repos) must trigger federation
+    /// mode. The federation family should now be reflected in
+    /// `advertised_count`.
+    #[test]
+    fn detect_server_modes_multi_repo_triggers_federation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("repos.yaml"),
+            "repos:\n  - id: a\n    source:\n      type: workspace_dir\n      path: /tmp/a\n  - id: b\n    source:\n      type: workspace_dir\n      path: /tmp/b\n",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(
+            fed,
+            "two repos in repos.yaml => federation_active must be true"
+        );
+        assert!(!ws, "repos.yaml alone doesn't affect workspace_active");
+    }
+
+    /// `workspaces.yaml` must trigger workspace mode regardless of
+    /// `repos.yaml` presence. Workspace and federation are
+    /// orthogonal.
+    #[test]
+    fn detect_server_modes_workspaces_yaml_triggers_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("workspaces.yaml"),
+            "workspaces:\n  - name: test-ws\n    members: [\"x\"]\n",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(
+            !fed,
+            "workspaces.yaml alone doesn't affect federation_active"
+        );
+        assert!(
+            ws,
+            "workspaces.yaml present => workspace_active must be true"
+        );
+    }
+
+    /// Both signals together must be reported independently. A
+    /// workspace server with multiple repos should show both
+    /// flags = true so advertised_count includes both families.
+    #[test]
+    fn detect_server_modes_both_signals_independent() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("repos.yaml"),
+            "repos:\n  - id: a\n    source:\n      type: workspace_dir\n      path: /tmp/a\n  - id: b\n    source:\n      type: workspace_dir\n      path: /tmp/b\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("workspaces.yaml"),
+            "workspaces:\n  - name: ws\n    members: [\"a\", \"b\"]\n",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(fed, "both files => federation_active true");
+        assert!(ws, "both files => workspace_active true");
+    }
+
+    /// Malformed YAML must NOT panic; it collapses to "false"
+    /// silently. Doctor is offline diagnostics — server-mode
+    /// errors don't block it.
+    #[test]
+    fn detect_server_modes_malformed_yaml_collapses_to_false() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("workspaces.yaml"),
+            "this is: not: valid: yaml: [[[",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(!fed);
+        assert!(!ws, "malformed workspaces.yaml must collapse to false");
     }
 }
 
@@ -125,11 +309,18 @@ fn dirty(repo: &git2::Repository) -> Result<bool> {
         .recurse_untracked_dirs(true)
         .update_index(false);
     Ok(repo.statuses(Some(&mut options))?.iter().any(|entry| {
-        // LAIN's own cache cannot make an otherwise clean source tree stale.
-        !entry
-            .path()
-            .ok()
-            .is_some_and(|path| path == ".lain" || path.starts_with(".lain/"))
+        // Only a change to a file the index reads can make it stale.
+        // LAIN's own cache, and the `.mcp.json` that `lain setup` writes
+        // into the repository, used to count: following the README
+        // (`setup`, then a query) left `doctor` reporting a stale graph.
+        entry.path().ok().is_some_and(|path| {
+            path != ".lain"
+                && !path.starts_with(".lain/")
+                && Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(crate::server::treesitter::is_indexed_extension)
+        })
     }))
 }
 
@@ -145,7 +336,7 @@ fn observe_repository(report: &mut DoctorReport, root: &Path) -> Result<()> {
         working_tree_dirty: Some(was_dirty),
     };
     report.capabilities.git_history = Capability::new(CapabilityState::Ready, false);
-    let refresh = "Run `lain mcp` in this repository to build or refresh the index.";
+    let refresh = "Run `lain oneshot find_anchors` in this repository to build or refresh the index (an agent's `lain mcp` server also indexes on startup).";
     match inspect_persisted_graph(&root.join(".lain/graph.bin")) {
         Ok(commit) => {
             repository.indexed_commit = commit.clone();
@@ -243,6 +434,48 @@ fn observe_semantic(report: &mut DoctorReport) {
 }
 
 pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
+    // Tool-profile report (PR-fix-1): surface the active wire-level
+    // filter so an operator reading doctor.json can tell whether
+    // `tools/list` is the curated 15 or the full 80. Reads `LAIN_TOOL_PROFILE`
+    // via the same env-var resolution the dispatcher uses, so doctor
+    // and the running server agree to the byte.
+    let profile = crate::server::tools::profile::ToolProfile::from_env();
+    // LSP prewarm knobs (PR-fix-1): defaults from `IngestionConfig::default()`.
+    // Doctor doesn't currently read `.lain/tuning.toml` — the snapshot
+    // would diverge from a server that has overrides applied, but
+    // the defaults are stable and useful enough for offline triage.
+    let prewarm_knobs = crate::tuning::IngestionConfig::default();
+    // Accept the same opt-out values case-insensitively. An
+    // operator who runs `export LAIN_LSP_PREWARM=FALSE` (caps)
+    // shouldn't get a different answer than `LAIN_LSP_PREWARM=false`
+    // — the case-insensitive norm matches `LAIN_TOOL_PROFILE`.
+    // `""` (empty) is accepted because `export LAIN_LSP_PREWARM=` is
+    // the natural "set to empty" idiom in POSIX shells.
+    let env_opt_out = matches!(
+        std::env::var("LAIN_LSP_PREWARM")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
+        Some("false") | Some("0") | Some("")
+    );
+    // `advertised_count` matches what `tools/list` would return under
+    // this profile. Federation and workspace modes are detected
+    // from disk once `root` is known below — they read the same
+    // on-disk signals the dispatcher uses (`repos.yaml` for
+    // federation, `workspaces.yaml` for workspace). When either
+    // file is missing or fails to parse, the corresponding flag
+    // is `false`: server-mode errors don't block offline
+    // diagnostics. Without a discovered root (no git repo),
+    // both flags default to `false` and the count matches the
+    // single-workspace snapshot.
+    let registry = crate::tools::registry::ToolRegistry::definitions();
+    let inventory_in_profile = registry
+        .iter()
+        .filter(|d| crate::server::mcp::handler::profile_allows(&profile, d.name))
+        .count();
+    let initial_advertised = inventory_in_profile
+        + crate::server::tools::profile::special_advertised_count(&profile, false, false);
+
     let mut report = DoctorReport {
         schema_version: SCHEMA_VERSION,
         server_version: env!("CARGO_PKG_VERSION"),
@@ -262,6 +495,16 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
             tools_count: None,
         },
         installation: installation(),
+        tool_profile: ToolProfileReport {
+            name: profile.as_str(),
+            advertised_count: initial_advertised,
+        },
+        lsp_prewarm: LspPrewarmKnobs {
+            timeout_secs: prewarm_knobs.lsp_prewarm_timeout_secs,
+            max_files: prewarm_knobs.lsp_prewarm_max_files,
+            opt_out: prewarm_knobs.lsp_prewarm_opt_out,
+            env_opt_out,
+        },
         problems: Vec::new(),
     };
     // Interactive CLI diagnosis follows its own cwd, not an agent parent's cwd.
@@ -272,6 +515,21 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
         .map_err(anyhow::Error::from)
         .and_then(|start| crate::cli::workspace::walk_up_for_git(&start))
         .and_then(|root| root.ok_or_else(|| anyhow!("No Git repository found.")));
+    // Once `root` is known, recompute the advertised count with
+    // the actual federation / workspace signals read from disk.
+    // The count may grow by `FEDERATION.len()` (if repos.yaml
+    // indicates a multi-repo setup) or `WORKSPACE.len()` (if
+    // workspaces.yaml is present) — both are exactly what the live
+    // server reports on `tools/list`, so the offline doctor.json
+    // matches the live wire shape.
+    if let Ok(ref r) = root {
+        let (fed_active, ws_active) = detect_server_modes(r);
+        let recomputed = inventory_in_profile
+            + crate::server::tools::profile::special_advertised_count(
+                &profile, fed_active, ws_active,
+            );
+        report.tool_profile.advertised_count = recomputed;
+    }
     match root {
         Err(error) => report.problem(
             "repository_not_found",
@@ -448,7 +706,7 @@ fn tools_count(value: &Value) -> Result<usize> {
 /// Internal probe endpoint: no indexing, watchers, model loading, or tool calls.
 pub async fn run_probe(workspace: &Path) -> Result<()> {
     // Validate before the sidecar constructor, preventing its fallback stub repo.
-    crate::server::git::GitSensor::new(workspace)?;
+    crate::server::git::AnyGitSensor::from_env(workspace)?;
     let graph = crate::server::graph::GraphDatabase::empty_read_only();
     let executor = crate::server::tools::ToolExecutor::new_read_only(
         graph,
@@ -511,4 +769,179 @@ fn probe_stdio(workspace: &Path) -> Result<usize> {
     };
     session.shutdown();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `build_report` runs without a workspace and without booting a
+    /// real server — it defaults to the workspace tuning defaults,
+    /// the registry's tool count, and a Semantic profile unless the
+    /// test runner happens to have `LAIN_TOOL_PROFILE=full` in its
+    /// env (it doesn't on CI). The tool-profile / prewarm fields
+    /// must reflect those defaults, NOT the registry's full
+    /// surface, so an operator doing `doctor --json` against an
+    /// offline server sees what `tools/list` will produce.
+    ///
+    /// Env-var parsing for `LAIN_LSP_PREWARM` (Iter 9 audit).
+    ///
+    /// The handler matches three values case-insensitively:
+    /// `"false"`, `"0"`, `""`. An operator who sets
+    /// `LAIN_LSP_PREWARM=FALSE` (uppercase) or `LAIN_LSP_PREWARM=No`
+    /// gets the same outcome as the lowercase form, by design —
+    /// matches the case-insensitivity already documented for
+    /// `LAIN_TOOL_PROFILE`. Empty string is accepted because
+    /// `export LAIN_LSP_PREWARM=` is the natural shell idiom.
+    ///
+    /// NOTE: this test mutates env via std::env::set_var. To avoid
+    /// racing siblings, we serialise on a process-wide mutex.
+    #[test]
+    fn lain_lsp_prewarm_env_is_case_insensitive() {
+        use std::sync::Mutex;
+        // Lazy static: first-acquire creates the mutex; subsequent
+        // acquires reuse it. Poisoning is acceptable — tests
+        // recovering from a panic shouldn't share env state.
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Snapshot pre-test state.
+        let prev = std::env::var("LAIN_LSP_PREWARM").ok();
+
+        // Cases that opt out.
+        for v in ["false", "FALSE", "False", "0", ""] {
+            std::env::set_var("LAIN_LSP_PREWARM", v);
+            // Re-invoke build_report (it reads env at call time)
+            // and assert env_opt_out is true.
+            let report = build_report(None).expect("build_report");
+            let report_json = serde_json::to_value(&report).unwrap();
+            assert_eq!(
+                report_json["lsp_prewarm"]["env_opt_out"], true,
+                "LAIN_LSP_PREWARM={v:?} must opt out (case-insensitive)"
+            );
+        }
+
+        // Cases that do NOT opt out.
+        for v in ["true", "yes", "1", "no", "off"] {
+            std::env::set_var("LAIN_LSP_PREWARM", v);
+            let report = build_report(None).expect("build_report");
+            let report_json = serde_json::to_value(&report).unwrap();
+            assert_eq!(
+                report_json["lsp_prewarm"]["env_opt_out"], false,
+                "LAIN_LSP_PREWARM={v:?} must NOT opt out (not in the opt-out set)"
+            );
+        }
+
+        // Restore.
+        match prev {
+            Some(v) => std::env::set_var("LAIN_LSP_PREWARM", v),
+            None => std::env::remove_var("LAIN_LSP_PREWARM"),
+        }
+    }
+
+    /// Caveat: a test that mutates `LAIN_TOOL_PROFILE` or
+    /// `LAIN_LSP_PREWARM` would race siblings that read them. We
+    /// don't mutate env in these tests — env-driven paths are
+    /// pinned at the unit-test level (`profile::tests::from_env`)
+    /// rather than here.
+    #[test]
+    fn report_carries_tool_profile_and_prewarm_knobs() {
+        let report = build_report(None).expect("build_report without workspace");
+        assert!(
+            report.tool_profile.name == "semantic" || report.tool_profile.name == "full",
+            "tool_profile.name must be one of the documented values, got {:?}",
+            report.tool_profile.name
+        );
+        // The advertised count under the default Semantic profile
+        // is much smaller than the registry total. We pin a
+        // coarse "less than the registry" check rather than an
+        // exact value — adding a tool to the registry is a normal
+        // event and shouldn't break doctor tests.
+        let registry = crate::tools::registry::ToolRegistry::definitions().len();
+        if report.tool_profile.name == "semantic" {
+            assert!(
+                report.tool_profile.advertised_count < registry,
+                "semantic profile advertised_count ({}) must be < registry len ({})",
+                report.tool_profile.advertised_count,
+                registry
+            );
+        } else {
+            assert_eq!(
+                report.tool_profile.advertised_count, registry,
+                "full profile must equal registry length"
+            );
+        }
+        // The prewarm knobs pin the documented defaults so a future
+        // tuning-config change is caught here before reaching a
+        // release.
+        assert_eq!(report.lsp_prewarm.timeout_secs, 30);
+        assert_eq!(report.lsp_prewarm.max_files, 50);
+        assert!(!report.lsp_prewarm.opt_out);
+    }
+
+    /// `doctor --json` JSON-serialises a complete document
+    /// regardless of whether a workspace was found. Captures the
+    /// wire shape via `serde_json::to_value` so a future field
+    /// rename in either `ToolProfileReport` or `LspPrewarmKnobs`
+    /// surfaces as a CI break.
+    #[test]
+    fn report_shape_round_trips_through_serde() {
+        let report = build_report(None).expect("build_report without workspace");
+        let value = serde_json::to_value(&report).expect("DoctorReport must serialise");
+        let obj = value.as_object().expect("top-level JSON is an object");
+        for required in [
+            "schema_version",
+            "server_version",
+            "build_commit",
+            "assessment",
+            "agent_ready",
+            "repository",
+            "capabilities",
+            "transport",
+            "installation",
+            "tool_profile",
+            "lsp_prewarm",
+            "problems",
+        ] {
+            assert!(
+                obj.contains_key(required),
+                "DoctorReport JSON missing required field {required:?}; full: {value}"
+            );
+        }
+        let profile = obj
+            .get("tool_profile")
+            .and_then(|v| v.as_object())
+            .expect("tool_profile is an object");
+        assert!(profile.contains_key("name"));
+        assert!(profile.contains_key("advertised_count"));
+        let prewarm = obj
+            .get("lsp_prewarm")
+            .and_then(|v| v.as_object())
+            .expect("lsp_prewarm is an object");
+        for k in ["timeout_secs", "max_files", "opt_out", "env_opt_out"] {
+            assert!(
+                prewarm.contains_key(k),
+                "lsp_prewarm JSON missing {k:?}; full: {value}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod dirty_tests {
+    use super::*;
+
+    /// `lain setup` writes `.mcp.json` into the repository; that must not
+    /// make the index look stale. A new source file must.
+    #[test]
+    fn only_indexed_files_make_the_tree_dirty() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(root.path()).unwrap();
+        std::fs::write(root.path().join(".mcp.json"), "{}").unwrap();
+        std::fs::create_dir(root.path().join(".lain")).unwrap();
+        std::fs::write(root.path().join(".lain/graph.bin"), "x").unwrap();
+        assert!(!dirty(&repo).unwrap());
+
+        std::fs::write(root.path().join("app.py"), "def f(): pass\n").unwrap();
+        assert!(dirty(&repo).unwrap());
+    }
 }

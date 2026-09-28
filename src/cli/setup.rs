@@ -6,13 +6,11 @@
 //! MCP client, and verifies the result with a real `initialize` +
 //! `tools/list` round trip against the exact command it just wrote.
 //!
-//! Two adapters exist today: `generic` (writes `.mcp.json`, the format
-//! documented in `docs/COOKBOOK.md`) and `claude-code` (shells out to
-//! the `claude` CLI's own `mcp add`/`get`/`remove`, which already owns
-//! safe JSON editing for its config — reimplementing that here would be
-//! a second, competing writer for a file this binary doesn't otherwise
-//! touch). Codex/Cursor/VS Code/Continue adapters are not implemented
-//! yet; `--agent` rejects anything but `generic` and `claude-code`.
+//! Adapters exist for generic MCP clients, Claude Code, Codex, Cursor,
+//! VS Code, and Continue. The generic adapter writes `.mcp.json`; the
+//! client-specific adapters update each client's native configuration.
+//! Claude Code delegates mutation to its own `claude mcp` CLI so lain
+//! does not become a competing writer for Claude's config file.
 
 use crate::cli::doctor;
 use crate::cli::io::write_file_atomic;
@@ -40,6 +38,12 @@ pub struct SetupOptions {
     /// Never attempt the model download, don't ask, don't report it as
     /// actionable — just note it's absent.
     pub no_model: bool,
+    /// Which optional language servers to install: `none`, `detected`
+    /// (every missing one for the languages found), or a comma list of
+    /// languages / extensions. `None` asks on a TTY and installs nothing
+    /// otherwise. `--yes` deliberately does not imply any: servers are
+    /// global installs the user should choose.
+    pub lsp: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -80,12 +84,58 @@ const MODEL_URL: &str =
 const TOKENIZER_URL: &str =
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
 
+/// Three-sentence protocol the agent sees on session start (PR 4 of
+/// `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). Installed by `lain setup
+/// --agent claude` (and equivalents); the setup command writes
+/// `PROMPT.md` under `.lain/` so the user can copy the snippet into
+/// `CLAUDE.md` / `.cursorrules` / `AGENTS.md` (whatever their host
+/// reads) without retyping it. The plain text matches the plan's
+/// example verbatim — copy-paste between the docs is the source of
+/// truth, and a typo here is a typo there.
+pub const LAIN_INTENT_PROMPT: &str = "\
+You are operating in a Lain-managed workspace. Lain coordinates
+across agents via declared intent and automatic observation.
+
+Before a substantial code change, declare your goal and the
+scopes you intend to modify via `lain_intent`. Update the intent
+when your scope materially changes. Do not report individual
+reads or commands; Lain observes those through hooks.";
+
+/// Filename for the prompt snippet under the workspace's `.lain/`
+/// directory. Kept distinct from the existing `tuning.toml` /
+/// `graph.bin` so it doesn't get clobbered by `lain init` or
+/// accidentally picked up as configuration.
+pub const PROMPT_FILENAME: &str = "PROMPT.md";
+
+/// Write the intent protocol to `<workspace>/.lain/PROMPT.md` so the
+/// user can copy it into their agent's startup-context file. The
+/// `.lain/` directory is created if missing; the write is atomic
+/// (same `write_file_atomic` helper as the state snapshot) so a
+/// partial file can't be observed by a concurrent `lain mcp`
+/// reading the snippet. Returns the path on success.
+fn write_intent_prompt(workspace: &Path) -> Result<PathBuf, String> {
+    let dir = workspace.join(".lain");
+    crate::config::create_state_dir(&dir)
+        .map_err(|e| format!("create_dir_all({}): {e}", dir.display()))?;
+    let path = dir.join(PROMPT_FILENAME);
+    crate::cli::io::write_file_atomic(&path, LAIN_INTENT_PROMPT.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Find an already-usable model without downloading anything. Checks,
 /// in order: `LAIN_EMBEDDING_MODEL` (the explicit override every other
 /// entry point already honors), the CWD-relative default `NlpEmbedder`
 /// falls back to, then the shared install directory `install.sh
 /// --download-model` and this command both write to.
+/// Absolute paths: the result is written into agent configs that apply in
+/// every directory, where a cwd-relative `models/…` finds nothing.
 fn locate_existing_model() -> Option<(PathBuf, PathBuf)> {
+    let absolute = |p: PathBuf| dunce::canonicalize(&p).unwrap_or(p);
+    locate_existing_model_relative().map(|(m, t)| (absolute(m), absolute(t)))
+}
+
+fn locate_existing_model_relative() -> Option<(PathBuf, PathBuf)> {
     if let Some(env) = std::env::var_os("LAIN_EMBEDDING_MODEL") {
         let (model, tokenizer) = NlpEmbedder::resolve_model_paths(Path::new(&env));
         if model.is_file() && tokenizer.is_file() {
@@ -228,8 +278,8 @@ fn resolve_semantic_model(opts: &SetupOptions) -> SemanticModelStatus {
             state: SemanticModelState::NotInstalled,
             model_path: None,
             detail: Some(
-                "Run `lain setup --yes` or download manually (see README's \
-                 \"Setting Up Semantic Search\" section)."
+                "Run `lain setup --yes`, or download it manually (docs/QUICKSTART.md, \
+                 \"semantic search model\")."
                     .into(),
             ),
         };
@@ -263,37 +313,314 @@ fn prompt_yes_no(question: &str) -> bool {
     matches!(line.trim(), "y" | "Y" | "yes" | "YES" | "Yes")
 }
 
-/// Detect languages by root-level manifest presence. Deliberately
-/// shallow — a one-level check, not a repo walk — this is a display
-/// hint for the setup transcript, not a build-system integration.
-fn detect_languages(root: &Path) -> Vec<String> {
-    let mut found = Vec::new();
-    let checks: &[(&str, &str)] = &[
-        ("Cargo.toml", "Rust"),
-        ("go.mod", "Go"),
-        ("pyproject.toml", "Python"),
-        ("setup.py", "Python"),
-        ("requirements.txt", "Python"),
-        ("pom.xml", "Java"),
-        ("build.gradle", "Java/Kotlin"),
-        ("build.gradle.kts", "Kotlin"),
-        ("Gemfile", "Ruby"),
-        ("composer.json", "PHP"),
+/// A language found in the repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetectedLanguage {
+    name: String,
+    /// Tracked files in this language; 0 when only a manifest was seen.
+    files: usize,
+    /// The extension used to look up its language server.
+    ext: String,
+}
+
+/// Detect languages from the repository's tracked files, most files first.
+/// Falls back to root-level manifests when git lists nothing (not a clone,
+/// or nothing committed yet).
+fn detect_languages(root: &Path) -> Vec<DetectedLanguage> {
+    let tracked = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    // language -> (files, ext -> count)
+    let mut counts: std::collections::BTreeMap<
+        &'static str,
+        (usize, std::collections::BTreeMap<String, usize>),
+    > = Default::default();
+    for path in tracked.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let path = String::from_utf8_lossy(path);
+        let Some(ext) = Path::new(path.as_ref())
+            .extension()
+            .and_then(|e| e.to_str())
+        else {
+            continue;
+        };
+        let Some(name) = crate::server::treesitter::language_name(ext) else {
+            continue;
+        };
+        let entry = counts.entry(name).or_default();
+        entry.0 += 1;
+        *entry.1.entry(ext.to_string()).or_default() += 1;
+    }
+    let mut found: Vec<DetectedLanguage> = counts
+        .into_iter()
+        .map(|(name, (files, exts))| DetectedLanguage {
+            name: name.to_string(),
+            files,
+            // The most common extension, preferring one with a server.
+            ext: exts
+                .iter()
+                .filter(|(e, _)| crate::server::lsp::language_server_for(e).is_some())
+                .max_by_key(|(_, n)| **n)
+                .or_else(|| exts.iter().max_by_key(|(_, n)| **n))
+                .map(|(e, _)| e.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+    found.sort_by(|a, b| b.files.cmp(&a.files).then(a.name.cmp(&b.name)));
+    if found.is_empty() {
+        found = detect_languages_from_manifests(root);
+    }
+    found
+}
+
+/// Manifest presence at the root: a shallow hint for repositories git
+/// cannot list yet.
+fn detect_languages_from_manifests(root: &Path) -> Vec<DetectedLanguage> {
+    let mut found: Vec<DetectedLanguage> = Vec::new();
+    let checks: &[(&str, &str, &str)] = &[
+        ("Cargo.toml", "Rust", "rs"),
+        ("go.mod", "Go", "go"),
+        ("pyproject.toml", "Python", "py"),
+        ("setup.py", "Python", "py"),
+        ("requirements.txt", "Python", "py"),
+        ("pom.xml", "Java", "java"),
+        ("build.gradle", "Java/Kotlin", "java"),
+        ("build.gradle.kts", "Kotlin", "kt"),
+        ("Gemfile", "Ruby", "rb"),
+        ("composer.json", "PHP", "php"),
     ];
-    for (file, lang) in checks {
-        if root.join(file).is_file() && !found.contains(&lang.to_string()) {
-            found.push(lang.to_string());
+    for (file, lang, ext) in checks {
+        if root.join(file).is_file() && !found.iter().any(|d| d.name == *lang) {
+            found.push(DetectedLanguage {
+                name: lang.to_string(),
+                files: 0,
+                ext: ext.to_string(),
+            });
         }
     }
     if root.join("package.json").is_file() {
-        let lang = if root.join("tsconfig.json").is_file() {
-            "TypeScript"
+        let (name, ext) = if root.join("tsconfig.json").is_file() {
+            ("TypeScript", "ts")
         } else {
-            "JavaScript"
+            ("JavaScript", "js")
         };
-        found.push(lang.to_string());
+        found.push(DetectedLanguage {
+            name: name.to_string(),
+            files: 0,
+            ext: ext.to_string(),
+        });
     }
     found
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanguageServerState {
+    /// Already on PATH.
+    Installed,
+    /// Not on PATH and not selected. The built-in parser still covers it.
+    NotInstalled,
+    /// Installed by this run.
+    InstalledNow,
+    /// Selected, but `--dry-run` / `--print-config` changes nothing.
+    WouldInstall,
+    /// Selected, and the install command failed.
+    InstallFailed,
+    /// Selected, but there is no command Lain can run here (no automated
+    /// installer, or Homebrew off macOS).
+    NoInstaller,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LanguageServerStatus {
+    pub language: String,
+    pub files: usize,
+    /// Always `built_in`: every language Lain detects has a compiled-in
+    /// parser, so the server below is never required.
+    pub parser: &'static str,
+    pub server: &'static str,
+    pub state: LanguageServerState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_cmd: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Report each detected language's optional server and install the ones the
+/// user selects (`--lsp`, or an interactive pick). Never installs anything
+/// the user did not choose.
+fn resolve_language_servers(
+    opts: &SetupOptions,
+    detected: &[DetectedLanguage],
+) -> Result<Vec<LanguageServerStatus>> {
+    let mut statuses: Vec<(crate::server::lsp::LanguageServer, LanguageServerStatus)> = Vec::new();
+    let mut push = |name: &str, files: usize, server: crate::server::lsp::LanguageServer| {
+        if statuses.iter().any(|(s, _)| s.binary == server.binary) {
+            return;
+        }
+        statuses.push((
+            server,
+            LanguageServerStatus {
+                language: name.to_string(),
+                files,
+                parser: "built_in",
+                server: server.binary,
+                state: if server.is_installed() {
+                    LanguageServerState::Installed
+                } else {
+                    LanguageServerState::NotInstalled
+                },
+                // Only a command that can run on this machine: offering
+                // `brew install llvm` on Linux would be advice that fails.
+                install_cmd: server.install_argv().ok().and(server.install_cmd),
+                detail: None,
+            },
+        ));
+    };
+    for lang in detected {
+        if let Some(server) = crate::server::lsp::language_server_for(&lang.ext) {
+            push(&lang.name, lang.files, server);
+        }
+    }
+
+    // Which binaries to install.
+    let selected: Vec<&'static str> = match opts.lsp.as_deref().map(str::trim) {
+        Some("none") | Some("") => Vec::new(),
+        Some("detected") | Some("all") => statuses
+            .iter()
+            .filter(|(_, st)| st.state == LanguageServerState::NotInstalled)
+            .map(|(s, _)| s.binary)
+            .collect(),
+        Some(list) => {
+            let mut picked = Vec::new();
+            for item in list.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+                let server = crate::server::lsp::language_server_for(item).ok_or_else(|| {
+                    anyhow!(
+                        "--lsp: no language server known for '{item}'; use a language \
+                         (python, go, typescript, ...) or an extension (py, go, ts, ...)"
+                    )
+                })?;
+                // A language the repo doesn't (yet) contain is still a valid pick.
+                let name = crate::server::treesitter::language_name(item.trim_start_matches('.'))
+                    .unwrap_or(item);
+                push(name, 0, server);
+                picked.push(server.binary);
+            }
+            picked
+        }
+        // `--yes` means "ask nothing", and servers are never installed
+        // unasked, so it selects none rather than stopping at the prompt.
+        None if opts.json || opts.print_config || opts.yes || !is_stdin_tty() => Vec::new(),
+        None => {
+            let missing: Vec<&LanguageServerStatus> = statuses
+                .iter()
+                .map(|(_, st)| st)
+                .filter(|st| st.state == LanguageServerState::NotInstalled)
+                .collect();
+            prompt_language_servers(&missing)
+        }
+    };
+
+    for (server, status) in statuses.iter_mut() {
+        if !selected.contains(&server.binary) || status.state == LanguageServerState::Installed {
+            continue;
+        }
+        let argv = match server.install_argv() {
+            Ok(argv) => argv,
+            Err(e) => {
+                status.state = LanguageServerState::NoInstaller;
+                status.detail = Some(e.to_string());
+                continue;
+            }
+        };
+        if opts.dry_run || opts.print_config {
+            status.state = LanguageServerState::WouldInstall;
+            continue;
+        }
+        if !opts.json {
+            println!("  Installing {} ({})…", server.binary, argv.join(" "));
+        }
+        let mut cmd = Command::new(argv[0]);
+        cmd.args(&argv[1..]).stdin(Stdio::null());
+        if opts.json {
+            // Keep stdout for the JSON report.
+            cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() && server.is_installed() => {
+                status.state = LanguageServerState::InstalledNow;
+            }
+            Ok(out) => {
+                status.state = LanguageServerState::InstallFailed;
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+                status.detail = Some(if out.status.success() {
+                    format!("install finished but {} is not on PATH", server.binary)
+                } else if tail.is_empty() {
+                    format!("`{}` exited with {}", argv.join(" "), out.status)
+                } else {
+                    tail
+                });
+            }
+            Err(e) => {
+                status.state = LanguageServerState::InstallFailed;
+                status.detail = Some(format!("could not run `{}`: {e}", argv[0]));
+            }
+        }
+    }
+    Ok(statuses.into_iter().map(|(_, st)| st).collect())
+}
+
+/// Ask which missing servers to install. Enter (the default) installs none.
+fn prompt_language_servers(missing: &[&LanguageServerStatus]) -> Vec<&'static str> {
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    println!();
+    println!("  Language servers are optional: the built-in parsers already index every");
+    println!("  language below. A server adds precision on top.");
+    for (i, st) in missing.iter().enumerate() {
+        println!(
+            "    {}) {:<12} {:<28} {}",
+            i + 1,
+            st.language,
+            st.server,
+            st.install_cmd
+                .unwrap_or("(install manually with your package manager)")
+        );
+    }
+    print!("  Install which? Numbers (e.g. 1,3), \"all\", or Enter to skip: ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return Vec::new();
+    }
+    parse_server_selection(&line, missing)
+}
+
+fn parse_server_selection(input: &str, missing: &[&LanguageServerStatus]) -> Vec<&'static str> {
+    let input = input.trim();
+    if input.eq_ignore_ascii_case("all") {
+        return missing.iter().map(|st| st.server).collect();
+    }
+    let mut picked = Vec::new();
+    for n in input
+        .split([',', ' '])
+        .filter_map(|t| t.trim().parse::<usize>().ok())
+    {
+        if let Some(st) = n.checked_sub(1).and_then(|i| missing.get(i)) {
+            if !picked.contains(&st.server) {
+                picked.push(st.server);
+            }
+        }
+    }
+    picked
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -433,6 +760,16 @@ fn configure_generic(
             detail: Some(pretty),
         };
     }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "generic".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
+        };
+    }
     if config_path.is_file() {
         if let Err(e) = backup_file(&config_path) {
             return ConfigurationOutcome {
@@ -472,8 +809,39 @@ fn claude_cli_available() -> bool {
         .unwrap_or(false)
 }
 
-fn claude_mcp_configured(name: &str) -> bool {
-    Command::new("claude")
+/// A `claude` invocation run from the workspace: local- and
+/// project-scope registrations belong to the directory `claude` runs in,
+/// so running it from the caller's cwd would register the wrong project
+/// when `--workspace` points elsewhere.
+fn claude_command(root: &Path) -> Command {
+    let mut cmd = Command::new("claude");
+    cmd.current_dir(root);
+    cmd
+}
+
+/// The `--scope` value of an existing registration, read from `claude mcp
+/// get`'s "Scope: User config (…)" line. Re-registering must keep it: the
+/// installer registers at user scope, and a scope-less `add` would
+/// silently narrow that to this one project.
+fn claude_scope_of(get_output: &str) -> Option<&'static str> {
+    let line = get_output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Scope:"))?
+        .trim()
+        .to_ascii_lowercase();
+    if line.starts_with("user") {
+        Some("user")
+    } else if line.starts_with("project") {
+        Some("project")
+    } else if line.starts_with("local") {
+        Some("local")
+    } else {
+        None
+    }
+}
+
+fn claude_mcp_configured(root: &Path, name: &str) -> bool {
+    claude_command(root)
         .args(["mcp", "get", name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -483,6 +851,7 @@ fn claude_mcp_configured(name: &str) -> bool {
 }
 
 fn configure_claude_code(
+    root: &Path,
     exe: &Path,
     model: Option<&Path>,
     opts: &SetupOptions,
@@ -500,7 +869,27 @@ fn configure_claude_code(
         };
     }
 
-    let mut add_args: Vec<String> = vec!["mcp".into(), "add".into(), "lain".into()];
+    let already_configured = claude_mcp_configured(root, "lain");
+    // Captured before anything is removed: it carries the scope to keep,
+    // and it is the only record of the old entry if the new `add` fails.
+    let previous_config = if already_configured {
+        claude_command(root)
+            .args(["mcp", "get", "lain"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    };
+    let scope = previous_config.as_deref().and_then(claude_scope_of);
+
+    let mut add_args: Vec<String> = vec!["mcp".into(), "add".into()];
+    if let Some(scope) = scope {
+        add_args.push("--scope".into());
+        add_args.push(scope.into());
+    }
+    add_args.push("lain".into());
     if let Some(model) = model {
         add_args.push("-e".into());
         add_args.push(format!("LAIN_EMBEDDING_MODEL={}", model.display()));
@@ -511,7 +900,11 @@ fn configure_claude_code(
     let command_line = format!("claude {}", add_args.join(" "));
 
     if opts.print_config {
-        println!("{command_line}");
+        // PR 4: surface the intent protocol alongside the MCP
+        // command so the operator can copy both pieces into the
+        // agent's startup context in one go.
+        println!("# MCP command:\n{command_line}\n");
+        println!("# System-prompt snippet (copy into CLAUDE.md / .cursorrules / AGENTS.md):\n{LAIN_INTENT_PROMPT}");
         return ConfigurationOutcome {
             agent: "claude-code".into(),
             state: ConfigurationState::Printed,
@@ -520,10 +913,19 @@ fn configure_claude_code(
         };
     }
 
-    let already_configured = claude_mcp_configured("lain");
+    let remove_args: Vec<String> = match scope {
+        Some(scope) => vec![
+            "mcp".into(),
+            "remove".into(),
+            "--scope".into(),
+            scope.into(),
+            "lain".into(),
+        ],
+        None => vec!["mcp".into(), "remove".into(), "lain".into()],
+    };
     if opts.dry_run {
         let plan = if already_configured {
-            format!("claude mcp remove lain && {command_line}")
+            format!("claude {} && {command_line}", remove_args.join(" "))
         } else {
             command_line
         };
@@ -548,31 +950,39 @@ fn configure_claude_code(
     // `claude mcp get`'s output before removing, and if the replacement
     // `add` fails, surface it so the user can restore by hand instead
     // of having to remember or reconstruct what they had.
-    let previous_config = if already_configured {
-        Command::new("claude")
-            .args(["mcp", "get", "lain"])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        None
-    };
     if already_configured {
-        let _ = Command::new("claude")
-            .args(["mcp", "remove", "lain"])
+        let _ = claude_command(root)
+            .args(&remove_args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
 
-    match Command::new("claude").args(&add_args).output() {
-        Ok(out) if out.status.success() => ConfigurationOutcome {
-            agent: "claude-code".into(),
-            state: ConfigurationState::Configured,
-            target: Some("claude mcp".into()),
-            detail: None,
-        },
+    match claude_command(root).args(&add_args).output() {
+        Ok(out) if out.status.success() => {
+            // PR 4: drop the intent protocol into `.lain/PROMPT.md`
+            // alongside the existing setup artifacts. The user copies
+            // it into `CLAUDE.md` / `.cursorrules` / `AGENTS.md` (or
+            // whichever file their agent host reads); we don't try to
+            // write that file because the host-specific location is
+            // outside Lain's purview. Best-effort: a write failure
+            // here doesn't unwind the MCP registration that already
+            // succeeded — the operator can re-run `--agent claude
+            // --print-config` to recover the snippet.
+            let prompt_detail = match write_intent_prompt(root) {
+                Ok(path) => Some(format!("wrote intent protocol to {}", path.display())),
+                Err(e) => Some(format!(
+                    "MCP configured, but PROMPT.md write failed: {e}. \
+                     Re-run with --print-config to recover the snippet."
+                )),
+            };
+            ConfigurationOutcome {
+                agent: "claude-code".into(),
+                state: ConfigurationState::Configured,
+                target: Some("claude mcp".into()),
+                detail: prompt_detail,
+            }
+        }
         Ok(out) => {
             let add_error = String::from_utf8_lossy(&out.stderr).trim().to_string();
             ConfigurationOutcome {
@@ -658,49 +1068,52 @@ fn build_codex_entry(exe: &Path, model: Option<&Path>) -> Value {
     entry
 }
 
-/// Merge `entry` into `path`'s `[mcp_servers]` table under
-/// `server_name`, preserving every other key. Codex's `config.toml`
-/// is TOML; we parse with the `toml` crate already in `Cargo.toml`,
-/// preserve the document order via `toml::Value::Table`, and emit
-/// the result via `toml::to_string_pretty`. Refuses (rather than
-/// silently rewrites) a file that isn't valid TOML — same contract
-/// as the JSON adapters.
-fn merge_codex_toml(path: &Path, server_name: &str, entry: Value) -> Result<toml::Value> {
-    let mut doc: toml::Value = if path.is_file() {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        text.parse::<toml::Value>().with_context(|| {
-            format!(
-                "{} contains invalid TOML; nothing was changed",
-                path.display()
-            )
-        })?
+/// Merge `entry` into `[mcp_servers.<server_name>]` of Codex's
+/// `config.toml`, returning the new file text. Edits the document in
+/// place with `toml_edit`, so the user's comments, key order and
+/// formatting survive; only the `lain` table is replaced. Refuses
+/// (rather than silently rewrites) a file that isn't valid TOML — same
+/// contract as the JSON adapters.
+fn merge_codex_toml(path: &Path, server_name: &str, entry: Value) -> Result<String> {
+    let text = if path.is_file() {
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
     } else {
-        toml::Value::Table(toml::map::Map::new())
+        String::new()
     };
-    let toml::Value::Table(ref mut root) = doc else {
-        return Err(anyhow!(
-            "{} does not contain a TOML table at the top level; nothing was changed",
+    let mut doc = text.parse::<toml_edit::DocumentMut>().with_context(|| {
+        format!(
+            "{} contains invalid TOML; nothing was changed",
             path.display()
-        ));
-    };
-    let servers = root
-        .entry("mcp_servers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let toml::Value::Table(ref mut servers_tbl) = servers else {
+        )
+    })?;
+    // `serde_json::Value` -> TOML goes through the `toml` crate, whose
+    // output `toml_edit` then parses as a table item to splice in.
+    let toml_entry: toml::Value = toml::Value::try_from(&entry)
+        .map_err(|e| anyhow!("could not convert codex entry to TOML: {e}"))?;
+    let mut wrapper = toml::map::Map::new();
+    wrapper.insert("entry".to_string(), toml_entry);
+    let fragment = toml::to_string(&toml::Value::Table(wrapper))
+        .map_err(|e| anyhow!("could not render codex entry: {e}"))?;
+    let mut fragment = fragment
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| anyhow!("could not render codex entry: {e}"))?;
+    let entry_item = fragment
+        .remove("entry")
+        .ok_or_else(|| anyhow!("could not render codex entry"))?;
+
+    let servers = doc.entry("mcp_servers").or_insert_with(|| {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        toml_edit::Item::Table(t)
+    });
+    let Some(servers_tbl) = servers.as_table_like_mut() else {
         return Err(anyhow!(
             "{}'s `mcp_servers` key is not a TOML table; nothing was changed",
             path.display()
         ));
     };
-    // `serde_json::Value` -> `toml::Value` is lossy in theory but the
-    // shape we build (`command`/`args`/`env`) maps cleanly. The
-    // conversion is explicit so any future schema addition is a
-    // single grep site.
-    let toml_entry: toml::Value = toml::Value::try_from(&entry)
-        .map_err(|e| anyhow!("could not convert codex entry to TOML: {e}"))?;
-    servers_tbl.insert(server_name.to_string(), toml_entry);
-    Ok(doc)
+    servers_tbl.insert(server_name, entry_item);
+    Ok(doc.to_string())
 }
 
 fn configure_codex(
@@ -714,18 +1127,14 @@ fn configure_codex(
 
     // Prefer the CLI when available; fall back to a direct TOML edit.
     if codex_cli_available() {
-        let mut add_args: Vec<String> = vec![
-            "mcp".into(),
-            "add".into(),
-            "lain".into(),
-            "--".into(),
-            exe.display().to_string(),
-            "mcp".into(),
-        ];
+        // `--env` is Codex's option and must come before `--`; anything
+        // after it is the server's own command line.
+        let mut add_args: Vec<String> = vec!["mcp".into(), "add".into(), "lain".into()];
         if let Some(m) = model {
-            add_args.push("-e".into());
+            add_args.push("--env".into());
             add_args.push(format!("LAIN_EMBEDDING_MODEL={}", m.display()));
         }
+        add_args.extend(["--".into(), exe.display().to_string(), "mcp".into()]);
         let command_line = format!("codex {}", add_args.join(" "));
 
         if opts.print_config {
@@ -780,7 +1189,7 @@ fn configure_codex(
             }
         }
     };
-    let pretty = toml::to_string_pretty(&merged).unwrap_or_default();
+    let pretty = merged;
 
     if opts.print_config {
         println!("{pretty}");
@@ -797,6 +1206,16 @@ fn configure_codex(
             state: ConfigurationState::WouldConfigure,
             target: Some(target),
             detail: Some(pretty),
+        };
+    }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "codex".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
         };
     }
     if config_path.is_file() {
@@ -877,6 +1296,16 @@ fn configure_cursor(
             state: ConfigurationState::WouldConfigure,
             target: Some(target),
             detail: Some(pretty),
+        };
+    }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "cursor".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
         };
     }
     if config_path.is_file() {
@@ -995,6 +1424,16 @@ fn configure_vscode(
             detail: Some(pretty),
         };
     }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "vscode".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
+        };
+    }
     if config_path.is_file() {
         if let Err(e) = backup_file(&config_path) {
             return ConfigurationOutcome {
@@ -1034,7 +1473,9 @@ fn merge_vscode_json(path: &Path, server_name: &str, entry: Value) -> Result<Val
     let mut root: Value = if path.is_file() {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        serde_json::from_str(&text).with_context(|| {
+        // VS Code's `mcp.json` is JSONC: comments and trailing commas
+        // are legal there, so accept them rather than refuse the file.
+        serde_json::from_str(&strip_jsonc(&text)).with_context(|| {
             format!(
                 "{} contains invalid JSON; nothing was changed",
                 path.display()
@@ -1060,13 +1501,118 @@ fn merge_vscode_json(path: &Path, server_name: &str, entry: Value) -> Result<Val
     Ok(root)
 }
 
+/// Plain JSON from JSONC: drops `//` and `/* */` comments outside
+/// strings and commas that directly precede `}` or `]`.
+fn strip_jsonc(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            out.push(c);
+            i += 1;
+            while i < chars.len() {
+                out.push(chars[i]);
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    out.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                if chars[i - 1] == '"' {
+                    break;
+                }
+            }
+        } else if c == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                i += 1;
+            }
+            i += 2;
+        } else if c == ',' {
+            // A trailing comma: the next significant character closes
+            // the object or array. Comments in between are skipped by
+            // the main loop, so look past whitespace and comments here.
+            let mut j = i + 1;
+            loop {
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if chars.get(j) == Some(&'/') && chars.get(j + 1) == Some(&'/') {
+                    while j < chars.len() && chars[j] != '\n' {
+                        j += 1;
+                    }
+                } else if chars.get(j) == Some(&'/') && chars.get(j + 1) == Some(&'*') {
+                    j += 2;
+                    while j < chars.len() && !(chars[j] == '*' && chars.get(j + 1) == Some(&'/')) {
+                        j += 1;
+                    }
+                    j += 2;
+                } else {
+                    break;
+                }
+            }
+            if !matches!(chars.get(j), Some('}') | Some(']')) {
+                out.push(c);
+            }
+            i += 1;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
 // ─── Continue (M8) ───────────────────────────────────────────────────────────
 //
-// Continue reads `~/.continue/config.json`. The MCP-server list lives
-// under `experimental.modelContextProtocolServers` and is an array,
-// not a map — the apply step removes any existing `lain` entry then
-// appends the new one. Same atomic-write / backup contract as the
-// other JSON adapters.
+// Continue's current config is YAML (`~/.continue/config.yaml`), and it
+// also loads standalone block files from `<workspace>/.continue/mcpServers/`.
+// When the user is on YAML (or has no Continue config yet) we write a
+// `lain.yaml` block there — no rewrite of the user's own file, so its
+// comments survive. Only a legacy `config.json` setup (no `config.yaml`)
+// gets the JSON edit: `experimental.modelContextProtocolServers` is an
+// array of `{ "transport": { "type": "stdio", command, args, env } }`,
+// and the apply step replaces any existing `lain` entry. Same atomic-write
+// / backup contract as the other JSON adapters.
+
+fn continue_yaml_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".continue/config.yaml")
+}
+
+fn continue_block_path(root: &Path) -> PathBuf {
+    root.join(".continue/mcpServers/lain.yaml")
+}
+
+/// The workspace block file. Strings are JSON-quoted, which YAML reads
+/// as double-quoted scalars, so paths with spaces or colons are safe.
+fn build_continue_block(exe: &Path, model: Option<&Path>) -> String {
+    let q = |s: String| serde_json::to_string(&s).unwrap_or_default();
+    let mut out = format!(
+        "name: Lain\nversion: 0.0.1\nschema: v1\nmcpServers:\n  - name: lain\n    command: {}\n    args: [\"mcp\"]\n",
+        q(exe.display().to_string())
+    );
+    if let Some(model) = model {
+        out.push_str(&format!(
+            "    env:\n      LAIN_EMBEDDING_MODEL: {}\n",
+            q(model.display().to_string())
+        ));
+    }
+    out
+}
+
+/// Whether an entry in the legacy array is Lain's: ours carry
+/// `"name": "lain"`; entries written before the schema fix had the
+/// command at the top level.
+fn is_lain_continue_entry(s: &Value, server_name: &str) -> bool {
+    s.get("name").and_then(|n| n.as_str()) == Some(server_name)
+}
 
 fn continue_config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -1114,36 +1660,33 @@ fn merge_continue_json(path: &Path, server_name: &str, entry: Value) -> Result<V
     // contract is "leave every other key untouched" — we leave
     // other servers in the array intact, just remove this one's
     // prior version.
-    servers_arr.retain(|s| {
-        s.get("name")
-            .and_then(|n| n.as_str())
-            .map(|n| n != server_name)
-            .unwrap_or(true)
-    });
+    servers_arr.retain(|s| !is_lain_continue_entry(s, server_name));
     servers_arr.push(entry);
     Ok(root)
 }
 
 fn build_continue_entry(exe: &Path, model: Option<&Path>) -> Value {
-    let mut entry = json!({
-        "name": "lain",
-        "transport": "stdio",
+    let mut transport = json!({
+        "type": "stdio",
         "command": exe.display().to_string(),
         "args": ["mcp"],
     });
     if let Some(model) = model {
-        entry["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
+        transport["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
     }
-    entry
+    json!({ "name": "lain", "transport": transport })
 }
 
 fn configure_continue(
-    _root: &Path,
+    root: &Path,
     exe: &Path,
     model: Option<&Path>,
     opts: &SetupOptions,
 ) -> ConfigurationOutcome {
     let config_path = continue_config_path();
+    if continue_yaml_path().is_file() || !config_path.is_file() {
+        return configure_continue_block(root, exe, model, opts);
+    }
     let target = config_path.display().to_string();
     let entry = build_continue_entry(exe, model);
     let merged = match merge_continue_json(&config_path, "lain", entry) {
@@ -1176,6 +1719,16 @@ fn configure_continue(
             detail: Some(pretty),
         };
     }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "continue".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
+        };
+    }
     if config_path.is_file() {
         if let Err(e) = backup_file(&config_path) {
             return ConfigurationOutcome {
@@ -1204,30 +1757,75 @@ fn configure_continue(
     }
 }
 
+fn configure_continue_block(
+    root: &Path,
+    exe: &Path,
+    model: Option<&Path>,
+    opts: &SetupOptions,
+) -> ConfigurationOutcome {
+    let path = continue_block_path(root);
+    let target = path.display().to_string();
+    let block = build_continue_block(exe, model);
+    let outcome = |state, detail| ConfigurationOutcome {
+        agent: "continue".into(),
+        state,
+        target: Some(target.clone()),
+        detail,
+    };
+    if opts.print_config {
+        println!("{block}");
+        return outcome(ConfigurationState::Printed, None);
+    }
+    if opts.dry_run {
+        return outcome(ConfigurationState::WouldConfigure, Some(block));
+    }
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return outcome(ConfigurationState::Failed, Some(e.to_string()));
+        }
+    }
+    match write_file_atomic(&path, block) {
+        Ok(()) => outcome(ConfigurationState::Configured, None),
+        Err(e) => outcome(ConfigurationState::Failed, Some(e.to_string())),
+    }
+}
+
 fn prompt_agent_choice() -> String {
     println!();
-    println!("  Choose an agent");
+    println!("  Choose an agent (Enter for the marked one)");
     println!("  › 1) Claude Code");
     println!("    2) Codex");
     println!("    3) Cursor");
     println!("    4) VS Code");
     println!("    5) Continue");
     println!("    6) Generic MCP");
-    print!("> ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_ok() {
-        match line.trim() {
-            "1" => return "claude-code".to_string(),
-            "2" => return "codex".to_string(),
-            "3" => return "cursor".to_string(),
-            "4" => return "vscode".to_string(),
-            "5" => return "continue".to_string(),
-            "6" => return "generic".to_string(),
-            _ => {}
+    // Enter picks the marked default. It used to pick Generic — as did any
+    // unrecognised answer, silently.
+    for _ in 0..3 {
+        print!("> ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            break; // EOF: take the default
         }
+        if let Some(agent) = agent_from_answer(&line) {
+            return agent.to_string();
+        }
+        println!("  Type 1-6 or a name (claude, codex, cursor, vscode, continue, generic).");
     }
-    "generic".to_string()
+    "claude-code".to_string()
+}
+
+fn agent_from_answer(answer: &str) -> Option<&'static str> {
+    Some(match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "claude" | "claude-code" | "claude code" => "claude-code",
+        "2" | "codex" => "codex",
+        "3" | "cursor" => "cursor",
+        "4" | "vscode" | "vs code" => "vscode",
+        "5" | "continue" => "continue",
+        "6" | "generic" | "generic mcp" => "generic",
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -1315,6 +1913,7 @@ pub struct SetupReport {
     pub server_version: &'static str,
     pub repository: PathBuf,
     pub languages: Vec<String>,
+    pub language_servers: Vec<LanguageServerStatus>,
     pub capabilities: crate::server::readiness::Capabilities,
     pub semantic_model: SemanticModelStatus,
     pub configuration: ConfigurationOutcome,
@@ -1337,15 +1936,21 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
             })
         })?;
 
-    let doctor_report = doctor::build_report(Some(&root))?;
-    let languages = detect_languages(&root);
-    let semantic = resolve_semantic_model(&opts);
-    let exe = std::env::current_exe().context("locate current lain binary")?;
-
+    // Settle the agent first: an unknown `--agent` used to fail only after
+    // language servers were installed and the model download started.
     let agent = match &opts.agent {
         Some(a) => a.clone(),
         None if !opts.json && is_stdin_tty() => prompt_agent_choice(),
         None => "generic".to_string(),
+    };
+    // Accept common shorthand names as aliases for the canonical
+    // agent kind. `claude` is what most operators type (the product
+    // is called "Claude Code"); `claude-code` is the canonical
+    // identifier the rest of the codebase uses. Normalizing once
+    // here keeps the dispatch table below uniform.
+    let agent = match agent.as_str() {
+        "claude" => "claude-code".to_string(),
+        other => other.to_string(),
     };
     if !matches!(
         agent.as_str(),
@@ -1357,8 +1962,17 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
         ));
     }
 
+    let doctor_report = doctor::build_report(Some(&root))?;
+    let detected = detect_languages(&root);
+    // Language servers first: a bad `--lsp` must fail before the ~90 MB
+    // model download starts, as a bad `--agent` does.
+    let language_servers = resolve_language_servers(&opts, &detected)?;
+    let semantic = resolve_semantic_model(&opts);
+    let languages: Vec<String> = detected.into_iter().map(|d| d.name).collect();
+    let exe = std::env::current_exe().context("locate current lain binary")?;
+
     let configuration = match agent.as_str() {
-        "claude-code" => configure_claude_code(&exe, semantic.model_path.as_deref(), &opts),
+        "claude-code" => configure_claude_code(&root, &exe, semantic.model_path.as_deref(), &opts),
         "codex" => configure_codex(&root, &exe, semantic.model_path.as_deref(), &opts),
         "cursor" => configure_cursor(&root, &exe, semantic.model_path.as_deref(), &opts),
         "vscode" => configure_vscode(&root, &exe, semantic.model_path.as_deref(), &opts),
@@ -1386,6 +2000,7 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
         server_version: env!("CARGO_PKG_VERSION"),
         repository: root,
         languages,
+        language_servers,
         capabilities: doctor_report.capabilities,
         semantic_model: semantic,
         configuration,
@@ -1404,6 +2019,17 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
         } else {
             print_human(&report);
         }
+    } else if report.configuration.state == ConfigurationState::Failed {
+        // Stdout stays config-only, but a failure must say why (it printed
+        // nothing at all and exited 1).
+        eprintln!(
+            "setup failed: {}",
+            report
+                .configuration
+                .detail
+                .as_deref()
+                .unwrap_or("could not build the configuration")
+        );
     }
     Ok(if report.ready { 0 } else { 1 })
 }
@@ -1416,13 +2042,42 @@ fn print_human(report: &SetupReport) {
     if report.languages.is_empty() {
         println!("  Languages         ○ none detected");
     } else {
-        println!("  Languages         ✓ {}", report.languages.join(", "));
+        println!(
+            "  Languages         ✓ {} (built-in parsers)",
+            report.languages.join(", ")
+        );
+    }
+    for st in &report.language_servers {
+        let (mark, state) = match st.state {
+            LanguageServerState::Installed => ("✓", "installed"),
+            LanguageServerState::InstalledNow => ("✓", "installed now"),
+            LanguageServerState::NotInstalled => ("○", "optional, not installed"),
+            LanguageServerState::WouldInstall => ("○", "would install (dry run)"),
+            LanguageServerState::InstallFailed => ("×", "install failed"),
+            LanguageServerState::NoInstaller => ("○", "install manually"),
+        };
+        println!(
+            "  {:<17} {mark} {} {state} ({})",
+            "", st.server, st.language
+        );
+        if let Some(detail) = &st.detail {
+            println!("  {:<19} {detail}", "");
+        }
     }
     for (label, capability) in [
         ("Structural index", &report.capabilities.symbols),
         ("Git history", &report.capabilities.git_history),
     ] {
         use crate::server::readiness::CapabilityState::*;
+        // A fresh repository has no index yet; that is expected, not an
+        // error — the agent's `lain mcp` builds it on first start.
+        if label == "Structural index"
+            && capability.state == UnavailableError
+            && !report.repository.join(".lain/graph.bin").exists()
+        {
+            println!("  {label:<17} ○ not built yet (built when the agent first starts lain)");
+            continue;
+        }
         let mark = match capability.state {
             Ready | StaleUsable => "✓",
             WarmingUp => "○",
@@ -1489,8 +2144,19 @@ fn print_human(report: &SetupReport) {
         }
     }
     println!();
-    if report.ready {
+    let indexed = matches!(
+        report.capabilities.symbols.state,
+        crate::server::readiness::CapabilityState::Ready
+            | crate::server::readiness::CapabilityState::StaleUsable
+    );
+    if report.ready && indexed {
         println!("  Ready. Ask your agent a question about this repository.");
+    } else if report.ready {
+        // Setup configures the agent; the index is built when the agent
+        // first starts Lain. "Ready" here read as a contradiction of
+        // `lain doctor`, which says the index is missing.
+        println!("  Configured. Lain indexes this repository when your agent first starts it");
+        println!("  (or run `lain oneshot find_anchors` now); `lain doctor` shows progress.");
     } else {
         println!("  Setup did not complete. See the messages above.");
     }
@@ -1500,6 +2166,81 @@ fn print_human(report: &SetupReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_answers() {
+        assert_eq!(agent_from_answer("\n"), Some("claude-code"));
+        assert_eq!(agent_from_answer("claude"), Some("claude-code"));
+        assert_eq!(agent_from_answer(" 6 "), Some("generic"));
+        assert_eq!(agent_from_answer("Codex"), Some("codex"));
+        assert_eq!(agent_from_answer("bogus"), None);
+    }
+
+    #[test]
+    fn strip_jsonc_drops_comments_and_trailing_commas_only() {
+        let text = r#"{
+  // user comment
+  "servers": { "x": { "url": "http://a//b", "s": "q\"/*not*/" }, }, /* tail */
+  "list": [1, 2, ],
+}"#;
+        let v: Value = serde_json::from_str(&strip_jsonc(text)).unwrap();
+        assert_eq!(v["servers"]["x"]["url"], "http://a//b");
+        assert_eq!(v["servers"]["x"]["s"], "q\"/*not*/");
+        assert_eq!(v["list"], json!([1, 2]));
+    }
+
+    #[test]
+    fn merge_codex_toml_keeps_comments_and_other_servers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my settings\nmodel = \"o3\" # inline\n\n[mcp_servers.other]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        let entry = build_codex_entry(Path::new("/usr/bin/lain"), Some(Path::new("/m.onnx")));
+        let text = merge_codex_toml(&path, "lain", entry).unwrap();
+        assert!(
+            text.starts_with("# my settings\nmodel = \"o3\" # inline"),
+            "{text}"
+        );
+        let v: toml::Value = text.parse().unwrap();
+        assert_eq!(v["mcp_servers"]["other"]["command"].as_str(), Some("x"));
+        assert_eq!(
+            v["mcp_servers"]["lain"]["command"].as_str(),
+            Some("/usr/bin/lain")
+        );
+        assert_eq!(
+            v["mcp_servers"]["lain"]["env"]["LAIN_EMBEDDING_MODEL"].as_str(),
+            Some("/m.onnx")
+        );
+        // Re-running replaces the entry instead of duplicating it.
+        std::fs::write(&path, &text).unwrap();
+        let again =
+            merge_codex_toml(&path, "lain", build_codex_entry(Path::new("/b/lain"), None)).unwrap();
+        let v: toml::Value = again.parse().unwrap();
+        assert_eq!(
+            v["mcp_servers"]["lain"]["command"].as_str(),
+            Some("/b/lain")
+        );
+        assert!(v["mcp_servers"]["lain"].get("env").is_none());
+        assert_eq!(again.matches("[mcp_servers.lain]").count(), 1, "{again}");
+    }
+
+    #[test]
+    fn claude_scope_is_read_from_get_output() {
+        let get = "lain:\n  Scope: User config (available in all your projects)\n  Type: stdio\n";
+        assert_eq!(claude_scope_of(get), Some("user"));
+        assert_eq!(
+            claude_scope_of("  Scope: Local config (private to you in this project)"),
+            Some("local")
+        );
+        assert_eq!(
+            claude_scope_of("  Scope: Project config (shared via .mcp.json)"),
+            Some("project")
+        );
+        assert_eq!(claude_scope_of("lain:\n  Type: stdio"), None);
+    }
 
     #[test]
     fn merge_mcp_json_creates_new_file_shape() {
@@ -1669,6 +2410,30 @@ mod tests {
         assert!(detail.contains("removed to make way"));
     }
 
+    /// PR 4: `write_intent_prompt` creates `.lain/PROMPT.md` with the
+    /// exact three-sentence protocol. The test pins the file content
+    /// against the plan verbatim so a future tweak to the wording
+    /// is a deliberate plan update, not a silent drift.
+    #[test]
+    fn write_intent_prompt_writes_the_protocol_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_intent_prompt(dir.path()).expect("write_intent_prompt");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body, LAIN_INTENT_PROMPT);
+        assert!(body.contains("lain_intent"));
+        assert!(body.contains("Lain observes"));
+    }
+
+    /// PR 4: the prompt write creates `.lain/` if it doesn't exist
+    /// (the typical case for a fresh `lain setup`).
+    #[test]
+    fn write_intent_prompt_creates_dot_lain_if_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!dir.path().join(".lain").exists());
+        write_intent_prompt(dir.path()).unwrap();
+        assert!(dir.path().join(".lain").join(PROMPT_FILENAME).exists());
+    }
+
     #[test]
     fn failed_replacement_detail_is_just_the_error_with_nothing_to_lose() {
         // No prior entry existed (fresh install) — nothing was removed,
@@ -1691,10 +2456,133 @@ mod tests {
         std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
         std::fs::write(tmp.path().join("package.json"), "{}").unwrap();
         std::fs::write(tmp.path().join("tsconfig.json"), "{}").unwrap();
-        let langs = detect_languages(tmp.path());
+        let langs: Vec<String> = detect_languages(tmp.path())
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
         assert!(langs.contains(&"Rust".to_string()));
         assert!(langs.contains(&"TypeScript".to_string()));
         assert!(!langs.contains(&"JavaScript".to_string()));
+    }
+
+    /// Tracked files, not root manifests: a Go service and Python scripts
+    /// in one repo are both found, most files first.
+    #[test]
+    fn detect_languages_counts_tracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("svc")).unwrap();
+        for f in ["svc/a.go", "svc/b.go", "tool.py", "README.md"] {
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        let langs = detect_languages(root);
+        assert_eq!(
+            langs
+                .iter()
+                .map(|d| (d.name.as_str(), d.files))
+                .collect::<Vec<_>>(),
+            vec![("Go", 2), ("Python", 1)]
+        );
+        assert_eq!(langs[0].ext, "go");
+    }
+
+    fn status(language: &str, server: &'static str) -> LanguageServerStatus {
+        LanguageServerStatus {
+            language: language.into(),
+            files: 1,
+            parser: "built_in",
+            server,
+            state: LanguageServerState::NotInstalled,
+            install_cmd: None,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn server_selection_defaults_to_none() {
+        let (a, b) = (status("Go", "gopls"), status("Python", "pylsp"));
+        let missing = vec![&a, &b];
+        assert!(parse_server_selection("", &missing).is_empty());
+        assert!(parse_server_selection("  \n", &missing).is_empty());
+        assert_eq!(parse_server_selection("2", &missing), vec!["pylsp"]);
+        assert_eq!(
+            parse_server_selection("1, 2,2 9", &missing),
+            vec!["gopls", "pylsp"]
+        );
+        assert_eq!(
+            parse_server_selection("ALL", &missing),
+            vec!["gopls", "pylsp"]
+        );
+    }
+
+    /// Non-interactive runs, and `--yes`, never install a language server
+    /// the user did not name.
+    #[test]
+    fn language_servers_are_never_installed_unasked() {
+        let detected = vec![DetectedLanguage {
+            name: "Go".into(),
+            files: 3,
+            ext: "go".into(),
+        }];
+        let opts = SetupOptions {
+            workspace: None,
+            agent: None,
+            json: true,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+            lsp: None,
+        };
+        let statuses = resolve_language_servers(&opts, &detected).unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert!(matches!(
+            statuses[0].state,
+            LanguageServerState::Installed | LanguageServerState::NotInstalled
+        ));
+    }
+
+    #[test]
+    fn lsp_flag_dry_run_reports_without_installing() {
+        let opts = SetupOptions {
+            workspace: None,
+            agent: None,
+            json: true,
+            dry_run: true,
+            print_config: false,
+            yes: false,
+            no_model: true,
+            // A server that is certainly not installed on the test machine.
+            lsp: Some("svelte".into()),
+        };
+        let statuses = resolve_language_servers(&opts, &[]).unwrap();
+        let st = statuses
+            .iter()
+            .find(|s| s.server == "svelte-language-server")
+            .unwrap();
+        if !which::which("svelte-language-server").is_ok() {
+            assert_eq!(st.state, LanguageServerState::WouldInstall);
+        }
+        assert!(resolve_language_servers(
+            &SetupOptions {
+                lsp: Some("klingon".into()),
+                ..opts
+            },
+            &[]
+        )
+        .is_err());
     }
 
     #[test]
@@ -1714,6 +2602,7 @@ mod tests {
             print_config: false,
             yes: false,
             no_model: true,
+            lsp: None,
         };
         let outcome = configure_generic(tmp.path(), Path::new("/usr/bin/lain"), None, &opts);
         assert_eq!(outcome.state, ConfigurationState::WouldConfigure);
@@ -1731,6 +2620,7 @@ mod tests {
             print_config: false,
             yes: false,
             no_model: true,
+            lsp: None,
         };
         let first = configure_generic(tmp.path(), Path::new("/usr/bin/lain"), None, &opts);
         assert_eq!(first.state, ConfigurationState::Configured);
@@ -1752,6 +2642,16 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".mcp.json.bak-"))
             .collect();
         assert_eq!(backups.len(), 1, "exactly one backup after one re-run");
+
+        // A third run with the same settings changes nothing: no new backup.
+        let third = configure_generic(tmp.path(), Path::new("/usr/bin/lain2"), None, &opts);
+        assert_eq!(third.state, ConfigurationState::Configured);
+        let backups = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".mcp.json.bak-"))
+            .count();
+        assert_eq!(backups, 1, "an unchanged re-run makes no backup");
     }
 
     // ─── M8: codex adapter ───────────────────────────────────────────────
@@ -1797,6 +2697,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_codex(
             _tmp.path(),
@@ -1835,6 +2736,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_codex(
             _tmp.path(),
@@ -1867,6 +2769,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_codex(
             _tmp.path(),
@@ -1904,6 +2807,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_cursor(
             _tmp.path(),
@@ -1943,6 +2847,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_cursor(
             _tmp.path(),
@@ -1974,6 +2879,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_cursor(
             _tmp.path(),
@@ -2016,6 +2922,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_vscode(
             tmp.path(),
@@ -2050,6 +2957,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_vscode(
             tmp.path(),
@@ -2080,6 +2988,9 @@ mod tests {
     fn continue_writes_lain_in_model_context_protocol_servers() {
         let _guard = SERIAL.lock().unwrap();
         let (_tmp, fake_home) = continue_fixture();
+        // A legacy JSON setup: config.json and no config.yaml.
+        std::fs::create_dir_all(fake_home.join(".continue")).unwrap();
+        std::fs::write(fake_home.join(".continue/config.json"), r#"{"models": []}"#).unwrap();
         let opts = SetupOptions {
             workspace: None,
             agent: Some("continue".into()),
@@ -2088,6 +2999,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_continue(
             _tmp.path(),
@@ -2099,6 +3011,7 @@ mod tests {
         let cfg = fake_home.join(".continue/config.json");
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed["models"], json!([]), "other keys are kept");
         let servers = parsed["experimental"]["modelContextProtocolServers"]
             .as_array()
             .expect("modelContextProtocolServers must be an array");
@@ -2106,8 +3019,49 @@ mod tests {
             .iter()
             .find(|s| s.get("name").and_then(|v| v.as_str()) == Some("lain"))
             .expect("a 'lain' server entry must exist in the array");
-        assert_eq!(lain["transport"], "stdio");
-        assert_eq!(lain["command"], "/usr/bin/lain");
+        assert_eq!(lain["transport"]["type"], "stdio");
+        assert_eq!(lain["transport"]["command"], "/usr/bin/lain");
+        assert_eq!(lain["transport"]["args"], json!(["mcp"]));
+    }
+
+    #[test]
+    fn continue_yaml_users_get_a_workspace_block_file() {
+        let _guard = SERIAL.lock().unwrap();
+        let (tmp, fake_home) = continue_fixture();
+        std::fs::create_dir_all(fake_home.join(".continue")).unwrap();
+        let yaml = "# mine\nname: cfg\n";
+        std::fs::write(fake_home.join(".continue/config.yaml"), yaml).unwrap();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("continue".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+            lsp: None,
+        };
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let out = configure_continue(
+            &root,
+            std::path::Path::new("/opt/my apps/lain"),
+            Some(std::path::Path::new("/m: x.onnx")),
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        assert_eq!(
+            std::fs::read_to_string(fake_home.join(".continue/config.yaml")).unwrap(),
+            yaml,
+            "the user's config.yaml is not rewritten"
+        );
+        let block = std::fs::read_to_string(root.join(".continue/mcpServers/lain.yaml")).unwrap();
+        assert!(block.contains("command: \"/opt/my apps/lain\""), "{block}");
+        assert!(
+            block.contains("LAIN_EMBEDDING_MODEL: \"/m: x.onnx\""),
+            "{block}"
+        );
+        assert!(block.contains("schema: v1"), "{block}");
     }
 
     #[test]
@@ -2139,6 +3093,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_continue(
             _tmp.path(),
@@ -2163,6 +3118,6 @@ mod tests {
             1,
             "duplicate 'lain' server entries must be deduplicated; got: {servers:?}"
         );
-        assert_eq!(lain_entries[0]["command"], "/usr/bin/lain");
+        assert_eq!(lain_entries[0]["transport"]["command"], "/usr/bin/lain");
     }
 }

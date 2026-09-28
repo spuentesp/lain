@@ -41,6 +41,27 @@ impl GraphBackend for HashMapBackend {
             .retain(|e| !global_ids.contains(&e.source_id) && !global_ids.contains(&e.target_id));
         Ok(removed)
     }
+    fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
+        let targets: std::collections::HashSet<(String, String, EdgeType)> = edges
+            .iter()
+            .map(|e| {
+                (
+                    e.source_id.clone(),
+                    e.target_id.clone(),
+                    e.edge_type.clone(),
+                )
+            })
+            .collect();
+        let before = self.edges.read().unwrap().len();
+        self.edges.write().unwrap().retain(|e| {
+            !targets.contains(&(
+                e.source_id.clone(),
+                e.target_id.clone(),
+                e.edge_type.clone(),
+            ))
+        });
+        Ok(before - self.edges.read().unwrap().len())
+    }
     fn upsert_node_global(
         &self,
         global_id: &str,
@@ -140,6 +161,63 @@ fn contract_upsert_edge_increments_count() {
     assert_eq!(b.edge_count(), 1);
 }
 
+/// F10 — `remove_edges` retracts edges without touching their
+/// endpoints. The federation's reconciliation pass uses it to drop
+/// edges the source repo no longer reports while keeping the
+/// caller/callee nodes live.
+#[test]
+fn contract_remove_edges_drops_only_matching_endpoints_stay() {
+    let b = HashMapBackend::new();
+    let n1 = GraphNode::new(NodeType::Function, "a".into(), "src/lib.rs".into());
+    let n2 = GraphNode::new(NodeType::Function, "b".into(), "src/lib.rs".into());
+    b.upsert_node(n1.clone()).unwrap();
+    b.upsert_node(n2.clone()).unwrap();
+    let edge = GraphEdge::new(EdgeType::Calls, n1.id.clone(), n2.id.clone());
+    b.upsert_edge(edge.clone()).unwrap();
+
+    let removed = b.remove_edges(std::slice::from_ref(&edge)).unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(b.edge_count(), 0);
+    assert_eq!(b.node_count(), 2, "endpoints must survive edge removal");
+
+    // Removing an already-gone edge is a no-op, not an error.
+    let removed_again = b.remove_edges(&[edge]).unwrap();
+    assert_eq!(removed_again, 0);
+}
+
+/// F10 — `remove_edges` matches on the full `(edge_type, source_id,
+/// target_id)` triple. An edge that differs only in `edge_type` (e.g.
+/// `Contains` vs `Calls`) is not collateral damage of removing a
+/// `Calls` edge between the same endpoints.
+#[test]
+fn contract_remove_edges_only_matches_full_triple() {
+    let b = HashMapBackend::new();
+    let n1 = GraphNode::new(NodeType::Function, "a".into(), "src/lib.rs".into());
+    let n2 = GraphNode::new(NodeType::Function, "b".into(), "src/lib.rs".into());
+    b.upsert_node(n1.clone()).unwrap();
+    b.upsert_node(n2.clone()).unwrap();
+    b.upsert_edge(GraphEdge::new(
+        EdgeType::Calls,
+        n1.id.clone(),
+        n2.id.clone(),
+    ))
+    .unwrap();
+    b.upsert_edge(GraphEdge::new(EdgeType::Uses, n1.id.clone(), n2.id.clone()))
+        .unwrap();
+
+    let removed = b
+        .remove_edges(&[GraphEdge::new(
+            EdgeType::Calls,
+            n1.id.clone(),
+            n2.id.clone(),
+        )])
+        .unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(b.edge_count(), 1, "Uses edge survives Calls removal");
+    let remaining = b.all_edges().unwrap();
+    assert_eq!(remaining[0].edge_type, EdgeType::Uses);
+}
+
 #[test]
 fn contract_get_missing_returns_none() {
     let b = HashMapBackend::new();
@@ -151,7 +229,7 @@ fn petgraph_backend_persists_and_reloads() {
     let tmp = tempfile::tempdir().unwrap();
     let b = PetgraphBackend::new(tmp.path()).unwrap();
     b.upsert_node_global(
-        "repo1:Function:src/lib.rs:f",
+        "repo1:Function:src/lib.rs:f:0",
         NodeType::Function,
         "src/lib.rs",
         "f",
@@ -163,7 +241,65 @@ fn petgraph_backend_persists_and_reloads() {
     let b2 = PetgraphBackend::new(tmp.path()).unwrap();
     assert_eq!(b2.node_count(), 1);
     assert!(b2
-        .get_node("repo1:Function:src/lib.rs:f")
+        .get_node("repo1:Function:src/lib.rs:f:0")
         .unwrap()
         .is_some());
+}
+
+#[test]
+fn petgraph_backend_rejects_pre_bump_version_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"LNF2");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 16]);
+    std::fs::write(&bin_path, &bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationSchemaMismatch { found, required } => {
+            assert_eq!(found, 1);
+            assert_eq!(required, 2);
+        }
+        other => panic!("expected FederationSchemaMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn petgraph_backend_rejects_headerless_legacy_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 32]);
+    std::fs::write(&bin_path, &bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, LainError::FederationSchemaMismatch { .. }),
+        "expected FederationSchemaMismatch, got {err:?}"
+    );
+}
+
+#[test]
+fn petgraph_backend_rejects_short_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    std::fs::write(&bin_path, [0u8; 4]).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, LainError::FederationSchemaMismatch { .. }),
+        "expected FederationSchemaMismatch, got {err:?}"
+    );
 }

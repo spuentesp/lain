@@ -1,3 +1,7 @@
+#[path = "support/isolated_state.rs"]
+mod isolated_state;
+use lain::server::activity::ActivityTracker;
+use lain::server::intent::IntentRegistry;
 use lain::server::presence::*;
 use std::time::SystemTime;
 
@@ -14,8 +18,6 @@ use std::time::SystemTime;
 /// in `tools/handlers/query_tests.rs`.
 #[tokio::test]
 async fn query_graph_includes_occupancy() {
-    use lain::server::LainServer;
-
     let tmp = tempfile::tempdir().unwrap();
     // `LainServer::new` -> `GitSensor::new` calls `git2::Repository::open`,
     // which requires a real initialized repo — a bare `.git` directory
@@ -23,7 +25,7 @@ async fn query_graph_includes_occupancy() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
 
     // Register an agent and claim the file.
     let agent = server.presence().register(
@@ -392,7 +394,6 @@ fn list_all_returns_all_claimed_paths() {
 /// by the federation constructors; this test exercises the simpler path.
 #[tokio::test]
 async fn lain_server_exposes_presence_and_occupancy() {
-    use lain::server::LainServer;
     // Build a single-workspace server (uses the placeholder ingestion)
     let tmp = tempfile::tempdir().unwrap();
     // `GitSensor::new` calls `git2::Repository::open`, which requires an
@@ -400,7 +401,7 @@ async fn lain_server_exposes_presence_and_occupancy() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
     assert!(server.presence().list_active(true).is_empty());
     assert!(server.occupancy().list_all().is_empty());
 }
@@ -523,13 +524,12 @@ async fn presence_tool_dispatchers_round_trip() {
         run_claim_files, run_list_active_agents, run_list_occupancy, run_my_claims,
         run_register_agent, run_release_files, run_who_am_i,
     };
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
     let server_arc = std::sync::Arc::new(server);
 
     // Subscribe BEFORE register_agent so we don't miss AgentJoined.
@@ -724,15 +724,182 @@ fn persistence_round_trip() {
             plan_revision: None,
         }],
     );
-    save_pair(&path, &reg1, &occ1).unwrap();
+    save_pair(
+        &path,
+        &reg1,
+        &occ1,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .unwrap();
 
     // Round 2: load into a fresh registry.
     let reg2 = PresenceRegistry::new();
     let occ2 = OccupancyMap::new();
-    load_pair(&path, &reg2, &occ2).unwrap();
+    load_pair(
+        &path,
+        &reg2,
+        &occ2,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .unwrap();
 
     assert_eq!(reg2.list_active(true).len(), 1);
     assert_eq!(occ2.list_for_agent(&agent.id).len(), 1);
+}
+
+/// Variant 1 of `scripts/agy_chaos.sh`: alice claims a path, the
+/// server holding her session is SIGKILLed, a fresh server boots.
+/// The state file carries alice's session *and* her claim. Without
+/// the cross-check in `load_pair`, the fresh server would refuse
+/// every competing claim on that path (a linearizability violation
+/// across server crashes — alice's lease isn't live but the in-memory
+/// `OccupancyMap` still owns it).
+///
+/// The fix: `load_pair` walks `by_agent` after hydration and drops
+/// every claim whose `agent_id` is no longer in `sessions`. The
+/// reclaimed paths are returned as `ClaimRevoked { reason:
+/// "stale_owner" }` events so SSE subscribers see the same view
+/// the new server has.
+#[test]
+fn load_pair_reclaims_orphaned_claims_on_fresh_server() {
+    use lain::server::presence::PresenceEvent;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let stem = "test-orphan";
+    let path = tmp.path().join(format!("{stem}.json"));
+
+    // Round 1: alice registers + claims + releases her session
+    // entry but her claim survives on disk (simulating a SIGKILL
+    // mid-cycle — the agent's heartbeat thread didn't get to
+    // release_files before the OS tore it down).
+    let reg1 = PresenceRegistry::new();
+    let occ1 = OccupancyMap::new();
+    let alice = reg1.register(
+        "alice".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    occ1.claim(
+        &alice.id,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("foo.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    // Simulate the SIGKILL: drop alice from sessions but leave
+    // her claim on disk. `PresenceRegistry::remove` only purges the
+    // session entry — it doesn't touch the occupancy map — so
+    // save_pair persists a state file with `sessions=[]` but
+    // `occupancy_by_agent=[alice.id -> [foo.rs]]`.
+    let removed = reg1.remove(&alice.id);
+    assert!(removed.is_some(), "sanity: alice's session was live");
+    save_pair(
+        &path,
+        &reg1,
+        &occ1,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .unwrap();
+
+    // Round 2: a fresh server loads the state file. `reg2` is
+    // empty, so every claim alice left behind is an orphan.
+    let reg2 = PresenceRegistry::new();
+    let occ2 = OccupancyMap::new();
+    let events = load_pair(
+        &path,
+        &reg2,
+        &occ2,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .expect("load_pair");
+
+    // No live session means the fresh server saw no agents.
+    assert_eq!(reg2.list_active(true).len(), 0);
+    // No live claim means the fresh server's occupancy is empty
+    // (alice's orphan claim was reclaimed during the load).
+    assert_eq!(occ2.list_all().len(), 0);
+    // The load reported the reclamation so SSE subscribers learn
+    // about it.
+    assert_eq!(events.len(), 1, "exactly one ClaimRevoked event");
+    match &events[0] {
+        PresenceEvent::ClaimRevoked {
+            agent_id,
+            path,
+            reason,
+        } => {
+            assert_eq!(agent_id, &alice.id);
+            assert_eq!(path, &std::path::PathBuf::from("foo.rs"));
+            assert_eq!(reason, "stale_owner");
+        }
+        other => panic!("expected ClaimRevoked, got {other:?}"),
+    }
+}
+
+/// Counterpart to `load_pair_reclaims_orphaned_claims_on_fresh_server`:
+/// when alice's session survives the load (e.g. a clean restart where
+/// she re-registers before the load), her claim must NOT be reclaimed.
+/// Regression for "the cross-check is too aggressive and silently
+/// drops claims for live agents".
+#[test]
+fn load_pair_keeps_claims_for_live_agents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stem = "test-live";
+    let path = tmp.path().join(format!("{stem}.json"));
+
+    let reg1 = PresenceRegistry::new();
+    let occ1 = OccupancyMap::new();
+    let alice = reg1.register(
+        "alice".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    occ1.claim(
+        &alice.id,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("bar.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    save_pair(
+        &path,
+        &reg1,
+        &occ1,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .unwrap();
+
+    let reg2 = PresenceRegistry::new();
+    let occ2 = OccupancyMap::new();
+    let events = load_pair(
+        &path,
+        &reg2,
+        &occ2,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .expect("load_pair");
+
+    assert_eq!(reg2.list_active(true).len(), 1);
+    assert_eq!(occ2.list_for_agent(&alice.id).len(), 1);
+    assert!(
+        events.is_empty(),
+        "live-agent claims must NOT emit ClaimRevoked; got {events:?}"
+    );
 }
 
 // --- Task 3 brief: explicit claim TTL via ttl_seconds + expires_at ---
@@ -1073,13 +1240,13 @@ fn parent_session_id_round_trips_on_agent_session() {
 #[tokio::test]
 async fn who_am_i_includes_parent_session_id() {
     use lain::server::mcp::presence_tools::{run_list_subagents, run_register_agent, run_who_am_i};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     // Register a parent (no parent_session_id).
     let parent_reg = run_register_agent(&server, serde_json::json!({"name": "parent"})).unwrap();
@@ -1160,13 +1327,12 @@ fn conflict_entry_carries_agent_id_and_last_seen_unix() {
 #[test]
 fn run_claim_files_conflict_json_has_no_unknown_name_field() {
     use lain::server::mcp::presence_tools::run_claim_files;
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
     let server_arc = std::sync::Arc::new(server);
 
     // Register two agents, each holding a valid session token.
@@ -1380,13 +1546,12 @@ fn claim_without_plan_revision_deserializes_to_none() {
 #[tokio::test]
 async fn to_old_path_fires_via_run_claim_files() {
     use lain::server::schema::{GraphNode, NodeType};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
     let server_arc = std::sync::Arc::new(server);
 
     // Drive the overlay revision past the ring buffer's 256-entry
@@ -1421,7 +1586,7 @@ async fn to_old_path_fires_via_run_claim_files() {
         "agent_id": session.id.as_str(),
         "session_token": session.session_token,
         "files": [{
-            "path": tmp.path().join("a.rs").to_string_lossy(),
+            "path": "a.rs",
             "symbols": ["a"],
             "intent": "read",
             "plan_revision": 0,
@@ -1460,14 +1625,13 @@ async fn to_old_path_fires_via_run_claim_files() {
 // -------------------------------------------------------------------------
 #[tokio::test]
 async fn get_world_state_tool_returns_retracted_and_beyond_current() {
-    use lain::server::LainServer;
     use serde_json::json;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
 
     // 1) Empty symbols → no-op WorldState
     let r = lain::server::mcp::presence_tools::run_get_world_state(&server, json!({}))
@@ -1549,7 +1713,7 @@ async fn get_recent_activity_tool_groups_by_path() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
 
     // Use a unique per-run path so the test is hermetic even if the
     // underlying state dir already contains audit events from prior
@@ -1570,12 +1734,11 @@ async fn get_recent_activity_tool_groups_by_path() {
     //      which canonicalizes to `/private/var/folders/…/T/…` —
     //      using the resolved form keeps the claimed paths and the
     //      glob pattern aligned on every platform.
+    // Claims must be inside the workspace now, and the audit log records
+    // them relative to its root — so claim relative paths and glob on the
+    // same relative prefix.
     let run_id = uuid::Uuid::new_v4().to_string();
-    let sibling = std::fs::canonicalize(tmp.path())
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| tmp.path().to_path_buf());
-    let prefix = format!("{}/hermetic-{}/", sibling.display(), run_id);
+    let prefix = format!("hermetic-{}/", run_id);
     let p1 = format!("{}alpha.rs", prefix);
     let p2 = format!("{}beta.rs", prefix);
     let p3 = format!("{}gamma.rs", prefix);
@@ -1887,12 +2050,12 @@ fn interactive_ttl_is_sized_for_model_latency() {
 #[tokio::test]
 async fn any_authenticated_tool_call_extends_the_session() {
     use lain::server::mcp::presence_tools::{run_my_claims, run_register_agent};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     let v = run_register_agent(&server, serde_json::json!({"name": "alice"})).unwrap();
     let agent_id = v["agent_id"].as_str().unwrap().to_string();
@@ -2078,23 +2241,33 @@ fn read_over_another_read_carries_no_advisory() {
     assert!(result.advisories.is_empty(), "two readers are not a hazard");
 }
 
-/// The holder's name is resolved live, so a departed holder reports
-/// `null` rather than the fabricated "unknown" that got the field
-/// removed in the first place.
+/// The holder's name is resolved live, so a departed holder is
+/// reclaimed by the next `load_pair` (see
+/// `load_pair_reclaims_orphaned_claims_on_fresh_server` for the
+/// linearizability fix this depends on). Before that fix landed
+/// the field reported `null` because the conflict path couldn't
+/// resolve a name; the fix moves the reclaim to `load_pair` itself
+/// so the orphan claim never makes it to the conflict reporter.
 #[tokio::test]
 async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
     use lain::server::mcp::presence_tools::run_claim_files;
     use lain::server::presence::{AgentId, ClaimIntent, ClaimRequest};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     let bob = run_register_agent_for_test(&server, "bob");
 
-    // An unresolvable holder has a claim in occupancy without a live session in presence
+    // Insert a phantom holder directly: a claim in `OccupancyMap`
+    // for an agent that was never registered in `PresenceRegistry`.
+    // This used to test that the conflict path resolved names to
+    // `null` rather than fabricating one. After the linearizability
+    // fix, the next `load_pair` (triggered by `with_shared_presence`
+    // inside `claim_files`) reclaims the phantom claim so bob's
+    // claim succeeds without conflict.
     let departed = AgentId("departed-uuid".into());
     server.occupancy().claim(
         &departed,
@@ -2115,10 +2288,16 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
         }),
     )
     .unwrap();
-    let c = &v["conflicts"].as_array().unwrap()[0];
+    let granted = v["granted"].as_array().unwrap();
+    let conflicts = v["conflicts"].as_array().unwrap();
+    assert_eq!(
+        granted.len(),
+        1,
+        "departed holder must be reclaimed so bob wins; got {v}"
+    );
     assert!(
-        c["name"].is_null(),
-        "an unresolvable holder must be null, not a fabricated name: {c}"
+        conflicts.is_empty(),
+        "no conflict should be reported against a reclaimed holder; got {conflicts:?}"
     );
 }
 
@@ -2126,12 +2305,12 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
 async fn session_removal_cleans_up_claims_and_locks() {
     use lain::server::mcp::presence_tools::run_claim_files;
     use lain::server::presence::AgentId;
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     let alice = run_register_agent_for_test(&server, "alice");
     let bob = run_register_agent_for_test(&server, "bob");
@@ -2175,12 +2354,12 @@ async fn session_removal_cleans_up_claims_and_locks() {
 async fn unregister_agent_cleans_up_claims_and_emits_event() {
     use lain::server::mcp::presence_tools::run_claim_files;
     use lain::server::presence::{AgentId, PresenceEvent};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
     let mut rx = server.presence_event_tx().subscribe();
 
     let alice = run_register_agent_for_test(&server, "alice");
@@ -2234,13 +2413,13 @@ async fn unregister_agent_cleans_up_claims_and_emits_event() {
 #[tokio::test]
 async fn claim_files_accepts_string_form_files() {
     use lain::server::mcp::presence_tools::run_claim_files;
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     let alice = run_register_agent_for_test(&server, "alice");
 
@@ -2275,4 +2454,154 @@ async fn claim_files_accepts_string_form_files() {
     let claims = server.occupancy().list_for_agent(&AgentId(alice.0.clone()));
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].path.to_string_lossy(), "src/a.rs");
+}
+
+/// Claims are for this repository's files: a path outside it is refused,
+/// not granted and written to the audit log under this workspace.
+#[test]
+fn claims_outside_the_workspace_are_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
+    let agent = server.presence().register(
+        "outsider".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    let claim = |path: &str| {
+        lain::server::mcp::presence_tools::run_claim_files(
+            &server,
+            serde_json::json!({"agent_id": agent.id.as_str(), "session_token": agent.session_token,
+                   "files": [{"path": path, "symbols": ["x"]}]}),
+        )
+    };
+    assert!(claim("a.rs").is_ok());
+    assert!(claim("src/../a.rs").is_ok());
+    let inside_abs = tmp.path().join("a.rs");
+    assert!(claim(inside_abs.to_str().unwrap()).is_ok());
+    for bad in ["../other/b.rs", "/etc/passwd", "src/../../x.rs"] {
+        let err = claim(bad).expect_err(bad);
+        assert!(err.contains("outside the repository"), "{bad}: {err}");
+    }
+    // An absolute path to a file that does not exist yet, escaping with `..`.
+    let escape = format!(
+        "{}/../../../../../../../../tmp/lain-nope-x",
+        tmp.path().display()
+    );
+    let err = claim(&escape).expect_err("unborn escape");
+    assert!(err.contains("outside the repository"), "{err}");
+    assert!(claim("").is_err(), "empty path");
+}
+
+// --- F01 rework #2: events_log boundary must not persist session_token ---
+
+/// `EventsLog::append` is the durable replay cache for SSE
+/// subscribers. After F01 rework #1 the live SSE wire went through
+/// `PresenceEventPublic` (no token), but the events log still wrote
+/// the internal `PresenceEvent` — so a `session_token` minted by
+/// `register` ended up persisted to `events.jsonl` on disk. This
+/// probe pins the closed-leak contract at the events_log boundary:
+/// the persisted JSONL line for an `AgentJoined` MUST NOT contain
+/// the bearer token.
+///
+/// Reuses the same `AgentSession::new` constructor the live `register`
+/// path uses, so the token is real (32 lowercase hex chars, non-empty)
+/// rather than a hand-rolled placeholder. Reads the on-disk file
+/// directly rather than going through `replay_after` — the spec is
+/// about *persisted bytes*, not about what the in-memory iterator
+/// hands back.
+#[test]
+fn events_log_persists_public_dto_no_token() {
+    use lain::server::events_log::{EventsLog, EVENTS_LOG_FILENAME};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let log = EventsLog::open(tmp.path()).unwrap();
+
+    let session = AgentSession::new(
+        AgentId("b1c2d3e4-1111-2222-3333-444455556666".into()),
+        "alice".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        Some(4242),
+        None,
+    );
+    let bearer = session.session_token.clone();
+    assert_eq!(
+        bearer.len(),
+        32,
+        "precondition: register mints 32 hex chars"
+    );
+    assert!(bearer.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let id = log.append(&PresenceEvent::AgentJoined(session));
+    assert_eq!(id, 1, "fresh log: first event gets id=1");
+
+    let path = tmp.path().join(EVENTS_LOG_FILENAME);
+    let line = std::fs::read_to_string(&path)
+        .expect("events.jsonl must exist after append")
+        .lines()
+        .next()
+        .expect("at least one line")
+        .to_string();
+    let (id_str, payload) = line.split_once('\t').expect("`id\\t{payload}` shape");
+    assert_eq!(id_str, "1");
+    assert!(
+        !payload.contains(&bearer),
+        "events.jsonl line MUST NOT carry the session_token; got payload {payload:?}",
+    );
+    // The agent's identity (id, name, kind) is the non-credential
+    // payload — confirm it's present so the test isn't passing by
+    // accident (e.g. an empty line).
+    assert!(
+        payload.contains("alice"),
+        "payload must still carry the agent name: {payload:?}"
+    );
+    assert!(
+        payload.contains("b1c2d3e4-1111-2222-3333-444455556666"),
+        "payload must still carry the agent id: {payload:?}",
+    );
+}
+
+/// Companion probe: the public DTO round-trips through
+/// `EventsLog::replay_after` (read path) and `sse::frame_for`
+/// (frame builder) without losing the AgentJoined event shape. The
+/// SSE frame's `data:` field is the same JSON the live path emits,
+/// minus `session_token`. Any future regression that re-exposes the
+/// token on the replay path fails here too.
+#[test]
+fn events_log_replay_roundtrips_through_frame_for() {
+    use lain::server::events_log::EventsLog;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let log = EventsLog::open(tmp.path()).unwrap();
+
+    let session = AgentSession::new(
+        AgentId("c1c2d3e4-aaaa-bbbb-cccc-ddddeeeeffff".into()),
+        "bob".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        Some(7777),
+        None,
+    );
+    let bearer = session.session_token.clone();
+    log.append(&PresenceEvent::AgentJoined(session));
+
+    let replayed: Vec<(u64, PresenceEventPublic)> = log.replay_after(0).collect();
+    assert_eq!(replayed.len(), 1);
+    let (id, public_ev) = &replayed[0];
+    assert!(matches!(public_ev, PresenceEventPublic::AgentJoined(_)));
+    assert!(!serde_json::to_string(public_ev).unwrap().contains(&bearer));
+
+    // The on-disk payload round-trips through Deserialize back to the
+    // public DTO byte-identical.
+    let path = tmp.path().join("events.jsonl");
+    let line = std::fs::read_to_string(&path).unwrap();
+    let (id_str, payload) = line.lines().next().unwrap().split_once('\t').unwrap();
+    assert_eq!(id_str, &id.to_string());
+    let parsed: PresenceEventPublic = serde_json::from_str(payload).unwrap();
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), payload);
 }

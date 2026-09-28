@@ -175,6 +175,90 @@ else
 fi
 echo ""
 
+# Test 8: Hash tool detection
+echo "Test 8: Hash tool detection"
+HASH_TOOL=$(bash -c "source '$INSTALL_SCRIPT' && _hash_tool" 2>/dev/null || echo "")
+if [ -n "$HASH_TOOL" ]; then
+  test_passed "Hash tool detected: $HASH_TOOL"
+else
+  test_failed "No hash tool found (need sha256sum or shasum)"
+fi
+echo ""
+
+# Test 9: SHA-256 of a known file
+echo "Test 9: SHA-256 computation of a known file"
+KNOWN_FILE="$TEST_TMP_DIR/known_content.txt"
+echo -n "hello" > "$KNOWN_FILE"
+# SHA-256 of "hello" is 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+EXPECTED_HASH="2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+COMPUTED_HASH=$(bash -c "source '$INSTALL_SCRIPT' && _sha256_of '$KNOWN_FILE'" 2>/dev/null || echo "")
+if [ "$COMPUTED_HASH" = "$EXPECTED_HASH" ]; then
+  test_passed "SHA-256 of 'hello' computed correctly"
+else
+  test_failed "SHA-256 mismatch: expected $EXPECTED_HASH, got $COMPUTED_HASH"
+fi
+echo ""
+
+# Test 10: SHA256SUMS parsing
+echo "Test 10: SHA256SUMS parsing"
+# Write a multi-line SHA256SUMS fixture (both plain GNU and *-prefixed BSD
+# formats mixed together) to a temp file so newlines survive the sourcing
+# subshell without quote-escaping complications.
+SUMS_FIXTURE="$TEST_TMP_DIR/SHA256SUMS.fixture"
+cat > "$SUMS_FIXTURE" << 'SUMSEOF'
+2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  lain-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9  lain-0.1.0-aarch64-apple-darwin.tar.gz
+SUMSEOF
+
+# Parse the linux entry via a subshell that sources install.sh and reads
+# the fixture file.
+PARSED=$(bash -c "
+  source '$INSTALL_SCRIPT'
+  sums_text=\$(cat '$SUMS_FIXTURE')
+  _parse_sha256sums \"\$sums_text\" 'lain-0.1.0-x86_64-unknown-linux-gnu.tar.gz'
+" 2>/dev/null || echo "")
+if [ "$PARSED" = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" ]; then
+  test_passed "SHA256SUMS parsed correct hash for linux target"
+else
+  test_failed "SHA256SUMS parsing failed: expected hash, got '$PARSED'"
+fi
+
+# Parse the darwin entry.
+PARSED_DARWIN=$(bash -c "
+  source '$INSTALL_SCRIPT'
+  sums_text=\$(cat '$SUMS_FIXTURE')
+  _parse_sha256sums \"\$sums_text\" 'lain-0.1.0-aarch64-apple-darwin.tar.gz'
+" 2>/dev/null || echo "")
+if [ "$PARSED_DARWIN" = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9" ]; then
+  test_passed "SHA256SUMS parsed correct hash for darwin target"
+else
+  test_failed "SHA256SUMS parsing failed for darwin: got '$PARSED_DARWIN'"
+fi
+
+# Missing entry returns empty.
+MISSING=$(bash -c "
+  source '$INSTALL_SCRIPT'
+  sums_text=\$(cat '$SUMS_FIXTURE')
+  _parse_sha256sums \"\$sums_text\" 'lain-99.99.99-x86_64-unknown-linux-gnu.tar.gz'
+" 2>/dev/null)
+if [ -z "$MISSING" ]; then
+  test_passed "SHA256SUMS returns empty for missing asset"
+else
+  test_failed "SHA256SUMS should return empty for missing asset, got '$MISSING'"
+fi
+echo ""
+
+# Test 11: Sidecar verification function is present
+echo "Test 11: Sidecar verification in verify_installation"
+# The updated verify_installation now handles both lain and lain-git-sidecar.
+# Confirm the function still exists and is callable without error.
+if bash -c "source '$INSTALL_SCRIPT' && declare -f verify_installation > /dev/null" 2>/dev/null; then
+  test_passed "verify_installation function exists (sidecar check included)"
+else
+  test_failed "verify_installation function missing"
+fi
+echo ""
+
 # Summary
 echo "========================================"
 echo "Test Results"

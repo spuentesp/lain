@@ -16,6 +16,8 @@
 use super::GraphEdge;
 use super::GraphNode;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
+use petgraph::visit::EdgeRef;
+use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,7 +29,8 @@ use std::path::Path;
 /// merging it into a v2 graph would double every node instead of updating
 /// it. `load_from_disk` therefore discards anything that isn't v2 and lets
 /// the caller rebuild from source.
-pub const PATH_FORMAT_VERSION: u32 = 2;
+/// 3: `GraphNode::container` added (bincode layout changed).
+pub const PATH_FORMAT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct GraphState {
@@ -64,23 +67,33 @@ pub(super) fn encode_state(state: &GraphState) -> Result<Vec<u8>, bincode::error
     bincode::serde::encode_to_vec(state, bincode::config::legacy())
 }
 
-/// Decode bytes into a `GraphState`. Mirrors [`encode_state`].
+/// Upper bound on what one decode may allocate. Without a limit a
+/// corrupt length prefix (an interrupted write, a full disk, another
+/// version's format) asked for exabytes and panicked with "capacity
+/// overflow" before the fail-soft path in `load_from_disk` could run —
+/// `lain oneshot`, `query` and `doctor` all crashed until `.lain` was
+/// deleted by hand. With it, the decode returns an error instead.
+pub(crate) const DECODE_LIMIT: usize = 1 << 32;
+
+/// Decode bytes into a `GraphState`. Mirrors [`encode_state`]; the
+/// layout is the same, only allocation is bounded.
 pub(super) fn decode_state(
     data: &[u8],
 ) -> Result<(GraphState, usize), bincode::error::DecodeError> {
-    bincode::serde::decode_from_slice(data, bincode::config::legacy())
+    bincode::serde::decode_from_slice(data, bincode::config::legacy().with_limit::<DECODE_LIMIT>())
 }
 
 /// Strict, read-only inspection for diagnostics. Unlike the runtime loader,
 /// this preserves the distinction between corrupt and missing graph data.
 pub fn inspect_persisted_graph(path: &Path) -> Result<Option<String>, GraphInspectionError> {
     let data = std::fs::read(path).map_err(GraphInspectionError::Io)?;
-    let (state, _) = decode_state(&data).map_err(GraphInspectionError::Corrupt)?;
+    let (mut state, _) = decode_state(&data).map_err(GraphInspectionError::Corrupt)?;
     if state.path_format_version != PATH_FORMAT_VERSION {
         return Err(GraphInspectionError::Incompatible(
             state.path_format_version,
         ));
     }
+    heal_duplicate_ids(&mut state);
     if state.index_map.len() != state.graph.node_count()
         || state
             .index_map
@@ -90,6 +103,59 @@ pub fn inspect_persisted_graph(path: &Path) -> Result<Option<String>, GraphInspe
         return Err(GraphInspectionError::InvalidIndex);
     }
     Ok(state.last_commit)
+}
+
+/// Fold nodes the id index does not point at into the node it does.
+///
+/// Before `replace_nodes_for_paths` refreshed kept Namespace nodes in place,
+/// every re-index added a second node under a directory's id. Those graphs
+/// still sit in users' `.lain/graph.bin`, and `lain doctor` rejects them.
+/// Moving the stray copy's edges onto the indexed node and dropping it
+/// repairs them on load instead of asking for a manual rebuild, and
+/// [`inspect_persisted_graph`] judges a graph by what loading it yields.
+pub(super) fn heal_duplicate_ids(state: &mut GraphState) {
+    let strays: Vec<NodeIndex> = state
+        .graph
+        .node_indices()
+        .filter(|i| state.index_map.get(&state.graph[*i].id) != Some(i))
+        .collect();
+    for stray in strays {
+        let id = state.graph[stray].id.clone();
+        let Some(keep) = state
+            .index_map
+            .get(&id)
+            .copied()
+            .filter(|k| state.graph.node_weight(*k).is_some_and(|n| n.id == id))
+        else {
+            // Nothing indexed under this id: the stray is the only copy.
+            state.index_map.insert(id, stray);
+            continue;
+        };
+        let moved: Vec<(NodeIndex, NodeIndex, GraphEdge)> = state
+            .graph
+            .edges_directed(stray, Direction::Outgoing)
+            .map(|e| (keep, e.target(), e.weight().clone()))
+            .chain(
+                state
+                    .graph
+                    .edges_directed(stray, Direction::Incoming)
+                    .map(|e| (e.source(), keep, e.weight().clone())),
+            )
+            .collect();
+        for (from, to, edge) in moved {
+            if from == stray || to == stray {
+                continue;
+            }
+            let already = state
+                .graph
+                .edges_connecting(from, to)
+                .any(|e| e.weight().edge_type == edge.edge_type);
+            if !already {
+                state.graph.add_edge(from, to, edge);
+            }
+        }
+        state.graph.remove_node(stray);
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -102,4 +168,17 @@ pub enum GraphInspectionError {
     Incompatible(u32),
     #[error("graph index does not match its nodes")]
     InvalidIndex,
+}
+
+#[cfg(test)]
+mod decode_limit_tests {
+    use super::*;
+
+    /// A clobbered length prefix is an error, not a panic.
+    #[test]
+    fn a_corrupt_length_prefix_is_an_error_not_a_panic() {
+        // Every length prefix reads as u64::MAX.
+        let bytes = vec![0xffu8; 64];
+        assert!(decode_state(&bytes).is_err());
+    }
 }

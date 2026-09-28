@@ -215,28 +215,30 @@ impl RepoSource for LocalCloneSource {
                     return Err(LainError::Git(format!("git clone {} failed", url)));
                 }
             }
+            // Fetch the configured ref itself and reset to what came back:
+            // a branch or a tag alike. Resetting to `origin/<ref>` failed
+            // for every tag (`--ref v1`), so the repo could never load.
             let fetch = Command::new("git")
                 .current_dir(&path)
                 .arg("fetch")
                 .arg("--quiet")
-                .arg("--all")
+                .arg("origin")
+                .arg(&git_ref)
                 .status()
                 .map_err(|e| LainError::Git(format!("git fetch failed: {e}")))?;
             if !fetch.success() {
-                return Err(LainError::Git("git fetch failed".into()));
+                return Err(LainError::Git(format!("git fetch origin {git_ref} failed")));
             }
             let reset = Command::new("git")
                 .current_dir(&path)
                 .arg("reset")
+                .arg("--quiet")
                 .arg("--hard")
-                .arg(format!("origin/{}", git_ref))
+                .arg("FETCH_HEAD")
                 .status()
                 .map_err(|e| LainError::Git(format!("git reset failed: {e}")))?;
             if !reset.success() {
-                return Err(LainError::Git(format!(
-                    "git reset to origin/{} failed",
-                    git_ref
-                )));
+                return Err(LainError::Git(format!("git reset to {git_ref} failed")));
             }
             *last_refreshed.write() = SystemTime::now();
             Ok(())
@@ -365,18 +367,17 @@ impl RepoSource for ShallowCloneSource {
                 if !fetch.success() {
                     return Err(LainError::Git("git fetch --depth 1 failed".into()));
                 }
+                // FETCH_HEAD is the ref just fetched — a branch or a tag.
                 let reset = Command::new("git")
                     .current_dir(&path)
                     .arg("reset")
+                    .arg("--quiet")
                     .arg("--hard")
-                    .arg(format!("origin/{}", git_ref))
+                    .arg("FETCH_HEAD")
                     .status()
                     .map_err(|e| LainError::Git(format!("git reset failed: {e}")))?;
                 if !reset.success() {
-                    return Err(LainError::Git(format!(
-                        "git reset to origin/{} failed",
-                        git_ref
-                    )));
+                    return Err(LainError::Git(format!("git reset to {git_ref} failed")));
                 }
             }
             *last_refreshed.write() = SystemTime::now();

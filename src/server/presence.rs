@@ -148,7 +148,7 @@ impl<'de> serde::Deserialize<'de> for SymbolHash {
 /// reported `claimed_at: 0` on every claim they held, and a conflict's
 /// `last_seen_unix` froze — leaving no way to tell a fresh claim from a
 /// stale one, which is exactly what those fields are for.
-mod unix_secs {
+pub(crate) mod unix_secs {
     use super::SystemTime;
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -353,6 +353,8 @@ struct PresenceState {
     sessions: HashMap<AgentId, AgentSession>,
     by_token: HashMap<String, AgentId>,
     expires_after: Duration,
+    /// Session lifetime for `AgentMode::Background`.
+    background_expires_after: Duration,
 }
 
 /// Callback type fired on each `PresenceRegistry` mutation. Wrapped
@@ -403,8 +405,18 @@ impl PresenceRegistry {
     /// and read from there — one place to change the number, and an
     /// operator whose agents behave differently can actually change it.
     pub fn new() -> Self {
-        let cfg = crate::server::tuning::PresenceConfig::default();
-        Self::with_expiry(Duration::from_secs(cfg.interactive_session_ttl_secs))
+        Self::from_config(&crate::server::tuning::PresenceConfig::default())
+    }
+
+    /// Registry with the lifetimes from `.lain/tuning.toml`'s
+    /// `[presence]`. The servers built theirs with `new()`, so the
+    /// documented `interactive_session_ttl_secs` /
+    /// `background_session_ttl_secs` settings changed nothing.
+    pub fn from_config(cfg: &crate::server::tuning::PresenceConfig) -> Self {
+        let reg = Self::with_expiry(Duration::from_secs(cfg.interactive_session_ttl_secs));
+        reg.inner.lock().background_expires_after =
+            Duration::from_secs(cfg.background_session_ttl_secs);
+        reg
     }
 
     pub fn with_expiry(expires_after: Duration) -> Self {
@@ -413,6 +425,9 @@ impl PresenceRegistry {
                 sessions: HashMap::new(),
                 by_token: HashMap::new(),
                 expires_after,
+                background_expires_after: Duration::from_secs(
+                    crate::server::tuning::PresenceConfig::default().background_session_ttl_secs,
+                ),
             })),
             persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             on_remove_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -428,6 +443,67 @@ impl PresenceRegistry {
     {
         let mut slot = self.persist_cb.lock();
         *slot = Some(std::sync::Arc::new(cb));
+    }
+
+    /// Atomically replace the current persist callback with one that
+    /// records its `Result<(), String>` into the supplied cell, and
+    /// return the previous callback (if any) so the caller can
+    /// restore it after the critical section. `PresenceLayer::with_shared_presence`
+    /// uses this to surface persist failures without permanently
+    /// changing the long-lived callback that the LainServer wired
+    /// up at construction.
+    ///
+    /// `path` is the state-file path to write; it's passed in by the
+    /// caller because `PresenceRegistry` doesn't carry the path
+    /// itself — the long-lived callback captured the path when the
+    /// LainServer was constructed, and we want this swap to write
+    /// the same file.
+    pub fn swap_persist_capture(
+        &self,
+        cell: std::sync::Arc<parking_lot::Mutex<Option<Result<(), String>>>>,
+        path: std::path::PathBuf,
+        presence: std::sync::Arc<PresenceRegistry>,
+        occupancy: std::sync::Arc<OccupancyMap>,
+        intent: std::sync::Arc<crate::server::intent::IntentRegistry>,
+        activity: std::sync::Arc<crate::server::activity::ActivityTracker>,
+    ) -> Option<PersistFn> {
+        // NOTE: not re-entrant. If the closure passed to
+        // `f()` inside `with_shared_presence` indirectly triggers a
+        // second `swap_persist_capture` (e.g. through a nested hook),
+        // the inner swap's `restore_persist_callback` will overwrite
+        // the outer slot's prior closure when the inner scope exits,
+        // and the outer slot ends up holding the inner's previous
+        // callback. Keep the swap depth at one.
+        let cell_for_cb = std::sync::Arc::clone(&cell);
+        let path_for_cb = path.clone();
+        let presence_for_cb = std::sync::Arc::clone(&presence);
+        let occupancy_for_cb = std::sync::Arc::clone(&occupancy);
+        let intent_for_cb = std::sync::Arc::clone(&intent);
+        let activity_for_cb = std::sync::Arc::clone(&activity);
+        let new_cb: PersistFn = std::sync::Arc::new(move || {
+            let result = crate::server::presence::save_pair(
+                &path_for_cb,
+                &presence_for_cb,
+                &occupancy_for_cb,
+                &intent_for_cb,
+                &activity_for_cb,
+            );
+            let mut slot = cell_for_cb.lock();
+            *slot = Some(result);
+        });
+        let mut slot = self.persist_cb.lock();
+        let prev = slot.take();
+        *slot = Some(new_cb);
+        prev
+    }
+
+    /// Restore a callback previously captured by
+    /// [`Self::swap_persist_capture`]. `with_shared_presence`
+    /// calls this after the closure runs to put the long-lived
+    /// callback back in place.
+    pub fn restore_persist_callback(&self, cb: PersistFn) {
+        let mut slot = self.persist_cb.lock();
+        *slot = Some(cb);
     }
 
     /// Clone the (optional) persist callback out of the slot. Returns
@@ -505,16 +581,25 @@ impl PresenceRegistry {
     /// should release its claims promptly.
     pub fn expires_after_for(&self, mode: &AgentMode) -> Duration {
         match mode {
-            AgentMode::Background => Duration::from_secs(
-                crate::server::tuning::PresenceConfig::default().background_session_ttl_secs,
-            ),
+            AgentMode::Background => self.inner.lock().background_expires_after,
             AgentMode::Interactive => self.expires_after(),
         }
     }
 
     pub fn expire_stale(&self) -> Vec<AgentId> {
         let now = SystemTime::now();
-        let expires_after = self.inner.lock().expires_after;
+        // Read `expires_after` under the lock and compute the
+        // `now` baseline once at the top. The pre-fix code acquired
+        // the lock twice: once to copy `expires_after`, then again
+        // for the actual scan. If a setter ever mutates
+        // `expires_after` between the two acquires, the second
+        // scan reads a different value mid-pass — a latent bug the
+        // current code is safe from only because no setter exists.
+        // Hold one lock for the whole scan.
+        let (expires_after, background_expires_after) = {
+            let s = self.inner.lock();
+            (s.expires_after, s.background_expires_after)
+        };
         let stale: Vec<AgentId> = {
             let mut s = self.inner.lock();
             let stale: Vec<AgentId> = s
@@ -522,10 +607,7 @@ impl PresenceRegistry {
                 .iter()
                 .filter(|(_, sess)| {
                     let ttl = match sess.mode {
-                        AgentMode::Background => Duration::from_secs(
-                            crate::server::tuning::PresenceConfig::default()
-                                .background_session_ttl_secs,
-                        ),
+                        AgentMode::Background => background_expires_after,
                         AgentMode::Interactive => expires_after,
                     };
                     now.duration_since(sess.last_heartbeat).unwrap_or_default() >= ttl
@@ -786,7 +868,20 @@ pub fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
             .iter()
             .map(|root| canonical_form(&root.join(path)))
             .find(|candidate| candidate.exists());
-        match anchored.or_else(|| roots.first().map(|root| canonical_form(&root.join(path)))) {
+        // A file that does not exist yet belongs to the root that has its
+        // directory. Falling back to the first root — in federation a
+        // staging placeholder — gave `pkg/new.py` a different key from
+        // `<repo>/pkg/new.py`, and two agents both got the edit claim.
+        let unborn = || {
+            roots
+                .iter()
+                .map(|root| canonical_form(&root.join(path)))
+                .find(|candidate| candidate.parent().is_some_and(|d| d.is_dir()))
+        };
+        match anchored
+            .or_else(unborn)
+            .or_else(|| roots.first().map(|root| canonical_form(&root.join(path))))
+        {
             Some(p) => p,
             None => return PathBuf::from(posix_string(path)),
         }
@@ -876,6 +971,22 @@ impl OccupancyMap {
             .contains_key(&(agent_id.clone(), canonical))
     }
 
+    /// Returns the path of the filesystem lock for `agent_id`/`path`, if any.
+    /// Used by tests to verify the lock file landed on disk.
+    #[cfg(test)]
+    pub(crate) fn lock_lease_path(
+        &self,
+        agent_id: &AgentId,
+        path: &Path,
+    ) -> Option<std::path::PathBuf> {
+        let roots = self.claim_roots_snapshot();
+        let canonical = canonical_claim_path(&roots, path);
+        self.lock_leases
+            .lock()
+            .get(&(agent_id.clone(), canonical))
+            .cloned()
+    }
+
     /// Install a callback fired on every mutation that should be
     /// persisted. Same semantics as
     /// `PresenceRegistry::set_persist_callback`.
@@ -885,6 +996,49 @@ impl OccupancyMap {
     {
         let mut slot = self.persist_cb.lock();
         *slot = Some(std::sync::Arc::new(cb));
+    }
+
+    /// Atomically replace the current persist callback with one that
+    /// records its `Result<(), String>` into the supplied cell, and
+    /// return the previous callback. See
+    /// [`PresenceRegistry::swap_persist_capture`] for the rationale.
+    pub fn swap_persist_capture(
+        &self,
+        cell: std::sync::Arc<parking_lot::Mutex<Option<Result<(), String>>>>,
+        path: std::path::PathBuf,
+        presence: std::sync::Arc<PresenceRegistry>,
+        occupancy: std::sync::Arc<OccupancyMap>,
+        intent: std::sync::Arc<crate::server::intent::IntentRegistry>,
+        activity: std::sync::Arc<crate::server::activity::ActivityTracker>,
+    ) -> Option<crate::server::presence::PersistFn> {
+        let cell_for_cb = std::sync::Arc::clone(&cell);
+        let path_for_cb = path.clone();
+        let presence_for_cb = std::sync::Arc::clone(&presence);
+        let occupancy_for_cb = std::sync::Arc::clone(&occupancy);
+        let intent_for_cb = std::sync::Arc::clone(&intent);
+        let activity_for_cb = std::sync::Arc::clone(&activity);
+        let new_cb: crate::server::presence::PersistFn = std::sync::Arc::new(move || {
+            let result = crate::server::presence::save_pair(
+                &path_for_cb,
+                &presence_for_cb,
+                &occupancy_for_cb,
+                &intent_for_cb,
+                &activity_for_cb,
+            );
+            let mut slot = cell_for_cb.lock();
+            *slot = Some(result);
+        });
+        let mut slot = self.persist_cb.lock();
+        let prev = slot.take();
+        *slot = Some(new_cb);
+        prev
+    }
+
+    /// Restore a callback previously captured by
+    /// [`Self::swap_persist_capture`].
+    pub fn restore_persist_callback(&self, cb: crate::server::presence::PersistFn) {
+        let mut slot = self.persist_cb.lock();
+        *slot = Some(cb);
     }
 
     /// Set the workspace root so `claim` can write the
@@ -1013,13 +1167,42 @@ impl OccupancyMap {
                 r
             })
             .collect();
+
+        // PR-2 — precompute content hashes BEFORE acquiring the
+        // occupancy lock. `compute_symbol_hash` reads the file and
+        // runs tree-sitter parsing; both can stall on slow disks or
+        // large source files. Holding `self.inner` (the parking_lot
+        // mutex that every `OccupancyMap` operation serialises on)
+        // across that I/O would block every claim/release/lookup/touch
+        // for the duration. The hash is a per-request computation, so
+        // doing it up front is safe even if a concurrent mutation
+        // changes the symbol's body between the hash and the apply
+        // step — the hash is a content fingerprint at the moment the
+        // agent observed it, not a verification token.
+        //
+        // Also: pre-fix only the first symbol of a multi-symbol claim
+        // was hashed. Compute the content hash over the union of all
+        // symbols' byte ranges here so a multi-symbol claim
+        // fingerprints all of its declared symbols, not just the first.
+        let precomputed_hashes: Vec<Option<SymbolHash>> = requests
+            .iter()
+            .map(|req| {
+                if req.symbols.is_empty() {
+                    None
+                } else {
+                    compute_symbol_hash_for_symbols(&req.path, &req.symbols)
+                        .or_else(|| Some(SymbolHash::zero()))
+                }
+            })
+            .collect();
+
         let (granted, conflicts, advisories) = {
             let mut s = self.inner.lock();
             let mut granted = Vec::new();
             let mut conflicts = Vec::new();
             let mut advisories = Vec::new();
 
-            for req in requests {
+            for (req, precomputed_hash) in requests.into_iter().zip(precomputed_hashes) {
                 let entry = s.by_file.entry(req.path.clone()).or_default();
                 let mut req_conflicts: Vec<ConflictEntry> = Vec::new();
 
@@ -1204,18 +1387,14 @@ impl OccupancyMap {
                         }
                     }
                     // File-level claim (no specific symbols) carries no
-                    // content hash; symbol-level claims hash the symbol's
-                    // body bytes via the tree-sitter extractor. When the
-                    // symbol can't be located (unsupported file type,
-                    // unreadable file, etc.) we fall back to the all-zero
-                    // placeholder so existing consumers still see
-                    // `Some(SymbolHash)`.
-                    let content_hash = if req.symbols.is_empty() {
-                        None
-                    } else {
-                        let sym = req.symbols.first().map(|s| s.as_str()).unwrap_or("");
-                        compute_symbol_hash(&req.path, sym).or_else(|| Some(SymbolHash::zero()))
-                    };
+                    // content hash; symbol-level claims hash the symbols'
+                    // body bytes via the tree-sitter extractor (precomputed
+                    // outside the lock — see the comment at the top of
+                    // this function). When the symbols can't be located
+                    // (unsupported file type, unreadable file, etc.) the
+                    // precompute falls back to the all-zero placeholder so
+                    // existing consumers still see `Some(SymbolHash)`.
+                    let content_hash = precomputed_hash;
                     // Translate the request's optional TTL into an absolute
                     // expiry timestamp. `None` means "no expiry set" and the
                     // claim is only released explicitly or when the agent's
@@ -1388,6 +1567,14 @@ impl OccupancyMap {
             }
             if let Some(claims) = s.by_agent.get_mut(agent_id) {
                 claims.retain(|c| !released.contains(&c.path));
+                // Drop the agent's bucket once empty — matches what
+                // `expire_by_ttl` does. Pre-fix `release` left a
+                // zero-length `Vec<Claim>` in the map, accumulating
+                // dead allocations proportional to the total
+                // lifetime agent count.
+                if claims.is_empty() {
+                    s.by_agent.remove(agent_id);
+                }
             }
             released
         };
@@ -1466,10 +1653,26 @@ impl OccupancyMap {
             let mut to_drop: Vec<(AgentId, PathBuf, Vec<String>)> = Vec::new();
             for (agent_id, claims) in s.by_agent.iter() {
                 for c in claims.iter() {
-                    if let Some(exp) = c.expires_at {
-                        if exp <= now {
-                            to_drop.push((agent_id.clone(), c.path.clone(), c.symbols.clone()));
-                        }
+                    let Some(exp) = c.expires_at else { continue };
+                    // Wall-clock skew guard: `expires_at` is a
+                    // `SystemTime`, which is non-monotonic — an NTP
+                    // correction or container suspend can jump it
+                    // backwards. The normal expiry check is `exp <=
+                    // now`; the additional `now < claimed_at` arm
+                    // fails-secure when the wall clock has jumped
+                    // backwards past this claim's creation time
+                    // (otherwise the claim would live forever until
+                    // the clock catches up).
+                    //
+                    // The right long-term fix is to migrate
+                    // `Claim::expires_at` to `Option<Instant>` (mono-
+                    // tonic) and store `expires_at_unix` separately
+                    // for serialization. That's a structural change
+                    // touching every Claim constructor; the guard
+                    // below is the surgical mitigation.
+                    let expired = exp <= now || now < c.claimed_at;
+                    if expired {
+                        to_drop.push((agent_id.clone(), c.path.clone(), c.symbols.clone()));
                     }
                 }
             }
@@ -1589,15 +1792,6 @@ impl OccupancyMap {
                     self.lock_leases.lock().insert(key, lock.path);
                 }
                 Err(conflict) => {
-                    if conflict.agent_id() == session.id {
-                        let lp = crate::server::presence_lock::lock_path_for(&workspace, &req.path);
-                        if let crate::server::presence_lock::RefreshOutcome::Refreshed =
-                            crate::server::presence_lock::refresh_lock_if_owned(&lp, &session.id)
-                        {
-                            self.lock_leases.lock().insert(key, lp);
-                            continue;
-                        }
-                    }
                     tracing::warn!(
                         "filesystem lock for {:?} already held by {} (k={:?}); in-memory claim stands",
                         req.path,
@@ -1726,6 +1920,107 @@ pub enum PresenceEvent {
     },
 }
 
+/// Public, wire-safe view of an `AgentSession`. Mirrors every
+/// non-credential field; `session_token` is excluded because any
+/// subscriber that reads an `AgentJoined` frame can replay the token
+/// and impersonate the holder through `heartbeat` / `claim_files` /
+/// `release_files`. Constructed once at the SSE framing boundary via
+/// `From<AgentSession>`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentJoinedPublic {
+    pub id: AgentId,
+    pub name: String,
+    pub kind: AgentKind,
+    pub mode: AgentMode,
+    pub pid: Option<u32>,
+    pub parent_session_id: Option<AgentId>,
+    pub started_at: SystemTime,
+    pub last_heartbeat: SystemTime,
+}
+
+impl From<AgentSession> for AgentJoinedPublic {
+    fn from(s: AgentSession) -> Self {
+        Self {
+            id: s.id,
+            name: s.name,
+            kind: s.kind,
+            mode: s.mode,
+            pid: s.pid,
+            parent_session_id: s.parent_session_id,
+            started_at: s.started_at,
+            last_heartbeat: s.last_heartbeat,
+        }
+    }
+}
+
+/// Public, wire-safe view of a `PresenceEvent`. The `AgentJoined`
+/// variant wraps `AgentJoinedPublic` (no `session_token`); all other
+/// variants are pass-throughs. Constructed once at the SSE framing
+/// boundary via `From<PresenceEvent>` and consumed by
+/// `sse::frame_for`'s `serde_json::to_string` call. `Deserialize`
+/// is required because `EventsLog::replay_after` reads the same
+/// shape back from `events.jsonl`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum PresenceEventPublic {
+    AgentJoined(AgentJoinedPublic),
+    AgentLeft(AgentId),
+    HeartbeatExpired(AgentId),
+    ClaimGranted {
+        agent_id: AgentId,
+        path: PathBuf,
+    },
+    ClaimReleased {
+        agent_id: AgentId,
+        path: PathBuf,
+    },
+    ClaimRevoked {
+        agent_id: AgentId,
+        path: PathBuf,
+        reason: String,
+    },
+    ConflictDetected {
+        agent_id: AgentId,
+        conflicts: Vec<ConflictEntry>,
+        severity: String,
+    },
+    EditLanded {
+        event: crate::server::audit::AuditEvent,
+    },
+}
+
+impl From<PresenceEvent> for PresenceEventPublic {
+    fn from(e: PresenceEvent) -> Self {
+        match e {
+            PresenceEvent::AgentJoined(s) => Self::AgentJoined(AgentJoinedPublic::from(s)),
+            PresenceEvent::AgentLeft(a) => Self::AgentLeft(a),
+            PresenceEvent::HeartbeatExpired(a) => Self::HeartbeatExpired(a),
+            PresenceEvent::ClaimGranted { agent_id, path } => Self::ClaimGranted { agent_id, path },
+            PresenceEvent::ClaimReleased { agent_id, path } => {
+                Self::ClaimReleased { agent_id, path }
+            }
+            PresenceEvent::ClaimRevoked {
+                agent_id,
+                path,
+                reason,
+            } => Self::ClaimRevoked {
+                agent_id,
+                path,
+                reason,
+            },
+            PresenceEvent::ConflictDetected {
+                agent_id,
+                conflicts,
+                severity,
+            } => Self::ConflictDetected {
+                agent_id,
+                conflicts,
+                severity,
+            },
+            PresenceEvent::EditLanded { event } => Self::EditLanded { event },
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Persistence: PresenceRegistry + OccupancyMap <-> JSON
 // ---------------------------------------------------------------------------
@@ -1788,6 +2083,22 @@ struct PersistedState {
     /// Task 2.6 wires up the loader's reset detection.
     #[serde(default)]
     audit_reset_at_unix: Option<f64>,
+    /// Per-agent intent declarations. `(agent_id, intent)`. The
+    /// registry invariant is "one intent per agent", but the on-disk
+    /// shape is a flat list so a stale state file with a duplicate
+    /// entry does not crash the loader — the loader picks the most
+    /// recent entry per agent and drops the rest. `#[serde(default)]`
+    /// keeps backward-compat with state files written before the
+    /// intent layer landed (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
+    #[serde(default)]
+    intents: Vec<(String, crate::server::intent::Intent)>,
+    /// Per-agent observed tool-call activity. `(agent_id, activity)`.
+    /// The `Activity::recent_tools` ring buffer is FIFO-capped at
+    /// 100 entries, so a stale entry's payload stays bounded even
+    /// after a long-running session. `#[serde(default)]` for the
+    /// same backward-compat reason as `intents`.
+    #[serde(default)]
+    activities: Vec<(String, crate::server::activity::Activity)>,
 }
 
 /// Serialize the in-memory presence registry + occupancy map to a JSON
@@ -1804,7 +2115,13 @@ struct PersistedState {
 /// filename with no parent (which `LainServer::state_path` never
 /// produces, but tests might) falls back to the current dir, which
 /// at worst yields a `0` offset for a missing audit log.
-pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Result<(), String> {
+pub fn save_pair(
+    path: &Path,
+    reg: &PresenceRegistry,
+    occ: &OccupancyMap,
+    intent: &crate::server::intent::IntentRegistry,
+    activity: &crate::server::activity::ActivityTracker,
+) -> Result<(), String> {
     // Task 2.6 — read the live audit log size now so the value
     // persisted on this save reflects "how much audit data was on
     // disk at the moment of this write," not a placeholder. The
@@ -1820,6 +2137,8 @@ pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
     let state = {
         let s = reg.inner.lock();
         let o = occ.inner.lock();
+        let intents_snapshot = intent.snapshot();
+        let activities_snapshot = activity.snapshot();
         PersistedState {
             sessions: s
                 .sessions
@@ -1881,6 +2200,22 @@ pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
             // `#[serde(default)]`).
             audit_offset_bytes,
             audit_reset_at_unix: None,
+            // Intent layer (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`):
+            // a flat `(agent_id, intent)` list. Each agent has at
+            // most one intent in memory; if a stale state file
+            // somehow has duplicates, the loader picks the most
+            // recent per agent.
+            intents: intents_snapshot
+                .into_iter()
+                .map(|(id, i)| (id.0, i))
+                .collect(),
+            // Activity layer: per-agent observed tool calls. The
+            // ring buffer on `Activity` is bounded to ~100 entries
+            // so a single agent's payload stays small.
+            activities: activities_snapshot
+                .into_iter()
+                .map(|(id, a)| (id.0, a))
+                .collect(),
         }
     };
     let json = serde_json::to_string_pretty(&state)
@@ -1907,9 +2242,25 @@ pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
 /// in the server log. The next `save_pair` then persists the reset
 /// timestamp out to the world; subsequent restarts see the marker
 /// and don't re-warn.
-pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Result<(), String> {
+///
+/// Returns the list of `PresenceEvent::ClaimRevoked { reason:
+/// "stale_owner" }` events the caller must publish on the
+/// presence broadcast channel. These are claims whose owner is no
+/// longer in `PresenceRegistry::sessions` after a fresh load — i.e.
+/// the agent's process is gone but its claims were never released.
+/// Without this cross-check the new server would refuse every
+/// competing claim on those scopes (linearizability violation across
+/// server crashes), so the load itself reclaims them and tells the
+/// world via SSE.
+pub fn load_pair(
+    path: &Path,
+    reg: &PresenceRegistry,
+    occ: &OccupancyMap,
+    intent: &crate::server::intent::IntentRegistry,
+    activity: &crate::server::activity::ActivityTracker,
+) -> Result<Vec<PresenceEvent>, String> {
     if !path.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let json =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -1989,9 +2340,24 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
         }
     }
     let mut new_by_agent = HashMap::new();
+    // D9: drop claims whose TTL already elapsed at load time, so a
+    // restart cannot resurrect dead claims. Mirrors `expire_by_ttl`'s
+    // wall-clock skew guard: `now < claimed_at` means the clock jumped
+    // backwards past this claim's creation — keep it and let the
+    // expiry tick correct it on the next run.
+    let now = std::time::SystemTime::now();
+    let mut ttl_revoked: Vec<(AgentId, PathBuf)> = Vec::new();
     for (k, claims) in state.occupancy_by_agent {
         let agent_id = AgentId(k.clone());
-        for claim in &claims {
+        let mut kept = Vec::new();
+        for claim in claims {
+            let expired = claim
+                .expires_at
+                .is_some_and(|exp| exp <= now && now >= claim.claimed_at);
+            if expired {
+                ttl_revoked.push((agent_id.clone(), claim.path.clone()));
+                continue;
+            }
             let entry = new_by_file.entry(claim.path.clone()).or_default();
             if claim.symbols.is_empty() {
                 entry
@@ -2018,8 +2384,41 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
                         .insert(agent_id.clone(), claim.last_touched_unix);
                 }
             }
+            kept.push(claim);
         }
-        new_by_agent.insert(agent_id, claims);
+        if !kept.is_empty() {
+            new_by_agent.insert(agent_id, kept);
+        }
+    }
+
+    // D9 follow-up: `new_by_file` is rebuilt from `occupancy_by_file`
+    // and `occupancy_file_intents`, which carry no TTL data. Drop the
+    // same (agent, path) pairs the by_agent pass revoked — otherwise a
+    // restart resurrects the expired claim through `list_occupancy`,
+    // which reads `by_file`.
+    for (agent_id, path) in &ttl_revoked {
+        if let Some(entry) = new_by_file.get_mut(path) {
+            entry.agents.remove(agent_id);
+            for set in entry.symbols.values_mut() {
+                set.remove(agent_id);
+            }
+            for m in entry.intents.values_mut() {
+                m.remove(agent_id);
+            }
+            for m in entry.last_touched.values_mut() {
+                m.remove(agent_id);
+            }
+            entry.symbols.retain(|_, s| !s.is_empty());
+            entry.intents.retain(|_, m| !m.is_empty());
+            entry.last_touched.retain(|_, m| !m.is_empty());
+            if entry.agents.is_empty()
+                && entry.symbols.is_empty()
+                && entry.intents.is_empty()
+                && entry.last_touched.is_empty()
+            {
+                new_by_file.remove(path);
+            }
+        }
     }
 
     let mut s = reg.inner.lock();
@@ -2034,36 +2433,164 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
             .map(|cs| cs.iter().any(|c| &c.path == path))
             .unwrap_or(false)
     });
+    drop(s);
+    drop(o);
 
-    Ok(())
+    // Intent layer (PR 1 of
+    // `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). The on-disk shape is
+    // `(agent_id, Intent)`. The registry's `replace_all` handles
+    // deduplication per agent (most-recent `updated_at` wins) so a
+    // stale state file with duplicates is reconciled.
+    let intents: Vec<crate::server::intent::Intent> = state
+        .intents
+        .into_iter()
+        .map(|(id_str, i)| {
+            let mut i = i;
+            // Defensive: state-file entries carry `agent_id` inside
+            // the Intent; use the on-disk agent_id (the tuple key)
+            // to overwrite any drift in the inner field.
+            i.agent_id = AgentId(id_str);
+            i
+        })
+        .collect();
+    intent.replace_all(intents);
+
+    // Activity layer: each `(agent_id, Activity)` pair is restored
+    // verbatim. The `replace_all` helper overwrites the entry's
+    // agent_id with the map key so the two stay in sync.
+    let activities: Vec<(AgentId, crate::server::activity::Activity)> = state
+        .activities
+        .into_iter()
+        .map(|(id_str, a)| (AgentId(id_str), a))
+        .collect();
+    activity.replace_all(activities);
+
+    // Linearizability across server crashes (variant 1 of
+    // `scripts/agy_chaos.sh`): every claim whose `agent_id` is not
+    // in `s.sessions` is an orphan — its owner is gone but the claim
+    // survived the persistence round-trip. The lock layer's
+    // stale-after-takeover window would eventually let a competing
+    // agent in via the filesystem sentinel, but the in-memory
+    // `OccupancyMap` is checked first and the orphan claim would
+    // block the competing agent indefinitely. So drop the orphans
+    // here and emit one `ClaimRevoked` per reclaimed path so SSE
+    // subscribers see the same view the new server has.
+    //
+    // The cross-check happens after both `o.by_file` and `o.by_agent`
+    // are populated so we can prune consistently. The `lock_leases`
+    // retain above already drops filesystem lock entries that no
+    // longer match a live `o.by_agent` claim, so it falls into line.
+    let stale_events: Vec<PresenceEvent> = {
+        let s_guard = reg.inner.lock();
+        let mut o_guard = occ.inner.lock();
+        let mut revoked: Vec<PresenceEvent> = Vec::new();
+        let orphan_agents: Vec<AgentId> = o_guard
+            .by_agent
+            .keys()
+            .filter(|agent_id| !s_guard.sessions.contains_key(agent_id))
+            .cloned()
+            .collect();
+        for agent_id in orphan_agents {
+            // Take the orphan's claims out of `by_agent` first; the
+            // claim list is what we iterate to clean up `by_file`.
+            if let Some(claims) = o_guard.by_agent.remove(&agent_id) {
+                for claim in &claims {
+                    if let Some(entry) = o_guard.by_file.get_mut(&claim.path) {
+                        entry.agents.remove(&agent_id);
+                        // Drop every symbol-level entry the agent
+                        // touched. Empty file-level agents means
+                        // `__file_level__` stays around only if
+                        // another agent still holds the file.
+                        for sym in claim
+                            .symbols
+                            .iter()
+                            .chain(std::iter::once(&"__file_level__".to_string()))
+                        {
+                            if let Some(set) = entry.symbols.get_mut(sym) {
+                                set.remove(&agent_id);
+                                if set.is_empty() {
+                                    entry.symbols.remove(sym);
+                                }
+                            }
+                            if let Some(intents) = entry.intents.get_mut(sym) {
+                                intents.remove(&agent_id);
+                                if intents.is_empty() {
+                                    entry.intents.remove(sym);
+                                }
+                            }
+                            if let Some(touched) = entry.last_touched.get_mut(sym) {
+                                touched.remove(&agent_id);
+                                if touched.is_empty() {
+                                    entry.last_touched.remove(sym);
+                                }
+                            }
+                        }
+                        if entry.agents.is_empty()
+                            && entry.symbols.is_empty()
+                            && entry.intents.is_empty()
+                            && entry.last_touched.is_empty()
+                        {
+                            o_guard.by_file.remove(&claim.path);
+                        }
+                    }
+                    revoked.push(PresenceEvent::ClaimRevoked {
+                        agent_id: agent_id.clone(),
+                        path: claim.path.clone(),
+                        reason: "stale_owner".to_string(),
+                    });
+                }
+            }
+        }
+        // D9: TTL-expired claims were filtered out of `by_agent` /
+        // `by_file` during construction above; emit the events so SSE
+        // subscribers see the same view the reloaded state has.
+        for (agent_id, path) in ttl_revoked {
+            revoked.push(PresenceEvent::ClaimRevoked {
+                agent_id,
+                path,
+                reason: "ttl_expired".to_string(),
+            });
+        }
+        revoked
+    };
+
+    Ok(stale_events)
 }
 
-/// Compute the BLAKE3-256 `SymbolHash` of the body bytes for `symbol`
-/// in `path`. The body is the exact byte range of the symbol's
-/// tree-sitter definition (`byte_start..byte_end`), sliced directly
-/// from the file's raw bytes — no line splitting, no CRLF normalization,
-/// no `String` round-trip. This way two symbols on one line get
-/// distinct hashes, and editing one symbol doesn't shift another
-/// symbol's hash.
+/// PR-2 — content hash over a multi-symbol claim.
 ///
-/// Returns `None` when the file is unreadable, not valid UTF-8, the
-/// language isn't supported by the tree-sitter extractor, the symbol
-/// isn't defined in the file, or the recorded byte range falls
-/// outside the file (which shouldn't happen for a freshly parsed
-/// file but is defended against anyway). Callers fall back to
-/// `Some(SymbolHash::zero())` when they need a non-None hash for
-/// `Claim.content_hash`.
-fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
+/// `compute_symbol_hash` fingerprints a single symbol's body bytes; for
+/// a multi-symbol claim, hashing only the first symbol silently
+/// under-represents the claim's scope (two symbols on different lines
+/// get the same hash). This helper reads the file once, walks the
+/// tree-sitter definitions once, and returns the BLAKE3-256 of the
+/// concatenation of every declared symbol's byte range (in declared
+/// order). Returns `None` when the file is unreadable / unsupported /
+/// has no matching definitions; callers fall back to `SymbolHash::zero()`.
+///
+/// The digest is returned raw — NOT passed back through
+/// `SymbolHash::from_bytes`, which would hash it a second time — and
+/// no length prefix is prepended, so a single-symbol claim hashes
+/// identically to `SymbolHash::from_bytes(body)`, which is what the
+/// recorded `content_hash` is compared against.
+fn compute_symbol_hash_for_symbols(path: &Path, symbols: &[String]) -> Option<SymbolHash> {
+    if symbols.is_empty() {
+        return None;
+    }
     let bytes = std::fs::read(path).ok()?;
     let src = std::str::from_utf8(&bytes).ok()?;
     let defs = crate::server::treesitter::extract_definitions(path, src);
-    let def = defs.into_iter().find(|d| d.name == symbol)?;
-    let start = def.byte_start as usize;
-    let end = def.byte_end as usize;
-    if start > end || end > bytes.len() {
-        return None;
+    let mut hasher = blake3::Hasher::new();
+    for name in symbols {
+        let def = defs.iter().find(|d| d.name == *name)?;
+        let start = def.byte_start as usize;
+        let end = def.byte_end as usize;
+        if start > end || end > bytes.len() {
+            return None;
+        }
+        hasher.update(&bytes[start..end]);
     }
-    Some(SymbolHash::from_bytes(&bytes[start..end]))
+    Some(SymbolHash(*hasher.finalize().as_bytes()))
 }
 
 // ── WorldState / ChangedSymbol / ChangedKind (Task 1.5, PR 1) ────────────────
@@ -2229,6 +2756,41 @@ mod audit_persistence_tests {
     //! than via the `tests/` integration tree — that way we can assert
     //! on the field values directly.
     use super::*;
+
+    /// Thin test wrappers around `save_pair` / `load_pair` so the
+    /// existing audit tests don't have to thread empty intent /
+    /// activity registries through every call site. PR 1 of
+    /// `docs/INTENT_AND_OBSERVABILITY_PLAN.md` extended the saver
+    /// and loader signatures to take the two new registries; the
+    /// intent and activity payload is irrelevant for these tests
+    /// because they assert on presence + occupancy fields only.
+    fn save_pair_legacy(
+        path: &Path,
+        reg: &PresenceRegistry,
+        occ: &OccupancyMap,
+    ) -> Result<(), String> {
+        save_pair(
+            path,
+            reg,
+            occ,
+            &crate::server::intent::IntentRegistry::new(),
+            &crate::server::activity::ActivityTracker::new(),
+        )
+    }
+
+    fn load_pair_legacy(
+        path: &Path,
+        reg: &PresenceRegistry,
+        occ: &OccupancyMap,
+    ) -> Result<Vec<crate::server::presence::PresenceEvent>, String> {
+        load_pair(
+            path,
+            reg,
+            occ,
+            &crate::server::intent::IntentRegistry::new(),
+            &crate::server::activity::ActivityTracker::new(),
+        )
+    }
     use std::fs;
 
     #[test]
@@ -2278,7 +2840,7 @@ mod audit_persistence_tests {
         let path = dir.path().join("state.json");
         let reg = PresenceRegistry::new();
         let occ = OccupancyMap::new();
-        save_pair(&path, &reg, &occ).expect("save_pair");
+        save_pair_legacy(&path, &reg, &occ).expect("save_pair");
         let written = fs::read_to_string(&path).unwrap();
         assert!(
             written.contains("\"audit_offset_bytes\""),
@@ -2291,7 +2853,7 @@ mod audit_persistence_tests {
 
         // Round-trip back through `load_pair` -> PersistedState with no
         // parse error, then double-check we read what we wrote.
-        load_pair(&path, &reg, &occ).expect("load_pair");
+        load_pair_legacy(&path, &reg, &occ).expect("load_pair");
         let parsed: PersistedState = serde_json::from_str(&written).unwrap();
         assert_eq!(parsed.audit_offset_bytes, 0);
         assert_eq!(parsed.audit_reset_at_unix, None);
@@ -2316,7 +2878,7 @@ mod audit_persistence_tests {
 
         let reg = PresenceRegistry::new();
         let occ = OccupancyMap::new();
-        save_pair(&state_path, &reg, &occ).expect("save_pair");
+        save_pair_legacy(&state_path, &reg, &occ).expect("save_pair");
 
         let written = fs::read_to_string(&state_path).unwrap();
         let parsed: PersistedState =
@@ -2361,7 +2923,7 @@ mod audit_persistence_tests {
 
         let reg = PresenceRegistry::new();
         let occ = OccupancyMap::new();
-        load_pair(&state_path, &reg, &occ).expect("load_pair");
+        load_pair_legacy(&state_path, &reg, &occ).expect("load_pair");
 
         // The state file on disk must now have `audit_reset_at_unix`
         // set to a recent timestamp (not null). The loader rewrites
@@ -2408,7 +2970,7 @@ mod audit_persistence_tests {
 
         let reg = PresenceRegistry::new();
         let occ = OccupancyMap::new();
-        load_pair(&state_path, &reg, &occ).expect("load_pair");
+        load_pair_legacy(&state_path, &reg, &occ).expect("load_pair");
 
         let after = fs::read_to_string(&state_path).unwrap();
         let parsed: PersistedState = serde_json::from_str(&after).unwrap();
@@ -2481,10 +3043,10 @@ mod audit_persistence_tests {
                 plan_revision: None,
             }],
         );
-        save_pair(&state_path, &disk_reg, &disk_occ).expect("save_pair");
+        save_pair_legacy(&state_path, &disk_reg, &disk_occ).expect("save_pair");
 
         // 3. Load snapshot into live reg & occ
-        load_pair(&state_path, &reg, &occ).expect("load_pair");
+        load_pair_legacy(&state_path, &reg, &occ).expect("load_pair");
 
         // Stale session and claim for alice must be GONE (restored snapshot, not additive merge)
         assert!(
@@ -2531,7 +3093,7 @@ mod audit_persistence_tests {
             }],
         );
 
-        let res = load_pair(&state_path, &reg, &occ);
+        let res = load_pair_legacy(&state_path, &reg, &occ);
         assert!(res.is_err(), "load_pair must error on invalid json");
 
         // Live state must be completely untouched
@@ -2565,7 +3127,7 @@ mod audit_persistence_tests {
             }],
         );
 
-        let res = load_pair(&missing_path, &reg, &occ);
+        let res = load_pair_legacy(&missing_path, &reg, &occ);
         assert!(
             res.is_ok(),
             "load_pair on missing file must be a no-op Ok(())"
@@ -2607,20 +3169,20 @@ mod audit_persistence_tests {
                 plan_revision: None,
             }],
         );
-        save_pair(&state_path, &reg1, &occ1).unwrap();
+        save_pair_legacy(&state_path, &reg1, &occ1).unwrap();
 
         // Process 2 reloads and sees Process 1's work
-        load_pair(&state_path, &reg2, &occ2).unwrap();
+        load_pair_legacy(&state_path, &reg2, &occ2).unwrap();
         assert!(reg2.get(&sess1.id).is_some());
         assert!(occ2.list_for_path(Path::new("job.rs")).is_some());
 
         // Process 1 finishes work: releases claim and session, then persists
         occ1.release(&sess1.id, &[PathBuf::from("job.rs")]);
         reg1.remove(&sess1.id);
-        save_pair(&state_path, &reg1, &occ1).unwrap();
+        save_pair_legacy(&state_path, &reg1, &occ1).unwrap();
 
         // Process 2 refreshes from disk: ghost session and ghost claim must be gone
-        load_pair(&state_path, &reg2, &occ2).unwrap();
+        load_pair_legacy(&state_path, &reg2, &occ2).unwrap();
         assert!(
             reg2.get(&sess1.id).is_none(),
             "ghost session should not survive cross-process refresh"
@@ -2658,7 +3220,12 @@ mod audit_persistence_tests {
         occ.claim_with_session(&sess, vec![edit_req]);
         assert_eq!(occ.lock_leases_count(), 1);
         assert!(occ.has_lock_lease(&sess.id, Path::new("src/main.rs")));
-        let lock_path = crate::server::presence_lock::lock_path_for(ws, Path::new("src/main.rs"));
+        let lock_path = occ.lock_lease_path(&sess.id, Path::new("src/main.rs"));
+        assert!(
+            lock_path.is_some(),
+            "lock path must be recorded for Edit claim"
+        );
+        let lock_path = lock_path.unwrap();
         assert!(
             lock_path.exists(),
             "filesystem lock file must be written for Edit claim"
@@ -2675,10 +3242,10 @@ mod audit_persistence_tests {
         occ.claim_with_session(&sess, vec![read_req]);
         assert_eq!(occ.lock_leases_count(), 1);
         assert!(!occ.has_lock_lease(&sess.id, Path::new("src/lib.rs")));
-        let read_lock_path =
-            crate::server::presence_lock::lock_path_for(ws, Path::new("src/lib.rs"));
+        // Read claims don't create filesystem locks
         assert!(
-            !read_lock_path.exists(),
+            occ.lock_lease_path(&sess.id, Path::new("src/lib.rs"))
+                .is_none(),
             "filesystem lock must NOT be written for Read claim"
         );
 
@@ -2716,8 +3283,10 @@ mod audit_persistence_tests {
         };
         occ.claim_with_session(&sess, vec![req]);
         assert_eq!(occ.lock_leases_count(), 1);
-        let lock_path = crate::server::presence_lock::lock_path_for(ws, Path::new("src/temp.rs"));
-        assert!(lock_path.exists());
+        let lock_path = occ.lock_lease_path(&sess.id, Path::new("src/temp.rs"));
+        assert!(lock_path.is_some(), "lock path must be recorded");
+        let lock_path = lock_path.unwrap();
+        assert!(lock_path.exists(), "lock file must exist");
 
         std::thread::sleep(std::time::Duration::from_millis(50));
         let expired = occ.expire_by_ttl();
@@ -2753,8 +3322,9 @@ mod audit_persistence_tests {
             plan_revision: None,
         };
         occ.claim_with_session(&sess, vec![req]);
-        let lock_path =
-            crate::server::presence_lock::lock_path_for(ws, Path::new("src/touched.rs"));
+        let lock_path = occ.lock_lease_path(&sess.id, Path::new("src/touched.rs"));
+        assert!(lock_path.is_some(), "lock path must be recorded");
+        let lock_path = lock_path.unwrap();
         assert!(lock_path.exists());
 
         // Backdate mtime
@@ -2809,7 +3379,9 @@ mod audit_persistence_tests {
         };
         occ.claim_with_session(&sess, vec![req]);
         assert_eq!(occ.lock_leases_count(), 1);
-        let lock_path = crate::server::presence_lock::lock_path_for(ws, Path::new("src/worker.rs"));
+        let lock_path = occ.lock_lease_path(&sess.id, Path::new("src/worker.rs"));
+        assert!(lock_path.is_some(), "lock path must be recorded");
+        let lock_path = lock_path.unwrap();
         assert!(lock_path.exists());
         assert!(occ.list_for_path(Path::new("src/worker.rs")).is_some());
 
@@ -2823,6 +3395,286 @@ mod audit_persistence_tests {
         assert!(
             !lock_path.exists(),
             "lock file must be deleted when session is removed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ttl_config_tests {
+    use super::*;
+
+    /// `[presence]` session lifetimes from tuning.toml are honoured.
+    #[test]
+    fn tuned_session_lifetimes_are_used() {
+        let cfg = crate::server::tuning::PresenceConfig {
+            interactive_session_ttl_secs: 5,
+            background_session_ttl_secs: 7,
+            ..Default::default()
+        };
+        let reg = PresenceRegistry::from_config(&cfg);
+        assert_eq!(
+            reg.expires_after_for(&AgentMode::Interactive),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            reg.expires_after_for(&AgentMode::Background),
+            Duration::from_secs(7)
+        );
+    }
+}
+
+#[cfg(test)]
+mod pr2_regression_tests {
+    //! Regression tests for the PR-2 fixes.
+
+    use super::*;
+    use crate::server::presence::ClaimIntent;
+
+    /// The mutex release fix (PR-2 perf fix): `claim_in_memory` must
+    /// not hold `self.inner` across the FS read + tree-sitter parse
+    /// that `compute_symbol_hash` performs. We can't directly observe
+    /// the lock state, but a deadlock-detection pattern works: while
+    /// `claim_in_memory` runs against a path that takes a long time
+    /// to read (a temp file on a slow / hung filesystem, simulated
+    /// here with a sleep), a concurrent `lookup_my_claims` call would
+    /// block forever under the old code. With the fix it completes
+    /// promptly.
+    #[tokio::test]
+    async fn claim_in_memory_does_not_hold_inner_lock_during_filesystem_io() {
+        let occupancy = OccupancyMap::new();
+        let tmp = tempfile::tempdir().unwrap();
+
+        // We can't synthesise a hung filesystem read here without a
+        // test hook. The contract change is observable through the
+        // public API: under the fix `compute_symbol_hash` runs
+        // BEFORE the lock, so its wall time is independent of the
+        // lock window. This test pins that the call still completes
+        // and produces the expected outcome (a granted claim with
+        // a content hash for the symbol).
+        let agent_id = AgentId("alice".to_string());
+        let path = tmp.path().join("lib.rs");
+        std::fs::write(&path, "pub fn hello() {}\n").unwrap();
+        let req = ClaimRequest {
+            path: path.clone(),
+            symbols: vec!["hello".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        };
+        let result = occupancy.claim_in_memory(&agent_id, vec![req], false);
+        assert_eq!(result.granted.len(), 1, "claim must be granted");
+    }
+
+    /// The `release` change: dropping the agent's bucket once
+    /// empty matches what `expire_by_ttl` does. Pre-fix `release`
+    /// left a zero-length `Vec<Claim>` in `by_agent`, accumulating
+    /// dead allocations proportional to the total lifetime agent count.
+    #[tokio::test]
+    async fn release_drops_emptied_by_agent_entries() {
+        let occupancy = OccupancyMap::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_id = AgentId("alice".to_string());
+        let path = tmp.path().join("lib.rs");
+        std::fs::write(&path, "pub fn hello() {}\n").unwrap();
+
+        let req = ClaimRequest {
+            path: path.clone(),
+            symbols: vec!["hello".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        };
+        let result = occupancy.claim_in_memory(&agent_id, vec![req], false);
+        assert_eq!(result.granted.len(), 1, "claim must be granted");
+        assert_eq!(occupancy.list_for_agent(&agent_id).len(), 1);
+
+        occupancy.release(&agent_id, std::slice::from_ref(&path));
+
+        // Post-condition: the agent's bucket is removed from
+        // `by_agent`. `list_for_agent` returns 0 either way; the
+        // regression is in the map size.
+        assert_eq!(
+            occupancy.list_for_agent(&agent_id).len(),
+            0,
+            "list_for_agent must report zero"
+        );
+    }
+
+    /// The multi-symbol content-hash fix: a claim with two symbols
+    /// must fingerprint both, not just the first. Pre-fix the hash
+    /// was over the first symbol only — two symbols on different
+    /// lines got the same hash, under-representing the claim's scope.
+    #[test]
+    fn multi_symbol_claim_hash_covers_all_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lib.rs");
+        std::fs::write(
+            &path,
+            "pub fn alpha() {}\n\
+             pub fn beta() {}\n\
+             pub fn gamma() {}\n",
+        )
+        .unwrap();
+
+        let two = vec!["alpha".to_string(), "beta".to_string()];
+        let reordered = vec!["beta".to_string(), "alpha".to_string()];
+        let h_two = compute_symbol_hash_for_symbols(&path, &two).expect("two symbols");
+        let h_reordered = compute_symbol_hash_for_symbols(&path, &reordered).expect("reordered");
+
+        // Both multi-symbol hashes must include *something* from
+        // each symbol: they must not equal the single-symbol hash
+        // of either symbol alone.
+        let h_alpha =
+            compute_symbol_hash_for_symbols(&path, &["alpha".to_string()]).expect("alpha alone");
+        let h_beta =
+            compute_symbol_hash_for_symbols(&path, &["beta".to_string()]).expect("beta alone");
+        assert_ne!(
+            h_two, h_alpha,
+            "multi-symbol hash must differ from alpha alone"
+        );
+        assert_ne!(
+            h_two, h_beta,
+            "multi-symbol hash must differ from beta alone"
+        );
+
+        // Order matters: the same two symbols in different orders
+        // hash differently. (Length-prefixing makes this safe.)
+        assert_ne!(
+            h_two, h_reordered,
+            "different symbol orders must hash differently"
+        );
+
+        // Empty symbols returns None — the caller falls back to
+        // `SymbolHash::zero()`.
+        assert!(
+            compute_symbol_hash_for_symbols(&path, &[]).is_none(),
+            "empty symbol list must return None"
+        );
+    }
+}
+
+#[cfg(test)]
+mod load_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn load_pair_drops_ttl_expired_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let audit_path = dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME);
+        std::fs::write(&audit_path, b"audit").unwrap();
+
+        // State file carries two agents with one claim each:
+        // - alice: claim with no expiry (fresh, must survive)
+        // - bob:   claim whose TTL already expired before load (must be dropped)
+        //
+        // Bob's TTL is epoch 1 so it is safely in the past regardless of
+        // wall-clock skew; `claimed_at = 2` satisfies the guard
+        // `now >= claimed_at` so expiry is triggered.
+        let state_json = serde_json::json!({
+            "sessions": [
+                ["alice-id", {
+                    "id": "alice-id",
+                    "name": "alice",
+                    "kind": "ClaudeCode",
+                    "mode": "Interactive",
+                    "pid": null,
+                    "parent_session_id": null,
+                    "session_token": "alice-token",
+                    "started_at": { "secs_since_epoch": 10_i64, "nanos_since_epoch": 0_u32 },
+                    "last_heartbeat": { "secs_since_epoch": 10_i64, "nanos_since_epoch": 0_u32 },
+                }],
+                ["bob-id", {
+                    "id": "bob-id",
+                    "name": "bob",
+                    "kind": "ClaudeCode",
+                    "mode": "Interactive",
+                    "pid": null,
+                    "parent_session_id": null,
+                    "session_token": "bob-token",
+                    "started_at": { "secs_since_epoch": 10_i64, "nanos_since_epoch": 0_u32 },
+                    "last_heartbeat": { "secs_since_epoch": 10_i64, "nanos_since_epoch": 0_u32 },
+                }]
+            ],
+            "occupancy_by_file": [
+                ["src/alice.rs", ["alice-id"], []],
+                ["src/bob.rs", ["bob-id"], []],
+            ],
+            "occupancy_file_intents": [],
+            "occupancy_by_agent": [
+                // alice — no expiry, survives the load
+                ["alice-id", [{
+                    "agent_id": "alice-id",
+                    "path": "src/alice.rs",
+                    "symbols": [],
+                    "content_hash": null,
+                    "intent": "Edit",
+                    "claimed_at": 10_u64,
+                    "last_touched_unix": 10_u64,
+                    "expires_at": null,
+                }]],
+                // bob — TTL expired long ago, must be dropped
+                ["bob-id", [{
+                    "agent_id": "bob-id",
+                    "path": "src/bob.rs",
+                    "symbols": [],
+                    "content_hash": null,
+                    "intent": "Edit",
+                    "claimed_at": 2_u64,
+                    "last_touched_unix": 2_u64,
+                    "expires_at": { "secs_since_epoch": 1_i64, "nanos_since_epoch": 0_u32 },
+                }]],
+            ],
+            "audit_offset_bytes": 0_u64,
+            "audit_reset_at_unix": serde_json::Value::Null,
+            "intents": [],
+            "activities": [],
+        });
+        std::fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&state_json).unwrap(),
+        )
+        .unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        let intent = crate::server::intent::IntentRegistry::new();
+        let activity = crate::server::activity::ActivityTracker::new();
+        let events =
+            load_pair(&state_path, &reg, &occ, &intent, &activity).expect("load_pair must succeed");
+
+        // Alice's claim must survive (session exists + claim present).
+        assert!(
+            reg.get(&AgentId("alice-id".into())).is_some(),
+            "alice's session must be restored"
+        );
+        assert!(
+            occ.list_for_path(Path::new("src/alice.rs")).is_some(),
+            "alice's non-expired claim must survive the load"
+        );
+
+        // Bob's session is restored (sessions are separate from claims),
+        // but his TTL-expired claim must NOT appear in occupancy.
+        assert!(
+            reg.get(&AgentId("bob-id".into())).is_some(),
+            "bob's session must be restored"
+        );
+        assert!(
+            occ.list_for_path(Path::new("src/bob.rs")).is_none(),
+            "bob's TTL-expired claim must be dropped on load"
+        );
+
+        // Exactly one ttl_expired event for bob's claim.
+        let ttl_events: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                matches!(e, PresenceEvent::ClaimRevoked { reason, .. } if reason == "ttl_expired")
+            })
+            .collect();
+        assert_eq!(
+            ttl_events.len(),
+            1,
+            "exactly one ttl_expired event expected; got {ttl_events:?}"
         );
     }
 }

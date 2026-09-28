@@ -25,6 +25,7 @@ pub mod tuning;
 pub mod nlp;
 pub mod overlay;
 pub mod revision_log;
+pub mod runtime_trace;
 pub mod sensors;
 pub mod sync_status;
 pub mod toolchains;
@@ -36,8 +37,11 @@ pub mod readiness;
 pub mod reload;
 
 // Multiplayer awareness
+pub mod activity;
 pub mod annotations;
 pub mod attribution;
+pub mod evaluation;
+pub mod intent;
 pub mod presence;
 pub mod presence_lock;
 pub mod sentinel;

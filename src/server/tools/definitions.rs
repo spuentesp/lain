@@ -34,6 +34,8 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "find_symbol"
             | "search_code"
             | "get_agent_strategy"
+            | "list_packages"
+            | "load_package"
             | "get_server_status"
             | "list_recent_projects"
             | "get_reload_status"
@@ -72,6 +74,9 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "resolve_annotation"
             | "leave_handoff_note"
             | "get_pending_handoffs"
+            | "unregister_agent"
+            | "lain_intent"
+            | "list_active_intents"
     ) {
         return Some(GraphIndependent);
     }
@@ -112,6 +117,10 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "get_cross_repo_blast_radius"
             | "get_cross_repo_blast_radius_for_repo"
             | "get_workspace_graph"
+            // Tier 3 — dynamic-dispatch mitigation. Reads the static
+            // graph, the overlay, the heuristic sensor's edges, and
+            // the runtime trace store; needs the graph to be indexed.
+            | "explain_dispatch"
     ) {
         return Some(GraphRequired);
     }

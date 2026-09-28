@@ -106,11 +106,11 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         // possible (so `limit=5` lands as a number, `active=true`
         // as a bool); otherwise left as strings. This mirrors the
         // behavior callers get from a JSON object.
+        let schema = tool_input_schema(tool);
         let mut map = serde_json::Map::new();
         for arg in args {
             if let Some((k, v)) = arg.split_once('=') {
-                let parsed = serde_json::from_str(v).unwrap_or_else(|_| json!(v));
-                map.insert(k.to_string(), parsed);
+                map.insert(k.to_string(), typed_value(schema.as_ref(), k, v)?);
             }
         }
         Value::Object(map)
@@ -122,13 +122,12 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         serde_json::from_str(&args[0])
             .with_context(|| format!("parse JSON object from oneshot arg: {}", args[0]))?
     } else {
-        // Form 3: bare positional. Wrap the first bare arg as
-        // `{"symbol": <arg>}` for the common single-symbol tools.
-        let first = &args[0];
-        let parsed = serde_json::from_str(first).unwrap_or_else(|_| json!(first));
-        let mut map = serde_json::Map::new();
-        map.insert("symbol".into(), parsed);
-        Value::Object(map)
+        // Form 3: bare positionals, assigned to the tool's required
+        // arguments in the order its schema declares them:
+        // `get_call_chain login helper` -> {from, to}, `find_symbol x` ->
+        // {name}. Only the first was used, always as `symbol`, so both of
+        // those failed with "missing required argument".
+        positional_args(tool, args)?
     };
 
     let timeout_secs: u64 = std::env::var("LAIN_ONESHOT_TIMEOUT")
@@ -211,11 +210,19 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
             .pointer("/result/content/0/text")
             .and_then(|v| v.as_str())
             .and_then(|text| serde_json::from_str::<Value>(text).ok());
-        let is_warming_up = gate_envelope
-            .as_ref()
-            .and_then(|v| v.get("state"))
-            .and_then(|s| s.as_str())
-            == Some("warming_up");
+        // An ungated tool answers mid-index with a partial result and a
+        // "still indexing" note. A persistent client can ask again later;
+        // a one-shot cannot, so wait for the whole index like the gate does.
+        let partial = response
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t.contains(crate::server::mcp::handler::INDEXING_NOTE_MARKER));
+        let is_warming_up = partial
+            || gate_envelope
+                .as_ref()
+                .and_then(|v| v.get("state"))
+                .and_then(|s| s.as_str())
+                == Some("warming_up");
         if !is_warming_up {
             break response;
         }
@@ -276,4 +283,135 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         ));
     }
     Ok(())
+}
+
+/// Map bare positional arguments onto `tool`'s required arguments,
+/// then (when it has none) onto its optional string arguments in
+/// declaration order — e.g. `lain oneshot find_dead_code <like>`.
+fn positional_args(tool: &str, args: &[String]) -> Result<Value> {
+    let schema_owned = tool_input_schema(tool);
+    let schema = schema_owned.as_ref();
+    let required: Vec<String> = schema
+        .and_then(|s| s.get("required"))
+        .and_then(|r| r.as_array())
+        .map(|r| {
+            r.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_property = |name: &str| {
+        schema
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.get(name))
+            .is_some()
+    };
+    let names: Vec<String> = if !required.is_empty() {
+        required
+    } else if has_property("symbol") || schema.is_none() {
+        vec!["symbol".to_string()]
+    } else {
+        schema
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.as_object())
+            .map(|p| {
+                p.keys()
+                    .filter(|k| {
+                        p.get(*k)
+                            .and_then(|v| v.get("type"))
+                            .and_then(|t| t.as_str())
+                            == Some("string")
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if args.len() > names.len() {
+        anyhow::bail!(
+            "`{tool}` takes {} positional argument(s) ({}); got {}. Use key=value for the others.",
+            names.len(),
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            },
+            args.len()
+        );
+    }
+    let mut map = serde_json::Map::new();
+    for (name, raw) in names.iter().zip(args) {
+        map.insert(name.clone(), typed_value(schema, name, raw)?);
+    }
+    Ok(Value::Object(map))
+}
+
+fn tool_input_schema(tool: &str) -> Option<Value> {
+    crate::server::mcp::definitions::dump_tools_schema(&[])
+        .into_iter()
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(tool))
+        .and_then(|t| t.get("inputSchema").cloned())
+}
+
+/// A command-line value converted to the type the tool's schema declares
+/// for `name`. Guessing from the text turned `find_symbol 2024` into a
+/// number the tool refused, and let `limit=abc` through as a string the
+/// tool silently ignored.
+fn typed_value(schema: Option<&Value>, name: &str, raw: &str) -> Result<Value> {
+    let declared = schema
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.get(name))
+        .and_then(|p| p.get("type"))
+        .and_then(|t| t.as_str());
+    match declared {
+        Some("string") => Ok(json!(raw)),
+        Some("integer") => raw
+            .parse::<i64>()
+            .map(|n| json!(n))
+            .map_err(|_| anyhow!("`{name}` must be an integer, got '{raw}'")),
+        Some("number") => raw
+            .parse::<f64>()
+            .map(|n| json!(n))
+            .map_err(|_| anyhow!("`{name}` must be a number, got '{raw}'")),
+        Some("boolean") => raw
+            .parse::<bool>()
+            .map(|b| json!(b))
+            .map_err(|_| anyhow!("`{name}` must be true or false, got '{raw}'")),
+        // Arrays, objects, or no schema: JSON if it parses, else text.
+        _ => Ok(serde_json::from_str(raw).unwrap_or_else(|_| json!(raw))),
+    }
+}
+
+#[cfg(test)]
+mod positional_tests {
+    use super::*;
+
+    #[test]
+    fn optional_string_args_take_positionals_when_nothing_is_required() {
+        let v = positional_args("find_dead_code", &["auth handler".into()]).unwrap();
+        assert_eq!(v, json!({"like": "auth handler"}));
+    }
+
+    #[test]
+    fn values_follow_the_schema_types() {
+        let v = positional_args("find_symbol", &["2024".into()]).unwrap();
+        assert_eq!(v, json!({"name": "2024"}));
+        let schema = tool_input_schema("find_anchors");
+        assert!(typed_value(schema.as_ref(), "limit", "abc").is_err());
+        assert_eq!(
+            typed_value(schema.as_ref(), "limit", "5").unwrap(),
+            json!(5)
+        );
+    }
+
+    #[test]
+    fn positionals_follow_the_required_arguments() {
+        let v = positional_args("get_call_chain", &["login".into(), "helper".into()]).unwrap();
+        assert_eq!(v, json!({"from": "login", "to": "helper"}));
+        let v = positional_args("find_symbol", &["helper".into()]).unwrap();
+        assert_eq!(v, json!({"name": "helper"}));
+        let v = positional_args("get_blast_radius", &["helper".into()]).unwrap();
+        assert_eq!(v, json!({"symbol": "helper"}));
+        assert!(positional_args("find_symbol", &["a".into(), "b".into()]).is_err());
+    }
 }
