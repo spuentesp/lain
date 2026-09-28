@@ -571,10 +571,18 @@ copy. Use a different tool if:
 
 - **Your codebase is under ~1k LOC.** The graph is overkill; a
   reader and a good outline beat a query language.
-- **Your monorepo has no dominant language and you need uniform
-  coverage.** Lain's extractor coverage is uneven across
-  languages. Rust and TypeScript are first-class; everything
-  else is best-effort.
+- **Your monorepo leans on languages outside the built-in
+  fourteen.** Extraction and who-calls are uniform across Rust,
+  Python, TypeScript, JavaScript, Go, Java, C, C++, C#, Ruby,
+  Swift, Kotlin, Scala and PHP (plus the `<script>` blocks of Vue
+  and Svelte) — every one gets definitions and a call graph with
+  nothing else installed, verified symbol-by-symbol against a
+  textual oracle (`scripts/acceptance/breadth.py`, disagreements
+  hand-reviewed in `breadth_reviewed.json`). Anything outside that
+  list is not indexed at all. What *is* uneven is enrichment:
+  optional language servers deepen signatures and reference
+  resolution where they exist (deepest with rust-analyzer) and are
+  simply absent elsewhere.
 - **You need a verifier, not a navigator.** Lain answers "what
   does this code do, and what depends on it?" It does not
   answer "is this code correct?" Use a type-checker, a
