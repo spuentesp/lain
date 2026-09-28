@@ -7,9 +7,11 @@ description: Use when working alongside other agents with Lain — "claim these 
 
 Multiplayer plumbing is hidden from the default surface because
 **hooks usually drive it** — `hooks/<agent>/` scripts call
-`claim_files` / `heartbeat` / `release_files` directly, and hidden
-tools still dispatch (advertising is not dispatch). Load these
-packages only when *you* are managing the coordination yourself.
+`claim_files` / `heartbeat` / `release_files` directly. Tools are
+callable by name even when hidden, but `load_package` makes them
+appear in `tools/list`; many MCP clients only permit tools their
+cached list contains. Load these packages only when *you* are
+managing the coordination yourself.
 
 ## Load them
 
@@ -41,6 +43,13 @@ you changed and what you did NOT do. `get_pending_handoffs` when you
 start. `lain_intent` / `list_active_intents` for the plan board;
 `add_annotation` / `list_annotations` / `resolve_annotation` for
 notes pinned to code.
+
+Example payloads (copy verbatim, fill in values):
+```
+add_annotation  →  target={"kind":"symbol","symbol":"MyFn","repo_id":"..."},
+                   kind="note", body="..."
+leave_handoff_note  →  body="[scope:auth] did X; Y still open", scope="auth"
+```
 
 ## Rules of thumb
 

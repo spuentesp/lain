@@ -12,8 +12,11 @@ Load it when you actually intend to run something.
 ## Load it
 
 Call `load_package("verify")` — or set `LAIN_TOOL_PROFILE=verify`
-at config time for agents that routinely verify. If the tools do
-not appear after loading, reconnect the client and refetch.
+at config time for agents that routinely verify. `load_package`
+makes the tools appear in `tools/list`; tools are callable by
+name even when hidden, but many MCP clients only permit tools
+their cached list contains. If the tools do not appear after
+loading, reconnect the client and refetch.
 
 ## The tools
 

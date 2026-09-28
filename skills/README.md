@@ -52,6 +52,6 @@ then `load_package("<package>")`. The response announces the tools
 it brings and flags `tools_list_changed` — **if the new tools do not
 appear, reconnect the MCP client** (most clients refetch on the
 notification; a few cache `tools/list` for the session). Tools are
-callable by name even when hidden — advertising is not dispatch —
-but a client that validates against its cached list will refuse
-them until it refreshes.
+callable by name even when hidden, but `load_package` is what makes
+them appear in `tools/list`; a client that validates against its
+cached list will refuse hidden tools until it refreshes.
