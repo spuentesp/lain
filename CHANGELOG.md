@@ -287,7 +287,7 @@ All notable changes to LAIN are documented here. Versions follow
   Advertising is not dispatch: hook scripts keep calling hidden tools,
   so hook-driven multiplayer is unaffected. The active profile is
   exposed through `get_capabilities.tool_profile`. The on-disk
-  `docs/tool-schema.json` (82 tools) is the canonical full surface;
+  `docs/tool-schema.json` (84 tools) is the canonical full surface;
   schema-drift CI validates it against `tools/list` under `full`.
 
 - **LSP prewarm visibility + operator knobs.** `GET /health` now

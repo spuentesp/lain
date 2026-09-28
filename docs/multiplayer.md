@@ -48,10 +48,9 @@ Command Center consumes.
 ## Operator quickstart
 
 Multiplayer is always on. Start `lain server` like you already do — the
-extra surface is 16 MCP tools (10 listed inline below, plus 6 more
-listed in their respective sections) plus the `POST /hook`
-observation endpoint and the SSE feed that the existing Command
-Center picks up automatically:
+extra surface is 21 MCP tools (the Session, Social, and Notes packages)
+plus the `POST /hook` observation endpoint and the SSE feed that the
+existing Command Center picks up automatically:
 
 ```bash
 # Start lain with the multiplayer features enabled (always-on in v0.5+)
@@ -62,7 +61,7 @@ What's new on the wire:
 
 | Surface | Purpose |
 |---|---|
-| 16 MCP tools (the multiplayer surface) | Presence: `register_agent`, `heartbeat`, `unregister_agent`, `list_active_agents`, `who_am_i`, `list_subagents`, `my_claims`. Coordination: `claim_files`, `release_files`, `list_occupancy`. Intent: `lain_intent`, `list_active_intents`. Diagnostics: `detect_overlap`, `get_audit_log`, `get_world_state`, `get_recent_activity`. (10 are listed inline below; the remaining 6 are documented in their respective sections.) |
+| 21 MCP tools (the multiplayer surface) | Presence: `register_agent`, `heartbeat`, `unregister_agent`, `list_active_agents`, `who_am_i`, `list_subagents`, `my_claims`. Coordination: `claim_files`, `release_files`, `list_occupancy`. Intent: `lain_intent`, `list_active_intents`. Diagnostics: `detect_overlap`, `get_audit_log`, `get_world_state`, `get_recent_activity`. (The remaining 5 rows each document one tool or tool group.) |
 | `register_agent`, `heartbeat`, `list_active_agents`, `who_am_i`, `claim_files`, `release_files`, `list_occupancy`, `my_claims` | The eight core call-shape tools introduced with the layer. |
 | `unregister_agent` | Tear down an agent's session: releases every claim, drops the intent + activity feed entries, removes the presence session. See [Lifecycle](#lifecycle). |
 | `lain_intent`, `list_active_intents` | The intent layer: declare a goal + scope, get a coordination level back (GREEN / YELLOW / RED). See [Intent layer](#intent-layer). |
@@ -309,7 +308,7 @@ via `list_subagents` (passing its own session token).
 The MCP tool `detect_overlap` finds symbol-level conflicts between two git refs in the active workspace:
 
 ```bash
-lain detect_overlap --base HEAD~1 --head HEAD --workspace backend
+lain hooks overlap-check --url http://localhost:9999 --base HEAD~1 --head HEAD --workspace backend
 ```
 
 Returns:
