@@ -222,3 +222,4 @@ Other gates:
 | 2026-09-28 | Implementation-ready rewrite, checked against v0.8.0 code: config-free sensors + `ContractIndex`; bincode compatibility via version bumps only; sensor phases and self-replacing output; `IndexMode::Snapshot`; LAIN-owned mirrors; canonical digest; recorded `join_config`; contract-tool infra (`ContractToolEntry`, schemas on `ToolDef`); bound-identifier field tracking with escapes; consumer-side diff; `ChangedWithoutSchema`; nested-field rule; full signatures, limits, error codes; decisions replace open questions |
 | 2026-09-28 | PR 1 done: `scripts/contracts-fixture.sh`, ground truth, scenario tags; review clean after one fix round |
 | 2026-09-29 | PR 2 done: F1 `GlobalId` percent-encoding; review clean after one fix round |
+| 2026-09-29 | PR 3 done: schema v3 (types, version bumps, migration note); review clean, no fix round |
