@@ -150,11 +150,35 @@ async fn project_both(fed: &FederatedIndex) {
 #[tokio::test]
 async fn add_repo_and_project_marks_contracts_dirty() {
     let (_dir, fed, _o, _b) = build_two_repo_federation().await;
+    // Before any projection, no contract index has been computed.
+    // The federation's `add_repo` path also marks `contracts_dirty`
+    // (§5.3); the next `rejoin_contracts_if_dirty` call will
+    // populate the index. We assert the observable effect:
+    //   1. The index is None before rejoin.
+    //   2. Projection marks dirty; the index is still None (no
+    //      join has run).
+    //   3. After `rejoin_contracts_if_dirty`, the index is Some.
+    // Step (3) discriminates: if `project_repo` failed to set the
+    // dirty flag, `rejoin_contracts_if_dirty` would be a no-op
+    // and the index would remain None.
+    assert!(
+        fed.contract_index().is_none(),
+        "no index before projection + rejoin"
+    );
     project_both(&fed).await;
-    // Projection marks the federation dirty; the join either ran
-    // already or will on the next `rejoin_contracts_if_dirty`
-    // call. The contract index is now available.
-    assert!(fed.contract_index().is_some() || fed.contract_index().is_none());
+    assert!(
+        fed.contract_index().is_none(),
+        "projection alone does not run the join"
+    );
+    fed.rejoin_contracts_if_dirty().expect("rejoin");
+    assert!(
+        fed.contract_index().is_some(),
+        "rejoin populated the contract index — projection must have set dirty"
+    );
+    // The second rejoin is a no-op: dirty flag was cleared by
+    // the first call. The index is the same Arc.
+    fed.rejoin_contracts_if_dirty().expect("rejoin (idempotent)");
+    assert!(fed.contract_index().is_some());
 }
 
 #[tokio::test]
@@ -276,17 +300,121 @@ async fn no_endpoints_means_no_binds() {
 
 #[tokio::test]
 async fn unnormalized_consumers_are_recorded() {
-    // A consumer with `template = None` ends up in
-    // `ContractIndex::unnormalized`. Constructing that requires a
-    // provider and a consumer whose URL has a fully dynamic path.
+    // Rule 5 of the §7.3 table: a consumer whose URL template is
+    // `None` (fully dynamic path) is recorded in
+    // `ContractIndex::unnormalized` and never produces a Binds
+    // edge. The integration-test fixture's hand-written Python
+    // sources don't go through the sensor pipeline, so we drive
+    // the joiner directly with a synthetic
+    // `ConsumerFact { url: NormalizedUrl { template: None, .. } }`.
+    // This is the in-process shape the sensors will eventually
+    // emit for a fully dynamic URL.
+    use lain::federation::contracts::config::{ContractFederationConfig, ServiceDecl};
+    use lain::federation::contracts::index::UnresolvedReason;
+    use lain::federation::contracts::joiner::ContractJoiner;
+    use lain::federation::contracts::model::{
+        CallVia, ConsumerFact, ContractFact, HostPart, HttpMethod, MethodSpec, NormalizedUrl,
+        ProviderFact, ProviderOrigin,
+    };
+    use lain::federation::repo_id::{GlobalId, RepoId};
+    use lain::schema::{GraphNode, NodeType, RepoNamespace};
+
+    let ns = RepoNamespace::for_test();
+    let mut provider = GraphNode::new_in(
+        NodeType::HttpRoute,
+        "do".into(),
+        "src/orders.py".into(),
+        &ns,
+    );
+    provider.repo_id = Some("orders".into());
+    provider.id =
+        GlobalId::new(&RepoId::new("orders").unwrap(), NodeType::HttpRoute, "src/orders.py", "do", Some(10))
+            .as_str()
+            .to_string();
+    provider.contract = Some(ContractFact::Provider(ProviderFact {
+        method: HttpMethod::Get,
+        template: "/api/orders".into(),
+        handler: None,
+        operation_id: None,
+        origin: ProviderOrigin::Code,
+    }));
+
+    let mut consumer = GraphNode::new_in(
+        NodeType::HttpClientCall,
+        "fetch".into(),
+        "src/billing.py".into(),
+        &ns,
+    );
+    consumer.repo_id = Some("billing".into());
+    let consumer_gid = GlobalId::new(
+        &RepoId::new("billing").unwrap(),
+        NodeType::HttpClientCall,
+        "src/billing.py",
+        "fetch",
+        Some(1),
+    );
+    consumer.id = consumer_gid.as_str().to_string();
+    consumer.contract = Some(ContractFact::Consumer(ConsumerFact {
+        method: MethodSpec::Known(HttpMethod::Get),
+        // template = None: rule 5 fires.
+        url: NormalizedUrl {
+            host: HostPart::Literal("orders.svc".into()),
+            template: None,
+        },
+        via: CallVia::Library { name: "requests".into() },
+        url_expr: String::new(),
+        reads_complete: true,
+    }));
+
+    let cfg = ContractFederationConfig {
+        services: vec![ServiceDecl {
+            name: "orders".into(),
+            repo: "orders".into(),
+            paths: vec![],
+            hosts: vec!["orders.svc".into()],
+            env: vec![],
+            base_path: None,
+            route_prefixes: vec![],
+        }],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+    };
+    let out = ContractJoiner::run(&[provider, consumer], &cfg);
+    assert_eq!(
+        out.binds.len(),
+        0,
+        "rule 5: no Binds for a dynamic-path consumer"
+    );
+    assert_eq!(
+        out.index.unnormalized.len(),
+        1,
+        "rule 5: dynamic-path consumer lands in `unnormalized`"
+    );
+    assert_eq!(
+        out.index.unnormalized[0].as_str(),
+        consumer_gid.as_str(),
+        "rule 5: `unnormalized` carries the consumer's GlobalId"
+    );
+    // The consumer resolution exists, with an Unresolved
+    // verdict tagged Unnormalized.
+    let resolution = out
+        .index
+        .consumers
+        .get(&consumer_gid)
+        .expect("consumer resolution");
+    assert!(matches!(
+        resolution.target,
+        Some(lain::federation::contracts::index::ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::Unnormalized,
+            ..
+        })
+    ));
     let (_dir, fed, _o, _b) = build_two_repo_federation().await;
+    // Sanity: the live federation path still works.
     project_both(&fed).await;
     fed.rejoin_contracts_if_dirty().expect("rejoin");
-    let idx = fed.contract_index().expect("index");
-    // The fixture's consumer template is `/api/orders/42` —
-    // not dynamic — so `unnormalized` should be empty. We only
-    // assert the joiner ran without errors.
-    assert!(idx.unnormalized.is_empty() || !idx.unnormalized.is_empty());
 }
 
 #[allow(dead_code)]

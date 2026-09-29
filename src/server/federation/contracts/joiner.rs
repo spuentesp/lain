@@ -81,7 +81,7 @@ impl ContractJoiner {
         // Step 2 — build endpoints (§7.2). Group provider nodes by
         // (service, method, template_after_prefixes). Code +
         // OpenAPI merge into one endpoint with two providers.
-        let (endpoint_table, endpoint_providers) = build_endpoints(nodes, &assignments, config);
+        let endpoint_table = build_endpoints(nodes, &assignments, config);
 
         // Step 3 — filter wrapper candidates (§7.3 rule 1).
         let http_clients = compile_http_clients(config);
@@ -289,10 +289,6 @@ impl ContractJoiner {
                 },
             );
         }
-        // Note: `endpoint_providers` is only used in the construction
-        // loop above; ensure the binding is read so the compiler does
-        // not drop the table.
-        let _ = &endpoint_providers;
 
         let index = ContractIndex {
             services,
@@ -417,10 +413,7 @@ fn build_endpoints(
     nodes: &[GraphNode],
     assignments: &BTreeMap<String, ServiceName>,
     config: &ContractFederationConfig,
-) -> (
-    BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
-    BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
-) {
+) -> BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>> {
     let mut table: BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>> =
         BTreeMap::new();
     for node in nodes {
@@ -469,8 +462,7 @@ fn build_endpoints(
                 method,
             });
     }
-    let table2 = table.clone();
-    (table, table2)
+    table
 }
 
 fn is_wrapper_candidate(consumer: &crate::federation::contracts::model::ConsumerFact) -> bool {

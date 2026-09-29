@@ -242,8 +242,7 @@ impl ContractFederationConfig {
         for s in &self.services {
             for (i, a) in s.paths.iter().enumerate() {
                 for b in s.paths.iter().skip(i + 1) {
-                    let a_b = path_prefixes_overlap(a, b);
-                    if a_b {
+                    if path_prefixes_overlap(a, b) {
                         return Err(LainError::Config(format!(
                             "service '{}' has overlapping paths '{a}' and '{b}'",
                             s.name
