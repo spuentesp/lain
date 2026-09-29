@@ -442,10 +442,6 @@ if [ -s "$WORK/spa/spa-tour.webm" ]; then
     -ss 5 -i "$WORK/spa/spa-tour.webm" -frames:v 1 \
     -vf "scale=1280:-1" \
     "$ARTIFACTS_SS/lain-demo-spa-overview.png" 2>/dev/null
-  ffmpeg -y -hide_banner -loglevel error \
-    -ss 30 -i "$WORK/spa/spa-tour.webm" -frames:v 1 \
-    -vf "scale=1280:-1" \
-    "$ARTIFACTS_SS/lain-demo-graph.png" 2>/dev/null
 fi
 if [ -s "$WORK/chapters/01-bootstrap.mp4" ]; then
   ffmpeg -y -hide_banner -loglevel error \
