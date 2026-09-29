@@ -155,6 +155,19 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::{GraphNode, NodeType, RepoNamespace};
+
+    fn db(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    fn fn_with_range(name: &str, path: &str, start: u32, end: u32) -> GraphNode {
+        let ns = RepoNamespace::for_test();
+        GraphNode::new_in(NodeType::Function, name.to_string(), path.to_string(), &ns)
+            .with_location_in(start, end, &ns)
+    }
 
     #[test]
     fn snake_case_handles_camel_and_pascal() {
@@ -201,6 +214,97 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "a.proto"),
             "walker missed the file: {names:?}"
+        );
+    }
+
+    /// `enclosing_symbol` returns the smallest range covering the
+    /// line. A 50-line nested function must beat a 200-line
+    /// surrounding one for a line inside both — otherwise the
+    /// joiner (PR 7) would attach every `SendsHttp` to the
+    /// outermost symbol.
+    #[test]
+    fn enclosing_symbol_returns_the_smallest_range() {
+        let g = db("enclosing_smallest");
+        let outer = fn_with_range("outer", "src/x.py", 1, 200);
+        let inner = fn_with_range("inner", "src/x.py", 50, 100);
+        g.insert_nodes_batch(&[outer.clone(), inner.clone()]).unwrap();
+
+        let found = enclosing_symbol(&g, "src/x.py", 75).expect("a symbol covers line 75");
+        assert_eq!(found.name, "inner", "smallest range wins");
+        assert_eq!(found.id, inner.id);
+    }
+
+    /// When two symbols span exactly the same number of lines, the
+    /// one whose `line_start` is later wins — a nested helper
+    /// declared further down the file is more specific than the
+    /// outer block that starts at the top.
+    #[test]
+    fn enclosing_symbol_breaks_range_ties_by_later_line_start() {
+        let g = db("enclosing_tie");
+        // Both ranges span 100 lines; B's line_start (50) is later
+        // than A's (1), so B wins on line 75.
+        let a = fn_with_range("a", "src/x.py", 1, 101);
+        let b = fn_with_range("b", "src/x.py", 50, 150);
+        g.insert_nodes_batch(&[a.clone(), b.clone()]).unwrap();
+
+        let found = enclosing_symbol(&g, "src/x.py", 75).expect("a symbol covers line 75");
+        assert_eq!(found.name, "b", "tie → later line_start");
+        assert_eq!(found.id, b.id);
+    }
+
+    /// A `File` node whose own range covers the line must not be
+    /// returned — `SendsHttp` and `Calls` always attach to a
+    /// `Function` or `Method`, never to the enclosing file.
+    #[test]
+    fn enclosing_symbol_excludes_non_function_nodes() {
+        let g = db("enclosing_file_excluded");
+        let file = fn_with_range("file", "src/x.py", 1, 100);
+        let mut file_node = file.clone();
+        file_node.node_type = NodeType::File;
+        let func = fn_with_range("the_function", "src/x.py", 20, 30);
+
+        g.insert_nodes_batch(&[file_node, func.clone()]).unwrap();
+
+        let found = enclosing_symbol(&g, "src/x.py", 25).expect("a symbol covers line 25");
+        assert_eq!(found.name, "the_function");
+        assert_eq!(found.node_type, NodeType::Function);
+        assert_ne!(found.node_type, NodeType::File);
+    }
+
+    /// A `Method` node is also accepted — both `Function` and
+    /// `Method` are in the candidate set per §6.1.
+    #[test]
+    fn enclosing_symbol_accepts_methods() {
+        let g = db("enclosing_method");
+        let ns = RepoNamespace::for_test();
+        let method = GraphNode::new_in(
+            NodeType::Method,
+            "the_method".to_string(),
+            "src/x.rs".to_string(),
+            &ns,
+        )
+        .with_location_in(10, 20, &ns);
+        g.insert_nodes_batch(&[method.clone()]).unwrap();
+
+        let found = enclosing_symbol(&g, "src/x.rs", 15).expect("a method covers line 15");
+        assert_eq!(found.name, "the_method");
+        assert_eq!(found.node_type, NodeType::Method);
+    }
+
+    /// A line outside every range returns `None` — the sensor
+    /// shouldn't claim an enclosing symbol for, say, a top-of-file
+    /// import.
+    #[test]
+    fn enclosing_symbol_returns_none_when_no_range_covers_the_line() {
+        let g = db("enclosing_no_match");
+        let f = fn_with_range("the_function", "src/x.py", 50, 100);
+        g.insert_nodes_batch(&[f]).unwrap();
+
+        assert!(enclosing_symbol(&g, "src/x.py", 10).is_none(), "line 10 is before the function");
+        assert!(enclosing_symbol(&g, "src/x.py", 200).is_none(), "line 200 is after the function");
+        assert!(
+            enclosing_symbol(&g, "src/other.py", 75).is_none(),
+            "path that doesn't exist in the graph returns None"
         );
     }
 }
