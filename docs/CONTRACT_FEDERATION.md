@@ -1,453 +1,769 @@
 # LAIN Contract Federation — Design
 
-Status: draft · 2026-09-28 · Target: LAIN 0.9.0 · Baseline: v0.8.0
+Status: implementation-ready · 2026-09-28 · Target: LAIN 0.9.0 · Baseline: v0.8.0
 
 Implementation progress is tracked in
 [`CONTRACT_FEDERATION_TRACKER.md`](CONTRACT_FEDERATION_TRACKER.md).
+Every code reference below was checked against the v0.8.0 tree. Paths are
+relative to `src/server/` unless they start with `src/`, `tests/`,
+`scripts/`, `docs/` or `.github/`.
 
-## Summary
+## 1. Summary
 
-LAIN 0.9 adds contract-level federation and a versioned, read-only tool interface for change-impact analysis. It links HTTP consumers to providers across repositories, models request and response fields, indexes repos at pinned commits, and classifies a proposed change as Verified, NeedsInvestigation or NoKnownImpact, with an evidence path for every claim. A future change-impact tool consumes these tools; that tool is designed separately and appears here only as a basic flow.
+LAIN 0.9 adds contract-level federation and a versioned, read-only tool interface for seeing how services depend on each other and what a change would affect. It links HTTP consumers to providers across services and repositories, models request and response fields, indexes repos at pinned commits, and classifies a proposed change as `Verified`, `NeedsInvestigation` or `NoKnownImpact`, with an evidence path for every claim. A future change-impact tool consumes these tools; that tool is designed separately and appears here only as a basic flow.
 
-**Problem.** A change to an endpoint or event payload can break consumers in other repositories. A repo-local coding agent cannot see them, and LAIN 0.8.0 joins repositories only through shared symbols, not through the contracts services actually talk over.
+**Problem.** Knowledge about who depends on a service is siloed: the team that owns an endpoint rarely knows every consumer, which fields they read, or what those consumers use it for. A change to an endpoint or event payload can therefore break consumers in other repositories. A repo-local coding agent cannot see them, and LAIN 0.8.0 joins repositories only through shared symbols, not through the contracts services actually talk over.
+
+**Vision.** Break those silos. For any service in the org, LAIN answers who uses it, what they use (endpoints and fields), and why (the consumer's own entry points that reach each call). Change impact is one question asked of that same map.
 
 **Goals**
 
-- Answer, for HTTP contracts: if this change lands, which code in which repositories is affected, and what proves it.
+- Answer, for any service: who consumes it, which endpoints and fields they use, and from which of their own entry points.
+- Answer, for HTTP contracts: if this change lands, which code in which repositories is affected, and what proves it. This covers provider changes and consumer changes.
 - Tie every impact claim to source locations at named commits.
-- Never count a missing, stale or unindexed repository as unaffected.
+- Never count a missing, stale or unindexed repository as unaffected. "No known impact" always names the configured repos that could not be reviewed.
+- Never call a change harmless because LAIN could not see its detail. Endpoints without a schema and consumers whose reads cannot be fully traced are reported as needing investigation, never dropped.
 - Expose all of it through a stable, versioned MCP interface that an external tool can build on without reading LAIN internals.
 - Keep LAIN read-only and free of model, GitHub and findings concerns.
 
-**Non-goals for 0.9 and the hackathon**
+**Non-goals for 0.9**
 
 - The change-impact tool itself: findings storage, PR reporting, model investigation, deployment.
-- Consumer-side detection for GraphQL, gRPC and WebSocket. Events are a stretch goal.
-- Service discovery from Kubernetes or IaC. Service bindings come from `repos.yaml`.
+- Consumer-side detection for GraphQL, gRPC and WebSocket. Events are a stretch goal (PR 15).
+- Service discovery from Kubernetes or IaC. Services come from `repos.yaml`.
 - Runtime traffic as a required input. OpenTelemetry edges stay optional.
+- Per-repo access control. 0.9 is a single trust domain (§10.7).
+- Repos not listed in `repos.yaml`. LAIN cannot see them, and every scoped answer says so.
+- Symbol-level cross-repo joins (`Calls`, `CrossRepoSameSymbol`) inside pinned snapshots. They stay live-only (§8.6).
+- Field-level analysis for providers without a machine-readable schema. Their changes are still surfaced (§9.2, `ChangedWithoutSchema`).
 
-## Baseline: LAIN 0.8.0
-
-Most of the org-level plumbing already exists. What is missing is the consumer side of contracts, field-level schemas, revision pinning and change classification. The findings below come from reading the v0.8.0 tag.
+## 2. Baseline: LAIN 0.8.0
 
 | Capability | State in 0.8.0 | Location |
 | --- | --- | --- |
-| Workspace, repo registry, readiness, freshness | Present | `federation/workspace.rs`, `manifest.rs`, `readiness.rs` |
-| Federated identity | Present, but breaks on names containing `:` | `federation/repo_id.rs` (`GlobalId`) |
-| Cross-repo symbol edges | Present: `Calls` via `CrossRepoResolver`, signature matching | `federation/cross_repo.rs`, `matching.rs` |
-| HTTP providers | Present: `HttpRoute` + `CallsHttp` from code and OpenAPI | `sensors/http_sensor.rs`, `openapi_sensor.rs` |
-| HTTP consumers | Missing: no client-call detection | none |
-| Request and response schemas | Missing: OpenAPI parses paths and operationIds only | `sensors/openapi_sensor.rs` |
-| Events | Declared only: `Topic`, `Produces`, `Consumes` are never emitted; `BusTopic` edges point at a synthetic hub | `schema.rs`, `dynamic_dispatch_sensor.rs` |
-| Cross-repo impact | `Calls` only, one edge type per traversal, node list without paths | `mcp/federation_tools/federation.rs`, `graph_backend.rs` |
-| Indexing at a commit | Missing: sources index the working tree or a branch tip | `federation/repo_source.rs` |
-| Contract diff | Missing | none |
-| MCP and command center | Present: tool registry with profiles, static command center | `mcp/`, `tools/handlers/registry_impl.rs` |
-| Edge provenance | Present: `Static`, `Heuristic{detector, confidence}`, `Runtime` | `schema.rs` (`EdgeProvenance`) |
+| Repo registry, readiness, freshness | Present | `federation/federated_index.rs`, `federation/manifest.rs`, `readiness.rs` |
+| Federated identity | `GlobalId` = `repo:Kind:path:name:line`, split on `:` | `federation/repo_id.rs:51`, `:134` |
+| Per-repo node identity | UUIDv5 over `(namespace, type, path, name, line)` | `schema.rs:577` (`GraphNode::generate_id`) |
+| Cross-repo symbol edges | `Calls` via `CrossRepoResolver`, signature matching | `federation/cross_repo.rs`, `federation/matching.rs` |
+| HTTP providers | `HttpRoute` + `CallsHttp` (route → handler) from code (regex) and OpenAPI | `sensors/http_sensor.rs`, `sensors/openapi_sensor.rs` |
+| OpenAPI | Paths and methods only. `operationId` is never parsed: `Operation.operation_id` has no `rename`, so it always falls back to `"method:path"` | `sensors/openapi_sensor.rs` |
+| HTTP consumers, schemas, fields | Missing | — |
+| Events | `Topic`, `Produces`, `Consumes` declared, never emitted | `schema.rs`, `sensors/dynamic_dispatch_sensor.rs` |
+| Sensor contract | `Sensor::scan(&GraphDatabase, root, namespace)`, run in `inventory` order (undefined) after static resolve | `sensors/mod.rs:80`, `ingest/ingestion.rs:702`, `:1735` |
+| Call edges | Tree-sitter name resolution; provenance `None` means `Static{TreeSitter}` | `treesitter.rs:1086`, `schema.rs:733` |
+| Entry points | Only functions named `main` or `App` | `graph/mod.rs:1557` |
+| Impact traversal | `traverse(start, one EdgeType, depth, direction)` | `federation/graph_backend.rs:88` |
+| Projection | `project_nodes` rewrites ids to `GlobalId` and drops vanished nodes (petgraph drops their incident edges); `project_edges` retracts stale repo-owned edges except outgoing cross-repo `Calls` | `federation/federated_index.rs:451`, `:765` |
+| Live refresh | Watcher re-indexes and sets `projection_stale`; a loop re-projects and relinks stale repos | `federation/repo_index.rs:864`, `src/cli/server.rs:453` |
+| Persistence | bincode 2, legacy (positional) config. Federation file `LNF2` + version 2; per-repo `PATH_FORMAT_VERSION = 3`, discarded and rebuilt on mismatch | `federation/graph_backend.rs:14`, `graph/persist.rs:33` |
+| Backend writes | Every `upsert_*` saves the whole graph; batch variants save once | `federation/graph_backend.rs:221` |
+| Indexing | `index_one_repo(IndexRequest)` requires `&LspPool` and `&VolatileOverlay`; no way to turn LSP off | `ingest/ingestion.rs:1422` |
+| MCP federation tools | `ToolDef` (flat arg-name lists, `output_schema: None`) + sync `McpToolEntry` inventory. The `FederationToolRegistry` named in `mcp/AGENTS.md` does not exist | `mcp/definitions.rs:68`, `mcp/handler.rs:616`, `:648` |
+| Profiles | `Package` enum, `LAIN_TOOL_PROFILE`, `load_package`. Advertising only: every registered tool stays callable | `tools/profile.rs`, `tools/capabilities.rs:23` |
+| Schema drift | `lain schema dump` → `docs/tool-schema.json`, CI job `schema-drift` | `.github/workflows/ci.yml:457` |
+| Command center | Static SPA calling `/mcp` `tools/call` | `mcp/command_center/app.js:17` |
+| Crates already present | `blake3`, `ignore`, `walkdir`, `git2`, `serde_yaml`, `proptest`, tree-sitter grammars for Rust, Python, JS, TS, Go | `Cargo.toml` |
 
-Three constraints in the current code shape the design and are handled in Foundational changes:
+## 3. Architecture
 
-1. `GlobalId` is `repo:Kind:path:name:line` split on `:`, so route names such as `GET /orders/:id` produce wrong `name()` and line values.
-2. `get_cross_repo_blast_radius` traverses incoming `Calls` only, and `GraphBackend::traverse` takes a single `EdgeType`.
-3. `project_edges` retracts every edge sourced in the re-projected repo that the projection does not reproduce. Join edges depend on another repo's state, so that rule is order-dependent for them.
-
-## Architecture
-
-LAIN records facts about code and contracts and exposes them through exactly one interface: the versioned tools of the `contracts` profile. Everything that judges, reports or calls a model lives in consumers outside LAIN.
+LAIN records facts about code and contracts and exposes them through exactly one interface: the versioned tools of the `contracts` package. Everything that judges, reports or calls a model lives in consumers outside LAIN.
 
 ```mermaid
 flowchart TD
-  repos["Fixture org on GitHub<br/>orders · billing · reports"]
+  repos["Repositories<br/>(fixture: orders · billing · reports · platform)"]
   subgraph LAIN["LAIN 0.9 — facts"]
-    sensors["Sensors<br/>per-repo facts: routes, calls, fields"]
-    cache["Per-commit index cache<br/>one immutable index per repo and sha"]
-    joiner["ContractJoiner<br/>Binds edges: the only cross-repo join"]
-    snap["Snapshot federation<br/>base and head views of the org"]
-    diff["diff · classify · evaluate<br/>changes, impact class, coverage"]
-    tools["MCP tools<br/>contracts profile, 11 read-only tools"]
-    sensors --> cache --> joiner --> snap --> diff --> tools
+    sensors["Sensors (per repo, config-free)<br/>routes, client calls, fields, reads, entry points"]
+    cache["Per-commit index cache<br/>one immutable graph per repo, sha, analyzer"]
+    joiner["ContractJoiner (per federation, uses config)<br/>services, targets, Binds, ContractIndex"]
+    views["Views: live federation · snapshot federations"]
+    diff["diff · classify · evaluate<br/>changes, impact class, scope"]
+    tools["MCP tools — contracts package, 13 read-only tools"]
+    sensors --> cache --> joiner --> views --> diff --> tools
+    views --> tools
   end
   subgraph Consumers["Consumers — designed separately"]
     impact["Change-impact tool<br/>prepare_snapshot · diff_contracts · resolve_evidence"]
-    agents["Coding agents<br/>trace_impact · get_contract · list_unresolved · read_source"]
+    agents["Coding agents, people, command center<br/>list_services · get_service · trace_impact · read_source"]
   end
   repos --> sensors
   tools -- "MCP, api_version pinned" --> impact
   tools -- "MCP, api_version pinned" --> agents
 ```
 
-Facts flow down LAIN's pipeline and cross the boundary once, through the MCP tools; the change-impact tool and coding agents use the same tools and get the same answers.
-
 | Concern | LAIN | Consumers |
 | --- | --- | --- |
-| Parsing code and specs | Yes | Never |
-| Cross-repo joins | `ContractJoiner` only | Never |
-| Compatibility classification and coverage | Yes, pure functions | Read it |
-| Confirming a binding | Validates with `check_binding`; reads `bindings` from config | Decides, and writes config through a normal PR |
+| Parsing code and specs | Sensors, per repo, never reading `repos.yaml` | Never |
+| Joins between services | `ContractJoiner` only | Never |
+| Classification and coverage | Pure functions | Read them |
+| Confirming a binding | `check_binding` validates it and emits the YAML entry | Decide; commit it to `repos.yaml` through a normal PR |
 | Model calls, findings, PR reporting | None | Their own design |
 
-**Why the boundary sits here.** LAIN is a hardened, supply-chain-audited MCP server. Keeping it read-only and free of model, GitHub and findings concerns keeps its trust surface small and its answers purely factual. It also makes the hackathon contribution explicit: a tagged range of LAIN PRs from v0.8.0 to v0.9.0, plus a separate consumer.
+**Why sensors never read config.** The per-commit cache is keyed by `(repo, sha, analyzer_version)`. If sensor output depended on `repos.yaml`, every config edit would invalidate every cache entry. Sensors record raw facts (URL parts, env var names, receiver names); the joiner turns them into services, targets and bindings using config. A config change re-runs only the join.
 
 **Why MCP rather than a library.** LAIN already versions its tool surface and fails CI on schema drift, so the tools are a tested contract. A crate dependency would couple consumers to LAIN's internal types and to Rust.
 
-## Domain model
+## 4. Domain model
 
-Per-repo indexes hold facts about one repository. Only the federation creates edges between repositories, and it creates exactly one kind: `Binds`. That rule is what keeps joins order-independent and auditable.
+### 4.1 Services
 
-**New node types**
+The unit of a join is a **service**. A service is declared in `repos.yaml` as a repo plus optional path prefixes, so one repo can hold several services (monorepo). A path covered by no prefix belongs to the repo's **implicit service**, named after the repo id. The joiner gives every node exactly one service from its repo-relative POSIX path (the key `graph::graph_path` produces): the longest matching prefix wins; prefixes within one repo must not overlap (config error, §7.1).
 
-| Node | Meaning | Emitted by |
-| --- | --- | --- |
-| `HttpClientCall` | One outbound HTTP call site: method, normalized template, target binding if known | `http_client_sensor` |
-| `Field` | One field of a schema, flattened to a JSON path such as `customer.address.city` | `openapi_sensor`, JSON Schema and proto sensors |
-| `FieldRef` | One field read in consumer code, such as `.customer_id` or `["customer_id"]` | `field_access_sensor` |
+Only the federation creates edges between services, and it creates exactly one kind: `Binds`. A `Binds` edge may connect two services in the same repo (`cross_repo = false`) or in different repos (`cross_repo = true`).
 
-Existing `HttpRoute`, `Topic` and `Schema` nodes gain a `contract` payload.
+### 4.2 Node and edge types (schema v3)
 
-**New edge types**
+New `NodeType` variants: `HttpClientCall`, `Field`, `FieldRef`. Existing `HttpRoute`, `Schema` and `Topic` are reused.
 
-| Edge | From → to | Scope |
-| --- | --- | --- |
-| `SendsHttp` | caller function → `HttpClientCall` | per repo |
-| `RequestSchema`, `ResponseSchema` | `HttpRoute` → `Schema` | per repo |
-| `PayloadSchema` | `Topic` → `Schema` | per repo |
-| `HasField` | `Schema` → `Field` | per repo |
-| `ReadsField` | consumer function → `FieldRef` | per repo |
-| `Binds` | consumer endpoint → provider endpoint (`HttpClientCall` → `HttpRoute`, `FieldRef` → `Field`, consumer `Topic` → producer `Topic`) | federation only |
+| Node | Meaning | Emitted by | `name` | `path`, `line_start` |
+| --- | --- | --- | --- | --- |
+| `HttpRoute` | One provider endpoint declaration | `http_sensor`, `openapi_sensor` | `<METHOD> <normalized template>` | declaring file and line |
+| `HttpClientCall` | One outbound call site | `http_client_sensor` | `<METHOD> <normalized template>`, or `<METHOD> <dynamic>` | call file and line |
+| `Schema` | One request, response or payload body of one route | `openapi_sensor` | `<METHOD> <template> <direction>` | spec file, line of the schema |
+| `Field` | One flattened field of a `Schema` | `openapi_sensor` | JSON path (§4.4) | spec file, line of the property |
+| `FieldRef` | One field read from one call's response | `field_access_sensor` | JSON path | reading file and line |
 
-`Produces` and `Consumes` become real edges emitted by the event sensor.
+| Edge | From → to | Scope | Impact propagation (§5.2) |
+| --- | --- | --- | --- |
+| `SendsHttp` | enclosing function → `HttpClientCall` | per repo | Incoming |
+| `RequestSchema`, `ResponseSchema` | `HttpRoute` → `Schema` | per repo | Incoming |
+| `PayloadSchema` | `Topic` → `Schema` (stretch) | per repo | Incoming |
+| `HasField` | `Schema` → `Field` | per repo | Incoming |
+| `ReadsField` | reading function → `FieldRef` | per repo | Incoming |
+| `ReadsFrom` | `FieldRef` → the `HttpClientCall` whose response it reads | per repo | Stop |
+| `Binds` | consumer → provider (`HttpClientCall` → `HttpRoute`, `FieldRef` → `Field`, consumer `Topic` → producer `Topic`) | federation only | Incoming |
 
-Example: one HTTP contract between two repositories, with the only two kinds of cross-repo edge.
+`Produces` and `Consumes` become real edges emitted by `event_sensor` (stretch).
 
-```mermaid
-flowchart LR
-  subgraph orders["repo: orders — provider"]
-    route["HttpRoute<br/>GET /api/orders/{}"]
-    handler["fn get_order"]
-    schema["Schema (response)"]
-    field["Field customer_id"]
-    route -- CallsHttp --> handler
-    route -- ResponseSchema --> schema
-    schema -- HasField --> field
-  end
-  subgraph billing["repo: billing — consumer"]
-    caller["fn fetch_order"]
-    clientCall["HttpClientCall<br/>GET /api/orders/{}"]
-    reader["fn build_invoice"]
-    fref["FieldRef customer_id"]
-    caller -- SendsHttp --> clientCall
-    reader -- ReadsField --> fref
-  end
-  clientCall == Binds ==> route
-  fref == Binds ==> field
-```
+### 4.3 Data structures
 
-**Contract payload**
+New types derive `Serialize, Deserialize` and use **externally tagged** enums, because bincode cannot decode internally tagged or untagged enums. `#[serde(default)]` does not make bincode files backward compatible; compatibility comes only from the version bumps in §5.4.
 
 ```rust
-pub struct GraphNode { /* existing fields */ #[serde(default)] pub contract: Option<ContractMeta> }
-pub struct GraphEdge { /* existing fields */ #[serde(default)] pub site: Option<SourceSite> }
+// schema.rs — added fields and variant
+pub struct GraphNode { /* existing */ pub contract: Option<ContractFact>, pub entry: Option<EntryKind> }
+pub struct GraphEdge { /* existing */ pub site: Option<SourceSite>, pub detail: Option<EdgeDetail> }
+pub enum EdgeProvenance { /* existing */ Confirmed { source: String } }  // "repos.yaml#bindings[<i>]"
+pub struct EdgeDetail { pub route_match: Option<RouteMatch>, pub stripped_prefix: Option<String> }
+pub enum RouteMatch { Exact, Pattern, PrefixStripped }
 
-pub struct ContractMeta {
-    pub key: ContractKey,             // repo-independent join key
-    pub role: ContractRole,           // Provider | Consumer
-    pub binding: Option<ServiceRef>,  // target service, when the call site reveals it
-    pub field: Option<FieldMeta>,     // set on Field and FieldRef nodes
+// federation/contracts/model.rs — per-repo facts written by sensors
+pub enum ContractFact {
+    Provider(ProviderFact),
+    Consumer(ConsumerFact),
+    Schema { direction: Direction },
+    Field(FieldMeta),
+    FieldRead(FieldReadFact),
 }
-
-pub enum ContractKey {
-    Http  { method: HttpMethod, template: String },            // POST /orders/{}
-    Topic { broker: String, name: String },                    // kafka / orders.created
-    Field { owner: Box<ContractKey>, dir: Direction, json_path: String },
+pub struct ProviderFact {
+    pub method: HttpMethod,
+    pub template: String,              // normalized, same-file prefixes applied (§6.2)
+    pub handler: Option<SymbolKey>,    // code routes; None for spec-only operations
+    pub operation_id: Option<String>,  // OpenAPI operations
+    pub origin: ProviderOrigin,        // Code | OpenApi
 }
-
+pub struct ConsumerFact {
+    pub method: MethodSpec,            // Known(HttpMethod) | Unknown
+    pub url: NormalizedUrl,
+    pub via: CallVia,                  // Library { name } | Receiver { expr, fn_name }
+    pub url_expr: String,              // source text of the URL argument, at most 200 chars
+    pub reads_complete: bool,          // §6.5: false when the response escapes tracking
+}
+pub struct NormalizedUrl {
+    pub host: HostPart,                // None | Literal(String) | Env(Vec<String>) | Expr(String)
+    pub template: Option<String>,      // None = dynamic path
+}
+pub struct FieldReadFact { pub chain: JsonPath, pub exact: bool }  // exact = read on a bound identifier (§6.5)
+pub struct FieldMeta { pub ty: TypeDesc, pub required: bool, pub nullable: bool, pub enum_values: Option<Vec<String>> }
+pub enum TypeDesc { String, Integer, Number, Boolean, Object, Array(Box<TypeDesc>), Unknown }
+pub enum HttpMethod { Get, Post, Put, Patch, Delete, Head, Options, Any }
 pub enum Direction { Request, Response, Payload }
-
-pub struct FieldMeta {
-    pub ty: TypeDesc,                 // String | Integer | Number | Boolean | Object | Array(Box<TypeDesc>) | Unknown
-    pub required: bool,
-    pub nullable: bool,
-    pub enum_values: Option<Vec<String>>,
-}
-
+pub enum EntryKind { HttpHandler, Scheduled, Cli, Main }
 pub struct SourceSite { pub path: String, pub line: u32 }
+pub struct SymbolKey { pub repo: RepoId, pub path: String, pub container: Option<String>, pub name: String }
+
+pub enum ContractKey {                 // Display / FromStr use the grammar of §4.4
+    Http { method: MethodSpec, template: String },   // MethodSpec::Unknown only in consumer keys
+    Topic { broker: String, name: String },
+}
+pub struct JsonPath(pub Vec<PathSegment>);   // Display / FromStr use the grammar of §4.4
+pub enum PathSegment { Name(String), ArrayItems, MapValues }   // `name`, `[]` suffix, `{}`
+pub struct ServiceName(pub String);           // validated as in §7.1
+pub type EndpointId = (ServiceName, ContractKey);
 ```
 
-**Template normalization** is one pure function used by every provider and consumer sensor, so both sides produce identical keys:
-
-1. Drop scheme, host, port, query and fragment.
-2. Replace every parameter form (`:id`, `{id}`, `<int:id>`, `${x}`, f-string holes) with `{}`.
-3. Collapse repeated `/`, remove a trailing `/`, keep case.
-4. Prefix the service `base_path` when the binding declares one.
-
-**Evidence** is referenced as `EvidenceRef { global_id, commit }` and rendered `repo@sha:path:line`. `GlobalId` stays revision-free; the commit comes from the snapshot the analysis ran on.
-
-**Provenance.** `EdgeProvenance` gains `Confirmed { source }` for bindings declared by a person in the `bindings` section of `repos.yaml`. It ranks with `Static` when classifying impact, and stays distinguishable so a consumer can show which links were confirmed rather than derived.
-
-## Foundational changes
-
-Three changes land before any contract edge exists: identity encoding, typed impact traversal, and a join pass that owns cross-repo edges. After them, every later workstream is additive.
-
-### F1. GlobalId encoding
-
-**Decision.** Percent-encode `%` and `:` inside the path and name segments. `GlobalId::new` encodes, `parse` requires exactly five segments, accessors decode. Ids without those characters are byte-identical to today; repo-prefix scoping keeps working because `RepoId` already forbids `:`.
-
-**Rejected.** Another delimiter makes ids unreadable to agents. A structured id rewrites every backend key. Escaping only route names leaves the bug for any `::` name.
-
-**Steps**
-
-1. Route every hand-built or hand-split id (`split(':')`, `format!` constructions, `global_id_str`) through `GlobalId`.
-2. Replace the hand-written `is_known_node_kind` list with a check against `NodeType::all()`.
-3. Ship with the schema v3 bump so users run `lain reindex` once.
-
-**Tests.** Proptest round-trip of arbitrary names including `:`, `%`, `::`. Regression: a `:id` route projects and is found by name.
-
-### F2. Typed impact traversal
-
-**Decision.** Keep `traverse` for existing callers. Add `traverse_impact(start, depth, cap) -> ImpactResult`, a breadth-first search driven by an exhaustive propagation table, with a predecessor map so every reached node returns its full path.
+`SymbolKey` is the line-free identity of a function. Anything that must survive edits (confirmed bindings, `PathChanged` pairing, consumer-change pairing) uses it instead of a `GlobalId`, whose last segment is a line number.
 
 ```rust
-enum Propagation { Incoming, Outgoing, Stop }
+// federation/contracts/index.rs — derived per federation by rejoin_contracts, never persisted
+pub struct ContractIndex {
+    pub services: BTreeMap<ServiceName, ServiceInfo>,        // repo, prefixes, endpoint ids
+    pub endpoints: BTreeMap<EndpointId, Endpoint>,           // EndpointId = (ServiceName, ContractKey)
+    pub consumers: BTreeMap<GlobalId, ConsumerResolution>,   // service, target, bound endpoints, unresolved reason
+    pub field_refs: BTreeMap<GlobalId, FieldRefResolution>,  // bound fields or unknown-field read
+    pub stale_bindings: Vec<StaleBinding>,
+    pub external: BTreeMap<String, u32>,                     // host → call count
+    pub unnormalized: Vec<GlobalId>,
+}
+```
 
-fn impact_propagation(e: &EdgeType) -> Propagation {
+`Binds` edges live in the graph backend, for traversal and the command center; everything else the tools need lives in `ContractIndex`. One `rejoin_contracts` pass produces both, so they cannot disagree.
+
+### 4.4 Keys and encodings
+
+| Thing | Grammar | Example |
+| --- | --- | --- |
+| `ContractKey` (HTTP) | `http:<METHOD> <template>`; `METHOD` ∈ `GET POST PUT PATCH DELETE HEAD OPTIONS ANY`, plus `UNKNOWN` in consumer keys only | `http:GET /api/orders/{}` |
+| `ContractKey` (topic) | `topic:<broker>/<name>` | `topic:kafka/orders.created` |
+| Endpoint | `{ service, key }`, two fields in every payload | `{ "service": "orders", "key": "http:GET /api/orders/{}" }` |
+| Template | `/`-separated segments: literal, `{}` (one segment) or `{**}` (one or more, last only); the root is `/` | `/api/orders/{}` |
+| JSON path | segments joined by `.`; array element suffix `[]`; map value segment `{}`; `\` escapes `.`, `[`, `]`, `{`, `}` and `\` inside names | `items[].sku`, `prices.{}.amount` |
+| Field id | `<ContractKey>#<direction>:<json path>`, direction `request`, `response` or `payload` | `http:GET /api/orders/{}#response:customer_id` |
+| EvidenceRef text | `<repo>@<first 12 hex of sha>:<path>:<line>` | `billing@9c20d41a7b3e:src/invoice.py:58` |
+
+### 4.5 URL normalization
+
+One pure function, `federation/contracts/normalize.rs`, used by every provider and consumer sensor. Input: the URL argument as a sequence of parts, `Literal(String) | Hole(String)` (§6.3). Output: a `NormalizedUrl`.
+
+1. **Host.** If the first literal contains `://`, the host is the text after it up to the next `/`, `?`, `#` or end, with userinfo and port removed, lower-cased → `HostPart::Literal`. If a hole comes before the first `/` of the path, that hole is the base, not a path parameter → `HostPart::Expr(hole)`, turned into `HostPart::Env` by §6.3 when possible. If the URL starts with `/` → `HostPart::None`.
+2. **Cut.** Drop everything from the first `?` or `#` found in a literal, including later holes.
+3. **Segments.** Split the rest on `/`. A segment containing any hole becomes `{}`. A literal segment in parameter syntax becomes `{}`: `:id`, `{id}`, `<id>`, `<int:id>`, `[id]`, `$id`. A wildcard segment (`*`, `*rest`, `{*rest}`, `{rest:path}`, `<path:rest>`) becomes `{**}`, which must be the last segment.
+4. **Clean.** Drop empty segments (this collapses `//` and removes a trailing `/`). An empty result is `/`. Case is preserved.
+5. **Dynamic.** If the path part consisted only of holes, `template = None`.
+
+Provider templates get their prefixes (§6.2) prepended before step 3. Consumer templates are never changed by config.
+
+Property tests: idempotence (normalizing a rendered template returns it unchanged); for every framework in the fixture, the provider declaration and the matching client call produce equal templates.
+
+### 4.6 Provenance and confidence
+
+| Provenance | Confidence | Counts as "certain" for `Verified` |
+| --- | --- | --- |
+| `Static { TreeSitter \| Lsp }`, or `None` | 1.0 | yes |
+| `Confirmed { source }` | 1.0 | yes |
+| `Runtime { … }` | 0.9 | no |
+| `Heuristic { detector, confidence }` | as recorded | no |
+
+A path's `min_confidence` is the minimum over its hops. Where a rule below says "capped by" another edge, the new edge's confidence is the minimum of both, and it is `Heuristic` if either is.
+
+## 5. Foundational changes
+
+### 5.1 F1 — GlobalId encoding (PR 2)
+
+**Decision.** Percent-encode `%` → `%25` and `:` → `%3A` inside the path and name segments. `GlobalId::new` encodes, `parse` requires exactly five segments, accessors (`path`, `name`, `line_start`) decode. Ids without those characters are byte-identical to today; repo-prefix scoping keeps working because `RepoId` already forbids `:`.
+
+**Steps.** (1) Route every hand-built or hand-split id through `GlobalId`: the `split(':')` calls in `federation/repo_id.rs`, the `rsplit(':')` at `repo_id.rs:280`, `global_id_str` at `federated_index.rs:33`, and every match of `rg 'split\(.:.\)|format!\("\{\}:\{' src/server/federation src/server/mcp`. (2) Replace the hand-written `is_known_node_kind` list with `NodeType::all()`. (3) Ship under the schema v3 bump (§5.4).
+
+**Tests.** Proptest round-trip of arbitrary path and name strings including `:`, `%`, `::` and `%3A`. Regression: an `HttpRoute` named `GET /orders/:id` projects, `name()` returns it, and `resolve_node` finds it by name.
+
+### 5.2 F2 — Typed impact traversal (PR 4)
+
+**Decision.** Keep `GraphBackend::traverse` for existing callers. Add:
+
+```rust
+fn traverse_impact(&self, starts: &[&str], depth: u32, cap: usize, min_confidence: f32) -> Result<ImpactResult, LainError>;
+
+pub enum Propagation { Incoming, Outgoing, Stop }
+pub fn impact_propagation(e: &EdgeType) -> Propagation {
     match e {  // exhaustive: a new EdgeType fails to compile until decided
         Calls | CallsHttp | SendsHttp | Binds | Consumes | ReadsField
         | HasField | RequestSchema | ResponseSchema | PayloadSchema => Incoming,
         Produces => Outgoing,
         Contains | Imports | CoChangedWith | Pattern | Uses | Implements | DeployedTo
-        | CrossRepoSameSymbol | DynamicDispatch | BusTopic | RouteMatches | RuntimeCall => Stop,
+        | CrossRepoSameSymbol | DynamicDispatch | BusTopic | RouteMatches | RuntimeCall
+        | ReadsFrom => Stop,
     }
 }
-
-pub struct ImpactPath   { pub hops: Vec<(GraphEdge, GraphNode)>, pub min_confidence: f32 }
+pub struct ImpactHop    { pub edge: GraphEdge, pub node: GraphNode }
+pub struct ImpactPath   { pub hops: Vec<ImpactHop>, pub min_confidence: f32 }
 pub struct ImpactResult { pub paths: Vec<ImpactPath>, pub truncated: bool }
 ```
 
-Everything except `Produces` propagates `Incoming`, because the holder of an edge is the dependent side. Traversal reports reachability; relevance is decided later by `evaluate`, so a consumer of a route that never reads a removed field is reached but not flagged.
+Everything except `Produces` propagates `Incoming`, because the holder of an edge is the dependent side.
 
-**Rejected.** One `traverse` per edge type loses paths that alternate types. Materialized reverse edges duplicate data and double reconciliation.
+**Algorithm.** Breadth-first from every node in `starts` at distance 0 (an endpoint has one start per provider node). For each dequeued node, follow edges by the table: `Incoming` follows edges whose target is the node, to their source; `Outgoing` the reverse. Each node is visited once, at its shortest distance; ties go to the predecessor with the higher `min_confidence`, then the lexicographically smaller `GlobalId`, so output is deterministic. An edge whose confidence is below `min_confidence` is not followed. A path is emitted for every visited node that has no unvisited successor or sits at `depth`. `cap` limits emitted paths; `truncated` is set when `cap` or `depth` cut the search. Paths are sorted by `min_confidence` descending, then length ascending, then the leaf's `GlobalId`.
 
-**Steps**
+**Steps.** (1) Ship the table with only `Calls` returning `Incoming`. (2) Rebuild `get_cross_repo_blast_radius` on it without changing its response shape; `tests/federation_blast_radius_regression.rs` passes untouched. (3) Each later PR switches its own edge types on, with a table test.
 
-1. Ship the table with only `Calls` set to `Incoming`.
-2. Rebuild `get_cross_repo_blast_radius` on it without changing its response shape; existing tests pass untouched.
-3. Each later PR flips its edge types from `Stop` together with its tests.
+### 5.3 F3 — Join ownership (PR 7)
 
-### F3. Join ownership
+**Decision.** `Binds` edges and the `ContractIndex` belong to a federation-level pass. `FederatedIndex::rejoin_contracts()` computes the complete desired `Binds` set and a fresh `ContractIndex` from every projected contract node plus config, diffs the edges against the stored `Binds` set, and applies adds and removes through `upsert_edges_batch` and `remove_edges` (one disk save). It is idempotent and order-independent. `project_edges` reconciliation skips `EdgeType::Binds` by type, never by whether an edge crosses repos.
 
-**Decision.** `Binds` edges belong to a federation-level pass, not to any repo. `FederatedIndex::rejoin_contracts()` computes the complete desired `Binds` set from all contract nodes, diffs it against the stored set, and applies adds and removes. It is idempotent and order-independent. `project_edges` reconciliation skips `EdgeType::Binds` by type.
+**Triggering.** `project_nodes` and `project_edges` set `contracts_dirty: AtomicBool`. `rejoin_contracts_if_dirty()` runs under `projection_lock` at the end of: the loader's Phase 2 (`federation/loader.rs`), every tick of the refresh loop that re-projected a repo (`src/cli/server.rs:453`), hot-reload apply (`reload.rs`), `add_repo`, `remove_repo`, and `from_snapshot`. Every contract tool on `live` also calls it before reading, so no query sees a half-joined state. Re-projecting a node deletes its incident `Binds` edges (petgraph), which is why every projection marks the federation dirty.
 
-**File location.** `ContractJoiner` lives in `federation/contract_joiner.rs` (its own module), not inside `federation/cross_repo.rs`, which already holds `CrossRepoResolver` for symbol edges. The joiner is the single owner of `Binds`; HTTP, field and topic joins are grouped under it.
+**Location.** `federation/contracts/joiner.rs` holds `ContractJoiner`; `federation/cross_repo.rs` keeps symbol edges. PR 7 updates `federation/AGENTS.md`, which says `cross_repo.rs` is the only file that joins across repos, to name both.
 
-**Runs** after loader Phase 2, after hot-reload apply, after `add_repo` and `remove_repo`, and inside `from_snapshot`, always under `projection_lock`. Cost is linear in contract endpoints; start with full recompute and scope it only if measured slow.
+**Cost.** `project_graph` records the `GlobalId`s of contract nodes per repo, so the join never scans the whole graph. Routes are indexed by `(service, method, segment count)`; each consumer checks its target service's bucket, or every service's bucket when unbound. Budget: 2 s × `LAIN_PERF_BUDGET_MULTIPLIER` for a full rejoin of the tokio + bytes federation (`scripts/demo-federation-fixture.sh`).
 
-**Rejected.** Exempting `Binds` from reconciliation, as done for cross-repo `Calls`, leaves stale bindings. Joining inside each repo's projection depends on order. Joining at query time lets MCP and the command center diverge.
-
-**Tests.** Projection order A,B equals B,A. Renaming a provider route rebinds without re-projecting the consumer. Removing the provider removes its bindings. Hot reload of the provider updates bindings.
+**Tests.** Projection order A,B equals B,A (identical `Binds` set and `ContractIndex`). Renaming a provider route rebinds without re-projecting the consumer. Removing the provider repo removes its bindings. Hot reload of the provider updates bindings. A consumer whose line moved keeps its binding after the next tick.
 
 The cross-repo `Calls` exemption has the same defect class; migrating it to this model is a follow-up outside 0.9.
 
-## Contract extraction
+### 5.4 Schema v3 and migration (PR 3)
 
-All extraction lives in sensors that follow the existing pattern: one concern per file, `impl Sensor`, one `inventory::submit!`, walker and helpers imported from `sensors/util.rs`, regex-first like `http_sensor`. Sensors emit per-repo facts only.
+- `FEDERATION_GRAPH_VERSION` 2 → 3 (`federation/graph_backend.rs:15`). Old files are refused with `FederationSchemaMismatch`; `lain reindex` rebuilds them, as in 0.8.
+- `PATH_FORMAT_VERSION` 3 → 4 (`graph/persist.rs:33`). Per-repo graphs with the old version are discarded and rebuilt on load, as today.
+- `NodeType::all()`, `EdgeType::all()` and `is_indexed()` updated; `describe_schema` picks them up.
+- `CHANGELOG.md` migration note, in this order: install 0.9 → `lain reindex` → enable the package with `LAIN_TOOL_PROFILE=contracts` or `load_package contracts` → use the new tools.
 
-### HTTP providers
+## 6. Contract extraction (per repo)
 
-`http_sensor` and `openapi_sensor` keep their current detection. Both switch to the shared template normalizer and set `ContractMeta { role: Provider, key: Http{..} }` on each `HttpRoute`.
+### 6.1 Sensor framework changes
 
-### HTTP consumers: `http_client_sensor.rs`
+- `Sensor` gains `fn phase(&self) -> u8 { 0 }`, and `run_all` sorts entries by `(phase, name)` instead of relying on `inventory` order. Phase 0: `http_sensor`, `openapi_sensor` and the existing sensors. Phase 1: `http_client_sensor`, `entry_point_sensor`. Phase 2: `field_access_sensor`, which needs `SendsHttp` and `Calls`.
+- `SensorCounts` and `SensorCountField` gain `http_clients`, `fields`, `field_reads` and `entry_points` (`events` in PR 15).
+- `http_client_sensor` and `field_access_sensor` parse with the tree-sitter grammars already linked (Python, JavaScript, TypeScript; Rust and Go in PR 14), because regex cannot follow URL expressions or values. Both use the shared walker in `sensors/util.rs` (`scripts/check-no-duplicate-sensors.py` enforces it).
+- New helper `util::enclosing_symbol(graph, path, line) -> Option<GraphNode>`: the `Function` or `Method` in `path` with the smallest `line_start..=line_end` containing `line`; on a tie, the later `line_start`.
+- **Sensor output replaces itself.** `run_all` rescans the whole repo on every index, but upserts alone would leave nodes for deleted routes and calls behind. Each sensor writes through a new `GraphDatabase::replace_sensor_output(owner: SensorOwner, nodes, edges)`, which first removes every node the same owner emitted before (petgraph drops their edges), then inserts. `SensorOwner` is derived from the node: `HttpRoute` with `ProviderOrigin::Code` → `http_sensor`, with `ProviderOrigin::OpenApi` → `openapi_sensor`; `Schema` and `Field` → `openapi_sensor`; `HttpClientCall` → `http_client_sensor`; `FieldRef` → `field_access_sensor`. `entry_point_sensor` clears and resets `GraphNode.entry` on every run. This also fixes stale `HttpRoute` nodes in 0.8.
+- Sensors never read `repos.yaml` (§3). Every map a sensor iterates is a `BTreeMap`, so output is deterministic; `http_sensor::get_route_patterns` switches from `HashMap`. The determinism test in §8.3 enforces this.
 
-| Language | Patterns in 0.9 | Priority |
-| --- | --- | --- |
-| TypeScript, JavaScript | `fetch`, `axios.{method}`, `axios({method, url})`, `got`, `ky` | core |
-| Python | `requests.*`, `httpx.*`, `httpx.AsyncClient().*`, `aiohttp` session methods | core |
-| Rust | `reqwest` `Client::{method}`, `.request(Method::X, …)` | stretch |
-| Go | `http.Get`, `http.Post`, `http.NewRequest(method, url, …)`, `resty` | stretch |
+### 6.2 HTTP providers (PR 5, PR 8)
 
-Per call site:
+- `http_sensor` and `openapi_sensor` normalize through §4.5 and set `ContractFact::Provider`.
+- **Method `ANY`.** `go-std` (`http.HandleFunc`) declares no verb and now emits `ANY` instead of `GET`. Flask `@app.route` without `methods` stays `GET`, which is Flask's default.
+- **Router prefixes in the same file** are prepended to the route template: FastAPI `APIRouter(prefix="…")` bound to the decorator's receiver name; Flask `Blueprint(…, url_prefix="…")`; axum `.nest("/p", f())` where `f` is defined in the same file; actix `web::scope("/p")`. Cross-file mounts (`app.include_router(r, prefix=…)`, Express `app.use("/p", router)`) are covered by `route_prefixes` config (§7.1) and by prefix-tolerant matching (§7.4).
+- **OpenAPI.** Fix `operationId` parsing (`#[serde(rename = "operationId")]`). Add `head` and `options` operations. Prefix every operation template with the path of the first `servers[].url` (OpenAPI 3) or `basePath` (Swagger 2) when present.
+- **Service `base_path`** (config) is applied by the joiner, not the sensor, as a prefix to every provider template of that service that does not already start with it.
 
-1. Extract method and URL expression. Literals, template literals and f-strings are parsed; `BASE + "/path"` concatenation records `BASE` as an unresolved binding hint.
-2. Normalize the path with the shared normalizer.
-3. Resolve the enclosing function with a new `util::enclosing_symbol(graph, path, line)`: the smallest `Function` or `Method` whose line range contains the site.
-4. Emit an `HttpClientCall` node with `ContractMeta { role: Consumer, key, binding }` and a `SendsHttp` edge carrying `site`.
+### 6.3 HTTP consumers: `http_client_sensor.rs` (PR 6)
 
-Wrapper clients (`ordersClient.post("/orders")`) are declared in `repos.yaml` under `http_clients` and matched like direct calls. Generated clients are matched by `operationId` against provider OpenAPI operations in phase 2.
+**Call shapes recognized**
 
-### Field-level schemas
+| Language | Shape | Method | URL |
+| --- | --- | --- | --- |
+| TS/JS | `fetch(url, init?)` | `init.method` if literal, else GET | arg 0 |
+| TS/JS | `axios.<verb>(url, …)`, `axios(url)`, `axios({ method, url })`, `got.<verb>(url)`, `got(url, { method })`, `ky.<verb>(url)` | verb, literal `method`, or GET | as shown |
+| TS/JS | `<recv>.<verb>(<arg0>, …)` where `<arg0>` is a string or template literal starting with `/` | verb | arg 0 (wrapper candidate) |
+| Python | `requests.<verb>(url, …)`, `requests.request("<M>", url)`, `httpx.<verb>`, `httpx.request`, and `<client>.<verb>` where `<client>` is assigned from `httpx.Client(…)`, `httpx.AsyncClient(…)`, `requests.Session()` or `aiohttp.ClientSession()` (including `with … as <client>` and `async with`) | verb or literal arg | arg 0 or `url=` |
+| Python | `<recv>.<verb>(<arg0>, …)` where `<arg0>` is a string or f-string starting with `/` | verb | arg 0 (wrapper candidate) |
 
-| Source | Extraction | Priority |
-| --- | --- | --- |
-| OpenAPI 3.x, Swagger 2.0 | `requestBody`, `responses.*.content.*.schema`, `components.schemas` with `$ref` resolution; emits `Schema`, `RequestSchema` or `ResponseSchema`, `HasField` → `Field` | core |
-| JSON Schema | `*.schema.json` plus a `schemas:` mapping in `repos.yaml` from topic or route to file | stretch |
-| Protobuf | Message fields with number, type and label, extending `proto_sensor` | stretch |
-| Code DTOs | Handler parameter and return types linked to `Struct` → `Property`; heuristic | phase 2 |
+`<verb>` is one of `get post put patch delete head options`, case-insensitive. A method given by a non-literal expression is `MethodSpec::Unknown`. Wrapper candidates record `CallVia::Receiver { expr, fn_name }`; the joiner keeps them only if they match `http_clients` (§7.3), and a discarded candidate is not counted anywhere. `httpx.Client(base_url=…)` contributes its `base_url` as the host part of every call on that client.
 
-Nested objects flatten to JSON paths. Arrays use `[]` in the path, as in `items[].sku`. `$ref` cycles stop at the first repeat and record a `Field` of type `Object`.
+**URL expression → parts.** A string literal is one `Literal`. A template literal or f-string alternates `Literal` and `Hole`. `a + b` gives the parts of `a` then `b`. `urljoin(base, "/p")` and `new URL("/p", base)` give the parts of `base` then `"/p"`. An identifier is resolved **once**, to its assignment, when it has a single module-level or same-function assignment in the same file; otherwise it stays a `Hole`.
 
-### Consumer field reads: `field_access_sensor.rs`
+**Host resolution (config-free).** A hole before the path whose resolved expression is `os.environ["X"]`, `os.environ.get("X", …)`, `os.getenv("X", …)`, `settings.X`, `config.X`, `process.env.X` or `process.env["X"]` becomes `HostPart::Env(["X"])`. Anything else stays `HostPart::Expr(text)`.
 
-Scope: functions holding a `SendsHttp` or `Consumes` edge, plus their direct callees (one hop). Inside that scope, detect `.name`, `["name"]`, `.get("name")`, and destructuring such as `{ name } =`. Emit a `FieldRef` node and a `ReadsField` edge with `site`. Reads through a typed generated client or DTO are `Static`; reads on untyped dicts and JSON are `Heuristic { detector: "field_access", confidence: 0.6 }`.
+**Emitted per call site.** An `HttpClientCall` node (§4.2) with `ContractFact::Consumer`, and a `SendsHttp` edge from `enclosing_symbol` carrying `site`. A call outside any function is attached to its `File` node.
 
-### Events: `event_sensor.rs` (stretch)
+### 6.4 OpenAPI schemas and fields (PR 8)
 
-Kafka first: kafkajs `producer.send({topic})` and `consumer.subscribe({topic})`, confluent-kafka and aiokafka, rdkafka `FutureRecord::to` and `subscribe`, segmentio kafka-go and sarama. Topic names resolve from literals and same-file constants. The sensor emits real `Topic` nodes with `ContractKey::Topic` and `Produces` or `Consumes` edges. Where it resolves a site that `dynamic_dispatch_sensor` also matched, the precise edge replaces the heuristic `BusTopic` edge for that site. Dynamic topic names are reported as unresolved in coverage.
+- **Bodies.** For each operation: `requestBody.content` with media type `application/json` or `*/*+json` → `Schema{Request}`; the union of every `2xx` response's JSON schema → `Schema{Response}`; `parameters` with `in: query` → request fields under the reserved first segment `$query` (`$query.limit`); a body property whose name starts with `$` is escaped as `\$`. Path parameters are part of the template. Header parameters and error responses are not modeled in 0.9.
+- **Flattening.** Properties recurse (`customer.address.city`); arrays add `[]` (`items[].sku`); `additionalProperties: <schema>` adds a `{}` segment; `allOf` merges properties, with required as the union; `oneOf` and `anyOf` include every branch's fields with `required = false`, and a field whose branches disagree on type becomes `Unknown`. `$ref` resolves within the file (`#/components/schemas/…`, `#/definitions/…`). A `$ref` cycle stops at the first repeat with a `Field` of type `Object`. An external-file `$ref` produces an `Object` field and a `coverage.unnormalized` entry.
+- **Types.** `string`, `integer`, `number`, `boolean`, `object` and `array` (with its `items`) map to the matching `TypeDesc`; anything else is `Unknown`. `format` is ignored, so `int32` → `int64` is not a change. Nullability: OAS 3.0 `nullable: true`, OAS 3.1 `type: [T, "null"]`, Swagger 2 `x-nullable: true`. `required` is relative to the parent object. Enum values are stringified with `serde_json` (`1` → `"1"`).
+- **Response union.** With several 2xx responses, a field is `required` only if every one requires it, and its type is `Unknown` if they disagree.
+- **Line numbers.** serde keeps no spans, so `openapi_sensor` builds a JSON-pointer → line index: YAML block mappings by indentation, JSON by tokenizing object keys. Flow-style YAML falls back to the nearest ancestor with a known line.
 
-## Federation joins
+### 6.5 Consumer field reads: `field_access_sensor.rs` (PR 9)
 
-`ContractJoiner` in `federation/contract_joiner.rs` is the only code that creates cross-repo contract edges. It runs inside `rejoin_contracts()` (F3), groups endpoints by `ContractKey`, and emits `Binds` edges with explicit provenance. It never chooses between ambiguous candidates; it records all of them.
+The sensor tracks **bound identifiers**, names that hold a call's response. Only reads on them become `FieldRef`s, so `.id` on an unrelated dict never matches a schema.
 
-**Service bindings** are new `repos.yaml` sections, documented in `docs/REPOS_YAML.md`:
+**Binding rules**, applied within the scope below:
+
+1. `x = <client call>` and `x = await <client call>` bind `x` to the call's response.
+2. `y = x.json()`, `y = await x.json()`, `y = x.data` (axios) and `y = x.body` (got) bind `y`; `x` stays bound, so `r.json()["id"]` is recorded.
+3. `z = x["k"]`, `z = x.k` and `z = x.get("k")` bind `z` to the sub-path `k`; `for it in x["items"]` binds `it` to `items[]`.
+4. `d = Dto(**x)`, `Dto.model_validate(x)`, `Dto.parse_obj(x)`, `Dto(x)`, and TypeScript `x as Dto` / `const d: Dto = x`, bind `d` with the same path.
+5. In a **caller** of the sending function S, `o = S(…)` and `o = await S(…)` bind `o` when S returns a bound identifier or a bound expression (`return r.json()`, `return (await r.json())["data"]`), with the returned sub-path.
+6. In a **callee** of S or of such a caller, the parameter at the position a bound identifier is passed in is bound.
+
+**Scope.** S, its direct callers (rule 5), and the direct callees of S and of those callers (rule 6). Only `Calls` edges with provenance `Static{TreeSitter}` or `None` are used, so live and snapshot indexing see the same scope.
+
+**Reads recorded.** `x.k`, `x["k"]`, `x.get("k")`, `"k" in x`, destructuring (`{ k, a: { b } } = x`) and Python `match` mapping patterns. The chain is the path from the call's response root: `o["customer"]["address"]["city"]` → `customer.address.city`. Each read emits a `FieldRef` node, a `ReadsField` edge from the reading function (with `site`, provenance `Static{TreeSitter}`) and a `ReadsFrom` edge to the `HttpClientCall`. A read whose key is not a literal emits nothing and sets `reads_complete = false`.
+
+**Escapes.** `reads_complete` on the call's `ConsumerFact` becomes `false` when a bound identifier is returned from a caller (it would leave the scope), passed to a function outside the scope, stored into an attribute, subscript, global or collection, spread (`**x`, `...x`, `Object.assign(…, x)`, `dict(x)`), serialized or passed through (`json.dumps(x)`, `JSON.stringify(x)`, `return JSONResponse(x)`, `res.json(x)`), or yielded. Reads and iteration are not escapes.
+
+### 6.6 Entry points: `entry_point_sensor.rs` (PR 16)
+
+Sets `GraphNode.entry` on function nodes, so `used_by` (§10.9) can say why code runs:
+
+| `EntryKind` | Detection |
+| --- | --- |
+| `HttpHandler` | Target of a `CallsHttp` edge (route → handler) |
+| `Scheduled` | node-cron `cron.schedule(expr, fn)`; module-level `setInterval(fn, …)`; APScheduler `@<x>.scheduled_job(…)` and `add_job(fn, …)`; Celery `@<x>.task` and `@shared_task`; NestJS `@Cron(…)` |
+| `Cli` | click `@click.command` and `@<group>.command`, typer `@<app>.command`, commander `.command(…).action(fn)` |
+| `Main` | functions named `main` or `App` (today's `find_entry_points`), and the enclosing module of an `if __name__ == "__main__":` block |
+
+A function passed by reference (`cron.schedule("0 0 1 * *", buildMonthlyReport)`) is resolved by name in the same file.
+
+### 6.7 Events: `event_sensor.rs` (stretch, PR 15)
+
+Kafka first: kafkajs `producer.send({ topic })` and `consumer.subscribe({ topic })`, confluent-kafka and aiokafka `produce` / `subscribe`, rdkafka `FutureRecord::to` and `subscribe`, kafka-go and sarama. Topic names resolve from literals and same-file constants, as in §6.3. The sensor emits `Topic` nodes with `ContractKey::Topic` and `Produces` / `Consumes` edges. Where it resolves a site that `dynamic_dispatch_sensor` also matched, the precise edge replaces that site's heuristic `BusTopic` edge. Dynamic topic names go to `coverage.unnormalized`. Payload schemas come from JSON Schema files mapped in `schemas` config.
+
+## 7. Federation joins (per federation)
+
+### 7.1 Configuration (`repos.yaml`)
+
+New top-level sections, all optional, documented in `docs/REPOS_YAML.md`:
 
 ```yaml
 services:
-  - name: orders
-    repo: orders
-    hosts: [orders, orders.svc.cluster.local]
+  - name: orders                 # unique; [a-z0-9][a-z0-9_-]*
+    repo: orders                 # a configured repo id
+    paths: []                    # repo-relative prefixes; empty = whole repo
+    hosts: [orders, orders.svc.cluster.local]   # lower-case; "*.example.com" wildcards allowed
     env: [ORDERS_URL, ORDERS_BASE_URL]
-    base_path: /api
-http_clients:
-  - call: "ordersClient.{method}"
-    service: orders
-bindings:            # person-confirmed links (Confirmed provenance), added by PR
-  - consumer: "billing:HttpClientCall:src/orders_api.py:POST /orders/{}:41"
-    provider: "orders:HttpRoute:src/api.rs:POST /orders/{}:88"
+    base_path: /api              # prefix the service is reached under, not visible in its code
+    route_prefixes:              # cross-file router mounts
+      - { path: src/routers/admin.py, prefix: /admin }
+  - { name: shipping,  repo: platform, paths: [services/shipping/] }
+  - { name: inventory, repo: platform, paths: [services/inventory/] }
+http_clients:                    # wrapper clients
+  - { call: "ordersClient.{method}", service: orders }             # {method} = any HTTP verb as method name
+  - { call: "api.fetchOrder", service: orders, method: GET, path_arg: 0 }
+generic_keys: ["GET /internal/ping"]   # added to the built-in list
+schemas:                         # stretch (PR 15): topic → JSON Schema file
+  - { topic: "kafka/orders.created", repo: orders, file: schemas/order_created.json }
+bindings:                        # person-confirmed links, added by PR
+  - consumer: { repo: billing, path: src/orders_api.py, symbol: create_order, key: "POST /api/orders" }
+    provider: { service: orders, key: "POST /api/orders" }
 ```
 
-**HTTP join rules**
+**Validation.** These errors fail config load; on hot reload the previous config stays active, as with existing `repos.yaml` errors: unknown `repo`; duplicate service `name`; a declared service whose name equals another repo's id; overlapping `paths` within one repo; an `http_clients.service` or `bindings.provider.service` that is neither declared nor implicit; the same `env` name or the same exact `hosts` entry listed by two services; a malformed `key` (it must parse as `<METHOD> <template>` and survive normalization unchanged); `path_arg` greater than 5.
 
-| Consumer state | Candidates | Edge written | Provenance |
+**Built-in generic keys:** `GET /`, `GET /health`, `GET /healthz`, `GET /ready`, `GET /readyz`, `GET /live`, `GET /livez`, `GET /ping`, `GET /status`, `GET /version`, `GET /metrics`, `GET /favicon.ico`.
+
+`config_hash` is the `blake3` of the canonical JSON (sorted keys) of `services`, `http_clients`, `generic_keys`, `schemas` and `bindings` after parsing.
+
+### 7.2 The join pass
+
+`ContractJoiner::run(nodes, config) -> (BindsSet, ContractIndex)` is a pure function. Steps, in order:
+
+1. **Assign services** to every contract node (§4.1).
+2. **Build endpoints.** Group provider nodes by `(service, method, template)` after applying the service's `base_path` and `route_prefixes`. A code route and an OpenAPI operation with the same key in the same service form **one endpoint** with two provider nodes. Its schemas come from whichever providers have them, merged like the response union of §6.4.
+3. **Filter wrapper candidates** against `http_clients` (§7.3 rule 1).
+4. **Resolve each consumer** (§7.3), producing `Binds` edges or an unresolved, external or unnormalized record.
+5. **Join fields** (§7.5).
+6. **Apply confirmed bindings** (§7.6) and record stale ones.
+7. **Sort** every output collection by its key.
+
+### 7.3 Consumer resolution
+
+For each `HttpClientCall` c, the first matching row decides:
+
+| # | Condition | Result | Provenance |
 | --- | --- | --- | --- |
-| Confirmed in `bindings` | the named route | `Binds` | `Confirmed { source: repos.yaml }`, 1.0 |
-| Host or env resolves to a service | routes with the same key in that service's repo | `Binds` | `Static`, 1.0 |
-| Unbound, exactly one key match in the org | that route | `Binds` | `Heuristic { unbound_host }`, 0.6 |
-| Unbound, several key matches | every match | one `Binds` each | `Heuristic { ambiguous }`, 0.3 |
-| No match | none | none | listed as unresolved consumer in coverage |
+| 1 | `via = Receiver` and no `http_clients.call` pattern matches `expr.fn_name` | discarded, not a call | — |
+| 2 | A `bindings` entry matches c (§7.6) | `Binds` to every provider node of the named endpoint | `Confirmed`, 1.0 |
+| 3 | Target service known: from the matching `http_clients` entry; else a `HostPart::Env` name listed in a service's `env`; else a `HostPart::Literal` host matching a service's `hosts` | route match (§7.4) in that service only. Found: `Binds`. Not found: unresolved, `reason = no_route_in_service` | `Static` 1.0; method `Unknown`: `Heuristic{method_unknown}` 0.6; prefix stripped: `Heuristic{prefix_stripped}` 0.5 |
+| 4 | `HostPart::Literal` host matches no service and is not `localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]` or `host.docker.internal` | `Target::External`, counted per host | — |
+| 5 | `template = None` | recorded in `unnormalized` | — |
+| 6 | Otherwise (target unknown) | route match across every service except c's own, skipping generic keys. One service matches: `Binds`. Several: one `Binds` per service. None: unresolved, `reason = no_match` | one: `Heuristic{unbound_host}` 0.6; several: `Heuristic{ambiguous}` 0.3 |
 
-**Field join.** A `FieldRef` binds to a `Field` only when the `FieldRef`'s scope function already reaches a `Binds`-ed provider whose response or payload schema contains that JSON path. Edge confidence is the lower of the contract bind and the field read. This scoping prevents a generic `.id` from matching every schema in the org.
+A service calling its own routes is not a contract between services, so rule 6 skips c's own service; an explicit rule 3 target that happens to be c's own service is honoured.
 
-**Topic join (stretch).** A consumer-repo `Topic` binds to every producer-repo `Topic` with the same `ContractKey::Topic`. Broker must match; a missing broker in config defaults to `kafka`.
+### 7.4 Route matching
 
-**Invariants checked in tests**
+Consumer template C matches provider template P when:
 
-- Every `Binds` edge connects endpoints in different repos and has `cross_repo = true`.
+- **Method.** C's method equals P's, or P is `ANY`, or C's method is `Unknown` (confidence capped at 0.6).
+- **Segments.** Same number of segments, or P ends with `{**}` and C has at least as many. Pairwise: literal equals literal (case-sensitive); P's `{}` matches any C segment; C's `{}` matches only P's `{}`, because a runtime value could be anything and so never proves a literal route.
+- **Specificity.** If several routes in one service match, the most specific wins: compare segments left to right with literal > `{}` > `{**}`; the first difference decides. Equal specificity means identical templates, i.e. the same endpoint.
+- **Prefix tolerance** (rule 3 only, target service known): if nothing matches, strip up to 3 leading literal segments from C, one at a time, and retry. A match is `Heuristic{prefix_stripped}` 0.5, and the edge's `detail.stripped_prefix` records what was removed. This covers unconfigured gateway prefixes and cross-file router mounts.
+
+Every `Binds` edge records `detail.route_match` = `Exact`, `Pattern` or `PrefixStripped`.
+
+### 7.5 Field join
+
+For each `FieldRef` f with `ReadsFrom` → call c, and each `Binds`(c → provider node r) of endpoint e:
+
+1. Take e's `Response` schema. If e has none, f stays unbound and e is listed in `schemaless_endpoints`.
+2. If f's chain equals a field's JSON path: `Binds`(f → that `Field`), with the read's provenance (`Static` when `exact`) capped by the endpoint bind.
+3. Else if f's chain is a suffix of exactly one field's path: `Binds`, `Heuristic{field_suffix}` 0.6, capped by the endpoint bind. If it is a suffix of several: one `Binds` each, `Heuristic{ambiguous_field}` 0.3.
+4. Else f is an **unknown-field read**, recorded on c's resolution and used by the consumer-side diff (§9.3).
+
+### 7.6 Confirmed bindings
+
+A `bindings` entry matches every `HttpClientCall` in `consumer.repo` at `consumer.path` whose enclosing symbol's name (or `Container.name`) equals `consumer.symbol` and whose `ContractKey` equals `consumer.key`. The provider is the endpoint `(provider.service, provider.key)`. An entry that matches no consumer, or whose endpoint does not exist, goes to `coverage.stale_bindings` with `reason = no_consumer` or `no_endpoint` and contributes nothing.
+
+### 7.7 Topic join (stretch, PR 15)
+
+A consumer-service `Topic` binds to every producer-service `Topic` with the same `ContractKey::Topic`. Brokers must match; a topic without a broker is `kafka`.
+
+### 7.8 Invariants checked in tests
+
+- Every `Binds` edge connects two different services; `cross_repo` is true exactly when their repos differ.
 - Every `Binds` edge carries provenance; none is `None`.
-- The joiner is a pure function of the endpoint set: the same input produces the same edge set in the same order.
+- `ContractJoiner::run` is a pure function of `(nodes, config)`: same input, same output in the same order, independent of projection order.
 
-## Revision-pinned analysis
+## 8. Revision-pinned analysis
 
-A change analysis compares two immutable federated views: the org at base commits, and the same org with the PR repository at its head commit. Per-repo indexes are cached by commit, so a PR reindexes one repository and reuses every other.
+### 8.1 Git access
 
-| Component | Design |
-| --- | --- |
-| `GitRevisionSource` | `impl RepoSource`, `kind = "git_revision"`, new `SourceConfig::GitRevision { url, commit }`. `fetch` runs `git worktree add --detach` into `~/.lain/worktrees/<repo>/<sha>` from one shared clone per repo. `content_hash` returns the sha. `is_stale` is always false. |
-| Index cache | Keyed by `(repo, sha, analyzer_version)` under `~/.lain/index-cache/`. Tree-sitter and sensors only, no LSP, for deterministic output. Least-recently-used eviction past a size budget. |
-| `Snapshot` | `Snapshot { repos: BTreeMap<RepoId, Sha>, analyzer_version }`. Head snapshot = base snapshot with one entry replaced. |
-| Ephemeral federation | `FederatedIndex::from_snapshot(&Snapshot, &IndexCache)` builds an in-memory `PetgraphBackend`, projects cached per-repo graphs, runs `rejoin_contracts`. It never touches the live index, watcher or overlay. At most `LAIN_SNAPSHOT_RESIDENT` (default 2) snapshot federations stay resident; when a new one is needed, the least recently used federation that no in-flight call holds is dropped. A `diff_contracts` call holds both of its snapshots until it returns; if every resident federation is held, the call waits for a slot and returns `busy` once `wait_ms` runs out. PR 11 measures peak RSS on the fixture org and on a larger multi-repo test org, commits the larger value as a CI ceiling. |
-| Worktree cleanup | Worktrees removed when their index is cached; `git worktree prune` on startup. A per-repo file lock serializes `git worktree add` and prune within a repo so an in-flight indexing job cannot lose its worktree. |
+- **Mirrors.** `<data_dir>/mirrors/<repo>.git` is a bare mirror (`git clone --mirror`) of the repo's source: the `url` of a `local_clone` or `shallow_clone` source, or the local path of a `workspace_dir` source. A mirror of a working directory sees committed state only; uncommitted edits are what `live` is for. LAIN never adds worktrees, refs or objects to a user's own repository. Fetching uses the `git` CLI, so the credential helpers the existing clone sources rely on apply; LAIN adds no credential handling. `git2` handles ref resolution, tree diffs and blob reads.
+- **Ref resolution.** A 40-hex sha, a unique sha prefix of at least 7 hex, `refs/…`, a branch or a tag. A ref missing locally triggers one `git fetch --prune` of the mirror, then fails with `ref_not_found`. A failed fetch (network, auth) is reported per repo as `fetch_failed`.
+- **Worktrees.** `git worktree add --detach <data_dir>/worktrees/<repo>/<sha> <sha>` from the mirror, removed as soon as the index is cached. A per-repo lock file, `<data_dir>/mirrors/<repo>.lock` (`std::fs::File::lock`), serializes fetch, `worktree add`, `worktree remove` and `worktree prune`. `prune` runs at startup under the same lock.
 
-**Base commit selection.** For a pull request: the PR repo uses the merge base with its target branch. Every other repo uses the commit its default branch pointed to when the analysis started, recorded in the snapshot. Results therefore name exact commits for every repository and can be reproduced.
+### 8.2 Snapshot indexing mode
 
-**Why no LSP.** Language servers make indexing slower and dependent on local toolchains. Tree-sitter plus sensors is enough for contract facts, and the provenance on each edge already records which source produced it.
+`IndexRequest` gains `mode: IndexMode { Live, Snapshot }`, and its `lsp_pool` and `overlay` fields become `Option<&…>`. In `Snapshot` mode, `index_one_repo` runs with `force = true` and without LSP, overlay, cross-repo resolver, co-change pass or embedding/NLP enrichment: tree-sitter symbols, static resolve and sensors only. `RepoIndex` is not involved; a snapshot index job calls `index_one_repo` directly on a fresh `GraphDatabase` in a temp directory.
 
-## Contract diff and compatibility
+### 8.3 Index cache
 
-The analysis is three pure functions with deterministic output order: `diff_contracts` lists what changed, `classify` says whether each change can break a consumer, and `evaluate` combines that with impact paths and coverage into an `ImpactClass`. The rules follow the established categories used by Buf for protobuf and oasdiff for OpenAPI rather than inventing new ones.
+- **Layout.** `<data_dir>/index-cache/<repo>/<sha>-<analyzer_version>/{graph.bin, manifest.json}`, where `manifest.json` = `{ repo, commit, analyzer_version, files: [repo-relative paths walked], sensor_counts, bytes, created_unix, last_used_unix }`. Entries are written to a temp directory and renamed into place.
+- **Eviction.** Least recently used past `LAIN_INDEX_CACHE_MB` (default 4096). An entry held by a resident snapshot federation or a running job is never evicted.
+- **analyzer_version** = `"<CARGO_PKG_VERSION>+c<CONTRACT_ANALYZER_REV>"`, with `const CONTRACT_ANALYZER_REV: u32` in `federation/contracts/mod.rs`. Any change to sensors, the normalizer or the joiner that changes output must bump it. `tests/contracts_analyzer_digest.rs` indexes the fixture and compares a blake3 canonical digest (below) of the cached graphs with `tests/fixtures/contracts/analyzer_digest.txt`; a mismatch without a bump fails with instructions to bump and regenerate.
+- **Determinism test.** `graph.bin` contains a `HashMap` (`GraphState::index_map`), so its bytes are not stable. Determinism is checked on the **canonical digest**: blake3 over every node sorted by id and every edge sorted by `(edge_type, source_id, target_id)`, each bincode-encoded after clearing the fields that record when indexing happened (`last_lsp_sync`, `last_git_sync`, `is_hydrated`) and `embedding`, which snapshot mode never computes. Indexing the same fixture sha twice must give the same digest. The analyzer digest above uses the same function.
 
-**Surface and diff**
+### 8.4 Snapshot records and jobs
+
+- **Record.** `<data_dir>/snapshots/<snapshot_id>.json` = `{ id, repos: {repo: commit}, excluded: [repo], refs: {repo: ref as given}, join_config, config_hash, analyzer_version, state, repo_states: {repo: {state, error?}}, created_unix, last_access_unix }`. `join_config` is the canonical JSON of the join-relevant sections (§7.1) at preparation time, and `from_snapshot` joins with it, never with the current `repos.yaml`. A snapshot therefore means the same thing after a config edit.
+- **Which config.** A snapshot prepared without `from` uses the current `repos.yaml`. A snapshot derived `from` another inherits its `join_config`, so a base and its derived head are always comparable.
+- **Identity.** `snapshot_id = "snap_"` + the first 16 hex of `blake3` over the canonical JSON of `{ repos, excluded, config_hash, analyzer_version }`.
+- **Jobs.** One per missing `(repo, sha, analyzer_version)` cache entry, deduplicated across snapshots, run on `LAIN_SNAPSHOT_WORKERS` (default 2) workers. At most 64 jobs queue; beyond that, `prepare_snapshot` returns `busy`. A job takes the lock, adds the worktree, indexes (§8.2), writes the cache entry, removes the worktree and releases the lock.
+- **Restart.** Records are reloaded; `pending` and `indexing` snapshots re-enqueue their missing jobs.
+- **Retention.** A record is deleted 7 days (`LAIN_SNAPSHOT_RETENTION_DAYS`) after `last_access_unix`. Preparing again with the same inputs gives the same id, so an expired snapshot can always be re-created.
+
+### 8.5 Snapshot federations
+
+- `FederatedIndex::from_snapshot(&SnapshotRecord, &IndexCache)` builds a federation over `PetgraphBackend::ephemeral()`, a `GraphDatabase` with persistence disabled whose `save()` is a no-op. No `RepoIndex`, watcher or overlay is created.
+- `project_nodes` and `project_edges` are refactored into `project_graph(repo_id, &GraphDatabase)`, shared by live and snapshot projection, so both produce identical node and edge sets from the same per-repo graph.
+- After projecting every repo, it runs `rejoin_contracts`.
+- **Residency.** At most `LAIN_SNAPSHOT_RESIDENT` (default 2) snapshot federations are in memory. A tool call holds the federations it uses until it returns (`diff_contracts` holds two). When a new one is needed, the least recently used federation that no call holds is dropped. If every resident federation is held, the call waits up to its `wait_ms` (analysis tools default to 5,000) and then returns `busy`.
+- **Memory ceiling.** PR 11 measures peak RSS for building the fixture and the tokio + bytes federation as snapshots and commits 1.5 × the larger value to `tests/fixtures/contracts/memory_ceiling.txt`. The check runs in the `main` full battery, since it needs network.
+
+### 8.6 What snapshots do not contain
+
+Per-repo cache entries are built without other repos, so snapshot federations have no cross-repo `Calls` or `CrossRepoSameSymbol` edges. Contract impact does not need them, because services talk through `Binds`. Tools that rely on symbol-level joins (`get_cross_repo_blast_radius`) keep working on `live` only.
+
+### 8.7 The live view
+
+`"live"` addresses the running federation. Each `EvidenceRef.commit` is the repo's last indexed commit (`GraphDatabase::get_last_commit`), with `dirty: true` when the repo's overlay holds uncommitted changes. Repo state maps from `RepoHealth` (`federation/health.rs`): `Ready` → reviewed; `Indexing` → `unreviewed: not_ready`; `Degraded`, `Unavailable` and `Missing` → `unreviewed: failed` with the health as `error`; repos in `load_errors` → `unreviewed: failed`. Live results carry `reproducible: false`. On `live`, `read_source` reads the repo's files on disk (its `local_path`), so it shows uncommitted content and marks it `dirty`.
+
+## 9. Contract diff and compatibility
+
+### 9.1 Surfaces
 
 ```rust
-pub struct ContractSurface { pub contracts: BTreeMap<ContractKey, ContractDef> }
-pub struct ContractDef { pub providers: Vec<GlobalId>, pub schemas: BTreeMap<Direction, SchemaDef> }
-
-pub fn diff_contracts(base: &ContractSurface, head: &ContractSurface) -> Vec<ContractChange>;
-
-pub enum ChangeKind {
-    EndpointRemoved, EndpointAdded, MethodChanged,
-    PathChanged,                                   // same handler, different key
-    FieldRemoved, FieldAdded { required: bool },
-    FieldRenamed { from: String, to: String },    // same parent, same TypeDesc: see pairing rule
-    FieldTypeChanged { from: TypeDesc, to: TypeDesc },
-    RequirednessChanged { now_required: bool },
-    NullabilityChanged { now_nullable: bool },
-    EnumValueRemoved(String), EnumValueAdded(String),
-    TopicRemoved, PayloadSchemaChanged,
+pub struct ContractSurface {
+    pub endpoints: BTreeMap<EndpointId, EndpointDef>,      // EndpointId = (ServiceName, ContractKey)
+    pub consumers: BTreeMap<ConsumerKey, ConsumerDef>,     // ConsumerKey = (caller SymbolKey, ContractKey or url_expr)
 }
+pub struct EndpointDef {
+    pub providers: Vec<ProviderRef>,                       // GlobalId, handler SymbolKey?, operation_id?
+    pub schemas: BTreeMap<Direction, BTreeMap<JsonPath, FieldMeta>>,
+    pub has_schema: bool,
+    pub source_files: BTreeSet<String>,                    // route and spec files, handler files
+}
+pub struct ConsumerDef { pub call: GlobalId, pub resolution: ConsumerResolution, pub reads: BTreeSet<JsonPath> }
 ```
 
-`diff_contracts(a, a)` is always empty. `PathChanged` is detected when a removed and an added route share the same handler `GlobalId`.
+A surface is extracted from a view's `ContractIndex`. Endpoints are keyed per service, so the same key served by two services (`GET /health`) never collides.
 
-`FieldRenamed` is reported when exactly one field is removed and one added under the same parent and they share the same `TypeDesc`. The pairing is a heuristic; a rename that changes type or adds a new sibling is reported as `FieldRemoved + FieldAdded`. On the response it classifies like `FieldRemoved` on the old name: anything still reading it is broken. On the request it classifies like `FieldAdded` on the new name: callers still send the old name, so it is `Breaking` when the new field is required and `NeedsReview` otherwise, because the provider silently ignores the value callers send. Reporting one change instead of two keeps the consumer output legible.
+### 9.2 Provider-side changes
 
-**Classification** — `classify(kind, direction) -> Compat`
+`diff_contracts(base, head)` compares `base.endpoints` with `head.endpoints`:
 
-| Change | Response or payload | Request |
+| `ChangeKind` | Rule |
+| --- | --- |
+| `PathChanged { from, to }`, `MethodChanged { from, to }` | An endpoint removed and one added in the same service share a provider handler `SymbolKey` (code) or `operation_id` (OpenAPI); `MethodChanged` when only the method differs |
+| `EndpointRemoved`, `EndpointAdded` | Removals and additions left unpaired |
+| `FieldRemoved`, `FieldAdded { required }` | Per endpoint and direction, by JSON path |
+| `FieldRenamed { from, to }` | Under one parent path and direction, exactly one field removed and one added, with equal `TypeDesc` |
+| `FieldTypeChanged { from, to }`, `RequirednessChanged { now_required }`, `NullabilityChanged { now_nullable }` | Same path, attribute differs |
+| `EnumValueRemoved(v)`, `EnumValueAdded(v)` | Same path, enum sets differ |
+| `ChangedWithoutSchema` | `has_schema = false` in both, and a file in `source_files` differs between the base and head commits (git2 tree diff in the mirror) |
+| `TopicRemoved`, `PayloadSchemaChanged` | Stretch (PR 15) |
+
+**Nested fields.** When an object field is removed, added or changes type, only the topmost affected path is reported; its descendants are not reported separately. A consumer "reads" a changed field when it reads that path or any path under it.
+
+**Behavior behind an unchanged schema.** A handler change on an endpoint that has a schema, with no schema change, is not a contract change and is not reported.
+
+`diff_contracts(a, a)` is empty by construction.
+
+### 9.3 Consumer-side changes
+
+For repos whose commit differs between base and head, compare `base.consumers` with `head.consumers`:
+
+| `ChangeKind` | Rule |
+| --- | --- |
+| `ConsumerEndpointUnmatched` | A consumer key present in head but not in base, unresolved in head (`no_route_in_service` or `no_match`) |
+| `ConsumerFieldUnmatched { field }` | A head consumer bound to an endpoint with a schema reads a path the schema does not contain (§7.5 step 4), and base did not |
+| `ConsumerRebound` | Same consumer key bound to a different endpoint; informational, `Compatible` |
+
+### 9.4 Classification — `classify(kind, direction) -> Compat`
+
+`Compat` is `Compatible | Breaking | BreakingIfRead | BreakingIfSent | NeedsReview`.
+
+| Change | Response / payload | Request |
 | --- | --- | --- |
 | Field removed | BreakingIfRead | Compatible |
-| Field added | Compatible | Breaking if required |
-| Field renamed | BreakingIfRead | Breaking if required, else NeedsReview |
-| Type changed | BreakingIfRead | Breaking |
+| Field added | Compatible | Breaking if required, else Compatible |
+| Field renamed | BreakingIfRead | Breaking if the new field is required, else NeedsReview |
+| Type changed | BreakingIfRead | Breaking if required, else BreakingIfSent |
 | Became nullable | BreakingIfRead | Compatible |
+| Became non-nullable | Compatible | BreakingIfSent |
 | Became required | Compatible | Breaking |
+| Became optional | BreakingIfRead | Compatible |
 | Enum value added | NeedsReview | Compatible |
-| Enum value removed | Compatible | Breaking |
-| Endpoint or topic removed; method or path changed | Breaking | Breaking |
+| Enum value removed | Compatible | BreakingIfSent |
+| Endpoint removed; path or method changed | Breaking | Breaking |
 | Endpoint added | Compatible | Compatible |
+| Changed without schema | NeedsReview | NeedsReview |
+| Consumer endpoint or field unmatched | Breaking | Breaking |
 
-A request field's type change breaks every caller whether or not anything reads the field, because the wire shape they send is wrong; a response field becoming required breaks nobody, because callers already handle its absence and now simply always receive it.
+A required request field's type change breaks every caller, since every request carries the field. An optional request field's type change, a request field becoming non-nullable, or a removed request enum value breaks only callers that send it: `BreakingIfSent`. 0.9 has no fact for what consumers send (`WritesField` is phase 2), so `BreakingIfSent` never reaches `Verified`. A response field becoming required breaks nobody, because callers already handle its absence; a response field becoming optional breaks callers that read it. A renamed request field behaves like the new name being added, because callers keep sending the old one.
 
-**Evaluation** — `evaluate(change, paths, coverage) -> ImpactClass`
+### 9.5 Evaluation — `evaluate(change, base_view, head_view) -> Impact`
+
+**Where to trace.** Provider-side changes are traced in the **base** view, where the old contract and its consumers exist: from the changed `Field` if it exists in base, otherwise from the endpoint's provider nodes. Consumer-side changes are traced in the **head** view, up from the new consumer's calling function (callers and entry points, as in `used_by`).
+
+**Qualifying prefix.** Only the hops that prove a dependency decide the class:
+
+- Field changes: `Field` ← `Binds` ← `FieldRef` ← `ReadsField` ← reading function.
+- Endpoint changes: `HttpRoute` ← `Binds` ← `HttpClientCall` ← `SendsHttp` ← calling function.
+- Consumer-side changes: the consumer's target-service resolution and, for fields, the endpoint `Binds`.
+
+Hops beyond the prefix (callers of callers, services further out) are reported with their own provenance but never change the class. Tree-sitter resolves `Calls` by name (`treesitter.rs:1086`); letting those hops decide would let a guessed call produce `Verified`.
+
+**Per bound consumer c of the changed endpoint.** `certain` means every prefix edge is `Static` or `Confirmed`.
+
+| Compat | c reads the field | c does not read it, `reads_complete = true` | c does not read it, `reads_complete = false` |
+| --- | --- | --- | --- |
+| Breaking | `Verified` if certain, else `NeedsInvestigation` (`heuristic_binding`); applies to every bound consumer whether it reads or not | same | same |
+| BreakingIfRead | `Verified` if certain, else `NeedsInvestigation` (`heuristic_binding`) | unaffected | `NeedsInvestigation` (`reads_not_fully_traced`) |
+| BreakingIfSent | `NeedsInvestigation` (`sends_not_modeled`) | same | same |
+| NeedsReview, response side | `NeedsInvestigation` (`needs_review`) | unaffected | `NeedsInvestigation` (`reads_not_fully_traced`) |
+| NeedsReview, request side or `ChangedWithoutSchema` | `NeedsInvestigation` (`needs_review` / `no_schema`) for every bound consumer | same | same |
+| Compatible | not reported; counted in `compatible_changes` | | |
+
+A change's class is the strongest over its consumers (`Verified` > `NeedsInvestigation` > `NoKnownImpact`), and `affected` lists each consumer with its own class and reasons. If no consumer is affected:
 
 | Condition | Class |
 | --- | --- |
-| Breaking with any bound consumer, or BreakingIfRead with a path through `ReadsField` → `Binds` → `Field`, all edges `Static` or Confirmed | `Verified` |
-| Same as above, but the strongest path contains a `Heuristic` edge | `NeedsInvestigation` |
-| NeedsReview with any bound consumer | `NeedsInvestigation` |
-| No qualifying path, coverage complete for every repo | `NoKnownImpact` |
-| No qualifying path, coverage incomplete | `NeedsInvestigation` |
-| Compatible | not reported |
+| A reviewed repo has an unresolved or ambiguous consumer that **could match** the change (§9.7) | `NeedsInvestigation` (`unresolved_candidates`), with those consumers listed |
+| Otherwise | `NoKnownImpact`, with `scope` |
 
-The last two rows enforce the invariant that absence of evidence is only reported as absence when coverage is complete.
+A consumer-side change is `Verified` when the consumer's target service is resolved `Static` or `Confirmed` and that service's repo is reviewed; otherwise `NeedsInvestigation`.
 
-**Coverage report**, returned with every analysis:
+### 9.6 Scoped NoKnownImpact
 
-- Repositories in the snapshot with their commits and index status, including repos that failed to index.
-- Sensor counts per repository.
-- Unresolved `HttpClientCall`s (no provider match) and ambiguous `Binds` groups.
-- Dynamic URLs and topic names the sensors could not normalize.
-- Analyzer version.
+LAIN never reports a bare "no impact". Every `NoKnownImpact` carries:
 
-Coverage is complete for a change only when every repository indexed and no unresolved or ambiguous consumer could match the changed contract. For HTTP, the method must match (or be unreadable); for an event, an unresolved topic name on the same broker could be any topic, the same way an unreadable method could be any method, and the change is therefore incomplete.
+```typescript
+type Scope = {
+  reviewed:   { repo: string; commit: string; dirty?: boolean }[];
+  unreviewed: { repo: string; reason: "failed" | "fetch_failed" | "excluded" | "not_ready"; error?: string }[];
+  configured_only: true;   // repos missing from repos.yaml are invisible to LAIN
+};
+```
 
-## Interface principles
+The text rendering always states it, for example: *"No known impact in 5 reviewed repos. 1 configured repo could not be reviewed: reports (excluded)."* An unresolved call site in a reviewed repo is a concrete lead, so it makes the change `NeedsInvestigation` (§9.5) instead of being listed in the scope.
 
-The new tools are a machine interface first: a change-impact tool and coding agents call them, so every response is structured, versioned, deterministic and read-only. They ship in an opt-in profile, `LAIN_TOOL_PROFILE=contracts`, which composes with the existing profiles; the default profile stays at 18 tools or fewer.
+### 9.7 Coverage
 
-| Principle | Rule |
-| --- | --- |
-| Registration | Inventory pattern and `FederationToolRegistry`; no new `dispatch_tool_call` arms. |
-| Transports | stdio and the existing HTTP transport serve the same handlers and byte-identical payloads. |
-| Payload | `structuredContent` validated against a published JSON Schema, plus a short text rendering for LLM agents. Output schemas are advertised in the tool definitions and dumped into `docs/tool-schema.json` under the existing drift check. |
-| Versioning | Every call may pass `api_version`; every response carries `api_version` and `analyzer_version`. Additive fields do not bump the version. A breaking change bumps it, and the previous version is served for one minor release. An unsupported version is refused with `unsupported_api_version`. |
-| Scope | Every analysis tool takes a `snapshot` id. `"live"` addresses the current federated index and is marked non-reproducible in the response. |
-| Identity | Nodes are named by `GlobalId` (encoded per F1). Anything tied to a snapshot is an `EvidenceRef` (`repo@sha:path:line` plus the `GlobalId`). |
-| Determinism | Same snapshot and analyzer version produce byte-identical `structuredContent`: collections sorted by key, no timestamps outside `meta`. |
-| Size | List tools page with an opaque `cursor` (`limit` default 100, max 1,000). Traversals take `cap` and return `truncated`. |
-| Safety | No tool writes to repositories, config or the live index. Snapshot preparation writes only to the worktree and index caches. `read_source` reads only paths the snapshot's indexer actually walked, so `.gitignore` and other ignore files apply; it denies common secret files (`.env*`, `*.pem`, `*.key`, `id_*`, `*.p12`, `.npmrc`), refuses binary files (any NUL byte in the first 8 KiB), and uses the same auth (`LAIN_API_KEYS`) as every other tool. |
+Returned with every analysis:
 
-## Snapshot lifecycle
+- Every configured repo with its commit and state (`indexed`, `failed`, `fetch_failed`, `excluded`, `not_ready`), sensor counts and error.
+- `unresolved_consumers` with reasons, `ambiguous` groups, `unnormalized` (dynamic URLs, topic names, external `$ref`s), `external` host counts, `stale_bindings`, `schemaless_endpoints`.
+- `scope`, and `complete`, derived: true iff `scope.unreviewed` is empty and, when an endpoint is given, no unresolved consumer could match it.
 
-Indexing a repository at a commit can take longer than a tool call should block, so snapshots are prepared asynchronously and addressed by a content-derived id. The same inputs always yield the same `snapshot_id`, which makes preparation idempotent and lets any consumer re-create a snapshot later.
+An unresolved HTTP consumer u in a reviewed repo **could match** a change on endpoint `(s, K)` iff u is not external, u's target service is `s` or unknown, u's method equals K's or one of them is `Unknown` or `ANY`, and u's template is `None` or matches K by §7.4, prefix tolerance included. For topics (stretch), an unresolved topic name on the same broker could match any topic.
 
-**Identity.** `snapshot_id = sha256(sorted repo→sha pairs, analyzer_version)`, rendered as `snap_<first 16 hex>`. Refs such as `main` are resolved to shas when the snapshot is prepared and recorded in it; the id never depends on a moving ref.
+## 10. Interface
+
+### 10.1 Package and registration
+
+- New `Package::Contracts` (`tools/capabilities.rs`), enabled by `LAIN_TOOL_PROFILE=contracts` (combinable with other packages) or `load_package contracts`. The default profile is unchanged and stays at 18 tools or fewer.
+- Tools live in `mcp/contract_tools/`, one file per group. Definitions go in a new `CONTRACT_TOOL_DEFS: &[ToolDef]` in `mcp/definitions.rs`, advertised when a `FederatedIndex` exists and the package is enabled.
+- `ToolDef` gains `input_schema: Option<&'static str>` and `output_schema: Option<&'static str>`: JSON loaded with `include_str!` from `mcp/contract_tools/schemas/<tool>.in.json` and `.out.json`. `defs_to_tools` and `defs_to_value_tools` use them when present, so `lain schema dump`, and therefore the `schema-drift` job, covers them.
+- New inventory entry `ContractToolEntry { name, handler: fn(&McpContext, Value) -> BoxFuture<'_, ToolOutcome> }` in `mcp/contract_tools/mod.rs`, checked by `dispatch_tool_call` right after `invoke_inventory` (`mcp/handler.rs:667`). `ToolOutcome` is `{ structured: serde_json::Value, text: String, is_error: bool }`, mapped onto `CallToolResult { structured_content, content: [text], is_error }` for stdio and onto the equivalent JSON for HTTP. It is async so `wait_ms` long-polls do not block a runtime thread. No `match` arm is added to `dispatch_tool_call` (`scripts/check-mcp-dispatch-shape.py`).
+- The snapshot manager is owned by `FederatedIndex` (`fed.snapshots()`) and reached through `McpContext.federation`.
+- Advertising is not dispatch (`tools/profile.rs`): contract tools can be called whenever a federation is configured, whether or not the package is advertised. Their safety rules (§10.7) therefore stand on their own.
+
+### 10.2 Envelope
+
+On success: `isError: false`; `structuredContent` is an `Envelope<T>`; `content[0].text` is a deterministic plain-text rendering of at most 2,000 characters, produced by the tool's `render` function. The scope sentence of §9.6 is always included when `scope` is present.
+
+```typescript
+type Envelope<T> = {
+  api_version: 1; analyzer_version: string; snapshot: SnapshotId;
+  reproducible: boolean;                   // false for "live"
+  data: T;
+  meta: { elapsed_ms: number };            // the only non-deterministic field
+};
+```
+
+On error: `isError: true`; `structuredContent` is `{ api_version, analyzer_version, error: ToolError }`; the text is `"<code>: <message>"`.
+
+### 10.3 Versioning
+
+Every call may pass `api_version` (an integer); absent means the newest. Every response carries `api_version` and `analyzer_version`. Additive output fields do not bump the version. A breaking change bumps it, and the previous version is served for one minor release. An unsupported value is refused with `unsupported_api_version` (`details.supported: [1]`).
+
+### 10.4 Determinism
+
+For a given view and analyzer version, `structuredContent` without `meta` is byte-identical across calls, processes and transports (stdio and HTTP): collections are sorted by their documented key, maps are `BTreeMap`, and floats use Rust's shortest round-trip formatting.
+
+### 10.5 Paging and limits
+
+| Parameter | Default | Max |
+| --- | --- | --- |
+| list `limit` (items; consumer services for `get_service`) | 100 | 1,000 |
+| `cap` (paths) | 50 | 500 |
+| `trace_impact.depth` | 6 | 12 |
+| `get_service.depth` (`used_by`) | 4 | 8 |
+| `resolve_evidence.refs` | — | 200 |
+| `context_lines` | 3 | 20 |
+| `read_source` range | — | 400 lines |
+| `wait_ms` | 0 for snapshot tools; 5,000 for residency waits in analysis tools | 60,000 |
+
+`cursor` is opaque: base64url of `{ v: 1, after: <sort key of the last item>, q: <first 8 hex of blake3 of the other arguments> }`. A cursor reused with different arguments is refused with `invalid_argument` (`reason: cursor_mismatch`). Exceeding a max is `range_too_large`.
+
+### 10.6 Identity
+
+Nodes are named by `GlobalId` (F1). Anything tied to a view is an `EvidenceRef` (§10.8). `GlobalId`s contain line numbers and are not stable across edits; persistent references use `SymbolKey` (§4.3).
+
+### 10.7 Safety
+
+- No tool writes to repositories, `repos.yaml` or the live index. Snapshot preparation writes only under `<data_dir>/mirrors`, `worktrees`, `index-cache` and `snapshots`.
+- `read_source` and `resolve_evidence` snippets read only files the view's index walked: the cache entry's `files` for snapshots, the repo's indexed files for `live`, so ignore files apply. They refuse secret files, matched case-insensitively by basename: `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `credentials*.json`, `*.keystore`. They refuse binaries (a NUL byte in the first 8 KiB). Snapshot content is read from the mirror's object store at the snapshot commit (git2 blob lookup), never from a working tree.
+- Auth is the existing HTTP transport auth (`LAIN_API_KEYS`, `auth.rs`); stdio is a local process. 0.9 is a single trust domain: any client that passes auth can read every configured repo, including at old commits, where a secret deleted from the current tree may still exist. Per-repo access control is a non-goal.
+
+### 10.8 Shared types
+
+```typescript
+type SnapshotId  = string;            // "snap_4f9a2c1e0b7d6a53" or "live"
+type GlobalId    = string;            // repo:Kind:path:name:line, F1-encoded
+type ContractKey = string;            // §4.4
+type Endpoint    = { service: string; key: ContractKey };
+type EvidenceRef = { id: GlobalId; repo: string; commit: string; path: string; line: number; text: string; dirty?: boolean };
+type Provenance  = { kind: "static" | "heuristic" | "runtime" | "confirmed"; detector?: string; source?: string; confidence: number };
+type Hop         = { edge: EdgeType; node: EvidenceRef; node_type: NodeType; name: string; provenance: Provenance;
+                     match?: "exact" | "pattern" | "prefix_stripped" };
+type ImpactPath  = { start: EvidenceRef; hops: Hop[]; min_confidence: number };
+type EntryPoint  = { ref: EvidenceRef; kind: "http_handler" | "scheduled" | "cli" | "main" | "unreferenced"; name: string };
+type Scope       = { reviewed: { repo: string; commit: string; dirty?: boolean }[];
+                     unreviewed: { repo: string; reason: "failed" | "fetch_failed" | "excluded" | "not_ready"; error?: string }[];
+                     configured_only: true };
+type Unresolved  = { consumer: EvidenceRef; url_expr: string; method: string; template?: string; host?: string;
+                     reason: "no_route_in_service" | "no_match"; target_service?: string };
+type Coverage = {
+  complete: boolean; scope: Scope;
+  repos: { repo: string; commit?: string; state: "indexed" | "failed" | "fetch_failed" | "excluded" | "not_ready";
+           sensors: Record<string, number>; error?: string }[];
+  unresolved_consumers: Unresolved[];
+  ambiguous: { consumer: EvidenceRef; candidates: Endpoint[] }[];
+  unnormalized: EvidenceRef[];
+  external: { host: string; calls: number }[];
+  stale_bindings: { entry: number; reason: "no_consumer" | "no_endpoint" }[];
+  schemaless_endpoints: Endpoint[];
+};
+type Reason = "reads_not_fully_traced" | "sends_not_modeled" | "heuristic_binding" | "unresolved_candidates" | "needs_review" | "no_schema";
+type Impact = { class: "Verified" | "NeedsInvestigation" | "NoKnownImpact"; reasons: Reason[]; scope?: Scope };  // scope iff NoKnownImpact
+```
+
+### 10.9 `used_by`
+
+From a consumer's calling function, walk incoming `Calls` edges up to `depth`. The calling function itself is reported if its `entry` is set, and the walk continues from it; any other node whose `entry` is set is reported and not expanded further (§6.6). So a function that is both a scheduled job and called by an HTTP handler reports both. A function with no incoming `Calls` that is not an entry point is reported as `kind: "unreferenced"`. If `depth` ends the walk before any entry point is found, `used_by_truncated` is true. Results are sorted by kind, then `GlobalId`.
+
+## 11. Snapshot lifecycle
 
 **States**
 
 | State | Meaning | Next |
 | --- | --- | --- |
-| `pending` | Accepted, waiting for an indexing worker | `indexing` |
-| `indexing` | At least one repo is being checked out or indexed | `ready`, `failed` |
-| `ready` | Every repo indexed, joins computed; analysis tools accept the id | `indexing` again only if a cache entry was evicted |
-| `failed` | At least one repo could not be checked out or indexed | Terminal for this id; per-repo errors are listed |
+| `pending` | Accepted, jobs queued | `indexing` |
+| `indexing` | At least one job running | `ready`, `failed` |
+| `ready` | Every non-excluded repo cached; the federation can be built | `indexing` if a cache entry was evicted |
+| `failed` | At least one repo failed (`fetch_failed`, `ref_not_found` after fetch, or an index error) | terminal for this id |
 
 ```mermaid
 stateDiagram-v2
@@ -459,290 +775,313 @@ stateDiagram-v2
   failed --> [*]
 ```
 
-A snapshot with a failed repo is not silently narrowed. The consumer may prepare a new snapshot without that repo; analysis on it then reports incomplete coverage for anything that repo could consume.
+A snapshot with a failed repo is never silently narrowed. The consumer may prepare a new snapshot with that repo in `exclude`; analysis on it reports the repo as `unreviewed: excluded`.
 
-**Waiting.** `prepare_snapshot` and `get_snapshot` take `wait_ms` (default 0, max 60,000) and return as soon as the snapshot is `ready` or `failed`, or when the wait ends. On the HTTP transport the same call can be polled.
+**Waiting.** `prepare_snapshot` and `get_snapshot` take `wait_ms` and return as soon as the snapshot is `ready` or `failed`, or when the wait ends.
 
-**Derivation.** A pull-request head is expressed as `from` another snapshot plus overrides, so only the overridden repos are indexed:
+**Inputs.** `repos` maps repo → ref or sha. Omitted repos use `from`'s commit when `from` is given, else the repo's default branch (the mirror's `HEAD`) resolved now. `exclude` lists repos to leave out. `from` may be in any state; its commits are fixed once it is accepted, and the derived snapshot does not inherit its failure. `max_base_age_s` (optional, only without `from`) reuses, for repos not in `repos`, the commits of the newest `ready` record younger than that age with the same `config_hash`, `analyzer_version` and `exclude` set.
 
-```json
-{ "from": "snap_4f9a2c1e0b7d6a53", "repos": { "orders": "e4d1c09" } }
-```
+**Merge base.** LAIN resolves refs and shas only. The consumer computes the PR's merge-base sha and passes it.
 
-`from`'s commits are fixed as soon as it is accepted, so derivation does not depend on its `state`. A `pending`, `indexing`, `ready` or `failed` `from` is accepted; the derived snapshot does not inherit `from`'s failure because the override may be exactly what unblocks the failing repo. Only an unknown `from` returns `snapshot_not_found`.
+## 12. Tool reference
 
-**Cost and retention.** Per-repo indexes are shared across snapshots through the `(repo, sha, analyzer_version)` cache. Indexing jobs are deduplicated on that key and run on a bounded worker pool (`LAIN_SNAPSHOT_WORKERS`, default 2). Snapshot records are small and kept 7 days; an evicted index is rebuilt transparently the next time its snapshot is used.
+Thirteen read-only tools in five groups. A consumer can run a full pull-request analysis with three of them (`prepare_snapshot`, `diff_contracts`, `resolve_evidence`); the service tools answer "who uses this service and why" without a diff.
 
-## Tool reference
+| Group | Tool | Purpose | On `live` |
+| --- | --- | --- | --- |
+| Snapshots | `prepare_snapshot` | Create or derive a pinned org view; optionally wait | n/a |
+| Snapshots | `get_snapshot` | State, commits and per-repo errors | yes (readiness) |
+| Services | `list_services` | Every service with repo, paths, endpoint and consumer counts | yes |
+| Services | `get_service` | Consumers of one service: endpoints and fields used, calling code, `used_by` | yes |
+| Contracts | `list_contracts` | Endpoints, filterable by service, repo and kind | yes |
+| Contracts | `get_contract` | Providers, schema fields and bound consumers of one endpoint | yes |
+| Contracts | `list_unresolved` | Unresolved and ambiguous consumers with candidates | yes |
+| Contracts | `check_binding` | Validate a proposed consumer → endpoint link and emit its `bindings` entry | yes |
+| Analysis | `diff_contracts` | Provider and consumer changes between two snapshots, classified, with impact and coverage | no: `invalid_argument` (`live_not_supported`) |
+| Analysis | `trace_impact` | Impact paths from an endpoint, field or symbol | yes |
+| Analysis | `get_coverage` | What a view saw and could not resolve | yes |
+| Evidence | `resolve_evidence` | Check refs exist at their commit; return context | yes |
+| Evidence | `read_source` | A bounded line range of a file at a view's commit | yes |
 
-Eleven read-only tools in four groups: snapshots, contract queries, change analysis, and evidence. A consumer can run a full pull-request analysis with three of them (`prepare_snapshot`, `diff_contracts`, `resolve_evidence`); the rest support investigation and agent use.
-
-| Group | Tool | Purpose |
-| --- | --- | --- |
-| Snapshots | `prepare_snapshot` | Create or derive a pinned org view; optionally wait for it |
-| Snapshots | `get_snapshot` | State, commits and per-repo errors of a snapshot |
-| Contracts | `list_contracts` | Contracts in a snapshot, filterable by repo and kind |
-| Contracts | `get_contract` | Providers, schemas, fields and bound consumers of one contract |
-| Contracts | `list_unresolved` | Consumers with no provider, or with ambiguous candidates |
-| Contracts | `check_binding` | Whether a proposed consumer→provider link is structurally valid |
-| Analysis | `diff_contracts` | Changes between two snapshots with classification, impact and coverage |
-| Analysis | `trace_impact` | Impact paths from a contract, field or symbol |
-| Analysis | `get_coverage` | What a snapshot saw and what it could not resolve |
-| Evidence | `resolve_evidence` | Check that refs exist at their commit and return their context |
-| Evidence | `read_source` | A bounded line range of a file at a snapshot commit |
-
-**Shared types**
+**Signatures** (inputs → `data`; every call also accepts `api_version`)
 
 ```typescript
-type SnapshotId = string;               // "snap_4f9a2c1e0b7d6a53" or "live"
-type GlobalId   = string;               // repo:Kind:path:name:line, F1-encoded
-type ContractKey = string;              // "http:POST /api/orders/{}" | "topic:kafka/orders.created"
-type EvidenceRef = { id: GlobalId; commit: string; path: string; line: number };  // renders repo@sha:path:line
-type Provenance  = { kind: "static" | "heuristic" | "runtime" | "confirmed"; detector?: string; confidence: number };
+prepare_snapshot({ repos?: Record<string, string>; exclude?: string[]; from?: SnapshotId; max_base_age_s?: number; wait_ms?: number })
+  → { snapshot: SnapshotId; state: "pending" | "indexing" | "ready" | "failed";
+      repos: { repo: string; ref?: string; commit?: string; state: "cached" | "queued" | "indexing" | "failed" | "excluded"; error?: string }[] }
 
-type Hop        = { edge: EdgeType; node: EvidenceRef; node_type: NodeType; name: string; provenance: Provenance };
-type ImpactPath = { start: EvidenceRef; hops: Hop[]; min_confidence: number };
+get_snapshot({ snapshot; wait_ms? })              → same shape as prepare_snapshot
 
-type Coverage = {
-  complete: boolean;
-  repos: { repo: string; commit: string; state: "indexed" | "failed" | "excluded"; sensors: Record<string, number>; error?: string }[];
-  unresolved_consumers: EvidenceRef[];
-  ambiguous: { consumer: EvidenceRef; candidates: EvidenceRef[] }[];
-  unnormalized: EvidenceRef[];          // dynamic URLs or topic names
-};
+list_services({ snapshot; repo?; cursor?; limit? })
+  → { items: { service: string; repo: string; paths: string[]; endpoints: number; consumer_services: number; unresolved_inbound: number }[];
+      scope: Scope; cursor? }
 
-type Envelope<T> = { api_version: 1; analyzer_version: string; snapshot: SnapshotId; data: T; meta: { elapsed_ms: number } };
+get_service({ snapshot; service; depth?; cursor?; limit? })
+  → { service; repo; paths: string[]; provider_reviewed: boolean; endpoints: ContractKey[];
+      consumers: { service: string; repo: string;
+                   uses: { endpoint: Endpoint; site: EvidenceRef; caller: EvidenceRef; binding: Provenance; match: string;
+                           fields: { json_path: string; site: EvidenceRef; provenance: Provenance }[];
+                           reads_complete: boolean; used_by: EntryPoint[]; used_by_truncated: boolean }[] }[];
+      unresolved_candidates: Unresolved[];          // unresolved consumers that could match any endpoint of this service (§9.7)
+      scope: Scope; cursor? }
+
+list_contracts({ snapshot; service?; repo?; kind?: "http" | "topic"; cursor?; limit? })
+  → { items: { endpoint: Endpoint; providers: EvidenceRef[]; has_schema: boolean; bound_consumers: number }[]; cursor? }
+
+get_contract({ snapshot; key; service? })          // no service → every service providing key
+  → { items: { endpoint: Endpoint; providers: EvidenceRef[];
+               schemas: { direction: "request" | "response" | "payload";
+                          fields: { json_path; ty; required; nullable; enum_values?; ref: EvidenceRef }[] }[];
+               consumers: { site: EvidenceRef; caller: EvidenceRef; binding: Provenance; match: string; reads_complete: boolean;
+                            reads: { json_path; site: EvidenceRef; provenance: Provenance }[] }[] }[] }
+
+list_unresolved({ snapshot; repo?; service?; cursor?; limit? })
+  → { items: (Unresolved & { candidates: { endpoint: Endpoint; reason: "same_key" | "pattern" | "prefix_stripped" }[] })[];
+      ambiguous: { consumer: EvidenceRef; candidates: Endpoint[] }[]; cursor? }
+
+check_binding({ snapshot; consumer: GlobalId; endpoint: Endpoint })
+  → { valid: boolean; reasons: ("not_a_consumer" | "method_mismatch" | "template_mismatch" | "same_service" | "already_bound")[];
+      method_match: boolean; template_match: "exact" | "pattern" | "prefix_stripped" | "none";
+      bindings_entry?: string }                     // YAML for repos.yaml `bindings`, when valid
+
+diff_contracts({ base: SnapshotId; head: SnapshotId; repo?; service?; min_impact?: "NoKnownImpact" | "NeedsInvestigation" | "Verified"; cap? })
+  → { changes: { side: "provider" | "consumer"; endpoint: Endpoint; kind: ChangeKind; direction?: string; field?: string;
+                 compat: Compat; impact: Impact; affected: { consumer: EvidenceRef; class: string; reasons: Reason[] }[];
+                 paths: ImpactPath[]; truncated: boolean }[];
+      compatible_changes: number; coverage: Coverage }
+
+trace_impact({ snapshot; from: { endpoint?: Endpoint; field?: { endpoint: Endpoint; direction: string; json_path: string }; symbol?: GlobalId };
+               depth?; min_confidence?; cap? })       // exactly one of endpoint, field, symbol
+  → { paths: ImpactPath[]; truncated: boolean; scope: Scope }
+
+get_coverage({ snapshot; endpoint?: Endpoint })    → Coverage
+
+resolve_evidence({ snapshot; refs: string[]; context_lines? })     // refs: GlobalIds or EvidenceRef texts
+  → { items: { ref: string; exists: boolean; node?: { id; node_type; name; ref: EvidenceRef }; snippet?: string;
+               reason?: "unknown_repo" | "commit_not_in_view" | "no_such_node" | "line_mismatch" | "malformed" }[] }
+
+read_source({ snapshot; repo; path; start; end })
+  → { commit; path; start; end; total_lines; text }
 ```
 
-**Signatures** (inputs → `data`)
-
-```typescript
-prepare_snapshot({ repos?: Record<string, string>, from?: SnapshotId, wait_ms?: number })
-  → { snapshot: SnapshotId; state: SnapshotState; repos: { repo; ref?; commit; state; error? }[] }
-  // repos maps repo → ref or sha; omitted repos use each repo's default branch (or `from`'s commit)
-
-get_snapshot({ snapshot, wait_ms? })              → same shape as prepare_snapshot
-
-list_contracts({ snapshot, repo?, kind?: "http" | "topic", cursor?, limit? })
-  → { items: { key: ContractKey; providers: EvidenceRef[]; bound_consumers: number; unresolved_consumers: number }[]; cursor? }
-
-get_contract({ snapshot, key })
-  → { key; providers: EvidenceRef[];
-      schemas: { direction: "request" | "response" | "payload"; fields: { json_path; ty; required; nullable; enum_values?; ref: EvidenceRef }[] }[];
-      consumers: { site: EvidenceRef; binding: Provenance; reads: { json_path; site: EvidenceRef; provenance: Provenance }[] }[] }
-
-list_unresolved({ snapshot, repo?, cursor?, limit? })
-  → { items: { consumer: EvidenceRef; key?: ContractKey; url_expr: string; binding_hint?: string;
-               candidates: { provider: EvidenceRef; reason: string }[] }[]; cursor? }
-
-check_binding({ snapshot, consumer: GlobalId, provider: GlobalId })
-  → { valid: boolean; reasons: string[]; key_match: boolean; method_match: boolean }
-
-diff_contracts({ base: SnapshotId, head: SnapshotId, repo?, min_impact?: ImpactClass, cap? })
-  → { changes: { contract: ContractKey; kind: ChangeKind; direction?; field?; compat: Compat;
-                 impact: ImpactClass; paths: ImpactPath[]; truncated: boolean }[];
-      coverage: Coverage }
-
-trace_impact({ snapshot, from: { key?: ContractKey; field?: string; symbol?: GlobalId }, depth?: number, min_confidence?, cap? })
-  → { paths: ImpactPath[]; truncated: boolean }
-
-get_coverage({ snapshot, key? })                 → Coverage
-
-resolve_evidence({ snapshot, refs: string[], context_lines?: number })
-  → { items: { ref: string; exists: boolean; node?: { id; node_type; name }; snippet?: string; reason?: string }[] }
-
-read_source({ snapshot, repo, path, start: number, end: number })
-  → { commit; path; start; end; text }   // at most 400 lines; path must exist in the repo at that commit
-```
+Sort orders: services by name; endpoints by `(service, key)`; consumers by `(service, caller GlobalId, site line)`; unresolved by `GlobalId`; changes by `(side, service, key, kind, direction, field)`. `min_impact` keeps changes whose class is at least the given one, ordered `NoKnownImpact` < `NeedsInvestigation` < `Verified`.
 
 **Guarantees per tool**
 
 | Tool | Guarantee |
 | --- | --- |
-| `prepare_snapshot` | Idempotent: the same inputs return the same id without re-indexing. Never touches the live index. |
-| `diff_contracts` | Refuses snapshots that are not `ready`. Both snapshots must share `analyzer_version`. `diff(a, a)` returns no changes. Every `Verified` change has at least one path whose edges are all `static` or `confirmed`. |
-| `trace_impact` | Paths ordered by `min_confidence` descending, then by length. `cap` applies to paths, not nodes. |
-| `get_coverage` | `complete` is false whenever any repo failed or was excluded, or any unresolved consumer could match `key`. |
+| `prepare_snapshot` | Idempotent: the same inputs, after ref resolution, return the same id without re-indexing. Never touches the live index. |
+| `diff_contracts` | Both snapshots must be `ready` (`snapshot_not_ready` or `snapshot_failed` otherwise), with equal `analyzer_version` (`analyzer_mismatch`) and `config_hash` (`invalid_argument`, `config_mismatch`). `diff(a, a)` is empty. Every `Verified` change has a path whose qualifying prefix is entirely `static` or `confirmed`. Every `NoKnownImpact` carries `scope`. |
+| `trace_impact` | Paths ordered by `min_confidence` descending, length ascending, leaf id; `cap` applies to paths. |
+| `get_coverage` | `scope.unreviewed` lists every configured repo that was not reviewed, with a reason. |
+| `get_service` | `scope` is always present; a configured service whose repo was not reviewed returns `provider_reviewed: false` rather than an error. |
 | `list_unresolved` | Lists every ambiguous candidate; never picks one. |
-| `check_binding` | Pure check; it does not create the binding. Confirmed bindings enter LAIN only through the `bindings` section of `repos.yaml`. |
-| `resolve_evidence` | A ref outside the snapshot's repos or commits returns `exists: false` with a reason, never an error. |
-| `read_source` | Reads from the snapshot's worktree or git object store; rejects paths escaping the repo root, paths the indexer did not walk (ignore files apply), secret files, and binary files. `end` is clamped to the file's length at that commit, and the response returns the resolved range; a `start` past the end of the file returns empty `text`, not an error. |
+| `check_binding` | Pure; creates nothing. |
+| `resolve_evidence` | A `GlobalId` ref exists if a node with that id is in the view. An EvidenceRef text exists if its repo is in the view, its sha prefix matches the view's commit for that repo, and the file has that line at that commit; `node` is then the innermost node whose range covers the line, and `line_mismatch` is returned when a `GlobalId`'s node no longer starts at the cited line. Anything else is `exists: false` with a reason, never an error. |
+| `read_source` | `end` is clamped to the file's length at the view's commit; a `start` past the end returns empty `text`. The rules of §10.7 apply. |
 
-**Example: `diff_contracts` result for removing `customer_id`** (`data` only, abridged)
+**Example: `diff_contracts` for removing `customer_id`** (`data`, abridged: `EvidenceRef`s are shown as their `text`, and provenance is omitted from hops)
 
 ```json
 {
   "changes": [{
-    "contract": "http:GET /api/orders/{}",
+    "side": "provider",
+    "endpoint": { "service": "orders", "key": "http:GET /api/orders/{}" },
     "kind": "FieldRemoved", "direction": "response", "field": "customer_id",
-    "compat": "BreakingIfRead", "impact": "Verified", "truncated": false,
+    "compat": "BreakingIfRead",
+    "impact": { "class": "Verified", "reasons": [] },
+    "affected": [{ "consumer": "billing@9c20d41a7b3e:src/orders_api.py:14", "class": "Verified", "reasons": [] }],
+    "truncated": false,
     "paths": [{
-      "start": "orders@a1f3…:openapi.yaml:212",
+      "start": "orders@a1f3c09e55d2:openapi.yaml:212",
       "min_confidence": 1.0,
       "hops": [
-        {"edge": "Binds",      "node": "billing@9c20…:src/invoice.py:58",  "name": "customer_id"},
-        {"edge": "ReadsField", "node": "billing@9c20…:src/invoice.py:52",  "name": "build_invoice"},
-        {"edge": "Calls",      "node": "billing@9c20…:src/api.py:30",      "name": "get_invoice"},
-        {"edge": "CallsHttp",  "node": "billing@9c20…:src/api.py:28",      "name": "GET /invoices/{}"},
-        {"edge": "Binds",      "node": "reports@77be…:src/monthly.ts:19",  "name": "GET /invoices/{}"},
-        {"edge": "SendsHttp",  "node": "reports@77be…:src/monthly.ts:12",  "name": "buildMonthlyReport"}
+        {"edge": "Binds",      "node": "billing@9c20d41a7b3e:src/invoice.py:58", "name": "customer_id"},
+        {"edge": "ReadsField", "node": "billing@9c20d41a7b3e:src/invoice.py:52", "name": "build_invoice"},
+        {"edge": "Calls",      "node": "billing@9c20d41a7b3e:src/api.py:30",     "name": "get_invoice"},
+        {"edge": "CallsHttp",  "node": "billing@9c20d41a7b3e:src/api.py:28",     "name": "GET /invoices/{}"},
+        {"edge": "Binds",      "node": "reports@77be01f3aa90:src/monthly.ts:19", "name": "GET /invoices/{}"},
+        {"edge": "SendsHttp",  "node": "reports@77be01f3aa90:src/monthly.ts:12", "name": "buildMonthlyReport"}
       ]
     }]
   }],
-  "coverage": { "complete": true, "repos": ["…"], "unresolved_consumers": [], "ambiguous": [], "unnormalized": [] }
+  "compatible_changes": 0,
+  "coverage": { "complete": true, "scope": { "reviewed": ["…"], "unreviewed": [], "configured_only": true } }
 }
 ```
 
-Provenance is omitted from the hops above for brevity; each real hop carries it.
+The first two hops are the qualifying prefix; the rest show how far the impact travels.
 
-## Errors
+## 13. Errors
 
-Errors are MCP tool results with `isError: true` and a structured body, so a consumer branches on `code`, never on message text. Absence of data is not an error: an unknown ref or an empty result is a normal answer.
+Errors are tool results with `isError: true` and the error envelope of §10.2, so consumers branch on `code`, never on message text. Absence of data is not an error: an unknown ref or an empty result is a normal answer.
 
 ```typescript
 type ToolError = { code: ErrorCode; message: string; retryable: boolean; details?: Record<string, unknown> };
 ```
 
-| Code | Raised when | Retryable | Consumer action |
+| Code | Raised when | Retryable | `details` (always present where listed) |
 | --- | --- | --- | --- |
-| `unsupported_api_version` | `api_version` not served | no | Upgrade the client or pin an older LAIN |
-| `federation_disabled` | Server runs without a federation config | no | Configure `repos.yaml` |
-| `repo_not_registered` | A repo in `repos` or `read_source` is not in the federation | no | Register the repo or drop it |
-| `ref_not_found` | A branch, tag or sha does not exist in the repo | no | Fix the ref; fetch if the commit is new |
-| `snapshot_not_found` | Unknown id or expired record | no | Call `prepare_snapshot` again with the same inputs |
-| `snapshot_not_ready` | Analysis on a `pending` or `indexing` snapshot | yes | `get_snapshot` with `wait_ms`, then retry |
-| `snapshot_failed` | Analysis on a `failed` snapshot; `details` lists repo errors | no | Prepare a snapshot without the failing repo, accepting incomplete coverage |
-| `analyzer_mismatch` | `diff_contracts` on snapshots with different analyzer versions | no | Re-prepare both on the current version |
-| `contract_not_found` | `get_contract` or `trace_impact` on an unknown key | no | Check `list_contracts` |
-| `invalid_id` | Malformed `GlobalId` or evidence ref | no | Use ids exactly as returned |
-| `range_too_large` | `read_source` over 400 lines, or `limit` over 1,000; `details` names which limit was hit, the maximum, and the requested value | no | Split the request |
-| `path_rejected` | `read_source` path outside the repo root, not walked by the indexer, on the secret denylist, or binary; `details.reason` is `outside_root`, `not_indexed`, `secret` or `binary` | no | Use a repo-relative path to an indexed text file |
-| `busy` | Worker pool saturated and `pending` queue full | yes | Back off and retry |
+| `unsupported_api_version` | `api_version` not served | no | `supported` |
+| `federation_disabled` | The server runs without `repos.yaml` | no | — |
+| `invalid_argument` | Missing or ill-typed argument; `live` where not allowed; cursor mismatch; `config_hash` mismatch in `diff_contracts` | no | `arg`, `reason` |
+| `repo_not_registered` | A repo in `repos`, `exclude` or `read_source` is not configured | no | `repo` |
+| `ref_not_found` | A ref or sha does not exist after one fetch | no | `repo`, `ref` |
+| `snapshot_not_found` | Unknown id or expired record | no | — |
+| `service_not_found` | A service that is neither declared nor implicit | no | `service` |
+| `snapshot_not_ready` | Analysis on a `pending` or `indexing` snapshot | yes | `state` |
+| `snapshot_failed` | Analysis on a `failed` snapshot | no | `repos` (per-repo errors) |
+| `analyzer_mismatch` | `diff_contracts` on snapshots with different analyzer versions | no | `base`, `head` |
+| `contract_not_found` | Unknown endpoint or field in `get_contract`, `trace_impact` or `check_binding` | no | `endpoint` |
+| `invalid_id` | A malformed `GlobalId` argument (not in `resolve_evidence.refs`, which answers `exists: false`) | no | `id` |
+| `range_too_large` | Any maximum of §10.5 exceeded | no | `limit`, `max`, `requested` |
+| `path_rejected` | `read_source` path outside the repo, not indexed, secret or binary | no | `reason`: `outside_root`, `not_indexed`, `secret` or `binary` |
+| `busy` | Job queue full, or no residency slot within `wait_ms` | yes | `retry_after_ms` |
 
-## Consumer integration
+## 14. Consumer integration
 
-The change-impact tool is designed separately; this section fixes only what it can rely on from LAIN. Its findings storage, PR reporting, model use and deployment are out of scope here. The interface above is complete enough that the whole pull-request flow needs no LAIN changes beyond this document.
+**Pull-request flow**
 
-**Basic flow for one pull request**
+1. The consumer computes the PR repo's merge-base sha.
+2. `prepare_snapshot({ repos: { <pr repo>: <merge-base sha> }, wait_ms })` → base.
+3. `prepare_snapshot({ from: base, repos: { <pr repo>: <head sha> }, wait_ms })` → head; only the PR repo is indexed.
+4. `diff_contracts(base, head)` → provider and consumer changes, impact, paths, coverage.
+5. For `NeedsInvestigation`: `list_unresolved`, `get_contract`, `get_service`, `trace_impact` and `read_source` give an investigator what they need; `resolve_evidence` checks every ref cited.
+6. A proposed link is checked with `check_binding`, which returns its `bindings` entry. Once someone confirms it, the consumer commits it to `repos.yaml`; the next snapshot has a new `config_hash`, hence a new id, and treats the link as `Confirmed`.
 
-1. `prepare_snapshot` with no `repos` overrides except the PR repo at its merge base → base snapshot; wait until `ready`.
-2. `prepare_snapshot` with `from` = base and the PR repo at its head sha → head snapshot; wait.
-3. `diff_contracts(base, head)` → changes, impact classes, paths, coverage.
-4. For `NeedsInvestigation` changes: `list_unresolved`, `get_contract`, `trace_impact` and `read_source` supply everything an investigator (human or model) needs; `resolve_evidence` checks every ref it cites.
-5. A proposed link is checked with `check_binding`. Once someone confirms it, the consumer adds it to `bindings` in `repos.yaml` through a normal pull request, and the next analysis treats it as `Confirmed` evidence.
-6. The consumer reports the result however it chooses.
+**Finding who uses a service** (people and agents): `list_services` → `get_service(orders)` → `read_source` on cited sites; `trace_impact` to look further out.
 
-```mermaid
-sequenceDiagram
-  participant C as Change-impact tool
-  participant L as LAIN (contracts profile)
-  C->>L: prepare_snapshot(base repos, wait_ms)
-  L-->>C: snap_base (ready)
-  C->>L: prepare_snapshot(from: snap_base, PR repo at head)
-  L-->>C: snap_head (ready)
-  C->>L: diff_contracts(snap_base, snap_head)
-  L-->>C: changes, impact classes, paths, coverage
-  opt NeedsInvestigation
-    C->>L: list_unresolved / get_contract / trace_impact / read_source
-    C->>L: resolve_evidence(cited refs)
-    C->>L: check_binding(consumer, provider)
-  end
-```
+**Command center.** A new Services tab calls `list_services` and `get_service` on `live` through `/mcp`, as the existing tabs do: services as nodes, one edge per consumer → provider service pair weighted by call sites, the `get_service` answer on click, and the scope sentence under the graph.
 
-**What the consumer must not assume**
+**What consumers must not assume**
 
-- That `NoKnownImpact` means safe outside the repos listed in coverage.
+- That `NoKnownImpact` means safe outside `scope.reviewed`.
 - That `live` results are reproducible.
-- That ids are stable across analyzer versions; they are stable across commits for unchanged code only.
-- That any LAIN tool writes; confirming bindings is always a config change the consumer makes.
+- That `GlobalId`s are stable across edits: they contain line numbers. Use `SymbolKey`-based `bindings` for anything persistent.
+- That any LAIN tool writes; confirming a binding is always a config change the consumer makes.
 
-## Verification
+## 15. Verification
 
-Correctness is measured against a fixture organization whose contracts and consumers are known by construction, extending LAIN's existing ground-truth demo harness. Every layer has its own tests; nothing is verified only end to end.
+### 15.1 Fixture organization
 
-**Fixture organization**, built by a script as three git repositories with scripted history:
+`scripts/contracts-fixture.sh <dir>` creates four local git repos with scripted history and writes `<dir>/repos.yaml` (`workspace_dir` sources, `services`, `http_clients`), with no network. The ground truth, `tests/fixtures/contracts/ground_truth.yaml`, lists every expected endpoint, `Binds` (with provenance), `ReadsField`, unresolved consumer, entry point and per-scenario result.
 
-| Repo | Language | Role |
+| Repo | Language | Content at tag `base` |
 | --- | --- | --- |
-| `orders` | Rust (axum) + `openapi.yaml` | Provides `GET /api/orders/{}` and `POST /api/orders` |
-| `billing` | Python (FastAPI, httpx) | Consumes orders, reads `customer_id` and `total`; provides `GET /invoices/{}` |
-| `reports` | TypeScript (fetch) | Consumes billing |
+| `orders` | Rust (axum) + `openapi.yaml` (OAS 3.0) | `GET /api/orders/{}` (handler `get_order`), `GET /api/orders/me`, `POST /api/orders` (required `customer_id` and `items[].sku`, optional `note`); the order response has `customer_id`, `total`, `status` (enum `open`, `paid`) and `items[].sku`; a code-only route `GET /api/orders/{}/label` not in the spec. Service `orders`, `env: [ORDERS_URL]` |
+| `billing` | Python (FastAPI, httpx) | `ORDERS_URL = os.environ["ORDERS_URL"]` at module level; `fetch_order(id)` does `r = httpx.get(f"{ORDERS_URL}/api/orders/{id}")` and `return r.json()`; `build_invoice` calls `fetch_order` and reads `customer_id` and `total`; route `GET /invoices/{}` (`get_invoice`) calls `build_invoice`; `fetch_me()` calls `/api/orders/me`; `print_label()` calls `/api/orders/{}/label`; `charge()` calls `https://api.stripe.com/v1/charges`. Service `billing`, `env: [BILLING_URL]` |
+| `reports` | TypeScript (fetch, Express, node-cron) | `buildMonthlyReport` calls `` fetch(`${process.env.BILLING_URL}/invoices/${id}`) ``, reached from `cron.schedule(…, buildMonthlyReport)` and from route `GET /reports/monthly` |
+| `platform` | Python monorepo | Services `shipping` (`services/shipping/`) and `inventory` (`services/inventory/`); `shipping` calls `inventory`'s `GET /stock/{}` via `INVENTORY_URL` |
 
-A ground-truth manifest lists every expected `Binds`, `ReadsField` and finding.
+Scenario tags, each one commit on top of `base` in the named repo: in `orders`, `s1-remove-customer-id`, `s2-add-currency`, `s5-enum-value`, `s6-rename-path`, `s11-rename-field`, `s12-rename-retype`, `s19-optional-request-type`, `s21-code-only-handler`; in `billing`, `s3-dynamic-url`, `s5b-read-status`, `s20-read-discount`, `s22-cache-response`.
 
-**Scenarios**
+### 15.2 Scenarios (`tests/federation_contracts_e2e.rs`, through MCP over stdio and HTTP)
 
 | # | Change or call | Expected result |
 | --- | --- | --- |
-| 1 | `orders` removes `customer_id` from the order response | `Verified`; path reaches `billing` and `reports` |
-| 2 | `orders` adds optional `currency` to the response | No reported change |
-| 3 | `billing` builds the URL from an unmapped variable | `NeedsInvestigation`; `list_unresolved` returns the call with the `orders` route as candidate |
-| 4 | Snapshot excludes `reports` | `coverage.complete = false`; nothing reported as `NoKnownImpact` |
-| 5 | `orders` adds an enum value to `status` | `NeedsInvestigation` via `NeedsReview` |
-| 6 | `orders` renames `/api/orders/{}` to `/api/order/{}`, same handler | `PathChanged`, `Verified` for `billing` |
-| 7 | `resolve_evidence` receives a forged ref | `exists: false` with a reason; no error |
-| 8 | `prepare_snapshot` called twice with the same inputs | Same `snapshot_id`; no second indexing job |
-| 9 | Head snapshot derived `from` base with one override | Only the overridden repo is indexed |
-| 10 | Binding for scenario 3 added to `repos.yaml` `bindings` | Next analysis shows it as `Confirmed`; scenario 3 becomes `Verified` if the field is read |
+| 1 | `orders` removes `customer_id` from the response | `Verified`; `affected` = `billing`; a path reaches `reports` |
+| 2 | `orders` adds optional `currency` to the response | Not reported; `compatible_changes = 1` |
+| 3 | `billing` builds the URL from an unmapped variable | `NeedsInvestigation` (`unresolved_candidates`); `list_unresolved` lists the call with the `orders` endpoint as candidate |
+| 4 | Snapshot with `exclude: [reports]`; an `orders` change no reviewed repo consumes | `NoKnownImpact`, `scope.unreviewed = [{ repo: reports, reason: excluded }]`; the text names `reports` |
+| 5 | `orders` adds enum value `refunded` to `status`; `billing` does not read `status` | `NoKnownImpact`. With `s5b-read-status` in billing: `NeedsInvestigation` (`needs_review`) |
+| 6 | `/api/orders/{}` → `/api/order/{}`, same handler | `PathChanged`; `Verified` for `billing` |
+| 7 | `resolve_evidence` receives a forged ref | `exists: false`, `reason: no_such_node`; no error |
+| 8 | `prepare_snapshot` twice with the same inputs | Same id; one indexing job |
+| 9 | Head derived `from` base with one override | Only the overridden repo is indexed |
+| 10 | Scenario 3's binding added to `bindings`, no commit moved | New `snapshot_id`; the binding is `Confirmed`; scenario 3's call is bound |
+| 11 | Response field `customer_id` → `customerId`, same type | One `FieldRenamed`, `BreakingIfRead`, `Verified` for `billing` |
+| 12 | Same rename with a type change | `FieldRemoved` + `FieldAdded` |
+| 13 | `billing` calls literal `/api/orders/me` | Binds `GET /api/orders/me`, not `/api/orders/{}` |
+| 14 | `billing` calls `api.stripe.com` | `coverage.external = [{ host: "api.stripe.com", calls: 1 }]`; not unresolved |
+| 15 | Lines inserted above a confirmed binding's call site | The binding still resolves; no `stale_bindings` |
+| 16 | `shipping` → `inventory` inside `platform` | One `Binds`, `cross_repo = false` |
+| 17 | `get_service(billing)` | `reports` listed with `used_by` = the scheduled job and the HTTP handler |
+| 18 | `get_service(orders)` on `live` with `reports` set to `RepoHealth::Indexing` (in-process, as `tests/federation_readiness.rs` does) | `scope.unreviewed` contains `reports: not_ready` |
+| 19 | Type change of optional request field `note` | `BreakingIfSent` → `NeedsInvestigation` (`sends_not_modeled`) |
+| 20 | `billing` starts reading `discount` | Consumer-side `ConsumerFieldUnmatched`, `Verified` |
+| 21 | `orders` changes the handler of `GET /api/orders/{}/label` | `ChangedWithoutSchema` → `NeedsInvestigation` (`no_schema`) for `billing` |
+| 22 | `billing` stores the response in a module-level cache, then scenario 1 | `reads_complete = false` → `NeedsInvestigation` (`reads_not_fully_traced`) |
 
-**Test layers**
+### 15.3 Test layers
 
 | Layer | Scope |
 | --- | --- |
-| Unit | Each extraction pattern, in the existing sensor test style; one regression case per bug |
-| Property | Normalizer idempotence and provider/consumer key equality; `GlobalId` round-trip; `diff(a, a)` empty |
-| Table | Every `ChangeKind` × `Direction` for `classify`; every row of `evaluate`; the propagation table |
-| Federation | Join order independence; rebinding on provider rename; removal and hot reload |
-| LAIN e2e | `tests/federation_contracts_e2e.rs` runs the seven scenarios through MCP |
-| Ground truth | Precision and recall of `Binds` and `ReadsField` in the `--quick` demo; CI fails below the committed baseline |
-| Determinism | Same snapshot pair gives byte-identical `diff_contracts` output |
-| Regression | `federation_blast_radius_regression.rs` and `federation_e2e.rs` unchanged and passing |
-| Interface | Golden JSON per tool validated against its published output schema; api_version negotiation; stdio/HTTP parity; one test per error code |
+| Unit | Each call shape of §6.3, each binding and escape rule of §6.5, each flattening rule of §6.4, each entry-point pattern of §6.6; one regression case per bug |
+| Property | Normalizer idempotence and provider/consumer equality; `GlobalId` round-trip; `diff(a, a)` empty; joiner order independence |
+| Table | Every `ChangeKind` × `Direction` for `classify`; every cell of the §9.5 tables; every row of §7.3; the propagation table |
+| Federation | The §5.3 tests; stale bindings; each config validation error |
+| Snapshot | Ref resolution, fetch failure, lock contention (two jobs on one repo), restart re-enqueue, retention, residency `busy`, eviction while held |
+| Determinism | Same sha indexed twice → identical canonical digest (§8.3); same snapshot pair → identical `diff_contracts`; stdio/HTTP byte parity |
+| Interface | Golden JSON per tool in `tests/fixtures/contracts/golden/`, validated against its output schema (dev-dependency `jsonschema`, not shipped); `api_version` negotiation; one test per error code |
+| Ground truth | `scripts/demo.sh --quick` gains a contracts phase: precision and recall of `Binds` and `ReadsField` against `ground_truth.yaml`; CI fails below the baseline committed in `tests/fixtures/contracts/baseline.json` |
+| Regression | `tests/federation_blast_radius_regression.rs` and `tests/federation_e2e.rs` unchanged and passing |
+| Analyzer | `tests/contracts_analyzer_digest.rs` (§8.3) |
 
-## Delivery plan
+Everything above runs in the `test` job on `dev` (Ubuntu) and in the full battery on `main`; the memory ceiling (§8.5) runs on `main` only.
 
-LAIN 0.9.0 is tagged by October 12, leaving the rest of the window before the October 30, 10:00 PT deadline for the separately designed consumer. Events and the Rust and Go client patterns ship only if the critical path is on time.
+## 16. Delivery plan
 
-**LAIN PRs** (critical path: 1–13)
+LAIN 0.9.0 is tagged by October 12, leaving the rest of the window before the October 30, 10:00 PT deadline for the separately designed consumer.
+
+**Order: live slice first, pinned snapshots second.** Week 1 builds the whole fact pipeline on the live federation, so `get_service` and `trace_impact` work end to end on the fixture, and the diff functions are tested on two in-process fixture states. Week 2 adds revision pinning underneath and wires `diff_contracts` into MCP. If pinning slips, the service view and impact tracing still ship, marked non-reproducible.
 
 | # | PR | Depends on | Week of |
 | --- | --- | --- | --- |
-| 1 | Fixture organization and ground-truth manifest | none | Sep 29 |
-| 2 | `GlobalId` encoding and round-trip proptest (F1) | none | Sep 29 |
-| 3 | Schema v3: new types, `ContractMeta`, `SourceSite`, `Confirmed` provenance, derived kind check, migration notes | 2 | Sep 29 |
-| 4 | `traverse_impact` and propagation table; blast radius migrated with unchanged tests (F2) | 3 | Sep 29 |
-| 5 | Shared template normalizer and `enclosing_symbol` | 3 | Sep 29 |
-| 6 | `http_client_sensor` for TypeScript and Python | 5 | Sep 29 |
-| 7 | Service bindings and `bindings` config, `ContractJoiner::join_http`, `rejoin_contracts`, reconciliation exemption (F3) | 4, 6 | Sep 29 |
-| 8 | OpenAPI request and response schemas, fields | 3 | Oct 6 |
-| 9 | `field_access_sensor` and field join | 7, 8 | Oct 6 |
-| 10 | `GitRevisionSource`, worktree cache, per-commit index cache | 3 | Oct 6 |
-| 11 | `Snapshot`, `FederatedIndex::from_snapshot`, snapshot job queue; `prepare_snapshot` and `get_snapshot` | 7, 10 | Oct 6 |
-| 12 | `diff_contracts`, `classify`, `evaluate`, coverage | 9, 11 | Oct 6 |
-| 13 | `contracts` profile: envelope, `api_version`, error codes, remaining tools, schema dump, golden tests; tag 0.9.0 | 11, 12 | Oct 6 |
+| 1 | Fixture script, ground truth, scenario tags (§15.1) | — | Sep 29 |
+| 2 | F1 `GlobalId` encoding (§5.1) | — | Sep 29 |
+| 3 | Schema v3: node/edge types, `ContractFact`, `EntryKind`, `SourceSite`, `EdgeDetail`, `Confirmed`, version bumps, migration note (§4.2–4.3, §5.4) | 2 | Sep 29 |
+| 4 | F2 `traverse_impact` (§5.2) | 3 | Sep 29 |
+| 5 | Normalizer, route matcher, `enclosing_symbol`, sensor phases, `ANY`, same-file router prefixes, `BTreeMap` in `http_sensor` (§4.5, §6.1–6.2, §7.4) | 3 | Sep 29 |
+| 6 | `http_client_sensor` for TS/JS and Python (§6.3) | 5 | Sep 29 |
+| 7 | Config sections and validation, `ContractJoiner`, `ContractIndex`, `rejoin_contracts` and triggers, reconciliation skips `Binds`, `federation/AGENTS.md` (§5.3, §7) | 4, 6 | Sep 29 |
+| 8 | OpenAPI schemas, fields, line index, `operationId` fix, `servers` prefix (§6.2, §6.4) | 3 | Sep 29 |
+| 9 | `field_access_sensor` and field join (§6.5, §7.5) | 7, 8 | Sep 29 |
+| 16 | `entry_point_sensor`; contract-tool infrastructure (§10.1–10.2); `list_services`, `get_service`, `used_by` on `live`; command-center Services tab | 7, 9 | Sep 29 |
+| 12 | Surfaces, `diff_contracts`, `classify`, `evaluate`, coverage as pure functions, tested on two in-process fixture states (§9) | 9 | Sep 29 |
+| 10 | Mirrors, worktrees and lock, `IndexMode::Snapshot`, index cache, analyzer digest, determinism test (§8.1–8.3) | 3 | Oct 6 |
+| 11 | Snapshot records and jobs, `from_snapshot`, `project_graph`, ephemeral backend, residency, memory ceiling; `prepare_snapshot`, `get_snapshot` (§8.4–8.5, §11) | 7, 10 | Oct 6 |
+| 13 | Remaining tools over snapshots; envelope, versioning, paging and errors complete; output schemas; golden tests; docs (§10, §12, §13) | 11, 12, 16 | Oct 6 |
 | 14 | `http_client_sensor` for Rust and Go | 6 | stretch |
-| 15 | JSON Schema and proto fields, `event_sensor`, topic join | 7, 8 | stretch |
+| 15 | Events, JSON Schema and proto fields, topic join | 7, 8 | stretch |
+| 17 | `codeowners_sensor`: owners on provider and consumer sites in `get_service` | 16 | stretch |
+| 18 | Generated-client matching by OpenAPI `operationId` | 6, 8 | stretch |
 
-**Cut order if late:** events first, then Rust and Go clients, then `check_binding` and `read_source`. The versioned envelope, coverage reporting and `resolve_evidence` are never cut; they are what makes every other answer trustworthy to a consumer.
+**Cut order if late:** 15 → 14 → 18 → 17 → `check_binding` and `read_source`. Never cut: the envelope, scoped coverage, `get_service` and `resolve_evidence`.
 
-## Risks and open questions
+## 17. Risks
 
 | Risk | Effect | Mitigation |
 | --- | --- | --- |
-| Regex detection misses calls through wrappers | Missed consumers | `http_clients` config, operationId matching, unresolved counts in coverage |
-| Generic field names match the wrong payload | False `Verified` | Field join only under an existing contract bind; untyped reads are heuristic |
-| Impact traversal explodes on hub functions | Slow or noisy results | Depth cap, paths ranked by minimum confidence, truncation flag |
-| Schema v3 forces a reindex | Upgrade friction | One `lain reindex`, documented like the v2 migration. Upgrade order in the migration note: install 0.9 → `lain reindex` (F1 changes ids for names containing `:`) → set `LAIN_TOOL_PROFILE=contracts` → use the new tools. |
-| Revision indexing is slow | Consumers wait on snapshots | Tree-sitter only, commit-keyed cache, derived snapshots reindex one repo, `wait_ms` long-poll |
-| Interface churn after consumers exist | Broken consumers | `api_version` negotiation, one release of overlap, golden tests under the drift check |
+| Mature orgs call through generated clients | Largest recall gap | PR 18 is the first stretch item after the critical path; until then such calls are seen only when configured in `http_clients` |
+| Dynamic URLs are common | Many results `NeedsInvestigation` | Env and constant resolution, prefix tolerance, and `list_unresolved` + `check_binding` make each lead cheap to close for good |
+| Field reads escape tracking | Consumers marked `reads_not_fully_traced` | Explicit escape rules; the result is conservative, never `NoKnownImpact` |
+| Providers without schemas | No field-level changes | `ChangedWithoutSchema` surfaces every handler change to bound consumers |
+| Monorepo prefixes wrong or missing | Calls mislabelled | Overlap validation; the implicit service is visible in `list_services` |
+| Impact traversal on hub functions | Slow or noisy | Depth and path caps, confidence ordering, `truncated` |
+| Snapshot indexing slow | Consumers wait | Tree-sitter only, commit-keyed cache, derived snapshots index one repo, `max_base_age_s`, long-poll |
+| Schema v3 forces a reindex | Upgrade friction | One `lain reindex`; per-repo graphs rebuild themselves |
+| Interface churn | Broken consumers | `api_version`, one release of overlap, golden tests under the drift check |
 
-**Open questions**
+## 18. Decisions (formerly open questions)
 
-- [ ] Is 7 days the right retention for snapshot records, or should consumers be able to pin a snapshot?
-- [ ] Should `diff_contracts` accept `live` as the head, for agents analyzing uncommitted edits, at the cost of reproducibility?
-- [ ] Should `PathChanged` detection also use OpenAPI `operationId` when handlers differ?
+| Question | Decision |
+| --- | --- |
+| Snapshot retention | 7 days after last access, configurable; no pinning in 0.9, because the same inputs always re-create the same id |
+| `live` as `diff_contracts` head | Not in 0.9 (`invalid_argument`, `live_not_supported`). Agents with uncommitted edits use `trace_impact` and `get_service` on `live` |
+| `operationId` for `PathChanged` | Yes, for OpenAPI operations without a code handler |
+| Who computes the merge base | The consumer; LAIN resolves refs and shas only |
+| Response and error bodies | 2xx JSON responses only in 0.9 |
+| Query parameters | Request fields under the reserved `$query` segment; headers ignored |
+| Integer formats | Ignored; `int32` → `int64` is not a change |
+| Wrapper-client candidates without config | Discarded, not counted as unresolved |
+| Calls to a service's own routes | Not contracts; skipped by unbound matching |
+| Monorepo services | In 0.9, via `services[].paths` |
+| Service view and `used_by` | In 0.9 (PR 16, critical path); CODEOWNERS is stretch (PR 17) |
+| Unresolved matching consumer in a reviewed repo | `NeedsInvestigation`, not `NoKnownImpact` |
+| Handler changes behind an unchanged schema | Not contract changes; not reported |
+| Which config a snapshot joins with | The config recorded when it was prepared; derived snapshots inherit it |
 
-**References**
+## References
 
-- [LAIN v0.8.0 release](https://github.com/spuentesp/lain/releases/tag/v0.8.0); code references in this doc come from the v0.8.0 tag.
+- [LAIN v0.8.0 release](https://github.com/spuentesp/lain/releases/tag/v0.8.0)
 - [Nebius Global AI Hackathon rules](https://nebiusglobalaihackathon.devpost.com/rules)
