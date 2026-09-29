@@ -594,9 +594,9 @@ pub fn impact_propagation(e: &EdgeType) -> Propagation {
         | EdgeType::Binds
         | EdgeType::RequestSchema
         | EdgeType::ResponseSchema
-        | EdgeType::HasField => Propagation::Incoming,
+        | EdgeType::HasField
+        | EdgeType::ReadsField => Propagation::Incoming,
         EdgeType::Consumes
-        | EdgeType::ReadsField
         | EdgeType::PayloadSchema
         | EdgeType::Produces
         | EdgeType::Contains

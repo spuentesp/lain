@@ -1,36 +1,41 @@
 //! Contract joiner (`docs/CONTRACT_FEDERATION.md` §5.3 + §7.2 / §7.3 /
-//! §7.4 / §7.6).
+//! §7.4 / §7.5 / §7.6).
 //!
-//! `ContractJoiner::run(nodes, config) -> (BindsSet, ContractIndex)` is
-//! the pure inner half of the federation's contract join. The caller
-//! supplies the projected contract nodes and the validated config; the
-//! joiner returns the desired `Binds` set and the `ContractIndex`. No
-//! I/O, no reads from the graph, no config reads inside `run`.
+//! `ContractJoiner::run(nodes, edges, config) -> JoinOutput` is the
+//! pure inner half of the federation's contract join. The caller
+//! supplies the projected contract nodes, the projected contract
+//! edges, and the validated config; the joiner returns the desired
+//! `Binds` set and the `ContractIndex`. No I/O, no reads from the
+//! graph, no config reads inside `run`.
 //!
-//! Step 5 (`§7.5` field join) is a documented no-op for this PR
-//! because no `FieldRef` nodes exist yet. The step is implemented as a
-//! one-line stub with the `// §7.5 field join lands with PR 9`
-//! comment.
+//! PR 7 left step 5 (§7.5 field join) as a documented no-op because
+//! no `FieldRef` nodes existed yet. PR 9 fills it: the joiner now
+//! collects response schemas per endpoint (from `HasField` /
+//! `RequestSchema` / `ResponseSchema` edges) and resolves every
+//! `FieldRef` against the endpoints its `HttpClientCall` is bound to.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::federation::contracts::config::{
     ConfirmedBinding, ContractFederationConfig, RoutePrefix as CfgRoutePrefix, ServiceDecl,
 };
+use crate::federation::contracts::field_join::{
+    collect_endpoint_schemas, resolve_field_refs, EndpointSchemas,
+};
 use crate::federation::contracts::index::{
     ConfirmedBindingKey, ConfirmedBindingProviderKey, ConsumerResolution, ConsumerTarget,
-    ContractIndex, Endpoint, EndpointId, EndpointProvider, FieldRefResolution, ServiceInfo,
-    StaleBinding, StaleReason, UnresolvedReason,
+    ContractIndex, Endpoint, EndpointId, EndpointProvider, ServiceInfo, StaleBinding, StaleReason,
+    UnresolvedReason,
 };
 use crate::federation::contracts::model::{
-    CallVia, ContractFact, ContractKey, HostPart, HttpMethod, MethodSpec, ProviderFact,
+    CallVia, ContractFact, ContractKey, Direction, HostPart, HttpMethod, MethodSpec, ProviderFact,
     ProviderOrigin, ServiceName,
 };
 use crate::federation::contracts::route_match::{
     compare_specificity, match_route, MatchDetail, MatchOutcome,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
-use crate::schema::{EdgeProvenance, GraphNode, RouteMatch};
+use crate::schema::{EdgeProvenance, GraphEdge, GraphNode, RouteMatch};
 
 /// The output of a `ContractJoiner::run` call. The federation-level
 /// orchestrator (`FederatedIndex::rejoin_contracts`) diffs the
@@ -64,13 +69,21 @@ pub struct ContractJoiner;
 
 impl ContractJoiner {
     /// Compute the desired `Binds` set and the `ContractIndex` from
-    /// `nodes` and `config`. Pure function of its inputs (§7.8).
+    /// `nodes`, `edges`, and `config`. Pure function of its inputs
+    /// (§7.8).
     ///
     /// `nodes` is the slice of every contract-bearing node the
     /// federation has projected; the orchestrator pre-filters the
     /// backend list to `contract_node_ids` (per repo) to avoid a
-    /// whole-graph scan (§5.3 Cost).
-    pub fn run(nodes: &[GraphNode], config: &ContractFederationConfig) -> JoinOutput {
+    /// whole-graph scan (§5.3 Cost). `edges` is the matching slice
+    /// of `ReadsField`, `ReadsFrom`, `HasField`, `RequestSchema`, and
+    /// `ResponseSchema` edges — the joiner reads only these to fill
+    /// the §7.5 step. Other edge types in `edges` are ignored.
+    pub fn run(
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+        config: &ContractFederationConfig,
+    ) -> JoinOutput {
         // Step 1 — assign services to every node (§4.1). Longest
         // matching prefix wins; implicit service = repo id.
         let assignments = assign_services(nodes, config);
@@ -158,9 +171,36 @@ impl ContractJoiner {
             );
         }
 
-        // Step 5 — field join. Documented no-op for PR 7.
-        // §7.5 field join lands with PR 9.
-        let field_refs: BTreeMap<GlobalId, FieldRefResolution> = BTreeMap::new();
+        // Step 5 — field join (§7.5, PR 9).
+        //
+        // Collect the response schemas per endpoint, then resolve
+        // every `FieldRef` against the endpoints its call binds to.
+        // The function lives in `field_join.rs`; this is the
+        // integration point.
+        let field_ref_nodes: Vec<&GraphNode> = nodes
+            .iter()
+            .filter(|n| {
+                n.node_type == crate::schema::NodeType::FieldRef
+                    && matches!(n.contract.as_ref(), Some(ContractFact::FieldRead(_)))
+            })
+            .collect();
+        // `ContractJoiner::run` doesn't have `&[GraphNode]` lifetimes
+        // for `&'a`, so re-borrow to owned references.
+        let field_ref_nodes_owned: Vec<GraphNode> =
+            field_ref_nodes.iter().map(|n| (*n).clone()).collect();
+        let reads_from_edges: Vec<GraphEdge> = edges
+            .iter()
+            .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsFrom)
+            .cloned()
+            .collect();
+        let schemas: EndpointSchemas = collect_endpoint_schemas(nodes, edges, &assignments);
+        let (field_refs, _schemaless, _unknown) =
+            resolve_field_refs(&field_ref_nodes_owned, &reads_from_edges, &binds, &schemas);
+        // A FieldRef whose call has no bind yet (an
+        // unresolved / external / unnormalized consumer) is recorded
+        // as `unknown = true` by `resolve_field_refs` already. The
+        // service on its `FieldRefResolution` falls back to
+        // `"unknown"` in that branch.
 
         // Step 7 — sort every output collection by its key.
         binds.sort_by(|a, b| {
@@ -277,14 +317,50 @@ impl ContractJoiner {
                     }
                 })
                 .collect();
+            // Collect the per-direction schemas for this endpoint
+            // (§7.5 feeds off `Response`; `Request` is here for the
+            // request-side diff in PR 12+). The schema node id is
+            // derived from the route's first provider so a reader can
+            // jump back to the source.
+            let endpoint_id = (service.clone(), key.clone());
+            let mut endpoint_schemas: BTreeMap<
+                Direction,
+                crate::federation::contracts::index::EndpointSchema,
+            > = BTreeMap::new();
+            if let Some(by_dir) = schemas.by_endpoint.get(&endpoint_id) {
+                for (dir, fields) in by_dir {
+                    // Pick the schema node id of the first provider
+                    // for this endpoint — the openapi sensor emits one
+                    // Schema per direction per operation; the joiner
+                    // does not need to differentiate between them.
+                    let schema_node_id = provider_records
+                        .first()
+                        .map(|p| p.node_id.clone())
+                        .unwrap_or_else(|| GlobalId::from_string("unknown"));
+                    let mut field_map: BTreeMap<
+                        crate::federation::contracts::model::JsonPath,
+                        crate::federation::contracts::model::FieldMeta,
+                    > = BTreeMap::new();
+                    for f in fields {
+                        field_map.insert(f.path.clone(), f.meta.clone());
+                    }
+                    endpoint_schemas.insert(
+                        *dir,
+                        crate::federation::contracts::index::EndpointSchema {
+                            node_id: schema_node_id,
+                            fields: field_map,
+                        },
+                    );
+                }
+            }
             endpoints.insert(
-                (service.clone(), key.clone()),
+                endpoint_id,
                 Endpoint {
                     id: (service, key),
                     method,
                     template,
                     providers: provider_records,
-                    schemas: BTreeMap::new(),
+                    schemas: endpoint_schemas,
                 },
             );
         }

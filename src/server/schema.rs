@@ -359,14 +359,16 @@ impl EdgeType {
             // `Binds` is the federation-only join (§5.3); it
             // materializes once `ContractJoiner::run` is wired into
             // `FederatedIndex::rejoin_contracts_if_dirty`.
+            //
+            // PR 9 flips `ReadsField` / `ReadsFrom` to `true`: the
+            // field-access sensor (§6.5) is wired in this PR. The
+            // other types still ship here as known-but-unindexed.
             EdgeType::SendsHttp
             | EdgeType::RequestSchema
             | EdgeType::ResponseSchema
             | EdgeType::PayloadSchema
-            | EdgeType::HasField
-            | EdgeType::ReadsField
-            | EdgeType::ReadsFrom
-            | EdgeType::Binds => false,
+            | EdgeType::HasField => false,
+            EdgeType::ReadsField | EdgeType::ReadsFrom | EdgeType::Binds => false,
             // No producer anywhere in the codebase. `Imports` in
             // particular reads like a core relationship and has never
             // been emitted by any indexer.

@@ -139,8 +139,8 @@ fn run_is_pure_two_independent_calls_match_byte_for_byte() {
         },
     );
     let cfg = default_config();
-    let a = ContractJoiner::run(&[p.clone(), c.clone()], &cfg);
-    let b = ContractJoiner::run(&[p, c], &cfg);
+    let a = ContractJoiner::run(&[p.clone(), c.clone()], &[], &cfg);
+    let b = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(a, b, "two runs of identical input must match");
 }
 
@@ -169,7 +169,7 @@ fn every_binds_edge_connects_two_services_and_carries_provenance() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     for edge in &out.binds {
         assert_ne!(
             edge.consumer_service, edge.provider_service,
@@ -207,7 +207,7 @@ fn cross_repo_flag_reflects_repos_difference() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p_orders, c], &cfg);
+    let out = ContractJoiner::run(&[p_orders, c], &[], &cfg);
     let edge = out.binds.first().expect("expected one Binds");
     let consumer_repo = edge.consumer.repo_id();
     let provider_repo = edge.provider.repo_id();
@@ -250,10 +250,10 @@ fn order_independence_two_projection_orders_match() {
         ),
     ];
     let cfg = default_config();
-    let a = ContractJoiner::run(&nodes, &cfg);
+    let a = ContractJoiner::run(&nodes, &[], &cfg);
     let mut reversed = nodes.clone();
     reversed.reverse();
-    let b = ContractJoiner::run(&reversed, &cfg);
+    let b = ContractJoiner::run(&reversed, &[], &cfg);
     assert_eq!(a.binds, b.binds);
     assert_eq!(a.index, b.index);
 }
@@ -286,7 +286,7 @@ fn rule_1_discards_wrapper_candidate_with_no_http_client_match() {
         },
     );
     let cfg = default_config(); // empty http_clients
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert!(
         out.binds.is_empty(),
         "rule 1: Receiver with no matching http_clients call is discarded"
@@ -334,7 +334,7 @@ fn rule_3_target_service_via_http_clients_binds_with_static_confidence() {
         schemas: vec![],
         bindings: vec![],
     };
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
     assert!(
@@ -370,7 +370,7 @@ fn rule_3_target_service_via_hosts_only() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1, "rule 3 via hosts only");
     assert!(matches!(
         out.binds[0].provenance,
@@ -400,7 +400,7 @@ fn rule_3_method_unknown_caps_confidence_at_0_6() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
     let (
@@ -445,7 +445,7 @@ fn rule_3_prefix_stripped_caps_confidence_at_0_5() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
     let (
@@ -489,7 +489,7 @@ fn rule_4_external_host_when_no_service_matches_and_not_exempt() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert!(out.binds.is_empty(), "rule 4 produces no Binds");
     let count = out.index.external.get("api.stripe.com").copied();
     assert_eq!(count, Some(1), "rule 4: external host counted");
@@ -517,7 +517,7 @@ fn rule_4_exempts_localhost() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert!(out.index.external.is_empty(), "localhost is exempt");
     assert!(out.index.unnormalized.is_empty(), "rule 5 not in play");
     // No service matches localhost, but it's exempt: falls through
@@ -561,7 +561,7 @@ fn known_target_with_dynamic_path_lands_in_unresolved_no_route_in_service() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     // Rule 3 fires (orders.svc matches the configured hosts
     // list); the dynamic path matches nothing → unresolved
     // no_route_in_service. `unnormalized` stays empty.
@@ -609,7 +609,7 @@ fn rule_5_unnormalized_recorded() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(
         out.index.unnormalized.len(),
         1,
@@ -652,7 +652,7 @@ fn dynamic_path_with_external_literal_host_lands_in_external_not_unnormalized() 
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert!(
         out.index.unnormalized.is_empty(),
         "row order: literal external host beats rule 5"
@@ -690,7 +690,7 @@ fn rule_6_own_service_skip() {
     let mut cfg = default_config();
     cfg.services[0].name = "billing".into();
     cfg.services[0].repo = "billing".into();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     // The own-service skip fires for rule 6; the call is
     // unresolved no_match.
     assert!(out.binds.is_empty(), "own-service call is not a contract");
@@ -718,7 +718,7 @@ fn rule_6_skips_generic_keys() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert!(
         out.binds.is_empty(),
         "rule 6: built-in generic /health is skipped"
@@ -748,7 +748,7 @@ fn rule_6_unbound_host_with_one_match_gives_0_6_confidence() {
     );
     let mut cfg = default_config();
     cfg.services.clear(); // remove implicit services
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
     let (
@@ -807,7 +807,7 @@ fn confirmed_binding_matches_consumer_and_records_provenance() {
             },
         }],
     };
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
     assert!(matches!(edge.provenance, EdgeProvenance::Confirmed { .. }));
@@ -834,7 +834,7 @@ fn confirmed_binding_no_endpoint_marks_stale() {
             },
         }],
     };
-    let out = ContractJoiner::run(&[], &cfg);
+    let out = ContractJoiner::run(&[], &[], &cfg);
     assert_eq!(out.binds.len(), 0);
     assert_eq!(out.index.stale_bindings.len(), 1);
     assert!(matches!(
@@ -871,7 +871,7 @@ fn confirmed_binding_no_consumer_marks_stale() {
             },
         }],
     };
-    let out = ContractJoiner::run(&[p], &cfg);
+    let out = ContractJoiner::run(&[p], &[], &cfg);
     assert!(out.binds.is_empty());
     assert_eq!(out.index.stale_bindings.len(), 1);
     assert!(matches!(
@@ -924,7 +924,7 @@ fn output_collections_are_sorted_by_key() {
     );
     let mut cfg = default_config();
     cfg.services.clear();
-    let out = ContractJoiner::run(&[p, p2, c1, c2], &cfg);
+    let out = ContractJoiner::run(&[p, p2, c1, c2], &[], &cfg);
     // binds sorted by (consumer, provider).
     for w in out.binds.windows(2) {
         let key = |e: &crate::federation::contracts::joiner::BindsEdge| {
@@ -953,7 +953,7 @@ fn no_field_refs_yet_field_join_is_a_no_op() {
         "/api/orders",
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p], &cfg);
+    let out = ContractJoiner::run(&[p], &[], &cfg);
     assert!(out.index.field_refs.is_empty());
 }
 
@@ -970,7 +970,7 @@ fn run_returns_the_join_output_struct() {
         "/api/orders",
     );
     let cfg = default_config();
-    let out: JoinOutput = ContractJoiner::run(&[p], &cfg);
+    let out: JoinOutput = ContractJoiner::run(&[p], &[], &cfg);
     // The struct is public; assert the fields exist and the basic
     // shape is sound.
     assert!(out.binds.is_empty());

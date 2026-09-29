@@ -1034,10 +1034,13 @@ impl FederatedIndex {
         // Collect every contract-bearing node by reading only the
         // ids recorded by `project_nodes` (§5.3 Cost).
         let mut contract_nodes: Vec<GraphNode> = Vec::new();
+        let mut contract_node_id_set: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut to_drop: Vec<RepoId> = Vec::new();
         for entry in self.contract_node_ids.iter() {
             let (rid, ids) = entry.pair();
             for gid in ids.iter() {
+                contract_node_id_set.insert(gid.clone());
                 if let Some(node) = self.backend.get_node(gid)? {
                     contract_nodes.push(node);
                 }
@@ -1059,7 +1062,36 @@ impl FederatedIndex {
             self.contract_node_ids.remove(&r);
         }
 
-        let out = ContractJoiner::run(&contract_nodes, &config);
+        // Collect the contract-bearing edges the joiner needs:
+        // `HasField`, `RequestSchema`, `ResponseSchema`, and
+        // `ReadsFrom` (the §7.5 input). Reading every edge and
+        // filtering would be cheaper than scanning the backend's full
+        // edge set with a type filter, but `all_edges()` is one
+        // round trip per call — fine for the size of edges we expect
+        // here. Other edge types are skipped.
+        let contract_edges: Vec<GraphEdge> = self
+            .backend
+            .all_edges()?
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e.edge_type,
+                    EdgeType::HasField
+                        | EdgeType::RequestSchema
+                        | EdgeType::ResponseSchema
+                        | EdgeType::ReadsFrom
+                )
+            })
+            .filter(|e| {
+                // Either side touching a contract node — saves us
+                // from sweeping every cross-repo `Calls` edge that
+                // happens to flow through one of the kept types.
+                contract_node_id_set.contains(&e.source_id)
+                    || contract_node_id_set.contains(&e.target_id)
+            })
+            .collect();
+
+        let out = ContractJoiner::run(&contract_nodes, &contract_edges, &config);
 
         // Diff against current backend `Binds`. Build the desired
         // set keyed by `(consumer_id, provider_id)`; build the

@@ -161,7 +161,7 @@ fn scenario_13_literal_route_binds_over_pattern() {
         },
     );
     let cfg = orders_config();
-    let out = ContractJoiner::run(&[p_orders, p_me, c], &cfg);
+    let out = ContractJoiner::run(&[p_orders, p_me, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1, "exactly one Binds");
     let edge = &out.binds[0];
     let key = match &edge.target_endpoint.1 {
@@ -201,7 +201,7 @@ fn scenario_14_external_host_recorded_not_unresolved() {
         },
     );
     let cfg = orders_config();
-    let out = ContractJoiner::run(&[p, c], &cfg);
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert!(out.binds.is_empty(), "no Binds for an external host");
     assert_eq!(
         out.index.external.get("api.stripe.com").copied(),
@@ -265,7 +265,7 @@ fn scenario_15_confirmed_binding_survives_line_insertion() {
             key: "POST /api/orders".into(),
         },
     });
-    let out = ContractJoiner::run(&[p.clone(), c_v1], &cfg);
+    let out = ContractJoiner::run(&[p.clone(), c_v1], &[], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge_v1 = &out.binds[0];
     assert!(matches!(
@@ -290,7 +290,7 @@ fn scenario_15_confirmed_binding_survives_line_insertion() {
             name: "requests".into(),
         },
     );
-    let out_v2 = ContractJoiner::run(&[p, c_v2], &cfg);
+    let out_v2 = ContractJoiner::run(&[p, c_v2], &[], &cfg);
     assert_eq!(
         out_v2.binds.len(),
         1,
@@ -359,7 +359,7 @@ fn scenario_16_shipping_to_inventory_one_binds_cross_repo_false() {
         schemas: vec![],
         bindings: vec![],
     };
-    let out = ContractJoiner::run(&[p_inv, c], &cfg);
+    let out = ContractJoiner::run(&[p_inv, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1, "exactly one Binds");
     let edge = &out.binds[0];
     assert_eq!(

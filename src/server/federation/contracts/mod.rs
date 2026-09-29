@@ -16,10 +16,14 @@
 //!   dependencies.
 //! - `index` (PR 7): `ContractIndex` (§4.3) — the per-federation
 //!   shape derived by the joiner. Pure data.
-//! - `joiner` (PR 7): `ContractJoiner::run(nodes, config)` computing
-//!   the desired `Binds` edge set and `ContractIndex`.
+//! - `joiner` (PR 7): `ContractJoiner::run(nodes, edges, config)`
+//!   computing the desired `Binds` edge set and `ContractIndex`.
+//! - `field_join` (PR 9): §7.5 four-rule case analysis that
+//!   resolves each `FieldRef` against the response schema of the
+//!   endpoints its call joins. The joiner step 5 calls into it.
 
 pub mod config;
+pub mod field_join;
 pub mod index;
 pub mod joiner;
 pub mod model;

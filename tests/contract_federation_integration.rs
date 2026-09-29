@@ -402,7 +402,7 @@ async fn unnormalized_consumers_are_recorded() {
         schemas: vec![],
         bindings: vec![],
     };
-    let out = ContractJoiner::run(&[provider, consumer], &cfg);
+    let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
     assert_eq!(
         out.binds.len(),
         0,

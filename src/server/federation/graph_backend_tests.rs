@@ -430,14 +430,14 @@ fn petgraph_backend_rejects_short_file() {
 // with multiple predecessors and edges below the confidence floor.
 
 #[test]
-fn impact_propagation_table_pr8_state() {
+fn impact_propagation_table_pr9_state() {
     use crate::federation::graph_backend::{impact_propagation, Propagation};
-    // Pin the PR 8 propagation carve-out. The §5.2 code block
+    // Pin the PR 9 propagation carve-out. The §5.2 code block
     // describes the *final* propagation table; the tracker checklist
-    // governs what actually ships per PR. PR 8 turns on
-    // `RequestSchema`, `ResponseSchema`, `HasField` (joining the
-    // `Calls` / `CallsHttp` / `SendsHttp` / `Binds` group PR 7
-    // already switched on).
+    // governs what actually ships per PR. PR 9 turns on
+    // `ReadsField` (joining the `Calls` / `CallsHttp` / `SendsHttp` /
+    // `Binds` / `RequestSchema` / `ResponseSchema` / `HasField` group
+    // PRs 4 / 7 / 8 already switched on).
     //
     // Per-PR trajectory — incoming / outgoing / stop:
     //   PR 4  →  1 / 0 / 23   (Calls)
@@ -484,18 +484,19 @@ fn impact_propagation_table_pr8_state() {
             | EdgeType::Binds
             | EdgeType::RequestSchema
             | EdgeType::ResponseSchema
-            | EdgeType::HasField => Propagation::Incoming,
+            | EdgeType::HasField
+            | EdgeType::ReadsField => Propagation::Incoming,
             _ => Propagation::Stop,
         };
         assert_eq!(got, expected, "propagation mismatch for {e:?}");
     }
-    // PR 8 actual state: 7 Incoming, 0 Outgoing, 17 Stop.
+    // PR 9 actual state: 8 Incoming, 0 Outgoing, 16 Stop.
     assert_eq!(cases.len(), 24, "every EdgeType variant must be listed");
     let incoming_count = cases
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Incoming)
         .count();
-    assert_eq!(incoming_count, 7);
+    assert_eq!(incoming_count, 8);
     let outgoing_count = cases
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Outgoing)
@@ -505,7 +506,7 @@ fn impact_propagation_table_pr8_state() {
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Stop)
         .count();
-    assert_eq!(stop_count, 17);
+    assert_eq!(stop_count, 16);
 }
 
 /// `traverse_impact` should ignore start ids that don't exist and
