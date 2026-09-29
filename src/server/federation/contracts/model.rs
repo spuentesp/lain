@@ -270,7 +270,10 @@ impl std::str::FromStr for ContractKey {
                 .ok_or_else(|| format!("malformed http key: {s:?}"))?;
             let method = parse_method_label(method_str)
                 .ok_or_else(|| format!("unknown method in http key: {method_str:?}"))?;
-            return Ok(ContractKey::Http { method, template: template.to_string() });
+            return Ok(ContractKey::Http {
+                method,
+                template: template.to_string(),
+            });
         }
         if let Some(rest) = s.strip_prefix("topic:") {
             // "broker/name"
@@ -362,9 +365,7 @@ impl std::str::FromStr for JsonPath {
             match c {
                 '\\' => {
                     chars.next();
-                    let esc = chars
-                        .next()
-                        .ok_or_else(|| "trailing escape".to_string())?;
+                    let esc = chars.next().ok_or_else(|| "trailing escape".to_string())?;
                     current.push(esc);
                 }
                 '.' => {
@@ -420,10 +421,7 @@ fn escape_name(s: &str) -> String {
     out
 }
 
-fn flush_name(
-    current: &mut String,
-    segments: &mut Vec<PathSegment>,
-) -> Result<(), String> {
+fn flush_name(current: &mut String, segments: &mut Vec<PathSegment>) -> Result<(), String> {
     if current.is_empty() {
         return Ok(());
     }

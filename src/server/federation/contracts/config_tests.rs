@@ -2,7 +2,7 @@
 //! are not part of the in-file `#[cfg(test)]` block.
 
 use crate::federation::contracts::config::{
-    BUILTIN_GENERIC_KEYS, ContractFederationConfig, MAX_PATH_ARG,
+    ContractFederationConfig, BUILTIN_GENERIC_KEYS, MAX_PATH_ARG,
 };
 
 #[test]

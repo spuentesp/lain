@@ -1067,7 +1067,12 @@ impl FederatedIndex {
         let desired: std::collections::BTreeSet<(String, String)> = out
             .binds
             .iter()
-            .map(|b| (b.consumer.as_str().to_string(), b.provider.as_str().to_string()))
+            .map(|b| {
+                (
+                    b.consumer.as_str().to_string(),
+                    b.provider.as_str().to_string(),
+                )
+            })
             .collect();
         let stored_edges: Vec<GraphEdge> = self
             .backend
@@ -1084,7 +1089,10 @@ impl FederatedIndex {
             .binds
             .iter()
             .filter(|b| {
-                !stored.contains(&(b.consumer.as_str().to_string(), b.provider.as_str().to_string()))
+                !stored.contains(&(
+                    b.consumer.as_str().to_string(),
+                    b.provider.as_str().to_string(),
+                ))
             })
             .map(|b| GraphEdge {
                 edge_type: EdgeType::Binds,

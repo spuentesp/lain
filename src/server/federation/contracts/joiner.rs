@@ -70,10 +70,7 @@ impl ContractJoiner {
     /// federation has projected; the orchestrator pre-filters the
     /// backend list to `contract_node_ids` (per repo) to avoid a
     /// whole-graph scan (§5.3 Cost).
-    pub fn run(
-        nodes: &[GraphNode],
-        config: &ContractFederationConfig,
-    ) -> JoinOutput {
+    pub fn run(nodes: &[GraphNode], config: &ContractFederationConfig) -> JoinOutput {
         // Step 1 — assign services to every node (§4.1). Longest
         // matching prefix wins; implicit service = repo id.
         let assignments = assign_services(nodes, config);
@@ -99,32 +96,20 @@ impl ContractJoiner {
                 Ok(g) => g,
                 Err(_) => continue,
             };
-            // Rule 1.
+            // Rule 1 — wrapper candidates with no matching
+            // http_clients entry are discarded (rule 1 of the
+            // §7.3 table). Rule 2 (confirmed bindings) is
+            // applied in step 6 below.
             if is_wrapper_candidate(consumer) && !http_clients.matches(&consumer.via) {
                 continue;
             }
-            // Rule 5 — recorded separately.
-            if consumer.url.template.is_none() {
-                unnormalized.push(call_id.clone());
-                let svc = assignments
-                    .get(call_id.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| implicit_service(node));
-                consumers.insert(
-                    call_id.clone(),
-                    ConsumerResolution {
-                        call_id: call_id.clone(),
-                        service: svc,
-                        target: Some(ConsumerTarget::Unresolved {
-                            reason: UnresolvedReason::Unnormalized,
-                        }),
-                        bound_endpoints: Vec::new(),
-                        reads_complete: consumer.reads_complete,
-                    },
-                );
-                continue;
-            }
-            // Rule 2 / 3 / 4 / 6 — in that order, first match wins.
+            // The remaining rows (3, 4, 5, 6) are checked in
+            // `resolve_consumer` below, in §7.3 table order. The
+            // order matters: rule 3 (target service known)
+            // beats rule 5 (template=None) — a dynamic-path
+            // call whose host resolves to a known service
+            // becomes rule 3's `no_route_in_service`, not
+            // `unnormalized`.
             let own_service = assignments
                 .get(call_id.as_str())
                 .cloned()
@@ -139,6 +124,20 @@ impl ContractJoiner {
                 &mut binds,
                 &mut external,
             );
+            // Rule 5 records the consumer in the
+            // `unnormalized` index. The verdict lives on the
+            // resolution itself; we mirror it into the
+            // federation-wide `unnormalized` Vec here so the
+            // surface tools can list candidates by id.
+            if matches!(
+                resolution.target,
+                Some(ConsumerTarget::Unresolved {
+                    reason: UnresolvedReason::Unnormalized,
+                    ..
+                })
+            ) {
+                unnormalized.push(call_id.clone());
+            }
             consumers.insert(call_id.clone(), resolution);
         }
 
@@ -507,7 +506,9 @@ fn pattern_matches(pattern: &str, fn_name: &str) -> bool {
     if let Some(idx) = pattern.find("{method}") {
         let head = &pattern[..idx];
         let tail = &pattern[idx + "{method}".len()..];
-        fn_name.starts_with(head) && fn_name.ends_with(tail) && fn_name.len() >= head.len() + tail.len()
+        fn_name.starts_with(head)
+            && fn_name.ends_with(tail)
+            && fn_name.len() >= head.len() + tail.len()
     } else {
         fn_name == pattern
     }
@@ -565,23 +566,13 @@ fn resolve_consumer(
     let target_template = consumer.url.template.clone();
     let target_method = consumer.method.clone();
 
-    // Rule 5 — template=None (fully dynamic path). The §7.3 table
-    // lists rule 5 explicitly; a dynamic path can never match a
-    // provider template so this short-circuits rules 3 / 4 / 6.
-    if target_template.is_none() {
-        return ConsumerResolution {
-            call_id: call_id.clone(),
-            service: own_service.clone(),
-            target: Some(ConsumerTarget::Unresolved {
-                reason: UnresolvedReason::Unnormalized,
-            }),
-            bound_endpoints: Vec::new(),
-            reads_complete: consumer.reads_complete,
-        };
-    }
-
-    // Rule 3 — target service known. Check http_clients first, then
-    // env, then hosts.
+    // Rule 3 — target service known. Check http_clients first,
+    // then env, then hosts. Fires even when `template = None`:
+    // a known target with a dynamic path becomes
+    // `unresolved no_route_in_service` (rule 3's verdict),
+    // not `unnormalized` (rule 5). Per §7.3 the first matching
+    // row decides; rule 5 only fires when rule 3 found no
+    // target service.
     if let Some(svc) = target_service_from_http_client(consumer, http_clients) {
         let resolution = match_one_service(
             call_id,
@@ -625,8 +616,10 @@ fn resolve_consumer(
         return resolution;
     }
 
-    // Rule 4 — external host (literal that matches no service and is
-    // not on the exempt list).
+    // Rule 4 — external host. A `HostPart::Literal` that
+    // matches no service and is not on the exempt list. Fires
+    // before rule 5 because rule 4 only needs the host, not
+    // the template.
     if let HostPart::Literal(host) = &consumer.url.host {
         if !host_is_external_exempt(host) {
             *external.entry(host.clone()).or_insert(0) += 1;
@@ -638,6 +631,24 @@ fn resolve_consumer(
                 reads_complete: consumer.reads_complete,
             };
         }
+    }
+
+    // Rule 5 — template = None AND we have not yet resolved
+    // through rules 3 / 4. Per the §7.3 row order this is the
+    // only path that lands a call in `unnormalized`: a
+    // dynamic path with no resolvable target service and no
+    // resolvable external host. A known target (rule 3) or an
+    // external literal host (rule 4) preempts this row.
+    if target_template.is_none() {
+        return ConsumerResolution {
+            call_id: call_id.clone(),
+            service: own_service.clone(),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::Unnormalized,
+            }),
+            bound_endpoints: Vec::new(),
+            reads_complete: consumer.reads_complete,
+        };
     }
 
     // Rule 6 — fall back to every service except own, skipping
@@ -692,12 +703,7 @@ fn resolve_consumer(
     // ambiguous and carry `Heuristic{ambiguous}` 0.3.
     let mut bound: Vec<EndpointId> = Vec::new();
     for svc in &hits {
-        let best = best_provider_for(
-            svc,
-            &target_method,
-            target_template.as_deref(),
-            endpoints,
-        );
+        let best = best_provider_for(svc, &target_method, target_template.as_deref(), endpoints);
         if let Some((key, detail)) = best {
             binds.push(BindsEdge {
                 consumer: call_id.clone(),
@@ -835,13 +841,7 @@ fn match_one_service(
             reads_complete: consumer.reads_complete,
         };
     };
-    let best = best_provider_for_in(
-        &target_service,
-        target_method,
-        template,
-        rule_3,
-        endpoints,
-    );
+    let best = best_provider_for_in(&target_service, target_method, template, rule_3, endpoints);
     match best {
         None => ConsumerResolution {
             call_id: call_id.clone(),
@@ -901,12 +901,7 @@ fn best_provider_for_in(
             continue;
         }
         for p in providers {
-            let outcome = match_route(
-                method.clone(),
-                consumer_template,
-                p.method,
-                &p.template,
-            );
+            let outcome = match_route(method.clone(), consumer_template, p.method, &p.template);
             if let MatchOutcome::Match(detail) = outcome {
                 candidates.push((key.clone(), detail));
                 break;
@@ -932,7 +927,9 @@ fn best_provider_for_in(
     // strip. Suppress this in non-rule-3 paths by re-running without
     // it: pick the first non-PrefixStripped candidate.
     if !rule_3 {
-        if let Some(non_prefix) = candidates.iter().find(|c| c.1.kind != RouteMatch::PrefixStripped)
+        if let Some(non_prefix) = candidates
+            .iter()
+            .find(|c| c.1.kind != RouteMatch::PrefixStripped)
         {
             return Some(non_prefix.clone());
         }
@@ -1081,10 +1078,7 @@ fn apply_confirmed_binding(
         }
         // Enclosing symbol: prefer `Container.name` when set,
         // otherwise the node's own name.
-        let symbol_name = node
-            .container
-            .clone()
-            .unwrap_or_else(|| node.name.clone());
+        let symbol_name = node.container.clone().unwrap_or_else(|| node.name.clone());
         if symbol_name != binding.consumer.symbol {
             continue;
         }

@@ -57,7 +57,14 @@ fn contract_node(
     n
 }
 
-fn provider(repo: &str, path: &str, name: &str, line: u32, method: HttpMethod, template: &str) -> GraphNode {
+fn provider(
+    repo: &str,
+    path: &str,
+    name: &str,
+    line: u32,
+    method: HttpMethod,
+    template: &str,
+) -> GraphNode {
     contract_node(
         repo,
         NodeType::HttpRoute,
@@ -74,7 +81,15 @@ fn provider(repo: &str, path: &str, name: &str, line: u32, method: HttpMethod, t
     )
 }
 
-fn consumer(repo: &str, path: &str, name: &str, line: u32, method: MethodSpec, url: NormalizedUrl, via: CallVia) -> GraphNode {
+fn consumer(
+    repo: &str,
+    path: &str,
+    name: &str,
+    line: u32,
+    method: MethodSpec,
+    url: NormalizedUrl,
+    via: CallVia,
+) -> GraphNode {
     contract_node(
         repo,
         NodeType::HttpClientCall,
@@ -141,7 +156,9 @@ fn scenario_13_literal_route_binds_over_pattern() {
             host: HostPart::Literal("orders.svc".into()),
             template: Some("/api/orders/me".into()),
         },
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = orders_config();
     let out = ContractJoiner::run(&[p_orders, p_me, c], &cfg);
@@ -179,7 +196,9 @@ fn scenario_14_external_host_recorded_not_unresolved() {
             host: HostPart::Literal("api.stripe.com".into()),
             template: Some("/v1/charges".into()),
         },
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = orders_config();
     let out = ContractJoiner::run(&[p, c], &cfg);
@@ -192,15 +211,15 @@ fn scenario_14_external_host_recorded_not_unresolved() {
     // Confirm no unresolved NoMatch or NoRouteInService was emitted
     // for this call: the external path is preferred.
     let consumers = &out.index.consumers;
-    assert!(consumers
-        .values()
-        .all(|r| !matches!(
-            r.target,
-            Some(crate::federation::contracts::index::ConsumerTarget::Unresolved {
+    assert!(consumers.values().all(|r| !matches!(
+        r.target,
+        Some(
+            crate::federation::contracts::index::ConsumerTarget::Unresolved {
                 reason: crate::federation::contracts::index::UnresolvedReason::NoMatch,
                 ..
-            })
-        )));
+            }
+        )
+    )));
 }
 
 // ─── Scenario 15 ────────────────────────────────────────────────────
@@ -229,7 +248,9 @@ fn scenario_15_confirmed_binding_survives_line_insertion() {
             host: HostPart::Literal("orders.svc".into()),
             template: Some("/api/orders".into()),
         },
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let mut cfg = orders_config();
     cfg.bindings.push(ConfirmedBinding {
@@ -265,10 +286,16 @@ fn scenario_15_confirmed_binding_survives_line_insertion() {
             host: HostPart::Literal("orders.svc".into()),
             template: Some("/api/orders".into()),
         },
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let out_v2 = ContractJoiner::run(&[p, c_v2], &cfg);
-    assert_eq!(out_v2.binds.len(), 1, "scenario 15: binding survives line insertion");
+    assert_eq!(
+        out_v2.binds.len(),
+        1,
+        "scenario 15: binding survives line insertion"
+    );
     assert!(matches!(
         out_v2.binds[0].provenance,
         crate::schema::EdgeProvenance::Confirmed { .. }
@@ -302,7 +329,9 @@ fn scenario_16_shipping_to_inventory_one_binds_cross_repo_false() {
             host: HostPart::Literal("inventory.svc".into()),
             template: Some("/api/inventory/42".into()),
         },
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = ContractFederationConfig {
         services: vec![
@@ -333,8 +362,11 @@ fn scenario_16_shipping_to_inventory_one_binds_cross_repo_false() {
     let out = ContractJoiner::run(&[p_inv, c], &cfg);
     assert_eq!(out.binds.len(), 1, "exactly one Binds");
     let edge = &out.binds[0];
-    assert_eq!(edge.consumer.repo_id(), edge.provider.repo_id(),
-        "scenario 16: shipping → inventory shares repo `platform`");
+    assert_eq!(
+        edge.consumer.repo_id(),
+        edge.provider.repo_id(),
+        "scenario 16: shipping → inventory shares repo `platform`"
+    );
     // The federation would emit `cross_repo = false` because both
     // endpoints are in the same repo (different services).
     let cross_repo = edge.consumer.repo_id() != edge.provider.repo_id();

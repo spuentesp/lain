@@ -149,36 +149,53 @@ async fn project_both(fed: &FederatedIndex) {
 
 #[tokio::test]
 async fn add_repo_and_project_marks_contracts_dirty() {
+    // This test discriminates against the §5.3 contract:
+    // `project_nodes` and `project_edges` must set
+    // `contracts_dirty` so the next `rejoin_contracts_if_dirty`
+    // call actually runs the join (instead of being a no-op).
+    //
+    // The discriminator is the `Arc` identity of
+    // `fed.contract_index()`. When `rejoin_contracts_if_dirty`
+    // runs the join (because dirty was set) it allocates a
+    // fresh `ContractIndex` and stores a new `Arc`. When the
+    // join is a no-op (dirty clear) the stored `Arc` is
+    // returned unchanged. We compare identities across two
+    // projection + rejoin cycles; if projection failed to
+    // mark dirty, the second cycle would short-circuit and
+    // the Arc would not change.
     let (_dir, fed, _o, _b) = build_two_repo_federation().await;
-    // Before any projection, no contract index has been computed.
-    // The federation's `add_repo` path also marks `contracts_dirty`
-    // (§5.3); the next `rejoin_contracts_if_dirty` call will
-    // populate the index. We assert the observable effect:
-    //   1. The index is None before rejoin.
-    //   2. Projection marks dirty; the index is still None (no
-    //      join has run).
-    //   3. After `rejoin_contracts_if_dirty`, the index is Some.
-    // Step (3) discriminates: if `project_repo` failed to set the
-    // dirty flag, `rejoin_contracts_if_dirty` would be a no-op
-    // and the index would remain None.
-    assert!(
-        fed.contract_index().is_none(),
-        "no index before projection + rejoin"
-    );
+
+    // Step 1: index is None before any rejoin.
+    assert!(fed.contract_index().is_none(), "no index before any rejoin");
+
+    // Step 2: project + first rejoin produces an index.
     project_both(&fed).await;
+    fed.rejoin_contracts_if_dirty().expect("first rejoin");
+    let arc_after_first = fed.contract_index().expect("index after first rejoin");
+
+    // Step 3: re-running rejoin without a projection in
+    // between is a no-op (dirty flag was cleared by the
+    // first call). Same Arc.
+    fed.rejoin_contracts_if_dirty().expect("second rejoin");
+    let arc_after_second = fed.contract_index().expect("index");
     assert!(
-        fed.contract_index().is_none(),
-        "projection alone does not run the join"
+        std::sync::Arc::ptr_eq(&arc_after_first, &arc_after_second),
+        "idempotent rejoin returns the same Arc"
     );
-    fed.rejoin_contracts_if_dirty().expect("rejoin");
+
+    // Step 4: a *fresh* projection must mark dirty again,
+    // and the next rejoin must produce a *different* Arc. If
+    // `project_nodes` or `project_edges` failed to set
+    // `contracts_dirty`, the second rejoin would still be a
+    // no-op and `ptr_eq` would be true — the assertion below
+    // discriminates against that regression.
+    project_both(&fed).await;
+    fed.rejoin_contracts_if_dirty().expect("third rejoin");
+    let arc_after_third = fed.contract_index().expect("index");
     assert!(
-        fed.contract_index().is_some(),
-        "rejoin populated the contract index — projection must have set dirty"
+        !std::sync::Arc::ptr_eq(&arc_after_first, &arc_after_third),
+        "projection re-marked dirty: third rejoin built a new ContractIndex"
     );
-    // The second rejoin is a no-op: dirty flag was cleared by
-    // the first call. The index is the same Arc.
-    fed.rejoin_contracts_if_dirty().expect("rejoin (idempotent)");
-    assert!(fed.contract_index().is_some());
 }
 
 #[tokio::test]
@@ -186,16 +203,10 @@ async fn rejoin_contracts_is_idempotent() {
     let (_dir, fed, _o, _b) = build_two_repo_federation().await;
     project_both(&fed).await;
     fed.rejoin_contracts_if_dirty().expect("first rejoin");
-    let count = fed
-        .contract_index()
-        .map(|i| i.consumers.len())
-        .unwrap_or(0);
+    let count = fed.contract_index().map(|i| i.consumers.len()).unwrap_or(0);
     // Second call must be a no-op (dirty flag is clear).
     fed.rejoin_contracts_if_dirty().expect("second rejoin");
-    let after = fed
-        .contract_index()
-        .map(|i| i.consumers.len())
-        .unwrap_or(0);
+    let after = fed.contract_index().map(|i| i.consumers.len()).unwrap_or(0);
     assert_eq!(count, after, "idempotent: no edges added on second pass");
 }
 
@@ -203,12 +214,14 @@ async fn rejoin_contracts_is_idempotent() {
 async fn remove_repo_clears_its_contract_nodes_and_dirties() {
     let (_dir, fed, _o, b) = build_two_repo_federation().await;
     project_both(&fed).await;
-    fed.rejoin_contracts_if_dirty().expect("rejoin before remove");
+    fed.rejoin_contracts_if_dirty()
+        .expect("rejoin before remove");
     let bid = RepoId::new("billing").unwrap();
     fed.remove_repo(&bid).expect("remove_repo billing");
     // After `remove_repo` the dirty flag must be set; the next
     // join recomputes without billing.
-    fed.rejoin_contracts_if_dirty().expect("rejoin after remove");
+    fed.rejoin_contracts_if_dirty()
+        .expect("rejoin after remove");
     let idx = fed.contract_index().expect("index");
     assert!(
         !idx.services.keys().any(|s| s.0 == "billing"),
@@ -255,10 +268,7 @@ async fn projection_order_independence() {
     let (_dir, fed, _o, _b) = build_two_repo_federation().await;
     project_both(&fed).await;
     fed.rejoin_contracts_if_dirty().expect("first rejoin");
-    let before = fed
-        .contract_index()
-        .map(|i| i.clone())
-        .unwrap_or_default();
+    let before = fed.contract_index().map(|i| i.clone()).unwrap_or_default();
     // Second pass: should be a no-op, no dirty flag.
     fed.rejoin_contracts_if_dirty().expect("second rejoin");
     let after = fed.contract_index().map(|i| i.clone()).unwrap_or_default();
@@ -303,9 +313,14 @@ async fn unnormalized_consumers_are_recorded() {
     // Rule 5 of the §7.3 table: a consumer whose URL template is
     // `None` (fully dynamic path) is recorded in
     // `ContractIndex::unnormalized` and never produces a Binds
-    // edge. The integration-test fixture's hand-written Python
-    // sources don't go through the sensor pipeline, so we drive
-    // the joiner directly with a synthetic
+    // edge. Rule 5 only fires when rules 3 (target service
+    // known) and 4 (literal external host) have not matched, so
+    // we use `HostPart::Expr(...)` — neither a literal nor an
+    // env name, so rules 3 and 4 cannot fire.
+    //
+    // The integration-test fixture's hand-written Python sources
+    // don't go through the sensor pipeline, so we drive the
+    // joiner directly with a synthetic
     // `ConsumerFact { url: NormalizedUrl { template: None, .. } }`.
     // This is the in-process shape the sensors will eventually
     // emit for a fully dynamic URL.
@@ -327,10 +342,15 @@ async fn unnormalized_consumers_are_recorded() {
         &ns,
     );
     provider.repo_id = Some("orders".into());
-    provider.id =
-        GlobalId::new(&RepoId::new("orders").unwrap(), NodeType::HttpRoute, "src/orders.py", "do", Some(10))
-            .as_str()
-            .to_string();
+    provider.id = GlobalId::new(
+        &RepoId::new("orders").unwrap(),
+        NodeType::HttpRoute,
+        "src/orders.py",
+        "do",
+        Some(10),
+    )
+    .as_str()
+    .to_string();
     provider.contract = Some(ContractFact::Provider(ProviderFact {
         method: HttpMethod::Get,
         template: "/api/orders".into(),
@@ -356,12 +376,15 @@ async fn unnormalized_consumers_are_recorded() {
     consumer.id = consumer_gid.as_str().to_string();
     consumer.contract = Some(ContractFact::Consumer(ConsumerFact {
         method: MethodSpec::Known(HttpMethod::Get),
-        // template = None: rule 5 fires.
+        // Expr host — rules 3 / 4 cannot resolve it; template
+        // = None — rule 5 fires.
         url: NormalizedUrl {
-            host: HostPart::Literal("orders.svc".into()),
+            host: HostPart::Expr("config.base_url".into()),
             template: None,
         },
-        via: CallVia::Library { name: "requests".into() },
+        via: CallVia::Library {
+            name: "requests".into(),
+        },
         url_expr: String::new(),
         reads_complete: true,
     }));
@@ -406,10 +429,12 @@ async fn unnormalized_consumers_are_recorded() {
         .expect("consumer resolution");
     assert!(matches!(
         resolution.target,
-        Some(lain::federation::contracts::index::ConsumerTarget::Unresolved {
-            reason: UnresolvedReason::Unnormalized,
-            ..
-        })
+        Some(
+            lain::federation::contracts::index::ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::Unnormalized,
+                ..
+            }
+        )
     ));
     let (_dir, fed, _o, _b) = build_two_repo_federation().await;
     // Sanity: the live federation path still works.

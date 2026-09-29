@@ -126,7 +126,10 @@ fn stale_binding_constructs_with_reason() {
 
 #[test]
 fn unresolved_reason_variants_distinguish_themselves() {
-    assert_ne!(UnresolvedReason::NoRouteInService, UnresolvedReason::NoMatch);
+    assert_ne!(
+        UnresolvedReason::NoRouteInService,
+        UnresolvedReason::NoMatch
+    );
     assert_ne!(UnresolvedReason::NoMatch, UnresolvedReason::Unnormalized);
 }
 

@@ -24,9 +24,7 @@
 //! §8.3 determinism test holds across runs.
 
 use crate::error::LainError;
-use crate::federation::contracts::model::{
-    HttpMethod, ProviderFact, ProviderOrigin, SymbolKey,
-};
+use crate::federation::contracts::model::{HttpMethod, ProviderFact, ProviderOrigin, SymbolKey};
 use crate::federation::contracts::normalize::{normalize, UrlPart};
 use crate::federation::repo_id::RepoId;
 use crate::graph::{GraphDatabase, SensorOwner};
@@ -317,10 +315,8 @@ fn extract_router_prefixes(content: &str, extension: &str) -> BTreeMap<String, S
 
     if extension == "py" {
         // FastAPI: `router = APIRouter(prefix="/api/v1")`
-        let re = regex::Regex::new(
-            r#"(\w+)\s*=\s*APIRouter\s*\(\s*prefix\s*=\s*["']([^"']+)["']"#,
-        )
-        .unwrap();
+        let re = regex::Regex::new(r#"(\w+)\s*=\s*APIRouter\s*\(\s*prefix\s*=\s*["']([^"']+)["']"#)
+            .unwrap();
         for cap in re.captures_iter(content) {
             out.insert(cap[1].to_string(), cap[2].to_string());
         }
@@ -337,12 +333,9 @@ fn extract_router_prefixes(content: &str, extension: &str) -> BTreeMap<String, S
         // axum: `.nest("/api", router)` where `router` is defined
         // in the same file. Match `let router = Router::new()...`
         // for the receiver name; the prefix is from `.nest("…", router)`.
-        let def_re =
-            regex::Regex::new(r"let\s+(\w+)\s*=\s*Router::new").unwrap();
-        let nest_re = regex::Regex::new(
-            r#"\.nest\s*\(\s*["']([^"']+)["']\s*,\s*(\w+)\s*\)"#,
-        )
-        .unwrap();
+        let def_re = regex::Regex::new(r"let\s+(\w+)\s*=\s*Router::new").unwrap();
+        let nest_re =
+            regex::Regex::new(r#"\.nest\s*\(\s*["']([^"']+)["']\s*,\s*(\w+)\s*\)"#).unwrap();
         for nest_cap in nest_re.captures_iter(content) {
             let prefix = &nest_cap[1];
             let receiver = &nest_cap[2];
@@ -544,8 +537,7 @@ pub fn scan_workspace_routes(
         };
         let mut routes = scan_file_for_routes(path, &content);
         for r in &mut routes {
-            r.handler_path =
-                crate::graph::graph_path(root, std::path::Path::new(&r.handler_path));
+            r.handler_path = crate::graph::graph_path(root, std::path::Path::new(&r.handler_path));
         }
         let (nodes, edges) = routes_to_graph(graph, &routes, namespace, repo_id);
         all_nodes.extend(nodes);
@@ -554,9 +546,7 @@ pub fn scan_workspace_routes(
 
     let removed = graph.replace_sensor_output(SensorOwner::HttpSensor, &all_nodes, &all_edges)?;
     if removed > 0 {
-        tracing::debug!(
-            "http_sensor: replaced {removed} stale route(s) for {root:?}"
-        );
+        tracing::debug!("http_sensor: replaced {removed} stale route(s) for {root:?}");
     }
     Ok(all_nodes.len())
 }
@@ -731,7 +721,10 @@ mod tests {
         );
 
         let unknown = scan_file_for_routes(std::path::Path::new("notes.txt"), go_source);
-        assert!(unknown.is_empty(), "an unhandled extension yields no routes");
+        assert!(
+            unknown.is_empty(),
+            "an unhandled extension yields no routes"
+        );
     }
 
     #[test]
@@ -793,7 +786,11 @@ mod tests {
     fn the_workspace_scan_emits_edges_not_just_nodes() {
         let dir = tempfile::tempdir().unwrap();
         let dir_path = dir.path().to_path_buf();
-        std::fs::write(dir_path.join("routes.go"), "r.GET(\"/api/users\", listUsers)\n").unwrap();
+        std::fs::write(
+            dir_path.join("routes.go"),
+            "r.GET(\"/api/users\", listUsers)\n",
+        )
+        .unwrap();
 
         let graph = temp_graph("scan");
         graph
@@ -878,7 +875,11 @@ mod tests {
         let repo_id = RepoId::new("test").unwrap();
 
         // First scan: one route exists.
-        std::fs::write(dir_path.join("routes.go"), "r.GET(\"/api/users\", listUsers)\n").unwrap();
+        std::fs::write(
+            dir_path.join("routes.go"),
+            "r.GET(\"/api/users\", listUsers)\n",
+        )
+        .unwrap();
         let n1 = scan_workspace_routes(
             &graph,
             &dir_path,

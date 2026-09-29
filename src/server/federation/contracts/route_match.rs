@@ -90,9 +90,7 @@ pub fn match_route(
     }
 
     // Prefix tolerance: strip leading literal segments from C, retry.
-    if let Some((_n_stripped, stripped_text)) =
-        try_prefix_strip(&consumer_segs, &provider_segs)
-    {
+    if let Some((_n_stripped, stripped_text)) = try_prefix_strip(&consumer_segs, &provider_segs) {
         // 0.5 is the prefix-stripped confidence; the method cap can
         // only lower it further (Unknown → 0.6 is already ≥ 0.5).
         let confidence = method_conf.min(0.5);
@@ -195,10 +193,7 @@ fn segment_pair_matches(consumer: &str, provider: &str) -> bool {
 /// neither `{}` nor `{**}`. Returns `Some((n, text))` on success
 /// where `text` is the stripped prefix and `n` is the number of
 /// stripped segments.
-fn try_prefix_strip(
-    consumer_segs: &[String],
-    provider_segs: &[String],
-) -> Option<(usize, String)> {
+fn try_prefix_strip(consumer_segs: &[String], provider_segs: &[String]) -> Option<(usize, String)> {
     for n in 1..=3 {
         if n > consumer_segs.len() {
             break;
@@ -206,10 +201,7 @@ fn try_prefix_strip(
         // Every segment being stripped must be literal (no hole or
         // wildcard — we never strip dynamic positions, since that
         // would invent information we do not have).
-        if consumer_segs[..n]
-            .iter()
-            .any(|s| s == "{}" || s == "{**}")
-        {
+        if consumer_segs[..n].iter().any(|s| s == "{}" || s == "{**}") {
             continue;
         }
         let stripped: Vec<String> = consumer_segs[n..].to_vec();
@@ -402,10 +394,7 @@ mod tests {
     #[test]
     fn the_leftmost_difference_decides() {
         // /a/b/c (literal) vs /a/{}/c (placeholder at position 1).
-        assert_eq!(
-            compare_specificity("/a/b/c", "/a/{}/c"),
-            Ordering::Greater
-        );
+        assert_eq!(compare_specificity("/a/b/c", "/a/{}/c"), Ordering::Greater);
     }
 
     // ─── Prefix tolerance ─────────────────────────────────────────

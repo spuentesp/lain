@@ -231,9 +231,12 @@ pub async fn run_rebuild(
         if let Some(fed) = server.federation() {
             if let Ok(text) = std::fs::read_to_string(&repos_yaml) {
                 if let Ok(cfg) =
-                    crate::federation::contracts::config::ContractFederationConfig::load_from_str(&text)
+                    crate::federation::contracts::config::ContractFederationConfig::load_from_str(
+                        &text,
+                    )
                 {
-                    let repo_ids: Vec<String> = repos_file.repos.iter().map(|r| r.id.clone()).collect();
+                    let repo_ids: Vec<String> =
+                        repos_file.repos.iter().map(|r| r.id.clone()).collect();
                     if cfg.validate(&repo_ids).is_ok() {
                         fed.set_contract_config(cfg);
                     }
@@ -481,7 +484,8 @@ mod tests {
                             path: path.to_path_buf(),
                         },
                     }],
-                    contract: crate::federation::contracts::config::ContractFederationConfig::default(),
+                    contract:
+                        crate::federation::contracts::config::ContractFederationConfig::default(),
                 };
                 let source = cfg
                     .build_source_for(&cfg.repos[0])

@@ -147,9 +147,7 @@ pub fn scan_workspace_clients(
     let removed =
         graph.replace_sensor_output(SensorOwner::HttpClientSensor, &all_nodes, &all_edges)?;
     if removed > 0 {
-        tracing::debug!(
-            "http_client_sensor: replaced {removed} stale call(s) for {root:?}"
-        );
+        tracing::debug!("http_client_sensor: replaced {removed} stale call(s) for {root:?}");
     }
     Ok(all_nodes.len())
 }
@@ -244,11 +242,7 @@ impl FileContext {
         ctx
     }
 
-    fn resolve_identifier(
-        &self,
-        name: &str,
-        enclosing_fn_line: Option<u32>,
-    ) -> Option<String> {
+    fn resolve_identifier(&self, name: &str, enclosing_fn_line: Option<u32>) -> Option<String> {
         // Same-function wins when unique.
         if let Some(line) = enclosing_fn_line {
             for ((l, n), c) in &self.fn_assign_counts {
@@ -283,7 +277,9 @@ fn collect_python_context(root: Node, src: &[u8], ctx: &mut FileContext) {
                         *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
                     } else if let Some(fn_line) = enclosing_function_line(node) {
                         let key = (fn_line, name.clone());
-                        ctx.fn_assignments.entry(key.clone()).or_insert_with(|| value.clone());
+                        ctx.fn_assignments
+                            .entry(key.clone())
+                            .or_insert_with(|| value.clone());
                         *ctx.fn_assign_counts.entry(key).or_insert(0) += 1;
                     }
                 }
@@ -487,8 +483,13 @@ fn is_module_level(node: Node) -> bool {
     let mut cur = node.parent();
     while let Some(p) = cur {
         match p.kind() {
-            "function_definition" | "class_definition" | "lambda" | "arrow_function"
-            | "function" | "function_expression" | "method_definition" => return false,
+            "function_definition"
+            | "class_definition"
+            | "lambda"
+            | "arrow_function"
+            | "function"
+            | "function_expression"
+            | "method_definition" => return false,
             _ => {}
         }
         cur = p.parent();
@@ -743,12 +744,7 @@ fn parts_from_node_inner(
                             }
                         }
                         "interpolation" => {
-                            let inner = parts_from_node_inner(
-                                child,
-                                src,
-                                ctx,
-                                enclosing_fn_line,
-                            );
+                            let inner = parts_from_node_inner(child, src, ctx, enclosing_fn_line);
                             if !inner.is_empty() {
                                 out.extend(inner);
                             }
@@ -855,12 +851,7 @@ fn template_string_parts(
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "template_substitution" => {
-                let inner = parts_from_node_inner(
-                    child,
-                    src,
-                    ctx,
-                    enclosing_fn_line,
-                );
+                let inner = parts_from_node_inner(child, src, ctx, enclosing_fn_line);
                 if inner.is_empty() {
                     out.push(UrlPart::Hole(String::new()));
                 } else {
@@ -1191,7 +1182,9 @@ fn detect_python_call(
             };
             // For `requests.request(method, url)` / `httpx.request(method, url)`,
             // the URL is positional arg 1, not arg 0.
-            let url_pos = if matches!(verb_text.as_str(), "request") && (recv_text == "requests" || recv_text == "httpx") {
+            let url_pos = if matches!(verb_text.as_str(), "request")
+                && (recv_text == "requests" || recv_text == "httpx")
+            {
                 1
             } else {
                 0
@@ -1316,7 +1309,8 @@ fn starts_with_slash_expr(node: Node, src: &[u8]) -> bool {
     // `"`, then the literal starts. We've already advanced past `"`;
     // check for `f` prefix in the original.
     let prefix_bytes = raw.as_bytes();
-    if prefix_bytes.len() >= 2 && prefix_bytes[0] == b'f' && matches!(prefix_bytes[1], b'"' | b'\'') {
+    if prefix_bytes.len() >= 2 && prefix_bytes[0] == b'f' && matches!(prefix_bytes[1], b'"' | b'\'')
+    {
         if prefix_bytes.len() >= 3 && prefix_bytes[2] == b'/' {
             return true;
         }
@@ -1403,8 +1397,7 @@ fn detect_tsjs_call(
                 let url_expr = truncate_url_expr(&url_source);
                 if first.kind() == "object" {
                     let (object_method, object_url) =
-                        object_method_and_url(first, src)
-                            .unwrap_or((MethodSpec::Unknown, first));
+                        object_method_and_url(first, src).unwrap_or((MethodSpec::Unknown, first));
                     let url_arg = object_url;
                     let url_source = text_of(url_arg, src).unwrap_or_else(|| url_expr.clone());
                     let url_expr = truncate_url_expr(&url_source);
@@ -1593,10 +1586,7 @@ fn init_method(init: Option<Node>, src: &[u8]) -> MethodSpec {
     MethodSpec::Known(HttpMethod::Get)
 }
 
-fn object_method_and_url<'a>(
-    obj: Node<'a>,
-    src: &[u8],
-) -> Option<(MethodSpec, Node<'a>)> {
+fn object_method_and_url<'a>(obj: Node<'a>, src: &[u8]) -> Option<(MethodSpec, Node<'a>)> {
     let mut method = MethodSpec::Unknown;
     let mut url_arg: Option<Node> = None;
     let mut cursor = obj.walk();
@@ -1720,9 +1710,7 @@ fn enclosing_sends_http_edge(
     line: u32,
     target_id: String,
 ) -> Vec<GraphEdge> {
-    if let Some(sym) =
-        crate::server::sensors::util::enclosing_symbol(graph, path, line)
-    {
+    if let Some(sym) = crate::server::sensors::util::enclosing_symbol(graph, path, line) {
         let mut e = GraphEdge::new(EdgeType::SendsHttp, sym.id, target_id);
         e.site = Some(crate::federation::contracts::model::SourceSite {
             path: path.to_string(),
@@ -1781,12 +1769,18 @@ mod tests {
     #[test]
     fn host_env_name_matches_os_getenv() {
         assert_eq!(host_env_name("os.getenv(\"BASE_URL\")"), Some("BASE_URL"));
-        assert_eq!(host_env_name("os.getenv(\"BASE_URL\", \"\")"), Some("BASE_URL"));
+        assert_eq!(
+            host_env_name("os.getenv(\"BASE_URL\", \"\")"),
+            Some("BASE_URL")
+        );
     }
 
     #[test]
     fn host_env_name_matches_process_env() {
-        assert_eq!(host_env_name("process.env.BILLING_URL"), Some("BILLING_URL"));
+        assert_eq!(
+            host_env_name("process.env.BILLING_URL"),
+            Some("BILLING_URL")
+        );
         assert_eq!(
             host_env_name("process.env[\"BILLING_URL\"]"),
             Some("BILLING_URL")
@@ -1822,21 +1816,33 @@ mod tests {
     #[test]
     fn template_from_string_keeps_a_pure_literal() {
         let parts = template_from_string("a/b/c");
-        assert_eq!(
-            parts,
-            vec![UrlPart::Literal("a/b/c".to_string())]
-        );
+        assert_eq!(parts, vec![UrlPart::Literal("a/b/c".to_string())]);
     }
 
     #[test]
     fn method_from_verb_maps_each_verb() {
         assert_eq!(method_from_verb("get"), MethodSpec::Known(HttpMethod::Get));
-        assert_eq!(method_from_verb("post"), MethodSpec::Known(HttpMethod::Post));
+        assert_eq!(
+            method_from_verb("post"),
+            MethodSpec::Known(HttpMethod::Post)
+        );
         assert_eq!(method_from_verb("put"), MethodSpec::Known(HttpMethod::Put));
-        assert_eq!(method_from_verb("patch"), MethodSpec::Known(HttpMethod::Patch));
-        assert_eq!(method_from_verb("delete"), MethodSpec::Known(HttpMethod::Delete));
-        assert_eq!(method_from_verb("head"), MethodSpec::Known(HttpMethod::Head));
-        assert_eq!(method_from_verb("options"), MethodSpec::Known(HttpMethod::Options));
+        assert_eq!(
+            method_from_verb("patch"),
+            MethodSpec::Known(HttpMethod::Patch)
+        );
+        assert_eq!(
+            method_from_verb("delete"),
+            MethodSpec::Known(HttpMethod::Delete)
+        );
+        assert_eq!(
+            method_from_verb("head"),
+            MethodSpec::Known(HttpMethod::Head)
+        );
+        assert_eq!(
+            method_from_verb("options"),
+            MethodSpec::Known(HttpMethod::Options)
+        );
         assert_eq!(method_from_verb("trace"), MethodSpec::Unknown);
     }
 

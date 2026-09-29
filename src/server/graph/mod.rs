@@ -96,9 +96,7 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
             ProviderOrigin::Code => Some(SensorOwner::HttpSensor),
             ProviderOrigin::OpenApi => Some(SensorOwner::OpenApiSensor),
         },
-        (NodeType::Schema, Some(ContractFact::Schema { .. })) => {
-            Some(SensorOwner::OpenApiSensor)
-        }
+        (NodeType::Schema, Some(ContractFact::Schema { .. })) => Some(SensorOwner::OpenApiSensor),
         (NodeType::Field, Some(ContractFact::Field(_))) => Some(SensorOwner::OpenApiSensor),
         (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
         (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
@@ -2401,7 +2399,8 @@ mod replace_tests {
             "src/main.py".into(),
         );
         handler.entry = Some(crate::federation::contracts::model::EntryKind::Scheduled);
-        g.insert_nodes_batch(std::slice::from_ref(&handler)).unwrap();
+        g.insert_nodes_batch(std::slice::from_ref(&handler))
+            .unwrap();
 
         let removed = g
             .replace_sensor_output(SensorOwner::EntryPointSensor, &[], &[])
@@ -2418,11 +2417,7 @@ mod replace_tests {
     /// §6.1. Pre-schema-v3 nodes (no contract) have no owner.
     #[test]
     fn sensor_owner_of_returns_none_for_unowned_nodes() {
-        let plain = GraphNode::new(
-            NodeType::Function,
-            "parse".into(),
-            "src/x.rs".into(),
-        );
+        let plain = GraphNode::new(NodeType::Function, "parse".into(), "src/x.rs".into());
         assert!(sensor_owner_of(&plain).is_none());
     }
 }

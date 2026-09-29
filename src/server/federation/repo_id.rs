@@ -87,7 +87,9 @@ fn decode_segment(s: &str) -> String {
     out
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct GlobalId(String);
 
 impl GlobalId {

@@ -173,16 +173,26 @@ impl ContractFederationConfig {
                 }
             };
             match key_str {
-                "services" => out.services = serde_yaml::from_value(v.clone())
-                    .map_err(|e| LainError::Config(format!("services: {e}")))?,
-                "http_clients" => out.http_clients = serde_yaml::from_value(v.clone())
-                    .map_err(|e| LainError::Config(format!("http_clients: {e}")))?,
-                "generic_keys" => out.generic_keys = serde_yaml::from_value(v.clone())
-                    .map_err(|e| LainError::Config(format!("generic_keys: {e}")))?,
-                "schemas" => out.schemas = serde_yaml::from_value(v.clone())
-                    .map_err(|e| LainError::Config(format!("schemas: {e}")))?,
-                "bindings" => out.bindings = serde_yaml::from_value(v.clone())
-                    .map_err(|e| LainError::Config(format!("bindings: {e}")))?,
+                "services" => {
+                    out.services = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("services: {e}")))?
+                }
+                "http_clients" => {
+                    out.http_clients = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("http_clients: {e}")))?
+                }
+                "generic_keys" => {
+                    out.generic_keys = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("generic_keys: {e}")))?
+                }
+                "schemas" => {
+                    out.schemas = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("schemas: {e}")))?
+                }
+                "bindings" => {
+                    out.bindings = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("bindings: {e}")))?
+                }
                 // Other top-level keys are the existing
                 // `FederationConfig`'s. They're handled by the
                 // federation loader, not by us; here we just skip
@@ -240,15 +250,14 @@ impl ContractFederationConfig {
         // `services/shipping` and `services/shipping-api` don't
         // overlap.
         for s in &self.services {
-            for (i, a) in s.paths.iter().enumerate() {
-                for b in s.paths.iter().skip(i + 1) {
+            for a in &s.paths {
+                for b in &s.paths {
                     if path_prefixes_overlap(a, b) {
                         return Err(LainError::Config(format!(
                             "service '{}' has overlapping paths '{a}' and '{b}'",
                             s.name
                         )));
                     }
-                    let _ = i;
                 }
             }
         }
@@ -504,10 +513,7 @@ services:
 "#;
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown repo"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("unknown repo"), "got: {err}");
     }
 
     #[test]
@@ -537,7 +543,8 @@ services:
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
         assert!(
-            err.to_string().contains("collides with a configured repo id"),
+            err.to_string()
+                .contains("collides with a configured repo id"),
             "got: {err}"
         );
     }
@@ -552,10 +559,7 @@ services:
 "#;
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
-        assert!(
-            err.to_string().contains("overlapping paths"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("overlapping paths"), "got: {err}");
     }
 
     #[test]
@@ -601,7 +605,8 @@ services:
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
         assert!(
-            err.to_string().contains("env var 'SHARED' is listed by both"),
+            err.to_string()
+                .contains("env var 'SHARED' is listed by both"),
             "got: {err}"
         );
     }
@@ -620,7 +625,8 @@ services:
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
         assert!(
-            err.to_string().contains("host 'api.example.com' is listed by both"),
+            err.to_string()
+                .contains("host 'api.example.com' is listed by both"),
             "got: {err}"
         );
     }
@@ -633,10 +639,7 @@ generic_keys:
 "#;
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
-        assert!(
-            err.to_string().contains("missing space"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("missing space"), "got: {err}");
     }
 
     #[test]
@@ -648,10 +651,7 @@ generic_keys:
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         // Empty segments collapse, so this normalizes to /api/orders.
         let err = cfg.validate(&repo_ids()).unwrap_err();
-        assert!(
-            err.to_string().contains("normalized to"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("normalized to"), "got: {err}");
     }
 
     #[test]
@@ -667,10 +667,7 @@ http_clients:
 "#;
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
-        assert!(
-            err.to_string().contains("path_arg 6 > 5"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("path_arg 6 > 5"), "got: {err}");
     }
 
     #[test]
@@ -683,10 +680,7 @@ services:
 "#;
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
-        assert!(
-            err.to_string().contains("upper-case"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("upper-case"), "got: {err}");
     }
 
     #[test]
@@ -713,10 +707,7 @@ bindings:
 "#;
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown service"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("unknown service"), "got: {err}");
     }
 
     #[test]
@@ -728,10 +719,7 @@ bindings:
 "#;
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown repo"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("unknown repo"), "got: {err}");
     }
 
     #[test]

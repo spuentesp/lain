@@ -147,7 +147,8 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
         })
         .min_by(|a, b| {
             // Smallest range first; tie → later line_start.
-            a.1.cmp(&b.1).then_with(|| b.0.line_start.cmp(&a.0.line_start))
+            a.1.cmp(&b.1)
+                .then_with(|| b.0.line_start.cmp(&a.0.line_start))
         })
         .map(|(n, _)| n)
 }
@@ -233,7 +234,8 @@ mod tests {
         let g = db("enclosing_smallest");
         let outer = fn_with_range("outer", "src/x.py", 1, 200);
         let inner = fn_with_range("inner", "src/x.py", 50, 100);
-        g.insert_nodes_batch(&[outer.clone(), inner.clone()]).unwrap();
+        g.insert_nodes_batch(&[outer.clone(), inner.clone()])
+            .unwrap();
 
         let found = enclosing_symbol(&g, "src/x.py", 75).expect("a symbol covers line 75");
         assert_eq!(found.name, "inner", "smallest range wins");
@@ -350,8 +352,14 @@ mod tests {
         let f = fn_with_range("the_function", "src/x.py", 50, 100);
         g.insert_nodes_batch(&[f]).unwrap();
 
-        assert!(enclosing_symbol(&g, "src/x.py", 10).is_none(), "line 10 is before the function");
-        assert!(enclosing_symbol(&g, "src/x.py", 200).is_none(), "line 200 is after the function");
+        assert!(
+            enclosing_symbol(&g, "src/x.py", 10).is_none(),
+            "line 10 is before the function"
+        );
+        assert!(
+            enclosing_symbol(&g, "src/x.py", 200).is_none(),
+            "line 200 is after the function"
+        );
         assert!(
             enclosing_symbol(&g, "src/other.py", 75).is_none(),
             "path that doesn't exist in the graph returns None"

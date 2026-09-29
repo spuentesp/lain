@@ -13,9 +13,7 @@
 //! (the route + `Provider(OpenApi)` fact is the joiner-visible part).
 
 use crate::error::LainError;
-use crate::federation::contracts::model::{
-    HttpMethod, ProviderFact, ProviderOrigin,
-};
+use crate::federation::contracts::model::{HttpMethod, ProviderFact, ProviderOrigin};
 use crate::federation::contracts::normalize::{normalize, UrlPart};
 use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
@@ -302,12 +300,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp_graph);
         let graph = GraphDatabase::new(&tmp_graph).unwrap();
 
-        let n = scan_workspace(
-            &graph,
-            dir_path,
-            &crate::schema::RepoNamespace::for_test(),
-        )
-        .unwrap();
+        let n =
+            scan_workspace(&graph, dir_path, &crate::schema::RepoNamespace::for_test()).unwrap();
         assert_eq!(n, 2, "both spec files contribute routes");
 
         let routes: Vec<_> = graph
@@ -315,8 +309,7 @@ mod tests {
             .into_iter()
             .filter(|n| n.node_type == NodeType::HttpRoute)
             .collect();
-        let names: std::collections::BTreeSet<_> =
-            routes.iter().map(|n| n.name.clone()).collect();
+        let names: std::collections::BTreeSet<_> = routes.iter().map(|n| n.name.clone()).collect();
         assert!(names.contains("GET /a"));
         assert!(names.contains("GET /b"));
     }
@@ -337,27 +330,15 @@ mod tests {
             "openapi: 3.0.0\npaths:\n  /a:\n    get:\n      operationId: getA\n",
         )
         .unwrap();
-        let n1 = scan_workspace(
-            &graph,
-            dir_path,
-            &crate::schema::RepoNamespace::for_test(),
-        )
-        .unwrap();
+        let n1 =
+            scan_workspace(&graph, dir_path, &crate::schema::RepoNamespace::for_test()).unwrap();
         assert_eq!(n1, 1);
         assert!(graph.find_node_by_name("GET /a").is_some());
 
         // Second scan: empty paths.
-        std::fs::write(
-            dir_path.join("openapi.yaml"),
-            "openapi: 3.0.0\npaths: {}\n",
-        )
-        .unwrap();
-        let n2 = scan_workspace(
-            &graph,
-            dir_path,
-            &crate::schema::RepoNamespace::for_test(),
-        )
-        .unwrap();
+        std::fs::write(dir_path.join("openapi.yaml"), "openapi: 3.0.0\npaths: {}\n").unwrap();
+        let n2 =
+            scan_workspace(&graph, dir_path, &crate::schema::RepoNamespace::for_test()).unwrap();
         assert_eq!(n2, 0);
         assert!(
             graph.find_node_by_name("GET /a").is_none(),

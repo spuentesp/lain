@@ -27,7 +27,9 @@ fn repo_ns() -> RepoNamespace {
 
 fn make_id(repo: &str, kind: NodeType, path: &str, name: &str, line: u32) -> String {
     let r = RepoId::new(repo).unwrap();
-    GlobalId::new(&r, kind, path, name, Some(line)).as_str().to_string()
+    GlobalId::new(&r, kind, path, name, Some(line))
+        .as_str()
+        .to_string()
 }
 
 fn provider_node(
@@ -128,8 +130,13 @@ fn run_is_pure_two_independent_calls_match_byte_for_byte() {
         "fetch_order",
         1,
         MethodSpec::Known(HttpMethod::Get),
-        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders/42")),
-        CallVia::Library { name: "requests".into() },
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let a = ContractJoiner::run(&[p.clone(), c.clone()], &cfg);
@@ -153,8 +160,13 @@ fn every_binds_edge_connects_two_services_and_carries_provenance() {
         "fetch_order",
         1,
         MethodSpec::Known(HttpMethod::Get),
-        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders/42")),
-        CallVia::Library { name: "requests".into() },
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let out = ContractJoiner::run(&[p, c], &cfg);
@@ -186,8 +198,13 @@ fn cross_repo_flag_reflects_repos_difference() {
         "fetch_order",
         1,
         MethodSpec::Known(HttpMethod::Get),
-        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders/42")),
-        CallVia::Library { name: "requests".into() },
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let out = ContractJoiner::run(&[p_orders, c], &cfg);
@@ -223,8 +240,13 @@ fn order_independence_two_projection_orders_match() {
             "fetch_order",
             1,
             MethodSpec::Known(HttpMethod::Get),
-            url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders/42")),
-            CallVia::Library { name: "requests".into() },
+            url_with_host_method(
+                HostPart::Literal("orders.svc".into()),
+                Some("/api/orders/42"),
+            ),
+            CallVia::Library {
+                name: "requests".into(),
+            },
         ),
     ];
     let cfg = default_config();
@@ -254,7 +276,10 @@ fn rule_1_discards_wrapper_candidate_with_no_http_client_match() {
         "fetch_order",
         1,
         MethodSpec::Known(HttpMethod::Get),
-        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders/42")),
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
         CallVia::Receiver {
             expr: "ordersClient".into(),
             fn_name: "get".into(),
@@ -288,7 +313,10 @@ fn rule_3_target_service_via_http_clients_binds_with_static_confidence() {
         "fetch_order",
         1,
         MethodSpec::Known(HttpMethod::Get),
-        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders/42")),
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
         CallVia::Receiver {
             expr: "ordersClient".into(),
             fn_name: "get".into(),
@@ -333,8 +361,13 @@ fn rule_3_target_service_via_hosts_only() {
         "fetch_order",
         1,
         MethodSpec::Known(HttpMethod::Get),
-        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders/42")),
-        CallVia::Library { name: "requests".into() },
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let out = ContractJoiner::run(&[p, c], &cfg);
@@ -362,16 +395,22 @@ fn rule_3_method_unknown_caps_confidence_at_0_6() {
         1,
         MethodSpec::Unknown,
         url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders")),
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let out = ContractJoiner::run(&[p, c], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
-    let (EdgeProvenance::Heuristic { detector, confidence }, _) = (
-        edge.provenance.clone(),
-        (),
-    ) else {
+    let (
+        EdgeProvenance::Heuristic {
+            detector,
+            confidence,
+        },
+        _,
+    ) = (edge.provenance.clone(), ())
+    else {
         panic!("expected Heuristic");
     };
     assert_eq!(detector, "method_unknown");
@@ -397,17 +436,26 @@ fn rule_3_prefix_stripped_caps_confidence_at_0_5() {
         "fetch_order",
         1,
         MethodSpec::Known(HttpMethod::Get),
-        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders/42")),
-        CallVia::Library { name: "requests".into() },
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let out = ContractJoiner::run(&[p, c], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
-    let (EdgeProvenance::Heuristic { detector, confidence }, _) = (
-        edge.provenance.clone(),
-        (),
-    ) else {
+    let (
+        EdgeProvenance::Heuristic {
+            detector,
+            confidence,
+        },
+        _,
+    ) = (edge.provenance.clone(), ())
+    else {
         panic!("expected Heuristic");
     };
     assert_eq!(detector, "prefix_stripped");
@@ -432,8 +480,13 @@ fn rule_4_external_host_when_no_service_matches_and_not_exempt() {
         "fetch_order",
         1,
         MethodSpec::Known(HttpMethod::Get),
-        url_with_host_method(HostPart::Literal("api.stripe.com".into()), Some("/v1/charges")),
-        CallVia::Library { name: "requests".into() },
+        url_with_host_method(
+            HostPart::Literal("api.stripe.com".into()),
+            Some("/v1/charges"),
+        ),
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let out = ContractJoiner::run(&[p, c], &cfg);
@@ -459,7 +512,9 @@ fn rule_4_exempts_localhost() {
         1,
         MethodSpec::Known(HttpMethod::Get),
         url_with_host_method(HostPart::Literal("localhost".into()), Some("/v1/charges")),
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let out = ContractJoiner::run(&[p, c], &cfg);
@@ -479,7 +534,13 @@ fn rule_4_exempts_localhost() {
 }
 
 #[test]
-fn rule_5_unnormalized_recorded() {
+fn known_target_with_dynamic_path_lands_in_unresolved_no_route_in_service() {
+    // Row-order regression pin. The §7.3 table fires rule 3
+    // (target service known) BEFORE rule 5 (template=None →
+    // unnormalized). A consumer whose host resolves to a
+    // declared service and whose template is dynamic must
+    // therefore become rule 3's verdict: no route in that
+    // service, marked as such. Not `unnormalized`.
     let p = provider_node(
         "orders",
         "src/orders.py",
@@ -495,11 +556,112 @@ fn rule_5_unnormalized_recorded() {
         1,
         MethodSpec::Known(HttpMethod::Get),
         url_with_host_method(HostPart::Literal("orders.svc".into()), None),
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let out = ContractJoiner::run(&[p, c], &cfg);
-    assert_eq!(out.index.unnormalized.len(), 1, "rule 5: template=None → unnormalized");
+    // Rule 3 fires (orders.svc matches the configured hosts
+    // list); the dynamic path matches nothing → unresolved
+    // no_route_in_service. `unnormalized` stays empty.
+    assert_eq!(
+        out.index.unnormalized.len(),
+        0,
+        "row order: known target + dynamic path is rule 3, not rule 5"
+    );
+    let consumer = out.index.consumers.values().next().expect("consumer");
+    assert!(matches!(
+        consumer.target,
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn rule_5_unnormalized_recorded() {
+    // Rule 5 only fires when rules 3 (target service known)
+    // and 4 (literal external host) have NOT matched. A
+    // consumer with `template = None` AND `HostPart::Expr` (not
+    // a literal, not an env name, not matching any service /
+    // env / hosts entry) reaches rule 5.
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "do_it",
+        10,
+        HttpMethod::Get,
+        "/api/orders/{}",
+    );
+    let c = consumer_node(
+        "billing",
+        "src/billing.py",
+        "fetch_dynamic",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        // HostPart::Expr — neither rule 3 nor rule 4 can
+        // resolve it (rule 4 is literal-only).
+        url_with_host_method(HostPart::Expr("config.base_url".into()), None),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    let cfg = default_config();
+    let out = ContractJoiner::run(&[p, c], &cfg);
+    assert_eq!(
+        out.index.unnormalized.len(),
+        1,
+        "rule 5: dynamic path + Expr host lands in unnormalized"
+    );
+    let consumer = out.index.consumers.values().next().expect("consumer");
+    assert!(matches!(
+        consumer.target,
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::Unnormalized,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn dynamic_path_with_external_literal_host_lands_in_external_not_unnormalized() {
+    // Row-order regression pin: rule 4 (literal external
+    // host) beats rule 5 (template=None → unnormalized). A
+    // consumer with `template = None` AND a literal host that
+    // doesn't match any service becomes `External`, not
+    // `unnormalized`.
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "do_it",
+        10,
+        HttpMethod::Get,
+        "/api/orders/{}",
+    );
+    let c = consumer_node(
+        "billing",
+        "src/billing.py",
+        "charge",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(HostPart::Literal("api.stripe.com".into()), None),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    let cfg = default_config();
+    let out = ContractJoiner::run(&[p, c], &cfg);
+    assert!(
+        out.index.unnormalized.is_empty(),
+        "row order: literal external host beats rule 5"
+    );
+    assert_eq!(
+        out.index.external.get("api.stripe.com").copied(),
+        Some(1),
+        "rule 4: api.stripe.com recorded as External"
+    );
 }
 
 #[test]
@@ -521,7 +683,9 @@ fn rule_6_own_service_skip() {
         1,
         MethodSpec::Known(HttpMethod::Get),
         url_with_host_method(HostPart::None, Some("/api/ping")),
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let mut cfg = default_config();
     cfg.services[0].name = "billing".into();
@@ -549,7 +713,9 @@ fn rule_6_skips_generic_keys() {
         1,
         MethodSpec::Known(HttpMethod::Get),
         url_with_host_method(HostPart::None, Some("/health")),
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let cfg = default_config();
     let out = ContractJoiner::run(&[p, c], &cfg);
@@ -576,17 +742,23 @@ fn rule_6_unbound_host_with_one_match_gives_0_6_confidence() {
         1,
         MethodSpec::Known(HttpMethod::Get),
         url_with_host_method(HostPart::None, Some("/api/orders")),
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let mut cfg = default_config();
     cfg.services.clear(); // remove implicit services
     let out = ContractJoiner::run(&[p, c], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
-    let (EdgeProvenance::Heuristic { detector, confidence }, _) = (
-        edge.provenance.clone(),
-        (),
-    ) else {
+    let (
+        EdgeProvenance::Heuristic {
+            detector,
+            confidence,
+        },
+        _,
+    ) = (edge.provenance.clone(), ())
+    else {
         panic!("expected Heuristic");
     };
     assert_eq!(detector, "unbound_host");
@@ -612,7 +784,9 @@ fn confirmed_binding_matches_consumer_and_records_provenance() {
         1,
         MethodSpec::Known(HttpMethod::Post),
         url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders")),
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     c.container = Some("create_order".into()); // enclosing symbol
     let cfg = ContractFederationConfig {
@@ -636,10 +810,7 @@ fn confirmed_binding_matches_consumer_and_records_provenance() {
     let out = ContractJoiner::run(&[p, c], &cfg);
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
-    assert!(matches!(
-        edge.provenance,
-        EdgeProvenance::Confirmed { .. }
-    ));
+    assert!(matches!(edge.provenance, EdgeProvenance::Confirmed { .. }));
     assert!((edge.confidence - 1.0).abs() < f32::EPSILON);
 }
 
@@ -736,7 +907,9 @@ fn output_collections_are_sorted_by_key() {
         1,
         MethodSpec::Known(HttpMethod::Get),
         url_with_host_method(HostPart::None, Some("/api/a")),
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let c2 = consumer_node(
         "billing",
@@ -745,7 +918,9 @@ fn output_collections_are_sorted_by_key() {
         2,
         MethodSpec::Known(HttpMethod::Get),
         url_with_host_method(HostPart::None, Some("/api/b")),
-        CallVia::Library { name: "requests".into() },
+        CallVia::Library {
+            name: "requests".into(),
+        },
     );
     let mut cfg = default_config();
     cfg.services.clear();
@@ -753,7 +928,10 @@ fn output_collections_are_sorted_by_key() {
     // binds sorted by (consumer, provider).
     for w in out.binds.windows(2) {
         let key = |e: &crate::federation::contracts::joiner::BindsEdge| {
-            (e.consumer.as_str().to_string(), e.provider.as_str().to_string())
+            (
+                e.consumer.as_str().to_string(),
+                e.provider.as_str().to_string(),
+            )
         };
         assert!(key(&w[0]) <= key(&w[1]));
     }

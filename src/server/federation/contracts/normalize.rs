@@ -69,9 +69,9 @@ fn extract_host(parts: &[UrlPart]) -> (HostPart, Vec<UrlPart>) {
     // Find the first literal containing the scheme delimiter. If none,
     // the URL has no scheme: a leading hole becomes HostPart::Expr;
     // anything else stays a path-only URL.
-    let scheme_idx = parts.iter().position(|p| {
-        matches!(p, UrlPart::Literal(s) if s.contains("://"))
-    });
+    let scheme_idx = parts
+        .iter()
+        .position(|p| matches!(p, UrlPart::Literal(s) if s.contains("://")));
 
     let Some(scheme_idx) = scheme_idx else {
         if let UrlPart::Hole(h) = &parts[0] {
@@ -320,10 +320,7 @@ fn is_wildcard(seg: &str) -> bool {
     }
     if let Some(rest) = seg.strip_prefix('*') {
         // `*` followed by an identifier (no `/`, no `{`, no `}`).
-        return !rest.is_empty()
-            && rest
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_');
+        return !rest.is_empty() && rest.chars().all(|c| c.is_alphanumeric() || c == '_');
     }
     if seg.starts_with("{*") && seg.ends_with('}') && seg.len() >= 4 {
         return !seg[2..seg.len() - 1].contains('{');
@@ -409,10 +406,7 @@ mod tests {
     #[test]
     fn host_literal_without_userinfo_keeps_the_host() {
         let url = normalize(&[lit("https://orders.svc/api/orders")]);
-        assert_eq!(
-            url.host,
-            HostPart::Literal("orders.svc".to_string())
-        );
+        assert_eq!(url.host, HostPart::Literal("orders.svc".to_string()));
         assert_eq!(url.template.as_deref(), Some("/api/orders"));
     }
 
@@ -477,11 +471,7 @@ mod tests {
 
     #[test]
     fn cut_drops_holes_after_the_query() {
-        let url = normalize(&[
-            lit("/api/orders?"),
-            hole("q"),
-            lit("/more"),
-        ]);
+        let url = normalize(&[lit("/api/orders?"), hole("q"), lit("/more")]);
         assert_eq!(url.template.as_deref(), Some("/api/orders"));
     }
 
