@@ -12,6 +12,7 @@
 
 pub mod dynamic_dispatch_sensor;
 pub mod graphql_sensor;
+pub mod http_client_sensor;
 pub mod http_sensor;
 pub mod openapi_sensor;
 pub mod proto_sensor;

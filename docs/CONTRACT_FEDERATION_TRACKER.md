@@ -22,7 +22,7 @@ Listed in delivery order. Week 1 is the live slice; week 2 adds pinned snapshots
 | 3 | Schema v3 (§4.2–4.3, §5.4) | 2 | Sep 29 | done | | |
 | 4 | F2 `traverse_impact` (§5.2) | 3 | Sep 29 | done | | |
 | 5 | Normalizer, route matcher, sensor framework, provider fixes (§4.5, §6.1–6.2, §7.4) | 3 | Sep 29 | done | | |
-| 6 | `http_client_sensor` TS/JS + Python (§6.3) | 5 | Sep 29 | todo | | |
+| 6 | `http_client_sensor` TS/JS + Python (§6.3) | 5 | Sep 29 | done | | |
 | 7 | F3 joiner, config, `ContractIndex` (§5.3, §7) | 4, 6 | Sep 29 | todo | | Monorepo services: about +1 day |
 | 8 | OpenAPI schemas and fields (§6.2, §6.4) | 3 | Sep 29 | todo | | |
 | 9 | `field_access_sensor` + field join (§6.5, §7.5) | 7, 8 | Sep 29 | todo | | |
@@ -83,11 +83,11 @@ Never cut: envelope, scoped coverage, `get_service`, `resolve_evidence`.
 - [x] `openapi_sensor`: normalizer + `ContractFact::Provider(OpenApi)` (authorized per design §6.2 "(PR 5, PR 8)"; PR 8 extends with schemas, `operationId`, `head`/`options`, `servers` prefix)
 
 ### PR 6 — http_client_sensor (TS/JS, Python)
-- [ ] Every call shape in §6.3, tree-sitter based
-- [ ] URL expression → parts; one-step identifier resolution; env/settings host resolution
-- [ ] Wrapper candidates recorded as `CallVia::Receiver`
-- [ ] `httpx.Client(base_url=…)` host propagation
-- [ ] `HttpClientCall` node + `SendsHttp` edge with `site`; module-level calls attach to `File`
+- [x] Every call shape in §6.3, tree-sitter based
+- [x] URL expression → parts; one-step identifier resolution; env/settings host resolution
+- [x] Wrapper candidates recorded as `CallVia::Receiver`
+- [x] `httpx.Client(base_url=…)` host propagation
+- [x] `HttpClientCall` node + `SendsHttp` edge with `site`; module-level calls attach to `File`
 
 ### PR 7 — F3 joiner and config
 - [ ] Config sections `services` (`paths`, `hosts`, `env`, `base_path`, `route_prefixes`), `http_clients`, `generic_keys`, `schemas`, `bindings`; every validation error of §7.1; `config_hash`
@@ -226,3 +226,4 @@ Other gates:
 | 2026-09-29 | PR 3 done: schema v3 (types, version bumps, migration note); review clean, no fix round |
 | 2026-09-29 | PR 4 done: F2 `traverse_impact` (§5.2) — exhaustive `impact_propagation` table with only `Calls` on; BFS + tie-breaks + sort; `get_cross_repo_blast_radius` rebuilt on it (response shape unchanged); `federation_blast_radius_regression.rs` untouched and green
 | 2026-09-29 | PR 5 done: §4.5 normalizer (5 steps + property tests); §7.4 route matcher (method/segments/specificity/prefix tolerance); `Sensor::phase` + `run_all` sort + `SensorCounts` reserved fields; `GraphDatabase::replace_sensor_output` + `SensorOwner` (fixes 0.8 stale `HttpRoute`); `util::enclosing_symbol`; `http_sensor` switched to normalizer + `ContractFact::Provider` + go-std `ANY` + same-file FastAPI/Flask/axum/actix router prefixes + `BTreeMap`; `openapi_sensor` global replacement; openapi sensor/schema work deliberately deferred to PR 8 | |
+| 2026-09-29 | PR 6 done: `http_client_sensor` (TS/JS + Python, phase 1) — every §6.3 call shape (fetch / axios.{verb,{},()} / got.{verb,({}, {method})} / ky.{verb} / requests.{verb,request} / <client>.{verb} from httpx.Client/AsyncClient, requests.Session, aiohttp.ClientSession incl. with/async-with; wrapper candidates); URL expression → parts (literal / template / f-string / concat / urljoin / new URL / one-step identifier resolution / unresolvable); config-free host resolution (`os.environ[/.get]`, `os.getenv`, `process.env`, `settings.X`, `config.X` → `HostPart::Env`, else `Expr`); `httpx.Client(base_url=…)` host propagation; `HttpClientCall` node with `ContractFact::Consumer` (reads_complete: true) + `SendsHttp` edge carrying `site`; module-level calls attach to `File`; `url_expr` capped at 200 chars; consumer-half of the deferred §4.5 equivalence property now in tests |
