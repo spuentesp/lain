@@ -569,15 +569,15 @@ fn reconstruct_path(
 // `Outgoing` follows edges whose source is the node. `Stop` ignores
 // the edge type entirely.
 //
-// PR 4 ships the table with **only `Calls` returning `Incoming`**
-// (the §5.2 code block is the *final* table; the tracker checklist
-// "only `Calls` on" governs PR 4's actual state). Every other
-// variant — including `Produces`, `CallsHttp`, `SendsHttp`, `Binds`,
-// `Consumes`, `ReadsField`, `HasField`, `RequestSchema`,
-// `ResponseSchema`, `PayloadSchema` — returns `Stop` for now. Later
-// PRs (7 / 8 / 9 / 15 per the tracker) flip their own types on. The
-// match is exhaustive: a new `EdgeType` variant will fail to compile
-// until a propagation has been decided for it.
+// The per-PR carve-out is recorded in `docs/CONTRACT_FEDERATION_TRACKER.md`.
+// The §5.2 code block describes the *final* propagation table; the
+// tracker checklist governs what actually ships. PR 4 turned on
+// `Calls`. PR 7 turned on `CallsHttp`, `SendsHttp`, `Binds`. PR 8
+// (this) turns on `RequestSchema`, `ResponseSchema`, `HasField`.
+// Future PRs: 9 adds `ReadsField`, 15 adds `PayloadSchema` /
+// `Produces` / `Consumes`. The match is exhaustive: a new
+// `EdgeType` variant will fail to compile until a propagation has
+// been decided for it.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Propagation {
@@ -588,15 +588,15 @@ pub enum Propagation {
 
 pub fn impact_propagation(e: &EdgeType) -> Propagation {
     match e {
-        EdgeType::Calls => Propagation::Incoming,
-        EdgeType::CallsHttp
+        EdgeType::Calls
+        | EdgeType::CallsHttp
         | EdgeType::SendsHttp
         | EdgeType::Binds
-        | EdgeType::Consumes
-        | EdgeType::ReadsField
-        | EdgeType::HasField
         | EdgeType::RequestSchema
         | EdgeType::ResponseSchema
+        | EdgeType::HasField => Propagation::Incoming,
+        EdgeType::Consumes
+        | EdgeType::ReadsField
         | EdgeType::PayloadSchema
         | EdgeType::Produces
         | EdgeType::Contains

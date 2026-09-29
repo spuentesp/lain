@@ -324,12 +324,12 @@ fn parse_method_label(s: &str) -> Option<MethodSpec> {
 /// name, array-element suffix, or map-values suffix. The `Display` /
 /// `FromStr` grammar is in §4.4 — implementations land with the
 /// joiner.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct JsonPath(pub Vec<PathSegment>);
 
 /// One segment of a `JsonPath`. `Name` is a literal field name;
 /// `ArrayItems` is the `[]` suffix; `MapValues` is the `{}` suffix.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PathSegment {
     Name(String),
     ArrayItems,
@@ -338,14 +338,30 @@ pub enum PathSegment {
 
 impl std::fmt::Display for JsonPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (i, seg) in self.0.iter().enumerate() {
-            if i > 0 {
-                f.write_str(".")?;
-            }
+        let mut first = true;
+        for seg in &self.0 {
             match seg {
-                PathSegment::Name(s) => write!(f, "{}", escape_name(s))?,
-                PathSegment::ArrayItems => f.write_str("[]")?,
-                PathSegment::MapValues => f.write_str("{}")?,
+                PathSegment::Name(s) => {
+                    if !first {
+                        f.write_str(".")?;
+                    }
+                    write!(f, "{}", escape_name(s))?;
+                    first = false;
+                }
+                // `[]` has no separator — `items[]` reads as "items
+                // followed by array suffix". `{}` keeps the dot to
+                // mirror the way an object property reads.
+                PathSegment::ArrayItems => {
+                    f.write_str("[]")?;
+                    first = false;
+                }
+                PathSegment::MapValues => {
+                    if !first {
+                        f.write_str(".")?;
+                    }
+                    f.write_str("{}")?;
+                    first = false;
+                }
             }
         }
         Ok(())
@@ -408,15 +424,24 @@ impl std::str::FromStr for JsonPath {
 }
 
 fn escape_name(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '.' | '[' | ']' | '{' | '}' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            other => out.push(other),
+    let mut out = String::with_capacity(s.len() + 1);
+    let mut chars = s.chars();
+    if let Some(first) = chars.next() {
+        // The reserved query sentinel (`$query`) is a literal
+        // segment per §6.4, not a body property, so it must not be
+        // escaped. Every other name starting with `$` carries the
+        // `\$` escape per §6.4 "a body property whose name starts
+        // with `$`".
+        if first == '$' && s != "$query" {
+            out.push('\\');
         }
+        out.push(first);
+    }
+    for c in chars {
+        if matches!(c, '.' | '[' | ']' | '{' | '}' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
     }
     out
 }

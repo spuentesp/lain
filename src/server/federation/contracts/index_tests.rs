@@ -202,6 +202,30 @@ fn jsonpath_round_trip_with_escapes() {
 }
 
 #[test]
+fn jsonpath_dollar_property_escapes_with_backslash() {
+    // §6.4 "a body property whose name starts with `$` is escaped as `\$`".
+    let p = JsonPath(vec![PathSegment::Name("$ref".into())]);
+    let s = p.to_string();
+    assert_eq!(s, "\\$ref");
+    let parsed: JsonPath = s.parse().unwrap();
+    assert_eq!(parsed, p);
+}
+
+#[test]
+fn jsonpath_dollar_query_sentinel_is_not_escaped() {
+    // The reserved `$query` first segment (§6.4) is a literal
+    // sentinel — its display form must not be backslash-escaped.
+    let p = JsonPath(vec![
+        PathSegment::Name("$query".into()),
+        PathSegment::Name("limit".into()),
+    ]);
+    let s = p.to_string();
+    assert_eq!(s, "$query.limit");
+    let parsed: JsonPath = s.parse().unwrap();
+    assert_eq!(parsed, p);
+}
+
+#[test]
 fn endpoint_id_is_a_tuple_of_service_and_key() {
     let id: EndpointId = (
         ServiceName("orders".into()),

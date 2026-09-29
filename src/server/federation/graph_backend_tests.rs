@@ -430,20 +430,25 @@ fn petgraph_backend_rejects_short_file() {
 // with multiple predecessors and edges below the confidence floor.
 
 #[test]
-fn impact_propagation_table_only_calls_is_incoming_in_pr4() {
+fn impact_propagation_table_pr8_state() {
     use crate::federation::graph_backend::{impact_propagation, Propagation};
-    // Pin PR 4's "only `Calls` is on" carve-out. The §5.2 code
-    // block describes the *final* propagation table; the tracker
-    // checklist ("only `Calls` on") governs what actually ships in
-    // PR 4. Every other variant — including `Produces`,
-    // `CallsHttp`, `SendsHttp`, `Binds`, `Consumes`, `ReadsField`,
-    // `HasField`, `RequestSchema`, `ResponseSchema`,
-    // `PayloadSchema` — returns `Stop` for now. Later PRs (7 / 8 /
-    // 9 / 15) flip their own rows on and update this test's counts
-    // (incoming: 1 → 3, 4, 5, 10; outgoing: 0 → 1; stop: 23 → 12).
-    // The match is exhaustive: a new `EdgeType` variant that
-    // hasn't been decided would fail to compile, which is the
-    // §5.2 contract on `impact_propagation`.
+    // Pin the PR 8 propagation carve-out. The §5.2 code block
+    // describes the *final* propagation table; the tracker checklist
+    // governs what actually ships per PR. PR 8 turns on
+    // `RequestSchema`, `ResponseSchema`, `HasField` (joining the
+    // `Calls` / `CallsHttp` / `SendsHttp` / `Binds` group PR 7
+    // already switched on).
+    //
+    // Per-PR trajectory — incoming / outgoing / stop:
+    //   PR 4  →  1 / 0 / 23   (Calls)
+    //   PR 7  →  4 / 0 / 20   (CallsHttp, SendsHttp, Binds added)
+    //   PR 8  →  7 / 0 / 17   (RequestSchema, ResponseSchema, HasField added)
+    //   PR 9  →  8 / 0 / 16   (ReadsField)
+    //   PR 15 → 10 / 1 / 13   (PayloadSchema, Produces, Consumes; first Outgoing)
+    //
+    // The match is exhaustive: a new `EdgeType` variant that hasn't
+    // been decided would fail to compile, which is the §5.2 contract
+    // on `impact_propagation`.
     let cases: &[EdgeType] = &[
         EdgeType::Calls,
         EdgeType::CallsHttp,
@@ -473,18 +478,24 @@ fn impact_propagation_table_only_calls_is_incoming_in_pr4() {
     for e in cases {
         let got = impact_propagation(e);
         let expected = match e {
-            EdgeType::Calls => Propagation::Incoming,
+            EdgeType::Calls
+            | EdgeType::CallsHttp
+            | EdgeType::SendsHttp
+            | EdgeType::Binds
+            | EdgeType::RequestSchema
+            | EdgeType::ResponseSchema
+            | EdgeType::HasField => Propagation::Incoming,
             _ => Propagation::Stop,
         };
         assert_eq!(got, expected, "propagation mismatch for {e:?}");
     }
-    // PR 4 actual state: 1 Incoming (`Calls`), 0 Outgoing, 23 Stop.
+    // PR 8 actual state: 7 Incoming, 0 Outgoing, 17 Stop.
     assert_eq!(cases.len(), 24, "every EdgeType variant must be listed");
     let incoming_count = cases
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Incoming)
         .count();
-    assert_eq!(incoming_count, 1);
+    assert_eq!(incoming_count, 7);
     let outgoing_count = cases
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Outgoing)
@@ -494,7 +505,7 @@ fn impact_propagation_table_only_calls_is_incoming_in_pr4() {
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Stop)
         .count();
-    assert_eq!(stop_count, 23);
+    assert_eq!(stop_count, 17);
 }
 
 /// `traverse_impact` should ignore start ids that don't exist and
