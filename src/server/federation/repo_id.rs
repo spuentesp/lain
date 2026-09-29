@@ -392,7 +392,10 @@ mod tests {
         );
         // The literal `:` in the name is now `%3A`, so the on-the-wire
         // id has exactly five `:`-delimited segments (repo:Kind:path:name:line).
-        assert_eq!(gid.as_str(), "orders-svc:HttpRoute:src/routes.py:GET /orders/%3Aid:42");
+        assert_eq!(
+            gid.as_str(),
+            "orders-svc:HttpRoute:src/routes.py:GET /orders/%3Aid:42"
+        );
     }
 
     /// `GlobalId::new` percent-encodes `%` so that the percent-decoder
@@ -402,13 +405,7 @@ mod tests {
     #[test]
     fn global_id_new_encodes_percent_in_path() {
         let repo = RepoId::new("svc").unwrap();
-        let gid = GlobalId::new(
-            &repo,
-            NodeType::Function,
-            "src/x%3Aweird.py",
-            "fn",
-            Some(1),
-        );
+        let gid = GlobalId::new(&repo, NodeType::Function, "src/x%3Aweird.py", "fn", Some(1));
         // `%` becomes `%25`; the previously-encoded `%3A` payload is
         // preserved (we encoded the `%`, not the `:` it sits inside).
         assert_eq!(gid.as_str(), "svc:Function:src/x%253Aweird.py:fn:1");
@@ -441,7 +438,10 @@ mod tests {
             "verify_token",
             Some(42),
         );
-        assert_eq!(gid.as_str(), "auth-svc:Function:src/auth.rs:verify_token:42");
+        assert_eq!(
+            gid.as_str(),
+            "auth-svc:Function:src/auth.rs:verify_token:42"
+        );
     }
 
     /// Accessors `path()` and `name()` round-trip the decoded segments

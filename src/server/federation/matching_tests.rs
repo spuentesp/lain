@@ -23,9 +23,8 @@ fn mk_node(name: &str, kind: &str, repo: &str, signature: Option<&str>, line: u3
         "Method" => NodeType::Method,
         _ => panic!("unsupported test kind {kind}"),
     };
-    let mut n =
-        GraphNode::new(node_kind.clone(), name.into(), "src/lib.rs".into())
-            .with_location(line, line + 2);
+    let mut n = GraphNode::new(node_kind.clone(), name.into(), "src/lib.rs".into())
+        .with_location(line, line + 2);
     n.id = GlobalId::new(
         &RepoId::new(repo).unwrap(),
         node_kind,

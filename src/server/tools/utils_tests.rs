@@ -504,6 +504,8 @@ mod file_content_cache_tests {
             commit_hash: None,
             is_hydrated: false,
             repo_id: None,
+            contract: None,
+            entry: None,
         }
     }
 }

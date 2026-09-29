@@ -11,8 +11,15 @@ use std::path::{Path, PathBuf};
 /// bytes, an unknown magic, a version mismatch, or a corrupt body under a
 /// valid header — is rejected with `LainError::FederationSchemaMismatch`
 /// rather than loaded.
+///
+/// Schema v3 (PR 3) adds contract-federation node/edge variants and
+/// `GraphNode.contract` / `GraphNode.entry` / `GraphEdge.site` /
+/// `GraphEdge.detail` fields. Per the repo's federation-schema policy
+/// (`AGENTS.md`), the version bump ships in the same commit as the
+/// layout change. Old v2 files are refused at load — recovery is
+/// `lain reindex`.
 pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
-pub const FEDERATION_GRAPH_VERSION: u32 = 2;
+pub const FEDERATION_GRAPH_VERSION: u32 = 3;
 pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
 
 /// Sibling file holding the validated payload (everything after the

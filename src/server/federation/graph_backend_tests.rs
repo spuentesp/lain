@@ -263,7 +263,14 @@ fn petgraph_backend_rejects_pre_bump_version_header() {
     match err {
         LainError::FederationSchemaMismatch { found, required } => {
             assert_eq!(found, 1);
-            assert_eq!(required, 2);
+            // `required` follows the live `FEDERATION_GRAPH_VERSION`
+            // constant so this test does not need to be rewritten on
+            // every schema bump — only when the bump changes the
+            // *meaning* of the test (rejecting v1, v2, …).
+            assert_eq!(
+                required,
+                crate::federation::graph_backend::FEDERATION_GRAPH_VERSION
+            );
         }
         other => panic!("expected FederationSchemaMismatch, got {other:?}"),
     }

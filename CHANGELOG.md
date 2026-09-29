@@ -3,6 +3,66 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Migration required — schema v3
+
+- **Federation graph schema is now v3** (`FEDERATION_GRAPH_VERSION`
+  2 → 3 in `src/server/federation/graph_backend.rs`).
+  `federated_graph.bin` files written by 0.8 are refused at load
+  with `FederationSchemaMismatch` ("written by schema v2; this
+  build expects schema v3"). Per-repo `graph.bin` files are now on
+  `PATH_FORMAT_VERSION` 4 (was 3 in 0.8); old per-repo graphs are
+  discarded on load and rebuilt, as today.
+- **Recovery, in order:**
+  1. Install 0.9 (`brew upgrade lain` / `cargo install lain` /
+     download the release tarball).
+  2. Run **`lain reindex`** to rebuild `federated_graph.bin` and
+     every per-repo `graph.bin` under the new schema. The old
+     federation graph is backed up to `federated_graph.bin.bak`,
+     and stale `.payload` sidecars are removed before the rebuild
+     so the next startup hydrates from source.
+  3. Enable the new contract tools via the `contracts` package —
+     either set `LAIN_TOOL_PROFILE=contracts` (composes with the
+     defaults) or call `load_package("contracts")` from an active
+     session. The package is **off by default** because every
+     contract tool assumes the federation has been reindexed under
+     schema v3 and the `contracts` package is loaded.
+  4. Use the new tools: `describe_schema` now reports the
+     contract node and edge types (`HttpClientCall`, `Field`,
+     `FieldRef`, `SendsHttp`, `RequestSchema`, `ResponseSchema`,
+     `PayloadSchema`, `HasField`, `ReadsField`, `ReadsFrom`,
+     `Binds`) as "known but unindexed" until their sensors land
+     in subsequent 0.9.x releases.
+
+  There is no silent migration. A `graph.bin` whose schema does
+  not match the build is never loaded; the loader refuses, prints
+  the recovery command, and exits.
+
+### Federation schema v3 (PR 3)
+
+- New `NodeType` variants: `HttpClientCall`, `Field`, `FieldRef`
+  (contract-federation surfaces; sensors land in subsequent
+  0.9.x releases).
+- New `EdgeType` variants: `SendsHttp`, `RequestSchema`,
+  `ResponseSchema`, `PayloadSchema`, `HasField`, `ReadsField`,
+  `ReadsFrom`, `Binds` (`Binds` is the federation-only consumer →
+  provider join).
+- `GraphNode` gains `contract: Option<ContractFact>` and
+  `entry: Option<EntryKind>`. `GraphEdge` gains
+  `site: Option<SourceSite>` and `detail: Option<EdgeDetail>`.
+  `EdgeProvenance` gains `Confirmed { source }` for
+  `repos.yaml#bindings[<i>]` joins.
+- New module `federation/contracts/model.rs` defines
+  `ContractFact`, `ProviderFact`, `ConsumerFact`, `NormalizedUrl`,
+  `FieldReadFact`, `FieldMeta`, `TypeDesc`, `HttpMethod`,
+  `MethodSpec`, `Direction`, `EntryKind`, `SourceSite`,
+  `SymbolKey`, `ContractKey`, `JsonPath`, `PathSegment`,
+  `ServiceName`, and the `EndpointId` alias. All enums are
+  externally tagged (bincode constraint; `#[serde(default)]` does
+  not make bincode files backward compatible — the version bumps
+  are the only path to forward compatibility).
+
 ## [0.8.0] — 2026-09-28
 
 ### Migration required — read first

@@ -501,6 +501,8 @@ mod tests {
                 detector: "message_bus_publisher".to_string(),
                 confidence: 0.7,
             }),
+            site: None,
+            detail: None,
         };
         graph.upsert_node(file_node("orders.py", &ns)).unwrap();
         graph
@@ -565,6 +567,8 @@ mod tests {
                     detector: "serde_value".to_string(),
                     confidence: 0.3,
                 }),
+                site: None,
+                detail: None,
             }])
             .unwrap();
 

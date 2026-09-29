@@ -30,7 +30,11 @@ use std::path::Path;
 /// it. `load_from_disk` therefore discards anything that isn't v2 and lets
 /// the caller rebuild from source.
 /// 3: `GraphNode::container` added (bincode layout changed).
-pub const PATH_FORMAT_VERSION: u32 = 3;
+/// 4: PR 3 schema v3 — `GraphNode.contract`, `GraphNode.entry`,
+///    `GraphEdge.site`, `GraphEdge.detail` added (bincode layout
+///    changed). Per-repo graphs with the old version are discarded
+///    and rebuilt on load, as today.
+pub const PATH_FORMAT_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct GraphState {

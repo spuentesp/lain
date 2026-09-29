@@ -302,6 +302,8 @@ pub fn scan_workspace_dispatch(
                     detector: det.detector.to_string(),
                     confidence: det.confidence,
                 }),
+                site: None,
+                detail: None,
             });
         }
     }

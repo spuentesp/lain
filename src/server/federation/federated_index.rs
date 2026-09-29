@@ -585,6 +585,8 @@ impl FederatedIndex {
                 weight: edge.weight,
                 cross_repo: false,
                 provenance: edge.provenance.clone(),
+                site: edge.site.clone(),
+                detail: edge.detail.clone(),
             });
         }
 
@@ -628,12 +630,9 @@ impl FederatedIndex {
                             id.as_str(),
                             gid.as_str(),
                         );
-                        let _ = self.backend.upsert_node_global(
-                            gid.as_str(),
-                            kind,
-                            &path,
-                            &name,
-                        );
+                        let _ = self
+                            .backend
+                            .upsert_node_global(gid.as_str(), kind, &path, &name);
                         placeholder_ids.push(gid.as_str().to_string());
                     }
                 }
@@ -662,6 +661,8 @@ impl FederatedIndex {
                     weight: edge.weight,
                     cross_repo: false,
                     provenance: edge.provenance.clone(),
+                    site: edge.site.clone(),
+                    detail: edge.detail.clone(),
                 });
             }
         }
@@ -757,6 +758,8 @@ impl FederatedIndex {
                     weight: Some(sim),
                     cross_repo: true,
                     provenance: None,
+                    site: None,
+                    detail: None,
                 });
             }
         }
