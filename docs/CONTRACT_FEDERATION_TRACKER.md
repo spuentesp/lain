@@ -24,7 +24,7 @@ Status legend: `todo` · `wip` · `review` · `done` · `cut`
 | 8 | OpenAPI request/response schemas and fields | 3 | Oct 6 | todo | | |
 | 9 | `field_access_sensor` + field join | 7, 8 | Oct 6 | todo | | |
 | 10 | `GitRevisionSource`, worktree cache, per-commit index cache | 3 | Oct 6 | todo | | |
-| 11 | `Snapshot`, `FederatedIndex::from_snapshot`, job queue; `prepare_snapshot`, `get_snapshot` | 7, 10 | Oct 6 | todo | | |
+| 11 | `Snapshot`, `FederatedIndex::from_snapshot`, job queue; `prepare_snapshot`, `get_snapshot`; per-repo file lock around `git worktree add` / prune; `LAIN_SNAPSHOT_RESIDENT` LRU; commit memory ceiling from fixture + larger org | 7, 10 | Oct 6 | todo | | |
 | 12 | `diff_contracts`, `classify`, `evaluate`, coverage | 9, 11 | Oct 6 | todo | | |
 | 13 | `contracts` profile: envelope, `api_version`, error codes, remaining tools, schema dump, golden tests | 11, 12 | Oct 6 | todo | | Release PR follows |
 | 14 | `http_client_sensor` (Rust, Go) | 6 | stretch | todo | | Cut 2nd |
@@ -59,6 +59,7 @@ Never cut: versioned envelope, coverage reporting, `resolve_evidence`.
 ### F3 — Join ownership (PR 7)
 - [ ] `FederatedIndex::rejoin_contracts()` — full desired set, diff, apply
 - [ ] `project_edges` reconciliation skips `EdgeType::Binds`
+- [ ] `ContractJoiner` lives in `federation/contract_joiner.rs` (not `federation/cross_repo.rs`)
 - [ ] Called after loader Phase 2, hot-reload apply, `add_repo`, `remove_repo`, `from_snapshot`; under `projection_lock`
 - [ ] Tests: order A,B == B,A; provider rename rebinds; provider removal unbinds; hot reload updates
 
@@ -100,6 +101,8 @@ Interface cross-cutting:
 | 8 | `prepare_snapshot` twice, same inputs | same id, one indexing job | [ ] |
 | 9 | Head derived `from` base + one override | only overridden repo indexed | [ ] |
 | 10 | Scenario 3 binding added to `bindings` | `Confirmed`; `Verified` if field read | [ ] |
+| 11 | Provider renames a response field (`customer_id` → `customerId`, same type) | Single `FieldRenamed` change, classified `BreakingIfRead`; not two changes | [ ] |
+| 12 | Provider renames a response field with a type change | Reported as `FieldRemoved + FieldAdded`, not `FieldRenamed` | [ ] |
 
 Other gates:
 - [ ] Ground-truth precision/recall baseline committed; CI fails below it
@@ -112,7 +115,7 @@ Other gates:
 - [ ] `docs/REPOS_YAML.md` — `services`, `http_clients`, `bindings`, `schemas`
 - [ ] `docs/FEDERATION.md` — contract joins, snapshots
 - [ ] `docs/quickstart-tools.md` — `contracts` profile
-- [ ] Schema v3 migration note (`lain reindex`)
+- [ ] Schema v3 migration note (`lain reindex`); upgrade order: install 0.9 → `lain reindex` → set `LAIN_TOOL_PROFILE=contracts` → use new tools; `read_source` threat model (ignore files, secret denylist, binary rejection, `LAIN_API_KEYS` parity)
 - [ ] `CHANGELOG` entry for 0.9.0
 
 ## Open questions
@@ -126,3 +129,5 @@ Other gates:
 | Date | Change |
 | --- | --- |
 | 2026-09-28 | Tracker created; design committed as `docs/CONTRACT_FEDERATION.md` |
+| 2026-09-28 | Design review incorporated: `ContractJoiner` to `federation/contract_joiner.rs`; per-repo worktree lock; derived snapshots accept `pending`/`indexing`/`failed` `from`; topic coverage equals HTTP coverage by unresolved-name rule; `FieldRenamed` heuristic + classification; type-vs-requiredness asymmetry sentence; `read_source` threat model (ignore files, secret denylist, binary rejection, auth parity); `LAIN_SNAPSHOT_RESIDENT` LRU + memory ceiling in PR 11; `range_too_large` `details`; upgrade order in migration note. |
+| 2026-09-28 | Second-pass design review fixed seven issues: (1) rename request-side classification corrected to `Breaking` if the new field is required, else `NeedsReview` — old-name still sent, provider silently ignores it; (2) response-required sentence corrected — callers already handle absence, now always receive; (3) residency rule is count-only, in-flight snapshots are never dropped, exhausted slots return `busy` after `wait_ms`; (4) `read_source` clamps `end` to file length at commit, `start` past end returns empty `text` not an error; (5) `path_rejected` extended with `details.reason ∈ {outside_root, not_indexed, secret, binary}`; (6) stale `federation/cross_repo.rs` reference in Federation joins section updated to `contract_joiner.rs`; (7) duplicate rename-classification sentence removed. |

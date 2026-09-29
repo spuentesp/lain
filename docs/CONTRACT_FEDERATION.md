@@ -237,6 +237,8 @@ Everything except `Produces` propagates `Incoming`, because the holder of an edg
 
 **Decision.** `Binds` edges belong to a federation-level pass, not to any repo. `FederatedIndex::rejoin_contracts()` computes the complete desired `Binds` set from all contract nodes, diffs it against the stored set, and applies adds and removes. It is idempotent and order-independent. `project_edges` reconciliation skips `EdgeType::Binds` by type.
 
+**File location.** `ContractJoiner` lives in `federation/contract_joiner.rs` (its own module), not inside `federation/cross_repo.rs`, which already holds `CrossRepoResolver` for symbol edges. The joiner is the single owner of `Binds`; HTTP, field and topic joins are grouped under it.
+
 **Runs** after loader Phase 2, after hot-reload apply, after `add_repo` and `remove_repo`, and inside `from_snapshot`, always under `projection_lock`. Cost is linear in contract endpoints; start with full recompute and scope it only if measured slow.
 
 **Rejected.** Exempting `Binds` from reconciliation, as done for cross-repo `Calls`, leaves stale bindings. Joining inside each repo's projection depends on order. Joining at query time lets MCP and the command center diverge.
@@ -292,7 +294,7 @@ Kafka first: kafkajs `producer.send({topic})` and `consumer.subscribe({topic})`,
 
 ## Federation joins
 
-`ContractJoiner` in `federation/cross_repo.rs` is the only code that creates cross-repo contract edges. It runs inside `rejoin_contracts()` (F3), groups endpoints by `ContractKey`, and emits `Binds` edges with explicit provenance. It never chooses between ambiguous candidates; it records all of them.
+`ContractJoiner` in `federation/contract_joiner.rs` is the only code that creates cross-repo contract edges. It runs inside `rejoin_contracts()` (F3), groups endpoints by `ContractKey`, and emits `Binds` edges with explicit provenance. It never chooses between ambiguous candidates; it records all of them.
 
 **Service bindings** are new `repos.yaml` sections, documented in `docs/REPOS_YAML.md`:
 
@@ -340,8 +342,8 @@ A change analysis compares two immutable federated views: the org at base commit
 | `GitRevisionSource` | `impl RepoSource`, `kind = "git_revision"`, new `SourceConfig::GitRevision { url, commit }`. `fetch` runs `git worktree add --detach` into `~/.lain/worktrees/<repo>/<sha>` from one shared clone per repo. `content_hash` returns the sha. `is_stale` is always false. |
 | Index cache | Keyed by `(repo, sha, analyzer_version)` under `~/.lain/index-cache/`. Tree-sitter and sensors only, no LSP, for deterministic output. Least-recently-used eviction past a size budget. |
 | `Snapshot` | `Snapshot { repos: BTreeMap<RepoId, Sha>, analyzer_version }`. Head snapshot = base snapshot with one entry replaced. |
-| Ephemeral federation | `FederatedIndex::from_snapshot(&Snapshot, &IndexCache)` builds an in-memory `PetgraphBackend`, projects cached per-repo graphs, runs `rejoin_contracts`. It never touches the live index, watcher or overlay. |
-| Worktree cleanup | Worktrees removed when their index is cached; `git worktree prune` on startup. |
+| Ephemeral federation | `FederatedIndex::from_snapshot(&Snapshot, &IndexCache)` builds an in-memory `PetgraphBackend`, projects cached per-repo graphs, runs `rejoin_contracts`. It never touches the live index, watcher or overlay. At most `LAIN_SNAPSHOT_RESIDENT` (default 2) snapshot federations stay resident; when a new one is needed, the least recently used federation that no in-flight call holds is dropped. A `diff_contracts` call holds both of its snapshots until it returns; if every resident federation is held, the call waits for a slot and returns `busy` once `wait_ms` runs out. PR 11 measures peak RSS on the fixture org and on a larger multi-repo test org, commits the larger value as a CI ceiling. |
+| Worktree cleanup | Worktrees removed when their index is cached; `git worktree prune` on startup. A per-repo file lock serializes `git worktree add` and prune within a repo so an in-flight indexing job cannot lose its worktree. |
 
 **Base commit selection.** For a pull request: the PR repo uses the merge base with its target branch. Every other repo uses the commit its default branch pointed to when the analysis started, recorded in the snapshot. Results therefore name exact commits for every repository and can be reproduced.
 
@@ -363,6 +365,7 @@ pub enum ChangeKind {
     EndpointRemoved, EndpointAdded, MethodChanged,
     PathChanged,                                   // same handler, different key
     FieldRemoved, FieldAdded { required: bool },
+    FieldRenamed { from: String, to: String },    // same parent, same TypeDesc: see pairing rule
     FieldTypeChanged { from: TypeDesc, to: TypeDesc },
     RequirednessChanged { now_required: bool },
     NullabilityChanged { now_nullable: bool },
@@ -373,12 +376,15 @@ pub enum ChangeKind {
 
 `diff_contracts(a, a)` is always empty. `PathChanged` is detected when a removed and an added route share the same handler `GlobalId`.
 
+`FieldRenamed` is reported when exactly one field is removed and one added under the same parent and they share the same `TypeDesc`. The pairing is a heuristic; a rename that changes type or adds a new sibling is reported as `FieldRemoved + FieldAdded`. On the response it classifies like `FieldRemoved` on the old name: anything still reading it is broken. On the request it classifies like `FieldAdded` on the new name: callers still send the old name, so it is `Breaking` when the new field is required and `NeedsReview` otherwise, because the provider silently ignores the value callers send. Reporting one change instead of two keeps the consumer output legible.
+
 **Classification** — `classify(kind, direction) -> Compat`
 
 | Change | Response or payload | Request |
 | --- | --- | --- |
 | Field removed | BreakingIfRead | Compatible |
 | Field added | Compatible | Breaking if required |
+| Field renamed | BreakingIfRead | Breaking if required, else NeedsReview |
 | Type changed | BreakingIfRead | Breaking |
 | Became nullable | BreakingIfRead | Compatible |
 | Became required | Compatible | Breaking |
@@ -386,6 +392,8 @@ pub enum ChangeKind {
 | Enum value removed | Compatible | Breaking |
 | Endpoint or topic removed; method or path changed | Breaking | Breaking |
 | Endpoint added | Compatible | Compatible |
+
+A request field's type change breaks every caller whether or not anything reads the field, because the wire shape they send is wrong; a response field becoming required breaks nobody, because callers already handle its absence and now simply always receive it.
 
 **Evaluation** — `evaluate(change, paths, coverage) -> ImpactClass`
 
@@ -408,7 +416,7 @@ The last two rows enforce the invariant that absence of evidence is only reporte
 - Dynamic URLs and topic names the sensors could not normalize.
 - Analyzer version.
 
-Coverage is complete for a change only when every repository indexed and no unresolved or ambiguous consumer could match the changed contract (same method, or a method the sensor could not read).
+Coverage is complete for a change only when every repository indexed and no unresolved or ambiguous consumer could match the changed contract. For HTTP, the method must match (or be unreadable); for an event, an unresolved topic name on the same broker could be any topic, the same way an unreadable method could be any method, and the change is therefore incomplete.
 
 ## Interface principles
 
@@ -424,7 +432,7 @@ The new tools are a machine interface first: a change-impact tool and coding age
 | Identity | Nodes are named by `GlobalId` (encoded per F1). Anything tied to a snapshot is an `EvidenceRef` (`repo@sha:path:line` plus the `GlobalId`). |
 | Determinism | Same snapshot and analyzer version produce byte-identical `structuredContent`: collections sorted by key, no timestamps outside `meta`. |
 | Size | List tools page with an opaque `cursor` (`limit` default 100, max 1,000). Traversals take `cap` and return `truncated`. |
-| Safety | No tool writes to repositories, config or the live index. Snapshot preparation writes only to the worktree and index caches. |
+| Safety | No tool writes to repositories, config or the live index. Snapshot preparation writes only to the worktree and index caches. `read_source` reads only paths the snapshot's indexer actually walked, so `.gitignore` and other ignore files apply; it denies common secret files (`.env*`, `*.pem`, `*.key`, `id_*`, `*.p12`, `.npmrc`), refuses binary files (any NUL byte in the first 8 KiB), and uses the same auth (`LAIN_API_KEYS`) as every other tool. |
 
 ## Snapshot lifecycle
 
@@ -460,6 +468,8 @@ A snapshot with a failed repo is not silently narrowed. The consumer may prepare
 ```json
 { "from": "snap_4f9a2c1e0b7d6a53", "repos": { "orders": "e4d1c09" } }
 ```
+
+`from`'s commits are fixed as soon as it is accepted, so derivation does not depend on its `state`. A `pending`, `indexing`, `ready` or `failed` `from` is accepted; the derived snapshot does not inherit `from`'s failure because the override may be exactly what unblocks the failing repo. Only an unknown `from` returns `snapshot_not_found`.
 
 **Cost and retention.** Per-repo indexes are shared across snapshots through the `(repo, sha, analyzer_version)` cache. Indexing jobs are deduplicated on that key and run on a bounded worker pool (`LAIN_SNAPSHOT_WORKERS`, default 2). Snapshot records are small and kept 7 days; an evicted index is rebuilt transparently the next time its snapshot is used.
 
@@ -556,7 +566,7 @@ read_source({ snapshot, repo, path, start: number, end: number })
 | `list_unresolved` | Lists every ambiguous candidate; never picks one. |
 | `check_binding` | Pure check; it does not create the binding. Confirmed bindings enter LAIN only through the `bindings` section of `repos.yaml`. |
 | `resolve_evidence` | A ref outside the snapshot's repos or commits returns `exists: false` with a reason, never an error. |
-| `read_source` | Reads from the snapshot's worktree or git object store; rejects paths escaping the repo root. |
+| `read_source` | Reads from the snapshot's worktree or git object store; rejects paths escaping the repo root, paths the indexer did not walk (ignore files apply), secret files, and binary files. `end` is clamped to the file's length at that commit, and the response returns the resolved range; a `start` past the end of the file returns empty `text`, not an error. |
 
 **Example: `diff_contracts` result for removing `customer_id`** (`data` only, abridged)
 
@@ -605,8 +615,8 @@ type ToolError = { code: ErrorCode; message: string; retryable: boolean; details
 | `analyzer_mismatch` | `diff_contracts` on snapshots with different analyzer versions | no | Re-prepare both on the current version |
 | `contract_not_found` | `get_contract` or `trace_impact` on an unknown key | no | Check `list_contracts` |
 | `invalid_id` | Malformed `GlobalId` or evidence ref | no | Use ids exactly as returned |
-| `range_too_large` | `read_source` over 400 lines, or `limit` over 1,000 | no | Split the request |
-| `path_rejected` | `read_source` path outside the repo root | no | Use repo-relative paths |
+| `range_too_large` | `read_source` over 400 lines, or `limit` over 1,000; `details` names which limit was hit, the maximum, and the requested value | no | Split the request |
+| `path_rejected` | `read_source` path outside the repo root, not walked by the indexer, on the secret denylist, or binary; `details.reason` is `outside_root`, `not_indexed`, `secret` or `binary` | no | Use a repo-relative path to an indexed text file |
 | `busy` | Worker pool saturated and `pending` queue full | yes | Back off and retry |
 
 ## Consumer integration
@@ -722,7 +732,7 @@ LAIN 0.9.0 is tagged by October 12, leaving the rest of the window before the Oc
 | Regex detection misses calls through wrappers | Missed consumers | `http_clients` config, operationId matching, unresolved counts in coverage |
 | Generic field names match the wrong payload | False `Verified` | Field join only under an existing contract bind; untyped reads are heuristic |
 | Impact traversal explodes on hub functions | Slow or noisy results | Depth cap, paths ranked by minimum confidence, truncation flag |
-| Schema v3 forces a reindex | Upgrade friction | One `lain reindex`, documented like the v2 migration |
+| Schema v3 forces a reindex | Upgrade friction | One `lain reindex`, documented like the v2 migration. Upgrade order in the migration note: install 0.9 → `lain reindex` (F1 changes ids for names containing `:`) → set `LAIN_TOOL_PROFILE=contracts` → use the new tools. |
 | Revision indexing is slow | Consumers wait on snapshots | Tree-sitter only, commit-keyed cache, derived snapshots reindex one repo, `wait_ms` long-poll |
 | Interface churn after consumers exist | Broken consumers | `api_version` negotiation, one release of overlap, golden tests under the drift check |
 
