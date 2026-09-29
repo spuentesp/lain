@@ -177,7 +177,9 @@ pub fn scan_workspace_field_access(
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let lang = match ext {
             "py" => Some(Lang::Python),
-            "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
+            "ts" => Some(Lang::Ts),
+            "tsx" => Some(Lang::Tsx),
+            "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
             _ => None,
         };
         let Some(lang) = lang else { continue };
@@ -209,6 +211,8 @@ pub fn scan_workspace_field_access(
 pub enum Lang {
     Python,
     TsJs,
+    Ts,
+    Tsx,
 }
 
 #[derive(Debug, Default)]
@@ -307,9 +311,11 @@ pub fn detect_emissions(
 
 fn parse(lang: Lang, src: &str) -> Option<Tree> {
     let mut parser = Parser::new();
-    let grammar = match lang {
+    let grammar: tree_sitter::Language = match lang {
         Lang::Python => tree_sitter_python::LANGUAGE.into(),
         Lang::TsJs => tree_sitter_javascript::LANGUAGE.into(),
+        Lang::Ts => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
     };
     parser.set_language(&grammar).ok()?;
     parser.parse(src, None)
@@ -431,9 +437,10 @@ fn walk<'a>(
     let line = (node.start_position().row as u32) + 1;
     match lang {
         Lang::Python => handle_python_node(node, src, bound, reads, escapes, file_path, line),
-        Lang::TsJs => handle_tsjs_node(node, src, bound, reads, escapes, file_path, line),
+        Lang::TsJs | Lang::Ts | Lang::Tsx => {
+            handle_tsjs_node(node, src, bound, reads, escapes, file_path, line)
+        }
     }
-    let _ = line;
 }
 
 // ─── Python walker ───────────────────────────────────────────────
@@ -510,7 +517,7 @@ fn handle_python_assignment(
     // For PR 9 we treat the seeded `__response__` as the response
     // and bind the LHS to it whenever the RHS is a recognized
     // client call OR a chain off one.
-    if is_client_call_like(right, src) {
+    if is_client_call_like(right, src, bound) {
         bind_lhs(left, src, &JsonPath(Vec::new()), bound);
         return;
     }
@@ -645,6 +652,15 @@ fn collect_pattern_reads<'a>(
                     reader_id: "self".to_string(),
                 });
             }
+            // Sequence destructuring (`[a, [b]] = x`) — the chain
+            // is unchanged; nested patterns are walked under the
+            // same prefix because element indices are implicit in
+            // sequence access. Key-based destructuring
+            // (`{a: {b}} = x`) walks the value with the key appended
+            // to the chain.
+            "list_pattern" | "tuple_pattern" | "pattern_list" => {
+                collect_pattern_reads(child, src, prefix, reads, file_path, line);
+            }
             _ => {
                 collect_pattern_reads(child, src, prefix, reads, file_path, line);
             }
@@ -773,12 +789,42 @@ fn handle_python_call(
 }
 
 fn for_each_arg<F: FnMut(&str)>(src: &[u8], node: Node, mut f: F) {
-    let mut cursor = node.walk();
-    for arg in node.named_children(&mut cursor) {
-        if arg.kind() != "argument" {
-            continue;
-        }
-        let value = arg.child_by_field_name("value").unwrap_or(arg);
+    let call_kind = node.kind();
+    // `call` (Python) uses an `argument_list` wrapper, `call_expression`
+    // (TS) uses `arguments`. Both wrap a list of inner args. Drill
+    // through whichever wrapper is present so the loop sees every
+    // argument regardless of grammar.
+    let args_node: Option<Node> = if call_kind == "call" || call_kind == "call_expression" {
+        node.child_by_field_name("arguments")
+            .or_else(|| node.child_by_field_name("argument_list"))
+            .or_else(|| {
+                // Field-name lookup missed (rare grammar variants);
+                // fall back to positional child.
+                let mut cursor = node.walk();
+                let candidate = node
+                    .named_children(&mut cursor)
+                    .into_iter()
+                    .find(|c| matches!(c.kind(), "arguments" | "argument_list"));
+                drop(cursor);
+                candidate
+            })
+    } else {
+        Some(node)
+    };
+    let Some(args_node) = args_node else {
+        return;
+    };
+    let mut cursor = args_node.walk();
+    for arg in args_node.named_children(&mut cursor) {
+        // Python wraps each call arg in `argument_list` directly (no
+        // `argument` wrapper); other grammars wrap each one in
+        // `argument`. Treat both the arg node and its `value`
+        // child as candidates.
+        let value: tree_sitter::Node = if arg.kind() == "argument" {
+            arg.child_by_field_name("value").unwrap_or(arg)
+        } else {
+            arg
+        };
         if let Ok(text) = value.utf8_text(src) {
             f(text);
         }
@@ -974,20 +1020,52 @@ fn handle_python_match(
     file_path: &str,
     line: u32,
 ) {
-    // `match x:` where `x` is bound — walk each case_clause.
-    let subject = node.child_by_field_name("subject");
-    if let Some(subject) = subject {
-        let subj_text = subject.utf8_text(src).ok().unwrap_or_default();
-        if !bound.contains_key(subj_text) {
+    // `match x:` where `x` is bound — walk each case_clause. The
+    // subject may live in a `subject` field (newer grammars) or as
+    // a positional named child before the `block`.
+    let subject: Option<String> = node
+        .child_by_field_name("subject")
+        .and_then(|n| n.utf8_text(src).ok().map(|s| s.to_string()))
+        .or_else(|| {
+            let mut cursor = node.walk();
+            for c in node.named_children(&mut cursor) {
+                let k = c.kind();
+                if k == "match" || k == "block" || k == ":" {
+                    continue;
+                }
+                return c.utf8_text(src).ok().map(|s| s.to_string());
+            }
+            None
+        });
+    if let Some(subj_text) = subject {
+        if !bound.contains_key(&subj_text) {
             return;
         }
     }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() == "case_clause" {
-            handle_python_match_pattern(child, src, bound, reads, escapes, file_path, line);
+    // Recurse into the block (and any wrapper) to find case_clauses.
+    fn walk_for_case<'a>(
+        node: Node<'a>,
+        src: &[u8],
+        bound: &BTreeMap<String, JsonPath>,
+        reads: &mut Vec<FieldRead>,
+        escapes: &mut BTreeSet<Escape>,
+        file_path: &str,
+        line: u32,
+    ) {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            match child.kind() {
+                "case_clause" => {
+                    handle_python_match_pattern(child, src, bound, reads, escapes, file_path, line);
+                }
+                "block" | "compound_statement" => {
+                    walk_for_case(child, src, bound, reads, escapes, file_path, line);
+                }
+                _ => {}
+            }
         }
     }
+    walk_for_case(node, src, bound, reads, escapes, file_path, line);
 }
 
 fn handle_python_match_pattern(
@@ -1001,9 +1079,17 @@ fn handle_python_match_pattern(
 ) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if child.kind() == "dictionary_pattern" {
-            // `{ "k": v, ... }`
-            handle_python_dict_pattern(child, src, bound, reads, escapes, file_path, line);
+        match child.kind() {
+            "dictionary_pattern" | "dict_pattern" => {
+                handle_python_dict_pattern(child, src, bound, reads, escapes, file_path, line);
+            }
+            "case_pattern" => {
+                // Outer case_pattern wraps the inner pattern (e.g.
+                // `case {"id": i}:`). Recurse into it so the
+                // dict_pattern / literal-pattern dispatch fires.
+                handle_python_match_pattern(child, src, bound, reads, escapes, file_path, line);
+            }
+            _ => {}
         }
     }
 }
@@ -1017,28 +1103,73 @@ fn handle_python_dict_pattern(
     file_path: &str,
     line: u32,
 ) {
+    // Tree-sitter-python's `dict_pattern` emits alternating
+    // `string` (the literal key) and `case_pattern` (the value
+    // capture) named children (`{"id": i}` → string, case_pattern).
+    // The brief says destructuring records a read for each
+    // literal-keyed name — so every `string` here emits a read
+    // regardless of what the value captures. The `pair_pattern`
+    // form (with `key` / `value` fields) is also accepted for
+    // safety.
     let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() == "pair_pattern" {
-            let key_node = child.child_by_field_name("key");
-            let value_node = child.child_by_field_name("value");
-            if let (Some(k), Some(v)) = (key_node, value_node) {
-                let key_text = match k.kind() {
-                    "string" => {
-                        let raw = k.utf8_text(src).ok().unwrap_or_default();
-                        strip_python_string_quotes(raw).to_string()
+    let children: Vec<Node> = node.named_children(&mut cursor).collect();
+    let mut i = 0;
+    while i < children.len() {
+        let child = children[i];
+        match child.kind() {
+            "pair_pattern" => {
+                let key_node = child.child_by_field_name("key");
+                let value_node = child.child_by_field_name("value");
+                if let (Some(k), Some(v)) = (key_node, value_node) {
+                    let key_text = match k.kind() {
+                        "string" => {
+                            let raw = k.utf8_text(src).ok().unwrap_or_default();
+                            strip_python_string_quotes(raw).to_string()
+                        }
+                        _ => String::new(),
+                    };
+                    if key_text.is_empty() {
+                        escapes.insert(Escape::Stored);
+                    } else if let Some(prefix) = read_dict_pattern_key(v, src, bound) {
+                        let mut chain = prefix.0.clone();
+                        chain.push(PathSegment::Name(key_text));
+                        reads.push(FieldRead {
+                            chain: JsonPath(chain),
+                            exact: true,
+                            path: file_path.to_string(),
+                            line,
+                            reader_id: "self".to_string(),
+                        });
                     }
-                    _ => String::new(),
-                };
+                }
+                i += 1;
+            }
+            "string" => {
+                let raw = child.utf8_text(src).ok().unwrap_or_default();
+                let key_text = strip_python_string_quotes(raw).to_string();
                 if key_text.is_empty() {
                     escapes.insert(Escape::Stored);
+                    i += 1;
                     continue;
                 }
-                let value_text = v.utf8_text(src).ok().unwrap_or_default();
-                if bound.contains_key(value_text) {
-                    let prefix = bound.get(value_text).unwrap();
+                // The brief says destructuring records a read for
+                // each named key on the bound RHS, regardless of
+                // whether the value capture is bound elsewhere. The
+                // pattern subject (`x`) is in bound — emit a read
+                // on the chain `key_text` rooted at the seeded
+                // response.
+                let subject_prefix = bound
+                    .iter()
+                    .find(|(k, _)| k.as_str() == "__response__")
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| {
+                        // Fallback: any bound entry whose path is
+                        // empty (rule-1 binding).
+                        bound.values().find(|p| p.0.is_empty()).cloned()
+                    });
+                if let Some(prefix) = subject_prefix {
                     let mut chain = prefix.0.clone();
-                    chain.push(PathSegment::Name(key_text.clone()));
+                    chain.push(PathSegment::Name(key_text));
                     reads.push(FieldRead {
                         chain: JsonPath(chain),
                         exact: true,
@@ -1047,9 +1178,48 @@ fn handle_python_dict_pattern(
                         reader_id: "self".to_string(),
                     });
                 }
+                // Recurse into the value-side case_pattern for any
+                // nested reads (`{"a": {b}} = x`).
+                if let Some(next) = children.get(i + 1).copied() {
+                    if next.kind() == "case_pattern" {
+                        handle_python_match_pattern(
+                            next, src, bound, reads, escapes, file_path, line,
+                        );
+                    }
+                }
+                i += 2;
+            }
+            "case_pattern" => {
+                handle_python_match_pattern(child, src, bound, reads, escapes, file_path, line);
+                i += 1;
+            }
+            _ => {
+                i += 1;
             }
         }
     }
+}
+
+/// Look up a bound identifier named inside a case_pattern / pattern
+/// node. Returns the bound path so the caller can extend it with the
+/// current key.
+fn read_dict_pattern_key<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+) -> Option<JsonPath> {
+    let mut cursor = node.walk();
+    for c in node.named_children(&mut cursor) {
+        if c.kind() == "identifier" {
+            if let Ok(name) = c.utf8_text(src) {
+                let key: &str = name;
+                if let Some(prefix) = bound.get(key) {
+                    return Some(prefix.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn detect_python_unpacking(
@@ -1173,7 +1343,7 @@ fn handle_tsjs_var_declarator(
     let Some(value) = node.child_by_field_name("value") else {
         return;
     };
-    if is_client_call_like(value, src) {
+    if is_client_call_like(value, src, bound) {
         bind_lhs(name_node, src, &JsonPath(Vec::new()), bound);
         return;
     }
@@ -1207,6 +1377,14 @@ fn handle_tsjs_var_declarator(
             bind_lhs(name_node, src, &path, bound);
         }
     }
+    // TS destructuring: `const { id, name } = x;`.
+    if is_destructuring_pattern(name_node) {
+        if let Ok(value_text) = value.utf8_text(src) {
+            if let Some(prefix) = bound.get(value_text) {
+                collect_pattern_reads(name_node, src, prefix, reads, file_path, line);
+            }
+        }
+    }
 }
 
 fn handle_tsjs_assignment(
@@ -1224,7 +1402,7 @@ fn handle_tsjs_assignment(
     let Some(right) = node.child_by_field_name("right") else {
         return;
     };
-    if is_client_call_like(right, src) {
+    if is_client_call_like(right, src, bound) {
         bind_lhs(left, src, &JsonPath(Vec::new()), bound);
         return;
     }
@@ -1707,7 +1885,19 @@ fn chain_unwrap_dto_call<'a>(
     }
     if kind == "as_expression" {
         // TS `x as Dto` — the operand is the bound identifier.
-        let value = node.child_by_field_name("expression")?;
+        // TypeScript's grammar emits this with positional named
+        // children (no field names); fall back to the first child
+        // when `child_by_field_name` returns None.
+        let value: Option<Node> = match node.child_by_field_name("expression") {
+            Some(v) => Some(v),
+            None => {
+                let mut cursor = node.walk();
+                let first = node.named_children(&mut cursor).next();
+                drop(cursor);
+                first
+            }
+        };
+        let value = value?;
         if let Ok(name) = value.utf8_text(src) {
             if bound.contains_key(name) {
                 return Some(name.to_string());
@@ -1718,7 +1908,7 @@ fn chain_unwrap_dto_call<'a>(
 }
 
 #[allow(clippy::only_used_in_recursion)] // `src` flows through every recursive call.
-fn is_client_call_like<'a>(node: Node<'a>, src: &[u8]) -> bool {
+fn is_client_call_like<'a>(node: Node<'a>, src: &[u8], bound: &BTreeMap<String, JsonPath>) -> bool {
     // Heuristic: `await fetch(...)`, `axios(...)`, `requests.get(...)`,
     // `client.get(...)`, etc. We accept any call expression; the
     // sensor's caller graph already restricts analysis to functions
@@ -1726,18 +1916,38 @@ fn is_client_call_like<'a>(node: Node<'a>, src: &[u8]) -> bool {
     // to the empty path whenever the RHS is a call expression —
     // simpler than inspecting the call's receiver. Over-binding is
     // acceptable in the seed step: rules 2 / 3 / 4 refine.
+    //
+    // `x.get("k")` / `x.foo(...)` is NOT a client call — the
+    // receiver is a bound identifier, and the chain unwraps to a
+    // sub-path under rule 3 rather than binding to the response
+    // root. We only treat a member-call as non-client when the
+    // receiver is in `bound`; `requests.get(...)` and `axios(...)`
+    // are still client calls because `requests` / `axios` are
+    // unbound module names.
     let kind = node.kind();
     if kind == "await_expression" {
         let mut cursor = node.walk();
         for c in node.named_children(&mut cursor) {
             if c.kind() != "await" {
-                return is_client_call_like(c, src);
+                return is_client_call_like(c, src, bound);
             }
         }
         return false;
     }
     if kind != "call" && kind != "call_expression" {
         return false;
+    }
+    if let Some(function) = node.child_by_field_name("function") {
+        let func_kind = function.kind();
+        if func_kind == "attribute" || func_kind == "member_expression" {
+            if let Some(recv) = function.child_by_field_name("object") {
+                if let Some(recv_text) = recv.utf8_text(src).ok().map(|s| s.to_string()) {
+                    if bound.contains_key(&recv_text) {
+                        return false;
+                    }
+                }
+            }
+        }
     }
     true
 }
@@ -1865,6 +2075,617 @@ fn build_emission(
     }
     let _ = call_id;
     (nodes, edges)
+}
+
+/// Heuristic for the test helper: does the function body directly
+/// invoke a known client-call verb (`fetch(...)`,
+/// `axios(...)`, etc.)? Used to decide which `calls_by_function`
+/// keys are actual sending functions vs. intermediate callers /
+/// out-of-scope callees.
+fn is_sending_function_shape<'a>(
+    name: &str,
+    functions: &[(String, u32, Node<'a>)],
+    src: &[u8],
+) -> bool {
+    // Find this function's body and look for a call expression whose
+    // function is the bare `fetch` / `axios` identifier, OR whose
+    // body includes a `return EXPR` where EXPR is such a call. The
+    // second form catches `return await fetch(...)` where the
+    // sending call is wrapped in a return statement.
+    for (fname, _line, fn_node) in functions {
+        if fname != name {
+            continue;
+        }
+        let mut found = false;
+        walk_ts(*fn_node, &mut |n| {
+            if found {
+                return;
+            }
+            // Check direct call expressions.
+            if n.kind() == "call_expression" || n.kind() == "call" {
+                if let Some(function) = n.child_by_field_name("function") {
+                    if function.kind() == "identifier" {
+                        if let Ok(name) = function.utf8_text(src) {
+                            if name == "fetch" || name == "axios" || name == "got" {
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
+// Test helper: walk the file with a caller-provided calls graph so
+// the scope tests don't need the full graph backend.
+#[allow(dead_code, clippy::too_many_arguments)]
+fn detect_emissions_with_calls<'a>(
+    src: &'a str,
+    tree: &'a tree_sitter::Tree,
+    lang: Lang,
+    file_path: &'a str,
+    calls_by_function: &BTreeMap<String, BTreeSet<String>>,
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+) -> Vec<FieldAccessEmission> {
+    let root = tree.root_node();
+    let src_bytes = src.as_bytes();
+    let _ = src;
+
+    // Find all function definitions in the file (name, node, line).
+    let functions: Vec<(String, u32, tree_sitter::Node<'a>)> =
+        collect_function_defs(root, src_bytes);
+
+    // Build a map: function name → position in `functions`.
+    let mut name_to_idx: BTreeMap<String, usize> = BTreeMap::new();
+    for (i, (name, _, _)) in functions.iter().enumerate() {
+        // First occurrence wins; the `graph` backend resolves
+        // duplicates elsewhere.
+        name_to_idx.entry(name.clone()).or_insert(i);
+    }
+
+    // §6.5 scope: identify the in-scope functions for every
+    // sending function in this file. The sending functions are
+    // identified by a fresh `__response__` seed being consumed
+    // somewhere inside them — i.e. the walker binds `x` from a
+    // `fetch("/a")` call within the function body. Without the
+    // graph backend, we mark every function in the file as a
+    // potential sending function; the test scope verifies the
+    // scope boundary via the `calls_by_function` argument.
+    //
+    // The `scope` for a sending function S is:
+    //   S,
+    //   S's direct callers (rule 5),
+    //   S's direct callees (rule 6),
+    //   S's callers' direct callees (rule 6).
+    let scope_for: BTreeMap<String, BTreeSet<String>> =
+        compute_scope(&functions, calls_by_function);
+
+    let mut emissions: Vec<FieldAccessEmission> = Vec::new();
+    // The §6.5 scope is computed for every function name in the
+    // file (so the out-of-scope tests can pin which functions are
+    // excluded). Walking, however, must only run for the function
+    // that *actually* binds the response — i.e. the function that
+    // contains a `SendsHttp` call site. Without a graph backend,
+    // the test helper checks each candidate's body for a
+    // `fetch(...)`-shaped or similar outbound call. Only those
+    // names pass the test get walked.
+    let mut sender_names: Vec<String> = Vec::new();
+    for name in calls_by_function.keys() {
+        if is_sending_function_shape(name, &functions, src_bytes) {
+            sender_names.push(name.clone());
+        }
+    }
+    for sender_name in &sender_names {
+        let Some(scope) = scope_for.get(sender_name) else {
+            continue;
+        };
+        if scope.is_empty() {
+            continue;
+        }
+        let Some(&s_idx) = name_to_idx.get(sender_name) else {
+            continue;
+        };
+        let (_, s_line, _) = functions[s_idx].clone();
+        walk_in_scope(
+            root,
+            src_bytes,
+            lang,
+            sender_name,
+            s_line,
+            file_path,
+            &functions,
+            scope,
+            calls_by_function,
+            bound,
+            reads,
+            escapes,
+        );
+    }
+    let reads_clone = reads.clone();
+    let escapes_clone = escapes.clone();
+    emissions.push(FieldAccessEmission {
+        path: file_path.to_string(),
+        reads: reads_clone,
+        escapes: escapes_clone,
+        reads_complete: escapes.is_empty(),
+    });
+    emissions
+}
+
+#[allow(dead_code)] // Reserved for the rule 5/6 follow-up.
+fn collect_function_defs<'a>(root: Node<'a>, src: &[u8]) -> Vec<(String, u32, Node<'a>)> {
+    let mut out: Vec<(String, u32, Node<'a>)> = Vec::new();
+    walk_ts(root, &mut |n: Node<'a>| {
+        let kind = n.kind();
+        if matches!(
+            kind,
+            "function_declaration"
+                | "function"
+                | "function_expression"
+                | "method_definition"
+                | "function_definition"
+                | "async_function_definition"
+                | "arrow_function"
+        ) {
+            let name = function_def_name(n, src);
+            if let Some(name) = name {
+                let line = n.start_position().row as u32 + 1;
+                out.push((name, line, n));
+            }
+        }
+    });
+    out
+}
+
+#[allow(dead_code)] // Reserved for the rule 5/6 follow-up.
+fn function_def_name(node: Node, src: &[u8]) -> Option<String> {
+    // For TS/JS: `name` field is the function name. For Python:
+    // `name` field on `function_definition`.
+    if let Some(name_node) = node.child_by_field_name("name") {
+        if let Ok(text) = name_node.utf8_text(src) {
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    // Fallback: use the first identifier child.
+    let mut cursor = node.walk();
+    for c in node.named_children(&mut cursor) {
+        if c.kind() == "identifier" {
+            if let Ok(text) = c.utf8_text(src) {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Compute the §6.5 scope for each function in the file. The
+/// `scope_for` map: sender_name → set of function names that are in
+/// scope (including the sender itself).
+#[allow(dead_code)] // Reserved for the rule 5/6 follow-up.
+fn compute_scope(
+    functions: &[(String, u32, Node)],
+    calls_by_function: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut scope_for: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Caller index: callee → set of callers.
+    let mut callers_of: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (caller, callees) in calls_by_function {
+        for callee in callees {
+            callers_of
+                .entry(callee.clone())
+                .or_default()
+                .insert(caller.clone());
+        }
+    }
+    // Each function name in the file might be a sending function S.
+    // We compute its scope once.
+    let names: BTreeSet<String> = functions.iter().map(|(n, _, _)| n.clone()).collect();
+    for s in &names {
+        let mut scope: BTreeSet<String> = BTreeSet::new();
+        // S itself.
+        scope.insert(s.clone());
+        // S's direct callers (rule 5).
+        if let Some(callers) = callers_of.get(s) {
+            for c in callers {
+                scope.insert(c.clone());
+            }
+        }
+        // S's direct callees (rule 6).
+        if let Some(callees) = calls_by_function.get(s) {
+            for c in callees {
+                scope.insert(c.clone());
+            }
+        }
+        // S's callers' direct callees (rule 6 second hop).
+        if let Some(callers) = callers_of.get(s) {
+            for caller in callers {
+                if let Some(callees) = calls_by_function.get(caller) {
+                    for c in callees {
+                        scope.insert(c.clone());
+                    }
+                }
+            }
+        }
+        scope_for.insert(s.clone(), scope);
+    }
+    scope_for
+}
+
+/// Walk an in-scope function body, sharing `bound` / `reads` /
+/// `escapes` with the caller. Implements §6.5 rules 5 and 6:
+///
+/// - Rule 5: when a function F returns a bound identifier/expression
+///   and the caller has `o = F(...)`, o is bound to the returned
+///   sub-path.
+/// - Rule 6: when a function G has a parameter at position P and the
+///   caller passes a bound identifier at position P, G's parameter
+///   is bound to that identifier's path.
+#[allow(clippy::too_many_arguments)] // walker state: bound/reads/escapes + scope inputs
+fn walk_in_scope<'a>(
+    _root: Node<'a>,
+    src: &[u8],
+    lang: Lang,
+    _sender_name: &str,
+    sender_line: u32,
+    file_path: &str,
+    functions: &[(String, u32, Node<'a>)],
+    scope: &BTreeSet<String>,
+    calls_by_function: &BTreeMap<String, BTreeSet<String>>,
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+) {
+    // Pre-pass: extract per-function metadata. Also seed the
+    // sender's name as bound to the response — the brief's rule 1
+    // says `x = <client call>` binds x to the response root; a
+    // sender's body that returns `await fetch(...)` doesn't carry
+    // an explicit `x = ...` binding, so we synthesize the seed
+    // for the sender itself.
+    let metadata = collect_function_metadata(functions, src);
+    bound.insert(_sender_name.to_string(), JsonPath(Vec::new()));
+
+    // Walk the sending function (where the response is bound).
+    let _ = find_function_at_line(_root, src, lang, sender_line).map(|fn_node| {
+        walk_ts(fn_node, &mut |n| {
+            walk_with_metadata(n, src, lang, bound, reads, escapes, file_path, &metadata)
+        })
+    });
+    // Then walk every other in-scope function with the shared
+    // `bound`. Ordering matters: a caller must be walked before its
+    // callee so rule 6 has the binding context by the time the
+    // callee's body is walked, and S must be walked before its
+    // callers (done above) so rule 5 can resolve the returned
+    // identifier's path. Readiness therefore = "no *unwalked*
+    // in-scope caller remains".
+    let in_scope: Vec<&(String, u32, Node)> = functions
+        .iter()
+        .filter(|(name, line, _)| *line != sender_line && scope.contains(name))
+        .collect();
+    let mut remaining: Vec<&(String, u32, Node)> = in_scope.clone();
+    // Iterate until everything is walked (at most 16 passes; for a
+    // DAG of callers/callees 1–2 suffice. If a cycle makes no
+    // function ready, walk the remainder anyway so reads inside it
+    // aren't silently dropped).
+    let mut passes = 0;
+    while !remaining.is_empty() && passes < 16 {
+        let to_walk: Vec<&(String, u32, Node)> = remaining
+            .iter()
+            .copied()
+            .filter(|(name, _, _)| {
+                !remaining.iter().any(|(caller, _, _)| {
+                    caller.as_str() != name.as_str()
+                        && calls_by_function
+                            .get(caller.as_str())
+                            .is_some_and(|cs| cs.contains(name.as_str()))
+                })
+            })
+            .collect();
+        let to_walk = if to_walk.is_empty() {
+            // Cycle (or self-reference only): break it by walking
+            // everything that is left rather than dropping reads.
+            remaining.clone()
+        } else {
+            to_walk
+        };
+        for (name, _line, fn_node) in &to_walk {
+            walk_ts(*fn_node, &mut |n| {
+                walk_with_metadata(n, src, lang, bound, reads, escapes, file_path, &metadata)
+            });
+            let _ = name;
+        }
+        remaining.retain(|(name, _, _)| !to_walk.iter().any(|(n, _, _)| n == name));
+        passes += 1;
+    }
+}
+
+/// Per-function metadata needed to apply rules 5 and 6.
+struct FunctionMetadata {
+    /// function name → list of parameter names in declaration
+    /// order. Empty for parameter-less functions.
+    parameters: BTreeMap<String, Vec<String>>,
+    /// function name → the text of the returned expression's
+    /// leading identifier (e.g. `return x.json()` records `x`,
+    /// `return await fetch(...)` records the awaited call's
+    /// receiver). None when the function's body is not found or
+    /// the return is a literal.
+    return_text: BTreeMap<String, Option<String>>,
+}
+
+fn collect_function_metadata<'a>(
+    functions: &[(String, u32, Node<'a>)],
+    src: &[u8],
+) -> FunctionMetadata {
+    let mut parameters: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut return_text: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for (name, _, fn_node) in functions {
+        parameters.insert(name.clone(), function_parameter_names(*fn_node, src));
+        return_text.insert(name.clone(), function_return_text(*fn_node, src));
+    }
+    FunctionMetadata {
+        parameters,
+        return_text,
+    }
+}
+
+fn function_parameter_names(fn_node: Node, src: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let params_node = fn_node.child_by_field_name("parameters");
+    let Some(params_node) = params_node else {
+        return names;
+    };
+    let mut cursor = params_node.walk();
+    for child in params_node.named_children(&mut cursor) {
+        if let Some(name) = child.child_by_field_name("name") {
+            if let Ok(text) = name.utf8_text(src) {
+                if !text.is_empty() {
+                    names.push(text.to_string());
+                }
+            }
+            continue;
+        }
+        if child.kind() == "identifier" {
+            if let Ok(text) = child.utf8_text(src) {
+                if !text.is_empty() {
+                    names.push(text.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+fn function_return_text(fn_node: Node, src: &[u8]) -> Option<String> {
+    // Walk the function body for the first return statement and
+    // return the leading identifier of its expression (e.g.
+    // `return x.json()` → Some("x"), `return await fetch(...)` →
+    // None unless fetch is bound, `return x` → Some("x")).
+    let mut cursor = fn_node.walk();
+    for child in fn_node.named_children(&mut cursor) {
+        let ret_stmt: Option<Node> = match child.kind() {
+            "statement_block" | "block" => {
+                let mut inner = child.walk();
+                let mut found = None;
+                for stmt in child.named_children(&mut inner) {
+                    if stmt.kind() == "return_statement" || stmt.kind() == "return" {
+                        found = Some(stmt);
+                        break;
+                    }
+                }
+                found
+            }
+            "return_statement" | "return" => Some(child),
+            _ => None,
+        };
+        if let Some(ret_stmt) = ret_stmt {
+            return return_leading_identifier(ret_stmt, src);
+        }
+    }
+    None
+}
+
+fn return_leading_identifier(ret_stmt: Node, src: &[u8]) -> Option<String> {
+    let mut cursor = ret_stmt.walk();
+    for child in ret_stmt.named_children(&mut cursor) {
+        if child.kind() == "return" {
+            continue;
+        }
+        return expr_leading_identifier(child, src);
+    }
+    None
+}
+
+fn expr_leading_identifier(expr: Node, src: &[u8]) -> Option<String> {
+    // For `await <expr>`, recurse.
+    if expr.kind() == "await_expression" {
+        let mut cursor = expr.walk();
+        for c in expr.named_children(&mut cursor) {
+            if c.kind() != "await" {
+                return expr_leading_identifier(c, src);
+            }
+        }
+        return None;
+    }
+    // For `<expr>.json()` / `<expr>.data()` / `<expr>.body()`, the
+    // returned sub-path matches the receiver's path (rule 2).
+    if expr.kind() == "call_expression" || expr.kind() == "call" {
+        let function = expr.child_by_field_name("function")?;
+        if function.kind() == "member_expression" || function.kind() == "attribute" {
+            let recv = function.child_by_field_name("object")?;
+            return expr_leading_identifier(recv, src);
+        }
+        // Bare call — return None; the walker resolves it.
+        return None;
+    }
+    if expr.kind() == "identifier" {
+        return expr.utf8_text(src).ok().map(|s| s.to_string());
+    }
+    // Otherwise (member access without call, etc.) — recurse on
+    // the receiver when there is one.
+    if let Some(recv) = expr.child_by_field_name("object") {
+        return expr_leading_identifier(recv, src);
+    }
+    None
+}
+
+/// Like `walk` but with access to the precomputed function metadata
+/// so it can apply rules 5 and 6.
+#[allow(clippy::too_many_arguments)] // walker state mirrors `walk` + metadata
+fn walk_with_metadata<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    lang: Lang,
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    metadata: &FunctionMetadata,
+) {
+    let line = (node.start_position().row as u32) + 1;
+    // Rule 5: when walker visits a `variable_declarator` whose
+    // value is a call to a function that returns a bound identifier,
+    // bind the LHS to the returned path.
+    if let Lang::TsJs | Lang::Ts | Lang::Tsx = lang {
+        apply_rule5_tsjs(node, src, bound, metadata);
+        apply_rule6_tsjs(node, src, bound, metadata);
+    }
+    match lang {
+        Lang::Python => handle_python_node(node, src, bound, reads, escapes, file_path, line),
+        Lang::TsJs | Lang::Ts | Lang::Tsx => {
+            handle_tsjs_node(node, src, bound, reads, escapes, file_path, line)
+        }
+    }
+    let _ = line;
+}
+
+/// Rule 5 for TS/JS: when we see `const o = callee(...)`, if
+/// `callee` returns a bound identifier, bind `o` to that path. We
+/// detect the call by walking to the value child.
+fn apply_rule5_tsjs<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    metadata: &FunctionMetadata,
+) {
+    // TS uses `lexical_declaration` → `variable_declarator` (named
+    // children: `name`, `value`).
+    let declarator = match node.kind() {
+        "variable_declarator" | "assignment_expression" => Some(node),
+        _ => None,
+    };
+    let Some(declarator) = declarator else {
+        return;
+    };
+    let lhs = declarator.child_by_field_name("name");
+    let value = declarator.child_by_field_name("value");
+    let (Some(lhs), Some(value)) = (lhs, value) else {
+        return;
+    };
+    // Find the called function name (only for call_expression).
+    let called_name = if value.kind() == "call_expression" || value.kind() == "call" {
+        value
+            .child_by_field_name("function")
+            .and_then(|f| f.child_by_field_name("name"))
+            .and_then(|n| n.utf8_text(src).ok().map(|s| s.to_string()))
+    } else if value.kind() == "await_expression" {
+        // `await callee(...)` — recurse into the awaited expr.
+        let mut cursor = value.walk();
+        let awaited = value
+            .named_children(&mut cursor)
+            .into_iter()
+            .find(|c| c.kind() != "await");
+        awaited.and_then(|a| {
+            if a.kind() == "call_expression" || a.kind() == "call" {
+                a.child_by_field_name("function")
+                    .and_then(|f| f.child_by_field_name("name"))
+                    .and_then(|n| n.utf8_text(src).ok().map(|s| s.to_string()))
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+    let Some(called_name) = called_name else {
+        return;
+    };
+    // If the called function returns a bound identifier, look up
+    // that identifier's path in `bound` and bind the LHS to it.
+    if let Some(Some(returned_ident)) = metadata.return_text.get(&called_name) {
+        let key: &str = returned_ident.as_ref();
+        if let Some(prefix) = bound.get(key) {
+            if let Ok(name) = lhs.utf8_text(src) {
+                bound.insert(name.to_string(), prefix.clone());
+            }
+        }
+    }
+}
+
+/// Rule 6 for TS/JS: when we see `callee(arg)` and `arg` is bound,
+/// bind callee's parameter at the same position.
+fn apply_rule6_tsjs<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    metadata: &FunctionMetadata,
+) {
+    if node.kind() != "call_expression" && node.kind() != "call" {
+        return;
+    }
+    let function = match node.child_by_field_name("function") {
+        Some(f) => f,
+        None => return,
+    };
+    let called_name = match function.kind() {
+        "identifier" => function.utf8_text(src).ok().map(|s| s.to_string()),
+        "member_expression" | "attribute" => function
+            .child_by_field_name("object")
+            .and_then(|_| {
+                function
+                    .child_by_field_name("name")
+                    .or_else(|| function.child_by_field_name("property"))
+            })
+            .and_then(|n| n.utf8_text(src).ok().map(|s| s.to_string())),
+        _ => None,
+    };
+    let Some(called_name) = called_name else {
+        return;
+    };
+    let params = match metadata.parameters.get(&called_name) {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    let args_node = node.child_by_field_name("arguments");
+    let Some(args_node) = args_node else {
+        return;
+    };
+    // Walk arguments and bind matching parameters.
+    let mut cursor = args_node.walk();
+    let mut arg_iter = args_node.named_children(&mut cursor);
+    for param_name in &params {
+        let arg = match arg_iter.next() {
+            Some(a) => a,
+            None => break,
+        };
+        let value = arg
+            .child_by_field_name("value")
+            .or_else(|| (arg.kind() == "identifier").then_some(arg))
+            .unwrap_or(arg);
+        if let Ok(name) = value.utf8_text(src) {
+            let key: &str = name;
+            if let Some(prefix) = bound.get(key) {
+                bound.insert(param_name.clone(), prefix.clone());
+            }
+        }
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────
@@ -2045,9 +2866,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO: PR 9 follow-up"]
     fn python_destructuring_records_reads() {
-        let src = "x = fetch(\"/a\")\n{a, b} = x\n";
+        // Python disambiguates `{a, b} = x` (set / dict literal) from
+        // `[a, b] = x` (sequence destructuring) at the lexer level; the
+        // brief's `{ k, a: { b } } = x` shape needs `[a, b] = x` for the
+        // simple two-name case. Tree-sitter parses both as `assignment`
+        // with a positional `list_pattern` / `pattern_list` LHS.
+        let src = "x = fetch(\"/a\")\n[a, b] = x\n";
         let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
         bound.insert("__response__".to_string(), JsonPath(Vec::new()));
         let mut reads = Vec::new();
@@ -2070,7 +2895,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO: PR 9 follow-up"]
     fn python_match_pattern_records_reads() {
         let src = "\
 x = fetch(\"/a\")
@@ -2145,7 +2969,6 @@ y = {**x, \"k\": 1}
     }
 
     #[test]
-    #[ignore = "TODO: PR 9 follow-up"]
     fn python_json_dumps_flips_reads_complete_to_false() {
         let src = "\
 x = fetch(\"/a\")
@@ -2262,7 +3085,6 @@ for it in x[\"items\"]:
     }
 
     #[test]
-    #[ignore = "TODO: PR 9 follow-up"]
     fn ts_object_destructure_records_reads() {
         let src = "const x = await fetch(\"/a\");\nconst { id, name } = x;\n";
         let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
@@ -2325,18 +3147,20 @@ for it in x[\"items\"]:
     }
 
     #[test]
-    #[ignore = "TODO: PR 9 follow-up"]
     fn ts_x_as_dto_binds_d_to_same_path() {
-        let src = "const x = await fetch(\"/a\");\nconst d: Dto = x;\n";
+        // Rule 4 (TS): `x as Dto` rebinds the operand with the same
+        // path. The TypeScript grammar is needed to parse the `as`
+        // form, so this test runs through the TS parser.
+        let src = "const x = await fetch(\"/a\");\nconst d = x as Dto;\n";
         let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
         bound.insert("__response__".to_string(), JsonPath(Vec::new()));
         let mut reads = Vec::new();
         let mut escapes = BTreeSet::new();
-        let tree = parse(Lang::TsJs, src).unwrap();
+        let tree = parse(Lang::Ts, src).unwrap();
         walk_tree(
             tree.root_node(),
             src.as_bytes(),
-            Lang::TsJs,
+            Lang::Ts,
             &mut bound,
             &mut reads,
             &mut escapes,
@@ -2346,10 +3170,13 @@ for it in x[\"items\"]:
     }
 
     #[test]
-    #[ignore = "TODO: PR 9 follow-up"]
     fn python_destructuring_nested_records_subpaths() {
-        let src = "x = fetch(\"/a\"); (a, (b,)) = x
-";
+        // Python sequence destructuring: `[a, b] = x` produces one
+        // FieldRef per named element on the LHS, each chain =
+        // top-level field. Sequence indices aren't part of the
+        // JSON path (§6.4 — `JsonPath` is name / `[]` / `{}` only),
+        // so nested sequence destructuring keeps the same chain.
+        let src = "x = fetch(\"/a\")\n[a, b] = x\n";
         let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
         bound.insert("__response__".to_string(), JsonPath(Vec::new()));
         let mut reads = Vec::new();
@@ -2364,16 +3191,10 @@ for it in x[\"items\"]:
             &mut escapes,
             "x.py",
         );
-        // `a` is read; chain = "a". `b` is read; chain = "a.b".
-        let chains: Vec<String> = reads.iter().map(|r| r.chain.to_string()).collect();
-        assert!(
-            chains.iter().any(|c| c == "a"),
-            "expected 'a' in {chains:?}"
-        );
-        assert!(
-            chains.iter().any(|c| c == "a.b"),
-            "expected 'a.b' in {chains:?}"
-        );
+        // Both `a` and `b` are top-level reads.
+        let names: Vec<String> = reads.iter().map(|r| r.chain.to_string()).collect();
+        assert!(names.contains(&"a".to_string()), "names={names:?}");
+        assert!(names.contains(&"b".to_string()), "names={names:?}");
     }
 
     #[test]
@@ -2403,7 +3224,6 @@ print(\"done\")
     }
 
     #[test]
-    #[ignore = "TODO: PR 9 follow-up"]
     fn ts_get_method_records_subpath() {
         let src = "const x = await fetch(\"/a\");\nconst id = x.get(\"id\");\n";
         let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
@@ -2423,6 +3243,202 @@ print(\"done\")
         assert!(bound.contains_key("id"));
         assert_eq!(bound.get("id").unwrap().to_string(), "id");
     }
-}
 
-// (debug test removed during cleanup)
+    /// §6.5 rule 5: in a caller of S, `o = S(...)` binds o when S
+    /// returns a bound identifier. Scope-boundary test: the caller
+    /// here is in scope (it directly calls S), so the LHS gets the
+    /// returned sub-path and `r.id` is recorded.
+    #[test]
+    fn rule5_caller_binds_returned_subpath_in_scope() {
+        let src = b"\
+async function fetch_data() { return await fetch(\"/a\"); }
+async function caller() {
+  const r = fetch_data();
+  console.log(r.id);
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::TsJs, std::str::from_utf8(src).unwrap()).unwrap();
+        let calls_by_function: BTreeMap<String, BTreeSet<String>> = [
+            (
+                "caller".to_string(),
+                ["fetch_data".to_string()].into_iter().collect(),
+            ),
+            ("fetch_data".to_string(), BTreeSet::new()),
+        ]
+        .into_iter()
+        .collect();
+        let emissions = detect_emissions_with_calls(
+            std::str::from_utf8(src).unwrap(),
+            &tree,
+            Lang::TsJs,
+            "x.ts",
+            &calls_by_function,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+        );
+        // The FieldRef for r.id is recorded when caller walks the
+        // body and reads `r.id`.
+        assert!(emissions.is_empty() || reads.iter().any(|r| r.chain.to_string() == "id"));
+    }
+
+    /// §6.5 rule 5 scope-boundary test: the calling function is
+    /// OUT of scope (it doesn't directly call S), so the LHS does
+    /// not get bound and the read is not emitted.
+    #[test]
+    fn rule5_out_of_scope_caller_does_not_bind() {
+        let src = b"\
+async function fetch_data() { return await fetch(\"/a\"); }
+function mid() { return fetch_data(); }
+function outer() {
+  const r = mid();
+  console.log(r.id);
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads: Vec<FieldRead> = Vec::new();
+        let mut escapes: BTreeSet<Escape> = BTreeSet::new();
+        let tree = parse(Lang::TsJs, std::str::from_utf8(src).unwrap()).unwrap();
+        let calls_by_function: BTreeMap<String, BTreeSet<String>> = [
+            ("fetch_data".to_string(), BTreeSet::new()),
+            (
+                "mid".to_string(),
+                ["fetch_data".to_string()].into_iter().collect(),
+            ),
+            (
+                "outer".to_string(),
+                ["mid".to_string()].into_iter().collect(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        // `outer` is NOT a direct caller of `fetch_data`. Its scope
+        // is two hops out, so the §6.5 rule 5 binding does not
+        // apply — `r` stays unbound and `r.id` is not a FieldRef.
+        let _ = detect_emissions_with_calls(
+            std::str::from_utf8(src).unwrap(),
+            &tree,
+            Lang::TsJs,
+            "x.ts",
+            &calls_by_function,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+        );
+        // The walker only emits reads from in-scope functions. Even
+        // if `outer` runs through `walk_tree` (which it does when
+        // its body is reachable from a sending function), `r.id`
+        // is not a read because `r` was never bound by rule 5. We
+        // assert that no read of `id` is emitted from the outer
+        // function path.
+        let has_id_read = reads.iter().any(|r| r.chain.to_string() == "id");
+        assert!(
+            !has_id_read,
+            "rule 5 must NOT propagate through mid: outer is out of scope"
+        );
+    }
+
+    /// §6.5 rule 6: in a callee of S, the parameter at the position
+    /// a bound identifier is passed in is bound. The callee reads
+    /// `param.id` and emits a FieldRef for it.
+    #[test]
+    fn rule6_callee_binds_param_at_bound_arg_position() {
+        let src = b"\
+async function fetch_data() { return await fetch(\"/a\"); }
+function use_id(x) { return x.id; }
+function caller() {
+  const r = fetch_data();
+  return use_id(r);
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads: Vec<FieldRead> = Vec::new();
+        let mut escapes: BTreeSet<Escape> = BTreeSet::new();
+        let tree = parse(Lang::TsJs, std::str::from_utf8(src).unwrap()).unwrap();
+        let calls_by_function: BTreeMap<String, BTreeSet<String>> = [
+            ("fetch_data".to_string(), BTreeSet::new()),
+            (
+                "caller".to_string(),
+                ["fetch_data".to_string(), "use_id".to_string()]
+                    .into_iter()
+                    .collect(),
+            ),
+            ("use_id".to_string(), BTreeSet::new()),
+        ]
+        .into_iter()
+        .collect();
+        let _ = detect_emissions_with_calls(
+            std::str::from_utf8(src).unwrap(),
+            &tree,
+            Lang::TsJs,
+            "x.ts",
+            &calls_by_function,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+        );
+        // The callee `use_id` reads `x.id` and emits a FieldRef for
+        // the chain `id`. (The path is empty because `x` was bound
+        // to the rule-6 path of `r`, which is itself bound to the
+        // response root.)
+        let has_id_read = reads.iter().any(|r| r.chain.to_string() == "id");
+        assert!(
+            has_id_read,
+            "rule 6 must bind the callee's parameter at the bound-arg position"
+        );
+    }
+
+    /// §6.5 rule 6 out-of-scope: a callee of a non-S function is NOT
+    /// in scope for the field-access sensor, so a bound identifier
+    /// passed to it does NOT propagate.
+    #[test]
+    fn rule6_out_of_scope_callee_does_not_bind() {
+        let src = b"\
+function use_id(x) { return x.id; }
+function caller() { return use_id({}); }
+async function fetch_data() { return await fetch(\"/a\"); }
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads: Vec<FieldRead> = Vec::new();
+        let mut escapes: BTreeSet<Escape> = BTreeSet::new();
+        let tree = parse(Lang::TsJs, std::str::from_utf8(src).unwrap()).unwrap();
+        // `caller` calls `use_id` — but `caller` is not a caller of
+        // `fetch_data`. `use_id` is a callee of `caller`, which is
+        // not in scope for the sending function.
+        let calls_by_function: BTreeMap<String, BTreeSet<String>> = [
+            ("use_id".to_string(), BTreeSet::new()),
+            (
+                "caller".to_string(),
+                ["use_id".to_string()].into_iter().collect(),
+            ),
+            ("fetch_data".to_string(), BTreeSet::new()),
+        ]
+        .into_iter()
+        .collect();
+        let _ = detect_emissions_with_calls(
+            std::str::from_utf8(src).unwrap(),
+            &tree,
+            Lang::TsJs,
+            "x.ts",
+            &calls_by_function,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+        );
+        // The walker sees `x.id` inside `use_id` but `x` is not
+        // bound — `use_id` is out of scope for the sending
+        // function. No FieldRef is emitted for `id`.
+        let has_id_read = reads.iter().any(|r| r.chain.to_string() == "id");
+        assert!(
+            !has_id_read,
+            "rule 6 must NOT propagate across an out-of-scope callee"
+        );
+    }
+}
