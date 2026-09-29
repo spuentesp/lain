@@ -157,10 +157,16 @@ mod tests {
     use super::*;
     use crate::schema::{GraphNode, NodeType, RepoNamespace};
 
-    fn db(name: &str) -> GraphDatabase {
-        let tmp = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&tmp);
-        GraphDatabase::new(&tmp).unwrap()
+    fn db(_name: &str) -> GraphDatabase {
+        // `tempfile::tempdir()` gives each test its own directory
+        // (cleaned up on Drop), so concurrent test processes don't
+        // race over a fixed `/tmp/util_…` path. The other walker
+        // tests in this file already use this style. The
+        // `GraphDatabase` opens an in-file index inside the temp
+        // dir; the dir itself is the file's `memory_path`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        GraphDatabase::new(&path).unwrap()
     }
 
     fn fn_with_range(name: &str, path: &str, start: u32, end: u32) -> GraphNode {
@@ -253,22 +259,66 @@ mod tests {
     }
 
     /// A `File` node whose own range covers the line must not be
-    /// returned — `SendsHttp` and `Calls` always attach to a
-    /// `Function` or `Method`, never to the enclosing file.
+    /// returned, even when no `Function`/`Method` covers it. The
+    /// doc contract is "no candidate → None"; the only way that
+    /// path triggers in practice is when the candidate set has
+    /// nothing but `File` (or other non-`Function`/`Method`)
+    /// nodes, because the resolver only attaches `SendsHttp` and
+    /// `Calls` to enclosing functions/methods. A regression that
+    /// widened the candidate set to include `File` would return
+    /// the file node here and fail.
     #[test]
-    fn enclosing_symbol_excludes_non_function_nodes() {
-        let g = db("enclosing_file_excluded");
-        let file = fn_with_range("file", "src/x.py", 1, 100);
-        let mut file_node = file.clone();
-        file_node.node_type = NodeType::File;
-        let func = fn_with_range("the_function", "src/x.py", 20, 30);
+    fn enclosing_symbol_returns_none_when_only_a_file_covers_the_line() {
+        let g = db("enclosing_file_only");
+        let ns = RepoNamespace::for_test();
+        // A file-shaped node covering the whole file.
+        let file = GraphNode::new_in(
+            NodeType::File,
+            "x.py".to_string(),
+            "src/x.py".to_string(),
+            &ns,
+        )
+        .with_location_in(1, 200, &ns);
+        g.insert_nodes_batch(&[file]).unwrap();
 
-        g.insert_nodes_batch(&[file_node, func.clone()]).unwrap();
+        // No Function/Method covers line 50 — only the File node
+        // does. The type filter must drop it; without the filter,
+        // the function under test would return the File.
+        assert!(
+            enclosing_symbol(&g, "src/x.py", 50).is_none(),
+            "a File node covering the line is not a Function/Method; the type filter must drop it"
+        );
+    }
 
-        let found = enclosing_symbol(&g, "src/x.py", 25).expect("a symbol covers line 25");
-        assert_eq!(found.name, "the_function");
+    /// Variant of the same rule for a file-shape node that is the
+    /// *smallest* covering range. Without the type filter, smallest-
+    /// range wins and the File would be returned — this test pins
+    /// the filter as load-bearing even when range selection would
+    /// otherwise pick the File.
+    #[test]
+    fn enclosing_symbol_excludes_a_file_with_the_smallest_covering_range() {
+        let g = db("enclosing_file_smallest");
+        let ns = RepoNamespace::for_test();
+        // File covers lines 1-3 (smallest possible range); the
+        // surrounding Function covers 1-200.
+        let file = GraphNode::new_in(
+            NodeType::File,
+            "x.py".to_string(),
+            "src/x.py".to_string(),
+            &ns,
+        )
+        .with_location_in(1, 3, &ns);
+        let func = fn_with_range("the_function", "src/x.py", 1, 200);
+        g.insert_nodes_batch(&[file, func.clone()]).unwrap();
+
+        let found = enclosing_symbol(&g, "src/x.py", 2)
+            .expect("a Function covers line 2 even though File does too");
         assert_eq!(found.node_type, NodeType::Function);
-        assert_ne!(found.node_type, NodeType::File);
+        assert_eq!(found.name, "the_function");
+        // A regression that loosened the candidate set to include
+        // File would return the file node — smallest range wins
+        // before the type filter — and the assertion above would
+        // fail on `found.node_type == NodeType::File`.
     }
 
     /// A `Method` node is also accepted — both `Function` and
