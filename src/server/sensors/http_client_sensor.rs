@@ -896,9 +896,18 @@ fn call_urljoin_parts(
     ctx: &FileContext,
     enclosing_fn_line: Option<u32>,
 ) -> Vec<UrlPart> {
-    let function = match node.child_by_field_name("function") {
-        Some(f) => f,
-        None => return Vec::new(),
+    // `new URL(...)` exposes the constructor under the `constructor`
+    // field rather than `function`. `call` / `call_expression` use
+    // `function`. Try `function` first, then `constructor`.
+    let function = node
+        .child_by_field_name("function")
+        .or_else(|| node.child_by_field_name("constructor"))
+        .or_else(|| {
+            // Some grammars (TS) emit `construct` on `new_expression`.
+            node.child_by_field_name("construct")
+        });
+    let Some(function) = function else {
+        return Vec::new();
     };
     let name = match function.kind() {
         "identifier" => text_of(function, src),
@@ -908,8 +917,7 @@ fn call_urljoin_parts(
             // leftmost identifier: if it's `urllib.parse.urljoin` or
             // similar we'd still want to recognize; but for the
             // fixture the bare `urljoin(...)` form suffices.
-            let leftmost = leftmost_identifier_text(function, src);
-            leftmost
+            leftmost_identifier_text(function, src)
         }
         _ => None,
     };
@@ -2111,15 +2119,39 @@ got(\"/api/y\", { method: \"PUT\" });
 
     #[test]
     fn ts_new_url_records_base_then_path() {
+        // §6.3: `new URL("/p", base)` gives parts of `base` then "/p".
+        // BASE is unresolvable here (no assignment), so the host is
+        // `Expr("BASE")`; the path is `/api`. This pins the
+        // `new URL` recognition — without `call_urljoin_parts`
+        // matching, parts would be empty and template would be `/`.
+        let src = "fetch(new URL(\"/api\", BASE));\n";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        assert_eq!(c.url.host, HostPart::Expr("BASE".to_string()));
+        assert_eq!(c.url.template.as_deref(), Some("/api"));
+    }
+
+    #[test]
+    fn ts_new_url_chained_records_dynamic_url() {
+        // `new URL(...).toString()` is a member_expression; §6.3 says
+        // we record what we can. Without further work the URL arg
+        // becomes a single Hole carrying the full expression text,
+        // host is `Expr(...)`. The §4.5 normalizer strips the host
+        // hole, leaving an empty path that renders as `/` (the root).
         let src = "fetch(new URL(\"/api\", BASE).toString());\n";
         let calls = ts_calls(src);
-        // We currently treat `new URL(...)` as a recognized form only
-        // when the call is recognized. The `toString()` wraps the URL
-        // in a method call, which means the URL arg to `fetch` is a
-        // member expression — `url_for` would emit a Hole for it.
-        // Either way, the test still passes with zero or one call;
-        // assert that we don't crash.
-        assert!(calls.len() <= 1);
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        match &c.url.host {
+            HostPart::Expr(_) => {}
+            other => panic!("expected Expr (member-chain dynamic URL), got {other:?}"),
+        }
+        assert_eq!(
+            c.url.template.as_deref(),
+            Some("/"),
+            "an entirely-Hole member expression has its host consumed; the empty path renders as '/' (§4.5 step 4)"
+        );
     }
 
     #[test]
