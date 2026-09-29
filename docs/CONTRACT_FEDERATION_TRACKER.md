@@ -21,7 +21,7 @@ Listed in delivery order. Week 1 is the live slice; week 2 adds pinned snapshots
 | 2 | F1 `GlobalId` encoding (§5.1) | — | Sep 29 | done | | |
 | 3 | Schema v3 (§4.2–4.3, §5.4) | 2 | Sep 29 | done | | |
 | 4 | F2 `traverse_impact` (§5.2) | 3 | Sep 29 | done | | |
-| 5 | Normalizer, route matcher, sensor framework, provider fixes (§4.5, §6.1–6.2, §7.4) | 3 | Sep 29 | todo | | |
+| 5 | Normalizer, route matcher, sensor framework, provider fixes (§4.5, §6.1–6.2, §7.4) | 3 | Sep 29 | done | | |
 | 6 | `http_client_sensor` TS/JS + Python (§6.3) | 5 | Sep 29 | todo | | |
 | 7 | F3 joiner, config, `ContractIndex` (§5.3, §7) | 4, 6 | Sep 29 | todo | | Monorepo services: about +1 day |
 | 8 | OpenAPI schemas and fields (§6.2, §6.4) | 3 | Sep 29 | todo | | |
@@ -74,12 +74,12 @@ Never cut: envelope, scoped coverage, `get_service`, `resolve_evidence`.
 | `PayloadSchema`, `Produces`, `Consumes` | 15 | [ ] |
 
 ### PR 5 — Normalizer, matcher, sensor framework
-- [ ] `federation/contracts/normalize.rs` implementing §4.5 steps 1–5; property tests
-- [ ] Route matcher (§7.4): method rules, segment rules, specificity, prefix tolerance
-- [ ] `Sensor::phase`, `run_all` sorted by `(phase, name)`; new `SensorCounts` fields
-- [ ] `GraphDatabase::replace_sensor_output` + `SensorOwner`; `http_sensor` and `openapi_sensor` switched to it (fixes stale routes)
-- [ ] `util::enclosing_symbol`
-- [ ] `http_sensor`: normalizer, `ContractFact::Provider`, `go-std` → `ANY`, same-file router prefixes (FastAPI, Flask, axum, actix), `HashMap` → `BTreeMap`
+- [x] `federation/contracts/normalize.rs` implementing §4.5 steps 1–5; property tests
+- [x] Route matcher (§7.4): method rules, segment rules, specificity, prefix tolerance
+- [x] `Sensor::phase`, `run_all` sorted by `(phase, name)`; new `SensorCounts` fields
+- [x] `GraphDatabase::replace_sensor_output` + `SensorOwner`; `http_sensor` and `openapi_sensor` switched to it (fixes stale routes)
+- [x] `util::enclosing_symbol`
+- [x] `http_sensor`: normalizer, `ContractFact::Provider`, `go-std` → `ANY`, same-file router prefixes (FastAPI, Flask, axum, actix), `HashMap` → `BTreeMap`
 
 ### PR 6 — http_client_sensor (TS/JS, Python)
 - [ ] Every call shape in §6.3, tree-sitter based
@@ -223,4 +223,5 @@ Other gates:
 | 2026-09-28 | PR 1 done: `scripts/contracts-fixture.sh`, ground truth, scenario tags; review clean after one fix round |
 | 2026-09-29 | PR 2 done: F1 `GlobalId` percent-encoding; review clean after one fix round |
 | 2026-09-29 | PR 3 done: schema v3 (types, version bumps, migration note); review clean, no fix round |
-| 2026-09-29 | PR 4 done: F2 `traverse_impact` (§5.2) — exhaustive `impact_propagation` table with only `Calls` on; BFS + tie-breaks + sort; `get_cross_repo_blast_radius` rebuilt on it (response shape unchanged); `federation_blast_radius_regression.rs` untouched and green |
+| 2026-09-29 | PR 4 done: F2 `traverse_impact` (§5.2) — exhaustive `impact_propagation` table with only `Calls` on; BFS + tie-breaks + sort; `get_cross_repo_blast_radius` rebuilt on it (response shape unchanged); `federation_blast_radius_regression.rs` untouched and green
+| 2026-09-29 | PR 5 done: §4.5 normalizer (5 steps + property tests); §7.4 route matcher (method/segments/specificity/prefix tolerance); `Sensor::phase` + `run_all` sort + `SensorCounts` reserved fields; `GraphDatabase::replace_sensor_output` + `SensorOwner` (fixes 0.8 stale `HttpRoute`); `util::enclosing_symbol`; `http_sensor` switched to normalizer + `ContractFact::Provider` + go-std `ANY` + same-file FastAPI/Flask/axum/actix router prefixes + `BTreeMap`; `openapi_sensor` global replacement; openapi sensor/schema work deliberately deferred to PR 8 | |

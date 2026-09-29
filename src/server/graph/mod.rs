@@ -60,6 +60,52 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
     }
 }
 
+/// Which sensor "owns" a node — drives [`GraphDatabase::replace_sensor_output`]
+/// so a sensor's rescan replaces only its own previous output (§6.1).
+/// The mapping is fixed by node type and `ContractFact` variant:
+///
+/// - `HttpRoute` with `ProviderOrigin::Code` → [`SensorOwner::HttpSensor`]
+/// - `HttpRoute` with `ProviderOrigin::OpenApi` → [`SensorOwner::OpenApiSensor`]
+/// - `Schema`, `Field` → [`SensorOwner::OpenApiSensor`]
+/// - `HttpClientCall` → [`SensorOwner::HttpClientSensor`] (PR 6)
+/// - `FieldRef` → [`SensorOwner::FieldAccessSensor`] (PR 9)
+/// - `EntryPointSensor` is special: it clears every node's `entry`
+///   field on every run regardless of type, then re-applies its own
+///   (§6.6).
+///
+/// Nodes whose `contract` is `None` (pre-schema-v3) have no owner —
+/// they are left alone by `replace_sensor_output`. Sensor owners
+/// only govern nodes they themselves wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorOwner {
+    HttpSensor,
+    OpenApiSensor,
+    HttpClientSensor,
+    FieldAccessSensor,
+    EntryPointSensor,
+}
+
+/// Map a node to its sensor owner (§6.1 derivation rules). Returns
+/// `None` for nodes that no sensor claims (pre-schema-v3 nodes,
+/// regular code symbols).
+pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
+    use crate::federation::contracts::model::{ContractFact, ProviderOrigin};
+    use crate::schema::NodeType;
+    match (node.node_type.clone(), node.contract.as_ref()) {
+        (NodeType::HttpRoute, Some(ContractFact::Provider(p))) => match p.origin {
+            ProviderOrigin::Code => Some(SensorOwner::HttpSensor),
+            ProviderOrigin::OpenApi => Some(SensorOwner::OpenApiSensor),
+        },
+        (NodeType::Schema, Some(ContractFact::Schema { .. })) => {
+            Some(SensorOwner::OpenApiSensor)
+        }
+        (NodeType::Field, Some(ContractFact::Field(_))) => Some(SensorOwner::OpenApiSensor),
+        (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
+        (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct GraphDatabase {
     graph: Arc<RwLock<StableGraph<GraphNode, GraphEdge>>>,
@@ -664,6 +710,120 @@ impl GraphDatabase {
                 }
             }
         }
+        Ok(removed)
+    }
+
+    /// Replace the per-sensor output for `owner`: drop every node the
+    /// same `owner` previously emitted, then insert `nodes` and
+    /// `edges` (§6.1).
+    ///
+    /// `run_all` rescans the whole repo on every index, but plain
+    /// upserts left nodes for deleted routes and calls behind
+    /// (upsert can only overwrite a node it sees again). Removing
+    /// every node the owner previously emitted first means a route
+    /// deleted from source is gone after the rescan — the stale
+    /// `HttpRoute` problem 0.8 had.
+    ///
+    /// `SensorOwner` is derived from a node's `node_type` and
+    /// `contract` variant: `HttpRoute + Code origin` → http_sensor,
+    /// `HttpRoute + OpenApi origin` (and `Schema` / `Field`) →
+    /// openapi_sensor, `HttpClientCall` → http_client_sensor,
+    /// `FieldRef` → field_access_sensor. Pre-schema-v3 nodes that
+    /// carry no `contract` cannot be assigned an owner and are left
+    /// alone — the §6.1 fix only governs sensor-owned nodes.
+    ///
+    /// `EntryPointSensor` is special: it clears every `GraphNode.entry`
+    /// field up front, then re-inserts its own set with the entries
+    /// re-applied.
+    ///
+    /// Returns the number of nodes removed.
+    pub fn replace_sensor_output(
+        &self,
+        owner: SensorOwner,
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+    ) -> Result<usize, LainError> {
+        self.check_writable()?;
+
+        let owner_for = |n: &GraphNode| sensor_owner_of(n);
+
+        let removed: usize = {
+            let mut graph = self.graph.write();
+
+            // 1. Collect ids of every node currently in the graph
+            //    that belongs to this owner.
+            let stale_ids: Vec<String> = graph
+                .node_references()
+                .filter_map(|(_, n)| {
+                    let o = owner_for(n);
+                    if o == Some(owner) {
+                        Some(n.id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // 2. Remove them (and their incident edges).
+            let mut removed_ids: Vec<String> = Vec::new();
+            for id in &stale_ids {
+                if let Some(idx) = self.index_map.get(id).map(|r| *r.value()) {
+                    if let Some(node) = graph.node_weight(idx) {
+                        let name = node.name.clone();
+                        let path = node.path.clone();
+                        if graph.remove_node(idx).is_some() {
+                            self.index_map.remove(id);
+                            let name_empty = self
+                                .name_index
+                                .get_mut(&name)
+                                .map(|mut e| {
+                                    e.retain(|i| *i != idx);
+                                    e.is_empty()
+                                })
+                                .unwrap_or(false);
+                            if name_empty {
+                                self.name_index.remove(&name);
+                            }
+                            let path_empty = self
+                                .path_index
+                                .get_mut(&path)
+                                .map(|mut e| {
+                                    e.retain(|i| *i != idx);
+                                    e.is_empty()
+                                })
+                                .unwrap_or(false);
+                            if path_empty {
+                                self.path_index.remove(&path);
+                            }
+                            removed_ids.push(id.clone());
+                        }
+                    }
+                }
+            }
+
+            // 3. Special case: EntryPointSensor wipes `entry` on
+            //    every node before re-applying its own.
+            if matches!(owner, SensorOwner::EntryPointSensor) {
+                for idx in 0..graph.node_count() {
+                    let nidx = petgraph::stable_graph::NodeIndex::new(idx);
+                    if let Some(n) = graph.node_weight_mut(nidx) {
+                        n.entry = None;
+                    }
+                }
+            }
+            removed_ids.len()
+        };
+
+        // 4. Insert the new nodes and edges (uses the existing
+        //    batch insert; edges whose endpoints aren't present are
+        //    dropped — same contract as `insert_edges_batch`).
+        for node in nodes {
+            self.upsert_node(node.clone())?;
+        }
+        if !edges.is_empty() {
+            self.insert_edges_batch(edges)?;
+        }
+
         Ok(removed)
     }
 
@@ -2126,6 +2286,144 @@ mod replace_tests {
             "emptied directory's node is gone"
         );
         assert!(g.find_node_by_name("gone").is_none());
+    }
+
+    /// `replace_sensor_output` must retract the nodes a sensor
+    /// previously emitted and replace them with the new set — this
+    /// is the §6.1 fix for stale `HttpRoute` (and the joiner's
+    /// other sensor-owned nodes).
+    #[test]
+    fn replace_sensor_output_drops_stale_nodes_by_owner() {
+        use crate::federation::contracts::model::{
+            ContractFact, HttpMethod, ProviderFact, ProviderOrigin,
+        };
+
+        let g = db("lain_test_replace_sensor_stale");
+
+        let mut route_v1 = GraphNode::new(
+            NodeType::HttpRoute,
+            "GET /api/users".into(),
+            "openapi.yaml".into(),
+        );
+        route_v1.contract = Some(ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Get,
+            template: "/api/users".into(),
+            handler: None,
+            operation_id: Some("listUsers".into()),
+            origin: ProviderOrigin::OpenApi,
+        }));
+        g.insert_nodes_batch(&[route_v1]).unwrap();
+        assert!(g.find_node_by_name("GET /api/users").is_some());
+
+        // Rescan with no operations → route is gone.
+        let removed = g
+            .replace_sensor_output(SensorOwner::OpenApiSensor, &[], &[])
+            .unwrap();
+        assert_eq!(removed, 1, "the prior OpenApi route must be retracted");
+        assert!(
+            g.find_node_by_name("GET /api/users").is_none(),
+            "stale route must be gone"
+        );
+
+        // Rescan with a different operation → the prior route (now
+        // absent) is replaced by the new one.
+        let mut route_v2 = GraphNode::new(
+            NodeType::HttpRoute,
+            "POST /api/users".into(),
+            "openapi.yaml".into(),
+        );
+        route_v2.contract = Some(ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Post,
+            template: "/api/users".into(),
+            handler: None,
+            operation_id: Some("createUser".into()),
+            origin: ProviderOrigin::OpenApi,
+        }));
+        let removed = g
+            .replace_sensor_output(SensorOwner::OpenApiSensor, &[route_v2], &[])
+            .unwrap();
+        assert_eq!(removed, 0, "fresh insert: nothing to retract");
+        assert!(g.find_node_by_name("POST /api/users").is_some());
+        assert!(
+            g.find_node_by_name("GET /api/users").is_none(),
+            "the v1 route stays gone"
+        );
+    }
+
+    /// `replace_sensor_output` only retracts nodes whose owner
+    /// matches the one passed in. An `HttpRoute + Code` route (owned
+    /// by `HttpSensor`) must survive an `OpenApiSensor` rescan that
+    /// emits nothing.
+    #[test]
+    fn replace_sensor_output_leaves_other_owners_alone() {
+        use crate::federation::contracts::model::{
+            ContractFact, HttpMethod, ProviderFact, ProviderOrigin,
+        };
+
+        let g = db("lain_test_replace_sensor_owners");
+
+        let mut code_route = GraphNode::new(
+            NodeType::HttpRoute,
+            "GET /api/users".into(),
+            "routes.go".into(),
+        );
+        code_route.contract = Some(ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Get,
+            template: "/api/users".into(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        }));
+        g.insert_nodes_batch(&[code_route]).unwrap();
+
+        // OpenApiSensor rescan with no operations must not delete
+        // the Code-origin HttpRoute — it belongs to HttpSensor.
+        let removed = g
+            .replace_sensor_output(SensorOwner::OpenApiSensor, &[], &[])
+            .unwrap();
+        assert_eq!(
+            removed, 0,
+            "OpenApiSensor must not retract HttpSensor-owned nodes"
+        );
+        assert!(g.find_node_by_name("GET /api/users").is_some());
+    }
+
+    /// The `EntryPointSensor` owner wipes every node's `entry`
+    /// field on every rescan (§6.6) and then re-applies its own.
+    /// The wipe is the special-case branch in
+    /// `replace_sensor_output`.
+    #[test]
+    fn replace_sensor_output_clears_entry_fields_for_entry_point_sensor() {
+        let g = db("lain_test_replace_sensor_entry");
+        let mut handler = GraphNode::new(
+            NodeType::Function,
+            "scheduledMonthlyReport".into(),
+            "src/main.py".into(),
+        );
+        handler.entry = Some(crate::federation::contracts::model::EntryKind::Scheduled);
+        g.insert_nodes_batch(std::slice::from_ref(&handler)).unwrap();
+
+        let removed = g
+            .replace_sensor_output(SensorOwner::EntryPointSensor, &[], &[])
+            .unwrap();
+        assert_eq!(removed, 0, "no nodes owned by EntryPointSensor yet");
+        let after = g.get_node(&handler.id).unwrap().unwrap();
+        assert!(
+            after.entry.is_none(),
+            "EntryPointSensor must clear every node's entry field"
+        );
+    }
+
+    /// `sensor_owner_of` maps node type and contract variant per
+    /// §6.1. Pre-schema-v3 nodes (no contract) have no owner.
+    #[test]
+    fn sensor_owner_of_returns_none_for_unowned_nodes() {
+        let plain = GraphNode::new(
+            NodeType::Function,
+            "parse".into(),
+            "src/x.rs".into(),
+        );
+        assert!(sensor_owner_of(&plain).is_none());
     }
 }
 

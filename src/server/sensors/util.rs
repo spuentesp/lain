@@ -121,6 +121,37 @@ pub fn find_handler_in_graph(graph: &GraphDatabase, name: &str) -> Option<GraphN
         .or_else(|| graph.find_node_by_name(&to_camel_case(name)))
 }
 
+/// The `Function` or `Method` in `path` with the smallest range
+/// `line_start..=line_end` that contains `line` (§6.1).
+///
+/// Ties (two symbols span the same number of lines) go to the
+/// symbol whose `line_start` is later — a nested function is more
+/// specific than the module-level one that wraps it. Returns
+/// `None` if `path` is not in the graph, no symbol in it covers
+/// `line`, or every candidate is a non-function/non-method node
+/// (`SendsHttp` and `Calls` attach to enclosing functions, never to
+/// the file node itself).
+pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<GraphNode> {
+    graph
+        .get_nodes_by_types(&[
+            crate::schema::NodeType::Function,
+            crate::schema::NodeType::Method,
+        ])
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter(|n| n.path == path)
+        .filter_map(|n| match (n.line_start, n.line_end) {
+            (Some(s), Some(e)) if s <= line && e >= line => Some((n, e.saturating_sub(s))),
+            _ => None,
+        })
+        .min_by(|a, b| {
+            // Smallest range first; tie → later line_start.
+            a.1.cmp(&b.1).then_with(|| b.0.line_start.cmp(&a.0.line_start))
+        })
+        .map(|(n, _)| n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
