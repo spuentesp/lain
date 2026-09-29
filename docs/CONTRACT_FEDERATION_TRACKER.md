@@ -17,7 +17,7 @@ Listed in delivery order. Week 1 is the live slice; week 2 adds pinned snapshots
 
 | # | PR | Depends on | Week | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Fixture script, ground truth, scenario tags (§15.1) | — | Sep 29 | todo | | |
+| 1 | Fixture script, ground truth, scenario tags (§15.1) | — | Sep 29 | done | | |
 | 2 | F1 `GlobalId` encoding (§5.1) | — | Sep 29 | todo | | |
 | 3 | Schema v3 (§4.2–4.3, §5.4) | 2 | Sep 29 | todo | | |
 | 4 | F2 `traverse_impact` (§5.2) | 3 | Sep 29 | todo | | |
@@ -42,10 +42,10 @@ Never cut: envelope, scoped coverage, `get_service`, `resolve_evidence`.
 ## Per-PR checklists
 
 ### PR 1 — Fixture
-- [ ] `scripts/contracts-fixture.sh <dir>`: four local repos (`orders`, `billing`, `reports`, `platform`) exactly as §15.1, no network
-- [ ] Generated `repos.yaml` with `workspace_dir` sources, `services` (incl. `platform` paths), env names
-- [ ] Scenario tags: `s1`, `s2`, `s5`, `s6`, `s11`, `s12`, `s19`, `s21` in `orders`; `s3`, `s5b`, `s20`, `s22` in `billing`
-- [ ] `tests/fixtures/contracts/ground_truth.yaml`: endpoints, `Binds` with provenance, `ReadsField`, unresolved, entry points, per-scenario expected result
+- [x] `scripts/contracts-fixture.sh <dir>`: four local repos (`orders`, `billing`, `reports`, `platform`) exactly as §15.1, no network
+- [x] Generated `repos.yaml` with `workspace_dir` sources, `services` (incl. `platform` paths), env names
+- [x] Scenario tags: `s1`, `s2`, `s5`, `s6`, `s11`, `s12`, `s19`, `s21` in `orders`; `s3`, `s5b`, `s20`, `s22` in `billing`
+- [x] `tests/fixtures/contracts/ground_truth.yaml`: endpoints, `Binds` with provenance, `ReadsField`, unresolved, entry points, per-scenario expected result
 
 ### PR 2 — F1 GlobalId encoding
 - [ ] `GlobalId::new` percent-encodes `%` and `:` in path and name; `parse` requires 5 segments; accessors decode
@@ -220,3 +220,4 @@ Other gates:
 | 2026-09-28 | Review round 2: rename request-side classification, response-required wording, count-only residency, `read_source` range clamping, `path_rejected` reasons |
 | 2026-09-28 | Revision 2 (silo-breaking vision): scoped `NoKnownImpact`; services incl. monorepos as the join unit; `list_services` / `get_service` + `used_by` in 0.9; CODEOWNERS and `operationId` as stretch; live slice first |
 | 2026-09-28 | Implementation-ready rewrite, checked against v0.8.0 code: config-free sensors + `ContractIndex`; bincode compatibility via version bumps only; sensor phases and self-replacing output; `IndexMode::Snapshot`; LAIN-owned mirrors; canonical digest; recorded `join_config`; contract-tool infra (`ContractToolEntry`, schemas on `ToolDef`); bound-identifier field tracking with escapes; consumer-side diff; `ChangedWithoutSchema`; nested-field rule; full signatures, limits, error codes; decisions replace open questions |
+| 2026-09-28 | PR 1 done: `scripts/contracts-fixture.sh`, ground truth, scenario tags; review clean after one fix round |
