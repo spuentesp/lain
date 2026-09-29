@@ -92,6 +92,34 @@ fn string_literals(text: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// Check one string literal and return every word after `lain ` that
+/// names a subcommand the binary does not have.
+fn check_literal_for_unknown_commands(literal: &str) -> Vec<String> {
+    let known = subcommands();
+    let mut bad = Vec::new();
+    for (idx, _) in literal.match_indices("lain ") {
+        let rest = &literal[idx + "lain ".len()..];
+        // `cargo install lain --features nlp` puts a flag after
+        // `lain `, not a subcommand. Only flag tokens are skipped,
+        // so a prose mention of a genuinely missing subcommand is
+        // still caught.
+        if rest.starts_with("--") {
+            continue;
+        }
+        let word: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+            .collect();
+        if word.is_empty() || PROSE.contains(&word.as_str()) {
+            continue;
+        }
+        if !known.contains(&word) {
+            bad.push(word);
+        }
+    }
+    bad
+}
+
 #[test]
 fn user_facing_strings_never_name_a_command_that_does_not_exist() {
     let known = subcommands();
@@ -104,26 +132,16 @@ fn user_facing_strings_never_name_a_command_that_does_not_exist() {
     for file in files {
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         for (lineno, literal) in string_literals(&text) {
-            for (idx, _) in literal.match_indices("lain ") {
-                let rest = &literal[idx + "lain ".len()..];
-                let word: String = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_lowercase() || *c == '-')
-                    .collect();
-                if word.is_empty() || PROSE.contains(&word.as_str()) {
-                    continue;
-                }
-                if !known.contains(&word) {
-                    let mut k: Vec<_> = known.iter().cloned().collect();
-                    k.sort();
-                    bad.push(format!(
-                        "{}:{}: `lain {}` is not a subcommand (have: {:?})",
-                        file.display(),
-                        lineno,
-                        word,
-                        k
-                    ));
-                }
+            for word in check_literal_for_unknown_commands(&literal) {
+                let mut k: Vec<_> = known.iter().cloned().collect();
+                k.sort();
+                bad.push(format!(
+                    "{}:{}: `lain {}` is not a subcommand (have: {:?})",
+                    file.display(),
+                    lineno,
+                    word,
+                    k
+                ));
             }
         }
     }
@@ -386,4 +404,14 @@ fn command_docs_do_not_claim_a_stale_subcommand_count() {
             );
         }
     }
+}
+
+#[test]
+fn flag_tokens_are_not_treated_as_subcommands_but_bad_ones_still_are() {
+    // Guards the `rest.starts_with("--")` skip: it must not disable the
+    // check for genuine subcommand names.
+    let good = "rebuild with cargo install lain --features nlp";
+    let bad = "run lain frobnicate to enable it";
+    assert!(check_literal_for_unknown_commands(good).is_empty());
+    assert!(!check_literal_for_unknown_commands(bad).is_empty());
 }
