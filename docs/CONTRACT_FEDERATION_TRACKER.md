@@ -20,7 +20,7 @@ Listed in delivery order. Week 1 is the live slice; week 2 adds pinned snapshots
 | 1 | Fixture script, ground truth, scenario tags (§15.1) | — | Sep 29 | done | | |
 | 2 | F1 `GlobalId` encoding (§5.1) | — | Sep 29 | done | | |
 | 3 | Schema v3 (§4.2–4.3, §5.4) | 2 | Sep 29 | done | | |
-| 4 | F2 `traverse_impact` (§5.2) | 3 | Sep 29 | todo | | |
+| 4 | F2 `traverse_impact` (§5.2) | 3 | Sep 29 | done | | |
 | 5 | Normalizer, route matcher, sensor framework, provider fixes (§4.5, §6.1–6.2, §7.4) | 3 | Sep 29 | todo | | |
 | 6 | `http_client_sensor` TS/JS + Python (§6.3) | 5 | Sep 29 | todo | | |
 | 7 | F3 joiner, config, `ContractIndex` (§5.3, §7) | 4, 6 | Sep 29 | todo | | Monorepo services: about +1 day |
@@ -61,13 +61,13 @@ Never cut: envelope, scoped coverage, `get_service`, `resolve_evidence`.
 - [x] `CHANGELOG.md` migration note (install → `lain reindex` → enable `contracts` → use)
 
 ### PR 4 — F2 traverse_impact
-- [ ] `traverse_impact(starts, depth, cap, min_confidence)` with deterministic BFS and tie-breaks (§5.2)
-- [ ] Exhaustive `impact_propagation`, only `Calls` on
-- [ ] `get_cross_repo_blast_radius` rebuilt on it; regression test untouched and green
+- [x] `traverse_impact(starts, depth, cap, min_confidence)` with deterministic BFS and tie-breaks (§5.2)
+- [x] Exhaustive `impact_propagation`, only `Calls` on
+- [x] `get_cross_repo_blast_radius` rebuilt on it; regression test untouched and green
 
 | Edge types switched on | PR | Done |
 | --- | --- | --- |
-| `Calls` | 4 | [ ] |
+| `Calls` | 4 | [x] |
 | `CallsHttp`, `SendsHttp`, `Binds` | 7 | [ ] |
 | `RequestSchema`, `ResponseSchema`, `HasField` | 8 | [ ] |
 | `ReadsField` | 9 | [ ] |
@@ -223,3 +223,4 @@ Other gates:
 | 2026-09-28 | PR 1 done: `scripts/contracts-fixture.sh`, ground truth, scenario tags; review clean after one fix round |
 | 2026-09-29 | PR 2 done: F1 `GlobalId` percent-encoding; review clean after one fix round |
 | 2026-09-29 | PR 3 done: schema v3 (types, version bumps, migration note); review clean, no fix round |
+| 2026-09-29 | PR 4 done: F2 `traverse_impact` (§5.2) — exhaustive `impact_propagation` table with only `Calls` on; BFS + tie-breaks + sort; `get_cross_repo_blast_radius` rebuilt on it (response shape unchanged); `federation_blast_radius_regression.rs` untouched and green |

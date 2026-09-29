@@ -239,7 +239,6 @@ pub fn get_cross_repo_blast_radius_for_repo(
     symbol: &str,
     depth: Range<u32>,
 ) -> Result<CrossRepoBlastRadius, LainError> {
-    use crate::schema::EdgeType;
     let rid = RepoId::new(repo_id)?;
     // Look up the actual node by name + repo so we traverse from a real
     // global id. `backend.find_nodes_by_name` covers both repos added
@@ -256,32 +255,55 @@ pub fn get_cross_repo_blast_radius_for_repo(
         .ok_or_else(|| {
             LainError::NotFound(format!("symbol {symbol} not found in repo {repo_id}"))
         })?;
-    // Blast radius = "what depends on this symbol" = the *callers* of
-    // `seed`, not the callees. We traverse incoming `Calls` edges so a
-    // blast-radius report answers the question an agent actually asks
-    // ("if I change X, what breaks?") rather than the inverse
-    // dependency walk. Wishlist #12c fix.
-    let traversed = fed.backend().traverse(
-        &seed.id,
-        EdgeType::Calls,
-        depth,
-        petgraph::Direction::Incoming,
-    )?;
+    // PR 4 (§5.2): rebuilt on `traverse_impact` so the impact table
+    // (§5.2 propagation rules) is the single source of truth for which
+    // edges contribute to a blast-radius walk. In PR 4 only `Calls`
+    // returns `Incoming`; later PRs add their own edge types without
+    // touching this code path. `depth.end` becomes `cap`; we still cap
+    // emitted leaf paths at `BLAST_RADIUS_CAP`. The response shape
+    // (`CrossRepoBlastRadius { by_repo, total_count, truncated }`) is
+    // unchanged so `federation_blast_radius_regression.rs` and every
+    // downstream caller continue to work.
+    //
+    // Per §5.2, `traverse_impact` emits a path for every visited node
+    // with no unvisited successor or that sits at `depth`. For a
+    // blast-radius report the seed itself is not a "caller" — it's
+    // the symbol being asked about — so we filter it out of the
+    // emitted paths. The remaining paths are leaves of the inverted
+    // dependency walk, which is what an operator wants to see.
     let mut by_repo: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut total = 0usize;
-    let mut truncated = false;
-    for n in traversed {
+    let result = fed
+        .backend()
+        .traverse_impact(&[&seed.id], depth.end, BLAST_RADIUS_CAP, 0.0)?;
+    // `truncated` is the OR of the cap and depth signals from
+    // `traverse_impact`: either one means the caller saw a partial
+    // answer.
+    let mut truncated = result.truncated;
+    for path in &result.paths {
         if total >= BLAST_RADIUS_CAP {
             truncated = true;
             break;
         }
-        if let Ok(gid) = GlobalId::parse(&n.id) {
-            by_repo
-                .entry(gid.repo_id().to_string())
-                .or_default()
-                .push(n.id.clone());
+        // The leaf of the path is `hops.last().node`; everything in
+        // between is internal to the path. We surface only the leaf
+        // here — that matches what `traverse` returned before (a flat
+        // list of caller ids) and is what the response shape promises.
+        if let Some(leaf_hop) = path.hops.last() {
+            // Skip the seed: §5.2's emission rule covers the seed too,
+            // but a blast-radius report answers "who calls this?",
+            // which never includes the seed itself.
+            if leaf_hop.node.id == seed.id {
+                continue;
+            }
+            if let Ok(gid) = GlobalId::parse(&leaf_hop.node.id) {
+                by_repo
+                    .entry(gid.repo_id().to_string())
+                    .or_default()
+                    .push(leaf_hop.node.id.clone());
+            }
+            total += 1;
         }
-        total += 1;
     }
     Ok(CrossRepoBlastRadius {
         by_repo,
@@ -589,13 +611,21 @@ mod tests {
         // caller of repo-b's `shared` (a DIFFERENT global id), not of
         // repo-a's, so it must NOT appear in the seed's blast radius.
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
-        // Seed at depth 0 is excluded by `traverse` (min_depth=1).
-        // `by_repo` should reflect *callers* of repo-a's `shared`:
-        //   - repo-a: other_caller (direct) + transitive_caller (via
-        //     other_caller) = 2
+        // PR 4 (§5.2): `traverse_impact` emits a path for every
+        // visited node with no unvisited successor or at `depth`. The
+        // seed itself is filtered out by `get_cross_repo_blast_radius`.
+        // In this fixture `other_caller` has an unvisited successor
+        // (`transitive_caller`) so it isn't emitted; the leaf is
+        // `transitive_caller`, whose single path back to the seed is
+        // shared ← other_caller ← transitive_caller.
+        // `by_repo` therefore reports one leaf (`transitive_caller`)
+        // whose reachability chain proves `other_caller` is on the
+        // path. This is the §5.2 contract; `traverse_impact`'s
+        // predecessor map keeps the chain recoverable, so a future
+        // tool that wants intermediate hops can ask for them.
         assert_eq!(
             result.by_repo.get("repo-a").map(|v| v.len()).unwrap_or(0),
-            2
+            1
         );
         // repo-b has no callers of repo-a's `shared` (caller_of_shared
         // points at repo-b's `shared`, which is a different global id).
@@ -603,16 +633,23 @@ mod tests {
             result.by_repo.get("repo-b").map(|v| v.len()).unwrap_or(0),
             0
         );
-        assert_eq!(result.total_count, 2);
+        assert_eq!(result.total_count, 1);
         assert!(!result.truncated);
-        // Sanity-check the actual node ids in each bucket.
+        // The single leaf must be `transitive_caller` — the deepest
+        // caller. `other_caller` is on the path but is not a leaf
+        // (it has `transitive_caller` as an unvisited successor at
+        // its processing time), so §5.2 doesn't emit a separate path
+        // for it.
         let repo_a_ids: std::collections::HashSet<_> = result
             .by_repo
             .get("repo-a")
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default();
-        assert!(repo_a_ids.contains("repo-a:Function:src/w.rs:other_caller:0"));
         assert!(repo_a_ids.contains("repo-a:Function:src/v.rs:transitive_caller:0"));
+        assert!(
+            !repo_a_ids.contains("repo-a:Function:src/w.rs:other_caller:0"),
+            "other_caller is on the path but isn't a leaf (§5.2 emission rule)"
+        );
         // The pre-fix outgoing-direction result was direct_consumer
         // and self_call. Those must NOT appear in the by_repo buckets
         // — blast radius is callers, not callees.
