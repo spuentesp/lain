@@ -286,39 +286,23 @@ mod tests {
         );
     }
 
-    /// Pin every `NodeType` Debug name that the parser accepts. If a
-    /// new variant is added to `NodeType` but not to this list,
-    /// `GlobalId::parse` will reject otherwise-valid ids produced by
-    /// the cold-start path.
+    /// Pin every `NodeType` the parser accepts. The id is built via
+    /// `GlobalId::new` (per §5.1 step 1 — every site routes through
+    /// `GlobalId`, no hand-built `format!("{...}:{...}")`) and the
+    /// variant list comes from `NodeType::all()` (per step 2 — the
+    /// hardcoded list used to duplicate `parse`'s `is_known_node_kind`
+    /// set, which has since been replaced by `NodeType::all()` itself;
+    /// iterating over `NodeType::all()` here keeps the test honest if
+    /// either side ever drifts from the other).
     #[test]
     fn global_id_parse_accepts_every_node_type() {
         let repo = RepoId::new("svc").unwrap();
         let path = "src/x";
         let name = "fn";
-        let kinds = [
-            "File",
-            "Namespace",
-            "Module",
-            "Package",
-            "Class",
-            "Interface",
-            "Struct",
-            "Enum",
-            "Trait",
-            "Function",
-            "Method",
-            "Property",
-            "Variable",
-            "Constant",
-            "HttpRoute",
-            "Topic",
-            "Resource",
-            "Schema",
-            "Synthetic",
-        ];
-        for k in kinds {
-            let s = format!("{repo}:{k}:{path}:{name}:0");
-            GlobalId::parse(&s).unwrap_or_else(|e| panic!("kind {k} should parse: {e}"));
+        for kind in NodeType::all() {
+            let gid = GlobalId::new(&repo, kind.clone(), path, name, None);
+            GlobalId::parse(gid.as_str())
+                .unwrap_or_else(|e| panic!("kind {kind:?} should parse: {e}"));
         }
     }
     #[test]
