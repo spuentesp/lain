@@ -80,6 +80,7 @@ Never cut: envelope, scoped coverage, `get_service`, `resolve_evidence`.
 - [x] `GraphDatabase::replace_sensor_output` + `SensorOwner`; `http_sensor` and `openapi_sensor` switched to it (fixes stale routes)
 - [x] `util::enclosing_symbol`
 - [x] `http_sensor`: normalizer, `ContractFact::Provider`, `go-std` → `ANY`, same-file router prefixes (FastAPI, Flask, axum, actix), `HashMap` → `BTreeMap`
+- [x] `openapi_sensor`: normalizer + `ContractFact::Provider(OpenApi)` (authorized per design §6.2 "(PR 5, PR 8)"; PR 8 extends with schemas, `operationId`, `head`/`options`, `servers` prefix)
 
 ### PR 6 — http_client_sensor (TS/JS, Python)
 - [ ] Every call shape in §6.3, tree-sitter based
