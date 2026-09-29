@@ -278,13 +278,13 @@ pub fn get_cross_repo_blast_radius_for_repo(
         .traverse_impact(&[&seed.id], depth.end, BLAST_RADIUS_CAP, 0.0)?;
     // `truncated` is the OR of the cap and depth signals from
     // `traverse_impact`: either one means the caller saw a partial
-    // answer.
-    let mut truncated = result.truncated;
+    // answer. `traverse_impact` enforces the cap itself, so the
+    // `BLAST_RADIUS_CAP` guard inside the loop below is redundant —
+    // debug-only assertion keeps the invariant locally visible
+    // without re-checking what the backend already guarantees.
+    let truncated = result.truncated;
     for path in &result.paths {
-        if total >= BLAST_RADIUS_CAP {
-            truncated = true;
-            break;
-        }
+        debug_assert!(total < BLAST_RADIUS_CAP, "traverse_impact honored cap");
         // The leaf of the path is `hops.last().node`; everything in
         // between is internal to the path. We surface only the leaf
         // here — that matches what `traverse` returned before (a flat

@@ -567,11 +567,17 @@ fn reconstruct_path(
 // walks from a visited node. `Incoming` follows edges whose target is
 // the node (so the BFS ascends to its callers / dependents).
 // `Outgoing` follows edges whose source is the node. `Stop` ignores
-// the edge type entirely. PR 4 ships the table with only `Calls`
-// returning `Incoming`; later PRs switch their own types on (the
-// switch-on table lives in `CONTRACT_FEDERATION_TRACKER.md` PR 4
-// row). The match is exhaustive: a new `EdgeType` variant will fail
-// to compile until a propagation has been decided for it.
+// the edge type entirely.
+//
+// PR 4 ships the table with **only `Calls` returning `Incoming`**
+// (the §5.2 code block is the *final* table; the tracker checklist
+// "only `Calls` on" governs PR 4's actual state). Every other
+// variant — including `Produces`, `CallsHttp`, `SendsHttp`, `Binds`,
+// `Consumes`, `ReadsField`, `HasField`, `RequestSchema`,
+// `ResponseSchema`, `PayloadSchema` — returns `Stop` for now. Later
+// PRs (7 / 8 / 9 / 15 per the tracker) flip their own types on. The
+// match is exhaustive: a new `EdgeType` variant will fail to compile
+// until a propagation has been decided for it.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Propagation {
@@ -582,8 +588,8 @@ pub enum Propagation {
 
 pub fn impact_propagation(e: &EdgeType) -> Propagation {
     match e {
-        EdgeType::Calls
-        | EdgeType::CallsHttp
+        EdgeType::Calls => Propagation::Incoming,
+        EdgeType::CallsHttp
         | EdgeType::SendsHttp
         | EdgeType::Binds
         | EdgeType::Consumes
@@ -591,9 +597,9 @@ pub fn impact_propagation(e: &EdgeType) -> Propagation {
         | EdgeType::HasField
         | EdgeType::RequestSchema
         | EdgeType::ResponseSchema
-        | EdgeType::PayloadSchema => Propagation::Incoming,
-        EdgeType::Produces => Propagation::Outgoing,
-        EdgeType::Contains
+        | EdgeType::PayloadSchema
+        | EdgeType::Produces
+        | EdgeType::Contains
         | EdgeType::Imports
         | EdgeType::CoChangedWith
         | EdgeType::Pattern
