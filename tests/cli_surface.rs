@@ -411,7 +411,7 @@ fn flag_tokens_are_not_treated_as_subcommands_but_bad_ones_still_are() {
     // Guards the `rest.starts_with("--")` skip: it must not disable the
     // check for genuine subcommand names.
     let good = "rebuild with cargo install lain --features nlp";
-    let bad = "run lain frobnicate to enable it";
+    let bad = "run lain frobnicate --json to enable it";
     assert!(check_literal_for_unknown_commands(good).is_empty());
     assert!(!check_literal_for_unknown_commands(bad).is_empty());
 }
