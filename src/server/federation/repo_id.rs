@@ -87,7 +87,7 @@ fn decode_segment(s: &str) -> String {
     out
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct GlobalId(String);
 
 impl GlobalId {
@@ -109,6 +109,15 @@ impl GlobalId {
             encode_segment(name),
             line_start.unwrap_or(0),
         ))
+    }
+    /// Wrap a pre-formatted `repo:Kind:path:name:line` string
+    /// without re-encoding it. Use only when the caller already has
+    /// a canonical id shape (e.g. contract-join helpers that
+    /// synthesize `GlobalId`s from parsed ids); production code
+    /// paths that mint fresh ids should go through
+    /// [`GlobalId::new`].
+    pub fn from_canonical(s: impl Into<String>) -> Self {
+        Self(s.into())
     }
     pub fn as_str(&self) -> &str {
         &self.0

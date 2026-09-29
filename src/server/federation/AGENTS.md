@@ -17,8 +17,10 @@ The short version:
   (`PetgraphBackend`). Don't reach into petgraph directly from
   `FederatedIndex`; go through the trait. A `MemgraphBackend` is
   the deferred escape hatch.
-- `cross_repo.rs` is the only file that should join edges across
-  repos. Don't add cross-repo joins in `repo_index.rs`.
+- `cross_repo.rs` joins symbol edges across repos; the
+  contract-federation `Binds` edges are owned by
+  `contracts/joiner.rs` (PR 7). Don't add cross-repo joins in
+  `repo_index.rs`.
 - Federation tools are MCP tools — see `src/server/mcp/AGENTS.md`
   for how to register them.
 

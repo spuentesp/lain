@@ -102,7 +102,7 @@ pub enum CallVia {
 /// verbs at a call site; `Unknown` is what `method=` (non-literal) or
 /// arbitrary expression yields. Only `ContractKey::Http` for a
 /// consumer key may carry `MethodSpec::Unknown` (§4.4).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MethodSpec {
     Known(HttpMethod),
     Unknown,
@@ -169,7 +169,7 @@ pub enum TypeDesc {
 
 /// One of the eight HTTP verbs. `Any` is the OpenAPI / Go-std
 /// "no verb declared" case (§6.2).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HttpMethod {
     Get,
     Post,
@@ -183,7 +183,7 @@ pub enum HttpMethod {
 
 /// Which side of an HTTP exchange a `Schema` belongs to. `Payload`
 /// is the topic-event variant (§6.7, stretch).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Direction {
     Request,
     Response,
@@ -233,7 +233,7 @@ pub struct SymbolKey {
 /// `(method, template)` pair; `Topic` keys are `(broker, name)`. The
 /// `Display` / `FromStr` grammar is in §4.4 — implementations land
 /// with the joiner (task 7) since they need the encoding machinery.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ContractKey {
     /// HTTP endpoint. `MethodSpec::Unknown` only appears in
     /// consumer-side keys (§4.4).
@@ -245,6 +245,76 @@ pub enum ContractKey {
         broker: String,
         name: String,
     },
+}
+
+impl std::fmt::Display for ContractKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContractKey::Http { method, template } => {
+                write!(f, "http:{} {}", method_label(method), template)
+            }
+            ContractKey::Topic { broker, name } => {
+                write!(f, "topic:{}/{}", broker, name)
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for ContractKey {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(rest) = s.strip_prefix("http:") {
+            // "<METHOD> <template>"
+            let (method_str, template) = rest
+                .split_once(' ')
+                .ok_or_else(|| format!("malformed http key: {s:?}"))?;
+            let method = parse_method_label(method_str)
+                .ok_or_else(|| format!("unknown method in http key: {method_str:?}"))?;
+            return Ok(ContractKey::Http { method, template: template.to_string() });
+        }
+        if let Some(rest) = s.strip_prefix("topic:") {
+            // "broker/name"
+            let (broker, name) = rest
+                .split_once('/')
+                .ok_or_else(|| format!("malformed topic key: {s:?}"))?;
+            return Ok(ContractKey::Topic {
+                broker: broker.to_string(),
+                name: name.to_string(),
+            });
+        }
+        Err(format!("unknown contract key kind: {s:?}"))
+    }
+}
+
+fn method_label(method: &MethodSpec) -> &'static str {
+    match method {
+        MethodSpec::Known(m) => match m {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+            HttpMethod::Put => "PUT",
+            HttpMethod::Patch => "PATCH",
+            HttpMethod::Delete => "DELETE",
+            HttpMethod::Head => "HEAD",
+            HttpMethod::Options => "OPTIONS",
+            HttpMethod::Any => "ANY",
+        },
+        MethodSpec::Unknown => "UNKNOWN",
+    }
+}
+
+fn parse_method_label(s: &str) -> Option<MethodSpec> {
+    Some(match s {
+        "GET" => MethodSpec::Known(HttpMethod::Get),
+        "POST" => MethodSpec::Known(HttpMethod::Post),
+        "PUT" => MethodSpec::Known(HttpMethod::Put),
+        "PATCH" => MethodSpec::Known(HttpMethod::Patch),
+        "DELETE" => MethodSpec::Known(HttpMethod::Delete),
+        "HEAD" => MethodSpec::Known(HttpMethod::Head),
+        "OPTIONS" => MethodSpec::Known(HttpMethod::Options),
+        "ANY" => MethodSpec::Known(HttpMethod::Any),
+        "UNKNOWN" => MethodSpec::Unknown,
+        _ => return None,
+    })
 }
 
 /// A JSON pointer (or, here, JSON path) into a payload. Segments are
@@ -263,11 +333,136 @@ pub enum PathSegment {
     MapValues,
 }
 
+impl std::fmt::Display for JsonPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, seg) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(".")?;
+            }
+            match seg {
+                PathSegment::Name(s) => write!(f, "{}", escape_name(s))?,
+                PathSegment::ArrayItems => f.write_str("[]")?,
+                PathSegment::MapValues => f.write_str("{}")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for JsonPath {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Ok(JsonPath(Vec::new()));
+        }
+        let mut segments = Vec::new();
+        let mut chars = s.chars().peekable();
+        let mut current = String::new();
+        while let Some(&c) = chars.peek() {
+            match c {
+                '\\' => {
+                    chars.next();
+                    let esc = chars
+                        .next()
+                        .ok_or_else(|| "trailing escape".to_string())?;
+                    current.push(esc);
+                }
+                '.' => {
+                    chars.next();
+                    flush_name(&mut current, &mut segments)?;
+                }
+                '[' => {
+                    chars.next();
+                    if chars.peek() == Some(&']') {
+                        chars.next();
+                        flush_name(&mut current, &mut segments)?;
+                        segments.push(PathSegment::ArrayItems);
+                    } else {
+                        current.push('[');
+                    }
+                }
+                ']' => {
+                    return Err("unescaped ']'".into());
+                }
+                '{' => {
+                    chars.next();
+                    if chars.peek() == Some(&'}') {
+                        chars.next();
+                        flush_name(&mut current, &mut segments)?;
+                        segments.push(PathSegment::MapValues);
+                    } else {
+                        current.push('{');
+                    }
+                }
+                '}' => return Err("unescaped '}'".into()),
+                _ => {
+                    chars.next();
+                    current.push(c);
+                }
+            }
+        }
+        flush_name(&mut current, &mut segments)?;
+        Ok(JsonPath(segments))
+    }
+}
+
+fn escape_name(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '.' | '[' | ']' | '{' | '}' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn flush_name(
+    current: &mut String,
+    segments: &mut Vec<PathSegment>,
+) -> Result<(), String> {
+    if current.is_empty() {
+        return Ok(());
+    }
+    let name = std::mem::take(current);
+    segments.push(PathSegment::Name(name));
+    Ok(())
+}
+
 /// Federation-level service name. Validated as in §7.1
 /// (`[a-z0-9][a-z0-9_-]*`). Validation lives with the config loader
 /// (task 8); this newtype is just the wire shape.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ServiceName(pub String);
+
+impl std::fmt::Display for ServiceName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Validation predicate used by the config loader. The match rule is
+/// `^[a-z0-9][a-z0-9_-]*$` per §7.1. Public so the config loader can
+/// call it without round-tripping through a `Config` type.
+pub fn service_name_is_valid(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().expect("non-empty");
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return false;
+    }
+    for c in chars {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+            return false;
+        }
+    }
+    true
+}
 
 /// `(service, key)` uniquely identifies an endpoint in a federation.
 /// The joiner indexes endpoints by this; tools serialize it as two

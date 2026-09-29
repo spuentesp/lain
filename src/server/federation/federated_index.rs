@@ -12,6 +12,9 @@
 //! plan flags this as acceptable for the MVP and notes a separate name index
 //! would be the production implementation.
 use crate::error::LainError;
+use crate::federation::contracts::config::ContractFederationConfig;
+use crate::federation::contracts::index::ContractIndex;
+use crate::federation::contracts::joiner::ContractJoiner;
 use crate::federation::graph_backend::GraphBackend;
 use crate::federation::health::RepoHealth;
 use crate::federation::matching::find_cross_repo_matches;
@@ -24,6 +27,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// The global id a node gets once its owning repo is known: `GlobalId::new`
@@ -93,6 +97,20 @@ pub struct FederatedIndex {
     /// `(source, target) -> source declares a dependency on target`;
     /// see [`Self::repo_depends_on`].
     depends_cache: DashMap<(String, String), bool>,
+    /// Set by `project_nodes` / `project_edges` whenever the
+    /// projected graph could change `Binds` outcomes. Cleared by
+    /// `rejoin_contracts_if_dirty` after the join lands (§5.3).
+    contracts_dirty: AtomicBool,
+    /// Per-repo set of `GlobalId`s that carry a `ContractFact`.
+    /// Maintained by `project_nodes` / `project_edges` so the joiner
+    /// never scans the whole backend (§5.3 Cost).
+    contract_node_ids: DashMap<RepoId, std::collections::BTreeSet<String>>,
+    /// The active contract config. Set via `set_contract_config`;
+    /// the joiner reads it inside `rejoin_contracts_if_dirty`.
+    contract_config: RwLock<Option<Arc<ContractFederationConfig>>>,
+    /// The most recent `ContractIndex`. Tools (PR 13/16) read this
+    /// after calling `rejoin_contracts_if_dirty`.
+    contract_index: RwLock<Option<Arc<ContractIndex>>>,
 }
 
 /// Collapse a per-definition repo list to the distinct repos in it,
@@ -128,6 +146,10 @@ impl FederatedIndex {
             projection_lock: parking_lot::Mutex::new(()),
             depends_cache: DashMap::new(),
             load_errors: RwLock::new(Vec::new()),
+            contracts_dirty: AtomicBool::new(false),
+            contract_node_ids: DashMap::new(),
+            contract_config: RwLock::new(None),
+            contract_index: RwLock::new(None),
         }
     }
 
@@ -293,6 +315,12 @@ impl FederatedIndex {
                     repo.set_overlay(overlay);
                 }
             }
+            // PR-7: a new repo brings fresh contract nodes (or
+            // none — but the join must re-run either way so any
+            // previously-unbound consumer can see its new
+            // provider). Mark dirty; the lock guards against
+            // concurrent reads.
+            self.contracts_dirty.store(true, Ordering::Release);
         }
         // Refresh the on-disk manifest so a runtime add survives a
         // restart. Best-effort; a save failure doesn't fail the add.
@@ -315,7 +343,13 @@ impl FederatedIndex {
             if let Some(repo) = self.repos.write().remove(id) {
                 repo.deactivate();
             }
+            self.contract_node_ids.remove(id);
             self.rebuild_symbol_index();
+            // PR-7: removing a repo invalidates every `Binds`
+            // edge whose source or target lived in it. Mark
+            // dirty so the next `rejoin_contracts_if_dirty`
+            // retracts them.
+            self.contracts_dirty.store(true, Ordering::Release);
         }
         // Mirror `add_repo`: keep the manifest in sync with live
         // membership. See `persist_manifest` for the failure semantics.
@@ -477,6 +511,21 @@ impl FederatedIndex {
             id.as_str(),
             batch_nodes.len()
         );
+
+        // PR 7 (§5.3 Cost): record every contract-bearing node id
+        // for this repo. The joiner reads this set instead of
+        // scanning the whole backend. We track it here so
+        // `rejoin_contracts` can stay linear in the number of
+        // contract nodes, not the number of all nodes.
+        let mut contract_ids: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for n in &batch_nodes {
+            if n.contract.is_some() {
+                contract_ids.insert(n.id.clone());
+            }
+        }
+        self.contract_node_ids.insert(id.clone(), contract_ids);
+        self.contracts_dirty.store(true, Ordering::Release);
 
         // Retract what this repo no longer has. Projection was upsert-only, so
         // the federated view accumulated every symbol a repo ever contained: a
@@ -801,6 +850,14 @@ impl FederatedIndex {
                 !(e.edge_type == crate::schema::EdgeType::Calls
                     && !e.target_id.starts_with(&prefix))
             })
+            // PR 7 (§5.3): `Binds` is federation-only. The
+            // joiner owns it; the per-repo projection never
+            // writes `Binds` edges, so its reconciliation
+            // must skip them by type. Skipping by
+            // cross-repo would let a same-repo `Binds`
+            // (legitimate when two services share a repo,
+            // §4.1) silently disappear.
+            .filter(|e| e.edge_type != crate::schema::EdgeType::Binds)
             .filter(|e| {
                 !new_keys.contains(&(
                     e.edge_type.clone(),
@@ -835,6 +892,13 @@ impl FederatedIndex {
                 placeholder_ids.len()
             );
         }
+
+        // PR 7 (§5.3): any projection that produces (or fails to
+        // produce) contract edges must mark the federation dirty
+        // so the next `rejoin_contracts_if_dirty` re-derives them.
+        // The dirty flag is set even when the batch is empty — a
+        // no-op reproject must not leave stale `Binds` behind.
+        self.contracts_dirty.store(true, Ordering::Release);
 
         // Rebuild the federation-wide `symbol_to_repos` only when this
         // projection actually surfaced nodes. The federation loader
@@ -905,6 +969,155 @@ impl FederatedIndex {
             1 => Ok(hits.into_iter().next().unwrap()),
             _ => Err(LainError::AmbiguousSymbol(distinct_repos(&hits))),
         }
+    }
+
+    /// Install the contract-federation config that the joiner
+    /// consumes. The federation owns the config so a hot reload can
+    /// swap it atomically: a config-load failure on the hot path
+    /// leaves the previous config in place (§7.1).
+    pub fn set_contract_config(&self, config: ContractFederationConfig) {
+        *self.contract_config.write() = Some(Arc::new(config));
+        // A config change invalidates the current join.
+        self.contracts_dirty.store(true, Ordering::Release);
+    }
+
+    /// The current contract config, or `None` when none has been
+    /// installed yet (e.g. before the first `load_federation`
+    /// call). The federation's loaders set this on every successful
+    /// load; a hot reload that fails to parse keeps the previous
+    /// config active.
+    pub fn contract_config(&self) -> Option<Arc<ContractFederationConfig>> {
+        self.contract_config.read().clone()
+    }
+
+    /// The most recent `ContractIndex` produced by
+    /// `rejoin_contracts_if_dirty`. Tools (PR 13/16) call
+    /// `rejoin_contracts_if_dirty` first, then read this snapshot.
+    pub fn contract_index(&self) -> Option<Arc<ContractIndex>> {
+        self.contract_index.read().clone()
+    }
+
+    /// Recompute the desired `Binds` set and `ContractIndex` when
+    /// any of `project_nodes`, `project_edges`, the loader's Phase
+    /// 2, the refresh-loop tick, hot-reload apply, `add_repo`, or
+    /// `remove_repo` marks the federation dirty. No-op when the
+    /// dirty flag is clear. Holds `projection_lock` so concurrent
+    /// projections do not race the join (§5.3).
+    ///
+    /// The current implementation does the read-modify-write
+    /// inline. PR 11 will hook `from_snapshot` here.
+    pub fn rejoin_contracts_if_dirty(&self) -> Result<(), LainError> {
+        let _guard = self.projection_lock.lock();
+        if !self.contracts_dirty.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.rejoin_contracts()
+    }
+
+    /// The dirty-flagged inner work: compute the desired
+    /// `ContractJoiner::run` output over the projected contract
+    /// nodes, diff against the current backend `Binds` set, and
+    /// apply adds and removes in one batch. Idempotent and
+    /// order-independent — same input, same output, no edges
+    /// change.
+    pub fn rejoin_contracts(&self) -> Result<(), LainError> {
+        let config = match self.contract_config.read().clone() {
+            Some(c) => c,
+            // No config: nothing to join. Still clear the flag so
+            // the next contract config install produces a single
+            // join.
+            None => {
+                self.contracts_dirty.store(false, Ordering::Release);
+                return Ok(());
+            }
+        };
+        // Collect every contract-bearing node by reading only the
+        // ids recorded by `project_nodes` (§5.3 Cost).
+        let mut contract_nodes: Vec<GraphNode> = Vec::new();
+        let mut to_drop: Vec<RepoId> = Vec::new();
+        for entry in self.contract_node_ids.iter() {
+            let (rid, ids) = entry.pair();
+            for gid in ids.iter() {
+                if let Some(node) = self.backend.get_node(gid)? {
+                    contract_nodes.push(node);
+                }
+            }
+            // Track which repos still have contract ids, so we
+            // can drop the entry when the repo disappears.
+            let _ = rid;
+        }
+        // Drop entries whose repo is gone. We collect first to
+        // release the DashMap ref before mutating.
+        let live_repos: std::collections::HashSet<RepoId> =
+            self.repos.read().keys().cloned().collect();
+        for entry in self.contract_node_ids.iter() {
+            if !live_repos.contains(entry.key()) {
+                to_drop.push(entry.key().clone());
+            }
+        }
+        for r in to_drop {
+            self.contract_node_ids.remove(&r);
+        }
+
+        let out = ContractJoiner::run(&contract_nodes, &config);
+
+        // Diff against current backend `Binds`. Build the desired
+        // set keyed by `(consumer_id, provider_id)`; build the
+        // stored set the same way. Adds and removes are batched.
+        let desired: std::collections::BTreeSet<(String, String)> = out
+            .binds
+            .iter()
+            .map(|b| (b.consumer.as_str().to_string(), b.provider.as_str().to_string()))
+            .collect();
+        let stored_edges: Vec<GraphEdge> = self
+            .backend
+            .all_edges()?
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::Binds)
+            .collect();
+        let stored: std::collections::BTreeSet<(String, String)> = stored_edges
+            .iter()
+            .map(|e| (e.source_id.clone(), e.target_id.clone()))
+            .collect();
+
+        let to_add: Vec<GraphEdge> = out
+            .binds
+            .iter()
+            .filter(|b| {
+                !stored.contains(&(b.consumer.as_str().to_string(), b.provider.as_str().to_string()))
+            })
+            .map(|b| GraphEdge {
+                edge_type: EdgeType::Binds,
+                source_id: b.consumer.as_str().to_string(),
+                target_id: b.provider.as_str().to_string(),
+                weight: Some(b.confidence),
+                cross_repo: b.consumer_service != b.provider_service
+                    && b.consumer.repo_id() != b.provider.repo_id(),
+                provenance: Some(b.provenance.clone()),
+                site: None,
+                detail: Some(crate::schema::EdgeDetail {
+                    route_match: Some(b.route_match),
+                    stripped_prefix: b.stripped_prefix.clone(),
+                }),
+            })
+            .collect();
+        let to_remove: Vec<GraphEdge> = stored_edges
+            .into_iter()
+            .filter(|e| !desired.contains(&(e.source_id.clone(), e.target_id.clone())))
+            .collect();
+
+        // One disk save at the end: upsert adds, then remove
+        // removes. The backend handles dedup.
+        if !to_add.is_empty() {
+            self.backend.upsert_edges_batch(&to_add)?;
+        }
+        if !to_remove.is_empty() {
+            self.backend.remove_edges(&to_remove)?;
+        }
+
+        *self.contract_index.write() = Some(Arc::new(out.index));
+        self.contracts_dirty.store(false, Ordering::Release);
+        Ok(())
     }
 
     fn rebuild_symbol_index(&self) {

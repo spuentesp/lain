@@ -40,6 +40,11 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     // / remove_repo persists its mutation. Without this, only the
     // end-of-load save_manifest below sees the file written.
     fed.set_manifest_path(Some(manifest_path.clone()));
+    // PR-7: install the contract config so the joiner has
+    // something to read. Validated by `FederationConfig::load`
+    // already; a hot-reload failure later keeps this one in
+    // place.
+    fed.set_contract_config(config.contract.clone());
 
     let sources = config.build_sources()?;
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
@@ -129,6 +134,17 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
         fed.project_edges(&repo_id).await?;
     }
 
+    // PR-7 (§5.3): every contract tool on `live` calls
+    // `rejoin_contracts_if_dirty` before reading, but the loader
+    // also kicks it once at the end of Phase 2 so any contract
+    // queries that land before the first user call see the
+    // already-joined state. Failures are non-fatal — the worst
+    // case is a tool sees a stale `Binds` set until the next
+    // dirty tick (which is no worse than the pre-PR-7 behavior).
+    if let Err(e) = fed.rejoin_contracts_if_dirty() {
+        tracing::warn!("federation: initial rejoin_contracts_if_dirty failed: {e}");
+    }
+
     // Persist the manifest on a best-effort basis: a save failure must not
     // tear down a federation that successfully loaded.
     //
@@ -191,6 +207,11 @@ pub async fn load_federation_with_workspace(
     // / remove_repo persists its mutation. Without this, only the
     // end-of-load save_manifest below sees the file written.
     fed.set_manifest_path(Some(manifest_path.clone()));
+    // PR-7: install the contract config so the joiner has
+    // something to read. Validated by `FederationConfig::load`
+    // already; a hot-reload failure later keeps this one in
+    // place.
+    fed.set_contract_config(config.contract.clone());
 
     // Cold-start orchestration (Codex finding #4). Same Phase 0/1/2
     // split as `load_federation`: register every repo in parallel,
@@ -233,6 +254,12 @@ pub async fn load_federation_with_workspace(
     // Phase 2: project all edges.
     for (repo_id, _) in fed.list_repos() {
         fed.project_edges(&repo_id).await?;
+    }
+
+    // PR-7 (§5.3): kick the joiner once at the end of Phase 2. See
+    // the mirror call in `load_federation` for the rationale.
+    if let Err(e) = fed.rejoin_contracts_if_dirty() {
+        tracing::warn!("federation: initial rejoin_contracts_if_dirty failed: {e}");
     }
 
     // Discarding this hid a failed save entirely: the federation came up
