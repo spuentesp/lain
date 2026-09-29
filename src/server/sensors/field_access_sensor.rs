@@ -481,6 +481,13 @@ fn walk_ts<'a, F: FnMut(Node<'a>)>(node: Node<'a>, f: &mut F) {
 struct FrameCtx<'a> {
     sender_name: &'a str,
     is_sender: bool,
+    /// The frame is a **direct caller of S** (§6.5 rule 5). Only a
+    /// caller-frame `return` of a bound identifier *leaves* the
+    /// scope — the caller's own caller is outside it — so only this
+    /// frame kind may fire `Escape::Returned`. S's return is rule
+    /// 5's propagation channel and a callee's return lands back in
+    /// an in-scope frame; neither escapes.
+    is_caller_of_s: bool,
 }
 
 impl<'a> FrameCtx<'a> {
@@ -490,6 +497,7 @@ impl<'a> FrameCtx<'a> {
         FrameCtx {
             sender_name: "",
             is_sender: true,
+            is_caller_of_s: false,
         }
     }
 }
@@ -539,7 +547,7 @@ fn handle_python_node(
         "assignment" => {
             handle_python_assignment(node, src, bound, reads, escapes, file_path, line, frame)
         }
-        "return_statement" => handle_python_return(node, src, bound, escapes),
+        "return_statement" => handle_python_return(node, src, bound, escapes, frame),
         "yield" => handle_python_yield(node, src, bound, escapes),
         "for_statement" => handle_python_for(node, src, bound),
         "dictionary_comprehension" => {
@@ -758,10 +766,17 @@ fn handle_python_return(
     src: &[u8],
     bound: &BTreeMap<String, JsonPath>,
     escapes: &mut BTreeSet<Escape>,
+    frame: FrameCtx<'_>,
 ) {
-    // `return r.json()` leaves the scope — the §6.5 escape list
-    // says "returned from a caller". We treat *any* return that
-    // mentions a bound identifier as a return-from-S escape.
+    // §6.5: an escape fires when a bound identifier is "returned
+    // from a caller (it would leave the scope)". Only a rule-5
+    // caller frame's return leaves the scope — S returning its
+    // bound response is rule 5's propagation channel (scenario 5
+    // depends on this not flipping `reads_complete`), and a
+    // callee's return lands back in an in-scope frame.
+    if !frame.is_caller_of_s {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if expression_uses_bound(child, src, bound) {
@@ -1366,7 +1381,7 @@ fn handle_tsjs_node(
         "assignment_expression" | "augmented_assignment_expression" => {
             handle_tsjs_assignment(node, src, bound, reads, escapes, file_path, line, frame)
         }
-        "return_statement" => handle_tsjs_return(node, src, bound, escapes),
+        "return_statement" => handle_tsjs_return(node, src, bound, escapes, frame),
         "yield_expression" => handle_tsjs_yield(node, src, bound, escapes),
         "for_statement" | "for_in_statement" => handle_tsjs_for(node, src, bound),
         "spread_element" => {
@@ -1536,7 +1551,13 @@ fn handle_tsjs_return(
     src: &[u8],
     bound: &BTreeMap<String, JsonPath>,
     escapes: &mut BTreeSet<Escape>,
+    frame: FrameCtx<'_>,
 ) {
+    // §6.5: only a rule-5 caller frame's `return` of a bound
+    // identifier leaves the scope (see `handle_python_return`).
+    if !frame.is_caller_of_s {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if expression_uses_bound(child, src, bound) {
@@ -2149,11 +2170,6 @@ fn build_emission(
     // The id is the per-repo node id; `project_edges` rewrites it to
     // the GlobalId `resolve_field_refs` keys `Binds` by.
     let call_id = emission.call_id.clone();
-    // Find the ReadsField source by walking the graph.
-    let reads_field_source = graph
-        .find_node_by_path(&emission.path)
-        .map(|n| n.id.clone())
-        .unwrap_or_else(|| "self".to_string());
     for read in &emission.reads {
         // §4.4: a `FieldRef` records the *reading* file and line —
         // for scope reads (§6.5) that can differ from the consumer
@@ -2163,6 +2179,22 @@ fn build_emission(
         } else {
             read.path.clone()
         };
+        // §6.5: the `ReadsField` edge starts at the *reading
+        // function*. Resolve the enclosing symbol at the read site;
+        // a genuinely module-level read (no function covers the
+        // line) falls back to the File node — the same convention
+        // `enclosing_sends_http_edge` uses for module-level calls.
+        let reads_field_source =
+            crate::server::sensors::util::enclosing_symbol(graph, &read_path, read.line)
+                .map(|n| n.id)
+                .unwrap_or_else(|| {
+                    graph
+                        .get_all_nodes()
+                        .into_iter()
+                        .find(|n| n.node_type == NodeType::File && n.path == read_path)
+                        .map(|n| n.id)
+                        .unwrap_or_else(|| "self".to_string())
+                });
         let mut node = GraphNode::new_in(
             NodeType::FieldRef,
             read.chain.to_string(),
@@ -2415,6 +2447,7 @@ fn extend_emissions_with_scope(
             let sender_frame = FrameCtx {
                 sender_name: &sender_name,
                 is_sender: true,
+                is_caller_of_s: false,
             };
             walk_ts(sender_node, &mut |n| {
                 walk_with_metadata(
@@ -2491,6 +2524,11 @@ fn extend_emissions_with_scope(
                 let scope_frame = FrameCtx {
                     sender_name: &sender_name,
                     is_sender: false,
+                    // §6.5 rule 5: direct caller of S → its `return`
+                    // of a bound identifier leaves the scope.
+                    is_caller_of_s: calls_by_function
+                        .get(id.as_str())
+                        .is_some_and(|cs| cs.contains(&emission.sender_id)),
                 };
                 let m_path = path.clone();
                 walk_ts(member_node, &mut |n| {
@@ -2801,6 +2839,7 @@ fn walk_in_scope<'a>(
     let sender_frame = FrameCtx {
         sender_name: _sender_name,
         is_sender: true,
+        is_caller_of_s: false,
     };
     let _ = find_function_at_line(_root, src, lang, sender_line).map(|fn_node| {
         walk_ts(fn_node, &mut |n| {
@@ -2858,6 +2897,11 @@ fn walk_in_scope<'a>(
             let scope_frame = FrameCtx {
                 sender_name: _sender_name,
                 is_sender: false,
+                // §6.5 rule 5: a direct caller of S — its `return`
+                // of a bound identifier leaves the scope.
+                is_caller_of_s: calls_by_function
+                    .get(name.as_str())
+                    .is_some_and(|cs| cs.contains(_sender_name)),
             };
             walk_ts(*fn_node, &mut |n| {
                 walk_with_metadata(
@@ -3499,11 +3543,25 @@ match x:
         assert!(names.contains(&"name".to_string()), "names={names:?}");
     }
 
+    /// §6.5 escapes: a bound identifier becomes `Escape::Returned`
+    /// only when it is "returned from a caller (it would leave the
+    /// scope)".
+    ///
+    /// - **S's own frame**: `return x` / `return r.json()` is rule
+    ///   5's propagation channel — the value lands in a direct
+    ///   caller, still inside the scope. Not an escape: flipping
+    ///   `reads_complete` here would (per §9.5) turn scenario 5's
+    ///   expected `NoKnownImpact` into `NeedsInvestigation`.
+    /// - **A rule-5 caller frame**: the caller's own caller is
+    ///   outside the scope (only *direct* callers of S are in
+    ///   scope), so a bound identifier returned there escapes and
+    ///   flips `reads_complete` to `false` (scenario 22).
     #[test]
-    fn python_return_flips_reads_complete_to_false() {
+    fn return_escape_fires_only_from_a_caller_frame() {
+        // Part 1: S-frame return of the bound identifier — no escape.
         let src = "\
 def fetch_order():
-    x = requests.get(\"/a\")
+    x = fetch(\"/a\")
     return x
 ";
         let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
@@ -3520,7 +3578,56 @@ def fetch_order():
             &mut escapes,
             "x.py",
         );
-        assert!(escapes.contains(&Escape::Returned));
+        assert!(
+            !escapes.contains(&Escape::Returned),
+            "S returning its bound response is rule 5's channel, not an escape \
+             (§6.5: escape is 'returned from a caller')"
+        );
+
+        // Part 2: a bound identifier returned from a *caller* frame
+        // leaves the scope → escape → reads_complete = false.
+        let src2 = "\
+def fetch_order():
+    x = fetch(\"/a\")
+    return x
+
+
+def caller():
+    order = fetch_order()
+    return order
+";
+        let mut bound2: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound2.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads2 = Vec::new();
+        let mut escapes2 = BTreeSet::new();
+        let tree2 = parse(Lang::Python, src2).unwrap();
+        let calls_by_function: BTreeMap<String, BTreeSet<String>> = [
+            (
+                "caller".to_string(),
+                ["fetch_order".to_string()].into_iter().collect(),
+            ),
+            ("fetch_order".to_string(), BTreeSet::new()),
+        ]
+        .into_iter()
+        .collect();
+        let emissions = detect_emissions_with_calls(
+            src2,
+            &tree2,
+            Lang::Python,
+            "x.py",
+            &calls_by_function,
+            &mut bound2,
+            &mut reads2,
+            &mut escapes2,
+        );
+        assert!(
+            escapes2.contains(&Escape::Returned),
+            "a bound identifier returned from a caller frame must escape (§6.5)"
+        );
+        assert!(
+            emissions.iter().any(|e| !e.reads_complete),
+            "the escape must flip the emission's reads_complete to false"
+        );
     }
 
     #[test]
@@ -4046,16 +4153,25 @@ async function fetch_data() { return await fetch(\"/a\"); }
     /// through `local_to_global` (`GlobalId::new(repo, kind, path,
     /// name, line_start)`), which is exactly the string
     /// `resolve_field_refs` matches `BindsEdge.consumer` by.
+    /// Returns `(call_node_id, caller_node_id)`. The Function nodes
+    /// carry line ranges so `enclosing_symbol` can resolve the
+    /// reading function at a read site (§6.5 `ReadsField` source).
+    #[allow(clippy::too_many_arguments)] // test fixture: ranges + ids
     fn seed_scope_fixture(
         graph: &GraphDatabase,
         ns: &RepoNamespace,
         path: &str,
         sender: &str,
+        sender_range: (u32, u32),
         caller: &str,
+        caller_range: (u32, u32),
         call_line: u32,
-    ) -> String {
-        let sender_node = GraphNode::new_in(NodeType::Function, sender.into(), path.into(), ns);
-        let caller_node = GraphNode::new_in(NodeType::Function, caller.into(), path.into(), ns);
+    ) -> (String, String) {
+        let sender_node = GraphNode::new_in(NodeType::Function, sender.into(), path.into(), ns)
+            .with_location_in(sender_range.0, sender_range.1, ns);
+        let caller_node = GraphNode::new_in(NodeType::Function, caller.into(), path.into(), ns)
+            .with_location_in(caller_range.0, caller_range.1, ns);
+        let caller_id = caller_node.id.clone();
         let mut call_node = GraphNode::new_in(
             NodeType::HttpClientCall,
             "GET /api/1".into(),
@@ -4097,7 +4213,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
         graph.upsert_node(call_node.clone()).unwrap();
         graph.upsert_edge(sends).unwrap();
         graph.upsert_edge(calls_e).unwrap();
-        call_node.id
+        (call_node.id, caller_id)
     }
 
     fn field_ref_by_chain(graph: &GraphDatabase, chain: &str) -> GraphNode {
@@ -4134,17 +4250,30 @@ async function fetch_data() { return await fetch(\"/a\"); }
         write_py(root, "src/main.py", content);
         let ns = RepoNamespace::for_test();
         let graph = GraphDatabase::new(&root.join("graph.bin")).unwrap();
-        let call_line = content
-            .lines()
+        let lines: Vec<&str> = content.lines().collect();
+        let call_line = lines
+            .iter()
             .position(|l| l.contains("requests.get"))
             .unwrap() as u32
             + 1;
-        let call_id = seed_scope_fixture(
+        let s_start = lines
+            .iter()
+            .position(|l| l.contains("def fetch_order"))
+            .unwrap() as u32
+            + 1;
+        let c_start = lines
+            .iter()
+            .position(|l| l.contains("def build_invoice"))
+            .unwrap() as u32
+            + 1;
+        let (call_id, caller_id) = seed_scope_fixture(
             &graph,
             &ns,
             "src/main.py",
             "fetch_order",
+            (s_start, c_start - 1),
             "build_invoice",
+            (c_start, lines.len() as u32),
             call_line,
         );
         let repo_id = RepoId::new("fixture").unwrap();
@@ -4174,6 +4303,17 @@ async function fetch_data() { return await fetch(\"/a\"); }
             reads_from.target_id, sends.target_id,
             "ReadsFrom target must be the identity SendsHttp's endpoint side uses \
              (projected to the joiner's Binds consumer GlobalId)"
+        );
+
+        // §6.5: the `ReadsField` edge starts at the *reading*
+        // function — `build_invoice`, not the File node.
+        let reads_field = edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::ReadsField && e.target_id == customer_ref.id)
+            .expect("FieldRef must carry a ReadsField edge");
+        assert_eq!(
+            reads_field.source_id, caller_id,
+            "ReadsField must start at the reading function node (build_invoice)"
         );
 
         // Gap 3, no-escape side: nothing escaped → the consumer fact
@@ -4213,17 +4353,30 @@ async function fetch_data() { return await fetch(\"/a\"); }
         write_py(root, "src/main.py", content);
         let ns = RepoNamespace::for_test();
         let graph = GraphDatabase::new(&root.join("graph.bin")).unwrap();
-        let call_line = content
-            .lines()
+        let lines: Vec<&str> = content.lines().collect();
+        let call_line = lines
+            .iter()
             .position(|l| l.contains("requests.get"))
             .unwrap() as u32
             + 1;
-        let call_id = seed_scope_fixture(
+        let s_start = lines
+            .iter()
+            .position(|l| l.contains("def fetch_order"))
+            .unwrap() as u32
+            + 1;
+        let c_start = lines
+            .iter()
+            .position(|l| l.contains("def build_invoice"))
+            .unwrap() as u32
+            + 1;
+        let (call_id, _caller_id) = seed_scope_fixture(
             &graph,
             &ns,
             "src/main.py",
             "fetch_order",
+            (s_start, c_start - 1),
             "build_invoice",
+            (c_start, lines.len() as u32),
             call_line,
         );
         let repo_id = RepoId::new("fixture").unwrap();
@@ -4253,6 +4406,55 @@ async function fetch_data() { return await fetch(\"/a\"); }
                 .filter(|n| n.id == call_id)
                 .count(),
             1
+        );
+    }
+
+    /// §6.5: the `ReadsField` edge starts at the *reading function*;
+    /// a genuinely module-level read (no enclosing function covers
+    /// the line) falls back to the `File` node — the same convention
+    /// `enclosing_sends_http_edge` uses for module-level calls.
+    #[test]
+    fn readstfield_source_falls_back_to_file_for_module_level_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+        // A function that exists at the path but does NOT cover the
+        // read's line — so `enclosing_symbol` yields None.
+        let helper = GraphNode::new_in(
+            NodeType::Function,
+            "helper".into(),
+            "src/main.py".into(),
+            &ns,
+        )
+        .with_location_in(10, 12, &ns);
+        graph.upsert_node(helper).unwrap();
+        let file_node =
+            GraphNode::new_in(NodeType::File, "main.py".into(), "src/main.py".into(), &ns);
+        let file_id = file_node.id.clone();
+        graph.upsert_node(file_node).unwrap();
+
+        let emission = FieldAccessEmission {
+            path: "src/main.py".into(),
+            call_id: String::new(),
+            sender_id: String::new(),
+            reads: vec![FieldRead {
+                chain: field_ref_chain("customer_id"),
+                exact: true,
+                path: "src/main.py".into(),
+                line: 3, // module level: no function covers line 3
+                reader_id: "self".into(),
+            }],
+            escapes: BTreeSet::new(),
+            reads_complete: true,
+        };
+        let (_nodes, edges) = build_emission(&graph, &emission, &ns);
+        let reads_field = edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::ReadsField)
+            .expect("ReadsField edge");
+        assert_eq!(
+            reads_field.source_id, file_id,
+            "a module-level read must attach to the File node"
         );
     }
 
