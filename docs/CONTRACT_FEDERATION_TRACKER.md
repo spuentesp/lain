@@ -18,7 +18,7 @@ Listed in delivery order. Week 1 is the live slice; week 2 adds pinned snapshots
 | # | PR | Depends on | Week | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Fixture script, ground truth, scenario tags (§15.1) | — | Sep 29 | done | | |
-| 2 | F1 `GlobalId` encoding (§5.1) | — | Sep 29 | todo | | |
+| 2 | F1 `GlobalId` encoding (§5.1) | — | Sep 29 | done | | |
 | 3 | Schema v3 (§4.2–4.3, §5.4) | 2 | Sep 29 | todo | | |
 | 4 | F2 `traverse_impact` (§5.2) | 3 | Sep 29 | todo | | |
 | 5 | Normalizer, route matcher, sensor framework, provider fixes (§4.5, §6.1–6.2, §7.4) | 3 | Sep 29 | todo | | |
@@ -48,10 +48,10 @@ Never cut: envelope, scoped coverage, `get_service`, `resolve_evidence`.
 - [x] `tests/fixtures/contracts/ground_truth.yaml`: endpoints, `Binds` with provenance, `ReadsField`, unresolved, entry points, per-scenario expected result
 
 ### PR 2 — F1 GlobalId encoding
-- [ ] `GlobalId::new` percent-encodes `%` and `:` in path and name; `parse` requires 5 segments; accessors decode
-- [ ] Hand-built/split ids routed through `GlobalId` (`repo_id.rs` splits, `repo_id.rs:280`, `global_id_str`, `rg` sweep of federation + mcp)
-- [ ] `is_known_node_kind` → `NodeType::all()`
-- [ ] Proptest round-trip (`:`, `%`, `::`, `%3A`); regression for `GET /orders/:id`
+- [x] `GlobalId::new` percent-encodes `%` and `:` in path and name; `parse` requires 5 segments; accessors decode
+- [x] Hand-built/split ids routed through `GlobalId` (`repo_id.rs` splits, `repo_id.rs:280`, `global_id_str`, `rg` sweep of federation + mcp)
+- [x] `is_known_node_kind` → `NodeType::all()`
+- [x] Proptest round-trip (`:`, `%`, `::`, `%3A`); regression for `GET /orders/:id`
 
 ### PR 3 — Schema v3
 - [ ] `NodeType`: `HttpClientCall`, `Field`, `FieldRef`; `EdgeType`: `SendsHttp`, `RequestSchema`, `ResponseSchema`, `PayloadSchema`, `HasField`, `ReadsField`, `ReadsFrom`, `Binds`; `all()` and `is_indexed()` updated
@@ -221,3 +221,4 @@ Other gates:
 | 2026-09-28 | Revision 2 (silo-breaking vision): scoped `NoKnownImpact`; services incl. monorepos as the join unit; `list_services` / `get_service` + `used_by` in 0.9; CODEOWNERS and `operationId` as stretch; live slice first |
 | 2026-09-28 | Implementation-ready rewrite, checked against v0.8.0 code: config-free sensors + `ContractIndex`; bincode compatibility via version bumps only; sensor phases and self-replacing output; `IndexMode::Snapshot`; LAIN-owned mirrors; canonical digest; recorded `join_config`; contract-tool infra (`ContractToolEntry`, schemas on `ToolDef`); bound-identifier field tracking with escapes; consumer-side diff; `ChangedWithoutSchema`; nested-field rule; full signatures, limits, error codes; decisions replace open questions |
 | 2026-09-28 | PR 1 done: `scripts/contracts-fixture.sh`, ground truth, scenario tags; review clean after one fix round |
+| 2026-09-29 | PR 2 done: F1 `GlobalId` percent-encoding; review clean after one fix round |
