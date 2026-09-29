@@ -1558,7 +1558,6 @@ async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
 }
 
 async fn get_order_label(Path(id): Path<String>) -> String {
-    // Handler body changed in s21: trailing suffix differs from base.
     format!("label-{id}-v2")
 }
 
@@ -2046,20 +2045,24 @@ import cron from "node-cron";
 const app = express();
 const PORT = 3001;
 
-export async function buildMonthlyReport(id: string): Promise<unknown> {
+async function buildMonthlyReport(id: string): Promise<unknown> {
   const res = await fetch(`${process.env.BILLING_URL}/invoices/${id}`);
   const invoice = await res.json();
   return invoice;
 }
 
-app.get("/reports/monthly", async (_req, res) => {
+async function getMonthlyReport(_req: express.Request, res: express.Response): Promise<void> {
   const report = await buildMonthlyReport("inv-1");
   res.json(report);
-});
+}
 
-cron.schedule("0 0 1 * *", () => {
-  void buildMonthlyReport("inv-1");
-});
+async function scheduledMonthlyReport(): Promise<void> {
+  await buildMonthlyReport("inv-1");
+}
+
+app.get("/reports/monthly", getMonthlyReport);
+
+cron.schedule("0 0 1 * *", scheduledMonthlyReport);
 
 app.listen(PORT);
 EOF
@@ -2182,7 +2185,7 @@ services:
   - name: orders
     repo: orders
     paths: []
-    env: [ORDERS_URL, ORDERS_BASE_URL]
+    env: [ORDERS_URL]
   - name: billing
     repo: billing
     paths: []

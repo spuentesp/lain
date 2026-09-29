@@ -207,8 +207,11 @@ external:
 #
 # Per service, every entry point §6.6 must tag. `kind` follows the
 # `EntryKind` enum (`HttpHandler | Scheduled | Cli | Main`). Reports
-# has both a `Scheduled` (node-cron `cron.schedule(...)`) and an
-# `HttpHandler` reaching `buildMonthlyReport` — §15.2 scenario 17.
+# has both a `Scheduled` (`scheduledMonthlyReport`, reached via
+# `cron.schedule(...)`) and an `HttpHandler` (`getMonthlyReport`,
+# reached via `app.get("/reports/monthly", ...)`); both call
+# `buildMonthlyReport`, the actual consumer of billing — §15.2
+# scenario 17.
 
 entry_points:
   orders:
@@ -219,8 +222,8 @@ entry_points:
   billing:
     - { kind: HttpHandler, name: get_invoice, route: "http:GET /invoices/{}" }
   reports:
-    - { kind: HttpHandler, name: getMonthlyReport, route: "http:GET /reports/monthly" }
-    - { kind: Scheduled,   name: buildMonthlyReport, schedule: "0 0 1 * *" }
+    - { kind: HttpHandler, name: getMonthlyReport,         route: "http:GET /reports/monthly" }
+    - { kind: Scheduled,   name: scheduledMonthlyReport,   schedule: "0 0 1 * *" }
   shipping:
     - { kind: HttpHandler, name: get_shipping, route: "http:GET /shipping/{}" }
   inventory:
@@ -318,6 +321,9 @@ scenarios:
       exclude: [reports]
     tool: diff_contracts
     expected:
+      impact:
+        class: NoKnownImpact
+        reasons: []
       changes: []   # nothing bound, so no change is reported
       compatible_changes: 0
       coverage:
@@ -590,8 +596,8 @@ scenarios:
       consumer_services:
         - service: reports
           used_by:
-            - { kind: scheduled, name: buildMonthlyReport }
-            - { kind: http_handler, name: buildMonthlyReport, route: "http:GET /reports/monthly" }
+            - { kind: http_handler, name: getMonthlyReport,       route: "http:GET /reports/monthly" }
+            - { kind: scheduled,    name: scheduledMonthlyReport, schedule: "0 0 1 * *" }
           used_by_truncated: false
 
   "18":
