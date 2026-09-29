@@ -167,9 +167,9 @@ impl ContractFederationConfig {
             let key_str = match k.as_str() {
                 Some(s) => s,
                 None => {
-                    return Err(LainError::Config(format!(
-                        "non-string top-level key in contract config"
-                    )))
+                    return Err(LainError::Config(
+                        "non-string top-level key in contract config".to_string(),
+                    ))
                 }
             };
             match key_str {

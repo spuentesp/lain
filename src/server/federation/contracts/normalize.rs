@@ -95,7 +95,7 @@ fn extract_host(parts: &[UrlPart]) -> (HostPart, Vec<UrlPart>) {
     if let UrlPart::Literal(s) = &parts[scheme_idx] {
         let scheme_pos = s.find("://").expect("contains ://");
         let after = &s[scheme_pos + 3..];
-        if let Some(pos) = after.find(|c: char| c == '/' || c == '?' || c == '#') {
+        if let Some(pos) = after.find(['/', '?', '#']) {
             host_chunks.push(UrlPart::Literal(after[..pos].to_string()));
             delim = Some((scheme_idx, scheme_pos + 3 + pos));
         } else {
@@ -107,7 +107,7 @@ fn extract_host(parts: &[UrlPart]) -> (HostPart, Vec<UrlPart>) {
         for (i, p) in parts.iter().enumerate().skip(scheme_idx + 1) {
             match p {
                 UrlPart::Literal(s) => {
-                    if let Some(pos) = s.find(|c: char| c == '/' || c == '?' || c == '#') {
+                    if let Some(pos) = s.find(['/', '?', '#']) {
                         host_chunks.push(UrlPart::Literal(s[..pos].to_string()));
                         delim = Some((i, pos));
                         break;
@@ -193,7 +193,7 @@ fn cut_query_or_fragment(parts: Vec<UrlPart>) -> Vec<UrlPart> {
         }
         match part {
             UrlPart::Literal(s) => {
-                if let Some(pos) = s.find(|c: char| c == '?' || c == '#') {
+                if let Some(pos) = s.find(['?', '#']) {
                     let head = &s[..pos];
                     if !head.is_empty() {
                         out.push(UrlPart::Literal(head.to_string()));

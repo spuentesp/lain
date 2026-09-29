@@ -204,12 +204,12 @@ impl ContractJoiner {
         for s in &config.services {
             let name = ServiceName(s.name.clone());
             let mut endpoint_ids: Vec<EndpointId> = Vec::new();
-            for ((svc, key), _) in &endpoint_table {
+            for (svc, key) in endpoint_table.keys() {
                 if svc == &name {
                     endpoint_ids.push((svc.clone(), key.clone()));
                 }
             }
-            endpoint_ids.sort_by(|a, b| endpoint_id_string(a).cmp(&endpoint_id_string(b)));
+            endpoint_ids.sort_by_key(endpoint_id_string);
             services.insert(
                 name.clone(),
                 ServiceInfo {

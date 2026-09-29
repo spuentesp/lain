@@ -18,7 +18,7 @@ use lain::federation::contracts::index::ContractIndex;
 use lain::federation::federated_index::FederatedIndex;
 use lain::federation::graph_backend::PetgraphBackend;
 use lain::federation::repo_id::RepoId;
-use lain::federation::repo_source::{RepoSource, ShallowCloneSource};
+use lain::federation::repo_source::RepoSource;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;

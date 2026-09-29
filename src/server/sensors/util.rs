@@ -336,7 +336,7 @@ mod tests {
             &ns,
         )
         .with_location_in(10, 20, &ns);
-        g.insert_nodes_batch(&[method.clone()]).unwrap();
+        g.insert_nodes_batch(std::slice::from_ref(&method)).unwrap();
 
         let found = enclosing_symbol(&g, "src/x.rs", 15).expect("a method covers line 15");
         assert_eq!(found.name, "the_method");

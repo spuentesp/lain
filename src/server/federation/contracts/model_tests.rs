@@ -80,7 +80,7 @@ fn every_http_method_variant_roundtrips() {
         HttpMethod::Options,
         HttpMethod::Any,
     ] {
-        let bytes = bincode::serde::encode_to_vec(&m, bincode::config::legacy()).unwrap();
+        let bytes = bincode::serde::encode_to_vec(m, bincode::config::legacy()).unwrap();
         let (decoded, _): (HttpMethod, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
         assert_eq!(decoded, m);
@@ -223,13 +223,13 @@ fn small_types_roundtrip() {
         EntryKind::Cli,
         EntryKind::Main,
     ] {
-        let bytes = bincode::serde::encode_to_vec(&entry, bincode::config::legacy()).unwrap();
+        let bytes = bincode::serde::encode_to_vec(entry, bincode::config::legacy()).unwrap();
         let (decoded, _): (EntryKind, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
         assert_eq!(decoded, entry);
     }
     for dir in [Direction::Request, Direction::Response, Direction::Payload] {
-        let bytes = bincode::serde::encode_to_vec(&dir, bincode::config::legacy()).unwrap();
+        let bytes = bincode::serde::encode_to_vec(dir, bincode::config::legacy()).unwrap();
         let (decoded, _): (Direction, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
         assert_eq!(decoded, dir);

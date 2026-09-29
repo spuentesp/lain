@@ -12,9 +12,9 @@
 //! - `Core`      — read-only, cheap, universally useful. Default.
 //! - `Power`     — composes core ideas for a specific job; still safe.
 //! - `Advanced`  — expensive, low-level, or answers questions the
-//!                 core tools already answer more cheaply.
+//!   core tools already answer more cheaply.
 //! - `Plumbing`  — setup, coordination, server mechanics. Owned by
-//!                 hooks or operators in most sessions.
+//!   hooks or operators in most sessions.
 
 /// The skill packages. `Core` is always advertised; the rest are
 /// opt-in per session (`load_package`) or per process
@@ -890,7 +890,7 @@ mod tests {
             }
             let n = package_tools(*p).len();
             assert!(
-                n >= 3 && n <= 12,
+                (3..=12).contains(&n),
                 "package {} has {n} tools; skills should be 3-12",
                 p.name()
             );

@@ -361,10 +361,7 @@ fn extract_router_prefixes(content: &str, extension: &str) -> BTreeMap<String, S
             // declared inside `scope("/prefix")`. We use the prefix
             // itself as the key so `router_prefix_for_receiver` can
             // match it.
-            out.insert(
-                format!("scope:{}", scope_cap[1].to_string()),
-                scope_cap[1].to_string(),
-            );
+            out.insert(format!("scope:{}", &scope_cap[1]), scope_cap[1].to_string());
         }
     }
 

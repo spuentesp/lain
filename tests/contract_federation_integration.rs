@@ -25,8 +25,6 @@ use tempfile::TempDir;
 mod common;
 use common::git_init_committed;
 
-const INDEX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// Build a workspace fixture with two repos containing one provider
 /// and one consumer node each, plus a `repos.yaml` declaring the
 /// services. The function returns the federation, the tempdir
@@ -268,10 +266,10 @@ async fn projection_order_independence() {
     let (_dir, fed, _o, _b) = build_two_repo_federation().await;
     project_both(&fed).await;
     fed.rejoin_contracts_if_dirty().expect("first rejoin");
-    let before = fed.contract_index().map(|i| i.clone()).unwrap_or_default();
+    let before = fed.contract_index().as_ref().cloned().unwrap_or_default();
     // Second pass: should be a no-op, no dirty flag.
     fed.rejoin_contracts_if_dirty().expect("second rejoin");
-    let after = fed.contract_index().map(|i| i.clone()).unwrap_or_default();
+    let after = fed.contract_index().as_ref().cloned().unwrap_or_default();
     assert_eq!(before.consumers, after.consumers);
     assert_eq!(before.endpoints, after.endpoints);
 }

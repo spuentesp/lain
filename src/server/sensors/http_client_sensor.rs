@@ -793,11 +793,11 @@ fn parts_from_node_inner(
             out
         }
         // TS template-string substitution: `substitution` wraps the
-        // expression in `${…}`. Recurse into the named child (the
-        // expression itself).
+        // expression in `${…}`. Recurse into the first named child
+        // (the expression itself).
         "substitution" | "template_substitution" => {
             let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
+            if let Some(child) = node.named_children(&mut cursor).next() {
                 return parts_from_node_inner(child, src, ctx, enclosing_fn_line);
             }
             Vec::new()
@@ -1008,7 +1008,7 @@ fn template_from_string(s: &str) -> Vec<UrlPart> {
             // Consume up to the matching `}`.
             let mut hole = String::new();
             let mut depth = 1;
-            while let Some(c2) = chars.next() {
+            for c2 in chars.by_ref() {
                 if c2 == '{' {
                     depth += 1;
                 } else if c2 == '}' {
@@ -1082,22 +1082,22 @@ fn host_env_name(text: &str) -> Option<&str> {
         if let Some(end) = rest.find(',') {
             return Some(inner_paren(&rest[..end]));
         }
-        if rest.ends_with(')') {
-            return Some(inner_paren(&rest[..rest.len() - 1]));
+        if let Some(stripped) = rest.strip_suffix(')') {
+            return Some(inner_paren(stripped));
         }
     }
     if let Some(rest) = t.strip_prefix("os.getenv(") {
         if let Some(end) = rest.find(',') {
             return Some(inner_paren(&rest[..end]));
         }
-        if rest.ends_with(')') {
-            return Some(inner_paren(&rest[..rest.len() - 1]));
+        if let Some(stripped) = rest.strip_suffix(')') {
+            return Some(inner_paren(stripped));
         }
     }
     // `process.env.X` / `process.env["X"]`.
     if let Some(rest) = t.strip_prefix("process.env[") {
-        if rest.ends_with(']') {
-            return Some(inner_bracket(&rest[..rest.len() - 1]));
+        if let Some(stripped) = rest.strip_suffix(']') {
+            return Some(inner_bracket(stripped));
         }
     }
     if let Some(rest) = t.strip_prefix("process.env.") {
@@ -1309,11 +1309,13 @@ fn starts_with_slash_expr(node: Node, src: &[u8]) -> bool {
     // `"`, then the literal starts. We've already advanced past `"`;
     // check for `f` prefix in the original.
     let prefix_bytes = raw.as_bytes();
-    if prefix_bytes.len() >= 2 && prefix_bytes[0] == b'f' && matches!(prefix_bytes[1], b'"' | b'\'')
+    if prefix_bytes.len() >= 2
+        && prefix_bytes[0] == b'f'
+        && matches!(prefix_bytes[1], b'"' | b'\'')
+        && prefix_bytes.len() >= 3
+        && prefix_bytes[2] == b'/'
     {
-        if prefix_bytes.len() >= 3 && prefix_bytes[2] == b'/' {
-            return true;
-        }
+        return true;
     }
     false
 }
@@ -1500,10 +1502,7 @@ fn detect_tsjs_call(
             if !starts_with_slash_expr_tsjs(args.first().copied(), src) {
                 return None;
             }
-            let url_arg = match args.first().copied() {
-                Some(a) => a,
-                None => return None,
-            };
+            let url_arg = args.first().copied()?;
             let url_source = text_of(url_arg, src)?;
             let url_expr = truncate_url_expr(&url_source);
             let method = method_from_verb(&verb_text);
@@ -2338,7 +2337,9 @@ requests.Post(\"/b\")
             &ns,
         )
         .with_location_in(5, 10, &ns);
-        graph.insert_nodes_batch(&[handler.clone()]).unwrap();
+        graph
+            .insert_nodes_batch(std::slice::from_ref(&handler))
+            .unwrap();
         let call = HttpClientCall {
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
@@ -2375,7 +2376,9 @@ requests.Post(\"/b\")
             "src/main.py".to_string(),
             &ns,
         );
-        graph.insert_nodes_batch(&[file.clone()]).unwrap();
+        graph
+            .insert_nodes_batch(std::slice::from_ref(&file))
+            .unwrap();
         let call = HttpClientCall {
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
