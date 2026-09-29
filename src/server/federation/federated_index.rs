@@ -628,9 +628,12 @@ impl FederatedIndex {
                             id.as_str(),
                             gid.as_str(),
                         );
-                        let _ = self
-                            .backend
-                            .upsert_node_global(gid.as_str(), kind, path, name);
+                        let _ = self.backend.upsert_node_global(
+                            gid.as_str(),
+                            kind,
+                            &path,
+                            &name,
+                        );
                         placeholder_ids.push(gid.as_str().to_string());
                     }
                 }
