@@ -153,7 +153,7 @@ pub async fn prepare_ready(
     }
     // The shared worker pool can back up under parallel test runs;
     // poll the on-disk record until the state machine settles.
-    let path = snapshot_record_path(&mgr.data_dir(), &id);
+    let path = snapshot_record_path(mgr.data_dir(), &id);
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {id}: {e}"));

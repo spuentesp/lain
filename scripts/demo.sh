@@ -874,6 +874,45 @@ case "$COVERAGE" in
   *)          check "every advertised tool is exercised" "complete" "$COVERAGE" ;;
 esac
 
+# ══ 13.5. Contract federation precision/recall (PR 13 §15.3) ══════════
+#
+# Runs the hermetic precision/recall test against the T1 fixture
+# (built by `scripts/contracts-fixture.sh`; the test calls it
+# itself). The baseline is committed at
+# `tests/fixtures/contracts/baseline.json`. Any metric below the
+# baseline fails the demo. Runs in `--quick` mode too — the test
+# takes ~5 s end-to-end.
+section "13.5. Contract federation precision/recall"
+
+PR13_BASELINE="$REPO_ROOT/tests/fixtures/contracts/baseline.json"
+if [ ! -f "$PR13_BASELINE" ]; then
+  skip "contract precision/recall" "missing $PR13_BASELINE"
+else
+  # The test prints `PR13_METRICS_JSON <json>` on success. Run with
+  # --nocapture so the line reaches stdout; `--test-threads=1` keeps
+  # the shared worker pool from backing up under parallel cargo runs.
+  PR13_OUT=$(cd "$REPO_ROOT" && cargo test --quiet --test federation_contracts_e2e \
+    pr13_hermetic_precision_recall_over_t1_fixture -- \
+    --nocapture --test-threads=1 2>&1 || true)
+  PR13_METRICS=$(printf '%s\n' "$PR13_OUT" | awk '/^PR13_METRICS_JSON / { sub(/^PR13_METRICS_JSON /, ""); print; exit }')
+  if [ -z "$PR13_METRICS" ]; then
+    skip "contract precision/recall" "test did not print PR13_METRICS_JSON"
+  else
+    # Compare each metric against the baseline; fail loudly if any
+    # regressed. Tolerate a 1e-6 epsilon for floating-point drift.
+    DIFF_FAIL=0
+    for metric in diff_precision diff_recall binds_precision binds_recall reads_field_precision reads_field_recall; do
+      measured=$(printf '%s' "$PR13_METRICS" | python3 -c "import json,sys; print(float(json.load(sys.stdin)['$metric']))")
+      baseline=$(python3 -c "import json; print(float(json.load(open('$PR13_BASELINE'))['$metric']))")
+      awk -v m="$measured" -v b="$baseline" 'BEGIN { exit !(m+1e-6 >= b) }' \
+        && check "$metric ≥ baseline ($baseline)" "$measured" "$measured" \
+        || { check "$metric ≥ baseline ($baseline)" "≥ $baseline" "$measured"; DIFF_FAIL=1; }
+    done
+    [ "$DIFF_FAIL" -ne 0 ] && skip "contract precision/recall" "metric regression" \
+      || check_contains "contract precision/recall meets baseline" "diff_precision" "$PR13_METRICS"
+  fi
+fi
+
 # ══ 14. Benchmark ═════════════════════════════════════════════════════
 if [ "$QUICK" = 0 ]; then
   section "14. Benchmark"

@@ -508,3 +508,296 @@ fn golden_one_test_per_error_code() {
         assert!(result.is_ok(), "{code} must validate: {result:?}");
     }
 }
+
+// ─── Per-tool `data` schema validation (§15.3) ───────────────────────
+//
+// Each tool's hand-written `*.out.json` schema pins the shape of
+// the `data` field in the success envelope. Loading them with
+// `include_str!` so a schema change forces a recompile. The data
+// payloads below are the *minimum required* — extra optional
+// fields are fine; the schemas declare them via the relevant
+// `additionalProperties: false` rules.
+
+fn data_schema_for(tool: &str) -> &'static Validator {
+    fn compile(json: &'static str) -> &'static Validator {
+        let value: Value = serde_json::from_str(json).expect("per-tool data schema");
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft7)
+            .build(&value)
+            .expect("compile per-tool data schema");
+        // Leak so the returned reference is 'static; this only
+        // happens once per tool per test binary, so the build cost
+        // is paid at most once.
+        Box::leak(Box::new(validator))
+    }
+    match tool {
+        "list_services" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/list_services.out.json"
+        )),
+        "get_service" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/get_service.out.json"
+        )),
+        "prepare_snapshot" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/prepare_snapshot.out.json"
+        )),
+        "get_snapshot" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/get_snapshot.out.json"
+        )),
+        "list_contracts" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/list_contracts.out.json"
+        )),
+        "get_contract" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/get_contract.out.json"
+        )),
+        "list_unresolved" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/list_unresolved.out.json"
+        )),
+        "check_binding" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/check_binding.out.json"
+        )),
+        "diff_contracts" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/diff_contracts.out.json"
+        )),
+        "trace_impact" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/trace_impact.out.json"
+        )),
+        "get_coverage" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/get_coverage.out.json"
+        )),
+        "resolve_evidence" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/resolve_evidence.out.json"
+        )),
+        "read_source" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/read_source.out.json"
+        )),
+        other => panic!("no per-tool data schema for tool `{other}`"),
+    }
+}
+
+fn assert_data_matches_schema(tool: &str, data: &Value) {
+    let result = data_schema_for(tool).validate(data);
+    assert!(
+        result.is_ok(),
+        "{tool} data must validate against its per-tool `*.out.json` schema: {result:?}"
+    );
+}
+
+#[test]
+fn golden_list_services_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "list_services",
+        &json!({
+            "items": [
+                {"service": "orders", "repo": "orders", "paths": ["src"], "endpoints": 4, "consumer_services": 1, "unresolved_inbound": 0}
+            ],
+            "scope": {"reviewed": [], "unreviewed": [], "configured_only": true}
+        }),
+    );
+}
+
+#[test]
+fn golden_get_service_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "get_service",
+        &json!({
+            "service": "orders",
+            "repo": "orders",
+            "paths": ["src"],
+            "provider_reviewed": true,
+            "endpoints": ["http:GET /api/orders/{}"],
+            "consumers": [],
+            "unresolved_candidates": [],
+            "scope": {"reviewed": [], "unreviewed": [], "configured_only": true}
+        }),
+    );
+}
+
+#[test]
+fn golden_prepare_snapshot_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "prepare_snapshot",
+        &json!({
+            "snapshot": "snap_abc",
+            "state": "ready",
+            "repos": [
+                {"repo": "orders", "state": "cached", "commit": "abc"}
+            ]
+        }),
+    );
+}
+
+#[test]
+fn golden_get_snapshot_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "get_snapshot",
+        &json!({
+            "snapshot": "snap_abc",
+            "state": "ready",
+            "repos": [
+                {"repo": "orders", "state": "cached", "commit": "abc"}
+            ]
+        }),
+    );
+}
+
+#[test]
+fn golden_list_contracts_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "list_contracts",
+        &json!({
+            "items": [
+                {
+                    "endpoint": {"service": "orders", "key": "http:GET /api/orders/{}"},
+                    "providers": [
+                        {"id": "orders:HttpRoute:get_order:1", "repo": "orders", "commit": "abc", "path": "src/main.rs", "line": 1, "text": "fn get_order()"}
+                    ],
+                    "has_schema": true,
+                    "bound_consumers": 1
+                }
+            ],
+            "scope": {"reviewed": [], "unreviewed": [], "configured_only": true}
+        }),
+    );
+}
+
+#[test]
+fn golden_get_contract_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "get_contract",
+        &json!({
+            "items": [
+                {
+                    "endpoint": {"service": "orders", "key": "http:GET /api/orders/{}"},
+                    "providers": [
+                        {"id": "orders:HttpRoute:get_order:1", "repo": "orders", "commit": "abc", "path": "src/main.rs", "line": 1, "text": "fn get_order()"}
+                    ],
+                    "schemas": [
+                        {
+                            "direction": "response",
+                            "fields": [
+                                {"json_path": "customer_id", "ty": "string", "required": true, "nullable": false, "enum_values": null,
+                                 "ref": {"id": "orders:Field:customer_id:5", "repo": "orders", "commit": "abc", "path": "src/main.rs", "line": 5, "text": "customer_id"}}
+                            ]
+                        }
+                    ],
+                    "consumers": []
+                }
+            ],
+            "scope": {"reviewed": [], "unreviewed": [], "configured_only": true}
+        }),
+    );
+}
+
+#[test]
+fn golden_list_unresolved_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "list_unresolved",
+        &json!({
+            "items": [
+                {
+                    "consumer": {"id": "billing:HttpClientCall:src/main.py:build_invoice:21", "repo": "billing", "commit": "abc", "path": "src/main.py", "line": 21, "text": "requests.get(BASE + '/v1/api/orders/{}')"},
+                    "url_expr": "f'{BASE}/v1/api/orders/{order_id}'",
+                    "method": "GET",
+                    "reason": "no_match",
+                    "target_service": "orders"
+                }
+            ],
+            "ambiguous": [],
+            "scope": {"reviewed": [], "unreviewed": [], "configured_only": true}
+        }),
+    );
+}
+
+#[test]
+fn golden_check_binding_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "check_binding",
+        &json!({
+            "valid": true,
+            "reasons": [],
+            "method_match": true,
+            "template_match": "exact",
+            "bindings_entry": "- consumer: { repo: billing, path: src/main.py, symbol: build_invoice, key: GET /api/orders/{} }\n  provider: { service: orders, key: GET /api/orders/{} }\n"
+        }),
+    );
+}
+
+#[test]
+fn golden_diff_contracts_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "diff_contracts",
+        &json!({
+            "changes": [],
+            "compatible_changes": 0,
+            "coverage": {
+                "complete": true,
+                "scope": {"reviewed": [], "unreviewed": [], "configured_only": true},
+                "repos": [],
+                "unresolved_consumers": [],
+                "ambiguous": [],
+                "unnormalized": [],
+                "external": [],
+                "stale_bindings": 0,
+                "schemaless_endpoints": []
+            }
+        }),
+    );
+}
+
+#[test]
+fn golden_trace_impact_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "trace_impact",
+        &json!({
+            "paths": [],
+            "truncated": false,
+            "scope": {"reviewed": [], "unreviewed": [], "configured_only": true}
+        }),
+    );
+}
+
+#[test]
+fn golden_get_coverage_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "get_coverage",
+        &json!({
+            "complete": true,
+            "scope": {"reviewed": [], "unreviewed": [], "configured_only": true},
+            "repos": [],
+            "unresolved_consumers": [],
+            "ambiguous": [],
+            "unnormalized": [],
+            "external": [],
+            "stale_bindings": 0,
+            "schemaless_endpoints": []
+        }),
+    );
+}
+
+#[test]
+fn golden_resolve_evidence_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "resolve_evidence",
+        &json!({
+            "items": [
+                {"ref": "orders:Function:get_order:1", "exists": true}
+            ]
+        }),
+    );
+}
+
+#[test]
+fn golden_read_source_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "read_source",
+        &json!({
+            "commit": "abc",
+            "path": "src/main.py",
+            "start": 0,
+            "end": 1,
+            "total_lines": 10,
+            "text": "def build_invoice(): pass\n",
+            "source": "snapshot"
+        }),
+    );
+}

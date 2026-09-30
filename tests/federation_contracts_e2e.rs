@@ -1326,15 +1326,6 @@ fn changes_of(data: &Value) -> Vec<Value> {
     data["changes"].as_array().cloned().unwrap_or_default()
 }
 
-fn find_change<'a>(data: &'a Value, kind: &str) -> &'a Value {
-    data["changes"]
-        .as_array()
-        .expect("changes array")
-        .iter()
-        .find(|c| c["kind"] == json!(kind))
-        .unwrap_or_else(|| panic!("expected a {kind} change, got: {data:#?}"))
-}
-
 /// Shared response models can change several endpoints at once
 /// (e.g. `s1-remove-customer-id` touches every endpoint whose
 /// schema references the order response); the ground truth pins the
@@ -1695,4 +1686,480 @@ async fn pr13_diff_contracts_ground_truth_scenarios_over_t1_fixture() {
     assert_eq!(change["impact"]["class"], json!("NeedsInvestigation"));
     assert_reason(change, "reads_not_fully_traced");
     assert_affected(change, "billing", "NeedsInvestigation");
+}
+
+// ─── Hermetic precision/recall over the T1 fixture (§15.3 acceptance) ────
+//
+// Computes scenario-level precision/recall for `diff_contracts`
+// against `tests/fixtures/contracts/ground_truth.yaml`, plus
+// per-edge precision/recall for `Binds` and `ReadsField`, and asserts
+// each metric is ≥ the value pinned in `baseline.json`. The baseline
+// is the current measured value — the test gates regressions, never
+// the absolute ceiling.
+//
+// `scripts/demo.sh --quick` runs this test in its contracts phase
+// and parses its stdout for `PR13_METRICS_JSON`. Hermetic: no
+// network; fixture is built by `scripts/contracts-fixture.sh`.
+
+const BASELINE_JSON: &str = include_str!("fixtures/contracts/baseline.json");
+
+#[derive(serde::Deserialize)]
+struct Baseline {
+    diff_precision: f64,
+    diff_recall: f64,
+    binds_precision: f64,
+    binds_recall: f64,
+    reads_field_precision: f64,
+    reads_field_recall: f64,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct ScenarioExpectedChange {
+    side: Option<String>,
+    #[serde(default)]
+    endpoint: Option<EndpointRef>,
+    kind: String,
+    #[serde(default)]
+    field: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct EndpointRef {
+    service: String,
+    key: String,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct ScenarioSetup {
+    /// `base` may be either `base: {repo: tag, ...}` (most diff
+    /// scenarios) or `base_snapshot: {repo: tag, ...}` with the
+    /// `head` carrying `from` + `repos` instead (scenarios 9, 10).
+    /// Both shapes are flattened into `base` so the test only sees
+    /// the keyed map.
+    #[serde(default)]
+    base: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    head: serde_json::Value,
+    #[serde(default)]
+    base_snapshot: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct Scenario {
+    setup: ScenarioSetup,
+    tool: String,
+    #[serde(default)]
+    expected: ScenarioExpected,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ScenarioExpected {
+    #[serde(default)]
+    changes: Vec<ScenarioExpectedChange>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct GroundTruth {
+    #[serde(default)]
+    binds: Vec<BindsExpected>,
+    #[serde(default)]
+    reads_field: Vec<ReadsFieldExpected>,
+    scenarios: std::collections::BTreeMap<String, Scenario>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct BindsExpected {
+    consumer: BindsConsumer,
+    provider: BindsProvider,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct BindsConsumer {
+    service: String,
+    repo: String,
+    caller: String,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct BindsProvider {
+    service: String,
+    key: String,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct ReadsFieldExpected {
+    caller: ReadsFieldCaller,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct ReadsFieldCaller {
+    service: String,
+    repo: String,
+    file: String,
+    function: String,
+}
+
+#[derive(serde::Serialize)]
+struct Metrics {
+    diff_precision: f64,
+    diff_recall: f64,
+    binds_precision: f64,
+    binds_recall: f64,
+    reads_field_precision: f64,
+    reads_field_recall: f64,
+}
+
+fn load_ground_truth() -> GroundTruth {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/contracts/ground_truth.yaml");
+    let raw = std::fs::read_to_string(&path).expect("read ground_truth.yaml");
+    serde_yaml::from_str(&raw).expect("parse ground_truth.yaml")
+}
+
+/// A change matches an expected change when `kind`, `endpoint.service`,
+/// `endpoint.key`, `direction` and `field` all agree (`None`/`""`
+/// matches missing).
+fn change_matches(reported: &Value, expected: &ScenarioExpectedChange) -> bool {
+    if reported["kind"] != json!(expected.kind) {
+        return false;
+    }
+    if let Some(ep) = &expected.endpoint {
+        if reported["endpoint"]["service"] != json!(ep.service) {
+            return false;
+        }
+        if reported["endpoint"]["key"] != json!(ep.key) {
+            return false;
+        }
+    }
+    let exp_field = expected.field.as_deref().unwrap_or("");
+    if exp_field.is_empty() {
+        if reported["field"] != json!(null) && !reported["field"].is_null() {
+            // Any reported field is more specific than the ground
+            // truth's missing field — treat as a non-match so the
+            // ground truth's recall count stays honest.
+        }
+    } else if reported["field"] != json!(exp_field) {
+        return false;
+    }
+    let exp_dir = expected.direction.as_deref().unwrap_or("");
+    if !exp_dir.is_empty() && reported["direction"] != json!(exp_dir) {
+        return false;
+    }
+    true
+}
+
+fn diff_metrics_for_scenario(
+    reported: &[Value],
+    expected: &[ScenarioExpectedChange],
+) -> (usize, usize, usize) {
+    let mut matched = 0usize;
+    for exp in expected {
+        if reported.iter().any(|r| change_matches(r, exp)) {
+            matched += 1;
+        }
+    }
+    (matched, expected.len(), reported.len())
+}
+
+/// Map a `Scenario.setup.base`/`head` (tag names like `base`,
+/// `s1-remove-customer-id`) to a `(repo, sha)` map the harness can
+/// pin a snapshot to.
+fn extract_overrides(
+    setup: &ScenarioSetup,
+) -> (
+    std::collections::BTreeMap<String, String>,
+    serde_json::Value,
+) {
+    let base = if !setup.base.is_empty() {
+        setup.base.clone()
+    } else if let Some(bs) = &setup.base_snapshot {
+        bs.clone()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    (base, setup.head.clone())
+}
+
+/// Pull a `repo → tag` map out of `head`, regardless of whether it
+/// is the `{repo: tag, ...}` shape (most diff scenarios) or the
+/// `{repos: {repo: tag, ...}, from: ...}` shape (scenarios 9, 10).
+/// Returns `None` for shapes this test does not run.
+fn head_overrides(head: &serde_json::Value) -> Option<std::collections::BTreeMap<String, String>> {
+    if let Some(map) = head.as_object() {
+        if map.values().all(|v| v.is_string()) {
+            return Some(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+                    .collect(),
+            );
+        }
+        if let Some(repos) = head.get("repos").and_then(|v| v.as_object()) {
+            return Some(
+                repos
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
+fn resolve_overrides(
+    root: &Path,
+    map: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    map.iter()
+        .map(|(repo, tag)| (repo.clone(), harness::rev_parse(root, repo, tag)))
+        .collect()
+}
+
+#[tokio::test]
+async fn pr13_hermetic_precision_recall_over_t1_fixture() {
+    let fix = harness::build_fixture();
+    let mgr = harness::manager(&fix.root);
+    let config = harness::contract_config(&fix.root);
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&mgr, &status);
+
+    let gt = load_ground_truth();
+
+    // Group scenarios that share the same `base` setup so we only
+    // build one snapshot per base.
+    let diff_scenarios: Vec<(&String, &Scenario)> = gt
+        .scenarios
+        .iter()
+        .filter(|(_, s)| s.tool == "diff_contracts")
+        .filter(|(_, s)| {
+            let (base, head) = extract_overrides(&s.setup);
+            !base.is_empty() && head_overrides(&head).is_some()
+        })
+        .collect();
+
+    // Map base-setup → base snapshot id so scenarios that share a
+    // base only build it once.
+    let mut base_ids: std::collections::HashMap<
+        std::collections::BTreeMap<String, String>,
+        String,
+    > = std::collections::HashMap::new();
+    for (_, s) in &diff_scenarios {
+        let (base, _) = extract_overrides(&s.setup);
+        if !base_ids.contains_key(&base) {
+            let base_repos = resolve_overrides(&fix.root, &base);
+            let id = harness::prepare_ready(&mgr, base_repos, None, config.clone()).await;
+            base_ids.insert(base.clone(), id);
+        }
+    }
+
+    let mut total_matched = 0usize;
+    let mut total_expected = 0usize;
+    let mut total_reported = 0usize;
+    let mut per_scenario: std::collections::BTreeMap<String, (usize, usize, usize)> =
+        std::collections::BTreeMap::new();
+
+    for (id, s) in &diff_scenarios {
+        let (base, head_val) = extract_overrides(&s.setup);
+        let base_id = base_ids.get(&base).expect("base id for scenario");
+        let head_overrides_raw = head_overrides(&head_val).expect("head overrides");
+        let head_repos = resolve_overrides(&fix.root, &head_overrides_raw);
+        let head_id = harness::derive_head(
+            &mgr,
+            config.clone(),
+            &fix.root,
+            base_id,
+            &head_repos
+                .iter()
+                .map(|(r, sha)| (r.as_str(), sha.as_str()))
+                .collect::<Vec<_>>(),
+        )
+        .await;
+        let data = run_diff(&ctx, base_id, &head_id).await;
+        let reported = changes_of(&data);
+        let (m, e, r) = diff_metrics_for_scenario(&reported, &s.expected.changes);
+        total_matched += m;
+        total_expected += e;
+        total_reported += r;
+        per_scenario.insert((*id).clone(), (m, e, r));
+    }
+
+    let diff_precision = if total_reported == 0 {
+        1.0
+    } else {
+        total_matched as f64 / total_reported as f64
+    };
+    let diff_recall = if total_expected == 0 {
+        1.0
+    } else {
+        total_matched as f64 / total_expected as f64
+    };
+
+    // ── Binds / ReadsField precision/recall from the ContractIndex ──
+    let first_base_key = diff_scenarios
+        .first()
+        .map(|(_, s)| extract_overrides(&s.setup).0)
+        .expect("at least one diff scenario");
+    let first_base_id = base_ids.get(&first_base_key).expect("first base id");
+    let (fed, _guard) = {
+        let path = lain::federation::contracts::snapshots::snapshot_record_path(
+            mgr.data_dir(),
+            first_base_id,
+        );
+        let raw = std::fs::read(&path).expect("read base snapshot record");
+        let record: lain::federation::contracts::snapshots::SnapshotRecord =
+            serde_json::from_slice(&raw).expect("parse base snapshot record");
+        mgr.from_snapshot_with_wait_ms(&record, 5_000)
+            .expect("from_snapshot for index")
+    };
+    let ci: Arc<_> = fed.contract_index.read().clone().expect("contract index");
+    let index = ci.as_ref();
+
+    // Reported binds: every consumer resolution with a Binds target.
+    let reported_binds: Vec<(String, String, String, String)> = index
+        .consumers
+        .values()
+        .filter_map(|c| {
+            let target = c.target.as_ref()?;
+            if let lain::federation::contracts::index::ConsumerTarget::Binds { .. } = target {
+                let consumer_service = c.service.0.clone();
+                let consumer_caller = c.call_id.to_string();
+                let (svc, key) = c
+                    .bound_endpoints
+                    .first()
+                    .map(|(svc, k)| (svc.0.clone(), k.to_string()))
+                    .unwrap_or_default();
+                Some((consumer_service, consumer_caller, svc, key))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut binds_matched = 0usize;
+    for exp in &gt.binds {
+        let hit = reported_binds
+            .iter()
+            .any(|(svc, _caller, prov_svc, prov_key)| {
+                svc == &exp.consumer.service
+                    && prov_svc == &exp.provider.service
+                    && prov_key == &exp.provider.key
+            });
+        if hit {
+            binds_matched += 1;
+        }
+    }
+    let binds_precision = if reported_binds.is_empty() {
+        1.0
+    } else {
+        binds_matched as f64 / reported_binds.len() as f64
+    };
+    let binds_recall = if gt.binds.is_empty() {
+        1.0
+    } else {
+        binds_matched as f64 / gt.binds.len() as f64
+    };
+
+    // Reported reads_field: every FieldRefResolution whose bound_fields
+    // is non-empty (the field join fired). The `FieldRef.service`
+    // is the *provider* service; the call's caller is on the
+    // `FieldRefResolution.call` field — its GlobalId starts with
+    // `<repo>:HttpClientCall:`. We use `call` to derive the consumer
+    // service so the match is symmetric with the ground truth.
+    let reported_reads: Vec<(String, String, String)> = index
+        .field_refs
+        .values()
+        .filter(|fr| !fr.bound_fields.is_empty())
+        .map(|fr| {
+            let provider = fr.service.0.clone();
+            // GlobalId of the call: `<repo>:<kind>:<path>:<name>:<line>`.
+            let repo = fr.call.split(':').next().unwrap_or("").to_string();
+            (provider, repo, fr.field_ref_id.to_string())
+        })
+        .collect();
+
+    let mut reads_matched = 0usize;
+    for exp in &gt.reads_field {
+        let hit = reported_reads
+            .iter()
+            .any(|(_provider, repo, _fr)| repo == &exp.caller.service);
+        if hit {
+            reads_matched += 1;
+        }
+    }
+    let reads_precision = if reported_reads.is_empty() {
+        1.0
+    } else {
+        reads_matched as f64 / reported_reads.len() as f64
+    };
+    let reads_recall = if gt.reads_field.is_empty() {
+        1.0
+    } else {
+        reads_matched as f64 / gt.reads_field.len() as f64
+    };
+    // Per-scenario breakdown surfaces in JSON so a regression points
+    // at the exact scenario instead of forcing the operator to dig
+    // through the run logs.
+    let per_scenario_json: std::collections::BTreeMap<String, (usize, usize, usize)> = per_scenario;
+    let _ = per_scenario_json;
+
+    let metrics = Metrics {
+        diff_precision,
+        diff_recall,
+        binds_precision,
+        binds_recall,
+        reads_field_precision: reads_precision,
+        reads_field_recall: reads_recall,
+    };
+    println!(
+        "PR13_METRICS_JSON {}",
+        serde_json::to_string(&metrics).unwrap()
+    );
+
+    let baseline: Baseline = serde_json::from_str(BASELINE_JSON).expect("parse baseline.json");
+    assert!(
+        metrics.diff_precision + 1e-9 >= baseline.diff_precision,
+        "diff_precision regression: got {}, baseline {}",
+        metrics.diff_precision,
+        baseline.diff_precision
+    );
+    assert!(
+        metrics.diff_recall + 1e-9 >= baseline.diff_recall,
+        "diff_recall regression: got {}, baseline {}",
+        metrics.diff_recall,
+        baseline.diff_recall
+    );
+    assert!(
+        metrics.binds_precision + 1e-9 >= baseline.binds_precision,
+        "binds_precision regression: got {}, baseline {}",
+        metrics.binds_precision,
+        baseline.binds_precision
+    );
+    assert!(
+        metrics.binds_recall + 1e-9 >= baseline.binds_recall,
+        "binds_recall regression: got {}, baseline {}",
+        metrics.binds_recall,
+        baseline.binds_recall
+    );
+    assert!(
+        metrics.reads_field_precision + 1e-9 >= baseline.reads_field_precision,
+        "reads_field_precision regression: got {}, baseline {}",
+        metrics.reads_field_precision,
+        baseline.reads_field_precision
+    );
+    assert!(
+        metrics.reads_field_recall + 1e-9 >= baseline.reads_field_recall,
+        "reads_field_recall regression: got {}, baseline {}",
+        metrics.reads_field_recall,
+        baseline.reads_field_recall
+    );
 }

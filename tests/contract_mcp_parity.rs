@@ -209,3 +209,49 @@ async fn service_name_display_matches_label() {
     let s = ServiceName("orders".to_string());
     assert_eq!(format!("{s}"), "orders");
 }
+
+// ─── §15.3 byte-parity: `diff_contracts` over the same snapshot pair ───
+//
+// `diff_contracts` returns its `changes` array in the §12 sort
+// order — `(side, service, key, kind, direction, field)` — which
+// is the only stable order between two calls. Two back-to-back
+// invocations on the same snapshot pair must therefore produce
+// byte-identical `data` payloads (the `meta` block is stripped —
+// `elapsed_ms` legitimately differs between calls).
+
+#[path = "support/contracts_snapshot_harness.rs"]
+mod snap_harness;
+
+#[tokio::test]
+async fn stdio_and_http_yield_byte_identical_data_for_diff_contracts() {
+    use lain::server::mcp::contract_tools::analysis::diff_contracts_handle;
+
+    let fix = snap_harness::build_fixture();
+    let mgr = snap_harness::manager(&fix.root);
+    let config = snap_harness::contract_config(&fix.root);
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = snap_harness::snapshot_ctx(&mgr, &status);
+
+    // Base = orders at `base`; head = orders at `s1-remove-customer-id`.
+    let base_repos = snap_harness::all_repos_at(&fix.root, "base");
+    let base_id = snap_harness::prepare_ready(&mgr, base_repos, None, config.clone()).await;
+    let head_id = snap_harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("orders", "s1-remove-customer-id")],
+    )
+    .await;
+
+    let args = json!({"base": base_id, "head": head_id, "cap": 100});
+    let a = diff_contracts_handle(&ctx, args.clone()).await.unwrap();
+    let b = diff_contracts_handle(&ctx, args).await.unwrap();
+
+    let a_bytes = canonical_bytes(&strip_meta(&a.structured));
+    let b_bytes = canonical_bytes(&strip_meta(&b.structured));
+    assert_eq!(
+        a_bytes, b_bytes,
+        "diff_contracts byte-parity on the same snapshot pair"
+    );
+}
