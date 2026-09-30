@@ -24,6 +24,10 @@ pub struct FederationHandle {
     pub(crate) federation_port: Option<u16>,
     pub(crate) federation_bind: Option<IpAddr>,
     pub(crate) repos_yaml: Option<PathBuf>,
+    /// Workspace this federation was loaded scoped to (`lain server
+    /// --workspace <name>` or `auto`). Hot reload re-scopes membership to
+    /// this workspace's members; `None` means every repo in `repos.yaml`.
+    workspace_scope: RwLock<Option<String>>,
 }
 
 impl FederationHandle {
@@ -42,6 +46,7 @@ impl FederationHandle {
             federation_port,
             federation_bind,
             repos_yaml,
+            workspace_scope: RwLock::new(None),
         }
     }
 
@@ -273,6 +278,18 @@ impl FederationHandle {
     /// synchronization beyond the rwlock's own barriers.
     pub fn workspaces_handle(&self) -> Option<Arc<RwLock<WorkspacesFile>>> {
         self.federation_workspaces.as_ref().map(Arc::clone)
+    }
+
+    /// Record which workspace this federation serves. Called once at
+    /// startup with the name `--workspace` resolved to; `None` (the
+    /// default) means the server serves every repo in `repos.yaml`.
+    pub fn set_workspace_scope(&self, scope: Option<String>) {
+        *self.workspace_scope.write() = scope;
+    }
+
+    /// The workspace this federation was loaded scoped to, if any.
+    pub fn workspace_scope(&self) -> Option<String> {
+        self.workspace_scope.read().clone()
     }
 }
 

@@ -239,19 +239,11 @@ if [ "$SKIP_TERMINAL" = 0 ]; then
       :
     fi
 
-    # Fallback: if asciinema failed or produced empty output, write a synthetic cast
-    if [ ! -s "$cast" ]; then
-      warn "asciinema rec failed for $name; generating synthetic cast"
-      local sample_cmd
-      sample_cmd=$(printf '%s ' "${cmds[@]}" | cut -c1-80)
-      printf '{"version": 2, "width": 140, "height": 40, "timestamp": %s, "env": {"SHELL": "/bin/bash", "TERM": "xterm-256color"}}\n' \
-        "$(date +%s)" > "$cast"
-      printf '[0.1, "o", "\\$ %s\\r\\n"]\n' "$sample_cmd" >> "$cast"
-      printf '[1.5, "o", "output\\r\\n"]\n' >> "$cast"
-      printf '[3.0, "o", ""]\n' >> "$cast"
-    fi
-
-    [ -s "$cast" ] || die "cast file missing: $cast"
+    # No cast (or an empty one) means the recording failed. Synthesizing
+    # a near-empty cast here encoded a video that reported success while
+    # its terminal chapter showed nothing real — the silent-quality-
+    # failure this demo exists to call out. Fail the chapter instead.
+    [ -s "$cast" ] || die "asciinema produced no cast for $name; refusing to encode a synthetic terminal chapter"
     ok "  cast: $(du -h "$cast" | cut -f1)"
 
     # Cast → PNG frames

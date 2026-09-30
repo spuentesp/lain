@@ -18,8 +18,7 @@ const path = require('node:path');
 const LAIN_BIN = process.env.LAIN_BIN
   || path.resolve(__dirname, '..', '..', 'target', 'release', 'lain');
 const CHROMIUM_BIN = process.env.CHROMIUM_BIN
-  || require('playwright').chromium.executablePath()
-  || '/home/spuentesp/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome';
+  || require('playwright').chromium.executablePath();
 
 // ── CLI args ────────────────────────────────────────────────────────────────
 

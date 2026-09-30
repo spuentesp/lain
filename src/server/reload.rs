@@ -192,6 +192,14 @@ pub async fn run_rebuild(
 
         // Compute the diff against the current federation. Repos are
         // keyed by their `id` (which is `RepoId`-validated on parse).
+        // A workspace-scoped server diffs against the active workspace's
+        // members rather than every repo in `repos.yaml`: `lain
+        // workspaces remove` must drop the repo from the running
+        // federation, and a reload must not widen the server to
+        // non-member repos. The cold loader's refusals (unknown
+        // workspace, 0 members, member missing from repos.yaml) apply
+        // here unchanged, so a reload cannot silently empty the
+        // federation either.
         let fed = server
             .federation()
             .ok_or_else(|| LainError::Other("rebuild: no federation on server".into()))?;
@@ -200,12 +208,25 @@ pub async fn run_rebuild(
             .into_iter()
             .map(|(id, _)| id.to_string())
             .collect();
+        let scoped: Vec<&crate::server::federation::config::RepoConfig> =
+            match server.workspace_scope() {
+                Some(name) => {
+                    let empty = WorkspacesFile::default();
+                    let ws = workspaces.as_deref().unwrap_or(&empty);
+                    crate::server::federation::loader::repos_for_workspace(
+                        &repos_file.repos,
+                        ws,
+                        &name,
+                    )?
+                }
+                None => repos_file.repos.iter().collect(),
+            };
         let new_ids: std::collections::HashSet<String> =
-            repos_file.repos.iter().map(|r| r.id.clone()).collect();
+            scoped.iter().map(|r| r.id.clone()).collect();
 
         // Additions: build the source and delegate to LainServer.
         let data_dir = repos_file.data_dir.clone();
-        for repo in &repos_file.repos {
+        for repo in scoped {
             if !prev_ids.contains(&repo.id) {
                 server
                     .add_repo(repo, &data_dir)
@@ -214,7 +235,7 @@ pub async fn run_rebuild(
             }
         }
 
-        // Removals: drop any repo id no longer in repos.yaml.
+        // Removals: drop any repo id no longer in scope.
         for id in prev_ids.difference(&new_ids) {
             server
                 .remove_repo(id)
@@ -528,6 +549,145 @@ mod tests {
                 .expect("run_rebuild");
             assert_eq!(server.repo_count(), 1);
             assert_eq!(bus.status().state, ReloadState::Idle);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn rebuild_drops_repo_removed_from_workspace_members() {
+            // `lain workspaces remove` only rewrites `workspaces.yaml`.
+            // The unfiltered diff against `repos.yaml` used to see no
+            // change and leave the repo in the running federation.
+            let tmp = tempfile::tempdir().unwrap();
+            let repo_a = tmp.path().join("repo-a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            git2::Repository::init(&repo_a).unwrap();
+            let repo_b = tmp.path().join("repo-b");
+            std::fs::create_dir_all(&repo_b).unwrap();
+            git2::Repository::init(&repo_b).unwrap();
+            write_repos_yaml(
+                tmp.path(),
+                &tmp.path().join("repos.yaml"),
+                &[("repo-a", &repo_a), ("repo-b", &repo_b)],
+            );
+            let ws_path = tmp.path().join("workspaces.yaml");
+            std::fs::write(
+                &ws_path,
+                "workspaces:\n  - name: w1\n    members: [repo-a, repo-b]\n",
+            )
+            .unwrap();
+            let data_dir = tmp.path().join("federation");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let fed = fed_for(&[("repo-a", &repo_a), ("repo-b", &repo_b)], &data_dir).await;
+            let server = build_server(tmp.path().join("repos.yaml").as_path(), fed).await;
+            server.set_workspace_scope(Some("w1".into()));
+            assert_eq!(server.repo_count(), 2);
+
+            // `lain workspaces remove w1 --repo repo-b`
+            std::fs::write(
+                &ws_path,
+                "workspaces:\n  - name: w1\n    members: [repo-a]\n",
+            )
+            .unwrap();
+            let bus = server.reload_bus();
+            crate::server::reload::run_rebuild(&server, &bus)
+                .await
+                .expect("run_rebuild");
+            assert_eq!(server.repo_count(), 1);
+            let ids: Vec<String> = server
+                .federation()
+                .unwrap()
+                .list_repos()
+                .into_iter()
+                .map(|(id, _)| id.to_string())
+                .collect();
+            assert_eq!(ids, vec!["repo-a".to_string()]);
+            assert_eq!(bus.status().state, ReloadState::Idle);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn rebuild_keeps_non_member_repos_out_of_a_scoped_server() {
+            // repo-b is in `repos.yaml` but not a member of w1. An
+            // unfiltered reload diff used to import it, widening a
+            // workspace-scoped server to the whole file.
+            let tmp = tempfile::tempdir().unwrap();
+            let repo_a = tmp.path().join("repo-a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            git2::Repository::init(&repo_a).unwrap();
+            let repo_b = tmp.path().join("repo-b");
+            std::fs::create_dir_all(&repo_b).unwrap();
+            git2::Repository::init(&repo_b).unwrap();
+            write_repos_yaml(
+                tmp.path(),
+                &tmp.path().join("repos.yaml"),
+                &[("repo-a", &repo_a), ("repo-b", &repo_b)],
+            );
+            let ws_path = tmp.path().join("workspaces.yaml");
+            std::fs::write(
+                &ws_path,
+                "workspaces:\n  - name: w1\n    members: [repo-a]\n",
+            )
+            .unwrap();
+            let data_dir = tmp.path().join("federation");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let fed = fed_for(&[("repo-a", &repo_a)], &data_dir).await;
+            let server = build_server(tmp.path().join("repos.yaml").as_path(), fed).await;
+            server.set_workspace_scope(Some("w1".into()));
+            assert_eq!(server.repo_count(), 1);
+
+            let bus = server.reload_bus();
+            crate::server::reload::run_rebuild(&server, &bus)
+                .await
+                .expect("run_rebuild");
+            assert_eq!(server.repo_count(), 1);
+            let ids: Vec<String> = server
+                .federation()
+                .unwrap()
+                .list_repos()
+                .into_iter()
+                .map(|(id, _)| id.to_string())
+                .collect();
+            assert_eq!(ids, vec!["repo-a".to_string()]);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn rebuild_refuses_a_reload_that_would_resolve_to_zero_members() {
+            // The loader refuses to come up with a 0-member workspace; a
+            // reload that resolves to zero members must fail loudly the
+            // same way instead of emptying the running federation.
+            let tmp = tempfile::tempdir().unwrap();
+            let repo_a = tmp.path().join("repo-a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            git2::Repository::init(&repo_a).unwrap();
+            write_repos_yaml(tmp.path(), &tmp.path().join("repos.yaml"), &[("repo-a", &repo_a)]);
+            let ws_path = tmp.path().join("workspaces.yaml");
+            std::fs::write(
+                &ws_path,
+                "workspaces:\n  - name: w1\n    members: [repo-a]\n",
+            )
+            .unwrap();
+            let data_dir = tmp.path().join("federation");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let fed = fed_for(&[("repo-a", &repo_a)], &data_dir).await;
+            let server = build_server(tmp.path().join("repos.yaml").as_path(), fed).await;
+            server.set_workspace_scope(Some("w1".into()));
+            assert_eq!(server.repo_count(), 1);
+
+            // `lain workspaces remove w1 --repo repo-a` on a *sourced*
+            // workspace: validate lets it save at 0 members.
+            std::fs::write(
+                &ws_path,
+                "workspaces:\n  - name: w1\n    members: []\n    source:\n      type: workspace_clone\n      url: https://example.invalid/w1.git\n",
+            )
+            .unwrap();
+            let bus = server.reload_bus();
+            let err = crate::server::reload::run_rebuild(&server, &bus)
+                .await
+                .expect_err("a 0-member reload must not succeed");
+            assert!(
+                format!("{err}").contains("has no members yet"),
+                "expected the loader's empty-workspace error, got: {err}"
+            );
+            assert_eq!(server.repo_count(), 1, "federation must not go empty");
+            assert!(matches!(bus.status().state, ReloadState::Failed(_)));
         }
 
         #[tokio::test(flavor = "multi_thread")]

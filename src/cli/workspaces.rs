@@ -110,11 +110,16 @@ fn workspaces_file_for(config: &Path) -> PathBuf {
 
 /// Which config path should carry the reload signal.
 ///
-/// `signal::socket_path_for` names the socket after the file stem, and a
-/// server started with `--config repos.yaml` therefore listens on
-/// `repos.sock`. Workspaces mutations live in `workspaces.yaml`, so signal
-/// through the sibling `repos.yaml` when there is one; otherwise fall back
-/// to the given path so a standalone `workspaces.yaml` still works.
+/// Workspaces mutations live in `workspaces.yaml`, but `signal_reload`
+/// names the socket after the file it is given, so signal through the
+/// sibling `repos.yaml` when there is one; otherwise fall back to the
+/// given path so a standalone `workspaces.yaml` still works.
+///
+/// Limitation: the sibling is matched by the hardcoded `repos.yaml`
+/// basename. A server started with `--config myrepos.yaml` listens on a
+/// socket named after `myrepos`, so these commands dial a socket nobody
+/// owns and the reload is silently missed. Sockets are path-hashed, so
+/// the misfire cannot reach another project's server either.
 fn reload_target(workspaces_yaml: &Path) -> PathBuf {
     let sibling = workspaces_yaml
         .parent()
@@ -361,6 +366,8 @@ pub async fn run_init(
     });
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
+    crate::cli::signal::signal_reload(&reload_target(&path))
+        .map_err(|e| anyhow!("signal reload after initializing '{name}': {e}"))?;
     println!("Initialized workspace '{name}' from {from_url}");
     Ok(())
 }
@@ -474,6 +481,8 @@ pub fn run_forget(name: &str, config: Option<&Path>) -> Result<()> {
     }
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
+    crate::cli::signal::signal_reload(&reload_target(&path))
+        .map_err(|e| anyhow!("signal reload after forgetting '{name}': {e}"))?;
     println!("Forgot workspace '{name}'");
     Ok(())
 }
@@ -565,5 +574,94 @@ mod tests {
         let ws = dir.path().join("workspaces.yaml");
         std::fs::write(&ws, "workspaces: []\n").unwrap();
         assert_eq!(reload_target(&ws), ws);
+    }
+
+    /// Run `op` with the reload socket made observable: `XDG_RUNTIME_DIR`
+    /// points at a tempdir (so `run_dir()` is private to this call) and a
+    /// listener is bound at the socket `signal_reload` will dial. Returns
+    /// the bytes that arrived. The sequence runs under a process-wide lock
+    /// because the env override is process-wide state.
+    #[cfg(unix)]
+    fn capture_reload_signal<F>(workspaces_yaml: &Path, op: F) -> String
+    where
+        F: FnOnce(&Path) -> anyhow::Result<()>,
+    {
+        use std::io::Read;
+        use std::os::unix::net::UnixListener;
+        use std::sync::Mutex;
+
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let run_dir_owner = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", run_dir_owner.path());
+
+        let sock = crate::cli::signal::socket_path_for(&reload_target(workspaces_yaml));
+        let _ = std::fs::remove_file(&sock);
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&sock).expect("bind reload socket");
+        listener.set_nonblocking(true).unwrap();
+
+        let outcome = op(workspaces_yaml);
+        match prev {
+            Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+        outcome.expect("command under test");
+
+        // `signal_reload` connects and writes before the command returns,
+        // so a signalled connection is already queued here.
+        let (stream, _) = listener
+            .accept()
+            .unwrap_or_else(|e| panic!("no reload signal after the command: {e}"));
+        let mut stream = stream;
+        stream.set_nonblocking(false).unwrap();
+        let mut buf = String::new();
+        stream.read_to_string(&mut buf).unwrap();
+        buf
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_forget_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(
+            &ws,
+            "workspaces:\n  - name: doomed\n    members: [repo-a]\n",
+        )
+        .unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| run_forget("doomed", Some(ws_path)));
+        assert_eq!(received, "reload\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_init_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        let received = capture_reload_signal(&ws, |ws_path| {
+            // Keep the clone scratch dir inside the test's tempdir. The
+            // nonexistent URL makes the best-effort fetch fail instantly
+            // and offline; init must still save and signal afterwards.
+            let prev = std::env::var_os("LAIN_HOME");
+            std::env::set_var("LAIN_HOME", dir.path().join("lain-home"));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let outcome = rt.block_on(run_init(
+                "sig-init",
+                "/nonexistent/not-a-repo",
+                None,
+                Some(ws_path),
+            ));
+            match prev {
+                Some(v) => std::env::set_var("LAIN_HOME", v),
+                None => std::env::remove_var("LAIN_HOME"),
+            }
+            outcome
+        });
+        assert_eq!(received, "reload\n");
     }
 }

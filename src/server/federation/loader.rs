@@ -148,6 +148,32 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     Ok(fed)
 }
 
+/// Resolve `workspace_name` against `workspaces` and pick its member repos
+/// from `all_repos`. Shared by the cold loader and `run_rebuild` so both
+/// refuse the same cases with the same messages: an unknown workspace, a
+/// 0-member workspace, and a member id missing from `repos.yaml`.
+///
+/// A 0-member workspace is legal on disk (`lain workspaces init` writes
+/// one before `lain workspaces add` populates it), but serving it would
+/// build a federation with zero repos — vacuous readiness and no error.
+/// Refuse to come up empty and name the remedy.
+pub(crate) fn repos_for_workspace<'a>(
+    all_repos: &'a [crate::federation::config::RepoConfig],
+    workspaces: &WorkspacesFile,
+    workspace_name: &str,
+) -> Result<Vec<&'a crate::federation::config::RepoConfig>, LainError> {
+    let ws_spec = resolve_active_workspace(workspaces, workspace_name)?.clone();
+    let workspace = WorkspaceIndex::from_spec(ws_spec);
+    if workspace.spec.members.is_empty() {
+        return Err(LainError::Config(format!(
+            "workspace '{}' has no members yet — run 'lain workspaces add {} --repo <repo-id>'",
+            workspace.spec.name, workspace.spec.name
+        )));
+    }
+    // If any member id is not in repos.yaml, fail with the missing ids listed.
+    filter_repos_by_workspace(all_repos, &workspace)
+}
+
 /// Load a federation scoped to a single workspace's repos. Same pattern as
 /// `load_federation` but filters `repos.yaml` to the workspace's members
 /// before adding them to the federation. Errors fast at config time if the
@@ -179,23 +205,7 @@ pub async fn load_federation_with_workspace(
     } else {
         WorkspacesFile::default()
     };
-    let ws_spec = resolve_active_workspace(&workspaces, workspace_name)?.clone();
-    let workspace = WorkspaceIndex::from_spec(ws_spec);
-
-    // A 0-member workspace is legal on disk (`lain workspaces init` writes
-    // one before `lain workspaces add` populates it), but loading it here
-    // would build a federation with zero repos — vacuous readiness and no
-    // error. Refuse to come up empty and name the remedy.
-    if workspace.spec.members.is_empty() {
-        return Err(LainError::Config(format!(
-            "workspace '{}' has no members yet — run 'lain workspaces add {} --repo <repo-id>'",
-            workspace.spec.name, workspace.spec.name
-        )));
-    }
-
-    // Filter repos.yaml to the workspace's members. If any member id is
-    // not in repos.yaml, fail with the missing ids listed.
-    let picked = filter_repos_by_workspace(&config.repos, &workspace)?;
+    let picked = repos_for_workspace(&config.repos, &workspaces, workspace_name)?;
 
     // Build the federation.
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(&config.data_dir)?);
