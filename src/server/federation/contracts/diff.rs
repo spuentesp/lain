@@ -189,13 +189,22 @@ fn endpoint_to_def(endpoint: &Endpoint) -> EndpointDef {
         schemas.insert(*dir, fields);
     }
     let has_schema = !schemas.is_empty() && schemas.values().any(|f| !f.is_empty());
-    // §9.2 `ChangedWithoutSchema`: the union of every route/spec/
-    // handler file the join observed — provider node paths (code
-    // routes, openapi paths) plus schema node paths.
+    // §9.2 `ChangedWithoutSchema`: the file(s) holding the bound
+    // handler SymbolKey when set (one file per code-bound provider),
+    // else the route/spec node's path for spec-only providers. Plus
+    // the schema node's path (where field metadata lives). Tied to
+    // the BOUND handler so an unrelated edit to a shared module file
+    // or routing table does not fire the rule for endpoints whose
+    // contract did not actually change.
     let mut source_files: BTreeSet<String> = BTreeSet::new();
     for p in &endpoint.providers {
-        if let Some(path) = p.node_id.path() {
-            source_files.insert(path);
+        let file = p
+            .handler
+            .as_ref()
+            .map(|h| h.path.clone())
+            .or_else(|| p.node_id.path());
+        if let Some(file) = file {
+            source_files.insert(file);
         }
     }
     for schema in endpoint.schemas.values() {

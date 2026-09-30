@@ -2240,3 +2240,159 @@ fn nested_field_rule_collapses_descendants_under_object_removal() {
     assert_eq!(removed_paths.len(), 1);
     assert_eq!(removed_paths[0], &path(&["x"]));
 }
+
+// ─── Bug A: ChangedWithoutSchema precision ────────────────────────────
+//
+// `EndpointDef.source_files` must reflect the file holding the BOUND
+// handler SymbolKey (when set), not every provider node's path. When
+// the route declaration lives in a routing table file and the bound
+// handler function lives elsewhere, an unrelated edit to the routing
+// table must NOT trigger ChangedWithoutSchema for this endpoint —
+// only an edit to the handler file should.
+
+#[test]
+fn source_files_uses_bound_handler_path_not_provider_node_id_path() {
+    // Endpoint `GET /api/orders/{}/label` whose HttpRoute declaration
+    // is in `src/routes.py` but whose bound handler function lives in
+    // `src/handlers/label.py`. After surface extraction, source_files
+    // must contain the handler file, not the routing-table file —
+    // otherwise an unrelated edit to the routing table would falsely
+    // fire ChangedWithoutSchema for THIS endpoint.
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/handlers/label.py".into(),
+        container: None,
+        name: "print_label".into(),
+    };
+    // HttpRoute node id points at the routing-table file.
+    let node_id = id(
+        "orders",
+        "HttpRoute",
+        "src/routes.py",
+        "GET /api/orders/{}/label",
+        5,
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/{}/label".into(),
+            providers: vec![EndpointProvider {
+                node_id: node_id.clone(),
+                origin: ProviderOrigin::Code,
+                handler: Some(handler.clone()),
+                operation_id: None,
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+    let surface = ContractSurface::from_index(&index);
+    let def = &surface.endpoints[&endpoint];
+    assert_eq!(
+        def.source_files,
+        BTreeSet::from(["src/handlers/label.py".to_string()]),
+        "source_files must contain the bound handler file ({}); got {:?} \
+         — the rule would fire on unrelated edits to the routing-table file",
+        handler.path,
+        def.source_files,
+    );
+    assert!(
+        !def.source_files.contains("src/routes.py"),
+        "source_files must NOT contain the routing-table file: {:?}",
+        def.source_files,
+    );
+}
+
+#[test]
+fn source_files_falls_back_to_provider_node_path_when_handler_missing() {
+    // Spec-only route (no `handler: SymbolKey`) — fall back to the
+    // route node's path. The fallback is the spec file for OpenAPI
+    // operations, and the routing-table file for declarative routes.
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/me");
+    let node_id = id(
+        "orders",
+        "HttpRoute",
+        "openapi.yaml",
+        "GET /api/orders/me",
+        10,
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/me".into(),
+            providers: vec![EndpointProvider {
+                node_id: node_id.clone(),
+                origin: ProviderOrigin::OpenApi,
+                handler: None,
+                operation_id: Some("getMe".into()),
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+    let surface = ContractSurface::from_index(&index);
+    let def = &surface.endpoints[&endpoint];
+    assert_eq!(
+        def.source_files,
+        BTreeSet::from(["openapi.yaml".to_string()]),
+        "spec-only route must fall back to the route node's path",
+    );
+}
+
+#[test]
+fn changed_without_schema_does_not_fire_when_unrelated_file_changes() {
+    // Endpoint with source_files = {src/handlers/label.py} only.
+    // `ChangedFilesSource` reports a change to `src/routes.py`
+    // (an unrelated file). The rule MUST NOT fire — the contract
+    // for this endpoint did not change.
+    use crate::federation::contracts::diff::diff_contracts as run_diff;
+    let consumer_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
+    let mut endpoint_def = empty_endpoint_def();
+    endpoint_def
+        .source_files
+        .insert("src/handlers/label.py".to_string());
+    let mut head = ContractSurface::default();
+    head.endpoints
+        .insert(consumer_endpoint.clone(), endpoint_def);
+    let base = head.clone();
+    // ChangedFilesSource reports an unrelated file.
+    let mut changed = BTreeSet::new();
+    changed.insert("src/routes.py".to_string());
+    let src = StaticChangedFiles(changed);
+    let changes = run_diff(&base, &head, &src);
+    let bad = changes
+        .iter()
+        .any(|c| matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. }));
+    assert!(!bad, "rule fired for an unrelated-file diff: {changes:?}");
+}
+
+#[test]
+fn changed_without_schema_fires_when_bound_handler_file_changes() {
+    // Endpoint with source_files = {src/handlers/label.py}. The
+    // handler file is reported as changed. The rule MUST fire.
+    let consumer_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
+    let mut endpoint_def = empty_endpoint_def();
+    endpoint_def
+        .source_files
+        .insert("src/handlers/label.py".to_string());
+    let mut head = ContractSurface::default();
+    head.endpoints
+        .insert(consumer_endpoint.clone(), endpoint_def);
+    let base = head.clone();
+    let mut changed = BTreeSet::new();
+    changed.insert("src/handlers/label.py".to_string());
+    let src = StaticChangedFiles(changed);
+    let changes = diff_contracts(&base, &head, &src);
+    let matched = changes
+        .iter()
+        .find(|c| matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. }));
+    assert!(
+        matched.is_some(),
+        "expected ChangedWithoutSchema when the handler file changes, got {changes:?}"
+    );
+}
