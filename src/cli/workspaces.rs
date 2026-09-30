@@ -276,6 +276,18 @@ pub fn run_remove(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
         );
     }
     ws.members.retain(|m| m != repo);
+    // `validate` lets a *sourced* workspace hold 0 members — `lain
+    // workspaces init` writes that transient state and `lain workspaces
+    // add` fills it — but this command must not drive a live workspace
+    // down to zero: the loader refuses to serve a 0-member workspace, so
+    // saving that state breaks the next reload.
+    if ws.members.is_empty() {
+        anyhow::bail!(
+            "workspace '{name}' must keep at least one repo — removing '{repo}' would leave it \
+             empty; run 'lain workspaces add {name} --repo <repo-id>' first, or 'lain workspaces \
+             forget {name}' to drop the workspace"
+        );
+    }
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
     crate::cli::signal::signal_reload(&reload_target(&path))
@@ -697,5 +709,30 @@ mod tests {
             outcome
         });
         assert_eq!(received, "reload\n");
+    }
+
+    /// `lain workspaces init` writes a sourced workspace with 0 members
+    /// and `lain workspaces add` fills it in; `WorkspacesFile::validate`
+    /// keeps accepting that transient state so init can save. `run_remove`
+    /// must not drive a workspace back down to 0 members on the way: the
+    /// loader refuses to serve a 0-member workspace, so saving that state
+    /// breaks the next reload.
+    #[test]
+    fn removing_the_last_member_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        let before = "workspaces:\n  - name: pending\n    members: [only]\n    source:\n      type: workspace_clone\n      url: https://example.com/ws.git\n";
+        std::fs::write(&ws, before).unwrap();
+        let err = run_remove("pending", "only", Some(&ws)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must keep at least one repo"),
+            "error must name the invariant, got: {msg}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ws).unwrap(),
+            before,
+            "a refused removal must not rewrite workspaces.yaml"
+        );
     }
 }

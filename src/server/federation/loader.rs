@@ -30,6 +30,15 @@ pub(crate) fn resolve_data_dir(
 
 pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, LainError> {
     let config = resolve_data_dir(FederationConfig::load(config_path)?, config_path);
+    // Symmetric with `repos_for_workspace`'s 0-member refusal: a config
+    // that declares no repos would come up as a silently empty
+    // federation (vacuous readiness, no error). Refuse before any state
+    // is created and name the remedy.
+    if config.repos.is_empty() {
+        return Err(LainError::Config(
+            "repos.yaml declares no repos — add one with 'lain repos add <id> <url>'".to_string(),
+        ));
+    }
     let manifest_path = config.data_dir.join("federation_manifest.bin");
     let _manifest = FederationManifest::load_or_default(&manifest_path)?;
 

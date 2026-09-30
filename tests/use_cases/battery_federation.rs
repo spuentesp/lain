@@ -108,25 +108,20 @@ async fn list_repos_returns_all_registered() {
     );
 }
 
-#[tokio::test]
-async fn list_repos_handles_empty_federation() {
+#[test]
+fn list_repos_handles_empty_federation() {
+    // The empty federation is the state under test, not the loader's:
+    // `load_federation` refuses a `repos: []` config (see
+    // `load_federation_refuses_empty_repos_list`), so build the
+    // `FederatedIndex` directly — the same pattern `hot_reload_remove`
+    // uses — and keep this test about `list_repos` on zero repos.
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::PetgraphBackend;
+
     let dir = tempfile::tempdir().unwrap();
-    // `data_dir` must be this test's own tempdir, not the shared `/tmp` —
-    // the loader writes a fixed-name `federation_manifest.bin` directly
-    // under `data_dir`, so a hardcoded `/tmp` collides with any other
-    // concurrent test or process on the machine using the same
-    // convention. Found via a real, reproducible "bincode: io error:
-    // unexpected end of file" from a torn concurrent write to
-    // `/tmp/federation_manifest.bin`.
-    let data_dir = dir.path().join("data");
-    std::fs::write(
-        dir.path().join("repos.yaml"),
-        format!("data_dir: {}\nrepos: []\n", data_dir.display()),
-    )
-    .unwrap();
-    let fed = load_federation(&dir.path().join("repos.yaml"))
-        .await
-        .unwrap();
+    let backend: std::sync::Arc<dyn lain::federation::graph_backend::GraphBackend> =
+        std::sync::Arc::new(PetgraphBackend::new(dir.path()).expect("PetgraphBackend::new"));
+    let fed = std::sync::Arc::new(FederatedIndex::new(backend));
     let repos = list_repos(&fed);
     assert!(repos.is_empty(), "empty federation returns empty list");
 }

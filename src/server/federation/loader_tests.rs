@@ -33,6 +33,39 @@ repos:
     assert_eq!(listed[0].0.as_str(), "ws");
 }
 
+/// `repos.yaml` with `repos: []` must not load into an all-repos
+/// federation: zero repos is a silently empty federation (vacuous
+/// readiness, no error) — the same failure mode the 0-member workspace
+/// refusal below guards, so it gets the same shape of error: name the
+/// problem and the remedy.
+#[tokio::test]
+async fn load_federation_refuses_empty_repos_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("repos.yaml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "data_dir: {}\nrepos: []\n",
+            tmp.path().join("data").display()
+        ),
+    )
+    .unwrap();
+
+    let err = match load_federation(&cfg_path).await {
+        Ok(_) => panic!("repos.yaml with no repos must not load into a federation"),
+        Err(e) => e,
+    };
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("repos.yaml declares no repos"),
+        "error must name the empty config, got: {msg}"
+    );
+    assert!(
+        msg.contains("lain repos add"),
+        "error must name the remedy, got: {msg}"
+    );
+}
+
 /// A workspace that `lain workspaces init` just wrote has 0 members until
 /// `lain workspaces add` fills it. `WorkspacesFile::validate` accepts that
 /// transient state so init can save the file, but the federation load must
