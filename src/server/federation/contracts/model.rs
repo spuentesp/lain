@@ -219,7 +219,7 @@ pub struct SourceSite {
 /// edits: confirmed bindings, `PathChanged` pairing, and consumer-
 /// change pairing use it instead of `GlobalId`, whose last segment
 /// is a line number and shifts on every move (§4.3 note).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SymbolKey {
     pub repo: RepoId,
     pub path: String,

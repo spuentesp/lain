@@ -126,7 +126,7 @@ pub enum ConsumerTarget {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnresolvedReason {
     /// Rule 3: target service known but no route in it.
     NoRouteInService,

@@ -23,6 +23,7 @@
 //!   endpoints its call joins. The joiner step 5 calls into it.
 
 pub mod config;
+pub mod diff;
 pub mod field_join;
 pub mod index;
 pub mod joiner;
@@ -32,6 +33,8 @@ pub mod route_match;
 
 #[cfg(test)]
 mod config_tests;
+#[cfg(test)]
+mod diff_tests;
 #[cfg(test)]
 mod index_tests;
 #[cfg(test)]
