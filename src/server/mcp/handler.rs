@@ -64,7 +64,8 @@ fn cow_to_bytes(cow: std::borrow::Cow<'static, [u8]>) -> Bytes {
     }
 }
 use crate::server::mcp::definitions::{
-    defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS, WORKSPACE_TOOL_DEFS,
+    defs_to_tools, defs_to_value_tools, CONTRACT_TOOL_DEFS, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS,
+    WORKSPACE_TOOL_DEFS,
 };
 use crate::server::mcp::envelope::{gated_tool_result, tool_text_result};
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
@@ -560,6 +561,26 @@ pub struct HandlerStatus {
 }
 
 impl HandlerStatus {
+    /// Test-only constructor with all-zero state. Used by
+    /// `tests/federation_contracts_e2e.rs` to build an `McpContext`
+    /// for in-process handler invocations. Not on the production
+    /// path — `LainMcpServer` builds `HandlerStatus` from its real
+    /// state at boot.
+    #[doc(hidden)]
+    pub fn for_test() -> Self {
+        use std::sync::Arc;
+        use std::time::SystemTime;
+        HandlerStatus {
+            transport: None,
+            port: None,
+            started_at: SystemTime::now(),
+            last_sync_at: Arc::new(parking_lot::Mutex::new(SystemTime::now())),
+            last_error: Arc::new(parking_lot::Mutex::new(None)),
+            repo_count: 0,
+            workspaces_count: 0,
+        }
+    }
+
     /// Render the `get_server_status` payload.
     ///
     /// Delegates to the one builder in
@@ -669,6 +690,21 @@ async fn dispatch_tool_call(
     };
     if let Some(result) = invoke_inventory(&ctx, name, args_map.clone()) {
         return tool_result(name, result);
+    }
+
+    // Contract-federation tools (PR 16): `list_services`, `get_service`.
+    // `invoke_contract_inventory` returns the tool's `ToolOutcome`
+    // directly — the inventory entry holds the rendered envelope +
+    // text, so the call is a single `await` and `tool_result` boxes
+    // it the same way the inventory path does. Dispatched after the
+    // `McpToolEntry` inventory so the legacy surface stays
+    // unaffected, and before the federation scoping below so contract
+    // tools can answer before the repo-resolution gate.
+    if let Some(fut) = invoke_contract_inventory(&ctx, name, args_map.clone()) {
+        match fut.await {
+            Ok(outcome) => return tool_result(name, Ok(outcome.structured)),
+            Err(text) => return (text, true),
+        }
     }
 
     if let Some(fed) = federation {
@@ -916,6 +952,11 @@ impl ServerHandler for LainHandler {
         }
         if self.federation.is_some() {
             tools.extend(defs_to_tools(FEDERATION_TOOL_DEFS));
+            // Contract-federation service view (PR 16). Conditional on
+            // a federation being configured because the tools answer
+            // from it; without a federation they would error with
+            // `federation_disabled` on every call.
+            tools.extend(defs_to_tools(CONTRACT_TOOL_DEFS));
         }
         if self.workspaces.is_some() {
             tools.extend(defs_to_tools(WORKSPACE_TOOL_DEFS));
@@ -2224,6 +2265,8 @@ async fn handle_request(
                             .collect();
                         if federation.is_some() {
                             tools.extend(defs_to_value_tools(FEDERATION_TOOL_DEFS));
+                            // Contract-federation service view (PR 16).
+                            tools.extend(defs_to_value_tools(CONTRACT_TOOL_DEFS));
                         }
                         if workspaces.is_some() {
                             tools.extend(defs_to_value_tools(WORKSPACE_TOOL_DEFS));
@@ -4219,6 +4262,34 @@ fn invoke_inventory(
     let value = serde_json::Value::Object(args_map.into_iter().collect());
     for entry in inventory::iter::<McpToolEntry>() {
         if entry.name == name {
+            return Some((entry.handler)(ctx, value));
+        }
+    }
+    None
+}
+
+/// Look up a contract-federation tool (`docs/CONTRACT_FEDERATION.md`
+/// §10.1) by name. Returns the tool's `ToolOutcome` already rendered,
+/// or `None` when no contract tool matches. Used by
+/// `dispatch_tool_call` after `invoke_inventory`; contract tools
+/// ride the same call shape as the inventory-registered presence
+/// tools, so no new match arm is added.
+///
+/// The future is `+ Send` so it composes with the rest of the
+/// async dispatcher (`handle_call_tool_request` returns a `Send`
+/// future). Each registered handler must therefore be a `Send`
+/// future; the contract handlers (`services.rs`) hold only owned
+/// data plus the `&McpContext` borrow, so this is satisfied
+/// trivially.
+fn invoke_contract_inventory<'a>(
+    ctx: &'a McpContext<'a>,
+    name: &str,
+    args: Map<String, serde_json::Value>,
+) -> Option<crate::server::mcp::contract_tools::ContractToolFuture<'a>> {
+    use crate::server::mcp::contract_tools::ContractToolEntry;
+    for entry in inventory::iter::<ContractToolEntry>() {
+        if entry.name == name {
+            let value = serde_json::Value::Object(args.into_iter().collect());
             return Some((entry.handler)(ctx, value));
         }
     }

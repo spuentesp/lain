@@ -62,7 +62,8 @@ registry the server filters with.
 | `ops` | 10 | Server health, reload, LSP install, re-enrichment |
 | `federation` | 5 | Org-wide queries (shown automatically in federation mode) |
 | `workspace` | 4 | Workspace groups (shown automatically when configured) |
-| `full` | 84 | Every registered tool |
+| `contracts` | 2 | Service view across the federation (`list_services`, `get_service`) |
+| `full` | 86 | Every registered tool |
 
 ### Role recipes
 

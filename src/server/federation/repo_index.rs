@@ -486,6 +486,14 @@ impl RepoIndex {
         *self.last_indexed.read()
     }
 
+    /// Whether the repo's `sync_overlay` cycle last saw any uncommitted
+    /// git changes (`overlay_paths` non-empty). Used by the
+    /// contract-tools live scope (`§8.7`/`§10.8`) to set
+    /// `EvidenceRef.dirty`.
+    pub fn overlay_has_pending_changes(&self) -> bool {
+        !self.overlay_paths.lock().is_empty()
+    }
+
     pub fn nodes(&self) -> Vec<GraphNode> {
         self.db.all_nodes()
     }

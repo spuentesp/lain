@@ -892,6 +892,576 @@
     "name": "get_workspace_graph"
   },
   {
+    "description": "Every service in the federation with its repo, paths, endpoint count and consumer counts. On `live` only (PR 16 scope); PR 11/13 will route named snapshots.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `list_services` (`docs/CONTRACT_FEDERATION.md` §12). On `live` only — PR 16 scope; PR 11/13 will route the value through the snapshot manager.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque paging cursor (base64url of `{v:1, after, q}`). Reused with different args → `cursor_mismatch`.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max items returned (default 100, max 1000).",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "repo": {
+          "description": "Optional: pin the listing to one repo (every listed service must live there)",
+          "type": "string"
+        },
+        "snapshot": {
+          "description": "Snapshot id (`live` for the in-process view; PR 11 surfaces named snapshots)",
+          "enum": [
+            "live"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "list_services input",
+      "type": "object"
+    },
+    "name": "list_services",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `list_services` envelope (§10.2). Service-level overview of the federation.",
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "items": {
+          "description": "One entry per service in the federation, sorted by service name.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "consumer_services": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "endpoints": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "repo": {
+                "type": "string"
+              },
+              "service": {
+                "type": "string"
+              },
+              "unresolved_inbound": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "service",
+              "repo",
+              "paths",
+              "endpoints",
+              "consumer_services",
+              "unresolved_inbound"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "additionalProperties": false,
+          "description": "§9.6 scope (live → RepoHealth mapping per §8.7).",
+          "properties": {
+            "configured_only": {
+              "enum": [
+                true
+              ],
+              "type": "boolean"
+            },
+            "reviewed": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "commit": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "dirty": {
+                    "type": "boolean"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "unreviewed": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "error": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "enum": [
+                      "failed",
+                      "fetch_failed",
+                      "excluded",
+                      "not_ready"
+                    ],
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "reviewed",
+            "unreviewed",
+            "configured_only"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "items",
+        "scope"
+      ],
+      "title": "list_services data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Consumers of one service: endpoints, calling code, fields used, and the `used_by` walk that explains why each caller runs (§10.9).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `get_service` (`docs/CONTRACT_FEDERATION.md` §12). Live only — PR 11/13 surfaces named snapshots.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque paging cursor.",
+          "type": "string"
+        },
+        "depth": {
+          "description": "Max depth for the `used_by` walk (§10.9). Default 4, max 8.",
+          "maximum": 8,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "limit": {
+          "description": "Max consumer-service rows (default 100, max 1000).",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "service": {
+          "description": "Service name (`^[a-z0-9][a-z0-9_-]*$`).",
+          "type": "string"
+        },
+        "snapshot": {
+          "enum": [
+            "live"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot",
+        "service"
+      ],
+      "title": "get_service input",
+      "type": "object"
+    },
+    "name": "get_service",
+    "outputSchema": {
+      "$defs": {
+        "EntryPoint": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "http_handler",
+                "scheduled",
+                "cli",
+                "main",
+                "unreferenced"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "ref": {
+              "$ref": "#/$defs/EvidenceRef"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        "EntryPointList": {
+          "items": {
+            "$ref": "#/$defs/EntryPoint"
+          },
+          "type": "array"
+        },
+        "EvidenceRef": {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "dirty": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "repo",
+            "commit",
+            "path",
+            "line",
+            "text"
+          ],
+          "type": "object"
+        },
+        "Provenance": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "type": "number"
+            },
+            "detector": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "static",
+                "heuristic",
+                "runtime",
+                "confirmed"
+              ],
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "Scope": {
+          "additionalProperties": false,
+          "properties": {
+            "configured_only": {
+              "enum": [
+                true
+              ],
+              "type": "boolean"
+            },
+            "reviewed": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "commit": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "dirty": {
+                    "type": "boolean"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "unreviewed": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "error": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "enum": [
+                      "failed",
+                      "fetch_failed",
+                      "excluded",
+                      "not_ready"
+                    ],
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "reviewed",
+            "unreviewed",
+            "configured_only"
+          ],
+          "type": "object"
+        },
+        "Unresolved": {
+          "additionalProperties": false,
+          "properties": {
+            "consumer": {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            "host": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "no_route_in_service",
+                "no_match"
+              ],
+              "type": "string"
+            },
+            "target_service": {
+              "type": "string"
+            },
+            "template": {
+              "type": "string"
+            },
+            "url_expr": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "consumer",
+            "url_expr",
+            "method",
+            "reason"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `get_service` envelope (§10.2). Consumers of one service.",
+      "properties": {
+        "consumers": {
+          "description": "Consumer services that bind to at least one of this service's endpoints.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "repo": {
+                "type": "string"
+              },
+              "service": {
+                "type": "string"
+              },
+              "uses": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "binding": {
+                      "$ref": "#/$defs/Provenance"
+                    },
+                    "caller": {
+                      "$ref": "#/$defs/EvidenceRef"
+                    },
+                    "endpoint": {
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "service": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "service",
+                        "key"
+                      ],
+                      "type": "object"
+                    },
+                    "fields": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "json_path": {
+                            "type": "string"
+                          },
+                          "provenance": {
+                            "$ref": "#/$defs/Provenance"
+                          },
+                          "site": {
+                            "$ref": "#/$defs/EvidenceRef"
+                          }
+                        },
+                        "required": [
+                          "json_path",
+                          "site",
+                          "provenance"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "match": {
+                      "enum": [
+                        "exact",
+                        "pattern",
+                        "prefix_stripped"
+                      ],
+                      "type": "string"
+                    },
+                    "reads_complete": {
+                      "type": "boolean"
+                    },
+                    "site": {
+                      "$ref": "#/$defs/EvidenceRef"
+                    },
+                    "used_by": {
+                      "$ref": "#/$defs/EntryPointList"
+                    },
+                    "used_by_truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "endpoint",
+                    "site",
+                    "caller",
+                    "binding",
+                    "match",
+                    "fields",
+                    "reads_complete",
+                    "used_by",
+                    "used_by_truncated"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "service",
+              "repo",
+              "uses"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "endpoints": {
+          "description": "Contract keys the service provides.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "provider_reviewed": {
+          "description": "False when the service's repo is not in `RepoHealth::Ready` (§12 guarantee).",
+          "type": "boolean"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "service": {
+          "type": "string"
+        },
+        "unresolved_candidates": {
+          "description": "Unresolved consumers that could match any endpoint of this service (§9.7).",
+          "items": {
+            "$ref": "#/$defs/Unresolved"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "service",
+        "repo",
+        "paths",
+        "provider_reviewed",
+        "endpoints",
+        "consumers",
+        "scope"
+      ],
+      "title": "get_service data",
+      "type": "object"
+    }
+  },
+  {
     "description": "Returns the server's run-time status: pid, transport, port, started_at, last_sync_at, last_error, repo_count, workspace_count.",
     "inputSchema": {
       "properties": {},

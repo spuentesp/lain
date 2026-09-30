@@ -1721,6 +1721,65 @@ impl GraphDatabase {
             .collect())
     }
 
+    /// Set the `entry` field on an existing node, identified by `id`.
+    /// Returns `Ok(true)` if the node existed and was updated, `Ok(false)`
+    /// if the id is unknown (a regex-only detection whose function hasn't
+    /// been indexed yet — the sensor will retry on the next scan).
+    ///
+    /// Phase 1 (`§6.6`) of `entry_point_sensor` calls this for every
+    /// regex-detected entry-point after `replace_sensor_output` has wiped
+    /// every node's `entry` field. The mutation is a single field
+    /// assignment under the graph write lock so concurrent readers see
+    /// either the old or the new value, never a torn one.
+    pub fn set_entry(
+        &self,
+        id: &str,
+        kind: crate::federation::contracts::model::EntryKind,
+    ) -> Result<bool, LainError> {
+        self.check_writable()?;
+        let mut graph = self.graph.write();
+        let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
+            return Ok(false);
+        };
+        if let Some(node) = graph.node_weight_mut(idx) {
+            node.entry = Some(kind);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Ids of every node that has an incoming `Calls` edge into
+    /// `node_id`. Sorted for determinism (`§8.3`). Used by
+    /// `used_by` (`§10.9`) to walk callers up the call graph.
+    pub fn incoming_calls(&self, node_id: &str) -> Vec<String> {
+        let graph = self.graph.read();
+        let Some(idx) = self.index_map.get(node_id).map(|r| *r.value()) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = graph
+            .edges_directed(idx, petgraph::Direction::Incoming)
+            .filter(|e| e.weight().edge_type == EdgeType::Calls)
+            .map(|e| graph[e.source()].id.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// All `CallsHttp` edges in the graph: `(handler_id, route_id)` pairs.
+    /// Used by `entry_point_sensor` (`§6.6`) to tag handler functions as
+    /// `EntryKind::HttpHandler`.
+    pub fn calls_http_pairs(&self) -> Vec<(String, String)> {
+        let graph = self.graph.read();
+        let mut out: Vec<(String, String)> = graph
+            .edge_references()
+            .filter(|e| e.weight().edge_type == EdgeType::CallsHttp)
+            .map(|e| (graph[e.source()].id.clone(), graph[e.target()].id.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn insert_co_change_edges(
         &self,
         pairs: &[(String, String, usize)],

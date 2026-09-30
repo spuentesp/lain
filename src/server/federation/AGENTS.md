@@ -23,6 +23,13 @@ The short version:
   `repo_index.rs`.
 - Federation tools are MCP tools — see `src/server/mcp/AGENTS.md`
   for how to register them.
+- Contract tools (`list_services`, `get_service` — PR 16) live in
+  `mcp/contract_tools/`. They ride the `ContractToolEntry`
+  inventory (see `mcp/AGENTS.md`) and read the federation's
+  `ContractIndex` after `rejoin_contracts_if_dirty`. New contract
+  tools should add a `ToolDef` to `CONTRACT_TOOL_DEFS`
+  (`mcp/definitions.rs`), a handler in `mcp/contract_tools/`, and an
+  inventory `submit!`. Don't extend `dispatch_tool_call`.
 
 The federation is the only place in Lain where per-process and
 cross-process state can disagree. Be conservative: prefer reading

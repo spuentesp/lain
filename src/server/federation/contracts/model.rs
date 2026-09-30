@@ -193,7 +193,7 @@ pub enum Direction {
 /// How a function is invoked at runtime. Set by `entry_point_sensor`
 /// on `GraphNode.entry` (§6.6) so `used_by` (§10.9) can say why code
 /// runs.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EntryKind {
     HttpHandler,
     Scheduled,

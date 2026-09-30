@@ -77,6 +77,8 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "unregister_agent"
             | "lain_intent"
             | "list_active_intents"
+            | "list_services"
+            | "get_service"
     ) {
         return Some(GraphIndependent);
     }
