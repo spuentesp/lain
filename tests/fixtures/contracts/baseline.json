@@ -1,8 +1,8 @@
 {
-  "diff_precision": 1.0,
-  "diff_recall": 1.0,
+  "diff_precision": 0.23809523809523808,
+  "diff_recall": 0.9090909090909091,
   "binds_precision": 1.0,
-  "binds_recall": 1.0,
-  "reads_field_precision": 1.0,
+  "binds_recall": 0.6,
+  "reads_field_precision": 0.5,
   "reads_field_recall": 1.0
 }

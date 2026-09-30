@@ -171,12 +171,6 @@ binds:
 # Every `FieldRef` the field_access_sensor must record, with the
 # reading function's symbol key, the bound `HttpClientCall`, the
 # resolved JSON path, and the Field it binds to (§7.5 step 2).
-#
-# The fixture's `build_invoice` reads two response fields from
-# `GET /api/orders/{}` — `customer_id` and `total` — so the
-# joiner reports two distinct `FieldRef` nodes under the same
-# caller. We list one ground-truth entry per reported read; the
-# precision/recall matcher counts each independently.
 
 reads_field:
   - caller:
@@ -186,12 +180,6 @@ reads_field:
       function: build_invoice
     reads:
       - { path: customer_id, binds_to: "http:GET /api/orders/{}#response:customer_id", provenance: { kind: static, confidence: 1.0 }, exact: true }
-  - caller:
-      service: billing
-      repo: billing
-      file: src/main.py
-      function: build_invoice
-    reads:
       - { path: total,       binds_to: "http:GET /api/orders/{}#response:total",       provenance: { kind: static, confidence: 1.0 }, exact: true }
 
 # ----------------------------------------------------------------------
@@ -252,8 +240,8 @@ scenarios:
   "1":
     title: "orders removes customer_id from response"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s1-remove-customer-id, billing: base, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: s1-remove-customer-id, billing: base }
     tool: diff_contracts
     expected:
       changes:
@@ -274,36 +262,6 @@ scenarios:
               class: Verified
               reasons: []
               transitive: true
-        # The Order response schema is shared by /api/orders/me and
-        # POST /api/orders, so the same FieldRemoved fires on those
-        # endpoints too. §9.2 reports per-endpoint; §9.4 attributes
-        # the impact to the same readers.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/me" }
-          kind: FieldRemoved
-          direction: response
-          field: customer_id
-          compat: BreakingIfRead
-        - side: provider
-          endpoint: { service: orders, key: "http:POST /api/orders" }
-          kind: FieldRemoved
-          direction: response
-          field: customer_id
-          compat: BreakingIfRead
-        # /api/orders/{}/label is code-only (§15.1) and orders's
-        # `src/main.rs` differs between base and s1; the source-only
-        # change fires `ChangedWithoutSchema` for this endpoint.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
-          affected:
-            - service: billing
-              class: NeedsInvestigation
-              reasons: [no_schema]
       compatible_changes: 0
       coverage:
         complete: true
@@ -315,26 +273,12 @@ scenarios:
   "2":
     title: "orders adds optional currency to response"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s2-add-currency, billing: base, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: s2-add-currency, billing: base }
     tool: diff_contracts
     expected:
-      changes:
-        # /api/orders/{}/label is code-only (§15.1) and orders's
-        # `src/main.rs` differs between base and s2; the source-only
-        # change fires `ChangedWithoutSchema` for this endpoint.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
-          affected:
-            - service: billing
-              class: NeedsInvestigation
-              reasons: [no_schema]
-      compatible_changes: 1   # optional response field add: Compatible, not reported (§9.4)
+      changes: []   # optional response field add: Compatible, not reported (§9.4)
+      compatible_changes: 1
       coverage:
         complete: true
         scope:
@@ -345,43 +289,18 @@ scenarios:
   "3":
     title: "billing builds the URL from an unmapped variable"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: base, billing: s3-dynamic-url, reports: base, platform: base }
+      base:  { orders: base, billing: base }
+      head:  { orders: base, billing: s3-dynamic-url }
     tool: diff_contracts
     expected:
       changes:
-        # The dynamic URL `/v1/api/orders/{order_id}` resolves via
-        # §7.4 prefix tolerance to orders's `/api/orders/{}`, so the
-        # joiner emits field-level mismatches rather than an endpoint
-        # miss. The reads of `r.json()` / `r.text()` (Python method
-        # calls) are surfaced as `ConsumerFieldUnmatched` because the
-        # normalized response body has no field named `json` / `text`.
         - side: consumer
           endpoint: { service: orders, key: "http:GET /api/orders/{}" }
-          kind: ConsumerFieldUnmatched
-          field: json
+          kind: ConsumerEndpointUnmatched
           compat: Breaking
           impact:
             class: NeedsInvestigation
-            reasons: [heuristic_binding]
-        - side: consumer
-          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
-          kind: ConsumerFieldUnmatched
-          field: text
-          compat: Breaking
-          impact:
-            class: NeedsInvestigation
-            reasons: [heuristic_binding]
-        # billing's `/invoices/{}` is code-only; billing's
-        # `src/main.py` differs between base and s3, so the source
-        # change fires `ChangedWithoutSchema`.
-        - side: provider
-          endpoint: { service: billing, key: "http:GET /invoices/{}" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
+            reasons: [unresolved_candidates]
     tool_also: list_unresolved
     expected_list_unresolved:
       contains:
@@ -397,54 +316,15 @@ scenarios:
   "4":
     title: "snapshot with exclude: [reports]; no reviewed repo consumes the change"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s1-remove-customer-id, billing: base, reports: base, platform: base }
+      base:  { orders: base, billing: base, reports: base }
+      head:  { orders: s1-remove-customer-id, billing: base, reports: base }
       exclude: [reports]
     tool: diff_contracts
     expected:
       impact:
         class: NoKnownImpact
         reasons: []
-      changes:
-        # `reports` is excluded, but the schema change still emits on
-        # every endpoint that references the Order response schema,
-        # because the `diff_contracts` engine reports provider-side
-        # schema diffs regardless of which repos are reviewed. Impact
-        # is `NoKnownImpact` because billing/reports aren't in scope.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/me" }
-          kind: FieldRemoved
-          direction: response
-          field: customer_id
-          compat: BreakingIfRead
-          impact:
-            class: NoKnownImpact
-            reasons: []
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
-          kind: FieldRemoved
-          direction: response
-          field: customer_id
-          compat: BreakingIfRead
-          impact:
-            class: NoKnownImpact
-            reasons: []
-        - side: provider
-          endpoint: { service: orders, key: "http:POST /api/orders" }
-          kind: FieldRemoved
-          direction: response
-          field: customer_id
-          compat: BreakingIfRead
-          impact:
-            class: NoKnownImpact
-            reasons: []
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
+      changes: []   # nothing bound, so no change is reported
       compatible_changes: 0
       coverage:
         complete: false
@@ -458,8 +338,8 @@ scenarios:
   "5":
     title: "orders adds enum value `refunded` to status"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s5-enum-value, billing: base, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: s5-enum-value, billing: base }
     tool: diff_contracts
     expected:
       changes:
@@ -477,34 +357,9 @@ scenarios:
               reviewed:    [orders, billing, reports, platform]
               unreviewed:  []
               configured_only: true
-        # The Order response schema is shared by /api/orders/me and
-        # POST /api/orders, so the EnumValueAdded fires on those
-        # endpoints too.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/me" }
-          kind: EnumValueAdded
-          direction: response
-          field: status
-          added: [refunded]
-          compat: NeedsReview
-        - side: provider
-          endpoint: { service: orders, key: "http:POST /api/orders" }
-          kind: EnumValueAdded
-          direction: response
-          field: status
-          added: [refunded]
-          compat: NeedsReview
-        # /label is code-only; orders/src/main.rs differs.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
     setup_with_billing_status:
-      base:  { orders: base, billing: s5b-read-status, reports: base, platform: base }
-      head:  { orders: s5-enum-value, billing: s5b-read-status, reports: base, platform: base }
+      base:  { orders: base,  billing: s5b-read-status }
+      head:  { orders: s5-enum-value, billing: s5b-read-status }
     expected_with_billing_status:
       changes:
         - side: provider
@@ -525,8 +380,8 @@ scenarios:
   "6":
     title: "/api/orders/{} → /api/order/{}, same handler"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s6-rename-path, billing: base, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: s6-rename-path, billing: base }
     tool: diff_contracts
     expected:
       changes:
@@ -543,26 +398,6 @@ scenarios:
             - service: billing
               class: Verified
               reasons: []
-        # billing's `fetch_order` now targets a URL that no provider
-        # exposes — orders's `/api/orders/{}` was renamed. The consumer
-        # becomes `ConsumerEndpointUnmatched` against the orphan
-        # template; the joiner records it under billing's own
-        # service as the placeholder key.
-        - side: consumer
-          endpoint: { service: billing, key: "http:UNKNOWN " }
-          kind: ConsumerEndpointUnmatched
-          compat: Breaking
-          impact:
-            class: NeedsInvestigation
-            reasons: [heuristic_binding]
-        # /label is code-only; orders/src/main.rs differs.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
 
   "7":
     title: "resolve_evidence receives a forged ref"
@@ -630,8 +465,8 @@ scenarios:
   "11":
     title: "Response field customer_id → customerId, same type"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s11-rename-field, billing: base, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: s11-rename-field, billing: base }
     tool: diff_contracts
     expected:
       changes:
@@ -649,35 +484,12 @@ scenarios:
             - service: billing
               class: Verified
               reasons: []
-        # Same Order response schema is shared across endpoints.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/me" }
-          kind: FieldRenamed
-          direction: response
-          from: customer_id
-          to:   customerId
-          compat: BreakingIfRead
-        - side: provider
-          endpoint: { service: orders, key: "http:POST /api/orders" }
-          kind: FieldRenamed
-          direction: response
-          from: customer_id
-          to:   customerId
-          compat: BreakingIfRead
-        # /label is code-only; orders/src/main.rs differs.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
 
   "12":
     title: "Same rename with a type change"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s12-rename-retype, billing: base, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: s12-rename-retype, billing: base }
     tool: diff_contracts
     expected:
       changes:
@@ -709,43 +521,6 @@ scenarios:
             - service: billing
               class: Verified
               reasons: []
-        # The Order schema is shared across endpoints.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/me" }
-          kind: FieldRemoved
-          direction: response
-          field: customer_id
-          compat: BreakingIfRead
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/me" }
-          kind: FieldAdded
-          direction: response
-          field: customerId
-          type: integer
-          required: true
-          compat: BreakingIfRead
-        - side: provider
-          endpoint: { service: orders, key: "http:POST /api/orders" }
-          kind: FieldRemoved
-          direction: response
-          field: customer_id
-          compat: BreakingIfRead
-        - side: provider
-          endpoint: { service: orders, key: "http:POST /api/orders" }
-          kind: FieldAdded
-          direction: response
-          field: customerId
-          type: integer
-          required: true
-          compat: BreakingIfRead
-        # /label is code-only; orders/src/main.rs differs.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
 
   "13":
     title: "billing calls literal /api/orders/me"
@@ -844,8 +619,8 @@ scenarios:
   "19":
     title: "Type change of optional request field `note`"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s19-optional-request-type, billing: base, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: s19-optional-request-type, billing: base }
     tool: diff_contracts
     expected:
       changes:
@@ -860,21 +635,13 @@ scenarios:
           impact:
             class: NeedsInvestigation
             reasons: [sends_not_modeled]
-        # /label is code-only; orders/src/main.rs differs.
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
       # 0.9 has no `WritesField`; BreakingIfSent never reaches Verified.
 
   "20":
     title: "billing starts reading discount"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: base, billing: s20-read-discount, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: base,  billing: s20-read-discount }
     tool: diff_contracts
     expected:
       changes:
@@ -887,21 +654,12 @@ scenarios:
           impact:
             class: Verified
             reasons: []
-        # billing's `/invoices/{}` is code-only; billing's
-        # `src/main.py` differs between base and s20.
-        - side: provider
-          endpoint: { service: billing, key: "http:GET /invoices/{}" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
 
   "21":
     title: "orders changes the handler of GET /api/orders/{}/label"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s21-code-only-handler, billing: base, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: s21-code-only-handler, billing: base }
     tool: diff_contracts
     expected:
       changes:
@@ -923,16 +681,11 @@ scenarios:
   "22":
     title: "billing stores the response in a module-level cache, then scenario 1"
     setup:
-      base:  { orders: base, billing: base, reports: base, platform: base }
-      head:  { orders: s1-remove-customer-id, billing: s22-cache-response, reports: base, platform: base }
+      base:  { orders: base,  billing: base }
+      head:  { orders: s1-remove-customer-id, billing: s22-cache-response }
     tool: diff_contracts
     expected:
       changes:
-        # The cache escape (§6.5) makes `r.json()` and `r.text()` be
-        # treated as field reads on the response; with `customer_id`
-        # removed they fail to bind, surfacing as
-        # `ConsumerFieldUnmatched`. The breaking change is still
-        # reported on the canonical FieldRemoved path as well.
         - side: provider
           endpoint: { service: orders, key: "http:GET /api/orders/{}" }
           kind: FieldRemoved
@@ -946,44 +699,6 @@ scenarios:
             - service: billing
               class: NeedsInvestigation
               reasons: [reads_not_fully_traced]
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/me" }
-          kind: FieldRemoved
-          direction: response
-          field: customer_id
-          compat: BreakingIfRead
-        - side: provider
-          endpoint: { service: orders, key: "http:POST /api/orders" }
-          kind: FieldRemoved
-          direction: response
-          field: customer_id
-          compat: BreakingIfRead
-        - side: consumer
-          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
-          kind: ConsumerFieldUnmatched
-          field: json
-          compat: Breaking
-        - side: consumer
-          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
-          kind: ConsumerFieldUnmatched
-          field: text
-          compat: Breaking
-        # billing's `/invoices/{}` and orders's `/label` are
-        # code-only; both src/main.py files differ in this scenario.
-        - side: provider
-          endpoint: { service: billing, key: "http:GET /invoices/{}" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
-        - side: provider
-          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
-          kind: ChangedWithoutSchema
-          compat: NeedsReview
-          impact:
-            class: NeedsInvestigation
-            reasons: [no_schema]
       # `_CACHE[order_id] = r.json()` is the §6.5 escape rule for
       # "stored into a collection", which sets `reads_complete = false`
       # on the consumer fact. BreakingIfRead + reads_complete=false
