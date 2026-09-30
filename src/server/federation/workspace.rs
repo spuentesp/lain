@@ -67,8 +67,9 @@ impl WorkspacesFile {
     }
 
     /// Validate structural invariants: unique workspace names, ≥1 member per
-    /// workspace (unless a `source` will supply them later — `lain workspaces
-    /// init` registers first and adds members afterwards), valid repo id
+    /// workspace (a workspace with a `source` may start empty — `lain
+    /// workspaces init` registers it and `lain workspaces add` fills in the
+    /// members; nothing merges members in from the source), valid repo id
     /// characters, default workspace exists if set.
     pub fn validate(&self) -> Result<(), LainError> {
         let mut seen_names = std::collections::HashSet::new();

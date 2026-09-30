@@ -28,7 +28,7 @@
 # The --agent-cmd flag lets a real MCP/agent session drive beats 3–5:
 #   ./scripts/make-demo-video.sh --agent-cmd "my-agent-session --tool-chain mcp"
 #
-# Requirements: ffmpeg, asciinema, Xvfb, xterm (all verified present).
+# Requirements: ffmpeg, asciinema (all verified present).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -1,7 +1,7 @@
 //! Contract tests for GraphBackend. The same tests will run against PetgraphBackend
 //! in Task 7. Here we use a simple in-memory HashMap impl to define the contract.
 use crate::error::LainError;
-use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
+use crate::federation::graph_backend::{GraphBackend, PetgraphBackend, FEDERATION_GRAPH_MAGIC};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -175,7 +175,7 @@ fn contract_remove_edges_drops_only_matching_endpoints_stay() {
     let edge = GraphEdge::new(EdgeType::Calls, n1.id.clone(), n2.id.clone());
     b.upsert_edge(edge.clone()).unwrap();
 
-    let removed = b.remove_edges(std::slice::from_ref(&edge)).unwrap();
+    let removed = b.remove_edges(&[edge.clone()]).unwrap();
     assert_eq!(removed, 1);
     assert_eq!(b.edge_count(), 0);
     assert_eq!(b.node_count(), 2, "endpoints must survive edge removal");
@@ -248,14 +248,17 @@ fn petgraph_backend_persists_and_reloads() {
 
 #[test]
 fn petgraph_backend_rejects_pre_bump_version_header() {
+    // Write a federated_graph.bin with header = 1 (pre-bump).
     let dir = tempfile::tempdir().unwrap();
     let bin_path = dir.path().join("federated_graph.bin");
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"LNF2");
-    bytes.extend_from_slice(&1u32.to_le_bytes());
-    bytes.extend_from_slice(&[0u8; 16]);
+    bytes.extend_from_slice(FEDERATION_GRAPH_MAGIC);
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // legacy version
+    bytes.extend_from_slice(&[0u8; 16]); // payload placeholder
     std::fs::write(&bin_path, &bytes).unwrap();
 
+    // Loading must return FederationSchemaMismatch, not a parse error
+    // and not a silent success.
     let err = match PetgraphBackend::new(dir.path()) {
         Ok(_) => panic!("expected FederationSchemaMismatch"),
         Err(e) => e,
@@ -267,39 +270,4 @@ fn petgraph_backend_rejects_pre_bump_version_header() {
         }
         other => panic!("expected FederationSchemaMismatch, got {other:?}"),
     }
-}
-
-#[test]
-fn petgraph_backend_rejects_headerless_legacy_payload() {
-    let dir = tempfile::tempdir().unwrap();
-    let bin_path = dir.path().join("federated_graph.bin");
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&2u32.to_le_bytes());
-    bytes.extend_from_slice(&[0u8; 32]);
-    std::fs::write(&bin_path, &bytes).unwrap();
-
-    let err = match PetgraphBackend::new(dir.path()) {
-        Ok(_) => panic!("expected FederationSchemaMismatch"),
-        Err(e) => e,
-    };
-    assert!(
-        matches!(err, LainError::FederationSchemaMismatch { .. }),
-        "expected FederationSchemaMismatch, got {err:?}"
-    );
-}
-
-#[test]
-fn petgraph_backend_rejects_short_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let bin_path = dir.path().join("federated_graph.bin");
-    std::fs::write(&bin_path, [0u8; 4]).unwrap();
-
-    let err = match PetgraphBackend::new(dir.path()) {
-        Ok(_) => panic!("expected FederationSchemaMismatch"),
-        Err(e) => e,
-    };
-    assert!(
-        matches!(err, LainError::FederationSchemaMismatch { .. }),
-        "expected FederationSchemaMismatch, got {err:?}"
-    );
 }

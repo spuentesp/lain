@@ -151,7 +151,10 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
 /// Load a federation scoped to a single workspace's repos. Same pattern as
 /// `load_federation` but filters `repos.yaml` to the workspace's members
 /// before adding them to the federation. Errors fast at config time if the
-/// workspace references a repo id not in `repos.yaml`.
+/// workspace references a repo id not in `repos.yaml`, or if the workspace
+/// has no members yet (a freshly-`init`ed workspace that `lain workspaces
+/// add` has not populated — coming up with zero repos would be a silently
+/// empty federation).
 ///
 /// `workspaces.yaml` is loaded from `<config_path parent>/workspaces.yaml`
 /// by default; pass an explicit path via the `workspaces_path` arg if it's
@@ -178,6 +181,17 @@ pub async fn load_federation_with_workspace(
     };
     let ws_spec = resolve_active_workspace(&workspaces, workspace_name)?.clone();
     let workspace = WorkspaceIndex::from_spec(ws_spec);
+
+    // A 0-member workspace is legal on disk (`lain workspaces init` writes
+    // one before `lain workspaces add` populates it), but loading it here
+    // would build a federation with zero repos — vacuous readiness and no
+    // error. Refuse to come up empty and name the remedy.
+    if workspace.spec.members.is_empty() {
+        return Err(LainError::Config(format!(
+            "workspace '{}' has no members yet — run 'lain workspaces add {} --repo <repo-id>'",
+            workspace.spec.name, workspace.spec.name
+        )));
+    }
 
     // Filter repos.yaml to the workspace's members. If any member id is
     // not in repos.yaml, fail with the missing ids listed.
