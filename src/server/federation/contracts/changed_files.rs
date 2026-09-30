@@ -37,7 +37,10 @@ impl std::fmt::Debug for MirrorChangedFiles {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MirrorChangedFiles")
             .field("data_dir", &self.data_dir)
-            .field("repo_count", &self.repos.read().map(|g| g.len()).unwrap_or(0))
+            .field(
+                "repo_count",
+                &self.repos.read().map(|g| g.len()).unwrap_or(0),
+            )
             .finish()
     }
 }
@@ -270,7 +273,10 @@ mod tests {
         setup_mirror(&work, &mirror);
         let src = MirrorChangedFiles::new(tmp.path());
         let same = src.diff("src", &base, &base);
-        assert!(same.is_empty(), "expected no diff for identical SHAs: {same:?}");
+        assert!(
+            same.is_empty(),
+            "expected no diff for identical SHAs: {same:?}"
+        );
     }
 
     #[test]
@@ -294,10 +300,7 @@ mod tests {
         setup_mirror(&work_b, &tmp.path().join("mirrors/b.git"));
         let out = diff_multi(
             tmp.path(),
-            &[
-                ("a".into(), a_base, a_head),
-                ("b".into(), b_base, b_head),
-            ],
+            &[("a".into(), a_base, a_head), ("b".into(), b_base, b_head)],
         );
         assert!(out.contains(&a_path));
         assert!(out.contains(&b_path));

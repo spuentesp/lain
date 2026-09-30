@@ -208,9 +208,7 @@ impl SnapshotManager {
         // resolves it from the manager. For the pure-record path
         // we approximate with the env var `LAIN_DATA_DIR` or
         // relative to the record's on-disk directory.
-        std::env::var("LAIN_DATA_DIR")
-            .ok()
-            .map(PathBuf::from)
+        std::env::var("LAIN_DATA_DIR").ok().map(PathBuf::from)
     }
 
     pub fn cache(&self) -> &IndexCache {

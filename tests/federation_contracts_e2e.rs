@@ -665,12 +665,9 @@ use lain::server::mcp::contract_tools::analysis::{
     diff_contracts_handle, get_coverage_handle, trace_impact_handle,
 };
 use lain::server::mcp::contract_tools::contracts::{
-    check_binding_handle, get_contract_handle, list_contracts_handle,
-    list_unresolved_handle,
+    check_binding_handle, get_contract_handle, list_contracts_handle, list_unresolved_handle,
 };
-use lain::server::mcp::contract_tools::evidence::{
-    read_source_handle, resolve_evidence_handle,
-};
+use lain::server::mcp::contract_tools::evidence::{read_source_handle, resolve_evidence_handle};
 
 fn ctx_for<'a>(
     fed: &'a Arc<FederatedIndex>,
@@ -691,11 +688,17 @@ async fn pr13_list_contracts_returns_at_least_one_endpoint() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
-    let outcome =
-        list_contracts_handle(&{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    }, json!({"snapshot": "live"})).await.unwrap();
+    let outcome = list_contracts_handle(
+        &{
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
+        json!({"snapshot": "live"}),
+    )
+    .await
+    .unwrap();
     assert!(!outcome.is_error);
     let items = outcome.structured["data"]["items"].as_array().unwrap();
     let keys: Vec<String> = items
@@ -713,13 +716,17 @@ async fn pr13_list_contracts_paging_respects_limit() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
-    let outcome =
-        list_contracts_handle(&{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    }, json!({"snapshot": "live", "limit": 1}))
-            .await
-            .unwrap();
+    let outcome = list_contracts_handle(
+        &{
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
+        json!({"snapshot": "live", "limit": 1}),
+    )
+    .await
+    .unwrap();
     let items = outcome.structured["data"]["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
 }
@@ -731,14 +738,20 @@ async fn pr13_get_contract_returns_providers_and_consumers() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = get_contract_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({"snapshot": "live", "key": "http:GET /invoices/{}", "service": "billing"}),
     )
     .await
     .unwrap();
-    assert!(!outcome.is_error, "errors: {:?}", outcome.structured["error"]);
+    assert!(
+        !outcome.is_error,
+        "errors: {:?}",
+        outcome.structured["error"]
+    );
     let items = outcome.structured["data"]["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     let item = &items[0];
@@ -759,9 +772,11 @@ async fn pr13_get_contract_unknown_key_returns_contract_not_found() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = get_contract_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({"snapshot": "live", "key": "http:GET /no/such/path"}),
     )
     .await
@@ -778,11 +793,17 @@ async fn pr13_list_unresolved_returns_empty_when_no_ambiguous() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
-    let outcome =
-        list_unresolved_handle(&{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    }, json!({"snapshot": "live"})).await.unwrap();
+    let outcome = list_unresolved_handle(
+        &{
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
+        json!({"snapshot": "live"}),
+    )
+    .await
+    .unwrap();
     assert!(!outcome.is_error);
     let data = &outcome.structured["data"];
     assert_eq!(data["items"].as_array().unwrap().len(), 0);
@@ -857,9 +878,11 @@ async fn pr13_check_binding_emits_bindings_entry_for_valid_link() {
     // `billing`). Use the order→billing cross-service link.
     let outcome = check_binding_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({
             "snapshot": "live",
             "consumer": "reports:HttpClientCall:src/index.ts:buildMonthlyReport:20",
@@ -881,11 +904,17 @@ async fn pr13_diff_contracts_rejects_live_base() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
-    let outcome =
-        diff_contracts_handle(&{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    }, json!({"base": "live", "head": "live"})).await.unwrap();
+    let outcome = diff_contracts_handle(
+        &{
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
+        json!({"base": "live", "head": "live"}),
+    )
+    .await
+    .unwrap();
     assert!(outcome.is_error);
     assert_eq!(
         outcome.structured["error"]["code"],
@@ -900,9 +929,11 @@ async fn pr13_diff_contracts_rejects_unknown_snapshot() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = diff_contracts_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({"base": "snap_missing", "head": "snap_missing"}),
     )
     .await
@@ -917,9 +948,11 @@ async fn pr13_trace_impact_rejects_zero_from() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = trace_impact_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({"snapshot": "live", "from": {}}),
     )
     .await
@@ -938,9 +971,11 @@ async fn pr13_trace_impact_endpoint_returns_paths() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = trace_impact_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({
             "snapshot": "live",
             "from": {"endpoint": {"service": "billing", "key": "http:GET /invoices/{}"}},
@@ -950,7 +985,11 @@ async fn pr13_trace_impact_endpoint_returns_paths() {
     )
     .await
     .unwrap();
-    assert!(!outcome.is_error, "errors: {:?}", outcome.structured["error"]);
+    assert!(
+        !outcome.is_error,
+        "errors: {:?}",
+        outcome.structured["error"]
+    );
     let paths = outcome.structured["data"]["paths"].as_array().unwrap();
     // No external symbol edges in the synthetic federation, so
     // paths may be empty — what matters is wire shape.
@@ -962,11 +1001,17 @@ async fn pr13_get_coverage_returns_scope_and_repos() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
-    let outcome =
-        get_coverage_handle(&{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    }, json!({"snapshot": "live"})).await.unwrap();
+    let outcome = get_coverage_handle(
+        &{
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
+        json!({"snapshot": "live"}),
+    )
+    .await
+    .unwrap();
     assert!(!outcome.is_error);
     let data = &outcome.structured["data"];
     assert!(data["scope"].is_object());
@@ -981,9 +1026,11 @@ async fn pr13_resolve_evidence_forged_ref_returns_exists_false() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = resolve_evidence_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({
             "snapshot": "live",
             "refs": ["orders:Function:src/main.rs:does_not_exist:99"]
@@ -1005,9 +1052,11 @@ async fn pr13_resolve_evidence_real_node_returns_exists_true() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = resolve_evidence_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({
             "snapshot": "live",
             "refs": ["billing:Function:src/billing.py:build_invoice:10"]
@@ -1028,9 +1077,11 @@ async fn pr13_resolve_evidence_malformed_returns_malformed_reason() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = resolve_evidence_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({"snapshot": "live", "refs": ["totally-malformed-ref"]}),
     )
     .await
@@ -1047,9 +1098,11 @@ async fn pr13_read_source_refuses_secret_basename() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = read_source_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({
             "snapshot": "live",
             "repo": "billing",
@@ -1061,10 +1114,7 @@ async fn pr13_read_source_refuses_secret_basename() {
     .await
     .unwrap();
     assert!(outcome.is_error);
-    assert_eq!(
-        outcome.structured["error"]["code"],
-        json!("path_rejected")
-    );
+    assert_eq!(outcome.structured["error"]["code"], json!("path_rejected"));
     assert_eq!(
         outcome.structured["error"]["details"]["reason"],
         json!("secret")
@@ -1130,10 +1180,7 @@ async fn pr13_read_source_returns_empty_when_start_past_end() {
     .await
     .unwrap();
     assert!(outcome.is_error);
-    assert_eq!(
-        outcome.structured["error"]["code"],
-        json!("path_rejected")
-    );
+    assert_eq!(outcome.structured["error"]["code"], json!("path_rejected"));
 }
 
 #[tokio::test]
@@ -1143,9 +1190,11 @@ async fn pr13_read_source_rejects_over_400_lines() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = read_source_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({
             "snapshot": "live",
             "repo": "billing",
@@ -1170,9 +1219,11 @@ async fn pr13_read_source_unknown_repo_returns_repo_not_registered() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = read_source_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({
             "snapshot": "live",
             "repo": "ghost",
@@ -1197,9 +1248,11 @@ async fn pr13_unsupported_api_version_returns_supported_array() {
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
     let outcome = list_contracts_handle(
         &{
-        let _status = Box::leak(Box::new(lain::server::mcp::handler::HandlerStatus::for_test()));
-        ctx_for(&fed, _status)
-    },
+            let _status = Box::leak(Box::new(
+                lain::server::mcp::handler::HandlerStatus::for_test(),
+            ));
+            ctx_for(&fed, _status)
+        },
         json!({"snapshot": "live", "api_version": 99}),
     )
     .await
@@ -1231,8 +1284,9 @@ async fn pr13_federation_disabled_when_no_fed() {
         reload_bus: None,
         snapshots: None,
     };
-    let outcome =
-        list_services_handle(&ctx, json!({"snapshot": "live"})).await.unwrap();
+    let outcome = list_services_handle(&ctx, json!({"snapshot": "live"}))
+        .await
+        .unwrap();
     // `list_services` raises `federation_disabled` when the server
     // runs without a federation; this is the §13 verbatim code,
     // not an internal failure.

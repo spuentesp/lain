@@ -127,6 +127,19 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             // per-repo caches; both are built off the static graph.
             | "prepare_snapshot"
             | "get_snapshot"
+            // PR 13: contract tools. Read the federation's
+            // `ContractIndex` (live) or the snapshot manager's
+            // `from_snapshot` projection (named snapshots); both
+            // require the graph to be indexed.
+            | "list_contracts"
+            | "get_contract"
+            | "list_unresolved"
+            | "check_binding"
+            | "diff_contracts"
+            | "trace_impact"
+            | "get_coverage"
+            | "resolve_evidence"
+            | "read_source"
     ) {
         return Some(GraphRequired);
     }

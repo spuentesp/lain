@@ -369,20 +369,14 @@ fn golden_read_source_envelope_matches_schema() {
 
 #[test]
 fn golden_error_envelope_unsupported_api_version_carries_supported() {
-    let envelope = error_envelope_shape(
-        "unsupported_api_version",
-        Some(json!({"supported": [1]})),
-    );
+    let envelope = error_envelope_shape("unsupported_api_version", Some(json!({"supported": [1]})));
     let result = envelope_schema().validate(&envelope);
     assert!(result.is_ok(), "error envelope must validate: {result:?}");
 }
 
 #[test]
 fn golden_error_envelope_repo_not_registered() {
-    let envelope = error_envelope_shape(
-        "repo_not_registered",
-        Some(json!({"repo": "ghost"})),
-    );
+    let envelope = error_envelope_shape("repo_not_registered", Some(json!({"repo": "ghost"})));
     assert!(envelope_schema().validate(&envelope).is_ok());
 }
 
@@ -403,19 +397,13 @@ fn golden_error_envelope_snapshot_not_found() {
 
 #[test]
 fn golden_error_envelope_service_not_found() {
-    let envelope = error_envelope_shape(
-        "service_not_found",
-        Some(json!({"service": "ghost"})),
-    );
+    let envelope = error_envelope_shape("service_not_found", Some(json!({"service": "ghost"})));
     assert!(envelope_schema().validate(&envelope).is_ok());
 }
 
 #[test]
 fn golden_error_envelope_snapshot_not_ready() {
-    let envelope = error_envelope_shape(
-        "snapshot_not_ready",
-        Some(json!({"state": "indexing"})),
-    );
+    let envelope = error_envelope_shape("snapshot_not_ready", Some(json!({"state": "indexing"})));
     assert!(envelope_schema().validate(&envelope).is_ok());
 }
 
@@ -472,10 +460,7 @@ fn golden_error_envelope_path_rejected() {
 
 #[test]
 fn golden_error_envelope_busy() {
-    let envelope = error_envelope_shape(
-        "busy",
-        Some(json!({"retry_after_ms": 1000})),
-    );
+    let envelope = error_envelope_shape("busy", Some(json!({"retry_after_ms": 1000})));
     assert!(envelope_schema().validate(&envelope).is_ok());
 }
 

@@ -43,11 +43,11 @@ use crate::federation::contracts::index::{
     UnresolvedReason,
 };
 use crate::federation::contracts::joiner::ContractJoiner;
+use crate::federation::contracts::model::MethodSpec;
 use crate::federation::contracts::model::{
     ContractKey, Direction, FieldMeta, JsonPath, ServiceName,
 };
 use crate::federation::contracts::route_match::match_route;
-use crate::federation::contracts::model::MethodSpec;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::PetgraphBackend;
 use crate::federation::repo_id::{GlobalId, RepoId};
@@ -79,10 +79,7 @@ inventory::submit!(ContractToolEntry {
 });
 
 /// `list_contracts` async handler.
-pub fn list_contracts_handle<'a>(
-    ctx: &'a McpContext<'a>,
-    args: Value,
-) -> ContractToolFuture<'a> {
+pub fn list_contracts_handle<'a>(ctx: &'a McpContext<'a>, args: Value) -> ContractToolFuture<'a> {
     let args_map = object_or_empty(args);
     let started = Instant::now();
     Box::pin(async move {
@@ -103,10 +100,7 @@ pub fn list_contracts_handle<'a>(
 }
 
 /// `get_contract` async handler.
-pub fn get_contract_handle<'a>(
-    ctx: &'a McpContext<'a>,
-    args: Value,
-) -> ContractToolFuture<'a> {
+pub fn get_contract_handle<'a>(ctx: &'a McpContext<'a>, args: Value) -> ContractToolFuture<'a> {
     let args_map = object_or_empty(args);
     let started = Instant::now();
     Box::pin(async move {
@@ -127,10 +121,7 @@ pub fn get_contract_handle<'a>(
 }
 
 /// `list_unresolved` async handler.
-pub fn list_unresolved_handle<'a>(
-    ctx: &'a McpContext<'a>,
-    args: Value,
-) -> ContractToolFuture<'a> {
+pub fn list_unresolved_handle<'a>(ctx: &'a McpContext<'a>, args: Value) -> ContractToolFuture<'a> {
     let args_map = object_or_empty(args);
     let started = Instant::now();
     Box::pin(async move {
@@ -151,10 +142,7 @@ pub fn list_unresolved_handle<'a>(
 }
 
 /// `check_binding` async handler.
-pub fn check_binding_handle<'a>(
-    ctx: &'a McpContext<'a>,
-    args: Value,
-) -> ContractToolFuture<'a> {
+pub fn check_binding_handle<'a>(ctx: &'a McpContext<'a>, args: Value) -> ContractToolFuture<'a> {
     let args_map = object_or_empty(args);
     let started = Instant::now();
     Box::pin(async move {
@@ -195,7 +183,10 @@ async fn run_list_contracts(
         .get("service")
         .and_then(|v| v.as_str())
         .map(|s| ServiceName(s.to_string()));
-    let repo_filter = args_map.get("repo").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let repo_filter = args_map
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let kind_filter = args_map
         .get("kind")
         .and_then(|v| v.as_str())
@@ -209,7 +200,11 @@ async fn run_list_contracts(
             }
         }
         if let Some(ref repo) = repo_filter {
-            if !endpoint.providers.iter().any(|p| p.node_id.repo_id() == repo.as_str()) {
+            if !endpoint
+                .providers
+                .iter()
+                .any(|p| p.node_id.repo_id() == repo.as_str())
+            {
                 continue;
             }
         }
@@ -226,7 +221,13 @@ async fn run_list_contracts(
         let providers_json: Vec<Value> = endpoint
             .providers
             .iter()
-            .map(|p| evidence_ref(&p.node_id, &p.node_id.path().unwrap_or_default(), p.node_id.line_start().unwrap_or(0)))
+            .map(|p| {
+                evidence_ref(
+                    &p.node_id,
+                    &p.node_id.path().unwrap_or_default(),
+                    p.node_id.line_start().unwrap_or(0),
+                )
+            })
             .collect();
         items.push(json!({
             "endpoint": {"service": endpoint_id.0 .0, "key": endpoint_id.1.to_string()},
@@ -331,11 +332,7 @@ async fn run_get_contract(
     let mut items: Vec<Value> = Vec::new();
     for (endpoint_id, endpoint) in &matched {
         let mut schemas: Vec<Value> = Vec::new();
-        for dir in [
-            Direction::Request,
-            Direction::Response,
-            Direction::Payload,
-        ] {
+        for dir in [Direction::Request, Direction::Response, Direction::Payload] {
             if let Some(schema) = endpoint.schemas.get(&dir) {
                 let mut fields: Vec<Value> = Vec::new();
                 for (path, meta) in &schema.fields {
@@ -393,14 +390,18 @@ async fn run_list_unresolved(
         ViewHandle::Empty(_) => {
             let mut data = json!({"items": [], "ambiguous": []});
             data["scope"] = scope_for_view(ctx, &args_map);
-            let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+            let envelope =
+                success_envelope(data.clone(), &snap_label, snap_label != "live", started);
             return Ok(outcome(envelope, &data, render_list_unresolved(&data)));
         }
         ViewHandle::Index { index, .. } => index,
     };
     let limit = parse_limit(&args_map, started)?;
     let cursor = parse_cursor(&args_map, started)?;
-    let repo_filter = args_map.get("repo").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let repo_filter = args_map
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let service_filter = args_map
         .get("service")
         .and_then(|v| v.as_str())
@@ -408,7 +409,9 @@ async fn run_list_unresolved(
 
     let mut items: Vec<Value> = Vec::new();
     for (call_id, resolution) in &view.consumers {
-        let Some(target) = &resolution.target else { continue };
+        let Some(target) = &resolution.target else {
+            continue;
+        };
         let (reason, target_service) = match target {
             ConsumerTarget::Unresolved {
                 reason,
@@ -505,17 +508,15 @@ async fn run_check_binding(
                 started,
             )
         })?;
-    let endpoint_raw = args_map
-        .get("endpoint")
-        .ok_or_else(|| {
-            error_outcome(
-                "invalid_argument",
-                "missing required argument: endpoint",
-                Some(json!({"arg": "endpoint"})),
-                &snap_label,
-                started,
-            )
-        })?;
+    let endpoint_raw = args_map.get("endpoint").ok_or_else(|| {
+        error_outcome(
+            "invalid_argument",
+            "missing required argument: endpoint",
+            Some(json!({"arg": "endpoint"})),
+            &snap_label,
+            started,
+        )
+    })?;
 
     let consumer_id = GlobalId::from_canonical(consumer_raw);
     if GlobalId::parse(consumer_id.as_str()).is_err() {
@@ -567,7 +568,6 @@ async fn run_check_binding(
 
     let resolution = view.consumers.get(&consumer_id).cloned();
     let mut reasons: Vec<&'static str> = Vec::new();
-    let mut method_match = false;
     let mut template_match = "none";
 
     if resolution.is_none() {
@@ -582,6 +582,7 @@ async fn run_check_binding(
             reasons.push("already_bound");
         }
     }
+    let _ = (); // sentinel — keep the binding site stable
     let (consumer_method, consumer_template) = parse_consumer_call_shape(&consumer_id);
     let (provider_method, provider_template) = match &key {
         ContractKey::Http { method, template } => (method.clone(), template.clone()),
@@ -596,14 +597,12 @@ async fn run_check_binding(
         }
     };
 
-    method_match = methods_compatible(&consumer_method, &provider_method);
+    let method_match = methods_compatible(&consumer_method, &provider_method);
     if !method_match {
         reasons.push("method_mismatch");
     }
-    let (template_compatible, match_label) = templates_compatible(
-        consumer_template.as_deref(),
-        &provider_template,
-    );
+    let (template_compatible, match_label) =
+        templates_compatible(consumer_template.as_deref(), &provider_template);
     template_match = match_label;
     if !template_compatible {
         reasons.push("template_mismatch");
@@ -611,12 +610,7 @@ async fn run_check_binding(
     let valid = reasons.is_empty() && endpoint_def.is_some();
 
     let data = if valid {
-        let entry = render_bindings_entry(
-            &consumer_repo,
-            &consumer_id,
-            &key,
-            &endpoint_id,
-        );
+        let entry = render_bindings_entry(&consumer_repo, &consumer_id, &key, &endpoint_id);
         json!({
             "valid": true,
             "reasons": [],
@@ -642,12 +636,10 @@ fn parse_endpoint(v: &Value) -> Result<Value, ToolOutcome> {
     match v {
         Value::Object(_) => Ok(v.clone()),
         Value::String(s) => {
-            let key = ContractKey::from_str(s).map_err(|e| {
-                ToolOutcome {
-                    structured: json!({}),
-                    text: format!("malformed endpoint: {e}"),
-                    is_error: true,
-                }
+            let key = ContractKey::from_str(s).map_err(|e| ToolOutcome {
+                structured: json!({}),
+                text: format!("malformed endpoint: {e}"),
+                is_error: true,
             })?;
             Ok(json!({"service": "", "key": key.to_string()}))
         }
@@ -702,7 +694,10 @@ pub async fn resolve_view(
         let Some(idx) = fed.contract_index() else {
             return Ok(ViewHandle::Empty("federation disabled or empty"));
         };
-        return Ok(ViewHandle::Index { index: idx, _hold: None });
+        return Ok(ViewHandle::Index {
+            index: idx,
+            _hold: None,
+        });
     }
     if !snap_label.starts_with(crate::federation::contracts::snapshots::SNAPSHOT_ID_PREFIX) {
         return Err(error_outcome(
@@ -723,15 +718,15 @@ pub async fn resolve_view(
         )
     })?;
     let outcome = mgr.get(&snap_label, 5_000).await.map_err(|e| match e {
-        crate::federation::contracts::snapshots::manager::PrepareError::SnapshotNotFound { snapshot } => {
-            error_outcome(
-                "snapshot_not_found",
-                format!("snapshot {snapshot:?} not found"),
-                Some(json!({"snapshot": snapshot})),
-                &snap_label,
-                started,
-            )
-        }
+        crate::federation::contracts::snapshots::manager::PrepareError::SnapshotNotFound {
+            snapshot,
+        } => error_outcome(
+            "snapshot_not_found",
+            format!("snapshot {snapshot:?} not found"),
+            Some(json!({"snapshot": snapshot})),
+            &snap_label,
+            started,
+        ),
         crate::federation::contracts::snapshots::manager::PrepareError::Busy { retry_after_ms } => {
             error_outcome(
                 "busy",
@@ -741,15 +736,15 @@ pub async fn resolve_view(
                 started,
             )
         }
-        crate::federation::contracts::snapshots::manager::PrepareError::RepoNotRegistered { repo } => {
-            error_outcome(
-                "repo_not_registered",
-                format!("repo {repo:?} not configured"),
-                Some(json!({"repo": repo})),
-                &snap_label,
-                started,
-            )
-        }
+        crate::federation::contracts::snapshots::manager::PrepareError::RepoNotRegistered {
+            repo,
+        } => error_outcome(
+            "repo_not_registered",
+            format!("repo {repo:?} not configured"),
+            Some(json!({"repo": repo})),
+            &snap_label,
+            started,
+        ),
         other => error_outcome(
             "invalid_argument",
             format!("{other:?}"),
@@ -758,15 +753,15 @@ pub async fn resolve_view(
             started,
         ),
     })?;
-    let (fed, _guard) = mgr
-        .from_snapshot(&outcome.record)
-        .map_err(|e| error_outcome(
+    let (fed, _guard) = mgr.from_snapshot(&outcome.record).map_err(|e| {
+        error_outcome(
             "invalid_argument",
             format!("from_snapshot failed: {e}"),
             None,
             &snap_label,
             started,
-        ))?;
+        )
+    })?;
     let ci = fed.contract_index.read().clone();
     let Some(idx) = ci else {
         return Ok(ViewHandle::Empty("snapshot has no contract index"));
@@ -779,7 +774,9 @@ pub async fn resolve_view(
 
 fn live_scope_when_live(ctx: &McpContext<'_>, args_map: &Map<String, Value>) -> Value {
     if snapshot_label(args_map) == "live" {
-        ctx.federation.map(live_scope).unwrap_or_else(|| empty_scope())
+        ctx.federation
+            .map(live_scope)
+            .unwrap_or_else(|| empty_scope())
     } else {
         empty_scope()
     }
@@ -952,7 +949,7 @@ fn static_provenance_ref() -> EdgeProvenance {
 }
 
 fn bound_field_for_call<'a>(
-    idx: &'a ContractIndex,
+    _idx: &'a ContractIndex,
     _ref_id: &GlobalId,
     _call_id: &GlobalId,
 ) -> Option<&'a crate::federation::contracts::index::BoundField> {
@@ -965,10 +962,12 @@ fn bound_field_for_call<'a>(
     None
 }
 
-fn field_from_bound_field(_idx: &ContractIndex, _b: &crate::federation::contracts::index::BoundField) -> Option<EdgeProvenance> {
+fn field_from_bound_field(
+    _idx: &ContractIndex,
+    _b: &crate::federation::contracts::index::BoundField,
+) -> Option<EdgeProvenance> {
     None
 }
-
 
 fn evidence_ref(id: &GlobalId, path: &str, line: u32) -> Value {
     json!({
@@ -1061,9 +1060,7 @@ fn type_desc_label(t: &crate::federation::contracts::model::TypeDesc) -> &'stati
 
 fn provenance_to_json(p: &EdgeProvenance) -> Value {
     let (kind, confidence, detector, source) = match p {
-        EdgeProvenance::Static { source } => {
-            ("static", 1.0_f32, None, Some(format!("{source:?}")))
-        }
+        EdgeProvenance::Static { source } => ("static", 1.0_f32, None, Some(format!("{source:?}"))),
         EdgeProvenance::Heuristic {
             detector,
             confidence,
@@ -1077,9 +1074,7 @@ fn provenance_to_json(p: &EdgeProvenance) -> Value {
             Some(trace_id.clone()),
             Some(last_seen_unix.to_string()),
         ),
-        EdgeProvenance::Confirmed { source } => {
-            ("confirmed", 1.0_f32, None, Some(source.clone()))
-        }
+        EdgeProvenance::Confirmed { source } => ("confirmed", 1.0_f32, None, Some(source.clone())),
     };
     let mut out = json!({"kind": kind, "confidence": confidence});
     if let Some(d) = detector {
@@ -1099,24 +1094,13 @@ fn candidate_endpoints_for(
     let mut out: Vec<Value> = Vec::new();
     let (consumer_method, consumer_template) = parse_consumer_call_shape(call_id);
     for (ep_id, _ep) in &view.endpoints {
-        if let ContractKey::Http {
-            method,
-            template,
-        } = &ep_id.1
-        {
+        if let ContractKey::Http { method, template } = &ep_id.1 {
             let same_method = match (&consumer_method, method) {
                 (
                     crate::federation::contracts::model::MethodSpec::Known(cm),
                     crate::federation::contracts::model::MethodSpec::Known(pm),
-                ) => cm == pm
-                    || matches!(
-                        pm,
-                        crate::federation::contracts::model::HttpMethod::Any
-                    ),
-                (
-                    crate::federation::contracts::model::MethodSpec::Unknown,
-                    _,
-                ) => true,
+                ) => cm == pm || matches!(pm, crate::federation::contracts::model::HttpMethod::Any),
+                (crate::federation::contracts::model::MethodSpec::Unknown, _) => true,
                 _ => false,
             };
             if !same_method {
@@ -1124,10 +1108,13 @@ fn candidate_endpoints_for(
             }
             let (ok, reason) = match consumer_template.as_deref() {
                 Some(t) => {
-                    let provider_method: crate::federation::contracts::model::HttpMethod = match method {
-                        MethodSpec::Known(pm) => *pm,
-                        MethodSpec::Unknown => crate::federation::contracts::model::HttpMethod::Any,
-                    };
+                    let provider_method: crate::federation::contracts::model::HttpMethod =
+                        match method {
+                            MethodSpec::Known(pm) => *pm,
+                            MethodSpec::Unknown => {
+                                crate::federation::contracts::model::HttpMethod::Any
+                            }
+                        };
                     let r = match_route(consumer_method.clone(), t, provider_method, template);
                     if r.is_match() {
                         (true, "same_key")
@@ -1149,7 +1136,12 @@ fn candidate_endpoints_for(
     out
 }
 
-fn parse_consumer_call_shape(call_id: &GlobalId) -> (crate::federation::contracts::model::MethodSpec, Option<String>) {
+fn parse_consumer_call_shape(
+    call_id: &GlobalId,
+) -> (
+    crate::federation::contracts::model::MethodSpec,
+    Option<String>,
+) {
     let name = call_id.name().unwrap_or_default();
     let parts: Vec<&str> = name.split_whitespace().collect();
     let method = match parts.first().copied() {
@@ -1259,7 +1251,8 @@ fn render_get_contract(data: &Value) -> String {
         ));
         let schemas = it["schemas"].as_array().cloned().unwrap_or_default();
         for s in &schemas {
-            out.push_str(&format!("- {} ({} fields)\n",
+            out.push_str(&format!(
+                "- {} ({} fields)\n",
                 s["direction"].as_str().unwrap_or(""),
                 s["fields"].as_array().map(|a| a.len()).unwrap_or(0),
             ));
@@ -1379,7 +1372,10 @@ mod tests {
     fn route_match_label_maps_enum() {
         assert_eq!(route_match_label(RouteMatch::Exact), "exact");
         assert_eq!(route_match_label(RouteMatch::Pattern), "pattern");
-        assert_eq!(route_match_label(RouteMatch::PrefixStripped), "prefix_stripped");
+        assert_eq!(
+            route_match_label(RouteMatch::PrefixStripped),
+            "prefix_stripped"
+        );
     }
 
     #[test]
@@ -1407,17 +1403,13 @@ mod tests {
 
     #[test]
     fn render_bindings_entry_yamls_consumer_provider_pair() {
-        let consumer = GlobalId::from_canonical(
-            "billing:HttpClientCall:src/main.py:fetch_order:20",
-        );
+        let consumer =
+            GlobalId::from_canonical("billing:HttpClientCall:src/main.py:fetch_order:20");
         let key = ContractKey::Http {
             method: MethodSpec::Known(HttpMethod::Get),
             template: "/api/orders/{}".into(),
         };
-        let ep_id: EndpointId = (
-            ServiceName("orders".into()),
-            key.clone(),
-        );
+        let ep_id: EndpointId = (ServiceName("orders".into()), key.clone());
         let entry = render_bindings_entry("billing", &consumer, &key, &ep_id);
         assert!(entry.contains("repo: billing"));
         assert!(entry.contains("symbol: fetch_order"));

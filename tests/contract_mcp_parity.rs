@@ -14,9 +14,7 @@ use lain::federation::contracts::config::ContractFederationConfig;
 use lain::federation::contracts::model::ServiceName;
 use lain::federation::federated_index::FederatedIndex;
 use lain::federation::graph_backend::PetgraphBackend;
-use lain::server::mcp::contract_tools::services::{
-    get_service_handle, list_services_handle,
-};
+use lain::server::mcp::contract_tools::services::{get_service_handle, list_services_handle};
 use lain::server::mcp::handler::McpContext;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -151,7 +149,9 @@ async fn stdio_and_http_yield_byte_identical_data_for_list_services() {
     // stdio and HTTP requests with the same args; the
     // `data` payload must be byte-identical.
     let args = json!({"snapshot": "live"});
-    let a = list_services_handle(&ctx_for(&fed), args.clone()).await.unwrap();
+    let a = list_services_handle(&ctx_for(&fed), args.clone())
+        .await
+        .unwrap();
     let b = list_services_handle(&ctx_for(&fed), args).await.unwrap();
     assert_eq!(a.structured["data"], b.structured["data"]);
     let a_bytes = canonical_bytes(&strip_meta(&a.structured));
@@ -165,7 +165,9 @@ async fn stdio_and_http_yield_byte_identical_data_for_get_service() {
     let root = tmp.path();
     let fed = build_min_federation(root).await;
     let args = json!({"snapshot": "live", "service": "orders"});
-    let a = get_service_handle(&ctx_for(&fed), args.clone()).await.unwrap();
+    let a = get_service_handle(&ctx_for(&fed), args.clone())
+        .await
+        .unwrap();
     let b = get_service_handle(&ctx_for(&fed), args).await.unwrap();
     let a_bytes = canonical_bytes(&strip_meta(&a.structured));
     let b_bytes = canonical_bytes(&strip_meta(&b.structured));
@@ -177,8 +179,12 @@ async fn service_name_sort_is_stable_across_calls() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_min_federation(root).await;
-    let a = list_services_handle(&ctx_for(&fed), json!({"snapshot": "live"})).await.unwrap();
-    let b = list_services_handle(&ctx_for(&fed), json!({"snapshot": "live"})).await.unwrap();
+    let a = list_services_handle(&ctx_for(&fed), json!({"snapshot": "live"}))
+        .await
+        .unwrap();
+    let b = list_services_handle(&ctx_for(&fed), json!({"snapshot": "live"}))
+        .await
+        .unwrap();
     let names_a: Vec<String> = a.structured["data"]["items"]
         .as_array()
         .unwrap()
@@ -193,10 +199,7 @@ async fn service_name_sort_is_stable_across_calls() {
         .collect();
     assert_eq!(names_a, names_b);
     // §12 sort: services by name → `billing` < `orders`.
-    assert_eq!(
-        names_a,
-        vec!["billing".to_string(), "orders".to_string()]
-    );
+    assert_eq!(names_a, vec!["billing".to_string(), "orders".to_string()]);
 }
 
 #[tokio::test]

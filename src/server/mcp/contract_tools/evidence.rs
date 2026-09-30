@@ -41,10 +41,7 @@ inventory::submit!(ContractToolEntry {
     handler: read_source_handle,
 });
 
-pub fn resolve_evidence_handle<'a>(
-    ctx: &'a McpContext<'a>,
-    args: Value,
-) -> ContractToolFuture<'a> {
+pub fn resolve_evidence_handle<'a>(ctx: &'a McpContext<'a>, args: Value) -> ContractToolFuture<'a> {
     let args_map = object_or_empty(args);
     let started = Instant::now();
     Box::pin(async move {
@@ -64,10 +61,7 @@ pub fn resolve_evidence_handle<'a>(
     })
 }
 
-pub fn read_source_handle<'a>(
-    ctx: &'a McpContext<'a>,
-    args: Value,
-) -> ContractToolFuture<'a> {
+pub fn read_source_handle<'a>(ctx: &'a McpContext<'a>, args: Value) -> ContractToolFuture<'a> {
     let args_map = object_or_empty(args);
     let started = Instant::now();
     Box::pin(async move {
@@ -342,7 +336,10 @@ fn resolve_global_id<'a>(view: &ViewState<'a>, id: &GlobalId, context_lines: u32
                 }),
             }
         }
-        ViewState::Snapshot { record, repo_states } => {
+        ViewState::Snapshot {
+            record,
+            repo_states,
+        } => {
             // Check the repo is in the snapshot, then look up via
             // `from_snapshot`'s backend.
             let Some(snap_id) = id.repo_id().split(':').next() else {
@@ -422,7 +419,9 @@ fn resolve_evidence_text<'a>(
                     "reason": "unknown_repo",
                 });
             }
-            let commit = fed.get_repo(&repo_id).and_then(|r| r.db().get_last_commit().ok().flatten());
+            let commit = fed
+                .get_repo(&repo_id)
+                .and_then(|r| r.db().get_last_commit().ok().flatten());
             commit
         }
         ViewState::Snapshot { record, .. } => {
@@ -456,10 +455,13 @@ fn resolve_evidence_text<'a>(
     let read: Option<String> = match view {
         ViewState::Live { fed } => {
             let repo_id = crate::federation::repo_id::RepoId::new(&parts.repo).ok();
-            let local_path = repo_id.and_then(|rid| {
-                fed.get_repo(&rid).map(|r| r.local_path().to_path_buf())
-            });
-            local_path.and_then(|p| read_file_lines(&p, &parts.path, parts.line, context_lines).ok().flatten())
+            let local_path =
+                repo_id.and_then(|rid| fed.get_repo(&rid).map(|r| r.local_path().to_path_buf()));
+            local_path.and_then(|p| {
+                read_file_lines(&p, &parts.path, parts.line, context_lines)
+                    .ok()
+                    .flatten()
+            })
         }
         ViewState::Snapshot { record, .. } => {
             let commit = commit_for_repo.as_deref().unwrap_or("");
@@ -649,13 +651,7 @@ fn run_read_source(
             let rid = crate::federation::repo_id::RepoId::new(&repo).unwrap();
             let indexed: HashSet<String> = fed
                 .get_repo(&rid)
-                .map(|r| {
-                    r.db()
-                        .get_all_nodes()
-                        .into_iter()
-                        .map(|n| n.path)
-                        .collect()
-                })
+                .map(|r| r.db().get_all_nodes().into_iter().map(|n| n.path).collect())
                 .unwrap_or_default();
             if !indexed.contains(&path) {
                 return Err(error_outcome(
@@ -736,7 +732,14 @@ fn run_read_source(
             }
             let (clamped_start, clamped_end, line_text) =
                 clamp_range(&text, start, end, total_lines);
-            (commit, "snapshot", clamped_start, clamped_end, total_lines, line_text)
+            (
+                commit,
+                "snapshot",
+                clamped_start,
+                clamped_end,
+                total_lines,
+                line_text,
+            )
         }
         ViewState::NoView => {
             return Err(error_outcome(
@@ -782,8 +785,10 @@ fn snapshot_blob_text(
     commit: &str,
     path: &str,
 ) -> Result<(String, u64), ()> {
-    let mgr = crate::federation::contracts::snapshots::manager::SnapshotManager::data_dir_accessor(record)
-        .ok_or(())?;
+    let mgr = crate::federation::contracts::snapshots::manager::SnapshotManager::data_dir_accessor(
+        record,
+    )
+    .ok_or(())?;
     let mirror_path = mgr.join("mirrors").join(format!("{repo}.git"));
     let repo_git = git2::Repository::open_bare(&mirror_path).map_err(|_| ())?;
     let oid = git2::Oid::from_str(commit).map_err(|_| ())?;
@@ -853,7 +858,9 @@ fn read_file_lines(
     if start >= lines.len() {
         return Ok(None);
     }
-    Ok(Some(lines[start.min(lines.len())..end.min(lines.len())].join("\n")))
+    Ok(Some(
+        lines[start.min(lines.len())..end.min(lines.len())].join("\n"),
+    ))
 }
 
 fn snippet_from_live(
@@ -862,24 +869,18 @@ fn snippet_from_live(
     line: u32,
     context_lines: u32,
 ) -> Option<String> {
-    let rid = crate::federation::repo_id::RepoId::new(
-        path.split('/').next().unwrap_or(""),
-    )
-    .ok()?;
+    let rid = crate::federation::repo_id::RepoId::new(path.split('/').next().unwrap_or("")).ok()?;
     let local = fed.get_repo(&rid)?.local_path().to_path_buf();
-    read_file_lines(&local, path, line, context_lines).ok().flatten()
+    read_file_lines(&local, path, line, context_lines)
+        .ok()
+        .flatten()
 }
 
 fn is_secret_basename(basename_lower: &str) -> bool {
     if basename_lower.is_empty() {
         return false;
     }
-    const PATTERNS: &[&str] = &[
-        ".env",
-        ".npmrc",
-        ".pypirc",
-        ".netrc",
-    ];
+    const PATTERNS: &[&str] = &[".env", ".npmrc", ".pypirc", ".netrc"];
     for p in PATTERNS {
         if basename_lower == *p {
             return true;

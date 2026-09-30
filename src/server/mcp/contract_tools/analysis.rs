@@ -69,10 +69,7 @@ inventory::submit!(ContractToolEntry {
     handler: get_coverage_handle,
 });
 
-pub fn diff_contracts_handle<'a>(
-    ctx: &'a McpContext<'a>,
-    args: Value,
-) -> ContractToolFuture<'a> {
+pub fn diff_contracts_handle<'a>(ctx: &'a McpContext<'a>, args: Value) -> ContractToolFuture<'a> {
     let args_map = object_or_empty(args);
     let started = Instant::now();
     Box::pin(async move {
@@ -92,10 +89,7 @@ pub fn diff_contracts_handle<'a>(
     })
 }
 
-pub fn trace_impact_handle<'a>(
-    ctx: &'a McpContext<'a>,
-    args: Value,
-) -> ContractToolFuture<'a> {
+pub fn trace_impact_handle<'a>(ctx: &'a McpContext<'a>, args: Value) -> ContractToolFuture<'a> {
     let args_map = object_or_empty(args);
     let started = Instant::now();
     Box::pin(async move {
@@ -115,10 +109,7 @@ pub fn trace_impact_handle<'a>(
     })
 }
 
-pub fn get_coverage_handle<'a>(
-    ctx: &'a McpContext<'a>,
-    args: Value,
-) -> ContractToolFuture<'a> {
+pub fn get_coverage_handle<'a>(ctx: &'a McpContext<'a>, args: Value) -> ContractToolFuture<'a> {
     let args_map = object_or_empty(args);
     let started = Instant::now();
     Box::pin(async move {
@@ -412,15 +403,15 @@ fn load_snapshot(
             label,
             started,
         ),
-        crate::federation::contracts::snapshots::manager::PrepareError::Busy {
-            retry_after_ms,
-        } => error_outcome(
-            "busy",
-            "snapshot residency busy",
-            Some(json!({"retry_after_ms": retry_after_ms})),
-            label,
-            started,
-        ),
+        crate::federation::contracts::snapshots::manager::PrepareError::Busy { retry_after_ms } => {
+            error_outcome(
+                "busy",
+                "snapshot residency busy",
+                Some(json!({"retry_after_ms": retry_after_ms})),
+                label,
+                started,
+            )
+        }
         crate::federation::contracts::snapshots::manager::PrepareError::RepoNotRegistered {
             repo,
         } => error_outcome(
@@ -519,9 +510,9 @@ fn build_scope(head: &SnapshotRecord) -> DiffScope {
             crate::federation::contracts::snapshots::RepoSnapshotState::Excluded => {
                 Some(("excluded", String::new()))
             }
-            crate::federation::contracts::snapshots::RepoSnapshotState::Failed { error, .. } => {
-                Some(("failed", error.clone()))
-            }
+            crate::federation::contracts::snapshots::RepoSnapshotState::Failed {
+                error, ..
+            } => Some(("failed", error.clone())),
             crate::federation::contracts::snapshots::RepoSnapshotState::Indexing { .. } => {
                 Some(("not_ready", String::new()))
             }
@@ -559,7 +550,10 @@ fn build_repo_coverage(
         };
         if let Some(state) = head.repo_states.get(repo) {
             match state {
-                crate::federation::contracts::snapshots::RepoSnapshotState::Failed { error, .. } => {
+                crate::federation::contracts::snapshots::RepoSnapshotState::Failed {
+                    error,
+                    ..
+                } => {
                     entry.state = "failed".to_string();
                     entry.error = Some(error.clone());
                 }
@@ -617,28 +611,56 @@ fn impact_to_value(
         "paths": [],
         "truncated": false,
     });
-    if let ChangeKind::FieldRemoved { direction, path, .. }
-    | ChangeKind::FieldAdded { direction, path, .. }
-    | ChangeKind::FieldTypeChanged { direction, path, .. }
-    | ChangeKind::RequirednessChanged { direction, path, .. }
-    | ChangeKind::NullabilityChanged { direction, path, .. } = kind
+    if let ChangeKind::FieldRemoved {
+        direction, path, ..
+    }
+    | ChangeKind::FieldAdded {
+        direction, path, ..
+    }
+    | ChangeKind::FieldTypeChanged {
+        direction, path, ..
+    }
+    | ChangeKind::RequirednessChanged {
+        direction, path, ..
+    }
+    | ChangeKind::NullabilityChanged {
+        direction, path, ..
+    } = kind
     {
         value["direction"] = json!(direction_label_str(*direction));
         value["field"] = json!(path.to_string());
     }
-    if let ChangeKind::EnumValueRemoved { direction, path, value: v, .. }
-    | ChangeKind::EnumValueAdded { direction, path, value: v, .. } = kind
+    if let ChangeKind::EnumValueRemoved {
+        direction,
+        path,
+        value: v,
+        ..
+    }
+    | ChangeKind::EnumValueAdded {
+        direction,
+        path,
+        value: v,
+        ..
+    } = kind
     {
         value["direction"] = json!(direction_label_str(*direction));
         value["field"] = json!(path.to_string());
         value["value"] = json!(v);
     }
-    if let ChangeKind::FieldRenamed { direction, from, to, .. } = kind {
+    if let ChangeKind::FieldRenamed {
+        direction,
+        from,
+        to,
+        ..
+    } = kind
+    {
         value["direction"] = json!(direction_label_str(*direction));
         value["from"] = json!(from.to_string());
         value["to"] = json!(to.to_string());
     }
-    if let ChangeKind::PathChanged { from, to, .. } | ChangeKind::MethodChanged { from, to, .. } = kind {
+    if let ChangeKind::PathChanged { from, to, .. } | ChangeKind::MethodChanged { from, to, .. } =
+        kind
+    {
         value["from"] = json!(from.to_string());
         value["to"] = json!(to.to_string());
     }
@@ -647,8 +669,7 @@ fn impact_to_value(
 
 fn endpoint_from_change(kind: &ChangeKind, service: &ServiceName) -> Value {
     let key = match kind {
-        ChangeKind::EndpointRemoved { key }
-        | ChangeKind::EndpointAdded { key } => key.clone(),
+        ChangeKind::EndpointRemoved { key } | ChangeKind::EndpointAdded { key } => key.clone(),
         ChangeKind::PathChanged { to, .. } | ChangeKind::MethodChanged { to, .. } => to.clone(),
         ChangeKind::FieldRemoved { endpoint, .. }
         | ChangeKind::FieldAdded { endpoint, .. }
@@ -787,17 +808,15 @@ async fn run_trace_impact(
     started: Instant,
 ) -> Result<ToolOutcome, ToolOutcome> {
     let snap_label = snapshot_label(&args_map);
-    let from = args_map
-        .get("from")
-        .ok_or_else(|| {
-            error_outcome(
-                "invalid_argument",
-                "missing required argument: from",
-                Some(json!({"arg": "from"})),
-                &snap_label,
-                started,
-            )
-        })?;
+    let from = args_map.get("from").ok_or_else(|| {
+        error_outcome(
+            "invalid_argument",
+            "missing required argument: from",
+            Some(json!({"arg": "from"})),
+            &snap_label,
+            started,
+        )
+    })?;
     let depth = args_map
         .get("depth")
         .and_then(|v| v.as_u64())
@@ -880,22 +899,25 @@ async fn run_trace_impact(
         let field = from.get("field").cloned().unwrap_or(Value::Null);
         let endpoint = field.get("endpoint").cloned().unwrap_or(Value::Null);
         let endpoint_pair = parse_endpoint_for_trace(&endpoint)?;
-        let _direction = field.get("direction").and_then(|v| v.as_str()).unwrap_or("response");
-        let _path = field.get("json_path").and_then(|v| v.as_str()).unwrap_or("");
+        let _direction = field
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("response");
+        let _path = field
+            .get("json_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         starts.push(endpoint_pair.0.clone());
     } else {
-        let symbol = from
-            .get("symbol")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                error_outcome(
-                    "invalid_argument",
-                    "missing symbol",
-                    Some(json!({"arg": "from.symbol"})),
-                    &snap_label,
-                    started,
-                )
-            })?;
+        let symbol = from.get("symbol").and_then(|v| v.as_str()).ok_or_else(|| {
+            error_outcome(
+                "invalid_argument",
+                "missing symbol",
+                Some(json!({"arg": "from.symbol"})),
+                &snap_label,
+                started,
+            )
+        })?;
         starts.push(symbol.to_string());
     }
 
@@ -914,15 +936,17 @@ async fn run_trace_impact(
 
     let impact_outcome: ImpactResult = {
         let refs: Vec<&str> = starts.iter().map(String::as_str).collect();
-        backend.traverse_impact(&refs, depth, cap, min_confidence).map_err(|e| {
-            error_outcome(
-                "invalid_argument",
-                format!("traverse_impact failed: {e}"),
-                None,
-                &snap_label,
-                started,
-            )
-        })?
+        backend
+            .traverse_impact(&refs, depth, cap, min_confidence)
+            .map_err(|e| {
+                error_outcome(
+                    "invalid_argument",
+                    format!("traverse_impact failed: {e}"),
+                    None,
+                    &snap_label,
+                    started,
+                )
+            })?
     };
     let mut paths = impact_outcome.paths;
     paths.sort_by(|a, b| {
@@ -1011,8 +1035,16 @@ fn parse_endpoint_for_trace(v: &Value) -> Result<(String, String), ToolOutcome> 
         text: "endpoint must be an object {service, key}".to_string(),
         is_error: true,
     })?;
-    let service = obj.get("service").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let key = obj.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let service = obj
+        .get("service")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let key = obj
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     Ok((service, key))
 }
 
@@ -1040,8 +1072,10 @@ async fn run_get_coverage(
     let snap_label = snapshot_label(&args_map);
     let view = match resolve_view(ctx, &args_map, started).await? {
         ViewHandle::Empty(_) => {
-            let data = json!({"complete": true, "scope": scope_for_view(ctx, &args_map), "repos": []});
-            let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+            let data =
+                json!({"complete": true, "scope": scope_for_view(ctx, &args_map), "repos": []});
+            let envelope =
+                success_envelope(data.clone(), &snap_label, snap_label != "live", started);
             return Ok(outcome(envelope, &data, render_coverage(&data)));
         }
         ViewHandle::Index { index, .. } => index,
@@ -1052,7 +1086,9 @@ async fn run_get_coverage(
     let mut coverage_repos: Vec<crate::federation::contracts::diff::RepoCoverage> = Vec::new();
     if let Some(fed) = ctx.federation {
         for (id, health) in fed.list_repos() {
-            let commit = fed.get_repo(&id).and_then(|r| r.db().get_last_commit().ok().flatten());
+            let commit = fed
+                .get_repo(&id)
+                .and_then(|r| r.db().get_last_commit().ok().flatten());
             let state_str = match health {
                 crate::federation::health::RepoHealth::Ready => "indexed",
                 crate::federation::health::RepoHealth::Indexing => "not_ready",
@@ -1115,12 +1151,16 @@ fn parse_scope(v: Value) -> DiffScope {
             arr.iter()
                 .filter_map(|item| {
                     let repo = item.get("repo").and_then(|s| s.as_str())?.to_string();
-                    let commit = item.get("commit").and_then(|s| s.as_str()).map(String::from);
-                    let dirty = item
-                        .get("dirty")
-                        .and_then(|s| s.as_bool())
-                        .unwrap_or(false);
-                    Some(ReviewedRepo { repo, commit, dirty })
+                    let commit = item
+                        .get("commit")
+                        .and_then(|s| s.as_str())
+                        .map(String::from);
+                    let dirty = item.get("dirty").and_then(|s| s.as_bool()).unwrap_or(false);
+                    Some(ReviewedRepo {
+                        repo,
+                        commit,
+                        dirty,
+                    })
                 })
                 .collect()
         })
@@ -1133,11 +1173,12 @@ fn parse_scope(v: Value) -> DiffScope {
                 .filter_map(|item| {
                     let repo = item.get("repo").and_then(|s| s.as_str())?.to_string();
                     let reason = item.get("reason").and_then(|s| s.as_str())?.to_string();
-                    let error = item
-                        .get("error")
-                        .and_then(|s| s.as_str())
-                        .map(String::from);
-                    Some(UnreviewedRepo { repo, reason, error })
+                    let error = item.get("error").and_then(|s| s.as_str()).map(String::from);
+                    Some(UnreviewedRepo {
+                        repo,
+                        reason,
+                        error,
+                    })
                 })
                 .collect()
         })
@@ -1176,8 +1217,8 @@ fn scope_for_view(ctx: &McpContext<'_>, args_map: &Map<String, Value>) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::federation::contracts::diff::{Affected, ReviewedRepo, UnreviewedRepo};
     use crate::federation::contracts::diff::ConsumerKey;
+    use crate::federation::contracts::diff::{Affected, ReviewedRepo, UnreviewedRepo};
     use crate::federation::contracts::model::SymbolKey;
     use crate::federation::repo_id::RepoId;
 
