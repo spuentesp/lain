@@ -87,7 +87,7 @@ uuid = { version = "1.6", features = ["v4", "v5", "serde"] }
 regex = "1.10"
 ignore = "0.4"
 serde_yaml = "0.9"
-toml = "0.8"
+toml = "1.1"
 toml_edit = "0.22"
 
 # Once cell for static initialization
