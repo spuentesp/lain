@@ -29,3 +29,34 @@ test('federationIsReady: treats health "ok" as ready', () => {
   const body = { federation: { repos: [{ id: 'a', health: 'ok' }] } };
   assert.equal(app.federationIsReady(body, 1), true);
 });
+
+test('federationReadyWithin: resolves true once the federation turns ready', async () => {
+  const origFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    const body = calls < 2
+      ? { federation: { repos: [{ id: 'a', health: 'indexing' }, { id: 'b', health: 'ready' }] } }
+      : { federation: { repos: [{ id: 'a', health: 'ready' }, { id: 'b', health: 'ready' }] } };
+    return { status: 200, json: async () => body };
+  };
+  try {
+    assert.equal(await app.federationReadyWithin('http://127.0.0.1:1', 2, 5000), true);
+    assert.ok(calls >= 2, 'must poll again after a not-ready answer');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('federationReadyWithin: gives up at the deadline', async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    status: 200,
+    json: async () => ({ federation: { repos: [{ id: 'a', health: 'ready' }] } }),
+  });
+  try {
+    assert.equal(await app.federationReadyWithin('http://127.0.0.1:1', 2, 350), false);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});

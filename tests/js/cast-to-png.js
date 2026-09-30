@@ -314,9 +314,11 @@ async function renderGrid(grid, outPath, castWidth, castHeight) {
 // ── Key-frame selection ─────────────────────────────────────────────────────
 //
 // Emit frames at a fixed interval (1/fps) across the FULL cast duration,
-// including trailing silence after the last output event. The grid state
-// is held between output events — only the cumulative state up to each
-// sample time is shown.
+// including trailing silence after the last output event. Each sample
+// renders the terminal state accumulated from the output events elapsed at
+// that sample's time, so early frames show early output and late frames the
+// full session. Every interval gets a frame (no deduplication) so the MP4
+// duration tracks the cast.
 //
 // This replaces the old output-event-driven approach which produced very few
 // frames for fast-executing commands.
@@ -332,15 +334,11 @@ function selectKeyFrames(frames, fps) {
   const lastEventT = frames[frames.length - 1].t;
   const endT = lastEventT + TRAILING_SECONDS;
 
-  // Build the complete grid (all ANSI applied)
-  const fullGrid = buildGrid(frames);
-
-  // Produce one frame per interval across the full cast + trailing silence.
-  // No deduplication — every interval gets a frame so the MP4 is correct.
   const result = [];
   for (let t = 0; t <= endT + interval / 2; t += interval) {
-    const snapshot = fullGrid.map(row => new Map(row));
-    result.push({ t, grid: snapshot });
+    let k = 0;
+    while (k < frames.length && frames[k].t <= t) k++;
+    result.push({ t, grid: buildGrid(frames.slice(0, k)) });
   }
 
   return result;
@@ -391,4 +389,10 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { parseArgs, parseCast, buildGrid, selectKeyFrames, renderGrid };
+}
+
+if (require.main === module) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}

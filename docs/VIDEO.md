@@ -59,9 +59,10 @@ out of `.gitignore`.
 ## How it works
 
 **Terminal chapters** — Each chapter records to an asciinema cast file, then
-`tests/js/cast-to-png.js` parses the ANSI-encoded output and renders each
-frame as an SVG → PNG using ImageMagick 7 (SVG+magick pipeline, no node-pty
-required). ffmpeg encodes the PNG sequence to H.264 MP4.
+`tests/js/cast-to-png.js` parses the ANSI-encoded output into a character
+grid and renders each frame as a PNG via ImageMagick 7 `magick -annotate`
+on a raster canvas (no node-pty required). ffmpeg encodes the PNG sequence
+to H.264 MP4.
 
 **SPA chapter** — `tests/js/record_spa_demo_video.js` launches Chromium via
 Playwright, starts the lain server against the fixture, waits for the federation
@@ -71,8 +72,8 @@ built-in WebM video recording captures the browser session; ffmpeg encodes it
 to H.264 and scales it to 1920×1080.
 
 **Assembly** — ffmpeg concat demuxer combines all chapter MP4s with generated
-title-card MP4s (solid-black 3-second clips with drawtext labels) into the
-final MP4.
+title-card MP4s (solid-black 3-second clips whose chapter titles are carried
+by the card filenames and concat order — no drawtext) into the final MP4.
 
 ## Regenerating
 
@@ -94,7 +95,6 @@ ls /tmp/lain-demo-video/
 
 - `ffmpeg` (with libx264, libavformat)
 - `asciinema` 2.x
-- `Xvfb`, `xterm` (for chapter 1 terminal demo)
-- `magick` (ImageMagick 7, for cast-to-png SVG rendering)
+- `magick` (ImageMagick 7, for cast-to-png frame rendering)
 - `node` (v24), `playwright` (in `tests/js/node_modules/`)
 - Chromium at `~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome`

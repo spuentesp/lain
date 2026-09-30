@@ -13,8 +13,8 @@
 # Terminal chapters are rendered by converting the asciinema cast to PNG frames
 # using a pure-JavaScript ANSI parser (no node-pty, no X11 needed for the
 # render pass), then encoded with ffmpeg.  The SPA chapter uses Playwright's
-# built-in video recording.  The final assembly uses ffmpeg concat + drawtext
-# title cards.
+# built-in video recording.  The final assembly uses ffmpeg concat +
+# filename-labelled title cards (no drawtext).
 #
 #   ./scripts/make-demo-video.sh --help
 #   ./scripts/make-demo-video.sh                          # --fixture synthetic --out docs/video/
