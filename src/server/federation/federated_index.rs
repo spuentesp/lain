@@ -1014,6 +1014,29 @@ impl FederatedIndex {
         self.rejoin_contracts()
     }
 
+    /// Mark the contract join as dirty so the next
+    /// [`Self::rejoin_contracts_if_dirty`] call rebuilds the index.
+    /// Test-only escape hatch: PR 7's contract nodes are tracked
+    /// automatically by `project_nodes` / `project_edges` /
+    /// `add_repo` / `remove_repo` / hot-reload; tests that
+    /// synthesize contract edges by hand need this to trigger a
+    /// rejoin on the next read.
+    pub fn mark_contracts_dirty(&self) {
+        self.contracts_dirty.store(true, Ordering::Release);
+    }
+
+    /// Register a synthetic contract node id (and the host repo) so
+    /// the next rejoin includes it in the join. Test-only escape
+    /// hatch — production paths use `project_nodes` /
+    /// `project_edges` for this bookkeeping.
+    pub fn register_contract_node_for_test(&self, repo: RepoId, node_id: String) {
+        self.contract_node_ids
+            .entry(repo)
+            .or_default()
+            .insert(node_id);
+        self.contracts_dirty.store(true, Ordering::Release);
+    }
+
     /// The dirty-flagged inner work: compute the desired
     /// `ContractJoiner::run` output over the projected contract
     /// nodes, diff against the current backend `Binds` set, and

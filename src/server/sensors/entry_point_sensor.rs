@@ -35,6 +35,7 @@ use crate::error::LainError;
 use crate::federation::contracts::model::EntryKind;
 use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::SensorEntry;
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -451,7 +452,7 @@ impl crate::server::sensors::Sensor for EntryPointSensor {
     }
 }
 
-inventory::submit!(crate::server::sensors::SensorEntry(&EntryPointSensor));
+inventory::submit!(SensorEntry(&EntryPointSensor));
 
 // ─── Tests ────────────────────────────────────────────────────────────
 

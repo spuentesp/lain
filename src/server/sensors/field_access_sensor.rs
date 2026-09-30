@@ -50,6 +50,7 @@ use crate::federation::contracts::model::{ContractFact, FieldReadFact, JsonPath,
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
@@ -158,7 +159,7 @@ impl crate::server::sensors::Sensor for FieldAccessSensor {
     }
 }
 
-inventory::submit!(crate::server::sensors::SensorEntry(&FieldAccessSensor));
+inventory::submit!(SensorEntry(&FieldAccessSensor));
 
 // ─── Workspace scan ───────────────────────────────────────────────
 

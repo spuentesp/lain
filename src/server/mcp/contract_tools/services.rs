@@ -33,6 +33,7 @@ use crate::federation::contracts::model::{ContractKey, EntryKind, ProviderOrigin
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::health::RepoHealth;
 use crate::federation::repo_id::{GlobalId, RepoId};
+use crate::schema::EdgeType;
 use crate::server::mcp::handler::McpContext;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -275,7 +276,8 @@ async fn run_list_services(
         items.retain(|it| it["service"].as_str().unwrap_or("") > after.as_str());
     }
     let key = |it: &Value| it["service"].as_str().unwrap_or("").to_string();
-    let (page, next_cursor) = apply_limit(items, limit, key);
+    let fp = fingerprint(&args_map);
+    let (page, next_cursor) = apply_limit(items, limit, key, &fp);
 
     let mut data = json!({
         "items": page,
@@ -432,7 +434,8 @@ async fn run_get_service(
         consumers_value.retain(|c| c["service"].as_str().unwrap_or("") > after.as_str());
     }
     let consumer_key = |c: &Value| c["service"].as_str().unwrap_or("").to_string();
-    let (consumers_page, next_cursor) = apply_limit(consumers_value, limit, consumer_key);
+    let fp = fingerprint(&args_map);
+    let (consumers_page, next_cursor) = apply_limit(consumers_value, limit, consumer_key, &fp);
 
     let mut data = json!({
         "service": info.name.0.as_str(),
@@ -601,10 +604,9 @@ fn build_unresolved_candidates(idx: &ContractIndex, _info: &ServiceInfo) -> Vec<
 #[derive(Debug, Clone)]
 struct CallerNode {
     id: String,
+    name: String,
     path: String,
     line: u32,
-    #[allow(dead_code)]
-    name: String,
 }
 
 fn caller_graph(
@@ -618,12 +620,21 @@ fn caller_graph(
 
 fn call_caller_node(fed: &FederatedIndex, call_id: &GlobalId) -> Option<CallerNode> {
     let (_, db) = caller_graph(fed, call_id)?;
-    let node = db.get_node(call_id.as_str()).ok().flatten()?;
+    // The `HttpClientCall` node has a `SendsHttp` edge from its
+    // enclosing function — that's the caller the `used_by` walk
+    // needs to start from. Real sensors wire this edge; the
+    // federation_contracts_e2e tests do too.
+    let sends_source_id = db
+        .all_edges()
+        .into_iter()
+        .find(|e| e.edge_type == EdgeType::SendsHttp && e.target_id == call_id.as_str())
+        .map(|e| e.source_id)?;
+    let caller = db.get_node(&sends_source_id).ok().flatten()?;
     Some(CallerNode {
-        id: node.id,
-        path: node.path,
-        line: node.line_start.unwrap_or(0),
-        name: node.name,
+        id: caller.id,
+        path: caller.path,
+        line: caller.line_start.unwrap_or(0),
+        name: caller.name,
     })
 }
 
@@ -661,6 +672,7 @@ fn consumer_repo_for(_fed: &FederatedIndex, caller: &CallerNode) -> String {
 fn caller_node_evidence(caller: &CallerNode) -> Value {
     json!({
         "id": caller.id,
+        "name": caller.name,
         "repo": "",
         "commit": "",
         "path": caller.path,

@@ -86,7 +86,19 @@ where
 /// Apply a `limit` cap, returning `(page, next_cursor)`. The `last_key`
 /// argument is the sort key of the last returned item; it's encoded
 /// into the next cursor when the page is full.
-pub fn apply_limit<T, F>(items: Vec<T>, limit: usize, key: F) -> (Vec<T>, Option<String>)
+///
+/// `fingerprint_hex` is the blake3 fingerprint of the original call's
+/// argument map (excluding `cursor`); it is embedded in the emitted
+/// cursor so the next page can verify the cursor wasn't reused with
+/// different args (`§10.5` `cursor_mismatch`). The next call must
+/// compute the same fingerprint from its args for the cursor to
+/// validate.
+pub fn apply_limit<T, F>(
+    items: Vec<T>,
+    limit: usize,
+    key: F,
+    fingerprint_hex: &str,
+) -> (Vec<T>, Option<String>)
 where
     F: Fn(&T) -> String,
 {
@@ -99,7 +111,7 @@ where
         .map(key)
         .unwrap_or_default();
     page.truncate(limit);
-    let cursor = encode_cursor(&next_key, "");
+    let cursor = encode_cursor(&next_key, fingerprint_hex);
     (page, Some(cursor))
 }
 
@@ -161,6 +173,13 @@ fn base64url_decode(input: &str) -> Result<Vec<u8>, ()> {
 mod tests {
     use super::*;
 
+    fn make_args() -> serde_json::Map<String, Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("snapshot".to_string(), json!("live"));
+        m.insert("limit".to_string(), json!(100));
+        m
+    }
+
     #[test]
     fn fingerprint_stable_across_calls() {
         let mut a = Map::new();
@@ -218,15 +237,45 @@ mod tests {
     #[test]
     fn apply_limit_emits_next_cursor_when_full() {
         let items: Vec<String> = (0..10).map(|i| format!("item-{:02}", i)).collect();
-        let (page, next) = apply_limit(items, 4, |s| s.clone());
+        let fp = fingerprint(&make_args());
+        let (page, next) = apply_limit(items, 4, |s| s.clone(), &fp);
         assert_eq!(page.len(), 4);
         assert!(next.is_some());
+        // The emitted cursor must round-trip with the same args.
+        let token = next.unwrap();
+        let round_trip_args = make_args();
+        let parsed = decode_cursor(&token).expect("decode emitted cursor");
+        let want = fingerprint(&round_trip_args);
+        assert_eq!(
+            parsed.q, want,
+            "emitted cursor q must match the same-args fingerprint"
+        );
+        // After the cursor's `after`, the page continues correctly.
+        assert_eq!(parsed.after, "item-03");
+    }
+
+    #[test]
+    fn apply_limit_cursor_rejects_args_fingerprint_change() {
+        let items: Vec<String> = (0..6).map(|i| format!("item-{:02}", i)).collect();
+        let fp_original = fingerprint(&make_args());
+        let (_, next) = apply_limit(items, 2, |s| s.clone(), &fp_original);
+        let token = next.expect("page was full");
+
+        // Same cursor, different args → fingerprint mismatch → Err.
+        let mut different_args = make_args();
+        different_args.insert("limit".to_string(), json!(999));
+        let parsed = decode_cursor(&token).expect("decode succeeds");
+        let want_with_different_args = fingerprint(&different_args);
+        assert_ne!(
+            parsed.q, want_with_different_args,
+            "different args must produce a different fingerprint"
+        );
     }
 
     #[test]
     fn apply_limit_omits_cursor_when_page_partial() {
         let items: Vec<String> = (0..3).map(|i| format!("item-{:02}", i)).collect();
-        let (page, next) = apply_limit(items, 100, |s| s.clone());
+        let (page, next) = apply_limit(items, 100, |s| s.clone(), &fingerprint(&make_args()));
         assert_eq!(page.len(), 3);
         assert!(next.is_none());
     }
