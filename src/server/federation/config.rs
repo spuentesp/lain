@@ -1,4 +1,5 @@
 use crate::error::LainError;
+use crate::federation::contracts::config::ContractFederationConfig;
 use crate::federation::repo_id::RepoId;
 use crate::federation::repo_source::{
     LocalCloneSource, RepoSource, ShallowCloneSource, WorkspaceDirSource,
@@ -19,6 +20,19 @@ pub struct FederationConfig {
     pub git_sensor: Option<crate::git::GitSensorMode>,
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
+    /// Contract-federation block (PR 7). The block is optional; an
+    /// absent block deserializes to `ContractFederationConfig::default()`
+    /// and the joiner runs over an empty config.
+    #[serde(default, skip_serializing_if = "is_contract_block_default")]
+    pub contract: ContractFederationConfig,
+}
+
+fn is_contract_block_default(c: &ContractFederationConfig) -> bool {
+    c.services.is_empty()
+        && c.http_clients.is_empty()
+        && c.generic_keys.is_empty()
+        && c.schemas.is_empty()
+        && c.bindings.is_empty()
 }
 
 impl Default for FederationConfig {
@@ -29,6 +43,7 @@ impl Default for FederationConfig {
             ready_threshold: default_ready_threshold(),
             git_sensor: None,
             repos: Vec::new(),
+            contract: ContractFederationConfig::default(),
         }
     }
 }
@@ -89,6 +104,8 @@ impl FederationConfig {
         let cfg: FederationConfig =
             serde_yaml::from_str(s).map_err(|e| LainError::Config(format!("yaml: {e}")))?;
         cfg.validate_unique_repo_ids()?;
+        let repo_ids: Vec<String> = cfg.repos.iter().map(|r| r.id.clone()).collect();
+        cfg.contract.validate(&repo_ids)?;
         Ok(cfg)
     }
     /// Reject duplicate `id` entries. Two `RepoConfig`s with the same id

@@ -376,7 +376,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     // tools (list_repos, search_org, get_federation_health,
     // get_cross_repo_blast_radius*) need the federation handle.
     let workspaces_lock = workspaces.map(|ws| Arc::new(RwLock::new((*ws).clone())));
-    let mcp = match workspaces_lock.as_ref() {
+    let mut mcp = match workspaces_lock.as_ref() {
         Some(lock) => crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
             tool_executor.clone(),
             Arc::clone(&federation),
@@ -389,11 +389,34 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         )
         .with_reindex_timeout(reindex_timeout),
     };
+
     // Wire the federation's shared `VolatileOverlay` into every
     // `RepoIndex` so a successful index pass touches the overlay and
     // the freshness banner doesn't read as "stale" forever. See
     // `FederatedIndex::install_overlay` for the swap semantics.
     federation.install_overlay(Arc::new(overlay.clone()));
+
+    // Snapshot manager (`PR 11`). Loads `repos.yaml` (the same file
+    // the federation loader consumed) to install a source
+    // resolver so `prepare_snapshot` can map every configured repo
+    // to its `workspace_dir` / `local_clone` / `shallow_clone`
+    // source. The federation owns the configured repos; the snapshot
+    // manager owns the on-disk cache + records under `<data_dir>`.
+    let snapshot_cfg: Option<crate::federation::config::FederationConfig> =
+        repos_yaml.as_deref().and_then(|p| {
+            crate::federation::config::FederationConfig::load(p)
+                .ok()
+                .map(|cfg| crate::server::federation::loader::resolve_data_dir(cfg, p))
+        });
+    if let Some(cfg) = snapshot_cfg.as_ref() {
+        let cache = crate::federation::contracts::index_cache::IndexCache::new(&cfg.data_dir);
+        let mgr =
+            crate::federation::contracts::snapshots::SnapshotManager::new(&cfg.data_dir, cache);
+        let resolver =
+            crate::federation::contracts::snapshots::SnapshotManager::resolver_from_config(cfg);
+        mgr.set_repo_source_resolver(resolver);
+        mcp = mcp.with_snapshots(mgr, Some(cfg));
+    }
     let _mcp = mcp;
     if workspaces_lock.is_some() {
         info!("Lain federation server initialized with workspaces");

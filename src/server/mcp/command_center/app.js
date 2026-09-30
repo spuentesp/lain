@@ -624,6 +624,104 @@ async function renderReposTab() {
   `;
 }
 
+// ── Tab: services (PR 16, contract-federation) ──────────────────────────
+
+async function renderServicesTab() {
+  const tab = document.getElementById('tab-services');
+  tab.innerHTML = '<p class="muted">Loading services…</p>';
+  let listResult;
+  try {
+    listResult = await mcpCall('list_services', {snapshot: 'live'});
+  } catch (e) {
+    tab.innerHTML = `<p class="error">list_services failed: ${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  if (listResult && listResult.isError) {
+    const msg = unwrapText(listResult) || 'list_services error';
+    if (/unknown tool|no federation/i.test(msg)) {
+      tab.innerHTML = '<p class="muted">no services configured (enable the contracts package)</p>';
+      return;
+    }
+    tab.innerHTML = `<p class="error">${escapeHtml(msg)}</p>`;
+    return;
+  }
+  // New contract tools return an Envelope: read `structuredContent.data`
+  // when present, fall back to the legacy unwrapText + parseJson path.
+  let items;
+  let scope = null;
+  if (listResult && listResult.structuredContent && listResult.structuredContent.data) {
+    const data = listResult.structuredContent.data;
+    items = data.items || [];
+    scope = data.scope || null;
+  } else {
+    const text = unwrapText(listResult);
+    try { items = JSON.parse(text || '{}').items || []; } catch (_) { items = []; }
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    tab.innerHTML = '<p class="muted">No services declared.</p>';
+    return;
+  }
+  const rows = items.map(it => `
+    <tr data-service="${escapeHtml(it.service)}">
+      <td><button class="service-link" data-name="${escapeHtml(it.service)}">${escapeHtml(it.service)}</button></td>
+      <td><code>${escapeHtml(it.repo)}</code></td>
+      <td>${it.endpoints ?? 0}</td>
+      <td>${it.consumer_services ?? 0}</td>
+      <td>${it.unresolved_inbound ?? 0}</td>
+    </tr>
+  `).join('');
+  tab.innerHTML = `
+    <div class="services-layout">
+      <div class="services-list-panel">
+        <table class="services-table">
+          <thead><tr><th>service</th><th>repo</th><th>endpoints</th><th>consumers</th><th>unresolved</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div id="service-detail" class="service-detail"><p class="muted">Pick a service on the left.</p></div>
+    </div>
+  `;
+  tab.querySelectorAll('.service-link').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.name;
+      await renderServiceDetail(name);
+    });
+  });
+}
+
+async function renderServiceDetail(serviceName) {
+  const detail = document.getElementById('service-detail');
+  detail.innerHTML = '<p class="muted">Loading…</p>';
+  let result;
+  try {
+    result = await mcpCall('get_service', {snapshot: 'live', service: serviceName});
+  } catch (e) {
+    detail.innerHTML = `<p class="error">get_service failed: ${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  if (result && result.isError) {
+    detail.innerHTML = `<p class="error">${escapeHtml(unwrapText(result) || 'get_service error')}</p>`;
+    return;
+  }
+  let data;
+  if (result && result.structuredContent && result.structuredContent.data) {
+    data = result.structuredContent.data;
+  } else {
+    try { data = JSON.parse(unwrapText(result) || '{}'); } catch (_) { data = {}; }
+  }
+  const consumers = data.consumers || [];
+  const edges = consumers.map(c => `<li>${escapeHtml(c.service)} → ${escapeHtml(serviceName)} <span class="muted">(${c.uses ? c.uses.length : 0} sites)</span></li>`).join('');
+  const text = unwrapText(result) || '';
+  detail.innerHTML = `
+    <h3>${escapeHtml(data.service || serviceName)} <span class="muted">(${escapeHtml(data.repo || '?')})</span></h3>
+    <p class="muted">provider_reviewed: ${data.provider_reviewed === true ? 'yes' : 'no'}</p>
+    <h4>Consumer edges</h4>
+    <ul>${edges || '<li class="muted">(no consumers)</li>'}</ul>
+    <h4>Detail</h4>
+    <pre class="service-detail-text">${escapeHtml(text)}</pre>
+  `;
+}
+
 // ── Tab: query ─────────────────────────────────────────────────────────────
 
 async function renderQueryTab() {

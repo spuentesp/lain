@@ -486,6 +486,14 @@ impl RepoIndex {
         *self.last_indexed.read()
     }
 
+    /// Whether the repo's `sync_overlay` cycle last saw any uncommitted
+    /// git changes (`overlay_paths` non-empty). Used by the
+    /// contract-tools live scope (`§8.7`/`§10.8`) to set
+    /// `EvidenceRef.dirty`.
+    pub fn overlay_has_pending_changes(&self) -> bool {
+        !self.overlay_paths.lock().is_empty()
+    }
+
     pub fn nodes(&self) -> Vec<GraphNode> {
         self.db.all_nodes()
     }
@@ -558,14 +566,15 @@ impl RepoIndex {
             index_one_repo(crate::server::ingest::ingestion::IndexRequest {
                 path: &path,
                 graph: db,
-                lsp_pool: &lsp,
+                lsp_pool: Some(&lsp),
                 git: &self.git,
-                overlay: &overlay,
+                overlay: Some(&overlay),
                 resolver: resolver_ref,
                 source_repo: Some(source_repo),
                 namespace: &self.id_namespace,
                 force: false,
                 cancel: &self.cancel,
+                mode: crate::server::ingest::ingestion::IndexMode::Live,
             })
             .await
         };
@@ -692,14 +701,15 @@ impl RepoIndex {
             index_one_repo(crate::server::ingest::ingestion::IndexRequest {
                 path: &path,
                 graph: db,
-                lsp_pool: &lsp,
+                lsp_pool: Some(&lsp),
                 git: &self.git,
-                overlay: &overlay,
+                overlay: Some(&overlay),
                 resolver: resolver_ref,
                 source_repo: Some(source_repo),
                 namespace: &self.id_namespace,
                 force: true,
                 cancel: &self.cancel,
+                mode: crate::server::ingest::ingestion::IndexMode::Live,
             })
             .await
         };

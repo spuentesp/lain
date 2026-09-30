@@ -1,0 +1,5 @@
+memory_ceiling_bytes: 260444160
+measurement_target: §15.1 fixture + tokio+bytes federation snapshots
+measurement_factor: 1.5
+phase1_kb: 62172
+phase2_kb: 169560

@@ -64,7 +64,8 @@ fn cow_to_bytes(cow: std::borrow::Cow<'static, [u8]>) -> Bytes {
     }
 }
 use crate::server::mcp::definitions::{
-    defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS, WORKSPACE_TOOL_DEFS,
+    defs_to_tools, defs_to_value_tools, CONTRACT_TOOL_DEFS, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS,
+    WORKSPACE_TOOL_DEFS,
 };
 use crate::server::mcp::envelope::{gated_tool_result, tool_text_result};
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
@@ -560,6 +561,26 @@ pub struct HandlerStatus {
 }
 
 impl HandlerStatus {
+    /// Test-only constructor with all-zero state. Used by
+    /// `tests/federation_contracts_e2e.rs` to build an `McpContext`
+    /// for in-process handler invocations. Not on the production
+    /// path — `LainMcpServer` builds `HandlerStatus` from its real
+    /// state at boot.
+    #[doc(hidden)]
+    pub fn for_test() -> Self {
+        use std::sync::Arc;
+        use std::time::SystemTime;
+        HandlerStatus {
+            transport: None,
+            port: None,
+            started_at: SystemTime::now(),
+            last_sync_at: Arc::new(parking_lot::Mutex::new(SystemTime::now())),
+            last_error: Arc::new(parking_lot::Mutex::new(None)),
+            repo_count: 0,
+            workspaces_count: 0,
+        }
+    }
+
     /// Render the `get_server_status` payload.
     ///
     /// Delegates to the one builder in
@@ -600,6 +621,10 @@ pub struct McpContext<'a> {
     pub workspaces: Option<&'a Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
     pub status: &'a HandlerStatus,
     pub reload_bus: Option<&'a crate::server::reload::ReloadBus>,
+    /// Snapshot manager (`PR 11`). Set when the server boots a
+    /// `SnapshotManager` against the same `data_dir` as the federation.
+    /// Tools in `mcp::contract_tools::snapshots` delegate here.
+    pub snapshots: Option<&'a Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
 }
 
 /// An inventory-registered MCP tool. `name` is the tool id; `handler`
@@ -652,6 +677,7 @@ async fn dispatch_tool_call(
     status: &HandlerStatus,
     reload_bus: Option<&crate::server::reload::ReloadBus>,
     server: Option<&LainServer>,
+    snapshots: Option<&Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     name: &str,
     mut args_map: Map<String, serde_json::Value>,
 ) -> (String, bool) {
@@ -666,9 +692,25 @@ async fn dispatch_tool_call(
         workspaces,
         status,
         reload_bus,
+        snapshots,
     };
     if let Some(result) = invoke_inventory(&ctx, name, args_map.clone()) {
         return tool_result(name, result);
+    }
+
+    // Contract-federation tools (PR 16): `list_services`, `get_service`.
+    // `invoke_contract_inventory` returns the tool's `ToolOutcome`
+    // directly — the inventory entry holds the rendered envelope +
+    // text, so the call is a single `await` and `tool_result` boxes
+    // it the same way the inventory path does. Dispatched after the
+    // `McpToolEntry` inventory so the legacy surface stays
+    // unaffected, and before the federation scoping below so contract
+    // tools can answer before the repo-resolution gate.
+    if let Some(fut) = invoke_contract_inventory(&ctx, name, args_map.clone()) {
+        match fut.await {
+            Ok(outcome) => return tool_result(name, Ok(outcome.structured)),
+            Err(text) => return (text, true),
+        }
     }
 
     if let Some(fed) = federation {
@@ -810,6 +852,9 @@ struct LainHandler {
     /// layer; the tools return `presence layer not configured` in
     /// that case.
     server: Option<Arc<LainServer>>,
+    /// Snapshot manager (`PR 11`); set when the handler is wired
+    /// into a federation-mode server with a `SnapshotManager`.
+    snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
 }
 
 /// Tools that cannot answer in the current mode, and must therefore not
@@ -916,6 +961,11 @@ impl ServerHandler for LainHandler {
         }
         if self.federation.is_some() {
             tools.extend(defs_to_tools(FEDERATION_TOOL_DEFS));
+            // Contract-federation service view (PR 16). Conditional on
+            // a federation being configured because the tools answer
+            // from it; without a federation they would error with
+            // `federation_disabled` on every call.
+            tools.extend(defs_to_tools(CONTRACT_TOOL_DEFS));
         }
         if self.workspaces.is_some() {
             tools.extend(defs_to_tools(WORKSPACE_TOOL_DEFS));
@@ -991,6 +1041,7 @@ impl ServerHandler for LainHandler {
             &handler_status,
             self.reload_bus.as_deref(),
             self.server.as_deref(),
+            self.snapshots.as_ref(),
             params.name.as_str(),
             args_owned,
         )
@@ -1015,6 +1066,9 @@ pub struct LainMcpServer {
     /// server. The same `Arc` is handed to `LainHandler`; the handler
     /// reads through the lock on every dispatch.
     workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
+    /// Snapshot manager (`PR 11`). Set by `with_snapshots`; tools in
+    /// `mcp::contract_tools::snapshots` delegate here.
+    snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     /// Transport for the active server, surfaced via `get_server_status`.
     status_transport: Option<crate::server::Transport>,
     /// TCP port for HTTP transport; surfaced via `get_server_status`.
@@ -1203,6 +1257,7 @@ impl LainMcpServer {
             executor,
             federation: None,
             workspaces: None,
+            snapshots: None,
             status_transport: None,
             status_port: None,
             status_started_at: now,
@@ -1224,6 +1279,7 @@ impl LainMcpServer {
             executor,
             federation: Some(federation),
             workspaces: None,
+            snapshots: None,
             status_transport: None,
             status_port: None,
             status_started_at: now,
@@ -1233,6 +1289,28 @@ impl LainMcpServer {
             server: None,
             reindex_timeout: None,
         }
+    }
+
+    /// Attach the snapshot manager (`PR 11`). Call this after
+    /// `with_federation` so `prepare_snapshot` and `get_snapshot`
+    /// are registered. The optional `source_config` is the parsed
+    /// `repos.yaml` block — when supplied, the server installs a
+    /// resolver that maps every configured repo to its source
+    /// URL/path (`workspace_dir`, `local_clone`, `shallow_clone`).
+    /// Without it, `prepare_snapshot` returns `repo_not_registered`
+    /// for every repo.
+    pub fn with_snapshots(
+        mut self,
+        snapshots: Arc<crate::federation::contracts::snapshots::SnapshotManager>,
+        source_config: Option<&crate::federation::config::FederationConfig>,
+    ) -> Self {
+        if let Some(cfg) = source_config {
+            let resolver =
+                crate::federation::contracts::snapshots::SnapshotManager::resolver_from_config(cfg);
+            snapshots.set_repo_source_resolver(resolver);
+        }
+        self.snapshots = Some(snapshots);
+        self
     }
 
     /// Federation + workspace constructor. When workspaces is Some, the
@@ -1265,6 +1343,7 @@ impl LainMcpServer {
             executor,
             federation: Some(federation),
             workspaces: Some(workspaces),
+            snapshots: None,
             status_transport: None,
             status_port: None,
             status_started_at: now,
@@ -1406,6 +1485,7 @@ impl LainMcpServer {
                                 status,
                                 None,
                                 None,
+                                None,
                                 addr.ip().is_loopback(),
                             )
                         });
@@ -1437,6 +1517,7 @@ impl LainMcpServer {
             executor: Arc::new(self.executor),
             federation: self.federation,
             workspaces: self.workspaces,
+            snapshots: self.snapshots,
             status_transport: self.status_transport,
             status_port: self.status_port,
             status_started_at: self.status_started_at,
@@ -1605,6 +1686,7 @@ impl LainMcpServer {
         let executor = Arc::new(self.executor);
         let federation = self.federation;
         let workspaces = self.workspaces;
+        let snapshots = self.snapshots;
         let status_transport = self.status_transport;
         let status_port = self.status_port;
         let status_started_at = self.status_started_at;
@@ -1620,6 +1702,7 @@ impl LainMcpServer {
                     let executor = executor.clone();
                     let federation = federation.clone();
                     let workspaces = workspaces.clone();
+                    let snapshots = snapshots.clone();
                     let status_transport = status_transport;
                     let status_port = status_port;
                     let status_started_at = status_started_at;
@@ -1634,6 +1717,7 @@ impl LainMcpServer {
                             let executor = executor.clone();
                             let federation = federation.clone();
                             let workspaces = workspaces.clone();
+                            let snapshots = snapshots.clone();
                             let handler_status = HandlerStatus {
                                 transport: status_transport,
                                 port: status_port,
@@ -1657,6 +1741,7 @@ impl LainMcpServer {
                                 handler_status,
                                 reload_bus.clone(),
                                 server.clone(),
+                                snapshots.clone(),
                                 loopback_bound,
                             )
                         });
@@ -1879,6 +1964,9 @@ async fn handle_request(
     // carry the presence layer. Presence-tool dispatches inside the
     // JSON-RPC branch see this as `None` and return a descriptive error.
     server: Option<Arc<LainServer>>,
+    // Snapshot manager (`PR 11`). Tools in
+    // `mcp::contract_tools::snapshots` delegate here.
+    snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     // Whether the HTTP listener is bound to a loopback address. Used by
     // the browser-guard to decide whether to block cross-origin requests.
     loopback_bound: bool,
@@ -2224,6 +2312,8 @@ async fn handle_request(
                             .collect();
                         if federation.is_some() {
                             tools.extend(defs_to_value_tools(FEDERATION_TOOL_DEFS));
+                            // Contract-federation service view (PR 16).
+                            tools.extend(defs_to_value_tools(CONTRACT_TOOL_DEFS));
                         }
                         if workspaces.is_some() {
                             tools.extend(defs_to_value_tools(WORKSPACE_TOOL_DEFS));
@@ -2272,6 +2362,7 @@ async fn handle_request(
                             &status,
                             reload_bus.as_deref(),
                             server.as_deref(),
+                            snapshots.as_ref(),
                             name,
                             args_map,
                         )
@@ -4219,6 +4310,34 @@ fn invoke_inventory(
     let value = serde_json::Value::Object(args_map.into_iter().collect());
     for entry in inventory::iter::<McpToolEntry>() {
         if entry.name == name {
+            return Some((entry.handler)(ctx, value));
+        }
+    }
+    None
+}
+
+/// Look up a contract-federation tool (`docs/CONTRACT_FEDERATION.md`
+/// §10.1) by name. Returns the tool's `ToolOutcome` already rendered,
+/// or `None` when no contract tool matches. Used by
+/// `dispatch_tool_call` after `invoke_inventory`; contract tools
+/// ride the same call shape as the inventory-registered presence
+/// tools, so no new match arm is added.
+///
+/// The future is `+ Send` so it composes with the rest of the
+/// async dispatcher (`handle_call_tool_request` returns a `Send`
+/// future). Each registered handler must therefore be a `Send`
+/// future; the contract handlers (`services.rs`) hold only owned
+/// data plus the `&McpContext` borrow, so this is satisfied
+/// trivially.
+fn invoke_contract_inventory<'a>(
+    ctx: &'a McpContext<'a>,
+    name: &str,
+    args: Map<String, serde_json::Value>,
+) -> Option<crate::server::mcp::contract_tools::ContractToolFuture<'a>> {
+    use crate::server::mcp::contract_tools::ContractToolEntry;
+    for entry in inventory::iter::<ContractToolEntry>() {
+        if entry.name == name {
+            let value = serde_json::Value::Object(args.into_iter().collect());
             return Some((entry.handler)(ctx, value));
         }
     }

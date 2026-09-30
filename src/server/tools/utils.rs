@@ -148,7 +148,7 @@ pub fn resolve_node(
     if let Ok(gid) = GlobalId::parse(handle) {
         if let (Some(gname), Some(gpath)) = (gid.name(), gid.path()) {
             let by_path: Vec<GraphNode> = graph
-                .find_all_nodes_by_name(gname)
+                .find_all_nodes_by_name(&gname)
                 .into_iter()
                 .filter(|n| n.path == gpath)
                 .collect();

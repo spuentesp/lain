@@ -3,6 +3,7 @@
 pub mod annotation_tools;
 pub mod audit_tools;
 pub mod command_center_assets;
+pub mod contract_tools;
 pub mod definitions;
 pub mod envelope;
 pub mod federation_tools;

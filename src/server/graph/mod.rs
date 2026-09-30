@@ -19,7 +19,6 @@ use petgraph::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::warn;
 
 /// The canonical graph key for a file: workspace-relative, forward-slashed.
 ///
@@ -57,6 +56,50 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
     match canonical_rel() {
         Some(rel) => crate::server::path_util::posix_string(&rel),
         None => crate::server::path_util::posix_string(path),
+    }
+}
+
+/// Which sensor "owns" a node — drives [`GraphDatabase::replace_sensor_output`]
+/// so a sensor's rescan replaces only its own previous output (§6.1).
+/// The mapping is fixed by node type and `ContractFact` variant:
+///
+/// - `HttpRoute` with `ProviderOrigin::Code` → [`SensorOwner::HttpSensor`]
+/// - `HttpRoute` with `ProviderOrigin::OpenApi` → [`SensorOwner::OpenApiSensor`]
+/// - `Schema`, `Field` → [`SensorOwner::OpenApiSensor`]
+/// - `HttpClientCall` → [`SensorOwner::HttpClientSensor`] (PR 6)
+/// - `FieldRef` → [`SensorOwner::FieldAccessSensor`] (PR 9)
+/// - `EntryPointSensor` is special: it clears every node's `entry`
+///   field on every run regardless of type, then re-applies its own
+///   (§6.6).
+///
+/// Nodes whose `contract` is `None` (pre-schema-v3) have no owner —
+/// they are left alone by `replace_sensor_output`. Sensor owners
+/// only govern nodes they themselves wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorOwner {
+    HttpSensor,
+    OpenApiSensor,
+    HttpClientSensor,
+    FieldAccessSensor,
+    EntryPointSensor,
+}
+
+/// Map a node to its sensor owner (§6.1 derivation rules). Returns
+/// `None` for nodes that no sensor claims (pre-schema-v3 nodes,
+/// regular code symbols).
+pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
+    use crate::federation::contracts::model::{ContractFact, ProviderOrigin};
+    use crate::schema::NodeType;
+    match (node.node_type.clone(), node.contract.as_ref()) {
+        (NodeType::HttpRoute, Some(ContractFact::Provider(p))) => match p.origin {
+            ProviderOrigin::Code => Some(SensorOwner::HttpSensor),
+            ProviderOrigin::OpenApi => Some(SensorOwner::OpenApiSensor),
+        },
+        (NodeType::Schema, Some(ContractFact::Schema { .. })) => Some(SensorOwner::OpenApiSensor),
+        (NodeType::Field, Some(ContractFact::Field(_))) => Some(SensorOwner::OpenApiSensor),
+        (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
+        (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
+        _ => None,
     }
 }
 
@@ -175,6 +218,17 @@ impl GraphDatabase {
         let mut db = Self::empty(Path::new(""));
         db.read_only = true;
         db
+    }
+
+    /// A fresh in-memory, writable graph. Used by PR 11's snapshot
+    /// federations (`§8.5`) so `PetgraphBackend::ephemeral` can wrap
+    /// a graph it can `upsert_node` against without ever reaching
+    /// the disk. The `persistence_path` is empty (`""`) — the
+    /// snapshot backend's `save()` is overridden to be a no-op, so
+    /// `GraphDatabase::save_to_disk_sync` is never called on this
+    /// graph.
+    pub(crate) fn empty_writable() -> Self {
+        Self::empty(Path::new(""))
     }
 
     fn empty(memory_path: &Path) -> Self {
@@ -664,6 +718,120 @@ impl GraphDatabase {
                 }
             }
         }
+        Ok(removed)
+    }
+
+    /// Replace the per-sensor output for `owner`: drop every node the
+    /// same `owner` previously emitted, then insert `nodes` and
+    /// `edges` (§6.1).
+    ///
+    /// `run_all` rescans the whole repo on every index, but plain
+    /// upserts left nodes for deleted routes and calls behind
+    /// (upsert can only overwrite a node it sees again). Removing
+    /// every node the owner previously emitted first means a route
+    /// deleted from source is gone after the rescan — the stale
+    /// `HttpRoute` problem 0.8 had.
+    ///
+    /// `SensorOwner` is derived from a node's `node_type` and
+    /// `contract` variant: `HttpRoute + Code origin` → http_sensor,
+    /// `HttpRoute + OpenApi origin` (and `Schema` / `Field`) →
+    /// openapi_sensor, `HttpClientCall` → http_client_sensor,
+    /// `FieldRef` → field_access_sensor. Pre-schema-v3 nodes that
+    /// carry no `contract` cannot be assigned an owner and are left
+    /// alone — the §6.1 fix only governs sensor-owned nodes.
+    ///
+    /// `EntryPointSensor` is special: it clears every `GraphNode.entry`
+    /// field up front, then re-inserts its own set with the entries
+    /// re-applied.
+    ///
+    /// Returns the number of nodes removed.
+    pub fn replace_sensor_output(
+        &self,
+        owner: SensorOwner,
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+    ) -> Result<usize, LainError> {
+        self.check_writable()?;
+
+        let owner_for = |n: &GraphNode| sensor_owner_of(n);
+
+        let removed: usize = {
+            let mut graph = self.graph.write();
+
+            // 1. Collect ids of every node currently in the graph
+            //    that belongs to this owner.
+            let stale_ids: Vec<String> = graph
+                .node_references()
+                .filter_map(|(_, n)| {
+                    let o = owner_for(n);
+                    if o == Some(owner) {
+                        Some(n.id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // 2. Remove them (and their incident edges).
+            let mut removed_ids: Vec<String> = Vec::new();
+            for id in &stale_ids {
+                if let Some(idx) = self.index_map.get(id).map(|r| *r.value()) {
+                    if let Some(node) = graph.node_weight(idx) {
+                        let name = node.name.clone();
+                        let path = node.path.clone();
+                        if graph.remove_node(idx).is_some() {
+                            self.index_map.remove(id);
+                            let name_empty = self
+                                .name_index
+                                .get_mut(&name)
+                                .map(|mut e| {
+                                    e.retain(|i| *i != idx);
+                                    e.is_empty()
+                                })
+                                .unwrap_or(false);
+                            if name_empty {
+                                self.name_index.remove(&name);
+                            }
+                            let path_empty = self
+                                .path_index
+                                .get_mut(&path)
+                                .map(|mut e| {
+                                    e.retain(|i| *i != idx);
+                                    e.is_empty()
+                                })
+                                .unwrap_or(false);
+                            if path_empty {
+                                self.path_index.remove(&path);
+                            }
+                            removed_ids.push(id.clone());
+                        }
+                    }
+                }
+            }
+
+            // 3. Special case: EntryPointSensor wipes `entry` on
+            //    every node before re-applying its own.
+            if matches!(owner, SensorOwner::EntryPointSensor) {
+                for idx in 0..graph.node_count() {
+                    let nidx = petgraph::stable_graph::NodeIndex::new(idx);
+                    if let Some(n) = graph.node_weight_mut(nidx) {
+                        n.entry = None;
+                    }
+                }
+            }
+            removed_ids.len()
+        };
+
+        // 4. Insert the new nodes and edges (uses the existing
+        //    batch insert; edges whose endpoints aren't present are
+        //    dropped — same contract as `insert_edges_batch`).
+        for node in nodes {
+            self.upsert_node(node.clone())?;
+        }
+        if !edges.is_empty() {
+            self.insert_edges_batch(edges)?;
+        }
+
         Ok(removed)
     }
 
@@ -1563,6 +1731,65 @@ impl GraphDatabase {
             .collect())
     }
 
+    /// Set the `entry` field on an existing node, identified by `id`.
+    /// Returns `Ok(true)` if the node existed and was updated, `Ok(false)`
+    /// if the id is unknown (a regex-only detection whose function hasn't
+    /// been indexed yet — the sensor will retry on the next scan).
+    ///
+    /// Phase 1 (`§6.6`) of `entry_point_sensor` calls this for every
+    /// regex-detected entry-point after `replace_sensor_output` has wiped
+    /// every node's `entry` field. The mutation is a single field
+    /// assignment under the graph write lock so concurrent readers see
+    /// either the old or the new value, never a torn one.
+    pub fn set_entry(
+        &self,
+        id: &str,
+        kind: crate::federation::contracts::model::EntryKind,
+    ) -> Result<bool, LainError> {
+        self.check_writable()?;
+        let mut graph = self.graph.write();
+        let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
+            return Ok(false);
+        };
+        if let Some(node) = graph.node_weight_mut(idx) {
+            node.entry = Some(kind);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Ids of every node that has an incoming `Calls` edge into
+    /// `node_id`. Sorted for determinism (`§8.3`). Used by
+    /// `used_by` (`§10.9`) to walk callers up the call graph.
+    pub fn incoming_calls(&self, node_id: &str) -> Vec<String> {
+        let graph = self.graph.read();
+        let Some(idx) = self.index_map.get(node_id).map(|r| *r.value()) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = graph
+            .edges_directed(idx, petgraph::Direction::Incoming)
+            .filter(|e| e.weight().edge_type == EdgeType::Calls)
+            .map(|e| graph[e.source()].id.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// All `CallsHttp` edges in the graph: `(handler_id, route_id)` pairs.
+    /// Used by `entry_point_sensor` (`§6.6`) to tag handler functions as
+    /// `EntryKind::HttpHandler`.
+    pub fn calls_http_pairs(&self) -> Vec<(String, String)> {
+        let graph = self.graph.read();
+        let mut out: Vec<(String, String)> = graph
+            .edge_references()
+            .filter(|e| e.weight().edge_type == EdgeType::CallsHttp)
+            .map(|e| (graph[e.source()].id.clone(), graph[e.target()].id.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn insert_co_change_edges(
         &self,
         pairs: &[(String, String, usize)],
@@ -1840,7 +2067,7 @@ impl GraphDatabase {
         let state = match persist::decode_state(&data) {
             Ok((state, _)) => state,
             Err(e) => {
-                warn!(
+                eprintln!(
                     "Ignoring unreadable graph at {}: {e}. Starting empty; \
                      the next index pass will rebuild it.",
                     self.persistence_path.display()
@@ -1850,7 +2077,7 @@ impl GraphDatabase {
         };
 
         if state.path_format_version != PATH_FORMAT_VERSION {
-            warn!(
+            eprintln!(
                 "Ignoring graph at {} written with path format v{} (this build expects v{}). \
                  Starting empty; the next index pass will rebuild it. Its node ids encode a \
                  different path convention, so merging would duplicate every node.",
@@ -1861,7 +2088,14 @@ impl GraphDatabase {
             return Ok(());
         }
 
-        let mut state = state;
+        self.apply_state_loaded(state)
+    }
+
+    /// Apply an already-decoded `persist::GraphState` to this graph
+    /// in place. The petgraph + secondary indices + `last_commit`
+    /// are all swapped under one write lock so a concurrent
+    /// reader never sees a mismatched graph/index pair.
+    fn apply_state_loaded(&self, mut state: persist::GraphState) -> Result<(), LainError> {
         persist::heal_duplicate_ids(&mut state);
 
         let mut path_index = HashMap::new();
@@ -1875,10 +2109,6 @@ impl GraphDatabase {
             // loaded petgraph nodes so `find_indices_by_name` /
             // `find_all_nodes_by_name` work immediately after a cold
             // load, not just after the next indexing pass.
-            // `load_from_disk` previously went through
-            // `graph.node_weights()` for name lookups; post-fix the
-            // secondary index is authoritative. The on-disk format
-            // is unchanged — `name_index` is purely derived state.
             name_index
                 .entry(node.name.clone())
                 .or_insert_with(Vec::new)
@@ -1906,6 +2136,38 @@ impl GraphDatabase {
         drop(graph);
         *self.last_commit.write() = state.last_commit;
         Ok(())
+    }
+
+    /// Build a fresh `GraphDatabase` from a bincode-encoded
+    /// `persist::GraphState` payload without ever touching the
+    /// filesystem. PR 11's snapshot hydration uses this to honour
+    /// §8.5's "no disk writes from `from_snapshot`" — every prior
+    /// implementation round-tripped through a temp file, which
+    /// (a) violated §8.5 and (b) raced on the shared staging path
+    /// for concurrent builds of the same record.
+    ///
+    /// Returns the populated database plus the `last_commit` it
+    /// recorded (the manager logs it for diagnostics; tests use it
+    /// to assert the hydrate path round-trips).
+    pub fn from_bytes(data: &[u8]) -> Result<(Self, Option<String>), LainError> {
+        let db = Self::empty_read_only();
+        // Snapshot hydration only reads from the hydrated DB; the
+        // petgraph state is loaded into memory once and never
+        // mutated again. `read_only` does not gate the swap; the
+        // `read_only: true` flag still guards `save_to_disk` /
+        // `insert_*` so a future caller that accidentally tries to
+        // mutate through this DB gets a clean error.
+        let (state, _) = persist::decode_state(data)
+            .map_err(|e| LainError::Database(format!("graph state decode: {e}")))?;
+        if state.path_format_version != PATH_FORMAT_VERSION {
+            return Err(LainError::Database(format!(
+                "graph state path format v{} does not match v{}",
+                state.path_format_version, PATH_FORMAT_VERSION
+            )));
+        }
+        db.apply_state_loaded(state)?;
+        let last_commit = db.last_commit.read().clone();
+        Ok((db, last_commit))
     }
 
     pub fn export_to_json(&self) -> Result<String, LainError> {
@@ -2126,6 +2388,141 @@ mod replace_tests {
             "emptied directory's node is gone"
         );
         assert!(g.find_node_by_name("gone").is_none());
+    }
+
+    /// `replace_sensor_output` must retract the nodes a sensor
+    /// previously emitted and replace them with the new set — this
+    /// is the §6.1 fix for stale `HttpRoute` (and the joiner's
+    /// other sensor-owned nodes).
+    #[test]
+    fn replace_sensor_output_drops_stale_nodes_by_owner() {
+        use crate::federation::contracts::model::{
+            ContractFact, HttpMethod, ProviderFact, ProviderOrigin,
+        };
+
+        let g = db("lain_test_replace_sensor_stale");
+
+        let mut route_v1 = GraphNode::new(
+            NodeType::HttpRoute,
+            "GET /api/users".into(),
+            "openapi.yaml".into(),
+        );
+        route_v1.contract = Some(ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Get,
+            template: "/api/users".into(),
+            handler: None,
+            operation_id: Some("listUsers".into()),
+            origin: ProviderOrigin::OpenApi,
+        }));
+        g.insert_nodes_batch(&[route_v1]).unwrap();
+        assert!(g.find_node_by_name("GET /api/users").is_some());
+
+        // Rescan with no operations → route is gone.
+        let removed = g
+            .replace_sensor_output(SensorOwner::OpenApiSensor, &[], &[])
+            .unwrap();
+        assert_eq!(removed, 1, "the prior OpenApi route must be retracted");
+        assert!(
+            g.find_node_by_name("GET /api/users").is_none(),
+            "stale route must be gone"
+        );
+
+        // Rescan with a different operation → the prior route (now
+        // absent) is replaced by the new one.
+        let mut route_v2 = GraphNode::new(
+            NodeType::HttpRoute,
+            "POST /api/users".into(),
+            "openapi.yaml".into(),
+        );
+        route_v2.contract = Some(ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Post,
+            template: "/api/users".into(),
+            handler: None,
+            operation_id: Some("createUser".into()),
+            origin: ProviderOrigin::OpenApi,
+        }));
+        let removed = g
+            .replace_sensor_output(SensorOwner::OpenApiSensor, &[route_v2], &[])
+            .unwrap();
+        assert_eq!(removed, 0, "fresh insert: nothing to retract");
+        assert!(g.find_node_by_name("POST /api/users").is_some());
+        assert!(
+            g.find_node_by_name("GET /api/users").is_none(),
+            "the v1 route stays gone"
+        );
+    }
+
+    /// `replace_sensor_output` only retracts nodes whose owner
+    /// matches the one passed in. An `HttpRoute + Code` route (owned
+    /// by `HttpSensor`) must survive an `OpenApiSensor` rescan that
+    /// emits nothing.
+    #[test]
+    fn replace_sensor_output_leaves_other_owners_alone() {
+        use crate::federation::contracts::model::{
+            ContractFact, HttpMethod, ProviderFact, ProviderOrigin,
+        };
+
+        let g = db("lain_test_replace_sensor_owners");
+
+        let mut code_route = GraphNode::new(
+            NodeType::HttpRoute,
+            "GET /api/users".into(),
+            "routes.go".into(),
+        );
+        code_route.contract = Some(ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Get,
+            template: "/api/users".into(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        }));
+        g.insert_nodes_batch(&[code_route]).unwrap();
+
+        // OpenApiSensor rescan with no operations must not delete
+        // the Code-origin HttpRoute — it belongs to HttpSensor.
+        let removed = g
+            .replace_sensor_output(SensorOwner::OpenApiSensor, &[], &[])
+            .unwrap();
+        assert_eq!(
+            removed, 0,
+            "OpenApiSensor must not retract HttpSensor-owned nodes"
+        );
+        assert!(g.find_node_by_name("GET /api/users").is_some());
+    }
+
+    /// The `EntryPointSensor` owner wipes every node's `entry`
+    /// field on every rescan (§6.6) and then re-applies its own.
+    /// The wipe is the special-case branch in
+    /// `replace_sensor_output`.
+    #[test]
+    fn replace_sensor_output_clears_entry_fields_for_entry_point_sensor() {
+        let g = db("lain_test_replace_sensor_entry");
+        let mut handler = GraphNode::new(
+            NodeType::Function,
+            "scheduledMonthlyReport".into(),
+            "src/main.py".into(),
+        );
+        handler.entry = Some(crate::federation::contracts::model::EntryKind::Scheduled);
+        g.insert_nodes_batch(std::slice::from_ref(&handler))
+            .unwrap();
+
+        let removed = g
+            .replace_sensor_output(SensorOwner::EntryPointSensor, &[], &[])
+            .unwrap();
+        assert_eq!(removed, 0, "no nodes owned by EntryPointSensor yet");
+        let after = g.get_node(&handler.id).unwrap().unwrap();
+        assert!(
+            after.entry.is_none(),
+            "EntryPointSensor must clear every node's entry field"
+        );
+    }
+
+    /// `sensor_owner_of` maps node type and contract variant per
+    /// §6.1. Pre-schema-v3 nodes (no contract) have no owner.
+    #[test]
+    fn sensor_owner_of_returns_none_for_unowned_nodes() {
+        let plain = GraphNode::new(NodeType::Function, "parse".into(), "src/x.rs".into());
+        assert!(sensor_owner_of(&plain).is_none());
     }
 }
 

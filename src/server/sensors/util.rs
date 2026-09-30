@@ -121,9 +121,60 @@ pub fn find_handler_in_graph(graph: &GraphDatabase, name: &str) -> Option<GraphN
         .or_else(|| graph.find_node_by_name(&to_camel_case(name)))
 }
 
+/// The `Function` or `Method` in `path` with the smallest range
+/// `line_start..=line_end` that contains `line` (§6.1).
+///
+/// Ties (two symbols span the same number of lines) go to the
+/// symbol whose `line_start` is later — a nested function is more
+/// specific than the module-level one that wraps it. Returns
+/// `None` if `path` is not in the graph, no symbol in it covers
+/// `line`, or every candidate is a non-function/non-method node
+/// (`SendsHttp` and `Calls` attach to enclosing functions, never to
+/// the file node itself).
+pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<GraphNode> {
+    graph
+        .get_nodes_by_types(&[
+            crate::schema::NodeType::Function,
+            crate::schema::NodeType::Method,
+        ])
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter(|n| n.path == path)
+        .filter_map(|n| match (n.line_start, n.line_end) {
+            (Some(s), Some(e)) if s <= line && e >= line => Some((n, e.saturating_sub(s))),
+            _ => None,
+        })
+        .min_by(|a, b| {
+            // Smallest range first; tie → later line_start.
+            a.1.cmp(&b.1)
+                .then_with(|| b.0.line_start.cmp(&a.0.line_start))
+        })
+        .map(|(n, _)| n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::{GraphNode, NodeType, RepoNamespace};
+
+    fn db(_name: &str) -> GraphDatabase {
+        // `tempfile::tempdir()` gives each test its own directory
+        // (cleaned up on Drop), so concurrent test processes don't
+        // race over a fixed `/tmp/util_…` path. The other walker
+        // tests in this file already use this style. The
+        // `GraphDatabase` opens an in-file index inside the temp
+        // dir; the dir itself is the file's `memory_path`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        GraphDatabase::new(&path).unwrap()
+    }
+
+    fn fn_with_range(name: &str, path: &str, start: u32, end: u32) -> GraphNode {
+        let ns = RepoNamespace::for_test();
+        GraphNode::new_in(NodeType::Function, name.to_string(), path.to_string(), &ns)
+            .with_location_in(start, end, &ns)
+    }
 
     #[test]
     fn snake_case_handles_camel_and_pascal() {
@@ -170,6 +221,148 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "a.proto"),
             "walker missed the file: {names:?}"
+        );
+    }
+
+    /// `enclosing_symbol` returns the smallest range covering the
+    /// line. A 50-line nested function must beat a 200-line
+    /// surrounding one for a line inside both — otherwise the
+    /// joiner (PR 7) would attach every `SendsHttp` to the
+    /// outermost symbol.
+    #[test]
+    fn enclosing_symbol_returns_the_smallest_range() {
+        let g = db("enclosing_smallest");
+        let outer = fn_with_range("outer", "src/x.py", 1, 200);
+        let inner = fn_with_range("inner", "src/x.py", 50, 100);
+        g.insert_nodes_batch(&[outer.clone(), inner.clone()])
+            .unwrap();
+
+        let found = enclosing_symbol(&g, "src/x.py", 75).expect("a symbol covers line 75");
+        assert_eq!(found.name, "inner", "smallest range wins");
+        assert_eq!(found.id, inner.id);
+    }
+
+    /// When two symbols span exactly the same number of lines, the
+    /// one whose `line_start` is later wins — a nested helper
+    /// declared further down the file is more specific than the
+    /// outer block that starts at the top.
+    #[test]
+    fn enclosing_symbol_breaks_range_ties_by_later_line_start() {
+        let g = db("enclosing_tie");
+        // Both ranges span 100 lines; B's line_start (50) is later
+        // than A's (1), so B wins on line 75.
+        let a = fn_with_range("a", "src/x.py", 1, 101);
+        let b = fn_with_range("b", "src/x.py", 50, 150);
+        g.insert_nodes_batch(&[a.clone(), b.clone()]).unwrap();
+
+        let found = enclosing_symbol(&g, "src/x.py", 75).expect("a symbol covers line 75");
+        assert_eq!(found.name, "b", "tie → later line_start");
+        assert_eq!(found.id, b.id);
+    }
+
+    /// A `File` node whose own range covers the line must not be
+    /// returned, even when no `Function`/`Method` covers it. The
+    /// doc contract is "no candidate → None"; the only way that
+    /// path triggers in practice is when the candidate set has
+    /// nothing but `File` (or other non-`Function`/`Method`)
+    /// nodes, because the resolver only attaches `SendsHttp` and
+    /// `Calls` to enclosing functions/methods. A regression that
+    /// widened the candidate set to include `File` would return
+    /// the file node here and fail.
+    #[test]
+    fn enclosing_symbol_returns_none_when_only_a_file_covers_the_line() {
+        let g = db("enclosing_file_only");
+        let ns = RepoNamespace::for_test();
+        // A file-shaped node covering the whole file.
+        let file = GraphNode::new_in(
+            NodeType::File,
+            "x.py".to_string(),
+            "src/x.py".to_string(),
+            &ns,
+        )
+        .with_location_in(1, 200, &ns);
+        g.insert_nodes_batch(&[file]).unwrap();
+
+        // No Function/Method covers line 50 — only the File node
+        // does. The type filter must drop it; without the filter,
+        // the function under test would return the File.
+        assert!(
+            enclosing_symbol(&g, "src/x.py", 50).is_none(),
+            "a File node covering the line is not a Function/Method; the type filter must drop it"
+        );
+    }
+
+    /// Variant of the same rule for a file-shape node that is the
+    /// *smallest* covering range. Without the type filter, smallest-
+    /// range wins and the File would be returned — this test pins
+    /// the filter as load-bearing even when range selection would
+    /// otherwise pick the File.
+    #[test]
+    fn enclosing_symbol_excludes_a_file_with_the_smallest_covering_range() {
+        let g = db("enclosing_file_smallest");
+        let ns = RepoNamespace::for_test();
+        // File covers lines 1-3 (smallest possible range); the
+        // surrounding Function covers 1-200.
+        let file = GraphNode::new_in(
+            NodeType::File,
+            "x.py".to_string(),
+            "src/x.py".to_string(),
+            &ns,
+        )
+        .with_location_in(1, 3, &ns);
+        let func = fn_with_range("the_function", "src/x.py", 1, 200);
+        g.insert_nodes_batch(&[file, func.clone()]).unwrap();
+
+        let found = enclosing_symbol(&g, "src/x.py", 2)
+            .expect("a Function covers line 2 even though File does too");
+        assert_eq!(found.node_type, NodeType::Function);
+        assert_eq!(found.name, "the_function");
+        // A regression that loosened the candidate set to include
+        // File would return the file node — smallest range wins
+        // before the type filter — and the assertion above would
+        // fail on `found.node_type == NodeType::File`.
+    }
+
+    /// A `Method` node is also accepted — both `Function` and
+    /// `Method` are in the candidate set per §6.1.
+    #[test]
+    fn enclosing_symbol_accepts_methods() {
+        let g = db("enclosing_method");
+        let ns = RepoNamespace::for_test();
+        let method = GraphNode::new_in(
+            NodeType::Method,
+            "the_method".to_string(),
+            "src/x.rs".to_string(),
+            &ns,
+        )
+        .with_location_in(10, 20, &ns);
+        g.insert_nodes_batch(std::slice::from_ref(&method)).unwrap();
+
+        let found = enclosing_symbol(&g, "src/x.rs", 15).expect("a method covers line 15");
+        assert_eq!(found.name, "the_method");
+        assert_eq!(found.node_type, NodeType::Method);
+    }
+
+    /// A line outside every range returns `None` — the sensor
+    /// shouldn't claim an enclosing symbol for, say, a top-of-file
+    /// import.
+    #[test]
+    fn enclosing_symbol_returns_none_when_no_range_covers_the_line() {
+        let g = db("enclosing_no_match");
+        let f = fn_with_range("the_function", "src/x.py", 50, 100);
+        g.insert_nodes_batch(&[f]).unwrap();
+
+        assert!(
+            enclosing_symbol(&g, "src/x.py", 10).is_none(),
+            "line 10 is before the function"
+        );
+        assert!(
+            enclosing_symbol(&g, "src/x.py", 200).is_none(),
+            "line 200 is after the function"
+        );
+        assert!(
+            enclosing_symbol(&g, "src/other.py", 75).is_none(),
+            "path that doesn't exist in the graph returns None"
         );
     }
 }

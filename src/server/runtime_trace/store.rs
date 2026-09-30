@@ -163,6 +163,8 @@ impl RuntimeTraceStore {
                     trace_id: span.trace_id.clone(),
                     last_seen_unix: now,
                 }),
+                site: None,
+                detail: None,
             };
             let entry = RuntimeEdge {
                 edge,

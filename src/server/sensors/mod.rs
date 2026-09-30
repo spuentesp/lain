@@ -11,8 +11,13 @@
 //! [`docs/CONTRIBUTING_AGENTS.md`](../../../docs/CONTRIBUTING_AGENTS.md#sensor-pattern-one-concern-per-file-one-trait-shared).
 
 pub mod dynamic_dispatch_sensor;
+pub mod entry_point_sensor;
+pub mod field_access_sensor;
 pub mod graphql_sensor;
+pub mod http_client_sensor;
 pub mod http_sensor;
+pub mod openapi_line_index;
+pub mod openapi_schema;
 pub mod openapi_sensor;
 pub mod proto_sensor;
 pub mod util;
@@ -23,7 +28,6 @@ use crate::graph::GraphDatabase;
 use crate::schema::RepoNamespace;
 pub use graphql_sensor::GraphQlOperation;
 pub use http_sensor::HttpRoute;
-pub use openapi_sensor::OpenApiOperation;
 pub use proto_sensor::ProtoService;
 use std::path::Path;
 pub use websocket_sensor::WebSocketEndpoint;
@@ -37,6 +41,14 @@ pub struct SensorCounts {
     pub graphql: usize,
     pub websocket: usize,
     pub dynamic_dispatch: usize,
+    // Contract-federation counts (§6.1). The corresponding sensors
+    // land in later PRs (6, 9, 16); the buckets are reserved here so
+    // `SensorCountField` and `run_all` carry them today. Until their
+    // sensors are wired in, `run_all` populates these as zero.
+    pub http_clients: usize,
+    pub fields: usize,
+    pub field_reads: usize,
+    pub entry_points: usize,
 }
 
 impl SensorCounts {
@@ -47,6 +59,10 @@ impl SensorCounts {
             + self.graphql
             + self.websocket
             + self.dynamic_dispatch
+            + self.http_clients
+            + self.fields
+            + self.field_reads
+            + self.entry_points
     }
 
     fn add(&mut self, field: SensorCountField, n: usize) {
@@ -57,6 +73,10 @@ impl SensorCounts {
             SensorCountField::Graphql => self.graphql += n,
             SensorCountField::Websocket => self.websocket += n,
             SensorCountField::DynamicDispatch => self.dynamic_dispatch += n,
+            SensorCountField::HttpClients => self.http_clients += n,
+            SensorCountField::Fields => self.fields += n,
+            SensorCountField::FieldReads => self.field_reads += n,
+            SensorCountField::EntryPoints => self.entry_points += n,
         }
     }
 }
@@ -72,11 +92,27 @@ pub enum SensorCountField {
     Graphql,
     Websocket,
     DynamicDispatch,
+    // Reserved for the contract-federation sensors that land in PR 6,
+    // 9, and 16. `run_all` carries the enum values now so the count
+    // types are honest before the sensors arrive.
+    HttpClients,
+    Fields,
+    FieldReads,
+    EntryPoints,
 }
 
 /// A registered protocol sensor. Each impl contributes its `scan`
 /// results to one bucket of [`SensorCounts`] and is discovered by
 /// `run_all` via the `inventory` collection.
+///
+/// [`Self::phase`] orders sensors across passes (§6.1): phase 0 runs
+/// first (HTTP, OpenAPI, proto, GraphQL, WebSocket, dynamic
+/// dispatch — anything that needs the static resolve phase done),
+/// phase 1 runs after (HTTP client, entry points — they read
+/// symbols sensors produced), and phase 2 runs last
+/// (`field_access_sensor`, which needs `SendsHttp` and `Calls`
+/// resolved by the joiner). Within a phase, sensors sort by name so
+/// ordering is deterministic across runs.
 pub trait Sensor: Send + Sync {
     fn name(&self) -> &'static str;
     fn count_field(&self) -> SensorCountField;
@@ -86,6 +122,11 @@ pub trait Sensor: Send + Sync {
         root: &Path,
         namespace: &RepoNamespace,
     ) -> Result<usize, LainError>;
+    /// Execution phase (§6.1). Lower phases run first; within a
+    /// phase, sensors run in lexicographic name order.
+    fn phase(&self) -> u8 {
+        0
+    }
 }
 
 /// Inventory wrapper so each sensor can `inventory::submit!(SensorEntry(&…))`.
@@ -94,6 +135,12 @@ inventory::collect!(SensorEntry);
 
 /// Run every registered protocol sensor over `root`, returning how
 /// many nodes/edges each contributed.
+///
+/// Sensors are sorted by `(phase, name)` so a later phase can rely
+/// on the side effects of an earlier one (HTTP client reads the
+/// routes `http_sensor` just emitted). Within a phase, name order
+/// keeps output deterministic — the §8.3 determinism test enforces
+/// this.
 ///
 /// Each sensor is independent: one failing is logged and skipped
 /// rather than aborting ingestion, because a malformed `.proto` in a
@@ -105,7 +152,13 @@ inventory::collect!(SensorEntry);
 /// silently overwrite each other on merge.
 pub fn run_all(graph: &GraphDatabase, root: &Path, namespace: &RepoNamespace) -> SensorCounts {
     let mut counts = SensorCounts::default();
-    for entry in inventory::iter::<SensorEntry>() {
+    let mut entries: Vec<&SensorEntry> = inventory::iter::<SensorEntry>().collect();
+    entries.sort_by(|a, b| {
+        let pa = a.0.phase();
+        let pb = b.0.phase();
+        pa.cmp(&pb).then_with(|| a.0.name().cmp(b.0.name()))
+    });
+    for entry in entries {
         let sensor = entry.0;
         match sensor.scan(graph, root, namespace) {
             Ok(n) => counts.add(sensor.count_field(), n),

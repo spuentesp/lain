@@ -12,9 +12,9 @@
 //! - `Core`      — read-only, cheap, universally useful. Default.
 //! - `Power`     — composes core ideas for a specific job; still safe.
 //! - `Advanced`  — expensive, low-level, or answers questions the
-//!                 core tools already answer more cheaply.
+//!   core tools already answer more cheaply.
 //! - `Plumbing`  — setup, coordination, server mechanics. Owned by
-//!                 hooks or operators in most sessions.
+//!   hooks or operators in most sessions.
 
 /// The skill packages. `Core` is always advertised; the rest are
 /// opt-in per session (`load_package`) or per process
@@ -31,6 +31,12 @@ pub enum Package {
     Social,
     Notes,
     Ops,
+    /// Contract federation service view (`docs/CONTRACT_FEDERATION.md` PR 16).
+    /// Opt-in via `LAIN_TOOL_PROFILE=contracts` (combinable) or `load_package contracts`.
+    /// The default profile is unchanged and stays at 18 tools or fewer; the
+    /// two contract tools (`list_services`, `get_service`) live behind this
+    /// package so they are not advertised unless explicitly requested.
+    Contracts,
 }
 
 impl Package {
@@ -45,6 +51,7 @@ impl Package {
         Package::Social,
         Package::Notes,
         Package::Ops,
+        Package::Contracts,
     ];
 
     /// Name used in `LAIN_TOOL_PROFILE` and `load_package`.
@@ -60,6 +67,7 @@ impl Package {
             Package::Social => "social",
             Package::Notes => "notes",
             Package::Ops => "ops",
+            Package::Contracts => "contracts",
         }
     }
 
@@ -78,6 +86,9 @@ impl Package {
             Package::Social => "Who else is here: agent roster, overlap, audit trail",
             Package::Notes => "Team memory: annotations, handoff notes, intents",
             Package::Ops => "Server health and setup: reload, status, LSP install, re-enrichment",
+            Package::Contracts => {
+                "Service view across the federation: who provides what, who consumes it and why"
+            }
         }
     }
 
@@ -106,13 +117,18 @@ impl Package {
             Package::Social => "coordination awareness, not code work",
             Package::Notes => "team memory layer — noise for a solo session",
             Package::Ops => "server mechanics and one-time setup chores",
+            Package::Contracts => {
+                "only meaningful when a federation is configured; opt in for cross-repo service questions"
+            },
         }
     }
 
     pub fn level(self) -> Level {
         match self {
             Package::Core => Level::Core,
-            Package::Federation | Package::Workspace | Package::Verify => Level::Power,
+            Package::Federation | Package::Workspace | Package::Verify | Package::Contracts => {
+                Level::Power
+            }
             Package::Architecture | Package::Primitives => Level::Advanced,
             Package::Session | Package::Social | Package::Notes | Package::Ops => Level::Plumbing,
         }
@@ -782,6 +798,35 @@ pub const CAPABILITIES: &[Capability] = &[
         "re-sync the graph with the current git HEAD",
         "the graph and the checkout disagree after a branch change",
     ),
+    // ── Contracts (PR 16) ────────────────────────────────────────────
+    c(
+        "list_services",
+        Package::Contracts,
+        Level::Power,
+        "every service in the federation with repo, paths, endpoint count and consumer counts",
+        "asking which services exist and how many endpoints each owns",
+    ),
+    c(
+        "get_service",
+        Package::Contracts,
+        Level::Power,
+        "consumers of one service: endpoints, calling code, fields used, used_by walk",
+        "asking who consumes a service and why a function runs",
+    ),
+    c(
+        "prepare_snapshot",
+        Package::Contracts,
+        Level::Power,
+        "pin every repo to a commit, index once, reuse the result by snapshot id",
+        "comparing two commits across repos without re-indexing each call",
+    ),
+    c(
+        "get_snapshot",
+        Package::Contracts,
+        Level::Power,
+        "read a snapshot's current state (cached, indexing, failed, or excluded per repo)",
+        "waiting on a prepare_snapshot you kicked off, or auditing a snapshot id",
+    ),
 ];
 
 /// Lookup one capability by tool name.
@@ -883,14 +928,17 @@ mod tests {
     #[test]
     fn packages_are_sized_like_skills() {
         // Opt-in packages are skills: small enough to read in one
-        // sitting.  is the always-on base and is exempt.
+        // sitting. Core is the always-on base and is exempt.
+        // `Contracts` ships PR 16 with 2 tools (`list_services`,
+        // `get_service`); PR 13 adds the rest of the package. Until
+        // then the package is intentionally below the 3-tool floor.
         for p in Package::ALL {
-            if *p == Package::Core {
+            if *p == Package::Core || *p == Package::Contracts {
                 continue;
             }
             let n = package_tools(*p).len();
             assert!(
-                n >= 3 && n <= 12,
+                (3..=12).contains(&n),
                 "package {} has {n} tools; skills should be 3-12",
                 p.name()
             );
@@ -943,6 +991,7 @@ mod tests {
         assert_eq!(Package::Primitives.name(), "raw");
         assert_eq!(Package::Verify.name(), "verify");
         assert_eq!(Package::Session.name(), "session");
+        assert_eq!(Package::Contracts.name(), "contracts");
     }
 
     #[test]

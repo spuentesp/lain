@@ -380,6 +380,8 @@ mod tests {
                     detector: "message_bus_publisher".to_string(),
                     confidence: 0.7,
                 }),
+                site: None,
+                detail: None,
             }])
             .unwrap();
 

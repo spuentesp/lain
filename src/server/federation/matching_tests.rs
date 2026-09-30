@@ -1,9 +1,18 @@
 use crate::federation::matching::*;
+use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{GraphNode, NodeType};
 
 fn node(repo: &str, name: &str, sig: &str) -> GraphNode {
     let mut n = GraphNode::new(NodeType::Function, name.into(), "src/lib.rs".into());
-    n.id = format!("{repo}:Function:src/lib.rs:{name}:0");
+    n.id = GlobalId::new(
+        &RepoId::new(repo).unwrap(),
+        NodeType::Function,
+        "src/lib.rs",
+        name,
+        None,
+    )
+    .as_str()
+    .to_string();
     n.signature = Some(sig.into());
     n
 }
@@ -14,10 +23,17 @@ fn mk_node(name: &str, kind: &str, repo: &str, signature: Option<&str>, line: u3
         "Method" => NodeType::Method,
         _ => panic!("unsupported test kind {kind}"),
     };
-    let kind_str = format!("{node_kind:?}");
-    let mut n =
-        GraphNode::new(node_kind, name.into(), "src/lib.rs".into()).with_location(line, line + 2);
-    n.id = format!("{repo}:{kind_str}:{}:{}:{}", "src/lib.rs", name, line);
+    let mut n = GraphNode::new(node_kind.clone(), name.into(), "src/lib.rs".into())
+        .with_location(line, line + 2);
+    n.id = GlobalId::new(
+        &RepoId::new(repo).unwrap(),
+        node_kind,
+        "src/lib.rs",
+        name,
+        Some(line),
+    )
+    .as_str()
+    .to_string();
     n.signature = signature.map(|s| s.to_string());
     n
 }

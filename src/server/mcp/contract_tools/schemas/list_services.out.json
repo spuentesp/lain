@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "list_services data",
+  "description": "`data` field of the `list_services` envelope (§10.2). Service-level overview of the federation.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "description": "One entry per service in the federation, sorted by service name.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "service": { "type": "string" },
+          "repo":   { "type": "string" },
+          "paths":  { "type": "array", "items": { "type": "string" } },
+          "endpoints": { "type": "integer", "minimum": 0 },
+          "consumer_services": { "type": "integer", "minimum": 0 },
+          "unresolved_inbound": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["service", "repo", "paths", "endpoints", "consumer_services", "unresolved_inbound"]
+      }
+    },
+    "scope": {
+      "type": "object",
+      "description": "§9.6 scope (live → RepoHealth mapping per §8.7).",
+      "additionalProperties": false,
+      "properties": {
+        "reviewed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repo": { "type": "string" },
+              "commit": { "type": ["string", "null"] },
+              "dirty": { "type": "boolean" }
+            },
+            "required": ["repo"]
+          }
+        },
+        "unreviewed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repo": { "type": "string" },
+              "reason": {
+                "type": "string",
+                "enum": ["failed", "fetch_failed", "excluded", "not_ready"]
+              },
+              "error": { "type": "string" }
+            },
+            "required": ["repo", "reason"]
+          }
+        },
+        "configured_only": { "type": "boolean", "enum": [true] }
+      },
+      "required": ["reviewed", "unreviewed", "configured_only"]
+    },
+    "cursor": { "type": "string" }
+  },
+  "required": ["items", "scope"]
+}

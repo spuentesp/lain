@@ -208,7 +208,7 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
     // (repo, name) pair rather than on literal id strings.
     let id_is = |id: &str, repo: &str| -> bool {
         lain::federation::repo_id::GlobalId::parse(id)
-            .map(|g| g.repo_id() == repo && g.name() == Some("shared_helper"))
+            .map(|g| g.repo_id() == repo && g.name().as_deref() == Some("shared_helper"))
             .unwrap_or(false)
     };
 
