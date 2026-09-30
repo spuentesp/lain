@@ -334,7 +334,8 @@ fn count_unresolved_inbound(idx: &ContractIndex, info: &ServiceInfo) -> usize {
             matches!(
                 r.target,
                 Some(ConsumerTarget::Unresolved {
-                    reason: UnresolvedReason::NoRouteInService
+                    reason: UnresolvedReason::NoRouteInService,
+                    ..
                 })
             ) && r.service.0 == info.name.0
         })
@@ -584,7 +585,7 @@ fn build_unresolved_candidates(idx: &ContractIndex, _info: &ServiceInfo) -> Vec<
     // consumer in this service's repo counts.
     let mut out: Vec<Value> = Vec::new();
     for r in idx.consumers.values() {
-        if let Some(ConsumerTarget::Unresolved { reason }) = &r.target {
+        if let Some(ConsumerTarget::Unresolved { reason, .. }) = &r.target {
             out.push(json!({
                 "consumer": {"id": r.call_id.as_str(), "repo": "", "commit": "", "path": "", "line": 0, "text": ""},
                 "url_expr": "",

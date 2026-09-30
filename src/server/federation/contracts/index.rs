@@ -123,6 +123,16 @@ pub enum ConsumerTarget {
     },
     Unresolved {
         reason: UnresolvedReason,
+        /// `Some(s)` when the joiner knew the target service but
+        /// found no matching route (§7.3 rule 3 —
+        /// `NoRouteInService`). `None` when the target service is
+        /// unknown (§7.3 rule 6 — `NoMatch`). §9.7's could-match
+        /// rule uses this to gate unresolved candidates: a
+        /// `Some(s)` unresolved only matches endpoints whose
+        /// service is `s`; `None` matches anything. The field is
+        /// `Option` because `UnresolvedReason::Unnormalized`
+        /// (§7.3 rule 5) has no resolved target either.
+        target_service: Option<ServiceName>,
     },
 }
 

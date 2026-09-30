@@ -118,6 +118,10 @@ pub enum SurfaceResolution {
     },
     Unresolved {
         reason: UnresolvedReason,
+        /// `Some(s)` when the joiner knew the target service but
+        /// found no matching route (§7.3 rule 3). `None` when the
+        /// target service is unknown (§7.3 rule 6 / rule 5).
+        target_service: Option<ServiceName>,
     },
 }
 
@@ -195,11 +199,16 @@ fn consumer_to_def(
         Some(IndexConsumerTarget::External { host }) => {
             SurfaceResolution::External { host: host.clone() }
         }
-        Some(IndexConsumerTarget::Unresolved { reason }) => {
-            SurfaceResolution::Unresolved { reason: *reason }
-        }
+        Some(IndexConsumerTarget::Unresolved {
+            reason,
+            target_service,
+        }) => SurfaceResolution::Unresolved {
+            reason: *reason,
+            target_service: target_service.clone(),
+        },
         None => SurfaceResolution::Unresolved {
             reason: UnresolvedReason::NoMatch,
+            target_service: None,
         },
     };
     ConsumerDef {
@@ -275,20 +284,26 @@ pub enum ChangeKind {
         required: bool,
     },
     /// §9.2: under one parent path + direction, exactly one removed
-    /// and one added with equal `TypeDesc`.
+    /// and one added with equal `TypeDesc`. `required` mirrors the
+    /// destination `FieldMeta.required` so §9.4's request-side
+    /// classify cell can branch on the new field's requiredness.
     FieldRenamed {
         endpoint: EndpointId,
         direction: Direction,
         from: JsonPath,
         to: JsonPath,
+        required: bool,
     },
-    /// §9.2: same path, `TypeDesc` differs.
+    /// §9.2: same path, `TypeDesc` differs. `required` mirrors the
+    /// destination `FieldMeta.required` so §9.4's request-side
+    /// classify cell can branch on the new field's requiredness.
     FieldTypeChanged {
         endpoint: EndpointId,
         direction: Direction,
         path: JsonPath,
         from: TypeDesc,
         to: TypeDesc,
+        required: bool,
     },
     /// §9.2: same path, requiredness differs.
     RequirednessChanged {
@@ -556,6 +571,7 @@ fn kind_label(kind: &ChangeKind) -> String {
             direction,
             from,
             to,
+            ..
         } => {
             format!(
                 "field-renamed:{}:{}:{from}->{to}",
@@ -785,6 +801,7 @@ pub(crate) fn diff_fields(
         }
     }
     for (from, to) in rename_from.iter().zip(rename_to.iter()) {
+        let required = head.get(to).map(|m| m.required).unwrap_or(false);
         out.push(Change {
             service: endpoint.0.clone(),
             kind: ChangeKind::FieldRenamed {
@@ -792,6 +809,7 @@ pub(crate) fn diff_fields(
                 direction,
                 from: from.clone(),
                 to: to.clone(),
+                required,
             },
         });
     }
@@ -814,6 +832,7 @@ pub(crate) fn diff_fields(
                     path: path.clone(),
                     from: base_meta.ty.clone(),
                     to: head_meta.ty.clone(),
+                    required: head_meta.required,
                 },
             });
         }
@@ -875,6 +894,7 @@ pub(crate) fn diff_fields(
                     path: path.clone(),
                     from: base_meta.ty.clone(),
                     to: head_meta.ty.clone(),
+                    required: head_meta.required,
                 },
             });
         }
@@ -982,7 +1002,7 @@ pub fn diff_consumers(base: &ContractSurface, head: &ContractSurface) -> Vec<Cha
     for (key, head_def) in &head.consumers {
         let base_def = base.consumers.get(key);
         match &head_def.resolution {
-            SurfaceResolution::Unresolved { reason } => {
+            SurfaceResolution::Unresolved { reason, .. } => {
                 if matches!(
                     reason,
                     UnresolvedReason::NoRouteInService | UnresolvedReason::NoMatch
@@ -1094,43 +1114,63 @@ impl Compat {
 }
 
 /// Map a `ChangeKind` + `Direction` to its `Compat` (§9.4 table, every
-/// cell verbatim).
+/// cell verbatim). The §9.4 table's "Response / payload" column
+/// groups `Direction::Response` and `Direction::Payload` together;
+/// `Direction::Request` is its own column.
 pub fn classify(kind: &ChangeKind, direction: Direction) -> Compat {
     use ChangeKind::*;
     match kind {
         FieldRemoved { .. } => match direction {
-            Direction::Response => Compat::BreakingIfRead,
-            Direction::Request | Direction::Payload => Compat::Compatible,
+            Direction::Request => Compat::Compatible,
+            Direction::Response | Direction::Payload => Compat::BreakingIfRead,
         },
         FieldAdded { required, .. } => match direction {
-            Direction::Response => Compat::Compatible,
-            Direction::Request | Direction::Payload => {
+            Direction::Request => {
                 if *required {
                     Compat::Breaking
                 } else {
                     Compat::Compatible
                 }
             }
+            Direction::Response | Direction::Payload => Compat::Compatible,
         },
-        FieldRenamed { .. } => match direction {
-            Direction::Response => Compat::BreakingIfRead,
-            Direction::Request | Direction::Payload => Compat::NeedsReview,
+        FieldRenamed { required, .. } => match direction {
+            Direction::Request => {
+                // §9.4: "Breaking if the new field is required, else
+                // NeedsReview". `required` is the destination
+                // `FieldMeta.required`.
+                if *required {
+                    Compat::Breaking
+                } else {
+                    Compat::NeedsReview
+                }
+            }
+            Direction::Response | Direction::Payload => Compat::BreakingIfRead,
         },
-        FieldTypeChanged { .. } => match direction {
-            Direction::Response => Compat::BreakingIfRead,
-            Direction::Request | Direction::Payload => Compat::BreakingIfSent,
+        FieldTypeChanged { required, .. } => match direction {
+            Direction::Request => {
+                // §9.4: "Breaking if required, else BreakingIfSent".
+                if *required {
+                    Compat::Breaking
+                } else {
+                    Compat::BreakingIfSent
+                }
+            }
+            Direction::Response | Direction::Payload => Compat::BreakingIfRead,
         },
         RequirednessChanged { now_required, .. } => match direction {
-            Direction::Response => {
+            Direction::Response | Direction::Payload => {
                 if *now_required {
-                    // §9.4: "became required" → response Compatible.
+                    // §9.4: "became required" → response/payload
+                    // Compatible.
                     Compat::Compatible
                 } else {
-                    // became optional → response BreakingIfRead.
+                    // became optional → response/payload
+                    // BreakingIfRead.
                     Compat::BreakingIfRead
                 }
             }
-            Direction::Request | Direction::Payload => {
+            Direction::Request => {
                 if *now_required {
                     Compat::Breaking
                 } else {
@@ -1139,16 +1179,18 @@ pub fn classify(kind: &ChangeKind, direction: Direction) -> Compat {
             }
         },
         NullabilityChanged { now_nullable, .. } => match direction {
-            Direction::Response => {
+            Direction::Response | Direction::Payload => {
                 if *now_nullable {
-                    // §9.4: "became nullable" → response BreakingIfRead.
+                    // §9.4: "became nullable" → response/payload
+                    // BreakingIfRead.
                     Compat::BreakingIfRead
                 } else {
-                    // §9.4: "became non-nullable" → response Compatible.
+                    // §9.4: "became non-nullable" → response/payload
+                    // Compatible.
                     Compat::Compatible
                 }
             }
-            Direction::Request | Direction::Payload => {
+            Direction::Request => {
                 if *now_nullable {
                     Compat::Compatible
                 } else {
@@ -1157,12 +1199,12 @@ pub fn classify(kind: &ChangeKind, direction: Direction) -> Compat {
             }
         },
         EnumValueRemoved { .. } => match direction {
-            Direction::Response => Compat::Compatible,
-            Direction::Request | Direction::Payload => Compat::BreakingIfSent,
+            Direction::Response | Direction::Payload => Compat::Compatible,
+            Direction::Request => Compat::BreakingIfSent,
         },
         EnumValueAdded { .. } => match direction {
-            Direction::Response => Compat::NeedsReview,
-            Direction::Request | Direction::Payload => Compat::Compatible,
+            Direction::Response | Direction::Payload => Compat::NeedsReview,
+            Direction::Request => Compat::Compatible,
         },
         EndpointRemoved { .. } | PathChanged { .. } | MethodChanged { .. } => Compat::Breaking,
         EndpointAdded { .. } => Compat::Compatible,
@@ -1339,27 +1381,67 @@ pub fn evaluate(
         );
     }
 
-    // Provider-side change — find every consumer in `head` bound to
-    // the changed endpoint, classify per the §9.5 table.
+    // Provider-side change — §9.5 says we trace the OLD contract in
+    // BASE "where the old contract and its consumers exist". The
+    // per-consumer table therefore iterates the consumers bound in
+    // `base`, not `head`. The head surface is consulted only when a
+    // consumer no longer binds in head (its URL or template moved) —
+    // for those the reads set comes from base. The `reads_complete`
+    // mirror lives on the per-base `ConsumerDef`; a consumer dropped
+    // from head without a head-side equivalent keeps base's
+    // `reads_complete` (escapes from base still escape in head).
     let target_endpoint = provider_target_endpoint(change);
-    let head_consumers: Vec<(&ConsumerKey, &ConsumerDef)> = head
-        .consumers
-        .iter()
-        .filter(|(_, c)| match (&c.resolution, &target_endpoint) {
-            (SurfaceResolution::Binds { endpoints, .. }, Some(target)) => {
-                endpoints.contains(target)
-            }
-            _ => false,
-        })
-        .collect();
 
-    // base consumers also matter for the per-consumer trace base
+    // Provider-side per-consumer trace base (§9.5). The "target"
+    // is the changed endpoint. For PathChanged / MethodChanged /
+    // EndpointRemoved the binding the consumer held in base can be
+    // the pre-rename id, so the filter accepts consumers bound to
+    // either the `to` key (head) or, when the change kind has a
+    // distinct `from`, the `from` key. For EndpointRemoved the
+    // `from` key is the removed endpoint id itself.
+    let secondary_target = match &change.kind {
+        ChangeKind::PathChanged { .. } | ChangeKind::MethodChanged { .. } => {
+            Some(change_secondary_target(change))
+        }
+        _ => None,
+    };
+    let removed_target = match &change.kind {
+        ChangeKind::EndpointRemoved { key } => Some((change.service.clone(), key.clone())),
+        _ => None,
+    };
+
+    let base_target_keys: Vec<&EndpointId> = match &change.kind {
+        ChangeKind::PathChanged { .. } | ChangeKind::MethodChanged { .. } => {
+            let mut v: Vec<&EndpointId> = Vec::new();
+            if let Some(t) = target_endpoint.as_ref() {
+                v.push(t);
+            }
+            if let Some(s) = secondary_target.as_ref() {
+                v.push(s);
+            }
+            v.dedup();
+            v
+        }
+        _ => {
+            if let Some(removed) = removed_target.as_ref() {
+                vec![removed]
+            } else {
+                target_endpoint
+                    .as_ref()
+                    .map(|t| vec![t])
+                    .unwrap_or_default()
+            }
+        }
+    };
+
     let base_consumers_for_endpoint: Vec<(&ConsumerKey, &ConsumerDef)> =
-        if let Some(target) = &target_endpoint {
+        if !base_target_keys.is_empty() {
             base.consumers
                 .iter()
                 .filter(|(_, c)| match &c.resolution {
-                    SurfaceResolution::Binds { endpoints, .. } => endpoints.contains(target),
+                    SurfaceResolution::Binds { endpoints, .. } => {
+                        base_target_keys.iter().any(|t| endpoints.contains(t))
+                    }
                     _ => false,
                 })
                 .collect()
@@ -1370,16 +1452,23 @@ pub fn evaluate(
     let mut class_overall = Class::NoKnownImpact;
     let mut reason_overall: Option<Reason> = None;
     let mut any_affected = false;
-    for (ckey, cdef) in &head_consumers {
-        let base_reads = base
-            .consumers
-            .get(*ckey)
-            .map(|c| c.reads.clone())
-            .unwrap_or_default();
-        let reads_complete = cdef.reads_complete();
-        let reads_field = reads_field_for(change, cdef, base_reads);
-        let (class, reason) =
-            per_consumer_verdict(compat, change, reads_field, reads_complete, cdef);
+    for (ckey, cdef) in &base_consumers_for_endpoint {
+        // Look up the same consumer in head; if absent, fall back to
+        // the base-side `ConsumerDef`. `reads_complete` stays
+        // identical between base and head — the sensor's escape
+        // rules (§6.5) are deterministic on the response's binding.
+        let head_def = head.consumers.get(*ckey);
+        let cdef_for_verdict = head_def.unwrap_or(cdef);
+        let base_reads = cdef.reads.clone();
+        let reads_complete = cdef_for_verdict.reads_complete();
+        let reads_field = reads_field_for(change, cdef_for_verdict, cdef, base_reads);
+        let (class, reason) = per_consumer_verdict(
+            compat,
+            change,
+            reads_field,
+            reads_complete,
+            cdef_for_verdict,
+        );
         if matches!(class, Class::NoKnownImpact) {
             continue;
         }
@@ -1440,7 +1529,6 @@ pub fn evaluate(
             class_overall = Class::NoKnownImpact;
             reason_overall = None;
         }
-        let _ = base_consumers_for_endpoint;
     }
 
     finalize_impact(
@@ -1461,12 +1549,6 @@ fn finalize_impact(
     coverage: &Coverage,
     compatible_changes: u32,
 ) -> Impact {
-    let mut scope = coverage.scope.clone();
-    // §9.5: scope is derived; we copy from coverage (the caller
-    // supplies it for the federation). The §9.6 contract applies
-    // even when `class != NoKnownImpact`, so the scope is always
-    // included.
-    let _ = &mut scope;
     Impact {
         service: change.service.clone(),
         kind: change.kind.clone(),
@@ -1487,6 +1569,18 @@ impl ConsumerDef {
     }
 }
 
+/// For a `PathChanged` / `MethodChanged`, the `from` endpoint id is
+/// the one the consumer was bound to in base. Used to widen the
+/// base-consumers filter to the pre-rename key.
+fn change_secondary_target(change: &Change) -> EndpointId {
+    match &change.kind {
+        ChangeKind::PathChanged { from, .. } | ChangeKind::MethodChanged { from, .. } => {
+            (change.service.clone(), from.clone())
+        }
+        _ => panic!("change_secondary_target called for non-Path/Method change"),
+    }
+}
+
 fn provider_target_endpoint(change: &Change) -> Option<EndpointId> {
     match &change.kind {
         ChangeKind::PathChanged { to, .. }
@@ -1501,7 +1595,11 @@ fn provider_target_endpoint(change: &Change) -> Option<EndpointId> {
         | ChangeKind::EnumValueRemoved { endpoint, .. }
         | ChangeKind::EnumValueAdded { endpoint, .. }
         | ChangeKind::ChangedWithoutSchema { endpoint } => Some(endpoint.clone()),
-        ChangeKind::EndpointRemoved { .. } => None,
+        // EndpointRemoved carries the removed key on its `service`;
+        // the endpoint was live in base, so we project it as the
+        // target so the could-match rule (and the per-base-consumer
+        // trace) can still fire on the removed endpoint id.
+        ChangeKind::EndpointRemoved { key } => Some((change.service.clone(), key.clone())),
         _ => None,
     }
 }
@@ -1522,31 +1620,52 @@ fn change_compat(change: &Change) -> Compat {
 
 fn reads_field_for(
     change: &Change,
-    consumer: &ConsumerDef,
-    base_reads: BTreeSet<JsonPath>,
+    head_consumer: &ConsumerDef,
+    base_consumer: &ConsumerDef,
+    _base_reads: BTreeSet<JsonPath>,
 ) -> bool {
-    let path = match &change.kind {
+    // For a rename, the "changed path" is both `from` (still read by
+    // stale consumers in base) and `to` (the new path head-side
+    // consumers read). §9.5: "A consumer 'reads' a changed field
+    // when it reads that path or any path under it" — for a rename
+    // we treat both names as the changed set, since the response
+    // shape is one field with two names during the migration.
+    match &change.kind {
+        ChangeKind::FieldRenamed { from, to, .. } => {
+            let head_reads = &head_consumer.reads;
+            if head_reads
+                .iter()
+                .any(|r| path_is_ancestor(to, r) || r == to)
+            {
+                return true;
+            }
+            let base_reads = &base_consumer.reads;
+            if base_reads
+                .iter()
+                .any(|r| path_is_ancestor(from, r) || r == from)
+            {
+                return true;
+            }
+            false
+        }
         ChangeKind::FieldRemoved { path, .. }
         | ChangeKind::FieldAdded { path, .. }
-        | ChangeKind::FieldRenamed { to: path, .. }
         | ChangeKind::FieldTypeChanged { path, .. }
         | ChangeKind::RequirednessChanged { path, .. }
         | ChangeKind::NullabilityChanged { path, .. }
         | ChangeKind::EnumValueRemoved { path, .. }
-        | ChangeKind::EnumValueAdded { path, .. } => path.clone(),
-        _ => return false,
-    };
-    let head_reads = &consumer.reads;
-    if head_reads
-        .iter()
-        .any(|r| path_is_ancestor(&path, r) || r == &path)
-    {
-        return true;
+        | ChangeKind::EnumValueAdded { path, .. } => {
+            let head_reads = &head_consumer.reads;
+            if head_reads
+                .iter()
+                .any(|r| path_is_ancestor(path, r) || r == path)
+            {
+                return true;
+            }
+            false
+        }
+        _ => false,
     }
-    // If the consumer read the field in base but not in head, that's
-    // not a read; fall through.
-    let _ = base_reads;
-    false
 }
 
 fn path_is_ancestor(parent: &JsonPath, descendant: &JsonPath) -> bool {
@@ -1693,18 +1812,25 @@ pub fn could_match(
     if matches!(consumer.resolution, SurfaceResolution::External { .. }) {
         return false;
     }
-    // Service name match (own consumer's call repo == endpoint's
-    // service or unknown). For unresolved consumers the resolution
-    // carries no service, so we treat it as "unknown".
-    let consumer_service = consumer_key.caller.repo.as_str();
-    if consumer_service != endpoint.0 .0 {
-        // unknown is acceptable: callers without an explicit service
-        // are still candidates. The surface's `Unknown` is encoded
-        // by `SurfaceResolution::Unresolved { reason: NoMatch }` and
-        // a `caller.repo` that doesn't match the endpoint service.
-        // Per §9.7 "u's target service is s or unknown" — accept.
-        // We already know consumer_service != s, which is the
-        // "unknown" branch.
+    // Service-name condition (§9.7): "u's target service is `s` or
+    // unknown". Resolved consumers carry the bound endpoint's
+    // service; unresolved consumers carry either the joiner-known
+    // target service (`Some`) or unknown (`None`). A consumer whose
+    // `target_service` is `Some(other)` does NOT could-match an
+    // `s` endpoint — its known target rules out the change.
+    let target_service_ok = match &consumer.resolution {
+        SurfaceResolution::Binds { endpoints, .. } => match endpoints.first() {
+            Some((svc, _)) => svc.0 == endpoint.0 .0,
+            None => false,
+        },
+        SurfaceResolution::Unresolved { target_service, .. } => match target_service {
+            Some(s) => s.0 == endpoint.0 .0,
+            None => true,
+        },
+        SurfaceResolution::External { .. } => false,
+    };
+    if !target_service_ok {
+        return false;
     }
     // Method check.
     let (consumer_method, consumer_template) = match &consumer_key.target {
@@ -1833,11 +1959,6 @@ pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Sc
         .filter(|(_, e)| e.schemas.is_empty() || e.schemas.values().all(|s| s.fields.is_empty()))
         .map(|(id, _)| id.clone())
         .collect();
-    let mut complete = scope.unreviewed.is_empty();
-    // complete is also false when an endpoint change has an unresolved
-    // candidate that could match it. The caller passes this through
-    // `evaluate`'s could-match branch by re-checking on demand.
-    let _ = &mut complete;
     Coverage {
         repos,
         unresolved_consumers: unresolved,
@@ -1849,6 +1970,32 @@ pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Sc
         complete: scope.unreviewed.is_empty(),
         scope,
     }
+}
+
+/// Apply §9.7's `complete` rule. `complete` is true iff
+/// `scope.unreviewed` is empty AND (when an endpoint is supplied) no
+/// unresolved consumer could match it. The caller passes the index
+/// so `could_match` can resolve each consumer's `target_service`
+/// (key alone doesn't carry the joiner-known target).
+pub fn coverage_complete(
+    coverage: &Coverage,
+    endpoint: Option<&EndpointId>,
+    index: &ContractIndex,
+) -> bool {
+    if !coverage.scope.unreviewed.is_empty() {
+        return false;
+    }
+    if let Some(target) = endpoint {
+        let surface = ContractSurface::from_index(index);
+        if coverage
+            .unresolved_consumers
+            .iter()
+            .any(|u| could_match(u, target, &surface))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 // ─── tests ────────────────────────────────────────────────────────────

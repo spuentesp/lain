@@ -207,6 +207,7 @@ fn classify_field_renamed_response_is_breaking_if_read() {
         direction: Direction::Response,
         from: path(&["a"]),
         to: path(&["b"]),
+        required: false,
     };
     assert_eq!(classify(&kind, Direction::Response), Compat::BreakingIfRead);
 }
@@ -218,8 +219,38 @@ fn classify_field_renamed_request_is_needs_review() {
         direction: Direction::Request,
         from: path(&["a"]),
         to: path(&["b"]),
+        required: false,
     };
     assert_eq!(classify(&kind, Direction::Request), Compat::NeedsReview);
+}
+
+#[test]
+fn classify_field_renamed_request_required_is_breaking() {
+    // §9.4: "Breaking if the new field is required, else NeedsReview"
+    // (request side). `required` carries the destination field's
+    // requiredness.
+    let kind = ChangeKind::FieldRenamed {
+        endpoint: endpoint_id("orders", HttpMethod::Post, "/a"),
+        direction: Direction::Request,
+        from: path(&["a"]),
+        to: path(&["b"]),
+        required: true,
+    };
+    assert_eq!(classify(&kind, Direction::Request), Compat::Breaking);
+}
+
+#[test]
+fn classify_field_renamed_payload_is_breaking_if_read() {
+    // §9.4: "Response / payload" is one column. Payload follows
+    // Response's `BreakingIfRead` verdict for renames.
+    let kind = ChangeKind::FieldRenamed {
+        endpoint: endpoint_id("orders", HttpMethod::Post, "/a"),
+        direction: Direction::Payload,
+        from: path(&["a"]),
+        to: path(&["b"]),
+        required: false,
+    };
+    assert_eq!(classify(&kind, Direction::Payload), Compat::BreakingIfRead);
 }
 
 #[test]
@@ -230,6 +261,7 @@ fn classify_field_type_changed_response_is_breaking_if_read() {
         path: path(&["x"]),
         from: TypeDesc::String,
         to: TypeDesc::Number,
+        required: false,
     };
     assert_eq!(classify(&kind, Direction::Response), Compat::BreakingIfRead);
 }
@@ -242,8 +274,50 @@ fn classify_field_type_changed_request_is_breaking_if_sent() {
         path: path(&["x"]),
         from: TypeDesc::String,
         to: TypeDesc::Number,
+        required: false,
     };
     assert_eq!(classify(&kind, Direction::Request), Compat::BreakingIfSent);
+}
+
+#[test]
+fn classify_field_type_changed_request_required_is_breaking() {
+    // §9.4: "Breaking if required, else BreakingIfSent" (request side).
+    let kind = ChangeKind::FieldTypeChanged {
+        endpoint: endpoint_id("orders", HttpMethod::Post, "/a"),
+        direction: Direction::Request,
+        path: path(&["x"]),
+        from: TypeDesc::String,
+        to: TypeDesc::Number,
+        required: true,
+    };
+    assert_eq!(classify(&kind, Direction::Request), Compat::Breaking);
+}
+
+#[test]
+fn classify_field_type_changed_payload_is_breaking_if_read() {
+    // §9.4: "Response / payload" is one column. Payload follows
+    // Response's `BreakingIfRead` verdict.
+    let kind = ChangeKind::FieldTypeChanged {
+        endpoint: endpoint_id("orders", HttpMethod::Get, "/a"),
+        direction: Direction::Payload,
+        path: path(&["x"]),
+        from: TypeDesc::String,
+        to: TypeDesc::Number,
+        required: false,
+    };
+    assert_eq!(classify(&kind, Direction::Payload), Compat::BreakingIfRead);
+}
+
+#[test]
+fn classify_field_removed_payload_is_breaking_if_read() {
+    // §9.4: "Response / payload" — payload follows Response's
+    // BreakingIfRead verdict for FieldRemoved.
+    let kind = ChangeKind::FieldRemoved {
+        endpoint: endpoint_id("orders", HttpMethod::Get, "/a"),
+        direction: Direction::Payload,
+        path: path(&["x"]),
+    };
+    assert_eq!(classify(&kind, Direction::Payload), Compat::BreakingIfRead);
 }
 
 #[test]
@@ -767,6 +841,7 @@ fn evaluate_breaking_if_sent_is_always_ni_sends_not_modeled() {
             path: path(&["note"]),
             from: TypeDesc::String,
             to: TypeDesc::Number,
+            required: false,
         },
     };
     let impact = evaluate(&change, &surface, &surface, &minimal_coverage());
@@ -917,6 +992,7 @@ fn evaluate_unresolved_candidate_in_reviewed_repo_is_ni_unresolved_candidates() 
         call: call.clone(),
         resolution: SurfaceResolution::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
+            target_service: None,
         },
         reads: BTreeSet::new(),
         reads_complete: true,
@@ -984,6 +1060,7 @@ fn evaluate_consumer_endpoint_unmatched_in_unreviewed_repo_is_ni() {
         call: call.clone(),
         resolution: SurfaceResolution::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
+            target_service: None,
         },
         reads: BTreeSet::new(),
         reads_complete: true,
@@ -1003,6 +1080,144 @@ fn evaluate_consumer_endpoint_unmatched_in_unreviewed_repo_is_ni() {
     assert_eq!(impact.class, Class::NeedsInvestigation);
 }
 
+// ─── Finding 2: provider-side trace base ────────────────────────────
+
+#[test]
+fn evaluate_path_changed_with_base_only_consumer_is_verified() {
+    // Consumer bound in base to the OLD endpoint id, but dropped
+    // from head (the consumer's URL was never updated to the new
+    // path). §9.5: trace the OLD contract in BASE — the consumer is
+    // still affected by the PathChanged (breaking, certain,
+    // Static) → Verified.
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 5);
+    let base_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let head_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/order/{}");
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Binds {
+            endpoints: vec![base_endpoint.clone()],
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::TreeSitter,
+            },
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let consumer_key = consumer_key_for_call(&call, base_endpoint.1.clone());
+    let mut base_consumers = BTreeMap::new();
+    base_consumers.insert(consumer_key.clone(), consumer_def);
+    let base = ContractSurface {
+        endpoints: BTreeMap::new(),
+        consumers: base_consumers,
+    };
+    let head = ContractSurface::default();
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::PathChanged {
+            from: base_endpoint.1.clone(),
+            to: head_endpoint.1.clone(),
+        },
+    };
+    let impact = evaluate(&change, &base, &head, &minimal_coverage());
+    assert_eq!(impact.class, Class::Verified);
+    assert_eq!(impact.affected.len(), 1);
+    assert_eq!(impact.affected[0].class, Class::Verified);
+}
+
+#[test]
+fn evaluate_endpoint_removed_with_unresolved_candidate_is_unresolved() {
+    // EndpointRemoved + an unresolved consumer in a reviewed repo
+    // could match it → NeedsInvestigation (unresolved_candidates).
+    // Before finding 2's fix, `target_endpoint` was `None` for
+    // EndpointRemoved so the could-match branch was skipped.
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let removed_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service: Some(svc("orders")),
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let consumer_key = consumer_key_for_call(&call, removed_endpoint.1.clone());
+    let mut head = ContractSurface::default();
+    head.consumers.insert(consumer_key.clone(), consumer_def);
+    let base = ContractSurface::default();
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::EndpointRemoved {
+            key: removed_endpoint.1.clone(),
+        },
+    };
+    let mut coverage = coverage_with_reviewed(vec!["orders"]);
+    coverage.unresolved_consumers.push(consumer_key.clone());
+    let impact = evaluate(&change, &base, &head, &coverage);
+    assert_eq!(impact.class, Class::NeedsInvestigation);
+    assert_eq!(impact.reason, Some(Reason::UnresolvedCandidates));
+    assert!(impact
+        .affected
+        .iter()
+        .any(|a| a.reason == Reason::UnresolvedCandidates));
+}
+
+// ─── Finding 3: rename read detection covers both `from` and `to` ──
+
+#[test]
+fn evaluate_field_renamed_with_stale_base_reads_is_verified() {
+    // Consumer only reads the OLD path `customer_id` in base; the
+    // rename moves it to `customerId`. §9.5: a consumer "reads" a
+    // renamed field if base OR head reads contain either name. The
+    // consumer is bound and certain (Static) → Verified.
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch_order", 5);
+    let consumer_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let mut base_reads = BTreeSet::new();
+    base_reads.insert(path(&["customer_id"]));
+    let base_consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Binds {
+            endpoints: vec![consumer_endpoint.clone()],
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::TreeSitter,
+            },
+        },
+        reads: base_reads,
+        reads_complete: true,
+    };
+    let head_consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Binds {
+            endpoints: vec![consumer_endpoint.clone()],
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::TreeSitter,
+            },
+        },
+        // Head reads are empty: the consumer hasn't migrated yet.
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let consumer_key = consumer_key_for_call(&call, consumer_endpoint.1.clone());
+    let mut base = ContractSurface::default();
+    base.consumers
+        .insert(consumer_key.clone(), base_consumer_def);
+    let mut head = ContractSurface::default();
+    head.consumers
+        .insert(consumer_key.clone(), head_consumer_def);
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRenamed {
+            endpoint: consumer_endpoint,
+            direction: Direction::Response,
+            from: path(&["customer_id"]),
+            to: path(&["customerId"]),
+            required: true,
+        },
+    };
+    let impact = evaluate(&change, &base, &head, &minimal_coverage());
+    assert_eq!(impact.class, Class::Verified);
+}
+
 // ─── §9.7 could-match ────────────────────────────────────────────────
 
 #[test]
@@ -1014,6 +1229,7 @@ fn could_match_accepts_same_service_no_match_method_any() {
         call: call.clone(),
         resolution: SurfaceResolution::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
+            target_service: None,
         },
         reads: BTreeSet::new(),
         reads_complete: true,
@@ -1050,6 +1266,7 @@ fn could_match_accepts_prefix_stripped_template() {
         call: call.clone(),
         resolution: SurfaceResolution::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
+            target_service: None,
         },
         reads: BTreeSet::new(),
         reads_complete: true,
@@ -1072,6 +1289,7 @@ fn could_match_rejects_mismatched_method() {
         call: call.clone(),
         resolution: SurfaceResolution::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
+            target_service: None,
         },
         reads: BTreeSet::new(),
         reads_complete: true,
@@ -1082,6 +1300,70 @@ fn could_match_rejects_mismatched_method() {
     assert!(!could_match(&key, &target, &head));
 }
 
+// Finding 4: target-service condition for could_match. An
+// unresolved consumer with a known target service (rule 3) must
+// NOT could-match an unrelated endpoint.
+#[test]
+fn could_match_rejects_unresolved_with_known_other_target() {
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let mut head = ContractSurface::default();
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service: Some(svc("shipping")),
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let key = consumer_key_for_call(&call, http_key(HttpMethod::Get, "/api/orders/{}"));
+    head.consumers.insert(key.clone(), consumer_def);
+    let target = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    // The consumer's known target is `shipping`, not `orders`;
+    // could_match must reject.
+    assert!(!could_match(&key, &target, &head));
+}
+
+#[test]
+fn could_match_accepts_unresolved_with_unknown_target() {
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let mut head = ContractSurface::default();
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoMatch,
+            target_service: None,
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let key = consumer_key_for_call(&call, http_key(HttpMethod::Get, "/api/orders/{}"));
+    head.consumers.insert(key.clone(), consumer_def);
+    let target = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    // target_service = None → permissive; could_match returns
+    // true (subject to method / template checks).
+    assert!(could_match(&key, &target, &head));
+}
+
+#[test]
+fn could_match_accepts_unresolved_with_matching_target() {
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let mut head = ContractSurface::default();
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service: Some(svc("orders")),
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let key = consumer_key_for_call(&call, http_key(HttpMethod::Get, "/api/orders/{}"));
+    head.consumers.insert(key.clone(), consumer_def);
+    let target = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    assert!(could_match(&key, &target, &head));
+}
+
 #[test]
 fn could_match_accepts_provider_any_method() {
     let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
@@ -1090,6 +1372,7 @@ fn could_match_accepts_provider_any_method() {
         call: call.clone(),
         resolution: SurfaceResolution::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
+            target_service: None,
         },
         reads: BTreeSet::new(),
         reads_complete: true,
@@ -1400,7 +1683,22 @@ fn scenario_6_path_changed_same_handler_verified() {
     let call = id("billing", "HttpClientCall", "src/b.py", "fetch_order", 5);
     let mut reads = BTreeSet::new();
     reads.insert(path(&["customer_id"]));
-    let consumer_def = ConsumerDef {
+    let base_consumer_def = ConsumerDef {
+        call: call.clone(),
+        // Bound to the OLD endpoint in base — the consumer's URL
+        // template matches the base endpoint, not the renamed one.
+        // After the rename the consumer's `head` binding would
+        // resolve against the new path.
+        resolution: SurfaceResolution::Binds {
+            endpoints: vec![base_endpoint.clone()],
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::TreeSitter,
+            },
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let head_consumer_def = ConsumerDef {
         call: call.clone(),
         resolution: SurfaceResolution::Binds {
             endpoints: vec![head_endpoint.clone()],
@@ -1415,16 +1713,18 @@ fn scenario_6_path_changed_same_handler_verified() {
     let mut endpoints = BTreeMap::new();
     endpoints.insert(head_endpoint.clone(), head_endpoint_def);
     let mut consumers = BTreeMap::new();
-    consumers.insert(consumer_key.clone(), consumer_def);
+    consumers.insert(consumer_key.clone(), head_consumer_def);
     let head = ContractSurface {
         endpoints,
         consumers,
     };
     let mut base_endpoints = BTreeMap::new();
     base_endpoints.insert(base_endpoint.clone(), base_endpoint_def.clone());
+    let mut base_consumers = BTreeMap::new();
+    base_consumers.insert(consumer_key.clone(), base_consumer_def);
     let base = ContractSurface {
         endpoints: base_endpoints,
-        consumers: BTreeMap::new(),
+        consumers: base_consumers,
     };
     let changes = diff_contracts(&base, &head, &*changed_set());
     // Expect PathChanged for the orders endpoint plus FieldRemoved
@@ -1606,6 +1906,7 @@ fn scenario_19_optional_request_type_change_is_sends_not_modeled() {
             path: path(&["note"]),
             from: TypeDesc::String,
             to: TypeDesc::Number,
+            required: false,
         },
     };
     let impact = evaluate(&change, &head, &head, &minimal_coverage());
@@ -1747,6 +2048,7 @@ fn build_coverage_reflects_index_state() {
         service: svc("billing"),
         target: Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
+            target_service: None,
         }),
         bound_endpoints: Vec::new(),
         reads_complete: true,
@@ -1759,6 +2061,7 @@ fn build_coverage_reflects_index_state() {
             service: svc("billing"),
             target: Some(ConsumerTarget::Unresolved {
                 reason: UnresolvedReason::NoRouteInService,
+                target_service: None,
             }),
             bound_endpoints: Vec::new(),
             reads_complete: true,
@@ -1801,6 +2104,107 @@ fn affected_shape_carries_class_and_reason() {
     };
     assert_eq!(a.class, Class::Verified);
     assert_eq!(a.reason, Reason::HeuristicBinding);
+}
+
+// ─── Finding 5: coverage_complete combines unreviewed + could-match ─
+
+#[test]
+fn coverage_complete_unreviewed_blocks_complete() {
+    use crate::federation::contracts::diff::coverage_complete;
+    let index = ContractIndex::default();
+    let coverage = build_coverage(
+        &index,
+        Vec::new(),
+        Scope {
+            reviewed: vec![],
+            unreviewed: vec![crate::federation::contracts::diff::UnreviewedRepo {
+                repo: "reports".into(),
+                reason: "excluded".into(),
+                error: None,
+            }],
+            configured_only: true,
+        },
+    );
+    assert!(!coverage_complete(&coverage, None, &index));
+}
+
+#[test]
+fn coverage_complete_no_endpoint_returns_true_when_reviewed_only() {
+    use crate::federation::contracts::diff::coverage_complete;
+    let index = ContractIndex::default();
+    let coverage = build_coverage(
+        &index,
+        Vec::new(),
+        Scope {
+            reviewed: vec![crate::federation::contracts::diff::ReviewedRepo {
+                repo: "orders".into(),
+                commit: Some("abc".into()),
+                dirty: false,
+            }],
+            unreviewed: Vec::new(),
+            configured_only: true,
+        },
+    );
+    assert!(coverage_complete(&coverage, None, &index));
+}
+
+#[test]
+fn coverage_complete_unresolved_could_match_blocks_complete() {
+    use crate::federation::contracts::diff::coverage_complete;
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let endpoint_id_orders = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service: Some(svc("orders")),
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let consumer_key = consumer_key_for_call(&call, endpoint_id_orders.1.clone());
+    let mut head = ContractSurface::default();
+    head.consumers.insert(consumer_key.clone(), consumer_def);
+    // Build the index manually: an unresolved consumer that could
+    // match the orders endpoint.
+    let mut index = ContractIndex::default();
+    index.consumers.insert(
+        call.clone(),
+        ConsumerResolution {
+            call_id: call.clone(),
+            service: svc("billing"),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoRouteInService,
+                target_service: Some(svc("orders")),
+            }),
+            bound_endpoints: Vec::new(),
+            reads_complete: true,
+        },
+    );
+    let mut coverage = build_coverage(
+        &index,
+        Vec::new(),
+        Scope {
+            reviewed: vec![crate::federation::contracts::diff::ReviewedRepo {
+                repo: "orders".into(),
+                commit: Some("abc".into()),
+                dirty: false,
+            }],
+            unreviewed: Vec::new(),
+            configured_only: true,
+        },
+    );
+    coverage.unresolved_consumers.push(consumer_key);
+    // Without an endpoint, complete is true (unreviewed empty).
+    assert!(coverage_complete(&coverage, None, &index));
+    // With the orders endpoint and a could-match candidate,
+    // complete is false.
+    assert!(!coverage_complete(
+        &coverage,
+        Some(&endpoint_id_orders),
+        &index
+    ));
+    let _ = head;
 }
 
 // ─── nested-field rule ──────────────────────────────────────────────

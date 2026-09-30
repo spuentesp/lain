@@ -726,6 +726,7 @@ fn resolve_consumer(
             service: own_service.clone(),
             target: Some(ConsumerTarget::Unresolved {
                 reason: UnresolvedReason::Unnormalized,
+                target_service: None,
             }),
             bound_endpoints: Vec::new(),
             reads_complete: consumer.reads_complete,
@@ -775,6 +776,7 @@ fn resolve_consumer(
             service: own_service.clone(),
             target: Some(ConsumerTarget::Unresolved {
                 reason: UnresolvedReason::NoMatch,
+                target_service: None,
             }),
             bound_endpoints: Vec::new(),
             reads_complete: consumer.reads_complete,
@@ -917,6 +919,7 @@ fn match_one_service(
             service: own_service.clone(),
             target: Some(ConsumerTarget::Unresolved {
                 reason: UnresolvedReason::NoRouteInService,
+                target_service: Some(target_service.clone()),
             }),
             bound_endpoints: Vec::new(),
             reads_complete: consumer.reads_complete,
@@ -929,6 +932,7 @@ fn match_one_service(
             service: own_service.clone(),
             target: Some(ConsumerTarget::Unresolved {
                 reason: UnresolvedReason::NoRouteInService,
+                target_service: Some(target_service.clone()),
             }),
             bound_endpoints: Vec::new(),
             reads_complete: consumer.reads_complete,
