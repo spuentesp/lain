@@ -413,10 +413,10 @@ fn analyze_sending_function(
         file_path,
     );
 
-    // Final reads_complete = !escapes.is_empty() && reads.is_empty()
-    // is NOT the rule — the rule is "escapes flip reads_complete to
-    // false". Empty reads with no escapes is still `true`. The
-    // call-site schema may simply not be exercised.
+    // The rule is `escapes.is_empty()`: an empty read set with no
+    // escapes is still fully traceable (`reads_complete = true`) —
+    // the call-site schema may simply not be exercised. Only an
+    // escape flips the flag to `false`.
     let reads_complete = escapes.is_empty();
     vec![FieldAccessEmission {
         path: call_site.consumer_path.clone(),
@@ -472,11 +472,15 @@ fn walk_ts<'a, F: FnMut(Node<'a>)>(node: Node<'a>, f: &mut F) {
 /// - `is_sender` — the sending function S itself (or a plain
 ///   single-function `walk`, e.g. the unit-test path): rule 1's
 ///   over-binding seed is allowed (`x = <client call>` binds `x`).
-/// - not `is_sender` — a scope frame (direct caller / callee): only
-///   `o = S(…)` may seed (rule 5, checked against `sender_name`), so
-///   a sibling frame's own client calls (`me = fetch_me()` while
-///   walking fetch_order's scope) never re-bind to *this* call's
-///   response.
+/// - not `is_sender` — a scope frame (direct caller / callee).
+///   Rule-5-only: a scope frame **never seeds on member calls**
+///   (`r = httpx.get(…)` inside a walked callee belongs to that
+///   callee's own sending function, not to this emission), and
+///   rule 5 only binds via `o = S(…)` — a bare call to the
+///   emission's sending function S (checked against `sender_name`).
+///   That is what keeps a sibling frame's own client calls
+///   (`me = fetch_me()` while walking fetch_order's scope) from
+///   re-binding to *this* call's response.
 #[derive(Debug, Clone, Copy)]
 struct FrameCtx<'a> {
     sender_name: &'a str,

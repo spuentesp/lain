@@ -194,8 +194,13 @@ impl ContractJoiner {
             .cloned()
             .collect();
         let schemas: EndpointSchemas = collect_endpoint_schemas(nodes, edges, &assignments);
-        let (field_refs, _schemaless, _unknown) =
+        let (field_refs, _schemaless, _unknown, field_binds) =
             resolve_field_refs(&field_ref_nodes_owned, &reads_from_edges, &binds, &schemas);
+        // §7.5 step 2/3 emit `Binds(FieldRef → Field)` edges — merge
+        // them into the desired bind set so step 7 sorts/dedups them
+        // with the call binds and `rejoin_contracts` persists them
+        // (§4.2 edge table; §9.5 traces `Field ← Binds ← FieldRef`).
+        binds.extend(field_binds);
         // A FieldRef whose call has no bind yet (an
         // unresolved / external / unnormalized consumer) is recorded
         // as `unknown = true` by `resolve_field_refs` already. The

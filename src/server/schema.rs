@@ -360,9 +360,13 @@ impl EdgeType {
             // materializes once `ContractJoiner::run` is wired into
             // `FederatedIndex::rejoin_contracts_if_dirty`.
             //
-            // PR 9 flips `ReadsField` / `ReadsFrom` to `true`: the
-            // field-access sensor (§6.5) is wired in this PR. The
-            // other types still ship here as known-but-unindexed.
+            // `ReadsField` / `ReadsFrom` are produced by the wired
+            // field-access sensor (§6.5, PR 9) but deliberately stay
+            // `false` here: flipping them expands `describe_schema`'s
+            // advertised edge set and is deferred to PR 13, which
+            // owns the `indexed_flags_match_reality` test that flips
+            // them with confidence. The other types still ship here
+            // as known-but-unindexed.
             EdgeType::SendsHttp
             | EdgeType::RequestSchema
             | EdgeType::ResponseSchema

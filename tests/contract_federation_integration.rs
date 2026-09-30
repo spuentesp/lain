@@ -440,5 +440,216 @@ async fn unnormalized_consumers_are_recorded() {
     fed.rejoin_contracts_if_dirty().expect("rejoin");
 }
 
+/// §7.5 + §4.2 + §9.5: the field join's `Binds(FieldRef → Field)`
+/// edges must **land in the graph backend** — the §9.5 qualifying
+/// prefix `Field ← Binds ← FieldRef ← ReadsField ← reading function`
+/// is a graph traversal, so the edge has to exist as a persisted
+/// `Binds` edge, not only in the `field_refs` index map.
+///
+/// Seeds the per-repo graphs with the nodes/edges the sensors would
+/// emit (provider route + response schema + field; consumer call +
+/// FieldRef + ReadsFrom), then runs the real `project_repo` +
+/// `rejoin_contracts` pipeline and inspects the backend.
+#[tokio::test]
+async fn field_ref_to_field_binds_edge_is_persisted() {
+    use lain::federation::contracts::model::{
+        CallVia, ConsumerFact, ContractFact, Direction, FieldMeta, FieldReadFact, HostPart,
+        HttpMethod, MethodSpec, NormalizedUrl, ProviderFact, ProviderOrigin, TypeDesc,
+    };
+    use lain::federation::repo_id::GlobalId;
+    use lain::schema::{
+        EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, StaticSource,
+    };
+
+    let (_dir, fed, _o, _b) = build_two_repo_federation().await;
+    let ns = RepoNamespace::for_test();
+
+    // Provider (orders): an OpenAPI route with a response schema and
+    // one field — the shapes `openapi_sensor` emits.
+    let mut route = GraphNode::new_in(
+        NodeType::HttpRoute,
+        "GET /api/orders/{}".into(),
+        "openapi.yaml".into(),
+        &ns,
+    );
+    route.repo_id = Some("orders".into());
+    route.line_start = Some(3);
+    route.contract = Some(ContractFact::Provider(ProviderFact {
+        method: HttpMethod::Get,
+        template: "/api/orders/{}".into(),
+        handler: None,
+        operation_id: Some("getOrder".into()),
+        origin: ProviderOrigin::OpenApi,
+    }));
+    let mut schema = GraphNode::new_in(
+        NodeType::Schema,
+        "response".into(),
+        "openapi.yaml".into(),
+        &ns,
+    );
+    schema.repo_id = Some("orders".into());
+    schema.line_start = Some(8);
+    schema.contract = Some(ContractFact::Schema {
+        direction: Direction::Response,
+    });
+    let mut field = GraphNode::new_in(
+        NodeType::Field,
+        "customer_id".into(),
+        "openapi.yaml".into(),
+        &ns,
+    );
+    field.repo_id = Some("orders".into());
+    field.line_start = Some(10);
+    field.contract = Some(ContractFact::Field(FieldMeta {
+        ty: TypeDesc::String,
+        required: true,
+        nullable: false,
+        enum_values: None,
+    }));
+
+    // Consumer (billing): the call and the field read — the shapes
+    // `http_client_sensor` and `field_access_sensor` emit.
+    let mut call = GraphNode::new_in(
+        NodeType::HttpClientCall,
+        "GET /api/orders/42".into(),
+        "src/billing.py".into(),
+        &ns,
+    );
+    call.repo_id = Some("billing".into());
+    call.line_start = Some(5);
+    call.contract = Some(ContractFact::Consumer(ConsumerFact {
+        method: MethodSpec::Known(HttpMethod::Get),
+        url: NormalizedUrl {
+            host: HostPart::Literal("orders.svc".into()),
+            template: Some("/api/orders/42".into()),
+        },
+        via: CallVia::Library {
+            name: "httpx".into(),
+        },
+        url_expr: "\"https://orders.svc/api/orders/42\"".into(),
+        reads_complete: true,
+    }));
+    let mut fr = GraphNode::new_in(
+        NodeType::FieldRef,
+        "customer_id".into(),
+        "src/billing.py".into(),
+        &ns,
+    );
+    fr.repo_id = Some("billing".into());
+    fr.line_start = Some(5);
+    fr.contract = Some(ContractFact::FieldRead(FieldReadFact {
+        chain: "customer_id".parse().unwrap(),
+        exact: true,
+    }));
+
+    // Edges (per-repo local ids; `project_edges` rewrites both
+    // endpoints to GlobalIds).
+    let response_schema = GraphEdge::new(
+        EdgeType::ResponseSchema,
+        route.id.clone(),
+        schema.id.clone(),
+    );
+    let has_field = GraphEdge::new(EdgeType::HasField, schema.id.clone(), field.id.clone());
+    let mut reads_from = GraphEdge::new(EdgeType::ReadsFrom, fr.id.clone(), call.id.clone());
+    reads_from.provenance = Some(EdgeProvenance::Static {
+        source: StaticSource::TreeSitter,
+    });
+
+    let orders = fed
+        .get_repo(&RepoId::new("orders").unwrap())
+        .expect("orders repo");
+    orders.db().upsert_node(route).expect("upsert route");
+    orders.db().upsert_node(schema).expect("upsert schema");
+    orders.db().upsert_node(field).expect("upsert field");
+    orders
+        .db()
+        .upsert_edge(response_schema)
+        .expect("upsert ResponseSchema");
+    orders.db().upsert_edge(has_field).expect("upsert HasField");
+    let billing = fed
+        .get_repo(&RepoId::new("billing").unwrap())
+        .expect("billing repo");
+    billing.db().upsert_node(call).expect("upsert call");
+    billing.db().upsert_node(fr).expect("upsert FieldRef");
+    billing
+        .db()
+        .upsert_edge(reads_from)
+        .expect("upsert ReadsFrom");
+
+    project_both(&fed).await;
+    fed.rejoin_contracts().expect("rejoin");
+
+    let call_gid = GlobalId::new(
+        &RepoId::new("billing").unwrap(),
+        NodeType::HttpClientCall,
+        "src/billing.py",
+        "GET /api/orders/42",
+        Some(5),
+    );
+    let fr_gid = GlobalId::new(
+        &RepoId::new("billing").unwrap(),
+        NodeType::FieldRef,
+        "src/billing.py",
+        "customer_id",
+        Some(5),
+    );
+    let field_gid = GlobalId::new(
+        &RepoId::new("orders").unwrap(),
+        NodeType::Field,
+        "openapi.yaml",
+        "customer_id",
+        Some(10),
+    );
+
+    // The persisted edge: FieldRef → Field, weight = min(read 1.0,
+    // endpoint-bind confidence), provenance carried (§7.8).
+    let edges = fed.backend().all_edges().expect("all_edges");
+    let field_binds: Vec<_> = edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Binds && e.source_id == fr_gid.as_str())
+        .collect();
+    assert_eq!(
+        field_binds.len(),
+        1,
+        "exactly one persisted Binds(FieldRef → Field) edge"
+    );
+    let fb = field_binds[0];
+    assert_eq!(fb.target_id, field_gid.as_str(), "target is the Field");
+    assert!(
+        fb.provenance.is_some(),
+        "§7.8: every Binds edge carries provenance"
+    );
+    // §4.6: capped by the endpoint bind — the call's own Binds edge
+    // weight is the endpoint-side confidence the field edge min'd
+    // with (the read was exact at 1.0).
+    let call_bind = edges
+        .iter()
+        .find(|e| e.edge_type == EdgeType::Binds && e.source_id == call_gid.as_str())
+        .expect("the call must bind to the orders endpoint");
+    let expected = call_bind.weight.unwrap_or(1.0).min(1.0);
+    assert!(
+        (fb.weight.unwrap_or(0.0) - expected).abs() < f32::EPSILON,
+        "field bind weight {} must be min(1.0, endpoint {})",
+        fb.weight.unwrap_or(0.0),
+        call_bind.weight.unwrap_or(1.0)
+    );
+    // §7.8: cross_repo is true exactly when the repos differ —
+    // FieldRef lives in billing, Field in orders.
+    assert!(fb.cross_repo, "billing → orders is cross-repo");
+
+    // §7.8 purity/idempotence: a second rejoin recomputes the
+    // desired set and must neither drop nor duplicate the edge.
+    fed.rejoin_contracts().expect("second rejoin");
+    let edges_after = fed.backend().all_edges().expect("all_edges after rejoin");
+    let field_binds_after: Vec<_> = edges_after
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Binds && e.source_id == fr_gid.as_str())
+        .collect();
+    assert_eq!(field_binds_after.len(), 1, "rejoin is idempotent");
+    assert_eq!(field_binds_after[0].target_id, fb.target_id);
+    assert_eq!(field_binds_after[0].weight, fb.weight);
+    assert_eq!(field_binds_after[0].provenance, fb.provenance);
+}
+
 #[allow(dead_code)]
 fn _hush() {}
