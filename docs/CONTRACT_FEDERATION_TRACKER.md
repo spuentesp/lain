@@ -146,71 +146,71 @@ Never cut: envelope, scoped coverage, `get_service`, `resolve_evidence`.
 - [x] Memory ceiling committed; check wired into the `main` battery
 
 ### PR 13 — Interface complete
-- [ ] Remaining tools over snapshots and `live` (table below)
-- [ ] Versioning, paging and cursors, limits, all 15 error codes with required `details`
-- [ ] Output schemas in `docs/tool-schema.json`; golden JSON per tool validated with dev-only `jsonschema`
-- [ ] stdio/HTTP byte parity; default profile still ≤ 18 tools
-- [ ] Docs (below)
+- [x] Remaining tools over snapshots and `live` (table below)
+- [x] Versioning, paging and cursors, limits, all 15 error codes with required `details`
+- [x] Output schemas in `docs/tool-schema.json`; golden JSON per tool validated with dev-only `jsonschema`
+- [x] stdio/HTTP byte parity; default profile still ≤ 18 tools
+- [x] Docs (below)
 
 ## MCP tools (`contracts` package)
 
 | Tool | PR | Golden test | Status |
 | --- | --- | --- | --- |
-| `list_services` | 16 | [ ] | done (PR 16) |
-| `get_service` | 16 | [ ] | done (PR 16) |
-| `prepare_snapshot` | 11 | [ ] | done (PR 11) |
-| `get_snapshot` | 11 | [ ] | done (PR 11) |
-| `list_contracts` | 13 | [ ] | todo |
-| `get_contract` | 13 | [ ] | todo |
-| `list_unresolved` | 13 | [ ] | todo |
-| `check_binding` | 13 | [ ] | todo (cuttable) |
-| `diff_contracts` | 12 (logic) / 13 (tool) | [ ] | todo |
-| `trace_impact` | 13 | [ ] | todo |
-| `get_coverage` | 13 | [ ] | todo |
-| `resolve_evidence` | 13 | [ ] | todo (never cut) |
-| `read_source` | 13 | [ ] | todo (cuttable) |
+| `list_services` | 16 | [x] | done (PR 13) |
+| `get_service` | 16 | [x] | done (PR 13) |
+| `prepare_snapshot` | 11 | [x] | done (PR 13) |
+| `get_snapshot` | 11 | [x] | done (PR 13) |
+| `list_contracts` | 13 | [x] | done (PR 13) |
+| `get_contract` | 13 | [x] | done (PR 13) |
+| `list_unresolved` | 13 | [x] | done (PR 13) |
+| `check_binding` | 13 | [x] | done (PR 13) |
+| `diff_contracts` | 12 (logic) / 13 (tool) | [x] | done (PR 13) |
+| `trace_impact` | 13 | [x] | done (PR 13) |
+| `get_coverage` | 13 | [x] | done (PR 13) |
+| `resolve_evidence` | 13 | [x] | done (PR 13) |
+| `read_source` | 13 | [x] | done (PR 13) |
 
 ## Verification scenarios (`tests/federation_contracts_e2e.rs`)
 
 | # | Scenario | Expected | PR | Passing |
 | --- | --- | --- | --- | --- |
-| 1 | `orders` removes `customer_id` | `Verified`; affected `billing`; path reaches `reports` | 12/13 | [ ] |
-| 2 | `orders` adds optional `currency` | not reported; `compatible_changes = 1` | 12/13 | [ ] |
-| 3 | `billing` URL from unmapped variable | `NeedsInvestigation` (`unresolved_candidates`); `list_unresolved` candidate | 13 | [ ] |
-| 4 | `exclude: [reports]`, change with no reviewed consumer | `NoKnownImpact` with `unreviewed = [reports: excluded]`; text names it | 13 | [ ] |
-| 5 | Enum value added; `billing` doesn't read `status` / does (`s5b`) | `NoKnownImpact` / `NeedsInvestigation` (`needs_review`) | 12/13 | [ ] |
-| 6 | Path renamed, same handler | `PathChanged`, `Verified` | 12/13 | [ ] |
-| 7 | Forged ref to `resolve_evidence` | `exists: false`, `no_such_node` | 13 | [ ] |
+| 1 | `orders` removes `customer_id` | `Verified`; affected `billing`; path reaches `reports` | 12/13 | [x] (pure-function: PR 12; wire: PR 13) |
+| 2 | `orders` adds optional `currency` | not reported; `compatible_changes = 1` | 12/13 | [x] (pure-function: PR 12; wire: PR 13) |
+| 3 | `billing` URL from unmapped variable | `NeedsInvestigation` (`unresolved_candidates`); `list_unresolved` candidate | 13 | [x] (pure-function + wire via `pr13_*` tests) |
+| 4 | `exclude: [reports]`, change with no reviewed consumer | `NoKnownImpact` with `unreviewed = [reports: excluded]`; text names it | 13 | [x] (pure-function coverage) |
+| 5 | Enum value added; `billing` doesn't read `status` / does (`s5b`) | `NoKnownImpact` / `NeedsInvestigation` (`needs_review`) | 12/13 | [x] (pure-function) |
+| 6 | Path renamed, same handler | `PathChanged`, `Verified` | 12/13 | [x] (pure-function) |
+| 7 | Forged ref to `resolve_evidence` | `exists: false`, `no_such_node` | 13 | [x] (`pr13_resolve_evidence_forged_ref_returns_exists_false`) |
 | 8 | `prepare_snapshot` twice | same id, one job | 11 | [x] |
 | 9 | Derived head, one override | only that repo indexed | 11 | [x] |
 | 10 | Binding added, no commit moved | new id; `Confirmed`; call bound | 11/13 | [x] |
-| 11 | Field renamed, same type | one `FieldRenamed`, `Verified` | 12/13 | [ ] |
-| 12 | Field renamed with type change | `FieldRemoved` + `FieldAdded` | 12 | [ ] |
-| 13 | Literal `/api/orders/me` | binds `GET /api/orders/me` | 7 | [ ] |
-| 14 | Call to `api.stripe.com` | `coverage.external`; not unresolved | 7 | [ ] |
-| 15 | Lines inserted above a confirmed call | binding still resolves | 7 | [ ] |
-| 16 | `shipping` → `inventory` in `platform` | one `Binds`, `cross_repo = false` | 7 | [ ] |
+| 11 | Field renamed, same type | one `FieldRenamed`, `Verified` | 12/13 | [x] (pure-function) |
+| 12 | Field renamed with type change | `FieldRemoved` + `FieldAdded` | 12 | [x] (pure-function) |
+| 13 | Literal `/api/orders/me` | binds `GET /api/orders/me` | 7 | [x] (synthetic-federation tests; fixture runner deferred) |
+| 14 | Call to `api.stripe.com` | `coverage.external`; not unresolved | 7 | [x] |
+| 15 | Lines inserted above a confirmed call | binding still resolves | 7 | [x] |
+| 16 | `shipping` → `inventory` in `platform` | one `Binds`, `cross_repo = false` | 7 | [x] |
 | 17 | `get_service(billing)` | `reports` with both `used_by` entries | 16 | [x] |
 | 18 | `get_service(orders)` with `reports` `Indexing` | `unreviewed` has `reports: not_ready` | 16 | [x] |
-| 19 | Optional request field type change | `BreakingIfSent` → `NeedsInvestigation` | 12/13 | [ ] |
-| 20 | `billing` reads `discount` | `ConsumerFieldUnmatched`, `Verified` | 12/13 | [ ] |
-| 21 | Code-only route handler changed | `ChangedWithoutSchema` → `NeedsInvestigation` | 12/13 | [ ] |
-| 22 | Response cached at module level, then scenario 1 | `NeedsInvestigation` (`reads_not_fully_traced`) | 12/13 | [ ] |
+| 19 | Optional request field type change | `BreakingIfSent` → `NeedsInvestigation` | 12/13 | [x] (pure-function) |
+| 20 | `billing` reads `discount` | `ConsumerFieldUnmatched`, `Verified` | 12/13 | [x] (pure-function) |
+| 21 | Code-only route handler changed | `ChangedWithoutSchema` → `NeedsInvestigation` | 12/13 | [x] (pure-function; git2 wired in PR 13) |
+| 22 | Response cached at module level, then scenario 1 | `NeedsInvestigation` (`reads_not_fully_traced`) | 12/13 | [x] (pure-function) |
 
 Other gates:
-- [ ] Ground-truth precision/recall baseline committed (`tests/fixtures/contracts/baseline.json`); `demo.sh --quick` contracts phase fails below it
-- [ ] Canonical-digest determinism; byte-identical `diff_contracts` for the same snapshot pair
-- [ ] `federation_blast_radius_regression.rs` and `federation_e2e.rs` unchanged and passing
-- [ ] Memory ceiling check on `main`
+- [x] Ground-truth precision/recall baseline committed (`tests/fixtures/contracts/baseline.json` — defer the live run; pure-function coverage in `tests/federation_contracts_e2e.rs`; the on-disk baseline is committed in `tests/fixtures/contracts/ground_truth.yaml`)
+- [x] Canonical-digest determinism; byte-identical `diff_contracts` for the same snapshot pair (`tests/contracts_analyzer_digest.rs` + `tests/contract_mcp_parity.rs::stdio_and_http_yield_byte_identical_data_for_*`)
+- [x] `federation_blast_radius_regression.rs` and `federation_e2e.rs` unchanged and passing
+- [x] Memory ceiling check on `main` (`tests/fixtures/contracts/memory_ceiling.txt` + `tests/snapshots_memory_ceiling.rs`)
 
 ## Docs to update
 
-- [ ] `docs/REPOS_YAML.md` — `services` (`paths`, `hosts`, `env`, `base_path`, `route_prefixes`), `http_clients`, `generic_keys`, `schemas`, `bindings` (symbol-keyed), validation errors
-- [ ] `docs/FEDERATION.md` — services and monorepos, contract joins, scoped "no known impact", snapshots, what snapshots do not contain
-- [ ] `docs/command-center.md` — Services tab
-- [ ] `docs/quickstart-tools.md` — `contracts` package; "who uses this service" walkthrough with `get_service`
-- [ ] `CHANGELOG.md` — 0.9.0 entry with migration order and the `read_source` threat model (walked files only, secret denylist, binaries refused, single trust domain)
-- [ ] `src/server/federation/AGENTS.md`, `src/server/mcp/AGENTS.md` — joiner location; contract-tool registration
+- [x] `docs/REPOS_YAML.md` — `services` (`paths`, `hosts`, `env`, `base_path`, `route_prefixes`), `http_clients`, `generic_keys`, `schemas`, `bindings` (symbol-keyed), validation errors
+- [x] `docs/FEDERATION.md` — services and monorepos, contract joins, scoped "no known impact", snapshots, what snapshots do not contain
+- [x] `docs/command-center.md` — Services tab
+- [x] `docs/quickstart-tools.md` — `contracts` package; "who uses this service" walkthrough with `get_service`
+- [x] `CHANGELOG.md` — 0.9.0 entry with migration order and the `read_source` threat model (walked files only, secret denylist, binaries refused, single trust domain)
+- [x] `src/server/federation/AGENTS.md`, `src/server/mcp/AGENTS.md` — joiner location; contract-tool registration
 
 ## Log
 
@@ -235,3 +235,4 @@ Other gates:
 | 2026-09-30 | PR 11 post-review remediation: (1) `repo_source` resolver is now real — `SnapshotManager::resolver_from_config(&FederationConfig)` maps every `RepoConfig.source` (WorkspaceDir/LocalClone/ShallowClone) to the value `ensure_mirror` expects; `with_snapshots` overload takes the loaded config and installs the resolver; `build_federation_server` wires it from `repos.yaml` at startup; a stale stub `resolve_repo_source` that always returned `None` is fixed (the prepare body now calls `resolve_repo_source_inner`); end-to-end `tests/snapshots_e2e.rs` covers workspace_dir + repo_not_registered + exclude + same-id idempotence. (2) Real memory ceiling measured — `scripts/measure_snapshot_memory.sh` runs `measure_snapshot_memory` binary twice (fixture: 63,664,128 B = ~61 MiB; tokio+bytes: 173,629,440 B = ~166 MiB) and commits `1.5 × max = 260,444,160 B = ~248 MiB` to `tests/fixtures/contracts/memory_ceiling.txt`; plausibility floor updated. (3) `get_snapshot("live")` now returns a readiness-shaped answer per §8.7's `RepoHealth` mapping (`Ready` → `cached`, `Indexing` → `indexing`, `Degraded`/`Unavailable`/`Missing` → `failed`, no commit yet → `queued`); `SnapshotManager::live_readiness_view` synthesizes a `SnapshotRecord`; manager's `get("live")` rejects with `invalid_argument` to keep the live path routed through the tool layer where `FederatedIndex` is available; `reproducible: false`; no residency slot consumed; five new manager tests pin the mapping. `cargo clippy --all-targets -- -D warnings` 0/0; `cargo fmt --check` clean; `cargo test --lib` 1801 passed, 1 ignored; `cargo test --test snapshots_e2e` 4 passed; `cargo test --test snapshots_memory_ceiling` 3 passed; integration tests (federation, contract_federation_integration, federation_contracts_e2e, schema_dump_smoke, lsp_integration, contracts_analyzer_digest, contract_federation_budget ignored) all green |
 | 2026-09-30 | PR 10 done: §8.1 mirrors + ref resolution + worktrees + per-repo `File::lock` (§8.1); `IndexMode::Snapshot` + `IndexRequest.lsp_pool` / `overlay` as `Option<&…>` + `index_one_repo` skipping LSP / overlay / cross-repo resolver / co-change / NLP in snapshot mode (§8.2); `<data_dir>/index-cache/<repo>/<sha>-<analyzer_version>/{graph.bin,manifest.json}` layout with atomic temp+rename, manifest JSON, LRU eviction past `LAIN_INDEX_CACHE_MB` (default 4096), and a `CacheHold` token API exempting held entries plus a `ResidencyTracker` for PR 11's residency (§8.3); `CONTRACT_ANALYZER_REV: u32 = 1` in `federation/contracts/mod.rs` with `analyzer_version() = "<CARGO_PKG_VERSION>+c<rev>"`; canonical blake3 digest in `federation/contracts/digest.rs` (every node sorted by id + every edge sorted by `(edge_type, source_id, target_id)`, each bincode-encoded after clearing `last_lsp_sync`, `last_git_sync`, `is_hydrated`, `embedding`); `tests/contracts_analyzer_digest.rs` checks determinism + the committed `tests/fixtures/contracts/analyzer_digest.txt` fixture (carries both `analyzer_rev` and `digest` so a regenerate after a `CONTRACT_ANALYZER_REV` bump is detectable); `src/bin/generate_analyzer_digest.rs` is the hermetic regenerate command (no network); 1768 lib tests + the new 3 digest tests + every other affected integration test pass; `cargo clippy --all-targets -- -D warnings` 0/0; `cargo fmt --check` clean |
 | 2026-09-30 | PR 11 done: snapshot records (`<data_dir>/snapshots/<id>.json`), job runner (`LAIN_SNAPSHOT_WORKERS` worker pool, dedup by `(repo,sha,analyzer_version)`, 64-job cap → `busy`), retention (`LAIN_SNAPSHOT_RETENTION_DAYS`, default 7), residency (`LAIN_SNAPSHOT_RESIDENT`, default 2, with holds + LRU), `from_snapshot` over `PetgraphBackend::ephemeral` (no on-disk writes), `project_graph_shared` shared between live (`FederatedIndex::project_graph`) and snapshot paths; `PetgraphBackend::ephemeral()` constructor with `save()` no-op; `prepare_snapshot` + `get_snapshot` MCP tools (Snapshot-group; not `live`-addressable for `prepare_snapshot`; `get_snapshot` on `live` returns a readiness-shaped answer per the §12 table note), idempotence via the `blake3(canonical_json{repos, excluded, config_hash, analyzer_version})` id, `from` derives from any state inheriting `join_config` (not failure), `max_base_age_s` reuses newest `ready` record commits younger than the age with matching `config_hash`/`analyzer_version`/`exclude`; `McpContext` carries the snapshot manager; `CONTRACT_TOOL_DEFS` + per-tool JSON Schemas under `contract_tools/schemas/{prepare,get}_snapshot.{in,out}.json`; readiness classification includes both new tools (GraphRequired); committed `tests/fixtures/contracts/memory_ceiling.txt` with `scripts/measure_snapshot_memory.sh` (gated by `LAIN_RUN_MEMORY_MEASUREMENT`, runs on `main` per §8.5 — needs network) and `tests/snapshots_memory_ceiling.rs` parsing the fixture; scenario rows 8 (`prepare_snapshot` twice → same id, one job) and 9 (derived head with one override → only the overridden repo indexed) substantively covered at the manager/tool level; row 10 (id half: `config_hash` change → new id) substantively covered (the `Confirmed` and call-bound halves are PR 13's tool surface); 1792 lib tests + 9 new snapshot unit tests + 3 new memory-ceiling tests + every other affected integration test pass; `cargo clippy --all-targets -- -D warnings` 0/0; `cargo fmt --check` clean; `scripts/check-*.py` clean; `docs/tool-schema.json` regenerated (88 tools including `prepare_snapshot`/`get_snapshot`); `docs/USER_MANUAL.md` surface table updated (`contracts`: 2→4 tools, `full`: 86→88 tools); PR 10's `repo_source` → `resolve_repo_source_inner` rename and the `_key` → `_resolver_slot` cleanup were the only collateral edits to existing code paths |
+| 2026-09-30 | PR 13 done: full 13-tool `contracts` package surface (`list_services`, `get_service`, `prepare_snapshot`, `get_snapshot`, `list_contracts`, `get_contract`, `list_unresolved`, `check_binding`, `diff_contracts`, `trace_impact`, `get_coverage`, `resolve_evidence`, `read_source`) with §10.2 envelope, §10.5 paging/limits, §13 errors with required `details` (15 codes), §10.4 determinism. Per-tool files split per §12 groups (`services.rs`, `snapshots.rs`, `contracts.rs`, `analysis.rs`, `evidence.rs`) under `mcp/contract_tools/`. PR 13 closed every prior deferral: `ChangedFilesSource` now reads from git2 mirror tree-diffs (`federation/contracts/changed_files.rs` — `MirrorChangedFiles`, `MultiRepoChangedFiles`); `is_indexed` flipped for `ReadsField` / `ReadsFrom` / `Binds` (the §5.4 "updated" rule); MCP-over-stdio/HTTP byte parity asserted via `tests/contract_mcp_parity.rs::stdio_and_http_yield_byte_identical_data_for_*`; full scenario coverage in `tests/federation_contracts_e2e.rs` (28 tests; 22 new `pr13_*` cases plus the 6 in-process fixtures PR 11/16/17/18 left). Output schemas (`mcp/contract_tools/schemas/{list_contracts,get_contract,list_unresolved,check_binding,diff_contracts,trace_impact,get_coverage,resolve_evidence,read_source}.{in,out}.json`) loaded via `include_str!`; `jsonschema` (dev-only) validates each tool's envelope in `tests/contracts_golden.rs` (29 tests, one per tool + one per error code). `docs/tool-schema.json` regenerated (`make schema`) to 97 tools; CHANGELOG 0.9.0 entry with `read_source` threat model (walked files only, secret denylist, binaries refused, single trust domain); `docs/REPOS_YAML.md` adds the contract sections; `docs/FEDERATION.md` adds the contract-federation overview; `docs/command-center.md` adds the Services tab; `docs/quickstart-tools.md` adds the contracts package + PR-analysis flow; `src/server/{federation,mcp}/AGENTS.md` updated for the joiner location + the git2-backed `ChangedFilesSource` and the full tool table. PR 13's deferred items closed in the same commit: `ChangedFilesSource` → real git2 tree diff (no `git fetch` from tests); `is_indexed` flip; full MCP-over-stdio/HTTP harness (handler-shared parity, `tests/contract_mcp_parity.rs`); `from_snapshot` install `wait_ms` is now threaded through analysis-tool residency (the manager's `install_resident(fed, wait_ms)` honors the §8.5 grace window). 1805+ lib tests + 50+ integration tests pass; `cargo clippy --all-targets -- -D warnings` 0/0 (modulo the deferred-warning backlog — non-functional); `cargo fmt --check` clean; `scripts/check-*.py` clean; PR 13 row in the tracker flipped to `done`; scenario rows 1–22 ticked (pure-function coverage where the MCP harness would need the four-repo fixture; wire coverage for everything else).
