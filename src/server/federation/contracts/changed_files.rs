@@ -15,7 +15,7 @@
 //! workspace-dir mirror records the same committed state (no
 //! worktree, no uncommitted edits).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -173,7 +173,7 @@ impl ChangedFilesSource for RepoScopedChangedFiles {
 /// Variant that exposes the multi-repo case to `diff_contracts`:
 /// returns the union of every cached repo's diff.
 pub struct MultiRepoChangedFiles {
-    pub by_repo: HashMap<String, BTreeSet<String>>,
+    pub by_repo: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl ChangedFilesSource for MultiRepoChangedFiles {
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn multi_repo_changed_files_unions_per_repo() {
-        let mut by_repo = HashMap::new();
+        let mut by_repo = BTreeMap::new();
         let mut a = BTreeSet::new();
         a.insert("src/a.rs".to_string());
         by_repo.insert("orders".into(), a);

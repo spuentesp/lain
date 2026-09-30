@@ -664,7 +664,7 @@ fn parse_endpoint(v: &Value) -> Result<Value, ToolOutcome> {
 /// Either an empty view (no `ContractIndex`, e.g. live with no
 /// federation) or the resolved `ContractIndex` plus a `HoldGuard`
 /// for residency.
-enum ViewHandle {
+pub enum ViewHandle {
     Empty(&'static str),
     Index {
         index: Arc<ContractIndex>,
@@ -674,7 +674,7 @@ enum ViewHandle {
     },
 }
 
-async fn resolve_view(
+pub async fn resolve_view(
     ctx: &McpContext<'_>,
     args_map: &Map<String, Value>,
     started: Instant,

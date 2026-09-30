@@ -46,6 +46,7 @@
 //! refresh-loop tick; `rejoin_contracts_if_dirty` is a no-op when the
 //! flag is clear.
 
+pub mod analysis;
 pub mod contracts;
 pub mod envelope;
 pub mod paging;
