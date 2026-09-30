@@ -51,7 +51,7 @@ pub async fn run_server(
         "lain server: loading federation from {}",
         config_path.display()
     );
-    let fed = load_federation_for_workspace(config_path, workspace_arg)
+    let (fed, workspace_scope) = load_federation_for_workspace(config_path, workspace_arg)
         .await
         .map_err(|e| anyhow!("federation load: {e}"))?;
 
@@ -119,6 +119,11 @@ pub async fn run_server(
             embedding_model,
         )?
     };
+
+    // Record which workspace `--workspace` resolved to: `run_rebuild`
+    // re-scopes hot-reload membership to it instead of importing every
+    // repo in `repos.yaml`.
+    server.set_workspace_scope(workspace_scope);
 
     // Record this project under `~/.config/lain/recent_projects` so the
     // dashboard's project switcher can find it. Failures are logged and
@@ -514,12 +519,15 @@ fn active_pointer_applies(active: &ActiveWorkspace, config_path: &Path) -> bool 
 }
 
 /// Resolve the `--workspace` arg and dispatch to the right loader.
+/// Returns the loaded federation plus the workspace name it was scoped
+/// to (`None` = every repo in `repos.yaml`), which `run_server` records
+/// on the server so hot reload re-scopes membership the same way.
 /// Exposed at the file level so a unit test can exercise the resolution
 /// without spinning up an MCP server.
 async fn load_federation_for_workspace(
     config_path: &Path,
     workspace_arg: &str,
-) -> Result<Arc<FederatedIndex>, anyhow::Error> {
+) -> Result<(Arc<FederatedIndex>, Option<String>), anyhow::Error> {
     let arg = workspace_arg.trim();
     let resolved_name: Option<String> = match arg {
         "" | "none" => None, // explicit "no workspace" — today's behavior
@@ -554,14 +562,15 @@ async fn load_federation_for_workspace(
         }
         _ => Some(arg.to_string()),
     };
-    match resolved_name {
-        None => Ok(load_federation(config_path).await?),
+    match &resolved_name {
+        None => Ok((load_federation(config_path).await?, None)),
         Some(name) => {
             let workspaces_path = config_path
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join("workspaces.yaml");
-            Ok(load_federation_with_workspace(config_path, &workspaces_path, &name).await?)
+            let fed = load_federation_with_workspace(config_path, &workspaces_path, name).await?;
+            Ok((fed, resolved_name))
         }
     }
 }

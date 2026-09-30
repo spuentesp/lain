@@ -187,9 +187,10 @@ fn lain_schema_dump_writes_tools_list_shape() {
 /// triggering the `if workspaces.is_some() { tools.extend(...); }`
 /// branch in the HTTP `tools/list` arm). The test writes a minimal
 /// valid `workspaces.yaml` (one empty workspace) so workspace tools
-/// are advertised; the federation is empty (`repos: []`) so no
-/// indexing work runs and startup stays under the 15s health-poll
-/// timeout.
+/// are advertised; the one fixture repo is a single committed file so
+/// no real indexing work runs and startup stays well within the
+/// health-poll timeout (`load_federation` refuses a config that
+/// declares no repos, so the fixture cannot be an empty `repos: []`).
 ///
 /// `XDG_CONFIG_HOME` is redirected to a tempdir so the
 /// `~/.config/lain/active_workspace` pointer file is empty — without
@@ -209,16 +210,31 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
         listener.local_addr().unwrap().port()
     };
 
-    // Empty federation (no repos indexed). `workspaces.yaml` exists so
-    // the workspace tools are advertised; one empty workspace is
-    // enough — `WorkspacesFile::validate` only checks ≥1 member and
-    // does not require the member to be in the federation.
+    // One tiny fixture repo. `workspaces.yaml` exists so the workspace
+    // tools are advertised; one workspace member is enough —
+    // `WorkspacesFile::validate` only checks ≥1 member and does not
+    // require the member to be in the federation.
     let project = tempfile::tempdir().unwrap();
     let data_dir = project.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
+    let fixture_repo = project.path().join("fixture-repo");
+    std::fs::create_dir_all(&fixture_repo).unwrap();
+    let git = git2::Repository::init(&fixture_repo).unwrap();
+    std::fs::write(fixture_repo.join("lib.rs"), "pub fn fixture() {}\n").unwrap();
+    let mut index = git.index().unwrap();
+    index.add_path(std::path::Path::new("lib.rs")).unwrap();
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    git.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+        .unwrap();
     std::fs::write(
         project.path().join("repos.yaml"),
-        format!("data_dir: {}\nrepos: []\n", data_dir.display()),
+        format!(
+            "data_dir: {}\nrepos:\n  - id: fixture\n    source:\n      type: workspace_dir\n      path: {}\n",
+            data_dir.display(),
+            fixture_repo.display()
+        ),
     )
     .unwrap();
     std::fs::write(

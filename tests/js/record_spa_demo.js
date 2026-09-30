@@ -17,6 +17,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { federationIsReady, federationReadyWithin } = require('./record_spa_demo_video.js');
 
 const LAIN_BIN = process.env.LAIN_BIN
   || path.resolve(__dirname, '..', '..', 'target', 'release', 'lain');
@@ -93,7 +94,7 @@ function startServer(workdir, port, workspace) {
   return proc;
 }
 
-async function waitForReady(baseUrl, timeoutMs) {
+async function waitForReady(baseUrl, timeoutMs, minRepos = 2) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = null;
   while (Date.now() < deadline) {
@@ -101,10 +102,7 @@ async function waitForReady(baseUrl, timeoutMs) {
       const res = await fetch(`${baseUrl}/health`);
       if (res.status === 200) {
         const body = await res.json().catch(() => null);
-        if (body && body.federation &&
-            Array.isArray(body.federation.repos) &&
-            body.federation.repos.length >= 2 &&
-            body.federation.repos.every(r => r.health === 'ready' || r.health === 'ok')) {
+        if (federationIsReady(body, minRepos)) {
           return;
         }
       }
@@ -532,7 +530,15 @@ async function main() {
   }
 
   console.log(`  starting server...`);
-  const serverProc = startServer(workdir, args.port, args.workspace);
+  const expectedRepos = readRepoIdsFromConfig(workdir).length;
+  const reuseUrl = `http://127.0.0.1:${args.port}`;
+  let serverProc;
+  if (await federationReadyWithin(reuseUrl, Math.max(expectedRepos, 1), 3_000)) {
+    console.log(`  reusing server already on port ${args.port}`);
+    serverProc = { kill: () => {} };
+  } else {
+    serverProc = startServer(workdir, args.port, args.workspace);
+  }
 
   let browser;
   let exitCode = 0;
@@ -542,7 +548,7 @@ async function main() {
     // minutes (tokio alone spawned proc-macro servers for ~80 s on the
     // last failed run before the recorder gave up). The cap exists only
     // on the recording path; production server startup is unaffected.
-    await waitForReady(baseUrl, args.ready_timeout_ms);
+    await waitForReady(baseUrl, args.ready_timeout_ms, Math.max(expectedRepos, 1));
     console.log(`  federation ready`);
 
     // Deterministic gate: confirm the cross-repo workspace-graph
@@ -602,4 +608,10 @@ async function main() {
   process.exit(exitCode);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { federationIsReady, federationReadyWithin };
+}
+
+if (require.main === module) {
+  main().catch(e => { console.error('FATAL:', e.message); process.exit(1); });
+}

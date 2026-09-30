@@ -891,6 +891,39 @@ function nodeRadius(role) {
   return role === 'focus' ? 7 : role === 'neighbour' ? 6 : 5;
 }
 
+// Wire format: schema::GraphNode serialises the node kind as `node_type`.
+// Focal-search candidates and some test fixtures still use `kind`. Accept
+// both so a normalised node never stamps `graph-node--kind-undefined`.
+function nodeKind(node) {
+  if (!node || typeof node !== 'object') return '';
+  if (typeof node.node_type === 'string' && node.node_type) return node.node_type;
+  if (typeof node.kind === 'string') return node.kind;
+  return '';
+}
+
+// Map graph coordinates into minimap space. Returns null when no node has
+// finite numeric coordinates — without that guard the bounds stay at
+// ±Infinity, `s`/`tx`/`ty` go non-finite, and the minimap frame rect is
+// written with x="NaN" y="NaN". Pure; covered by tests/js/graph_tab.test.js.
+function computeMinimapTransform(coords, w, h) {
+  const pts = (Array.isArray(coords) ? coords : [])
+    .filter(p => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (!pts.length) return null;
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  for (const p of pts) {
+    if (p.x < xmin) xmin = p.x;
+    if (p.x > xmax) xmax = p.x;
+    if (p.y < ymin) ymin = p.y;
+    if (p.y > ymax) ymax = p.y;
+  }
+  const dx = (xmax - xmin) || 1;
+  const dy = (ymax - ymin) || 1;
+  const s = Math.min((w - 6) / dx, (h - 6) / dy);
+  const tx = (w - s * (xmin + xmax)) / 2;
+  const ty = (h - s * (ymin + ymax)) / 2;
+  return { s, tx, ty };
+}
+
 function applyFilters(graph, state) {
   const visibleNodes = [];
   const hiddenNodeIds = new Set();
@@ -898,9 +931,7 @@ function applyFilters(graph, state) {
   const acceptedKinds = state.kinds;
   for (const n of graph.nodes) {
     const repoOk = acceptedRepos.has(n.repo_id);
-    // Read either field so the filter works on raw payloads (tests) and
-    // on payloads that have already been through normalizeGraphPayload.
-    const kindOk = acceptedKinds.has(n.node_type);
+    const kindOk = acceptedKinds.has(nodeKind(n));
     if (!repoOk || !kindOk) {
       hiddenNodeIds.add(n.id);
     } else {
@@ -1167,7 +1198,7 @@ function paintLegend(graph, palette, container) {
 
   for (const repo of repos) {
     for (const kind of kinds) {
-      const hasData = graph.nodes.some(n => n.repo_id === repo && n.node_type === kind);
+      const hasData = graph.nodes.some(n => n.repo_id === repo && nodeKind(n) === kind);
       const cell = document.createElement('div');
       cell.className = 'graph-legend-cell' + (hasData ? '' : ' is-empty');
       const repoCls = palette.get(repo) || 'graph-repo-fallback';
@@ -1297,15 +1328,11 @@ function paintMinimap(graph, minimapEl, viewportTransform, filterState) {
   minimapEl.setAttribute('viewBox', `0 0 ${w} ${h}`);
   minimapEl.innerHTML = '';
   if (!graph.nodes.length) return;
-  const bounds = graph.nodes.reduce((acc, n) => ({
-    xmin: Math.min(acc.xmin, n.x ?? acc.xmin), xmax: Math.max(acc.xmax, n.x ?? acc.xmax),
-    ymin: Math.min(acc.ymin, n.y ?? acc.ymin), ymax: Math.max(acc.ymax, n.y ?? acc.ymax),
-  }), { xmin: Infinity, xmax: -Infinity, ymin: Infinity, ymax: -Infinity });
-  const dx = bounds.xmax - bounds.xmin || 1;
-  const dy = bounds.ymax - bounds.ymin || 1;
-  const sx = (w - 6) / dx, sy = (h - 6) / dy, s = Math.min(sx, sy);
-  const tx = (w - s * (bounds.xmin + bounds.xmax)) / 2;
-  const ty = (h - s * (bounds.ymin + bounds.ymax)) / 2;
+  // No placed nodes yet (the simulation has not ticked): leave the minimap
+  // empty rather than writing a frame rect with x="NaN".
+  const transform = computeMinimapTransform(graph.nodes, w, h);
+  if (!transform) return;
+  const { s, tx, ty } = transform;
   const computed = applyFilters(graph, filterState);
   const visible = new Set(computed.visibleNodes.map(n => n.id));
   for (const n of graph.nodes) {
@@ -1422,12 +1449,13 @@ function drawGraphSvg(svgEl, graph) {
     .data(nodes)
     .join('path')
     .attr('class', d => {
-      const cls = ['graph-node', `graph-node--kind-${d.kind}`];
+      const kind = nodeKind(d);
+      const cls = ['graph-node', `graph-node--kind-${kind}`];
       cls.push(repoColour(d.repo_id, palette));
       return cls.join(' ');
     })
     .attr('data-node-id', d => d.id)
-    .attr('d', d => d3.symbol().size(64).type(d3[nodeShape(d.kind)])())
+    .attr('d', d => d3.symbol().size(64).type(d3[nodeShape(nodeKind(d))])())
     .call(d3.drag()
       .on('start', (event, d) => {
         if (!event.active) simulation.alphaTarget(0.3).restart();
@@ -1456,7 +1484,7 @@ function drawGraphSvg(svgEl, graph) {
   const updateTooltip = (d, evt) => {
     if (!d) { tooltipGroup.style('display', 'none'); return; }
     const deg = neighboursById.get(d.id)?.size ?? 0;
-    const text = `${d.name}\n${d.repo_id} · ${d.kind}\n${d.path}\ndegree: ${deg}`;
+    const text = `${d.name}\n${d.repo_id} · ${nodeKind(d)}\n${d.path}\ndegree: ${deg}`;
     tooltipText.selectAll('tspan').remove();
     text.split('\n').forEach((line, i) => {
       tooltipText.append('tspan').attr('x', 8).attr('dy', i === 0 ? 12 : 14).text(line);
@@ -1635,7 +1663,7 @@ function disambiguateFocalSearch(query, workspaceGraph, anchors) {
     for (const n of workspaceGraph.nodes) {
       if (!n || !n.name) continue;
       if (String(n.name).toLowerCase().includes(q)) {
-        addCandidate(n.name, n.repo_id, n.path, n.node_type || n.kind);
+        addCandidate(n.name, n.repo_id, n.path, nodeKind(n));
       }
     }
   }
@@ -1643,7 +1671,7 @@ function disambiguateFocalSearch(query, workspaceGraph, anchors) {
     for (const a of anchors) {
       if (!a || !a.name) continue;
       if (String(a.name).toLowerCase().includes(q)) {
-        addCandidate(a.name, a.repo_id, a.path, a.kind);
+        addCandidate(a.name, a.repo_id, a.path, nodeKind(a));
       }
     }
   }
@@ -2742,6 +2770,8 @@ if (typeof module !== 'undefined' && module.exports) {
     repoColour,
     nodeShape,
     nodeRadius,
+    nodeKind,
+    computeMinimapTransform,
     // SPA graph v2: anchors-first (2026-08-31):
     computeAnchorVisibleSet,
     parseGlobalId,

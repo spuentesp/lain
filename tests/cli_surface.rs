@@ -92,6 +92,75 @@ fn string_literals(text: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// Check one string literal and return every word after `lain ` that
+/// names a subcommand the binary does not have.
+fn check_literal_for_unknown_commands(literal: &str) -> Vec<String> {
+    let known = subcommands();
+    let mut bad = Vec::new();
+    for (idx, _) in literal.match_indices("lain ") {
+        // Walk to the candidate subcommand position: skip flag tokens,
+        // and the value of a flag that takes one, so a flag in front does
+        // not hide a genuinely missing subcommand (`lain --json
+        // frobnicate`) while a foreign `--features nlp` does not promote
+        // `nlp` to one.
+        let mut rest = &literal[idx + "lain ".len()..];
+        loop {
+            let tok_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let tok = &rest[..tok_end];
+            if tok.len() < 2 || !tok.starts_with('-') {
+                break;
+            }
+            let (name, inline_value) = match tok.split_once('=') {
+                Some((n, _)) => (n, true),
+                None => (tok, false),
+            };
+            let mut consumed = tok_end;
+            if !inline_value && flag_takes_value(name) {
+                let after = rest[tok_end..].trim_start();
+                let val_end = after.find(char::is_whitespace).unwrap_or(after.len());
+                consumed = tok_end + (rest.len() - tok_end - after.len()) + val_end;
+            }
+            rest = rest[consumed..].trim_start();
+        }
+        let word: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+            .collect();
+        if word.is_empty() || PROSE.contains(&word.as_str()) {
+            continue;
+        }
+        if !known.contains(&word) {
+            bad.push(word);
+        }
+    }
+    bad
+}
+
+/// Does the flag `name` (`--long` or `-s`) consume the token after it?
+///
+/// Answered by clap itself, across the whole command tree: `--json` is a
+/// boolean on several subcommands and swallows nothing, while `--config`
+/// takes a value. A flag no lain command has (`cargo`'s `--features`) is
+/// assumed to belong to the surrounding foreign command line and takes a
+/// value; an unknown single-dash token is skipped alone, so a missing
+/// subcommand after `lain -x` stays visible.
+fn flag_takes_value(name: &str) -> bool {
+    fn find_arg<'a>(cmd: &'a clap::Command, name: &str) -> Option<&'a clap::Arg> {
+        let long = name.strip_prefix("--");
+        let short = name.strip_prefix('-').filter(|_| long.is_none());
+        cmd.get_arguments()
+            .find(|a| {
+                long.is_some_and(|l| a.get_long() == Some(l))
+                    || short.is_some_and(|s| s.len() == 1 && a.get_short() == s.chars().next())
+            })
+            .or_else(|| cmd.get_subcommands().find_map(|sc| find_arg(sc, name)))
+    }
+    match find_arg(&lain::cli::Args::command(), name) {
+        Some(arg) => arg.get_num_args().is_some_and(|r| r.takes_values()),
+        None => name.starts_with("--"),
+    }
+}
+
 #[test]
 fn user_facing_strings_never_name_a_command_that_does_not_exist() {
     let known = subcommands();
@@ -104,26 +173,16 @@ fn user_facing_strings_never_name_a_command_that_does_not_exist() {
     for file in files {
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         for (lineno, literal) in string_literals(&text) {
-            for (idx, _) in literal.match_indices("lain ") {
-                let rest = &literal[idx + "lain ".len()..];
-                let word: String = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_lowercase() || *c == '-')
-                    .collect();
-                if word.is_empty() || PROSE.contains(&word.as_str()) {
-                    continue;
-                }
-                if !known.contains(&word) {
-                    let mut k: Vec<_> = known.iter().cloned().collect();
-                    k.sort();
-                    bad.push(format!(
-                        "{}:{}: `lain {}` is not a subcommand (have: {:?})",
-                        file.display(),
-                        lineno,
-                        word,
-                        k
-                    ));
-                }
+            for word in check_literal_for_unknown_commands(&literal) {
+                let mut k: Vec<_> = known.iter().cloned().collect();
+                k.sort();
+                bad.push(format!(
+                    "{}:{}: `lain {}` is not a subcommand (have: {:?})",
+                    file.display(),
+                    lineno,
+                    word,
+                    k
+                ));
             }
         }
     }
@@ -386,4 +445,43 @@ fn command_docs_do_not_claim_a_stale_subcommand_count() {
             );
         }
     }
+}
+
+#[test]
+fn flag_tokens_are_not_treated_as_subcommands_but_bad_ones_still_are() {
+    // Flag skipping must not disable the check for genuine subcommand
+    // names, nor report a foreign flag's value as one.
+    let good = "rebuild with cargo install lain --features nlp";
+    let bad = "run lain frobnicate --json to enable it";
+    assert!(check_literal_for_unknown_commands(good).is_empty());
+    assert!(!check_literal_for_unknown_commands(bad).is_empty());
+}
+
+#[test]
+fn a_missing_subcommand_after_a_flag_is_still_caught() {
+    // `if rest.starts_with("--") { continue; }` skipped the whole
+    // remainder, so `lain --json frobnicate` scanned nothing and the
+    // missing subcommand was invisible.
+    assert_eq!(
+        check_literal_for_unknown_commands("lain --json frobnicate"),
+        vec!["frobnicate".to_string()]
+    );
+    // While a flag that takes a value must not promote its value:
+    // `nlp` is cargo's feature name, not a lain subcommand.
+    assert!(
+        check_literal_for_unknown_commands("cargo install lain --features nlp").is_empty(),
+        "the value of --features must not read as a subcommand"
+    );
+}
+
+#[test]
+fn single_dash_flags_are_skipped_but_the_subcommand_after_one_is_not() {
+    assert_eq!(
+        check_literal_for_unknown_commands("lain -x frobnicate"),
+        vec!["frobnicate".to_string()]
+    );
+    assert!(
+        check_literal_for_unknown_commands("lain -x").is_empty(),
+        "a single-dash flag is not a phantom subcommand"
+    );
 }
