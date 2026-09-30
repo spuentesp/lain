@@ -159,12 +159,9 @@ fn load_or_default(path: &Path) -> Result<WorkspacesFile> {
 
 fn save(path: &Path, f: &WorkspacesFile) -> Result<()> {
     let text = serde_yaml::to_string(f).map_err(|e| anyhow!("serialize: {e}"))?;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    std::fs::write(path, text)?;
+    // Temp-then-rename, as `repos.yaml` is written: a watcher-triggered
+    // rebuild must never read a torn `workspaces.yaml`.
+    crate::cli::io::write_file_atomic(path, text.as_bytes())?;
     Ok(())
 }
 
@@ -470,6 +467,20 @@ pub fn run_current() -> Result<()> {
     Ok(())
 }
 
+/// `lain workspaces forget` of the active workspace cannot resolve on a
+/// running `lain server` scoped to it: the rebuild goes `Failed` and the
+/// server keeps serving the forgotten workspace's repos until restart or
+/// re-creation. The command still succeeds, so surface the consequence on
+/// stderr. Returns the warning text when `name` is the active workspace.
+fn forgetting_active_workspace_warning(name: &str) -> Option<String> {
+    let active = ActiveWorkspace::load().ok().flatten()?;
+    (active.name == name).then(|| {
+        format!(
+            "warning: '{name}' is the active workspace; a running `lain server` will keep serving its repos until restart or re-creation"
+        )
+    })
+}
+
 /// `lain workspaces forget <name>` — remove a workspace from workspaces.yaml.
 pub fn run_forget(name: &str, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config);
@@ -481,6 +492,9 @@ pub fn run_forget(name: &str, config: Option<&Path>) -> Result<()> {
     }
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
+    if let Some(warning) = forgetting_active_workspace_warning(name) {
+        eprintln!("{warning}");
+    }
     crate::cli::signal::signal_reload(&reload_target(&path))
         .map_err(|e| anyhow!("signal reload after forgetting '{name}': {e}"))?;
     println!("Forgot workspace '{name}'");
@@ -633,6 +647,26 @@ mod tests {
         .unwrap();
         let received = capture_reload_signal(&ws, |ws_path| run_forget("doomed", Some(ws_path)));
         assert_eq!(received, "reload\n");
+    }
+
+    #[test]
+    fn forgetting_the_active_workspace_warns_about_the_running_server() {
+        let _g = crate::state::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = crate::test_util::XdgGuard::new(tmp.path());
+        ActiveWorkspace {
+            name: "doomed".into(),
+            config_path: None,
+        }
+        .save()
+        .unwrap();
+        let warning = forgetting_active_workspace_warning("doomed")
+            .expect("forgetting the active workspace must warn");
+        assert!(warning.contains("doomed"), "{warning}");
+        assert!(warning.contains("serving"), "{warning}");
+        assert!(forgetting_active_workspace_warning("other").is_none());
     }
 
     #[cfg(unix)]

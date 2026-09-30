@@ -148,10 +148,24 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     Ok(fed)
 }
 
+/// Policy for workspace members that `repos.yaml` does not define.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MissingMembers {
+    /// Cold start: a member id missing from `repos.yaml` is a config
+    /// error — refuse to come up.
+    Refuse,
+    /// Hot reload: `lain repos remove X` rewrites only `repos.yaml`, so
+    /// for a moment the workspace still lists `X`. Drop the dangling
+    /// member with a warning and let the rebuild converge; erroring here
+    /// left the rebuild `Failed` and `X` serving forever while the CLI
+    /// reported it removed.
+    Drop,
+}
+
 /// Resolve `workspace_name` against `workspaces` and pick its member repos
-/// from `all_repos`. Shared by the cold loader and `run_rebuild` so both
-/// refuse the same cases with the same messages: an unknown workspace, a
-/// 0-member workspace, and a member id missing from `repos.yaml`.
+/// from `all_repos`. Shared by the cold loader and `run_rebuild`: an
+/// unknown workspace and a 0-member workspace are refused by both, a
+/// member id missing from `repos.yaml` is decided by `missing`.
 ///
 /// A 0-member workspace is legal on disk (`lain workspaces init` writes
 /// one before `lain workspaces add` populates it), but serving it would
@@ -161,15 +175,33 @@ pub(crate) fn repos_for_workspace<'a>(
     all_repos: &'a [crate::federation::config::RepoConfig],
     workspaces: &WorkspacesFile,
     workspace_name: &str,
+    missing: MissingMembers,
 ) -> Result<Vec<&'a crate::federation::config::RepoConfig>, LainError> {
-    let ws_spec = resolve_active_workspace(workspaces, workspace_name)?.clone();
-    let workspace = WorkspaceIndex::from_spec(ws_spec);
-    if workspace.spec.members.is_empty() {
+    let mut ws_spec = resolve_active_workspace(workspaces, workspace_name)?.clone();
+    if ws_spec.members.is_empty() {
         return Err(LainError::Config(format!(
             "workspace '{}' has no members yet — run 'lain workspaces add {} --repo <repo-id>'",
-            workspace.spec.name, workspace.spec.name
+            ws_spec.name, ws_spec.name
         )));
     }
+    if matches!(missing, MissingMembers::Drop) {
+        let (present, dangling): (Vec<String>, Vec<String>) = ws_spec
+            .members
+            .iter()
+            .cloned()
+            .partition(|m| all_repos.iter().any(|r| &r.id == m));
+        for id in &dangling {
+            tracing::warn!(
+                "workspace '{}' lists repo '{}' which is not in repos.yaml; dropping it from the reload — run 'lain workspaces remove {} --repo {}' to clean up",
+                ws_spec.name,
+                id,
+                ws_spec.name,
+                id
+            );
+        }
+        ws_spec.members = present;
+    }
+    let workspace = WorkspaceIndex::from_spec(ws_spec);
     // If any member id is not in repos.yaml, fail with the missing ids listed.
     filter_repos_by_workspace(all_repos, &workspace)
 }
@@ -205,7 +237,12 @@ pub async fn load_federation_with_workspace(
     } else {
         WorkspacesFile::default()
     };
-    let picked = repos_for_workspace(&config.repos, &workspaces, workspace_name)?;
+    let picked = repos_for_workspace(
+        &config.repos,
+        &workspaces,
+        workspace_name,
+        MissingMembers::Refuse,
+    )?;
 
     // Build the federation.
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(&config.data_dir)?);

@@ -78,3 +78,42 @@ workspaces:
         "error must name the remedy, got: {msg}"
     );
 }
+
+/// Cold start must keep refusing a workspace that names a repo id missing
+/// from `repos.yaml`. The hot-reload path tolerates dangling members so a
+/// `lain repos remove` converges (see `repos_for_workspace`); starting up
+/// against that state is still a config error and must say so.
+#[tokio::test]
+async fn load_federation_with_workspace_refuses_member_missing_from_repos_yaml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("repos.yaml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "data_dir: {}\nrepos:\n  - id: present\n    source: {{ type: workspace_dir, path: {} }}\n",
+            tmp.path().join("data").display(),
+            tmp.path().join("present").display()
+        ),
+    )
+    .unwrap();
+    let workspaces_path = tmp.path().join("workspaces.yaml");
+    std::fs::write(
+        &workspaces_path,
+        "workspaces:\n  - name: team\n    members: [present, ghost]\n",
+    )
+    .unwrap();
+
+    let err = match load_federation_with_workspace(&cfg_path, &workspaces_path, "team").await {
+        Ok(_) => panic!("a workspace member missing from repos.yaml must not load cold"),
+        Err(e) => e,
+    };
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("ghost"),
+        "error must name the dangling repo id, got: {msg}"
+    );
+    assert!(
+        msg.contains("references repos not in repos.yaml"),
+        "got: {msg}"
+    );
+}

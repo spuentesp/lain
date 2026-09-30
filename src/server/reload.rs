@@ -196,10 +196,12 @@ pub async fn run_rebuild(
         // members rather than every repo in `repos.yaml`: `lain
         // workspaces remove` must drop the repo from the running
         // federation, and a reload must not widen the server to
-        // non-member repos. The cold loader's refusals (unknown
-        // workspace, 0 members, member missing from repos.yaml) apply
-        // here unchanged, so a reload cannot silently empty the
-        // federation either.
+        // non-member repos. An unknown workspace and a 0-member
+        // workspace still fail the rebuild as the cold loader does, but
+        // a member missing from `repos.yaml` is dropped with a warning:
+        // `lain repos remove X` rewrites only `repos.yaml`, and failing
+        // there left `X` serving forever while the CLI reported it
+        // removed.
         let fed = server
             .federation()
             .ok_or_else(|| LainError::Other("rebuild: no federation on server".into()))?;
@@ -217,6 +219,7 @@ pub async fn run_rebuild(
                         &repos_file.repos,
                         ws,
                         &name,
+                        crate::server::federation::loader::MissingMembers::Drop,
                     )?
                 }
                 None => repos_file.repos.iter().collect(),
@@ -604,6 +607,61 @@ mod tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
+        async fn rebuild_converges_when_repos_remove_leaves_a_workspace_member_dangling() {
+            // `lain repos remove` rewrites only `repos.yaml`; for a moment
+            // the workspace still lists the removed repo as a member.
+            // Failing the resolve step there left the rebuild `Failed` and
+            // the removed repo serving forever while the CLI reported
+            // success — the reload must drop the dangling member and
+            // converge instead.
+            let tmp = tempfile::tempdir().unwrap();
+            let repo_a = tmp.path().join("repo-a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            git2::Repository::init(&repo_a).unwrap();
+            let repo_b = tmp.path().join("repo-b");
+            std::fs::create_dir_all(&repo_b).unwrap();
+            git2::Repository::init(&repo_b).unwrap();
+            write_repos_yaml(
+                tmp.path(),
+                &tmp.path().join("repos.yaml"),
+                &[("repo-a", &repo_a), ("repo-b", &repo_b)],
+            );
+            let ws_path = tmp.path().join("workspaces.yaml");
+            std::fs::write(
+                &ws_path,
+                "workspaces:\n  - name: w1\n    members: [repo-a, repo-b]\n",
+            )
+            .unwrap();
+            let data_dir = tmp.path().join("federation");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let fed = fed_for(&[("repo-a", &repo_a), ("repo-b", &repo_b)], &data_dir).await;
+            let server = build_server(tmp.path().join("repos.yaml").as_path(), fed).await;
+            server.set_workspace_scope(Some("w1".into()));
+            assert_eq!(server.repo_count(), 2);
+
+            // `lain repos remove repo-b`: workspaces.yaml is untouched and
+            // still names repo-b as a w1 member.
+            write_repos_yaml(
+                tmp.path(),
+                tmp.path().join("repos.yaml").as_path(),
+                &[("repo-a", &repo_a)],
+            );
+            let bus = server.reload_bus();
+            crate::server::reload::run_rebuild(&server, &bus)
+                .await
+                .expect("a dangling workspace member must not fail the rebuild");
+            let ids: Vec<String> = server
+                .federation()
+                .unwrap()
+                .list_repos()
+                .into_iter()
+                .map(|(id, _)| id.to_string())
+                .collect();
+            assert_eq!(ids, vec!["repo-a".to_string()]);
+            assert_eq!(bus.status().state, ReloadState::Idle);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
         async fn rebuild_keeps_non_member_repos_out_of_a_scoped_server() {
             // repo-b is in `repos.yaml` but not a member of w1. An
             // unfiltered reload diff used to import it, widening a
@@ -657,7 +715,11 @@ mod tests {
             let repo_a = tmp.path().join("repo-a");
             std::fs::create_dir_all(&repo_a).unwrap();
             git2::Repository::init(&repo_a).unwrap();
-            write_repos_yaml(tmp.path(), &tmp.path().join("repos.yaml"), &[("repo-a", &repo_a)]);
+            write_repos_yaml(
+                tmp.path(),
+                &tmp.path().join("repos.yaml"),
+                &[("repo-a", &repo_a)],
+            );
             let ws_path = tmp.path().join("workspaces.yaml");
             std::fs::write(
                 &ws_path,
