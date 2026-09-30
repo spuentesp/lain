@@ -37,16 +37,15 @@ use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
 use crate::federation::contracts::changed_files::{MirrorChangedFiles, MultiRepoChangedFiles};
 use crate::federation::contracts::diff::{
     build_coverage, classify, coverage_complete, diff_consumers, diff_contracts, evaluate,
-    Affected, ChangeKind, Class, Compat, ContractSurface, Coverage as DiffCoverage, Impact,
-    Reason as DiffReason, ReviewedRepo, Scope as DiffScope, UnreviewedRepo,
+    ChangeKind, Class, Compat, ContractSurface, Coverage as DiffCoverage, Impact, ReviewedRepo,
+    Scope as DiffScope, UnreviewedRepo,
 };
-use crate::federation::contracts::index::{ContractIndex, EndpointId, ServiceInfo};
+use crate::federation::contracts::index::{ContractIndex, EndpointId};
 use crate::federation::contracts::model::ServiceName;
-use crate::federation::contracts::model::{ContractKey, Direction, JsonPath, MethodSpec};
+use crate::federation::contracts::model::{ContractKey, Direction, MethodSpec};
 use crate::federation::contracts::snapshots::record::SnapshotRecord;
 use crate::federation::graph_backend::{ImpactPath as GraphImpactPath, ImpactResult};
-use crate::federation::repo_id::GlobalId;
-use crate::schema::{EdgeProvenance, EdgeType};
+use crate::schema::EdgeProvenance;
 use crate::server::mcp::handler::McpContext;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -180,8 +179,8 @@ async fn run_diff_contracts(
     let _ = args_map.get("repo");
     let _ = args_map.get("service");
 
-    let base_record = load_snapshot(ctx, &base_label, started)?;
-    let head_record = load_snapshot(ctx, &head_label, started)?;
+    let base_record = load_snapshot(ctx, &base_label, started).await?;
+    let head_record = load_snapshot(ctx, &head_label, started).await?;
     if !snapshot_state_is_ready(&base_record) {
         return Err(error_outcome(
             "snapshot_not_ready",
@@ -221,8 +220,8 @@ async fn run_diff_contracts(
             started,
         ));
     }
-    let base_index = snapshot_contract_index(ctx, &base_record, started)?;
-    let head_index = snapshot_contract_index(ctx, &head_record, started)?;
+    let base_index = snapshot_contract_index(ctx, &base_record, &args_map, started)?;
+    let head_index = snapshot_contract_index(ctx, &head_record, &args_map, started)?;
     let data_dir = ctx
         .snapshots
         .map(|m| m.data_dir().to_path_buf())
@@ -367,7 +366,7 @@ fn build_changed_source(
     MultiRepoChangedFiles { by_repo }
 }
 
-fn load_snapshot(
+async fn load_snapshot(
     ctx: &McpContext<'_>,
     label: &str,
     started: Instant,
@@ -381,19 +380,7 @@ fn load_snapshot(
             started,
         )
     })?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| {
-            error_outcome(
-                "invalid_argument",
-                format!("tokio runtime: {e}"),
-                None,
-                label,
-                started,
-            )
-        })?;
-    let outcome = rt.block_on(mgr.get(label, 1_000)).map_err(|e| match e {
+    let outcome = mgr.get(label, 1_000).await.map_err(|e| match e {
         crate::federation::contracts::snapshots::manager::PrepareError::SnapshotNotFound {
             snapshot,
         } => error_outcome(
@@ -451,6 +438,7 @@ fn snapshot_state_label(r: &SnapshotRecord) -> &'static str {
 fn snapshot_contract_index(
     ctx: &McpContext<'_>,
     record: &SnapshotRecord,
+    args_map: &Map<String, Value>,
     started: Instant,
 ) -> Result<Arc<ContractIndex>, ToolOutcome> {
     let mgr = ctx.snapshots.ok_or_else(|| {
@@ -462,15 +450,25 @@ fn snapshot_contract_index(
             started,
         )
     })?;
-    let (fed, _guard) = mgr.from_snapshot(record).map_err(|e| {
-        error_outcome(
-            "invalid_argument",
-            format!("from_snapshot: {e}"),
-            None,
-            &record.id,
-            started,
-        )
-    })?;
+    // §10.5: analysis tools default 5_000 ms residency grace.
+    let wait_ms = std::cmp::min(
+        args_map
+            .get("wait_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5_000),
+        60_000,
+    );
+    let (fed, _guard) = mgr
+        .from_snapshot_with_wait_ms(record, wait_ms)
+        .map_err(|e| {
+            error_outcome(
+                "invalid_argument",
+                format!("from_snapshot: {e}"),
+                None,
+                &record.id,
+                started,
+            )
+        })?;
     let ci = fed.contract_index.read().clone();
     ci.ok_or_else(|| {
         error_outcome(
@@ -1218,8 +1216,10 @@ fn scope_for_view(ctx: &McpContext<'_>, args_map: &Map<String, Value>) -> Value 
 mod tests {
     use super::*;
     use crate::federation::contracts::diff::ConsumerKey;
-    use crate::federation::contracts::diff::{Affected, ReviewedRepo, UnreviewedRepo};
-    use crate::federation::contracts::model::SymbolKey;
+    use crate::federation::contracts::diff::{
+        Affected, Reason as DiffReason, ReviewedRepo, UnreviewedRepo,
+    };
+    use crate::federation::contracts::model::{JsonPath, SymbolKey};
     use crate::federation::repo_id::RepoId;
 
     #[test]
@@ -1359,10 +1359,4 @@ mod tests {
         assert!(v["start"].is_string());
         assert_eq!(v["min_confidence"], 1.0);
     }
-}
-
-// Suppress unused-import warnings for types we keep for trait objects.
-#[allow(dead_code)]
-fn _retain_types(_: &ServiceInfo) {
-    let _: &str = std::any::type_name::<EdgeType>();
 }

@@ -30,7 +30,7 @@ Listed in delivery order. Week 1 is the live slice; week 2 adds pinned snapshots
 | 12 | Diff, classify, evaluate, coverage as pure functions (§9) | 9 | Sep 29 | done | | |
 | 10 | Mirrors, snapshot index mode, index cache (§8.1–8.3) | 3 | Oct 6 | done | | |
 | 11 | Snapshots, `from_snapshot`, residency (§8.4–8.5, §11) | 7, 10 | Oct 6 | todo | | |
-| 13 | Remaining tools, full interface, golden tests, docs (§10, §12, §13) | 11, 12, 16 | Oct 6 | todo | | Release PR follows |
+| 13 | Remaining tools, full interface, golden tests, docs (§10, §12, §13) | 11, 12, 16 | Oct 6 | review | | | Round-1 review fixes in flight |
 | 14 | `http_client_sensor` Rust + Go | 6 | stretch | todo | | Cut 2nd |
 | 15 | Events, JSON Schema + proto fields, topic join (§6.7, §7.7) | 7, 8 | stretch | todo | | Cut 1st |
 | 17 | `codeowners_sensor` | 16 | stretch | todo | | Cut 4th |

@@ -63,6 +63,12 @@ impl MirrorChangedFiles {
     /// Open or fetch the repo's mirror handle. Returns `None` when
     /// the mirror is missing (caller treats this as "no diff to
     /// report" — `ChangedWithoutSchema` will not fire).
+    ///
+    /// The `Arc<Repository>` cache is local to one
+    /// `MirrorChangedFiles` value, which is created and consumed
+    /// inside a single diff call; no two threads ever call into
+    /// the same `git2::Repository` concurrently.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn repo(&self, repo: &str) -> Option<Arc<Repository>> {
         if let Some(r) = self.repos.read().ok()?.get(repo).cloned() {
             return Some(r);

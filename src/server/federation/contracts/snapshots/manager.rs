@@ -104,9 +104,23 @@ pub struct SnapshotFederation {
     /// `true` when at least one tool call currently holds a
     /// reference. Residency evictions are skipped while held.
     pub held: AtomicBool,
+    /// The owning manager's `data_dir`. Tool-layer paths (`read_source`,
+    /// `resolve_evidence` snippets) locate the per-repo mirror
+    /// under `<data_dir>/mirrors/<repo>.git` for git2 blob
+    /// lookups. PR 13 round-1 review: this used to fall back to
+    /// `LAIN_DATA_DIR` (`manager.rs:206-211`); now the manager
+    /// threads the real path through.
+    pub data_dir: PathBuf,
 }
 
 impl SnapshotFederation {
+    /// The owning manager's `data_dir`. Used by tool-layer paths
+    /// that resolve a repo's mirror under
+    /// `<data_dir>/mirrors/<repo>.git`.
+    pub fn manager_data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     pub fn mark_used(&self) {
         *self.last_used_unix.lock() = now_unix();
     }
@@ -198,17 +212,6 @@ impl SnapshotManager {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
-    }
-
-    /// Copy the `data_dir` for callers that hold only the snapshot
-    /// record (e.g. the `read_source` tool's blob path lookup).
-    /// Returns `Some(path)` for any non-empty record.
-    pub fn data_dir_accessor(_record: &SnapshotRecord) -> Option<PathBuf> {
-        // The record doesn't carry the data_dir; the tool layer
-        // resolves it from the manager. For the pure-record path
-        // we approximate with the env var `LAIN_DATA_DIR` or
-        // relative to the record's on-disk directory.
-        std::env::var("LAIN_DATA_DIR").ok().map(PathBuf::from)
     }
 
     pub fn cache(&self) -> &IndexCache {
@@ -970,16 +973,31 @@ impl SnapshotManager {
     /// Returns an `Arc<SnapshotFederation>` plus a `Hold` token the
     /// caller must keep alive for the duration of the analysis —
     /// the §8.5 residency invariant.
+    ///
+    /// `wait_ms` is the residency grace window (§8.5). When the
+    /// resident set is full and every entry is held, the call
+    /// blocks up to `wait_ms` for a hold to release before
+    /// returning `busy`. Analysis tools default to 5,000 ms per
+    /// §10.5; `prepare_snapshot` and `get_snapshot` pass 0 because
+    /// they do not need the federation live.
     pub fn from_snapshot(
         self: &Arc<Self>,
         record: &SnapshotRecord,
     ) -> Result<(Arc<SnapshotFederation>, HoldGuard), LainError> {
+        self.from_snapshot_with_wait_ms(record, 0)
+    }
+
+    /// Like [`Self::from_snapshot`] but with an explicit residency
+    /// grace window. Analysis tools pass 5_000 (§8.5); `prepare_`/
+    /// `get_snapshot` pass 0 because they don't keep a hold past
+    /// the call's return.
+    pub fn from_snapshot_with_wait_ms(
+        self: &Arc<Self>,
+        record: &SnapshotRecord,
+        wait_ms: u64,
+    ) -> Result<(Arc<SnapshotFederation>, HoldGuard), LainError> {
         // 1. Try the resident cache first.
         if let Some(fed) = self.resident.lock().get(&record.id).cloned() {
-            // A resident federation has its cache holds still
-            // attached; the caller takes a *new* `HoldGuard` that
-            // bumps the held counter for residency-eviction
-            // purposes only.
             return Ok((
                 Arc::clone(&fed),
                 HoldGuard::new(fed, Arc::clone(&self.residency_notify)),
@@ -988,12 +1006,7 @@ impl SnapshotManager {
         // 2. Build a new ephemeral federation.
         let fed = self.build_snapshot_federation(record)?;
         let hold_guard = HoldGuard::new(Arc::clone(&fed), Arc::clone(&self.residency_notify));
-        if let Err(busy) = self.install_resident(Arc::clone(&fed), 0) {
-            // The freshly-built federation has no caller holding a
-            // guard yet, so the only way this branch fires is a
-            // racing install filling the cap between the cache
-            // check above and here. Drop the federation and surface
-            // the busy error so the tool layer retries.
+        if let Err(busy) = self.install_resident(Arc::clone(&fed), wait_ms) {
             return Err(LainError::Other(format!(
                 "snapshot residency busy (retry after {}ms)",
                 busy.retry_after_ms
@@ -1057,6 +1070,7 @@ impl SnapshotManager {
             contract_index: parking_lot::RwLock::new(Some(Arc::new(contract_index))),
             last_used_unix: Mutex::new(now_unix()),
             held: AtomicBool::new(false),
+            data_dir: self.data_dir.clone(),
         });
         // Suppress unused warning: residency is consulted on
         // eviction; the `holds` vector is the active pin.
@@ -1546,6 +1560,7 @@ mod tests {
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(0),
             held: AtomicBool::new(false),
+            data_dir: std::path::PathBuf::from("."),
         });
         fed.held.store(true, Ordering::Release);
         let notify = Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
@@ -1802,6 +1817,7 @@ repos:
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(now_unix()),
             held: AtomicBool::new(false),
+            data_dir: std::path::PathBuf::from("."),
         });
         held_fed.held.store(true, Ordering::Release);
         let notify = Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
@@ -1817,6 +1833,7 @@ repos:
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(now_unix()),
             held: AtomicBool::new(false),
+            data_dir: std::path::PathBuf::from("."),
         });
         let err = mgr.install_resident(new_fed, 0).expect_err("busy");
         assert_eq!(err.retry_after_ms, 250);
@@ -1839,6 +1856,7 @@ repos:
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(now_unix()),
             held: AtomicBool::new(false),
+            data_dir: std::path::PathBuf::from("."),
         });
         held_fed.held.store(true, Ordering::Release);
         let notify = Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
@@ -1856,6 +1874,7 @@ repos:
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(now_unix()),
             held: AtomicBool::new(false),
+            data_dir: std::path::PathBuf::from("."),
         });
         let new_fed_clone = Arc::clone(&new_fed);
         let waiter =

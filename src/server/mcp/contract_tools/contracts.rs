@@ -37,24 +37,16 @@ use super::envelope::{check_api_version, error_outcome, outcome, success_envelop
 use super::paging::{apply_limit, decode_cursor, fingerprint};
 use super::scope::live_scope;
 use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
-use crate::federation::contracts::config::ContractFederationConfig;
 use crate::federation::contracts::index::{
-    ConsumerResolution, ConsumerTarget, ContractIndex, Endpoint, EndpointId, ServiceInfo,
-    UnresolvedReason,
+    ConsumerResolution, ConsumerTarget, ContractIndex, Endpoint, EndpointId, UnresolvedReason,
 };
-use crate::federation::contracts::joiner::ContractJoiner;
 use crate::federation::contracts::model::MethodSpec;
-use crate::federation::contracts::model::{
-    ContractKey, Direction, FieldMeta, JsonPath, ServiceName,
-};
+use crate::federation::contracts::model::{ContractKey, Direction, ServiceName};
 use crate::federation::contracts::route_match::match_route;
-use crate::federation::federated_index::FederatedIndex;
-use crate::federation::graph_backend::PetgraphBackend;
-use crate::federation::repo_id::{GlobalId, RepoId};
-use crate::schema::{EdgeProvenance, GraphEdge, GraphNode, RouteMatch};
+use crate::federation::repo_id::GlobalId;
+use crate::schema::{EdgeProvenance, RouteMatch};
 use crate::server::mcp::handler::McpContext;
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -171,7 +163,7 @@ async fn run_list_contracts(
 ) -> Result<ToolOutcome, ToolOutcome> {
     let snap_label = snapshot_label(&args_map);
     let view = match resolve_view(ctx, &args_map, started).await? {
-        ViewHandle::Empty(reason) => {
+        ViewHandle::Empty(_reason) => {
             let scope = live_scope_when_live(ctx, &args_map);
             return Ok(empty_outcome(scope, "list_contracts", &snap_label, started));
         }
@@ -243,6 +235,9 @@ async fn run_list_contracts(
             it["endpoint"]["key"].as_str().unwrap_or("")
         )
     };
+    if let Some(after) = cursor.as_ref().map(|c| c.after.clone()) {
+        items.retain(|it| key(it) > after);
+    }
     let fp = fingerprint(&args_map);
     let (page, next_cursor) = apply_limit(items, limit, key, &fp);
 
@@ -308,7 +303,7 @@ async fn run_get_contract(
     // services never collides (§9.1).
     let mut matched: Vec<(&EndpointId, &Endpoint)> = Vec::new();
     for (endpoint_id, endpoint) in &view.endpoints {
-        if &endpoint_id.1 != &key {
+        if endpoint_id.1 != key {
             continue;
         }
         if let Some(ref svc) = service_filter {
@@ -459,6 +454,9 @@ async fn run_list_unresolved(
     }
 
     let key = |it: &Value| it["consumer"]["id"].as_str().unwrap_or("").to_string();
+    if let Some(after) = cursor.as_ref().map(|c| c.after.clone()) {
+        items.retain(|it| key(it) > after);
+    }
     let fp = fingerprint(&args_map);
     let (page, next_cursor) = apply_limit(items, limit, key, &fp);
 
@@ -568,7 +566,6 @@ async fn run_check_binding(
 
     let resolution = view.consumers.get(&consumer_id).cloned();
     let mut reasons: Vec<&'static str> = Vec::new();
-    let mut template_match = "none";
 
     if resolution.is_none() {
         reasons.push("not_a_consumer");
@@ -603,7 +600,7 @@ async fn run_check_binding(
     }
     let (template_compatible, match_label) =
         templates_compatible(consumer_template.as_deref(), &provider_template);
-    template_match = match_label;
+    let template_match = match_label;
     if !template_compatible {
         reasons.push("template_mismatch");
     }
@@ -753,15 +750,18 @@ pub async fn resolve_view(
             started,
         ),
     })?;
-    let (fed, _guard) = mgr.from_snapshot(&outcome.record).map_err(|e| {
-        error_outcome(
-            "invalid_argument",
-            format!("from_snapshot failed: {e}"),
-            None,
-            &snap_label,
-            started,
-        )
-    })?;
+    // §10.5: 5_000 ms residency grace for analysis tools.
+    let (fed, _guard) = mgr
+        .from_snapshot_with_wait_ms(&outcome.record, 5_000)
+        .map_err(|e| {
+            error_outcome(
+                "invalid_argument",
+                format!("from_snapshot failed: {e}"),
+                None,
+                &snap_label,
+                started,
+            )
+        })?;
     let ci = fed.contract_index.read().clone();
     let Some(idx) = ci else {
         return Ok(ViewHandle::Empty("snapshot has no contract index"));
@@ -774,9 +774,7 @@ pub async fn resolve_view(
 
 fn live_scope_when_live(ctx: &McpContext<'_>, args_map: &Map<String, Value>) -> Value {
     if snapshot_label(args_map) == "live" {
-        ctx.federation
-            .map(live_scope)
-            .unwrap_or_else(|| empty_scope())
+        ctx.federation.map(live_scope).unwrap_or_else(empty_scope)
     } else {
         empty_scope()
     }
@@ -802,7 +800,7 @@ fn empty_scope() -> Value {
 fn empty_outcome(scope: Value, _name: &str, snapshot: &str, started: Instant) -> ToolOutcome {
     let data = json!({"items": [], "scope": scope});
     let envelope = success_envelope(data.clone(), snapshot, snapshot != "live", started);
-    let text = format!("# empty view\n");
+    let text = "# empty view\n".to_string();
     outcome(envelope, &data, text)
 }
 
@@ -923,14 +921,14 @@ fn collect_consumers_for_endpoint(idx: &ContractIndex, endpoint_id: &EndpointId)
 
 fn collect_reads_for_consumer(idx: &ContractIndex, call_id: &GlobalId) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
-    for (ref_id, _res) in &idx.field_refs {
+    for ref_id in idx.field_refs.keys() {
         let Some(field) = bound_field_for_call(idx, ref_id, call_id) else {
             continue;
         };
         out.push(json!({
             "json_path": field.field_path.to_string(),
             "site": evidence_ref(ref_id, &ref_id.path().unwrap_or_default(), ref_id.line_start().unwrap_or(0)),
-            "provenance": provenance_to_json(&field_from_bound_field(idx, &field).unwrap_or_else(static_provenance_ref)),
+            "provenance": provenance_to_json(&field_from_bound_field(idx, field).unwrap_or_else(static_provenance_ref)),
         }));
     }
     out.sort_by(|a, b| {
@@ -1093,7 +1091,7 @@ fn candidate_endpoints_for(
 ) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let (consumer_method, consumer_template) = parse_consumer_call_shape(call_id);
-    for (ep_id, _ep) in &view.endpoints {
+    for ep_id in view.endpoints.keys() {
         if let ContractKey::Http { method, template } = &ep_id.1 {
             let same_method = match (&consumer_method, method) {
                 (
@@ -1304,25 +1302,12 @@ fn render_check_binding(data: &Value) -> String {
     out
 }
 
-// Suppress unused warnings for types we re-export via trait impls.
-#[allow(dead_code)]
-fn _retain_types(
-    _: &BTreeMap<EndpointId, Endpoint>,
-    _: &BTreeSet<JsonPath>,
-    _: &ServiceInfo,
-    _: &ContractFederationConfig,
-    _: &PetgraphBackend,
-    _: &GraphNode,
-    _: &GraphEdge,
-    _: &RepoId,
-) {
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::federation::contracts::index::EndpointId;
     use crate::federation::contracts::model::{HttpMethod, MethodSpec};
+    use crate::federation::repo_id::RepoId;
 
     #[test]
     fn parse_consumer_call_shape_extracts_method_and_template() {

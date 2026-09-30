@@ -91,7 +91,7 @@ async fn build_min_federation(root: &Path) -> Arc<FederatedIndex> {
     fed
 }
 
-fn ctx_for(fed: &Arc<FederatedIndex>) -> McpContext {
+fn ctx_for(fed: &Arc<FederatedIndex>) -> McpContext<'_> {
     use std::sync::OnceLock;
     static STATUS: OnceLock<lain::server::mcp::handler::HandlerStatus> = OnceLock::new();
     let status = STATUS.get_or_init(lain::server::mcp::handler::HandlerStatus::for_test);
