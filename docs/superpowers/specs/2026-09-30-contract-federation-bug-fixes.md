@@ -148,87 +148,111 @@ Python and TS walkers. Two parts:
 
 ### Bug C — prefix tolerance hides `ConsumerEndpointUnmatched`
 
-**Current behavior.** `federation/contracts/joiner.rs` applies prefix
-tolerance (rule 7.4) in rule 6 (target-unknown cross-service search)
-as well as in rule 3 (target known). For scenario 3 the consumer's
-template is `/v1/api/orders/{}` (3 segments) and the only matching
-provider is `/api/orders/{}` (2 segments); with prefix tolerance the
-matcher strips `/v1/` and emits a `Binds` edge with `stripped_prefix =
-Some("/v1")`. The consumer resolution becomes bound.
+**Current behavior.** `federation/contracts/joiner.rs::resolve_consumer`
+applies the route matcher's prefix tolerance (§7.4) in the rule-3
+match path (`target service known`) and, conditionally (the suppressor
+at lines ~1023-1029), in rule 6 too. For scenario 3 the consumer's
+template is `/v1/api/orders/{}` (3 segments) and orders' provider is
+`/api/orders/{}` (2 segments); plain matching fails. With prefix
+tolerance: strip `/v1/` from C → `api/orders/{}` matches the provider
+exactly. Result: a `Binds` edge with `RouteMatch::PrefixStripped`,
+`confidence = 0.5`, `stripped_prefix = Some("/v1")`.
 
-But the design (`tests/fixtures/contracts/ground_truth.yaml` lines
-~294-313) says:
-```
-expected:
-  changes:
-    - side: consumer
-      endpoint: { service: orders, key: "http:GET /api/orders/{}" }
-      kind: ConsumerEndpointUnmatched
-      compat: Breaking
-      impact: { class: NeedsInvestigation, reasons: [unresolved_candidates] }
-tool_also: list_unresolved
-expected_list_unresolved:
-  contains:
-    - consumer: { service: billing, ..., symbol: build_invoice }
-      template: /v1/api/orders/{}
-      reason: no_match
-      candidates:
-        - endpoint: { service: orders, key: "http:GET /api/orders/{}" }
-        # Plain §7.4 matching fails (3 vs 2 segments); prefix
-        # tolerance strips /v1/ and matches, so orders is the
-```
+For scenario 3 the design intent (`tests/fixtures/contracts/ground_truth.yaml`
+lines ~294-313) is:
+- `diff_contracts`: `ConsumerEndpointUnmatched`, compat `Breaking`,
+  impact `NeedsInvestigation (unresolved_candidates)`.
+- `list_unresolved`: the consumer is in `unresolved_consumers` with
+  `reason: no_match`, with orders listed as a could-match candidate
+  via prefix tolerance.
 
-The consumer is **unresolved** for `diff_contracts` (with `no_match` as
-the reason), but the endpoint is **a could-match candidate** for
-`list_unresolved` (because prefix tolerance WOULD match). The current
-joiner conflates these two cases by binding in rule 6 with prefix
-tolerance, which makes `diff_contracts` see the consumer as bound and
-miss `ConsumerEndpointUnmatched`.
+Two facts must coexist — "the consumer is unresolved" and "the
+endpoint is a could-match candidate via prefix tolerance" — and they
+must be visible separately. The current joiner collapses them into one
+bind via prefix-strip, which makes `diff_contracts` see the consumer
+as bound (low confidence) instead of unresolved. §9.3's
+`ConsumerEndpointUnmatched` rule reads "A consumer key present in head
+but not in base, **unresolved** in head (`no_route_in_service` or
+`no_match`)" — the consumer is not unresolved, so the rule doesn't
+fire.
 
-**Root cause.** `federation/contracts/joiner.rs::resolve_consumer`
-applies the route matcher's prefix tolerance to every path (rules 3
-and 6). §7.4 is explicit: "Prefix tolerance (rule 3 only, target
-service known)". Rule 6 (target unknown) must NOT apply prefix tolerance.
-The suppression at line ~1023-1029 ("pick first non-PrefixStripped
-candidate") mitigates *preferring* a PrefixStripped match when a
-non-stripped one exists — it does not *forbid* PrefixStripped matches
-when they are the only ones. With the current implementation, when a
-PrefixStripped match is the *only* match, the code returns it as the
-resolution; the consumer is bound; `diff_contracts` never sees
-`ConsumerEndpointUnmatched`.
+**Root cause.** Two separable design questions and a code choice:
 
-**Fix shape.** Two parts, both in `joiner.rs`:
+1. **What is prefix tolerance FOR?** §7.4's text ("if nothing matches,
+   retry") describes a fallback matcher. But the prose gloss is
+   "This covers unconfigured gateway prefixes and cross-file router
+   mounts" — i.e. a hint that the consumer MIGHT be this endpoint
+   behind a proxy. The design's downstream rule (§9.7 could-match)
+   treats prefix-stripped matches as could-match candidates, not as
+   binds.
+2. **Where does the can-match signal live?** The current
+   `ContractIndex.unresolved_consumers` already stores unresolved
+   consumers. `diff.rs::could_match` (lines ~1699-1708) computes the
+   could-match surface for `list_unresolved` / `coverage`. The cleanest
+   read: the joiner surfaces "this consumer is unresolved AND its
+   endpoint is reachable under prefix tolerance" by leaving the
+   consumer unresolved AND populating a separate could-match channel.
+3. **Rule 6 is already suppressed.** The joiner already has a suppressor
+   at `joiner.rs:1023-1029` that drops PrefixStripped candidates when
+   `!rule_3` (a fallback when no non-PrefixStripped match exists still
+   returns the PrefixStripped one; the bug is not here). The actual
+   bug is in **rule 3**: rule 3 binds via prefix-strip instead of
+   returning `Unresolved { reason: NoRouteInService }` with the
+   endpoint as a could-match candidate.
 
-1. **Do not apply prefix tolerance in rule 6.** In the rule 6 match
-   path, use the matcher with prefix tolerance DISABLED (or, equivalently,
-   filter `PrefixStripped` results out before selecting). Rule 6
-   becomes: "target unknown → for every other service, find the
-   most-specific non-prefix-stripped match. None found → unresolved,
-   reason `no_match`." This restores scenario 3's intended outcome.
-2. **Preserve the could-match signal for `list_unresolved` (§9.7).**
-   `coverage.unresolved_consumers` already exists; the `ContractIndex`
-   surfaces the same data. The could-match computation in
-   `contracts/diff.rs::could_match` (lines ~1699-1708) currently
-   doesn't include prefix tolerance — it just compares target service
-   and template. Fix it to use the matcher's prefix-stripped mode when
-   computing could-match (caller-side, pure function, no live state
-   involved): if `could_match(endpoint, consumer_template)` returns
-   true when prefix tolerance is enabled, the endpoint IS a
-   could-match candidate for that consumer.
+**Fix shape.** Two parts in `federation/contracts/joiner.rs` and
+`federation/contracts/diff.rs`:
 
-This makes rule 6 return `no_match` when only prefix-stripped matches
-exist, while preserving the prefix-stripped-could-match signal that
-`list_unresolved` reports.
+1. **Rule 3 prefix tolerance becomes a could-match hint.** In
+   `resolve_consumer`'s rule-3 path: plain matching first (per §7.3
+   "Found: Binds"); if no plain match in the target service, retry
+   with prefix tolerance. On the prefix-stripped retry: the consumer
+   resolution becomes `Unresolved { reason: NoRouteInService }`, and
+   the candidate endpoint (`ServiceName`, `ContractKey`) is recorded
+   as a could-match candidate. Two surface options (pick one):
+   - **Inline in `ConsumerResolution`** — add `could_match_endpoints:
+     Vec<(ServiceName, ContractKey)>` to the enum and populate it
+     here. `ContractIndex` is derived, never persisted (§4.3), so a
+     new Vec field is safe. `diff.rs::ConsumerEndpointUnmatched` and
+     `list_unresolved` consume it directly; no recomputation needed.
+   - **Recompute in `diff.rs::could_match`** — `diff.rs::could_match`
+     (which exists, lines ~1699-1708) already considers the
+     unresolved consumer's target service + template + prefix-stripped
+     matcher. No new fields on `ConsumerResolution`. The fix in
+     `joiner.rs` is "don't bind; stay Unresolved; could_match handles
+     the rest". This is the chosen shape.
+
+   The `bindings[]` override path (rule 3 confirmed binding) is
+   unchanged — explicit operator-provided bindings still produce a
+   `Binds` edge with `Confirmed { confidence: 1.0 }` provenance.
+
+2. **`diff.rs::could_match` consumes the prefix-stripped signal.** The
+   existing function (lines ~1699-1708) currently checks
+   `target_service == Some(s) || None` and `method/template` match.
+   Extend it to ALSO test prefix-stripped matching for rule-3 unresolved
+   consumers whose target service is known but plain route match
+   failed. This is what `list_unresolved`'s `candidates` listing and
+   `coverage.unresolved_consumers` consume; no separate field needed.
 
 **Tests.**
 - New discriminating test in `joiner_tests.rs`: synthetic fixture with
-  consumer template `/v1/api/orders/{}` and provider `/api/orders/{}` —
-  assert `resolution == Unresolved { reason: NoMatch }` AND
-  `coverage.unresolved_consumers` contains the consumer with the
-  endpoint as candidate.
-- Existing test: prefix tolerance still resolves rule-3 consumers
-  (e.g. scenario 11, 12 tests with `routes_prefix_is_applied_to_template`).
+  consumer template `/v1/api/orders/{}`, orders provider
+  `/api/orders/{}` (3 vs 2 segments). Assert:
+  `resolution == Unresolved { reason: NoRouteInService }` (NOT a
+  bind). The `could_match(endpoint)` call returns `true` for orders.
+  With the bug, `resolution == Binds(PrefixStripped, 0.5, "/v1")`.
+- Existing test for prefix tolerance still resolves rule-3 (when there
+  IS a plain match available? No — by definition if there is a plain
+  match, prefix tolerance isn't tried). Existing rule-3 prefix-tolerance
+  test (`routes_prefix_is_applied_to_template`) may need to change its
+  expected outcome from "Binds" to "Unresolved with orders as
+  could-match"; that's the deliberate semantics change. Run the full
+  suite to find any tests that asserted the old behavior.
 - `pr13_hermetic_precision_recall_over_t1_fixture` → `diff_precision ≥ 0.7`.
+- `pr13_diff_contracts_ground_truth_scenarios_over_t1_fixture` scenario 3
+  emits `ConsumerEndpointUnmatched` with `reasons: [unresolved_candidates]`
+  and `list_unresolved` reports `reason: no_match` with orders as a
+  candidate — matching the ground truth exactly.
 
 ## Cross-cutting concerns
 
