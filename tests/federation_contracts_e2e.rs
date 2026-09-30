@@ -408,6 +408,7 @@ async fn call_list_services(fed: Arc<FederatedIndex>) -> Value {
         workspaces: None,
         status: &status,
         reload_bus: None,
+        snapshots: None,
     };
     let outcome = list_services_handle(&ctx, json!({"snapshot": "live"}))
         .await
@@ -423,6 +424,7 @@ async fn call_get_service(fed: Arc<FederatedIndex>, service: &str) -> Value {
         workspaces: None,
         status: &status,
         reload_bus: None,
+        snapshots: None,
     };
     let outcome = get_service_handle(&ctx, json!({"snapshot": "live", "service": service}))
         .await
@@ -601,6 +603,7 @@ async fn list_services_rejects_non_live_snapshot_with_snapshot_not_found() {
         workspaces: None,
         status: &status,
         reload_bus: None,
+        snapshots: None,
     };
     let outcome = list_services_handle(&ctx, json!({"snapshot": "snap_does_not_exist"}))
         .await
@@ -624,6 +627,7 @@ async fn get_service_returns_service_not_found_when_service_absent() {
         workspaces: None,
         status: &status,
         reload_bus: None,
+        snapshots: None,
     };
     let outcome = get_service_handle(&ctx, json!({"snapshot": "live", "service": "ghost"}))
         .await

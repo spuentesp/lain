@@ -135,6 +135,12 @@ pub struct PetgraphBackend {
     index: DashMap<String, GlobalId>,
     bin_path: PathBuf,
     payload_path: PathBuf,
+    /// When `true`, [`Self::save`] is a no-op and no file under
+    /// `data_dir` is ever written. Snapshot federations (`§8.5`) live
+    /// here: they need a real `GraphBackend` to walk, but every
+    /// snapshot is built from on-disk cache entries and never persists
+    /// itself.
+    ephemeral: bool,
 }
 
 impl PetgraphBackend {
@@ -196,13 +202,42 @@ impl PetgraphBackend {
             index,
             bin_path,
             payload_path,
+            ephemeral: false,
         })
+    }
+
+    /// Build a `PetgraphBackend` that never writes to disk (`§8.5`).
+    /// The wrapped `GraphDatabase` is a fresh in-memory graph; the
+    /// `save()` override skips every disk write.
+    ///
+    /// `data_dir` is used only as a diagnostic identifier — no file is
+    /// ever created or read at that path. The caller typically passes
+    /// `data_dir/<snapshot_id>` so logs identify the snapshot.
+    pub fn ephemeral(data_dir: &Path) -> Self {
+        let db = crate::graph::GraphDatabase::empty_writable();
+        Self {
+            db,
+            index: DashMap::new(),
+            bin_path: data_dir.to_path_buf(),
+            payload_path: data_dir.to_path_buf(),
+            ephemeral: true,
+        }
+    }
+
+    /// True iff [`Self::save`] is a no-op. Snapshot federations use
+    /// this so callers and tests can assert "no disk write happened".
+    pub fn is_ephemeral(&self) -> bool {
+        self.ephemeral
     }
 
     /// Save the federated graph to disk, prepending the schema envelope
     /// (magic + version) before the bincode payload so the canonical
-    /// file is always self-describing on the next load.
+    /// file is always self-describing on the next load. No-op for
+    /// ephemeral backends (`§8.5` snapshot federations).
     fn save(&self) -> Result<(), LainError> {
+        if self.ephemeral {
+            return Ok(());
+        }
         self.db.save_to_disk_sync()?;
         let payload = std::fs::read(&self.payload_path)?;
         let mut with_header = Vec::with_capacity(FEDERATION_GRAPH_HEADER_LEN + payload.len());

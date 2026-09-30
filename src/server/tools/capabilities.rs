@@ -813,6 +813,20 @@ pub const CAPABILITIES: &[Capability] = &[
         "consumers of one service: endpoints, calling code, fields used, used_by walk",
         "asking who consumes a service and why a function runs",
     ),
+    c(
+        "prepare_snapshot",
+        Package::Contracts,
+        Level::Power,
+        "pin every repo to a commit, index once, reuse the result by snapshot id",
+        "comparing two commits across repos without re-indexing each call",
+    ),
+    c(
+        "get_snapshot",
+        Package::Contracts,
+        Level::Power,
+        "read a snapshot's current state (cached, indexing, failed, or excluded per repo)",
+        "waiting on a prepare_snapshot you kicked off, or auditing a snapshot id",
+    ),
 ];
 
 /// Lookup one capability by tool name.

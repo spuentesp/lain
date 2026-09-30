@@ -479,6 +479,29 @@ impl FederatedIndex {
         Ok(())
     }
 
+    /// Build the per-repo node + intra-edge rewrite (global-id
+    /// rekey) without touching the live backend. The live path
+    /// (`project_nodes` / `project_edges`) uses this to share the
+    /// per-repo rewrite rule with [`crate::federation::contracts::snapshots::manager::project_graph_shared`]
+    /// — both produce the same node and edge sets from the same
+    /// per-repo graph, which the §8.5 invariant requires.
+    ///
+    /// Returns `(rewritten_nodes, intra_edges)`. Edges with either
+    /// endpoint missing from the per-repo DB are skipped (e.g.
+    /// scanner-introduced virtual edges).
+    pub fn project_graph(
+        &self,
+        id: &RepoId,
+    ) -> Result<(Vec<crate::schema::GraphNode>, Vec<crate::schema::GraphEdge>), LainError> {
+        let repo = self
+            .get_repo(id)
+            .ok_or_else(|| LainError::NotFound(format!("repo {id}")))?;
+        crate::federation::contracts::snapshots::manager::project_graph_shared(
+            repo.db(),
+            id.as_str(),
+        )
+    }
+
     /// Project this repo's nodes into the federated backend. Idempotent.
     /// Safe to run before other repos' nodes are projected — by design,
     /// the second pass ([`Self::project_edges`]) is what needs full visibility.
@@ -486,22 +509,10 @@ impl FederatedIndex {
         // Serialize each phase against add_repo/remove_repo. The guard
         // must not cross an async suspension; neither phase awaits below.
         let _guard = self.projection_lock.lock();
-        let repo = self
-            .get_repo(id)
-            .ok_or_else(|| LainError::NotFound(format!("repo {id}")))?;
-        let nodes = repo.nodes();
+        let (batch_nodes, _) = self.project_graph(id)?;
+        let live: std::collections::HashSet<String> =
+            batch_nodes.iter().map(|n| n.id.clone()).collect();
 
-        // Re-key every node to its global id and upsert into the backend.
-        let mut live: std::collections::HashSet<String> =
-            std::collections::HashSet::with_capacity(nodes.len());
-        let mut batch_nodes: Vec<crate::schema::GraphNode> = Vec::with_capacity(nodes.len());
-        for n in &nodes {
-            let gid = global_id_str(id, n);
-            let mut rewritten = n.clone();
-            rewritten.id = gid.clone();
-            live.insert(gid.clone());
-            batch_nodes.push(rewritten);
-        }
         // Batch upsert: one disk save at the end instead of ~N syncs.
         // The per-node path saved on every upsert and wedged the
         // loader for seconds-to-minutes on large repos (3k+ nodes).
@@ -586,7 +597,11 @@ impl FederatedIndex {
         // reference per-repo node ids; the federated backend uses
         // global ids. Recomputing this here keeps `project_edges`
         // self-contained — it does not depend on `project_nodes`
-        // having been called in the same process.
+        // having been called in the same process. The shared
+        // `project_graph` helper produces the same map; we re-derive
+        // it below for `local_to_global` (used by the cross-repo
+        // external-edge stash and the cross-repo peer matching).
+        let (batch_nodes_owned, intra_edges) = self.project_graph(id)?;
         let mut local_to_global: std::collections::HashMap<String, String> =
             std::collections::HashMap::with_capacity(nodes.len());
         for n in &nodes {
@@ -601,43 +616,7 @@ impl FederatedIndex {
         // cross-repo `CrossRepoSameSymbol` peer matches. The intra and
         // external passes follow the original rules; see the comments
         // below for what each guard means.
-        let db = repo.db();
-        let mut batch: Vec<crate::schema::GraphEdge> = Vec::new();
-
-        // Intra-repo edges (Calls / Contains / Uses / ...) with
-        // endpoints rewritten to global ids. Edges with either endpoint
-        // missing from `local_to_global` (e.g. scanner-introduced virtual
-        // edges) are skipped — they'll show up next time the scanner
-        // emits them with stable ids.
-        //
-        // Cross-repo edges (wishlist #13): when an edge's target was
-        // already written in global form by the resolve phase, it does
-        // NOT appear in `local_to_global`. Try to parse it as a global
-        // id; on success, pass it through unchanged. On failure
-        // (genuinely unresolved), skip — same as the pre-fix behavior
-        // for non-cross-repo edges.
-        for edge in &db.all_edges() {
-            let Some(src) = local_to_global.get(&edge.source_id) else {
-                continue;
-            };
-            let resolved_target: String = match local_to_global.get(&edge.target_id) {
-                Some(g) => g.clone(),
-                None => match GlobalId::parse(&edge.target_id) {
-                    Ok(gid) => gid.as_str().to_string(),
-                    Err(_) => continue,
-                },
-            };
-            batch.push(crate::schema::GraphEdge {
-                edge_type: edge.edge_type.clone(),
-                source_id: src.clone(),
-                target_id: resolved_target,
-                weight: edge.weight,
-                cross_repo: false,
-                provenance: edge.provenance.clone(),
-                site: edge.site.clone(),
-                detail: edge.detail.clone(),
-            });
-        }
+        let mut batch: Vec<crate::schema::GraphEdge> = intra_edges;
 
         // Wishlist #13: drain the resolve phase's cross-repo edge stash
         // (edges whose target lives in another repo, written in global
@@ -755,19 +734,18 @@ impl FederatedIndex {
         // per match. `target_nodes` is keyed by id to dedupe: several
         // matches can target the same peer node.
         // This repo's nodes re-keyed to global ids (the same rewrite
-        // `project_nodes` publishes) so cross-repo matching sees the
-        // id shape `find_cross_repo_matches` parses.
-        let batch_nodes: Vec<GraphNode> = nodes
-            .iter()
-            .map(|n| {
-                let mut rewritten = n.clone();
-                rewritten.id = global_id_str(id, n);
-                rewritten
-            })
-            .collect();
+        // `project_nodes` publishes via [`Self::project_graph`]) so
+        // cross-repo matching sees the id shape
+        // `find_cross_repo_matches` parses. The `batch_nodes_owned`
+        // already holds the rewritten nodes from the shared
+        // projection helper above.
+        // Suppress unused name collision — `batch_nodes_owned` is
+        // already in scope from the shared projection call.
+        let _ = batch_nodes_owned;
+        let batch_nodes_owned: Vec<GraphNode> = batch_nodes_owned;
         let mut target_nodes: std::collections::HashMap<String, GraphNode> =
             std::collections::HashMap::new();
-        for new_node in &batch_nodes {
+        for new_node in &batch_nodes_owned {
             let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5, false);
             for (target_gid, sim, _confidence) in matches {
                 // The matched node's owning repo may not have run its own

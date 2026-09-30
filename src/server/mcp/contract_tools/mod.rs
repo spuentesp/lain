@@ -50,6 +50,7 @@ pub mod envelope;
 pub mod paging;
 pub mod scope;
 pub mod services;
+pub mod snapshots;
 pub mod used_by;
 
 use crate::server::mcp::handler::McpContext;

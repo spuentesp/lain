@@ -1462,6 +1462,201 @@
     }
   },
   {
+    "description": "Pin every repo to a commit, index once, reuse the result. Same inputs after ref resolution produce the same id (§8.4); `from` derives a snapshot from an existing base (§11).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `prepare_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Same inputs after ref resolution produce the same snapshot id (§8.4) — `prepare_snapshot` is idempotent.",
+      "properties": {
+        "exclude": {
+          "description": "Repos to exclude from the snapshot (§8.4).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "from": {
+          "description": "Snapshot id to derive from (§11). Derived snapshots inherit `join_config` and the un-overridden commits; they do NOT inherit failure. Mutually exclusive with `max_base_age_s`.",
+          "type": "string"
+        },
+        "max_base_age_s": {
+          "description": "Reuse the newest `ready` record younger than this age for any repo not in `repos`. Only valid without `from` (§11).",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "repos": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "`repo -> ref | sha` map. Refs resolved against the federation's mirror; shas passed through unchanged.",
+          "type": "object"
+        },
+        "wait_ms": {
+          "description": "Maximum time to wait for `ready`/`failed`. Defaults to 5,000 ms; capped at 60,000 ms (§10.5).",
+          "maximum": 60000,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "title": "prepare_snapshot input",
+      "type": "object"
+    },
+    "name": "prepare_snapshot",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Output for `prepare_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). The `data` field of the §10.2 envelope.",
+      "properties": {
+        "created_unix": {
+          "type": "integer"
+        },
+        "last_access_unix": {
+          "type": "integer"
+        },
+        "repos": {
+          "description": "Per-repo readiness (§8.4). `commit` is the resolved sha; omitted for `excluded`.",
+          "items": {
+            "properties": {
+              "commit": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              },
+              "state": {
+                "enum": [
+                  "cached",
+                  "queued",
+                  "indexing",
+                  "failed",
+                  "excluded"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "state"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "snapshot": {
+          "description": "Snapshot id (`snap_` + 16 hex). Same inputs after ref resolution produce the same id.",
+          "type": "string"
+        },
+        "state": {
+          "description": "The §11 state machine's terminal-or-current state at the time the tool returned.",
+          "enum": [
+            "pending",
+            "indexing",
+            "ready",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot",
+        "state",
+        "repos"
+      ],
+      "title": "prepare_snapshot output",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Read a snapshot's current state. The `snapshot` argument is required; same shape as `prepare_snapshot` returns.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `get_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Reads the on-disk record and refreshes `last_access_unix` per §8.4.",
+      "properties": {
+        "snapshot": {
+          "description": "Snapshot id (`snap_` + 16 hex). Same shape as `prepare_snapshot` returns.",
+          "type": "string"
+        },
+        "wait_ms": {
+          "description": "Maximum time to wait for a non-terminal state. Defaults to 5,000 ms; capped at 60,000 ms (§10.5).",
+          "maximum": 60000,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "get_snapshot input",
+      "type": "object"
+    },
+    "name": "get_snapshot",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Output for `get_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Same shape as `prepare_snapshot`.",
+      "properties": {
+        "created_unix": {
+          "type": "integer"
+        },
+        "last_access_unix": {
+          "type": "integer"
+        },
+        "repos": {
+          "items": {
+            "properties": {
+              "commit": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              },
+              "state": {
+                "enum": [
+                  "cached",
+                  "queued",
+                  "indexing",
+                  "failed",
+                  "excluded"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "state"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "indexing",
+            "ready",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot",
+        "state",
+        "repos"
+      ],
+      "title": "get_snapshot output",
+      "type": "object"
+    }
+  },
+  {
     "description": "Returns the server's run-time status: pid, transport, port, started_at, last_sync_at, last_error, repo_count, workspace_count.",
     "inputSchema": {
       "properties": {},

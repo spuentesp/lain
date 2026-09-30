@@ -19,7 +19,6 @@ use petgraph::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::warn;
 
 /// The canonical graph key for a file: workspace-relative, forward-slashed.
 ///
@@ -219,6 +218,17 @@ impl GraphDatabase {
         let mut db = Self::empty(Path::new(""));
         db.read_only = true;
         db
+    }
+
+    /// A fresh in-memory, writable graph. Used by PR 11's snapshot
+    /// federations (`§8.5`) so `PetgraphBackend::ephemeral` can wrap
+    /// a graph it can `upsert_node` against without ever reaching
+    /// the disk. The `persistence_path` is empty (`""`) — the
+    /// snapshot backend's `save()` is overridden to be a no-op, so
+    /// `GraphDatabase::save_to_disk_sync` is never called on this
+    /// graph.
+    pub(crate) fn empty_writable() -> Self {
+        Self::empty(Path::new(""))
     }
 
     fn empty(memory_path: &Path) -> Self {
@@ -2057,7 +2067,7 @@ impl GraphDatabase {
         let state = match persist::decode_state(&data) {
             Ok((state, _)) => state,
             Err(e) => {
-                warn!(
+                eprintln!(
                     "Ignoring unreadable graph at {}: {e}. Starting empty; \
                      the next index pass will rebuild it.",
                     self.persistence_path.display()
@@ -2067,7 +2077,7 @@ impl GraphDatabase {
         };
 
         if state.path_format_version != PATH_FORMAT_VERSION {
-            warn!(
+            eprintln!(
                 "Ignoring graph at {} written with path format v{} (this build expects v{}). \
                  Starting empty; the next index pass will rebuild it. Its node ids encode a \
                  different path convention, so merging would duplicate every node.",
@@ -2078,7 +2088,14 @@ impl GraphDatabase {
             return Ok(());
         }
 
-        let mut state = state;
+        self.apply_state_loaded(state)
+    }
+
+    /// Apply an already-decoded `persist::GraphState` to this graph
+    /// in place. The petgraph + secondary indices + `last_commit`
+    /// are all swapped under one write lock so a concurrent
+    /// reader never sees a mismatched graph/index pair.
+    fn apply_state_loaded(&self, mut state: persist::GraphState) -> Result<(), LainError> {
         persist::heal_duplicate_ids(&mut state);
 
         let mut path_index = HashMap::new();
@@ -2092,10 +2109,6 @@ impl GraphDatabase {
             // loaded petgraph nodes so `find_indices_by_name` /
             // `find_all_nodes_by_name` work immediately after a cold
             // load, not just after the next indexing pass.
-            // `load_from_disk` previously went through
-            // `graph.node_weights()` for name lookups; post-fix the
-            // secondary index is authoritative. The on-disk format
-            // is unchanged — `name_index` is purely derived state.
             name_index
                 .entry(node.name.clone())
                 .or_insert_with(Vec::new)
@@ -2123,6 +2136,38 @@ impl GraphDatabase {
         drop(graph);
         *self.last_commit.write() = state.last_commit;
         Ok(())
+    }
+
+    /// Build a fresh `GraphDatabase` from a bincode-encoded
+    /// `persist::GraphState` payload without ever touching the
+    /// filesystem. PR 11's snapshot hydration uses this to honour
+    /// §8.5's "no disk writes from `from_snapshot`" — every prior
+    /// implementation round-tripped through a temp file, which
+    /// (a) violated §8.5 and (b) raced on the shared staging path
+    /// for concurrent builds of the same record.
+    ///
+    /// Returns the populated database plus the `last_commit` it
+    /// recorded (the manager logs it for diagnostics; tests use it
+    /// to assert the hydrate path round-trips).
+    pub fn from_bytes(data: &[u8]) -> Result<(Self, Option<String>), LainError> {
+        let db = Self::empty_read_only();
+        // Snapshot hydration only reads from the hydrated DB; the
+        // petgraph state is loaded into memory once and never
+        // mutated again. `read_only` does not gate the swap; the
+        // `read_only: true` flag still guards `save_to_disk` /
+        // `insert_*` so a future caller that accidentally tries to
+        // mutate through this DB gets a clean error.
+        let (state, _) = persist::decode_state(data)
+            .map_err(|e| LainError::Database(format!("graph state decode: {e}")))?;
+        if state.path_format_version != PATH_FORMAT_VERSION {
+            return Err(LainError::Database(format!(
+                "graph state path format v{} does not match v{}",
+                state.path_format_version, PATH_FORMAT_VERSION
+            )));
+        }
+        db.apply_state_loaded(state)?;
+        let last_commit = db.last_commit.read().clone();
+        Ok((db, last_commit))
     }
 
     pub fn export_to_json(&self) -> Result<String, LainError> {

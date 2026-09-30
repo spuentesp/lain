@@ -31,6 +31,10 @@
 //!   layout, manifest, atomic temp+rename write, LRU eviction past
 //!   `LAIN_INDEX_CACHE_MB` (default 4096) with hold exemption for
 //!   resident snapshot federations and running jobs.
+//! - `snapshots` (PR 11): records (`<data_dir>/snapshots/<id>.json`),
+//!   per-`(repo, sha, analyzer_version)` job runner, residency
+//!   (`LAIN_SNAPSHOT_RESIDENT`), and the `from_snapshot`
+//!   projection path. See `contracts/snapshots/mod.rs`.
 //! - `digest` (PR 10): the canonical blake3 digest over the
 //!   per-repo graph (every node sorted by id + every edge sorted by
 //!   `(edge_type, source_id, target_id)`, each bincode-encoded after
@@ -50,6 +54,7 @@ pub mod mirrors;
 pub mod model;
 pub mod normalize;
 pub mod route_match;
+pub mod snapshots;
 
 /// Per-module revision counter for the contract analyzer (§8.3).
 ///

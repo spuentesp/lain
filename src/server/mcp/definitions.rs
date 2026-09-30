@@ -189,6 +189,22 @@ pub const CONTRACT_TOOL_DEFS: &[ToolDef] = &[
         input_schema: Some(include_str!("contract_tools/schemas/get_service.in.json")),
         output_schema: Some(include_str!("contract_tools/schemas/get_service.out.json")),
     },
+    ToolDef {
+        name: "prepare_snapshot",
+        description: "Pin every repo to a commit, index once, reuse the result. Same inputs after ref resolution produce the same id (§8.4); `from` derives a snapshot from an existing base (§11).",
+        required_args: &[],
+        optional_args: &["repos", "exclude", "from", "max_base_age_s", "wait_ms"],
+        input_schema: Some(include_str!("contract_tools/schemas/prepare_snapshot.in.json")),
+        output_schema: Some(include_str!("contract_tools/schemas/prepare_snapshot.out.json")),
+    },
+    ToolDef {
+        name: "get_snapshot",
+        description: "Read a snapshot's current state. The `snapshot` argument is required; same shape as `prepare_snapshot` returns.",
+        required_args: &["snapshot"],
+        optional_args: &["wait_ms"],
+        input_schema: Some(include_str!("contract_tools/schemas/get_snapshot.in.json")),
+        output_schema: Some(include_str!("contract_tools/schemas/get_snapshot.out.json")),
+    },
 ];
 
 /// Server-status, recent-projects, reload, and multiplayer (presence)

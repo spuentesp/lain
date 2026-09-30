@@ -123,6 +123,10 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             // graph, the overlay, the heuristic sensor's edges, and
             // the runtime trace store; needs the graph to be indexed.
             | "explain_dispatch"
+            // PR 11: snapshot tools. Read the snapshot manager +
+            // per-repo caches; both are built off the static graph.
+            | "prepare_snapshot"
+            | "get_snapshot"
     ) {
         return Some(GraphRequired);
     }

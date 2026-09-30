@@ -621,6 +621,10 @@ pub struct McpContext<'a> {
     pub workspaces: Option<&'a Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
     pub status: &'a HandlerStatus,
     pub reload_bus: Option<&'a crate::server::reload::ReloadBus>,
+    /// Snapshot manager (`PR 11`). Set when the server boots a
+    /// `SnapshotManager` against the same `data_dir` as the federation.
+    /// Tools in `mcp::contract_tools::snapshots` delegate here.
+    pub snapshots: Option<&'a Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
 }
 
 /// An inventory-registered MCP tool. `name` is the tool id; `handler`
@@ -673,6 +677,7 @@ async fn dispatch_tool_call(
     status: &HandlerStatus,
     reload_bus: Option<&crate::server::reload::ReloadBus>,
     server: Option<&LainServer>,
+    snapshots: Option<&Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     name: &str,
     mut args_map: Map<String, serde_json::Value>,
 ) -> (String, bool) {
@@ -687,6 +692,7 @@ async fn dispatch_tool_call(
         workspaces,
         status,
         reload_bus,
+        snapshots,
     };
     if let Some(result) = invoke_inventory(&ctx, name, args_map.clone()) {
         return tool_result(name, result);
@@ -846,6 +852,9 @@ struct LainHandler {
     /// layer; the tools return `presence layer not configured` in
     /// that case.
     server: Option<Arc<LainServer>>,
+    /// Snapshot manager (`PR 11`); set when the handler is wired
+    /// into a federation-mode server with a `SnapshotManager`.
+    snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
 }
 
 /// Tools that cannot answer in the current mode, and must therefore not
@@ -1032,6 +1041,7 @@ impl ServerHandler for LainHandler {
             &handler_status,
             self.reload_bus.as_deref(),
             self.server.as_deref(),
+            self.snapshots.as_ref(),
             params.name.as_str(),
             args_owned,
         )
@@ -1056,6 +1066,9 @@ pub struct LainMcpServer {
     /// server. The same `Arc` is handed to `LainHandler`; the handler
     /// reads through the lock on every dispatch.
     workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
+    /// Snapshot manager (`PR 11`). Set by `with_snapshots`; tools in
+    /// `mcp::contract_tools::snapshots` delegate here.
+    snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     /// Transport for the active server, surfaced via `get_server_status`.
     status_transport: Option<crate::server::Transport>,
     /// TCP port for HTTP transport; surfaced via `get_server_status`.
@@ -1244,6 +1257,7 @@ impl LainMcpServer {
             executor,
             federation: None,
             workspaces: None,
+            snapshots: None,
             status_transport: None,
             status_port: None,
             status_started_at: now,
@@ -1265,6 +1279,7 @@ impl LainMcpServer {
             executor,
             federation: Some(federation),
             workspaces: None,
+            snapshots: None,
             status_transport: None,
             status_port: None,
             status_started_at: now,
@@ -1274,6 +1289,28 @@ impl LainMcpServer {
             server: None,
             reindex_timeout: None,
         }
+    }
+
+    /// Attach the snapshot manager (`PR 11`). Call this after
+    /// `with_federation` so `prepare_snapshot` and `get_snapshot`
+    /// are registered. The optional `source_config` is the parsed
+    /// `repos.yaml` block — when supplied, the server installs a
+    /// resolver that maps every configured repo to its source
+    /// URL/path (`workspace_dir`, `local_clone`, `shallow_clone`).
+    /// Without it, `prepare_snapshot` returns `repo_not_registered`
+    /// for every repo.
+    pub fn with_snapshots(
+        mut self,
+        snapshots: Arc<crate::federation::contracts::snapshots::SnapshotManager>,
+        source_config: Option<&crate::federation::config::FederationConfig>,
+    ) -> Self {
+        if let Some(cfg) = source_config {
+            let resolver =
+                crate::federation::contracts::snapshots::SnapshotManager::resolver_from_config(cfg);
+            snapshots.set_repo_source_resolver(resolver);
+        }
+        self.snapshots = Some(snapshots);
+        self
     }
 
     /// Federation + workspace constructor. When workspaces is Some, the
@@ -1306,6 +1343,7 @@ impl LainMcpServer {
             executor,
             federation: Some(federation),
             workspaces: Some(workspaces),
+            snapshots: None,
             status_transport: None,
             status_port: None,
             status_started_at: now,
@@ -1447,6 +1485,7 @@ impl LainMcpServer {
                                 status,
                                 None,
                                 None,
+                                None,
                                 addr.ip().is_loopback(),
                             )
                         });
@@ -1478,6 +1517,7 @@ impl LainMcpServer {
             executor: Arc::new(self.executor),
             federation: self.federation,
             workspaces: self.workspaces,
+            snapshots: self.snapshots,
             status_transport: self.status_transport,
             status_port: self.status_port,
             status_started_at: self.status_started_at,
@@ -1646,6 +1686,7 @@ impl LainMcpServer {
         let executor = Arc::new(self.executor);
         let federation = self.federation;
         let workspaces = self.workspaces;
+        let snapshots = self.snapshots;
         let status_transport = self.status_transport;
         let status_port = self.status_port;
         let status_started_at = self.status_started_at;
@@ -1661,6 +1702,7 @@ impl LainMcpServer {
                     let executor = executor.clone();
                     let federation = federation.clone();
                     let workspaces = workspaces.clone();
+                    let snapshots = snapshots.clone();
                     let status_transport = status_transport;
                     let status_port = status_port;
                     let status_started_at = status_started_at;
@@ -1675,6 +1717,7 @@ impl LainMcpServer {
                             let executor = executor.clone();
                             let federation = federation.clone();
                             let workspaces = workspaces.clone();
+                            let snapshots = snapshots.clone();
                             let handler_status = HandlerStatus {
                                 transport: status_transport,
                                 port: status_port,
@@ -1698,6 +1741,7 @@ impl LainMcpServer {
                                 handler_status,
                                 reload_bus.clone(),
                                 server.clone(),
+                                snapshots.clone(),
                                 loopback_bound,
                             )
                         });
@@ -1920,6 +1964,9 @@ async fn handle_request(
     // carry the presence layer. Presence-tool dispatches inside the
     // JSON-RPC branch see this as `None` and return a descriptive error.
     server: Option<Arc<LainServer>>,
+    // Snapshot manager (`PR 11`). Tools in
+    // `mcp::contract_tools::snapshots` delegate here.
+    snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     // Whether the HTTP listener is bound to a loopback address. Used by
     // the browser-guard to decide whether to block cross-origin requests.
     loopback_bound: bool,
@@ -2315,6 +2362,7 @@ async fn handle_request(
                             &status,
                             reload_bus.as_deref(),
                             server.as_deref(),
+                            snapshots.as_ref(),
                             name,
                             args_map,
                         )
