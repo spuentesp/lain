@@ -761,14 +761,8 @@ mod tests {
     fn run_add_signals_reload_after_save() {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("workspaces.yaml");
-        std::fs::write(
-            &ws,
-            "workspaces:\n  - name: w\n    members: [r1]\n",
-        )
-        .unwrap();
-        let received = capture_reload_signal(&ws, |ws_path| {
-            run_add("w", "r2", Some(ws_path))
-        });
+        std::fs::write(&ws, "workspaces:\n  - name: w\n    members: [r1]\n").unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| run_add("w", "r2", Some(ws_path)));
         assert_eq!(received, "reload\n");
     }
 
@@ -777,14 +771,8 @@ mod tests {
     fn run_remove_signals_reload_after_save() {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("workspaces.yaml");
-        std::fs::write(
-            &ws,
-            "workspaces:\n  - name: w\n    members: [r1, r2]\n",
-        )
-        .unwrap();
-        let received = capture_reload_signal(&ws, |ws_path| {
-            run_remove("w", "r2", Some(ws_path))
-        });
+        std::fs::write(&ws, "workspaces:\n  - name: w\n    members: [r1, r2]\n").unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| run_remove("w", "r2", Some(ws_path)));
         assert_eq!(received, "reload\n");
     }
 
