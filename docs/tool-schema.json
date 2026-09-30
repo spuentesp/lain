@@ -892,7 +892,7 @@
     "name": "get_workspace_graph"
   },
   {
-    "description": "Every service in the federation with its repo, paths, endpoint count and consumer counts. On `live` only (PR 16 scope); PR 11/13 will route named snapshots.",
+    "description": "Every service in the federation with its repo, paths, endpoint count and consumer counts. Works on `live` and named snapshots (§12).",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
@@ -1569,7 +1569,7 @@
     }
   },
   {
-    "description": "Read a snapshot's current state. The `snapshot` argument is required; same shape as `prepare_snapshot` returns.",
+    "description": "Read a snapshot's current state. The `snapshot` argument is required; same shape as `prepare_snapshot` returns. On `live` returns a readiness-shaped answer (§8.7).",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
@@ -1653,6 +1653,1491 @@
         "repos"
       ],
       "title": "get_snapshot output",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Endpoints the federation exposes, filterable by service, repo, and kind (http/topic).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `list_contracts` (`docs/CONTRACT_FEDERATION.md` §12). Filters endpoints by service, repo, and kind; supports paging via `cursor`/`limit`.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque paging cursor.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Filter by contract kind.",
+          "enum": [
+            "http",
+            "topic"
+          ],
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max items per page (default 100, max 1000).",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "repo": {
+          "description": "Filter by repo id.",
+          "type": "string"
+        },
+        "service": {
+          "description": "Filter by service name.",
+          "type": "string"
+        },
+        "snapshot": {
+          "description": "Snapshot id (`snap_<hex>`) or `live`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "list_contracts input",
+      "type": "object"
+    },
+    "name": "list_contracts",
+    "outputSchema": {
+      "$defs": {
+        "EvidenceRef": {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "dirty": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "repo",
+            "commit",
+            "path",
+            "line",
+            "text"
+          ],
+          "type": "object"
+        },
+        "Scope": {
+          "additionalProperties": false,
+          "properties": {
+            "configured_only": {
+              "enum": [
+                true
+              ],
+              "type": "boolean"
+            },
+            "reviewed": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "commit": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "dirty": {
+                    "type": "boolean"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "unreviewed": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "error": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "enum": [
+                      "failed",
+                      "fetch_failed",
+                      "excluded",
+                      "not_ready"
+                    ],
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "reviewed",
+            "unreviewed",
+            "configured_only"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `list_contracts` envelope (§10.2). Endpoints sorted by `(service, key)`.",
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bound_consumers": {
+                "type": "integer"
+              },
+              "endpoint": {
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "service": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "service",
+                  "key"
+                ],
+                "type": "object"
+              },
+              "has_schema": {
+                "type": "boolean"
+              },
+              "providers": {
+                "items": {
+                  "$ref": "#/$defs/EvidenceRef"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "endpoint",
+              "providers",
+              "has_schema",
+              "bound_consumers"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "required": [
+        "items",
+        "scope"
+      ],
+      "title": "list_contracts data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Providers, schema fields, and bound consumers for one endpoint (§12).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `get_contract` (`docs/CONTRACT_FEDERATION.md` §12). Returns providers, schema fields and bound consumers for one endpoint.",
+      "properties": {
+        "key": {
+          "description": "Contract key (`http:<METHOD> <template>` or `topic:<broker>/<name>`).",
+          "type": "string"
+        },
+        "service": {
+          "description": "Optional service filter; without it every service providing `key` is returned.",
+          "type": "string"
+        },
+        "snapshot": {
+          "description": "Snapshot id (`snap_<hex>`) or `live`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot",
+        "key"
+      ],
+      "title": "get_contract input",
+      "type": "object"
+    },
+    "name": "get_contract",
+    "outputSchema": {
+      "$defs": {
+        "EvidenceRef": {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "dirty": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "repo",
+            "commit",
+            "path",
+            "line",
+            "text"
+          ],
+          "type": "object"
+        },
+        "Provenance": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "type": "number"
+            },
+            "detector": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "static",
+                "heuristic",
+                "runtime",
+                "confirmed"
+              ],
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "Scope": {
+          "additionalProperties": false,
+          "properties": {
+            "configured_only": {
+              "type": "boolean"
+            },
+            "reviewed": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "unreviewed": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "reviewed",
+            "unreviewed",
+            "configured_only"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `get_contract` envelope (§10.2). `items` is keyed per service.",
+      "properties": {
+        "items": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "consumers": {
+                "items": {
+                  "properties": {
+                    "binding": {
+                      "$ref": "#/$defs/Provenance"
+                    },
+                    "caller": {
+                      "$ref": "#/$defs/EvidenceRef"
+                    },
+                    "match": {
+                      "enum": [
+                        "exact",
+                        "pattern",
+                        "prefix_stripped"
+                      ],
+                      "type": "string"
+                    },
+                    "reads": {
+                      "items": {
+                        "properties": {
+                          "json_path": {
+                            "type": "string"
+                          },
+                          "provenance": {
+                            "$ref": "#/$defs/Provenance"
+                          },
+                          "site": {
+                            "$ref": "#/$defs/EvidenceRef"
+                          }
+                        },
+                        "required": [
+                          "json_path",
+                          "site",
+                          "provenance"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "reads_complete": {
+                      "type": "boolean"
+                    },
+                    "site": {
+                      "$ref": "#/$defs/EvidenceRef"
+                    }
+                  },
+                  "required": [
+                    "site",
+                    "caller",
+                    "binding",
+                    "match",
+                    "reads_complete",
+                    "reads"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "endpoint": {
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "service": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "service",
+                  "key"
+                ],
+                "type": "object"
+              },
+              "providers": {
+                "items": {
+                  "$ref": "#/$defs/EvidenceRef"
+                },
+                "type": "array"
+              },
+              "schemas": {
+                "items": {
+                  "properties": {
+                    "direction": {
+                      "enum": [
+                        "request",
+                        "response",
+                        "payload"
+                      ],
+                      "type": "string"
+                    },
+                    "fields": {
+                      "items": {
+                        "properties": {
+                          "enum_values": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": [
+                              "array",
+                              "null"
+                            ]
+                          },
+                          "json_path": {
+                            "type": "string"
+                          },
+                          "nullable": {
+                            "type": "boolean"
+                          },
+                          "ref": {
+                            "$ref": "#/$defs/EvidenceRef"
+                          },
+                          "required": {
+                            "type": "boolean"
+                          },
+                          "ty": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "json_path",
+                          "ty",
+                          "required",
+                          "nullable",
+                          "ref"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "direction",
+                    "fields"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "endpoint",
+              "providers",
+              "schemas",
+              "consumers"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "required": [
+        "items",
+        "scope"
+      ],
+      "title": "get_contract data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Every ambiguous and unresolved consumer with the candidate endpoints that could match (§9.7).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `list_unresolved` (`docs/CONTRACT_FEDERATION.md` §12). Lists every ambiguous and unresolved consumer with the candidate endpoints that could match it.",
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "list_unresolved input",
+      "type": "object"
+    },
+    "name": "list_unresolved",
+    "outputSchema": {
+      "$defs": {
+        "EvidenceRef": {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "repo",
+            "commit",
+            "path",
+            "line",
+            "text"
+          ],
+          "type": "object"
+        },
+        "Scope": {
+          "additionalProperties": false,
+          "properties": {
+            "configured_only": {
+              "type": "boolean"
+            },
+            "reviewed": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "unreviewed": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "reviewed",
+            "unreviewed",
+            "configured_only"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `list_unresolved` envelope (§10.2).",
+      "properties": {
+        "ambiguous": {
+          "items": {
+            "properties": {
+              "candidates": {
+                "items": {
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "service": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "service",
+                    "key"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "consumer": {
+                "$ref": "#/$defs/EvidenceRef"
+              }
+            },
+            "required": [
+              "consumer",
+              "candidates"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "properties": {
+              "candidates": {
+                "items": {
+                  "properties": {
+                    "endpoint": {
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "service": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "service",
+                        "key"
+                      ],
+                      "type": "object"
+                    },
+                    "reason": {
+                      "enum": [
+                        "same_key",
+                        "pattern",
+                        "prefix_stripped"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "endpoint",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "consumer": {
+                "$ref": "#/$defs/EvidenceRef"
+              },
+              "host": {
+                "type": "string"
+              },
+              "method": {
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  "no_route_in_service",
+                  "no_match"
+                ],
+                "type": "string"
+              },
+              "target_service": {
+                "type": "string"
+              },
+              "template": {
+                "type": "string"
+              },
+              "url_expr": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "consumer",
+              "url_expr",
+              "method",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "required": [
+        "items",
+        "ambiguous",
+        "scope"
+      ],
+      "title": "list_unresolved data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Validate a proposed consumer→endpoint link and emit the YAML for `repos.yaml#bindings` (§12). Pure; creates nothing.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `check_binding` (`docs/CONTRACT_FEDERATION.md` §12). Validates a proposed consumer→endpoint link and emits its `bindings_entry` YAML for `repos.yaml`.",
+      "properties": {
+        "consumer": {
+          "description": "Consumer GlobalId.",
+          "type": "string"
+        },
+        "endpoint": {
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "service": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "service",
+            "key"
+          ],
+          "type": "object"
+        },
+        "snapshot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot",
+        "consumer",
+        "endpoint"
+      ],
+      "title": "check_binding input",
+      "type": "object"
+    },
+    "name": "check_binding",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `check_binding` envelope (§10.2).",
+      "properties": {
+        "bindings_entry": {
+          "description": "YAML snippet for `repos.yaml#bindings`, present when valid=true.",
+          "type": "string"
+        },
+        "method_match": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "items": {
+            "enum": [
+              "not_a_consumer",
+              "method_mismatch",
+              "template_mismatch",
+              "same_service",
+              "already_bound"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "template_match": {
+          "enum": [
+            "exact",
+            "pattern",
+            "prefix_stripped",
+            "none"
+          ],
+          "type": "string"
+        },
+        "valid": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "valid",
+        "reasons",
+        "method_match",
+        "template_match"
+      ],
+      "title": "check_binding data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Provider and consumer changes between two snapshots, classified, with impact paths and coverage (§12). `live` is not allowed as base/head.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `diff_contracts` (`docs/CONTRACT_FEDERATION.md` §12). Both `base` and `head` must be `ready` snapshots; `live` is not allowed.",
+      "properties": {
+        "base": {
+          "description": "Snapshot id (`snap_<hex>`); must be `ready`.",
+          "type": "string"
+        },
+        "cap": {
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "head": {
+          "description": "Snapshot id (`snap_<hex>`); must be `ready`. `live` is invalid (`invalid_argument`, `live_not_supported`).",
+          "type": "string"
+        },
+        "min_impact": {
+          "enum": [
+            "NoKnownImpact",
+            "NeedsInvestigation",
+            "Verified"
+          ],
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "base",
+        "head"
+      ],
+      "title": "diff_contracts input",
+      "type": "object"
+    },
+    "name": "diff_contracts",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `diff_contracts` envelope (§10.2).",
+      "properties": {
+        "changes": {
+          "items": {
+            "properties": {
+              "affected": {
+                "type": "array"
+              },
+              "compat": {
+                "enum": [
+                  "Compatible",
+                  "Breaking",
+                  "BreakingIfRead",
+                  "BreakingIfSent",
+                  "NeedsReview"
+                ],
+                "type": "string"
+              },
+              "direction": {
+                "type": "string"
+              },
+              "endpoint": {
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "service": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "field": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "impact": {
+                "properties": {
+                  "class": {
+                    "enum": [
+                      "Verified",
+                      "NeedsInvestigation",
+                      "NoKnownImpact"
+                    ],
+                    "type": "string"
+                  },
+                  "reasons": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "scope": {
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "paths": {
+                "type": "array"
+              },
+              "side": {
+                "enum": [
+                  "provider",
+                  "consumer"
+                ],
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "compatible_changes": {
+          "type": "integer"
+        },
+        "coverage": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "changes",
+        "compatible_changes",
+        "coverage"
+      ],
+      "title": "diff_contracts data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Impact paths from an endpoint, field, or symbol (§5.2 + §12). Exactly one of endpoint/field/symbol is required.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `trace_impact` (`docs/CONTRACT_FEDERATION.md` §12). Exactly one of endpoint/field/symbol is required.",
+      "properties": {
+        "cap": {
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "depth": {
+          "maximum": 12,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "from": {
+          "description": "Exactly one of `endpoint`, `field`, `symbol` must be set.",
+          "properties": {
+            "endpoint": {
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "service": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "field": {
+              "properties": {
+                "direction": {
+                  "enum": [
+                    "request",
+                    "response",
+                    "payload"
+                  ],
+                  "type": "string"
+                },
+                "endpoint": {
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "service": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "json_path": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "symbol": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "min_confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "snapshot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot",
+        "from"
+      ],
+      "title": "trace_impact input",
+      "type": "object"
+    },
+    "name": "trace_impact",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `trace_impact` envelope (§10.2). Paths sorted by `min_confidence` desc, length asc, leaf id.",
+      "properties": {
+        "paths": {
+          "items": {
+            "properties": {
+              "hops": {
+                "items": {
+                  "properties": {
+                    "edge": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "node": {
+                      "type": "string"
+                    },
+                    "node_type": {
+                      "type": "string"
+                    },
+                    "provenance": {
+                      "type": "object"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "min_confidence": {
+                "type": "number"
+              },
+              "start": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "type": "object"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "paths",
+        "truncated",
+        "scope"
+      ],
+      "title": "trace_impact data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "What the view saw and what it could not resolve (§9.7). With an `endpoint`, `complete` reflects the could-match gate.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `get_coverage` (`docs/CONTRACT_FEDERATION.md` §12).",
+      "properties": {
+        "endpoint": {
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "service": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "snapshot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "get_coverage input",
+      "type": "object"
+    },
+    "name": "get_coverage",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `get_coverage` envelope (§10.2). `complete` is true iff `scope.unreviewed` is empty and (with an endpoint) no unresolved consumer could match it.",
+      "properties": {
+        "ambiguous": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "external": {
+          "items": {
+            "properties": {
+              "calls": {
+                "type": "integer"
+              },
+              "host": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "repos": {
+          "items": {
+            "properties": {
+              "commit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              },
+              "sensors": {
+                "type": "object"
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "schemaless_endpoints": {
+          "items": {
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "service": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "additionalProperties": false,
+          "properties": {
+            "configured_only": {
+              "type": "boolean"
+            },
+            "reviewed": {
+              "items": {
+                "properties": {
+                  "commit": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "dirty": {
+                    "type": "boolean"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "unreviewed": {
+              "items": {
+                "properties": {
+                  "error": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "enum": [
+                      "failed",
+                      "fetch_failed",
+                      "excluded",
+                      "not_ready"
+                    ],
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "reviewed",
+            "unreviewed",
+            "configured_only"
+          ],
+          "type": "object"
+        },
+        "stale_bindings": {
+          "type": "integer"
+        },
+        "unnormalized": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "unresolved_consumers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "complete",
+        "scope",
+        "repos"
+      ],
+      "title": "get_coverage data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Check refs exist at their commit; return context. Bad refs are `exists: false` with a reason, never an error (§12).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `resolve_evidence` (`docs/CONTRACT_FEDERATION.md` §12). `refs` accepts GlobalIds or EvidenceRef texts (`<repo>@<sha>:<path>:<line>`).",
+      "properties": {
+        "context_lines": {
+          "maximum": 20,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "type": "array"
+        },
+        "snapshot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot",
+        "refs"
+      ],
+      "title": "resolve_evidence input",
+      "type": "object"
+    },
+    "name": "resolve_evidence",
+    "outputSchema": {
+      "$defs": {
+        "EvidenceRef": {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "repo",
+            "commit",
+            "path",
+            "line",
+            "text"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `resolve_evidence` envelope (§10.2). A bad ref is `exists: false` with a reason, never an error.",
+      "properties": {
+        "items": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "exists": {
+                "type": "boolean"
+              },
+              "node": {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "node_type": {
+                    "type": "string"
+                  },
+                  "ref": {
+                    "$ref": "#/$defs/EvidenceRef"
+                  }
+                },
+                "type": "object"
+              },
+              "reason": {
+                "enum": [
+                  "unknown_repo",
+                  "commit_not_in_view",
+                  "no_such_node",
+                  "line_mismatch",
+                  "malformed"
+                ],
+                "type": "string"
+              },
+              "ref": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "ref",
+              "exists"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "resolve_evidence data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "A bounded line range of a file at a view's commit (§10.7). Refuses secrets and binaries; reads snapshot content from the mirror's git2 blob.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `read_source` (`docs/CONTRACT_FEDERATION.md` §12). Reads a bounded line range from a file the view's index walked. The §10.7 safety rules apply.",
+      "properties": {
+        "end": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "start": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "snapshot",
+        "repo",
+        "path",
+        "start",
+        "end"
+      ],
+      "title": "read_source input",
+      "type": "object"
+    },
+    "name": "read_source",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `read_source` envelope (§10.2). `end` is clamped to file length; start past end yields empty `text`.",
+      "properties": {
+        "commit": {
+          "type": "string"
+        },
+        "end": {
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "live",
+            "snapshot"
+          ],
+          "type": "string"
+        },
+        "start": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        },
+        "total_lines": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "commit",
+        "path",
+        "start",
+        "end",
+        "total_lines",
+        "text"
+      ],
+      "title": "read_source data",
       "type": "object"
     }
   },

@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "diff_contracts data",
+  "description": "`data` field of the `diff_contracts` envelope (§10.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "side": { "type": "string", "enum": ["provider", "consumer"] },
+          "endpoint": {
+            "type": "object",
+            "properties": {
+              "service": { "type": "string" },
+              "key": { "type": "string" }
+            }
+          },
+          "kind": { "type": "string" },
+          "direction": { "type": "string" },
+          "field": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "value": { "type": "string" },
+          "compat": {
+            "type": "string",
+            "enum": ["Compatible", "Breaking", "BreakingIfRead", "BreakingIfSent", "NeedsReview"]
+          },
+          "impact": {
+            "type": "object",
+            "properties": {
+              "class": { "type": "string", "enum": ["Verified", "NeedsInvestigation", "NoKnownImpact"] },
+              "reasons": { "type": "array", "items": { "type": "string" } },
+              "scope": { "type": "object" }
+            }
+          },
+          "affected": { "type": "array" },
+          "paths": { "type": "array" },
+          "truncated": { "type": "boolean" }
+        }
+      }
+    },
+    "compatible_changes": { "type": "integer" },
+    "coverage": { "type": "object" }
+  },
+  "required": ["changes", "compatible_changes", "coverage"]
+}

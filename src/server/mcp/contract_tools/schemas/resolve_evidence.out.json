@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "resolve_evidence data",
+  "description": "`data` field of the `resolve_evidence` envelope (§10.2). A bad ref is `exists: false` with a reason, never an error.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ref": { "type": "string" },
+          "exists": { "type": "boolean" },
+          "node": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "node_type": { "type": "string" },
+              "name": { "type": "string" },
+              "ref": { "$ref": "#/$defs/EvidenceRef" }
+            }
+          },
+          "snippet": { "type": ["string", "null"] },
+          "reason": {
+            "type": "string",
+            "enum": ["unknown_repo", "commit_not_in_view", "no_such_node", "line_mismatch", "malformed"]
+          }
+        },
+        "required": ["ref", "exists"]
+      }
+    }
+  },
+  "required": ["items"],
+  "$defs": {
+    "EvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id":     { "type": "string" },
+        "repo":   { "type": "string" },
+        "commit": { "type": "string" },
+        "path":   { "type": "string" },
+        "line":   { "type": "integer" },
+        "text":   { "type": "string" }
+      },
+      "required": ["id", "repo", "commit", "path", "line", "text"]
+    }
+  }
+}

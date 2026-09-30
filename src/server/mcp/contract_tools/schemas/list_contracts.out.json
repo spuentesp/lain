@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "list_contracts data",
+  "description": "`data` field of the `list_contracts` envelope (§10.2). Endpoints sorted by `(service, key)`.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "object",
+            "properties": {
+              "service": { "type": "string" },
+              "key": { "type": "string" }
+            },
+            "required": ["service", "key"]
+          },
+          "providers": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/EvidenceRef" }
+          },
+          "has_schema": { "type": "boolean" },
+          "bound_consumers": { "type": "integer" }
+        },
+        "required": ["endpoint", "providers", "has_schema", "bound_consumers"]
+      }
+    },
+    "cursor": { "type": "string" },
+    "scope": { "$ref": "#/$defs/Scope" }
+  },
+  "required": ["items", "scope"],
+  "$defs": {
+    "EvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id":     { "type": "string" },
+        "repo":   { "type": "string" },
+        "commit": { "type": "string" },
+        "path":   { "type": "string" },
+        "line":   { "type": "integer" },
+        "text":   { "type": "string" },
+        "dirty":  { "type": "boolean" }
+      },
+      "required": ["id", "repo", "commit", "path", "line", "text"]
+    },
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repo":   { "type": "string" },
+              "commit": { "type": ["string", "null"] },
+              "dirty":  { "type": "boolean" }
+            },
+            "required": ["repo"]
+          }
+        },
+        "unreviewed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repo":   { "type": "string" },
+              "reason": { "type": "string", "enum": ["failed", "fetch_failed", "excluded", "not_ready"] },
+              "error":  { "type": "string" }
+            },
+            "required": ["repo", "reason"]
+          }
+        },
+        "configured_only": { "type": "boolean", "enum": [true] }
+      },
+      "required": ["reviewed", "unreviewed", "configured_only"]
+    }
+  }
+}

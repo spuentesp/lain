@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "list_unresolved data",
+  "description": "`data` field of the `list_unresolved` envelope (§10.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "consumer": { "$ref": "#/$defs/EvidenceRef" },
+          "url_expr": { "type": "string" },
+          "method": { "type": "string" },
+          "template": { "type": "string" },
+          "host": { "type": "string" },
+          "reason": { "type": "string", "enum": ["no_route_in_service", "no_match"] },
+          "target_service": { "type": "string" },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "endpoint": {
+                  "type": "object",
+                  "properties": {
+                    "service": { "type": "string" },
+                    "key": { "type": "string" }
+                  },
+                  "required": ["service", "key"]
+                },
+                "reason": { "type": "string", "enum": ["same_key", "pattern", "prefix_stripped"] }
+              },
+              "required": ["endpoint", "reason"]
+            }
+          }
+        },
+        "required": ["consumer", "url_expr", "method", "reason"]
+      }
+    },
+    "ambiguous": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "consumer": { "$ref": "#/$defs/EvidenceRef" },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "service": { "type": "string" },
+                "key": { "type": "string" }
+              },
+              "required": ["service", "key"]
+            }
+          }
+        },
+        "required": ["consumer", "candidates"]
+      }
+    },
+    "cursor": { "type": "string" },
+    "scope": { "$ref": "#/$defs/Scope" }
+  },
+  "required": ["items", "ambiguous", "scope"],
+  "$defs": {
+    "EvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id":     { "type": "string" },
+        "repo":   { "type": "string" },
+        "commit": { "type": "string" },
+        "path":   { "type": "string" },
+        "line":   { "type": "integer" },
+        "text":   { "type": "string" }
+      },
+      "required": ["id", "repo", "commit", "path", "line", "text"]
+    },
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewed": { "type": "array", "items": { "type": "object" } },
+        "unreviewed": { "type": "array", "items": { "type": "object" } },
+        "configured_only": { "type": "boolean" }
+      },
+      "required": ["reviewed", "unreviewed", "configured_only"]
+    }
+  }
+}

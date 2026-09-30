@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "get_contract data",
+  "description": "`data` field of the `get_contract` envelope (§10.2). `items` is keyed per service.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "object",
+            "properties": {
+              "service": { "type": "string" },
+              "key": { "type": "string" }
+            },
+            "required": ["service", "key"]
+          },
+          "providers": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/EvidenceRef" }
+          },
+          "schemas": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "direction": { "type": "string", "enum": ["request", "response", "payload"] },
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "json_path": { "type": "string" },
+                      "ty": { "type": "string" },
+                      "required": { "type": "boolean" },
+                      "nullable": { "type": "boolean" },
+                      "enum_values": {
+                        "type": ["array", "null"],
+                        "items": { "type": "string" }
+                      },
+                      "ref": { "$ref": "#/$defs/EvidenceRef" }
+                    },
+                    "required": ["json_path", "ty", "required", "nullable", "ref"]
+                  }
+                }
+              },
+              "required": ["direction", "fields"]
+            }
+          },
+          "consumers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "site": { "$ref": "#/$defs/EvidenceRef" },
+                "caller": { "$ref": "#/$defs/EvidenceRef" },
+                "binding": { "$ref": "#/$defs/Provenance" },
+                "match": { "type": "string", "enum": ["exact", "pattern", "prefix_stripped"] },
+                "reads_complete": { "type": "boolean" },
+                "reads": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "json_path": { "type": "string" },
+                      "site": { "$ref": "#/$defs/EvidenceRef" },
+                      "provenance": { "$ref": "#/$defs/Provenance" }
+                    },
+                    "required": ["json_path", "site", "provenance"]
+                  }
+                }
+              },
+              "required": ["site", "caller", "binding", "match", "reads_complete", "reads"]
+            }
+          }
+        },
+        "required": ["endpoint", "providers", "schemas", "consumers"]
+      }
+    },
+    "scope": { "$ref": "#/$defs/Scope" }
+  },
+  "required": ["items", "scope"],
+  "$defs": {
+    "EvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id":     { "type": "string" },
+        "repo":   { "type": "string" },
+        "commit": { "type": "string" },
+        "path":   { "type": "string" },
+        "line":   { "type": "integer" },
+        "text":   { "type": "string" },
+        "dirty":  { "type": "boolean" }
+      },
+      "required": ["id", "repo", "commit", "path", "line", "text"]
+    },
+    "Provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["static", "heuristic", "runtime", "confirmed"] },
+        "detector": { "type": "string" },
+        "source": { "type": "string" },
+        "confidence": { "type": "number" }
+      },
+      "required": ["kind", "confidence"]
+    },
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewed": { "type": "array", "items": { "type": "object" } },
+        "unreviewed": { "type": "array", "items": { "type": "object" } },
+        "configured_only": { "type": "boolean" }
+      },
+      "required": ["reviewed", "unreviewed", "configured_only"]
+    }
+  }
+}

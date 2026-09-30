@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "check_binding data",
+  "description": "`data` field of the `check_binding` envelope (§10.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "valid": { "type": "boolean" },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["not_a_consumer", "method_mismatch", "template_mismatch", "same_service", "already_bound"]
+      }
+    },
+    "method_match": { "type": "boolean" },
+    "template_match": {
+      "type": "string",
+      "enum": ["exact", "pattern", "prefix_stripped", "none"]
+    },
+    "bindings_entry": {
+      "type": "string",
+      "description": "YAML snippet for `repos.yaml#bindings`, present when valid=true."
+    }
+  },
+  "required": ["valid", "reasons", "method_match", "template_match"]
+}
