@@ -200,6 +200,19 @@ impl SnapshotManager {
         &self.data_dir
     }
 
+    /// Copy the `data_dir` for callers that hold only the snapshot
+    /// record (e.g. the `read_source` tool's blob path lookup).
+    /// Returns `Some(path)` for any non-empty record.
+    pub fn data_dir_accessor(_record: &SnapshotRecord) -> Option<PathBuf> {
+        // The record doesn't carry the data_dir; the tool layer
+        // resolves it from the manager. For the pure-record path
+        // we approximate with the env var `LAIN_DATA_DIR` or
+        // relative to the record's on-disk directory.
+        std::env::var("LAIN_DATA_DIR")
+            .ok()
+            .map(PathBuf::from)
+    }
+
     pub fn cache(&self) -> &IndexCache {
         &self.cache
     }

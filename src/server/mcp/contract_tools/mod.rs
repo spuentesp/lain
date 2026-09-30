@@ -49,6 +49,7 @@
 pub mod analysis;
 pub mod contracts;
 pub mod envelope;
+pub mod evidence;
 pub mod paging;
 pub mod scope;
 pub mod services;

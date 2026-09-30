@@ -436,6 +436,13 @@ impl RepoIndex {
         self.source.as_ref()
     }
 
+    /// The repo's local source path (the `workspace_dir`,
+    /// `local_clone` checkout, or workspace root). `read_source` on
+    /// `live` reads the file from this path.
+    pub fn local_path(&self) -> &Path {
+        self.source.local_path()
+    }
+
     pub fn db(&self) -> &GraphDatabase {
         &self.db
     }
