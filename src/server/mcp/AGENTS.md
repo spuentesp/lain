@@ -24,7 +24,7 @@ The short version:
 - `federation_tools/dto.rs` is being emptied. Don't add a DTO that
   mirrors `schema::*`; extend the schema type instead.
   `scripts/check-no-mirror-dtos.py` rejects it.
-- Contract tools (PR 16+) live in `contract_tools/`. They ride
+- Contract tools (PR 16+, PR 13) live in `contract_tools/`. They ride
   `ContractToolEntry` — an `inventory::collect!`'d struct that
   pairs a tool name with an async handler
   (`BoxFuture<'static, Result<ToolOutcome, String>>`). Register
@@ -32,9 +32,20 @@ The short version:
   Dispatch lives in `invoke_contract_inventory` inside
   `handler.rs::dispatch_tool_call` (right after `invoke_inventory`).
   **Don't add a new match arm to `dispatch_tool_call`** —
-  `scripts/check-mcp-dispatch-shape.py` rejects it. The PR 16
-  contract tools (`list_services`, `get_service`) are the only
-  current entries; PR 13 will add the rest of the table.
+  `scripts/check-mcp-dispatch-shape.py` rejects it. The 13
+  contract tools (`list_services`, `get_service`,
+  `prepare_snapshot`, `get_snapshot`, `list_contracts`,
+  `get_contract`, `list_unresolved`, `check_binding`,
+  `diff_contracts`, `trace_impact`, `get_coverage`,
+  `resolve_evidence`, `read_source`) are the full table;
+  follow the existing file split (`services.rs`, `snapshots.rs`,
+  `contracts.rs`, `analysis.rs`, `evidence.rs`) when adding a
+  new tool. Per-tool JSON Schemas live at
+  `contract_tools/schemas/<tool>.{in,out}.json` and are loaded
+  with `include_str!` from `CONTRACT_TOOL_DEFS` in
+  `mcp/definitions.rs`. Output schemas are validated against
+  `tests/fixtures/contracts/golden/envelope.schema.json` by the
+  dev-only `jsonschema` crate in `tests/contracts_golden.rs`.
 - `handler.rs::handle_request` is an 800-line HTTP router god
   function. Don't add new routes to it without checking whether
   the request would fit better as an MCP tool — most "HTTP

@@ -346,3 +346,113 @@ run with:
 ```bash
 cargo test --lib federation::config
 ```
+
+---
+
+## Contract-federation sections (PR 7+, PR 13)
+
+These optional top-level sections live alongside `data_dir` and
+`repos` and are validated by `ContractFederationConfig::validate`
+(`src/server/federation/contracts/config.rs`). Every malformed
+value fails config load; on hot reload the previous config stays
+active. Sensors are config-free (§3); the joiner is the only place
+that reads these sections.
+
+### `services` (list)
+
+A service is a declared name for a unit of join work; the joiner
+routes every contract node to its service by the longest matching
+`paths` prefix under the service's `repo`.
+
+```yaml
+services:
+  - name: orders                # required; unique; [a-z0-9][a-z0-9_-]*
+    repo: orders                # required; a configured repo id
+    paths: []                   # repo-relative prefixes; [] = whole repo
+    hosts: [orders, orders.svc.cluster.local]   # lower-case; wildcards ok
+    env: [ORDERS_URL, ORDERS_BASE_URL]          # env names that resolve to this host
+    base_path: /api             # prefix the service is reached under
+    route_prefixes:             # cross-file router mounts (§6.2)
+      - { path: src/routers/admin.py, prefix: /admin }
+  - { name: shipping, repo: platform, paths: [services/shipping/] }
+  - { name: inventory, repo: platform, paths: [services/inventory/] }
+```
+
+### `http_clients` (list)
+
+Wrapper-client candidates the joiner keeps (§6.3 / §7.3 rule 1).
+A candidate that matches no entry is discarded.
+
+```yaml
+http_clients:
+  - { call: "ordersClient.{method}", service: orders }
+  - { call: "api.fetchOrder",        service: orders, method: GET, path_arg: 0 }
+```
+
+`path_arg > 5` is a config error.
+
+### `generic_keys` (list of strings)
+
+Additional keys treated as generic health-check endpoints on top
+of the built-in list (`GET /`, `GET /health`, `GET /ready`, …).
+
+```yaml
+generic_keys: ["GET /internal/ping"]
+```
+
+### `schemas` (list, PR 15 / stretch)
+
+JSON-Schema-file mappings for topic payloads:
+
+```yaml
+schemas:
+  - { topic: "kafka/orders.created", repo: orders, file: schemas/order_created.json }
+```
+
+### `bindings` (list)
+
+Person-confirmed consumer → provider links (§7.6). A binding's
+`(repo, path, symbol, key)` matches one `HttpClientCall` in the
+consumer repo and joins it to the named endpoint with
+`Confirmed { source: "repos.yaml#bindings[<i>]" }` provenance.
+Bindings that match no consumer or whose endpoint does not exist
+appear in `coverage.stale_bindings` and contribute nothing.
+
+```yaml
+bindings:
+  - consumer:
+      repo: billing
+      path: src/main.py
+      symbol: create_order
+      key: "http:POST /api/orders"
+    provider:
+      service: orders
+      key: "http:POST /api/orders"
+```
+
+The MCP tool `check_binding` (§12) validates a proposed link and
+emits the YAML above for `repos.yaml` once the operator confirms it.
+
+### Validation errors (PR 7 §7.1)
+
+The config load fails with a precise message for each of:
+
+- Unknown `repo` in any section.
+- Duplicate service `name`.
+- Declared service whose name equals another repo's id.
+- Overlapping `paths` within one repo.
+- `http_clients.service` or `bindings.provider.service` that is
+  neither declared nor implicit.
+- Same `env` name listed by two services.
+- Same exact `hosts` entry listed by two services.
+- A `key` that does not parse as `<METHOD> <template>` or that does
+  not survive normalization unchanged.
+- `path_arg > 5`.
+- Upper-case host or service-name entries.
+
+The blake3 hash of the canonical JSON of these sections is the
+snapshot's `config_hash` (§8.4 / §13): a `diff_contracts` call
+that compares snapshots with different `bindings:` raises
+`analyzer_mismatch` (different `analyzer_version`) or
+`invalid_argument` reason `config_mismatch` (different
+`config_hash`).

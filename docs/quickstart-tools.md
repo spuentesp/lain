@@ -434,6 +434,37 @@ are documented where they are central to the workflow they belong to:
   `get_repo_info`, `get_federation_health`, `search_org`,
   `get_cross_repo_blast_radius` (pass `repo_id` to disambiguate; the
   old `_for_repo` variant remains as a dispatch alias).
+- **Contract federation** ([`CONTRACT_FEDERATION.md`](CONTRACT_FEDERATION.md)):
+  the `contracts` package adds 13 read-only tools in five groups
+  (§12): `list_services`, `get_service`, `prepare_snapshot`,
+  `get_snapshot`, `list_contracts`, `get_contract`,
+  `list_unresolved`, `check_binding`, `diff_contracts`,
+  `trace_impact`, `get_coverage`, `resolve_evidence`, `read_source`.
+  Load it with `LAIN_TOOL_PROFILE=contracts` or
+  `load_package("contracts")`. PR 13 is the release surface; see
+  the migration note in `CHANGELOG.md` for the recovery order
+  (`reindex` → enable package → use).
+
+  A typical PR analysis flow:
+
+  ```text
+  1. `list_services` → pick `<pr-service>`.
+  2. `get_service(<pr-service>)` → see consumers + entry points.
+  3. `prepare_snapshot({ repos: { <pr-service>: <merge-base sha> }, wait_ms })` → base id.
+  4. `prepare_snapshot({ from: base, repos: { <pr-service>: <head sha> }, wait_ms })` → head id.
+  5. `diff_contracts(base, head)` → changes + impact paths + coverage.
+  6. For `NeedsInvestigation`, drill in: `list_unresolved`,
+     `get_contract`, `get_service`, `trace_impact`, `read_source`.
+  7. Propose a confirmed link: `check_binding` returns the YAML
+     snippet for `repos.yaml#bindings`. Once committed, the next
+     snapshot has a new `config_hash` and treats the link as
+     `Confirmed`.
+  ```
+
+  Errors follow §13 with the required `details` shape. `read_source`
+  reads only files the view's index walked and refuses secrets
+  (`.env`, `*.pem`, `*.key`, `id_rsa*`, …) and binaries (NUL in the
+  first 8 KiB).
 - **Workspaces** ([`FEDERATION.md`](FEDERATION.md) §Workspaces):
   `list_workspaces`, `get_active_workspace`, `get_workspace`.
 - **Presence** ([`multiplayer.md`](multiplayer.md)): `register_agent`,

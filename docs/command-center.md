@@ -99,6 +99,7 @@ flowchart TB
         OVW["Overview<br/>get_health + get_federation_health"]
         GRAPH["Graph<br/>D3 force-directed"]
         REPOSTAB["Repos<br/>id, path, health, counts"]
+        SERVICES["Services (PR 16/13)<br/>list_services + get_service"]
         Q["Query<br/>query_graph form"]
         TOOLS["Tools<br/>auto-generated form per tool<br/>(from inputSchema)"]
     end
@@ -155,6 +156,13 @@ flowchart TB
 - **Repos** — *(see [Tour step 3](#tour) for what this looks like)* per-repo table (id, path, health, node count, edge count).
 - **Repos tab** — per-repo table with id, path, health, node count, edge
   count. Each row uses `get_repo_info` for the live numbers.
+- **Services (PR 16/13)** — service→consumer view from the `contracts`
+  package. Calls `list_services` for the roster and `get_service`
+  for the consumer map + `used_by` walk (§10.9). Clicking a
+  service draws a services-as-nodes graph with one edge per
+  consumer→provider pair, weighted by call-site count, and
+  surfaces the §9.6 scope sentence under the graph. Requires
+  `LAIN_TOOL_PROFILE=contracts` (or `load_package("contracts")`).
 - **Query** — *(see [Tour step 4](#tour) for what this looks like)* runs `query_graph` against the federation.
 - **Query tab** — runs a `query_graph` call against the federation. Pick a
   repo, an op (currently `find`), a node type, and a limit. The JSON result
