@@ -338,10 +338,11 @@ fn rule_3_target_service_via_http_clients_binds_with_static_confidence() {
     assert_eq!(out.binds.len(), 1);
     let edge = &out.binds[0];
     assert!(
-        matches!(edge.provenance, EdgeProvenance::Heuristic { ref detector, confidence }
-            if detector == "static" && (confidence - 1.0).abs() < f32::EPSILON),
-        "rule 3: known method on static host → Heuristic(static) 1.0, got {:?}",
-        edge.provenance
+        matches!(edge.provenance, EdgeProvenance::Static { .. })
+            && (edge.confidence - 1.0).abs() < f32::EPSILON,
+        "rule 3: known method on a known target → Static 1.0 (§7.3), got {:?} @ {}",
+        edge.provenance,
+        edge.confidence
     );
 }
 
@@ -372,10 +373,11 @@ fn rule_3_target_service_via_hosts_only() {
     let cfg = default_config();
     let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1, "rule 3 via hosts only");
-    assert!(matches!(
-        out.binds[0].provenance,
-        EdgeProvenance::Heuristic { ref detector, .. } if detector == "static"
-    ));
+    assert!(
+        matches!(out.binds[0].provenance, EdgeProvenance::Static { .. }),
+        "rule 3 via hosts → Static 1.0 (§7.3), got {:?}",
+        out.binds[0].provenance
+    );
 }
 
 #[test]

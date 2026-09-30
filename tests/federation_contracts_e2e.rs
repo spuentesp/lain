@@ -1296,3 +1296,403 @@ async fn pr13_federation_disabled_when_no_fed() {
         json!("federation_disabled")
     );
 }
+
+// ─── §15.2 diff scenarios over the T1 fixture (review r1, F1) ────────
+//
+// Ground truth: `tests/fixtures/contracts/ground_truth.yaml`
+// (scenarios 1, 2, 5, 5b, 6, 11, 12, 19, 20, 21, 22) and the §15.2
+// table in `docs/CONTRACT_FEDERATION.md`. One base snapshot at the
+// fixture's `base` tag; each scenario derives `from: <base>` with its
+// scenario tag as the override and runs `diff_contracts` through the
+// same handler path the MCP dispatcher uses.
+
+#[path = "support/contracts_snapshot_harness.rs"]
+mod snap_harness;
+
+use snap_harness as harness;
+
+async fn run_diff(ctx: &McpContext<'_>, base: &str, head: &str) -> Value {
+    let args = json!({"base": base, "head": head, "cap": 100});
+    let outcome = diff_contracts_handle(ctx, args).await.unwrap();
+    assert!(
+        !outcome.is_error,
+        "diff_contracts({base}, {head}) error: {:#?}",
+        outcome.structured
+    );
+    outcome.structured["data"].clone()
+}
+
+fn changes_of(data: &Value) -> Vec<Value> {
+    data["changes"].as_array().cloned().unwrap_or_default()
+}
+
+fn find_change<'a>(data: &'a Value, kind: &str) -> &'a Value {
+    data["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .find(|c| c["kind"] == json!(kind))
+        .unwrap_or_else(|| panic!("expected a {kind} change, got: {data:#?}"))
+}
+
+/// Shared response models can change several endpoints at once
+/// (e.g. `s1-remove-customer-id` touches every endpoint whose
+/// schema references the order response); the ground truth pins the
+/// change on one specific endpoint key.
+fn find_endpoint_change<'a>(data: &'a Value, kind: &str, key: &str) -> &'a Value {
+    data["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .find(|c| c["kind"] == json!(kind) && c["endpoint"]["key"] == json!(key))
+        .unwrap_or_else(|| panic!("expected {kind} on {key}, got: {data:#?}"))
+}
+
+fn assert_affected(change: &Value, service: &str, class: &str) {
+    let affected = change["affected"].as_array().expect("affected array");
+    assert!(
+        affected
+            .iter()
+            .any(|a| a["service"] == json!(service) && a["class"] == json!(class)),
+        "affected must contain {service} → {class}: {affected:#?}"
+    );
+}
+
+fn assert_reason(change: &Value, reason: &str) {
+    let reasons = change["impact"]["reasons"]
+        .as_array()
+        .expect("impact.reasons array");
+    assert!(
+        reasons.iter().any(|r| r == &json!(reason)),
+        "impact.reasons must contain {reason}: {reasons:#?}"
+    );
+}
+
+/// The base fixture reviews all four configured repos (§9.6 scope).
+fn assert_scope_complete(data: &Value) {
+    assert_eq!(
+        data["coverage"]["complete"],
+        json!(true),
+        "coverage: {data:#?}"
+    );
+    let scope = &data["coverage"]["scope"];
+    let mut reviewed: Vec<String> = scope["reviewed"]
+        .as_array()
+        .expect("reviewed array")
+        .iter()
+        .map(|r| r["repo"].as_str().unwrap_or("").to_string())
+        .collect();
+    reviewed.sort();
+    assert_eq!(
+        reviewed,
+        vec![
+            "billing".to_string(),
+            "orders".to_string(),
+            "platform".to_string(),
+            "reports".to_string(),
+        ],
+        "scope.reviewed: {scope:#?}"
+    );
+    assert_eq!(scope["unreviewed"], json!([]), "scope.unreviewed");
+}
+
+/// §15.2 scenario 1: "a path reaches `reports`" — some hop of some
+/// path on the change lands in the `reports` repo. The shared
+/// response model means several endpoints can carry the same
+/// `kind`; the ground truth pins the change on one key.
+fn path_reaches(data: &Value, kind: &str, key: &str, repo: &str) {
+    let change = find_endpoint_change(data, kind, key);
+    let prefix = format!("{repo}:");
+    let reaches = change["paths"]
+        .as_array()
+        .expect("paths array")
+        .iter()
+        .any(|p| {
+            p["hops"].as_array().map(|hops| {
+                hops.iter().any(|h| {
+                    h["node"]
+                        .as_str()
+                        .map(|n| n.starts_with(&prefix))
+                        .unwrap_or(false)
+                })
+            }) == Some(true)
+        });
+    assert!(
+        reaches,
+        "a path of the {kind} change must reach {repo}: {:#?}",
+        change["paths"]
+    );
+}
+
+#[tokio::test]
+async fn pr13_diff_contracts_ground_truth_scenarios_over_t1_fixture() {
+    let fix = harness::build_fixture();
+    let mgr = harness::manager(&fix.root);
+    let config = harness::contract_config(&fix.root);
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&mgr, &status);
+
+    // One shared base: all four repos at the `base` tag.
+    let base_repos = harness::all_repos_at(&fix.root, "base");
+    let base_id = harness::prepare_ready(&mgr, base_repos.clone(), None, config.clone()).await;
+
+    // Scenario 5b's base: billing already at `s5b-read-status`.
+    let mut base5b_repos = base_repos;
+    base5b_repos.insert(
+        "billing".to_string(),
+        harness::rev_parse(&fix.root, "billing", "s5b-read-status"),
+    );
+    let base5b_id = harness::prepare_ready(&mgr, base5b_repos, None, config.clone()).await;
+
+    // ── 1: orders removes customer_id from the response ────────────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("orders", "s1-remove-customer-id")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    let change = find_endpoint_change(&data, "FieldRemoved", "http:GET /api/orders/{}");
+    assert_eq!(change["endpoint"]["service"], json!("orders"));
+    assert_eq!(change["direction"], json!("response"));
+    assert_eq!(change["field"], json!("customer_id"));
+    assert_eq!(change["compat"], json!("BreakingIfRead"));
+    assert_eq!(
+        change["impact"]["class"],
+        json!("Verified"),
+        "scenario 1 class: {change:#?}"
+    );
+    assert_affected(change, "billing", "Verified");
+    assert_eq!(data["compatible_changes"], json!(0));
+    assert_scope_complete(&data);
+    // §15.2: "a path reaches `reports`" (traced in the base view).
+    path_reaches(&data, "FieldRemoved", "http:GET /api/orders/{}", "reports");
+
+    // ── 2: orders adds optional currency — not reported ────────────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("orders", "s2-add-currency")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    // §15.2 row 2: the compatible optional-field add is *not
+    // reported*, and `compatible_changes = 1`. The ground-truth
+    // YAML spells this `changes: []`, but §9.2's file-level
+    // `ChangedWithoutSchema` rule also fires here: every orders
+    // scenario rewrites `src/main.rs`, which holds both the
+    // touched handlers and the schemaless `GET /api/orders/{}/label`
+    // route. Assert the row's actual claim — no field change is
+    // reported — rather than literal emptiness.
+    assert!(
+        changes_of(&data).iter().all(|c| {
+            c["field"] != json!("currency")
+                && !matches!(
+                    c["kind"].as_str(),
+                    Some(
+                        "FieldAdded"
+                            | "FieldRemoved"
+                            | "FieldRenamed"
+                            | "FieldTypeChanged"
+                            | "RequirednessChanged"
+                            | "NullabilityChanged"
+                            | "EnumValueAdded"
+                            | "EnumValueRemoved"
+                    )
+                )
+        }),
+        "scenario 2: the compatible field add must not be reported: {data:#?}"
+    );
+    assert_eq!(data["compatible_changes"], json!(1));
+
+    // ── 5: orders adds enum value `refunded`; billing unread ───────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("orders", "s5-enum-value")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    let change = find_endpoint_change(&data, "EnumValueAdded", "http:GET /api/orders/{}");
+    assert_eq!(change["endpoint"]["service"], json!("orders"));
+    assert_eq!(change["direction"], json!("response"));
+    assert_eq!(change["field"], json!("status"));
+    assert_eq!(change["compat"], json!("NeedsReview"));
+    assert_eq!(change["impact"]["class"], json!("NoKnownImpact"));
+    // §9.6: every NoKnownImpact carries its scope.
+    assert!(
+        change["impact"]["scope"]["reviewed"]
+            .as_array()
+            .map(|a| a.len() == 4)
+            .unwrap_or(false),
+        "NI must carry the reviewed scope: {change:#?}"
+    );
+
+    // ── 5b: same, with billing reading `status` ────────────────────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base5b_id,
+        &[("orders", "s5-enum-value")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base5b_id, &head).await;
+    let change = find_endpoint_change(&data, "EnumValueAdded", "http:GET /api/orders/{}");
+    assert_eq!(change["impact"]["class"], json!("NeedsInvestigation"));
+    assert_reason(change, "needs_review");
+    assert_affected(change, "billing", "NeedsInvestigation");
+
+    // ── 6: /api/orders/{} → /api/order/{}, same handler ────────────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("orders", "s6-rename-path")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    let change = find_endpoint_change(&data, "PathChanged", "http:GET /api/order/{}");
+    assert_eq!(change["endpoint"]["service"], json!("orders"));
+    assert_eq!(change["from"], json!("http:GET /api/orders/{}"));
+    assert_eq!(change["to"], json!("http:GET /api/order/{}"));
+    assert_eq!(change["compat"], json!("Breaking"));
+    assert_eq!(change["impact"]["class"], json!("Verified"));
+    assert_affected(change, "billing", "Verified");
+
+    // ── 11: customer_id → customerId, same type ────────────────────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("orders", "s11-rename-field")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    // §15.2: "One `FieldRenamed`" — a same-type rename must not
+    // decompose into a remove + add pair.
+    assert!(
+        changes_of(&data)
+            .iter()
+            .all(|c| c["kind"] != json!("FieldRemoved") && c["kind"] != json!("FieldAdded")),
+        "scenario 11: rename must stay one FieldRenamed: {data:#?}"
+    );
+    let change = find_endpoint_change(&data, "FieldRenamed", "http:GET /api/orders/{}");
+    assert_eq!(change["endpoint"]["service"], json!("orders"));
+    assert_eq!(change["direction"], json!("response"));
+    assert_eq!(change["from"], json!("customer_id"));
+    assert_eq!(change["to"], json!("customerId"));
+    assert_eq!(change["compat"], json!("BreakingIfRead"));
+    assert_eq!(change["impact"]["class"], json!("Verified"));
+    assert_affected(change, "billing", "Verified");
+
+    // ── 12: rename with a type change → FieldRemoved + FieldAdded ──
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("orders", "s12-rename-retype")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    // §15.2: "FieldRemoved + FieldAdded" — the type change splits
+    // the rename into a pair on the changed endpoint.
+    let removed = find_endpoint_change(&data, "FieldRemoved", "http:GET /api/orders/{}");
+    assert_eq!(removed["field"], json!("customer_id"));
+    assert_eq!(removed["compat"], json!("BreakingIfRead"));
+    assert_eq!(removed["impact"]["class"], json!("Verified"));
+    assert_affected(removed, "billing", "Verified");
+    let added = find_endpoint_change(&data, "FieldAdded", "http:GET /api/orders/{}");
+    assert_eq!(added["field"], json!("customerId"));
+    assert_eq!(added["compat"], json!("BreakingIfRead"));
+    assert_eq!(added["impact"]["class"], json!("Verified"));
+    assert_affected(added, "billing", "Verified");
+
+    // ── 19: optional request field `note` type change ──────────────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("orders", "s19-optional-request-type")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    let change = find_endpoint_change(&data, "FieldTypeChanged", "http:POST /api/orders");
+    assert_eq!(change["endpoint"]["service"], json!("orders"));
+    assert_eq!(change["direction"], json!("request"));
+    assert_eq!(change["field"], json!("note"));
+    assert_eq!(change["compat"], json!("BreakingIfSent"));
+    assert_eq!(change["impact"]["class"], json!("NeedsInvestigation"));
+    assert_reason(change, "sends_not_modeled");
+
+    // ── 20: billing starts reading `discount` ──────────────────────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("billing", "s20-read-discount")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    let change = find_endpoint_change(&data, "ConsumerFieldUnmatched", "http:GET /api/orders/{}");
+    assert_eq!(change["side"], json!("consumer"));
+    assert_eq!(change["endpoint"]["service"], json!("orders"));
+    assert_eq!(change["endpoint"]["key"], json!("http:GET /api/orders/{}"));
+    assert_eq!(change["field"], json!("discount"));
+    assert_eq!(change["compat"], json!("Breaking"));
+    assert_eq!(change["impact"]["class"], json!("Verified"));
+    assert_affected(change, "billing", "Verified");
+    assert_eq!(change["consumer"]["symbol"], json!("build_invoice"));
+
+    // ── 21: code-only route handler changed ────────────────────────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[("orders", "s21-code-only-handler")],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    let change = find_endpoint_change(
+        &data,
+        "ChangedWithoutSchema",
+        "http:GET /api/orders/{}/label",
+    );
+    assert_eq!(change["endpoint"]["service"], json!("orders"));
+    assert_eq!(change["compat"], json!("NeedsReview"));
+    assert_eq!(change["impact"]["class"], json!("NeedsInvestigation"));
+    assert_reason(change, "no_schema");
+    assert_affected(change, "billing", "NeedsInvestigation");
+
+    // ── 22: billing caches the response, then scenario 1 ───────────
+    let head = harness::derive_head(
+        &mgr,
+        config.clone(),
+        &fix.root,
+        &base_id,
+        &[
+            ("orders", "s1-remove-customer-id"),
+            ("billing", "s22-cache-response"),
+        ],
+    )
+    .await;
+    let data = run_diff(&ctx, &base_id, &head).await;
+    let change = find_endpoint_change(&data, "FieldRemoved", "http:GET /api/orders/{}");
+    assert_eq!(change["field"], json!("customer_id"));
+    assert_eq!(change["compat"], json!("BreakingIfRead"));
+    assert_eq!(change["impact"]["class"], json!("NeedsInvestigation"));
+    assert_reason(change, "reads_not_fully_traced");
+    assert_affected(change, "billing", "NeedsInvestigation");
+}

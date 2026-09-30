@@ -947,24 +947,45 @@ fn static_provenance_ref() -> EdgeProvenance {
 }
 
 fn bound_field_for_call<'a>(
-    _idx: &'a ContractIndex,
-    _ref_id: &GlobalId,
-    _call_id: &GlobalId,
+    idx: &'a ContractIndex,
+    ref_id: &GlobalId,
+    call_id: &GlobalId,
 ) -> Option<&'a crate::federation::contracts::index::BoundField> {
-    // PR 9 left the field-join bookkeeping on
-    // `ContractIndex::field_refs` keyed by `FieldRef` id. The
-    // §9.5 reads set lives on the surface (`ContractSurface`)
-    // rather than the index — the joiner's `bound_fields` is
-    // surfaced via the call-side resolution. We surface the
-    // FieldRef path itself here.
-    None
+    // The FieldRef must `ReadsFrom` this call (§7.5); among its
+    // bound fields prefer one whose endpoint this call actually
+    // binds to, falling back to the first bound field.
+    let fr = idx.field_refs.get(ref_id)?;
+    if fr.call != call_id.as_str() {
+        return None;
+    }
+    let call = idx.consumers.get(call_id)?;
+    fr.bound_fields
+        .iter()
+        .find(|b| call.bound_endpoints.contains(&b.endpoint))
+        .or_else(|| fr.bound_fields.first())
 }
 
 fn field_from_bound_field(
     _idx: &ContractIndex,
-    _b: &crate::federation::contracts::index::BoundField,
+    b: &crate::federation::contracts::index::BoundField,
 ) -> Option<EdgeProvenance> {
-    None
+    // §7.5: exact-path reads bind `Static` at the capped confidence;
+    // suffix/ambiguous joins stay heuristic with the §7.5 detectors.
+    if (b.confidence - 1.0).abs() < f32::EPSILON {
+        Some(EdgeProvenance::Static {
+            source: crate::schema::StaticSource::TreeSitter,
+        })
+    } else if (b.confidence - 0.6).abs() < f32::EPSILON {
+        Some(EdgeProvenance::Heuristic {
+            detector: "field_suffix".into(),
+            confidence: b.confidence,
+        })
+    } else {
+        Some(EdgeProvenance::Heuristic {
+            detector: "ambiguous_field".into(),
+            confidence: b.confidence,
+        })
+    }
 }
 
 fn evidence_ref(id: &GlobalId, path: &str, line: u32) -> Value {

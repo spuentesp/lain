@@ -148,6 +148,7 @@ fn field_ref_resolution_default_unknown() {
         service: ServiceName("billing".into()),
         bound_fields: Vec::<BoundField>::new(),
         unknown: true,
+        call: String::new(),
     };
     assert!(r.unknown);
     assert!(r.bound_fields.is_empty());

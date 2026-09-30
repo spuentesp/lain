@@ -607,6 +607,19 @@ fn handle_python_assignment(
             (l, r)
         }
     };
+    // §6.5 escapes: storing into a container (`_CACHE[k] = r.json()`,
+    // `obj.field = r`) takes the value out of tracking. The binding
+    // rules below can only bind a plain identifier or pattern — a
+    // container target must be recorded as an escape (scenario 22's
+    // module-level cache is this exact shape).
+    if matches!(
+        left.kind(),
+        "subscript" | "subscription" | "attribute" | "member_expression"
+    ) && expression_uses_bound(right, src, bound)
+    {
+        escapes.insert(Escape::Stored);
+        return;
+    }
     // Rule 1: `x = <client call>` — the right side is a call that
     // resolves to a `__response__`-seeded identifier (already in
     // `bound` because of seeding). The simplest case: `x = await fetch(…)`.
@@ -778,15 +791,38 @@ fn handle_python_return(
     // caller frame's return leaves the scope — S returning its
     // bound response is rule 5's propagation channel (scenario 5
     // depends on this not flipping `reads_complete`), and a
-    // callee's return lands back in an in-scope frame.
+    // callee's return lands back in an in-scope frame. The
+    // returned expression must *be* the bound identifier: reads
+    // consumed inside a constructed value (`return
+    // Invoice(customer_id=order["customer_id"])`, the fixture's
+    // `build_invoice`) are the endpoint of tracking, not an escape.
     if !frame.is_caller_of_s {
         return;
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if expression_uses_bound(child, src, bound) {
+        if returns_bound_identifier(child, src, bound) {
             escapes.insert(Escape::Returned);
         }
+    }
+}
+
+/// `true` when `node` is itself a bound identifier (`return order`).
+/// A larger expression that merely *uses* a bound identifier — a
+/// constructor call, a subscript, an arithmetic form — does not
+/// move the bound value out of scope; only the bare identifier does
+/// (§6.5 "a bound identifier is returned").
+fn returns_bound_identifier<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+) -> bool {
+    if node.kind() != "identifier" {
+        return false;
+    }
+    match node.utf8_text(src) {
+        Ok(name) => bound.contains_key(name),
+        Err(_) => false,
     }
 }
 
@@ -1565,7 +1601,7 @@ fn handle_tsjs_return(
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if expression_uses_bound(child, src, bound) {
+        if returns_bound_identifier(child, src, bound) {
             escapes.insert(Escape::Returned);
         }
     }

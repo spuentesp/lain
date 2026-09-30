@@ -334,14 +334,23 @@ impl ContractJoiner {
             > = BTreeMap::new();
             if let Some(by_dir) = schemas.by_endpoint.get(&endpoint_id) {
                 for (dir, fields) in by_dir {
-                    // Pick the schema node id of the first provider
-                    // for this endpoint — the openapi sensor emits one
-                    // Schema per direction per operation; the joiner
-                    // does not need to differentiate between them.
-                    let schema_node_id = provider_records
-                        .first()
-                        .map(|p| p.node_id.clone())
-                        .unwrap_or_else(|| GlobalId::from_string("unknown"));
+                    // The schema node id is the openapi `Schema` node
+                    // for (endpoint, direction) — `HasField` edges
+                    // hang off it, so tools can walk `Schema →
+                    // Field`. Fall back to the first provider only
+                    // for endpoints with no schema node (code-only
+                    // routes are schemaless).
+                    let schema_node_id = schemas
+                        .schema_node
+                        .get(&endpoint_id)
+                        .and_then(|m| m.get(dir))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            provider_records
+                                .first()
+                                .map(|p| p.node_id.clone())
+                                .unwrap_or_else(|| GlobalId::from_string("unknown"))
+                        });
                     let mut field_map: BTreeMap<
                         crate::federation::contracts::model::JsonPath,
                         crate::federation::contracts::model::FieldMeta,
@@ -940,6 +949,10 @@ fn match_one_service(
         Some((key, detail)) => {
             let provider = provider_node_id(endpoints, &target_service, &key);
             let (provenance, confidence) = provenance_for_detail(&detail, consumer);
+            // The resolution carries the same provenance as the
+            // emitted edge — §9.5 `is_certain` reads the target's
+            // provenance, and §7.3 fixes rule 3 at `Static 1.0`.
+            let target_provenance = provenance.clone();
             binds.push(BindsEdge {
                 consumer: call_id.clone(),
                 provider,
@@ -955,10 +968,7 @@ fn match_one_service(
                 call_id: call_id.clone(),
                 service: own_service.clone(),
                 target: Some(ConsumerTarget::Binds {
-                    provenance: EdgeProvenance::Heuristic {
-                        detector: detector_for(&detail),
-                        confidence,
-                    },
+                    provenance: target_provenance,
                     confidence,
                     route_match: detail.kind,
                     stripped_prefix: detail.stripped_prefix,
@@ -1055,6 +1065,19 @@ fn provenance_for_detail(
             },
             detail.confidence,
         ),
+        _ if (detail.confidence - 1.0).abs() < f32::EPSILON => {
+            // §7.3 rule 3: a known target service matched with the
+            // real method at full confidence is `Static 1.0` — the
+            // ground-truth binds (`{kind: static, confidence: 1.0}`)
+            // and `is_certain` (§9.5 `Verified`) both read this
+            // provenance, not a `Heuristic` labelled "static".
+            (
+                EdgeProvenance::Static {
+                    source: crate::schema::StaticSource::TreeSitter,
+                },
+                detail.confidence,
+            )
+        }
         _ => {
             let detector = if (detail.confidence - 0.6).abs() < f32::EPSILON {
                 "method_unknown"
@@ -1068,19 +1091,6 @@ fn provenance_for_detail(
                 },
                 detail.confidence,
             )
-        }
-    }
-}
-
-fn detector_for(detail: &MatchDetail) -> String {
-    match detail.kind {
-        RouteMatch::PrefixStripped => "prefix_stripped".into(),
-        _ => {
-            if (detail.confidence - 0.6).abs() < f32::EPSILON {
-                "method_unknown".into()
-            } else {
-                "static".into()
-            }
         }
     }
 }

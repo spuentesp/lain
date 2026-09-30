@@ -42,13 +42,14 @@ use crate::federation::contracts::diff::{
 };
 use crate::federation::contracts::index::{ContractIndex, EndpointId};
 use crate::federation::contracts::model::ServiceName;
-use crate::federation::contracts::model::{ContractKey, Direction, MethodSpec};
+use crate::federation::contracts::model::{ContractKey, Direction, JsonPath, MethodSpec};
 use crate::federation::contracts::snapshots::record::SnapshotRecord;
-use crate::federation::graph_backend::{ImpactPath as GraphImpactPath, ImpactResult};
+use crate::federation::graph_backend::{GraphBackend, ImpactPath as GraphImpactPath, ImpactResult};
+use crate::federation::repo_id::GlobalId;
 use crate::schema::EdgeProvenance;
 use crate::server::mcp::handler::McpContext;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -176,8 +177,17 @@ async fn run_diff_contracts(
         Err(o) => return Err(o),
     };
     let cap = parse_cap(&args_map, 50, 500, started)?;
-    let _ = args_map.get("repo");
-    let _ = args_map.get("service");
+    // §12: `repo` and `service` narrow the reported changes; both
+    // apply before `min_impact` and before `compatible_changes`
+    // counting (a filtered-out change is not counted either).
+    let service_filter = args_map
+        .get("service")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let repo_filter = args_map
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let base_record = load_snapshot(ctx, &base_label, started).await?;
     let head_record = load_snapshot(ctx, &head_label, started).await?;
@@ -220,8 +230,10 @@ async fn run_diff_contracts(
             started,
         ));
     }
-    let base_index = snapshot_contract_index(ctx, &base_record, &args_map, started)?;
-    let head_index = snapshot_contract_index(ctx, &head_record, &args_map, started)?;
+    let (base_index, base_fed, _base_hold) =
+        snapshot_contract_index(ctx, &base_record, &args_map, started)?;
+    let (head_index, head_fed, _head_hold) =
+        snapshot_contract_index(ctx, &head_record, &args_map, started)?;
     let data_dir = ctx
         .snapshots
         .map(|m| m.data_dir().to_path_buf())
@@ -239,33 +251,151 @@ async fn run_diff_contracts(
     let coverage_repos = build_repo_coverage(&head_record);
     let coverage = build_coverage(&head_index, coverage_repos, scope.clone());
 
+    // §15.2 scenario 12: a rename whose type changed splits into
+    // `FieldRemoved` + `FieldAdded` (the wire kinds §12 lists), but
+    // the pair still *is* a rename for §9.4/§9.5 — both halves
+    // classify as `BreakingIfRead` and evaluate with the rename's
+    // "consumer reads the old name" rule. When exactly one field
+    // was removed and one added under the same endpoint +
+    // direction, the `FieldAdded` half is evaluated as the
+    // `FieldRenamed` it belongs to while the wire keeps its
+    // `FieldAdded` kind.
+    let mut removed_by_ed: BTreeMap<(EndpointId, Direction), Vec<JsonPath>> = BTreeMap::new();
+    let mut added_by_ed: BTreeMap<(EndpointId, Direction), Vec<JsonPath>> = BTreeMap::new();
+    for change in &all_changes {
+        match &change.kind {
+            ChangeKind::FieldRemoved {
+                endpoint,
+                direction,
+                path,
+                ..
+            } => {
+                removed_by_ed
+                    .entry((endpoint.clone(), *direction))
+                    .or_default()
+                    .push(path.clone());
+            }
+            ChangeKind::FieldAdded {
+                endpoint,
+                direction,
+                path,
+                ..
+            } => {
+                added_by_ed
+                    .entry((endpoint.clone(), *direction))
+                    .or_default()
+                    .push(path.clone());
+            }
+            _ => {}
+        }
+    }
+    let mut rename_splits: BTreeMap<(EndpointId, Direction), (JsonPath, JsonPath)> =
+        BTreeMap::new();
+    for (ed, removes) in &removed_by_ed {
+        if let Some(adds) = added_by_ed.get(ed) {
+            if removes.len() == 1 && adds.len() == 1 {
+                rename_splits.insert(ed.clone(), (removes[0].clone(), adds[0].clone()));
+            }
+        }
+    }
+
     let mut evaluated: Vec<(Impact, Compat, ChangeKind, ServiceName)> = Vec::new();
     for change in all_changes {
-        let direction = direction_of_change(&change.kind);
+        let mut eval_kind = change.kind.clone();
+        if let ChangeKind::FieldAdded {
+            endpoint,
+            direction,
+            path,
+            required,
+            ..
+        } = &change.kind
+        {
+            if let Some((from, to)) = rename_splits.get(&(endpoint.clone(), *direction)) {
+                if to == path {
+                    eval_kind = ChangeKind::FieldRenamed {
+                        endpoint: endpoint.clone(),
+                        direction: *direction,
+                        from: from.clone(),
+                        to: path.clone(),
+                        required: *required,
+                    };
+                }
+            }
+        }
+        let direction = direction_of_change(&eval_kind);
         let compat = if let Some(d) = direction {
-            classify(&change.kind, d)
+            classify(&eval_kind, d)
         } else {
-            classify(&change.kind, Direction::Response)
+            classify(&eval_kind, Direction::Response)
         };
-        let impact = evaluate(&change, &base_surface, &head_surface, &coverage);
+        let eval_change = crate::federation::contracts::diff::Change {
+            service: change.service.clone(),
+            kind: eval_kind,
+        };
+        let impact = evaluate(&eval_change, &base_surface, &head_surface, &coverage);
         evaluated.push((impact, compat, change.kind, change.service));
     }
 
     let min_class = min_impact.unwrap_or(Class::NoKnownImpact);
     let mut kept: Vec<Value> = Vec::new();
     let mut compatible_changes: u32 = 0;
+    // A shared component (`$ref: Order`) fans one mutation out to
+    // every endpoint that resolves it; `compatible_changes` counts
+    // the *mutation* once (ground truth scenario 2: one optional
+    // `currency` addition → 1, not 3).
+    let mut compatible_seen: BTreeSet<String> = BTreeSet::new();
     for (impact, compat, kind, service) in evaluated {
+        if let Some(ref sf) = service_filter {
+            if service.0.as_str() != sf.as_str() {
+                continue;
+            }
+        }
+        if let Some(ref rf) = repo_filter {
+            if !change_repo_set(&kind, &service, &base_index, &head_index).contains(rf.as_str()) {
+                continue;
+            }
+        }
         let cls = impact.class;
-        if cls < min_class {
-            if matches!(cls, Class::NoKnownImpact) && matches!(compat, Compat::Compatible) {
+        if matches!(cls, Class::NoKnownImpact) && matches!(compat, Compat::Compatible) {
+            // §9.5: "Compatible → not reported; counted in
+            // `compatible_changes`".
+            if impact.compatible_changes > 0 && compatible_seen.insert(compatible_identity(&kind)) {
                 compatible_changes += impact.compatible_changes;
             }
             continue;
         }
-        if matches!(cls, Class::NoKnownImpact) && matches!(compat, Compat::Compatible) {
-            compatible_changes += impact.compatible_changes;
+        if cls < min_class {
+            continue;
         }
-        kept.push(impact_to_value(&impact, &kind, &service, compat, cap));
+        let enclosing = match &kind {
+            ChangeKind::ConsumerEndpointUnmatched { consumer }
+            | ChangeKind::ConsumerFieldUnmatched { consumer, .. }
+            | ChangeKind::ConsumerRebound { consumer, .. } => {
+                enclosing_sender(head_fed.backend.as_ref(), &consumer.caller)
+            }
+            _ => None,
+        };
+        let mut value = impact_to_value(
+            &impact,
+            &kind,
+            &service,
+            compat,
+            cap,
+            &head_index,
+            enclosing.as_ref(),
+        );
+        attach_change_paths(
+            &mut value,
+            &kind,
+            &service,
+            &base_index,
+            &base_fed,
+            &head_fed,
+            cap,
+            &head_label,
+            started,
+        )?;
+        kept.push(value);
     }
     kept.sort_by(|a, b| {
         let ka = sort_key(a);
@@ -283,14 +413,85 @@ async fn run_diff_contracts(
     Ok(outcome(envelope, &data, text))
 }
 
+/// §12 sort: `(side, service, key, kind, direction, field)`.
+/// Missing `direction` / `field` (endpoint-level changes) sort as
+/// the empty string, which keeps the order stable and total.
 fn sort_key(v: &Value) -> String {
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}",
         v["side"].as_str().unwrap_or(""),
         v["endpoint"]["service"].as_str().unwrap_or(""),
         v["endpoint"]["key"].as_str().unwrap_or(""),
-        v["kind"].as_str().unwrap_or("")
+        v["kind"].as_str().unwrap_or(""),
+        v["direction"].as_str().unwrap_or(""),
+        v["field"].as_str().unwrap_or("")
     )
+}
+
+/// The logical identity of a change for `compatible_changes`
+/// deduplication: endpoint-independent (a shared component's
+/// mutation looks identical across the endpoints that resolve it).
+fn compatible_identity(kind: &ChangeKind) -> String {
+    match kind {
+        ChangeKind::FieldRemoved {
+            direction, path, ..
+        }
+        | ChangeKind::FieldAdded {
+            direction, path, ..
+        }
+        | ChangeKind::FieldTypeChanged {
+            direction, path, ..
+        }
+        | ChangeKind::RequirednessChanged {
+            direction, path, ..
+        }
+        | ChangeKind::NullabilityChanged {
+            direction, path, ..
+        } => {
+            format!(
+                "{}|{}|{}",
+                kind_label(kind),
+                direction_label_str(*direction),
+                path
+            )
+        }
+        ChangeKind::EnumValueRemoved {
+            direction,
+            path,
+            value,
+            ..
+        }
+        | ChangeKind::EnumValueAdded {
+            direction,
+            path,
+            value,
+            ..
+        } => format!(
+            "{}|{}|{}|{}",
+            kind_label(kind),
+            direction_label_str(*direction),
+            path,
+            value
+        ),
+        ChangeKind::FieldRenamed {
+            direction,
+            from,
+            to,
+            ..
+        } => format!(
+            "FieldRenamed|{}|{}|{}",
+            direction_label_str(*direction),
+            from,
+            to
+        ),
+        ChangeKind::PathChanged { from, to } | ChangeKind::MethodChanged { from, to } => {
+            format!("{}|{}|{}", kind_label(kind), from, to)
+        }
+        ChangeKind::EndpointAdded { key } | ChangeKind::EndpointRemoved { key } => {
+            format!("{}|{}", kind_label(kind), key)
+        }
+        other => format!("{:?}", other),
+    }
 }
 
 fn direction_of_change(kind: &ChangeKind) -> Option<Direction> {
@@ -305,6 +506,107 @@ fn direction_of_change(kind: &ChangeKind) -> Option<Direction> {
         | ChangeKind::EnumValueAdded { direction, .. } => Some(*direction),
         _ => None,
     }
+}
+
+/// The endpoint a provider-side change is about (§9.1 ids).
+/// Consumer-side kinds carry no endpoint of their own here.
+fn change_endpoint_id(kind: &ChangeKind, service: &ServiceName) -> Option<EndpointId> {
+    match kind {
+        ChangeKind::FieldRemoved { endpoint, .. }
+        | ChangeKind::FieldAdded { endpoint, .. }
+        | ChangeKind::FieldRenamed { endpoint, .. }
+        | ChangeKind::FieldTypeChanged { endpoint, .. }
+        | ChangeKind::RequirednessChanged { endpoint, .. }
+        | ChangeKind::NullabilityChanged { endpoint, .. }
+        | ChangeKind::EnumValueRemoved { endpoint, .. }
+        | ChangeKind::EnumValueAdded { endpoint, .. }
+        | ChangeKind::ChangedWithoutSchema { endpoint } => Some(endpoint.clone()),
+        ChangeKind::EndpointRemoved { key } | ChangeKind::EndpointAdded { key } => {
+            Some((service.clone(), key.clone()))
+        }
+        ChangeKind::PathChanged { to, .. } | ChangeKind::MethodChanged { to, .. } => {
+            Some((service.clone(), to.clone()))
+        }
+        ChangeKind::ConsumerEndpointUnmatched { .. }
+        | ChangeKind::ConsumerFieldUnmatched { .. }
+        | ChangeKind::ConsumerRebound { .. } => None,
+    }
+}
+
+/// Every repo a change touches: the consumer's repo (consumer-side
+/// kinds), the endpoint's providers' repos (either view), and the
+/// service's declared repo. Used by `diff_contracts`' `repo`
+/// filter — mirrors how `list_contracts` resolves `repo` against
+/// provider `GlobalId`s.
+fn change_repo_set(
+    kind: &ChangeKind,
+    service: &ServiceName,
+    base_index: &ContractIndex,
+    head_index: &ContractIndex,
+) -> BTreeSet<String> {
+    let mut repos: BTreeSet<String> = BTreeSet::new();
+    match kind {
+        ChangeKind::ConsumerEndpointUnmatched { consumer }
+        | ChangeKind::ConsumerFieldUnmatched { consumer, .. }
+        | ChangeKind::ConsumerRebound { consumer, .. } => {
+            repos.insert(consumer.caller.repo.as_str().to_string());
+        }
+        _ => {}
+    }
+    if let Some(eid) = change_endpoint_id(kind, service) {
+        for idx in [base_index, head_index] {
+            if let Some(ep) = idx.endpoints.get(&eid) {
+                for p in &ep.providers {
+                    repos.insert(p.node_id.repo_id().to_string());
+                }
+            }
+        }
+    }
+    for idx in [head_index, base_index] {
+        if let Some(info) = idx.services.get(service) {
+            repos.insert(info.repo.as_str().to_string());
+        }
+    }
+    repos
+}
+
+/// Resolve the `Field` node's GlobalId for
+/// `(endpoint, direction, json_path)` (§9.5: field-level traces
+/// start at the changed `Field`). The schema node's `HasField`
+/// edges (`Schema → Field`, §6.4) carry the direction; the
+/// fallback scans `Field` nodes of the service's repo by name.
+fn find_field_node(
+    backend: &dyn GraphBackend,
+    index: &ContractIndex,
+    endpoint_id: &EndpointId,
+    direction: Direction,
+    json_path: &str,
+) -> Option<String> {
+    let endpoint = index.endpoints.get(endpoint_id)?;
+    let schema = endpoint.schemas.get(&direction)?;
+    // Walk the schema node's `HasField` edges (§6.4): the field
+    // belongs to *this* endpoint's schema. When the endpoint has no
+    // schema node (code-only route) or the field isn't in the
+    // schema, there is no Field to trace from — §9.5 then starts
+    // from the endpoint's provider nodes instead. A repo-wide name
+    // scan would pick an arbitrary endpoint's field (the fixture's
+    // `customer_id` appears in four schemas).
+    let edges = backend.all_edges().ok()?;
+    let mut targets: Vec<String> = edges
+        .iter()
+        .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)
+        .filter(|e| e.source_id == schema.node_id.as_str())
+        .map(|e| e.target_id.clone())
+        .collect();
+    targets.sort();
+    for target in &targets {
+        if let Ok(Some(node)) = backend.get_node(target) {
+            if node.name == json_path {
+                return Some(target.clone());
+            }
+        }
+    }
+    None
 }
 
 fn parse_min_impact(args: &Map<String, Value>) -> Result<Option<Class>, ToolOutcome> {
@@ -435,12 +737,23 @@ fn snapshot_state_label(r: &SnapshotRecord) -> &'static str {
     }
 }
 
+/// Load a snapshot's `ContractIndex` together with the resident
+/// federation that backs it. The third element is the residency
+/// `HoldGuard` — callers must keep it alive for the whole analysis
+/// (§8.5), which is what makes the backend usable for §9.5 traces.
 fn snapshot_contract_index(
     ctx: &McpContext<'_>,
     record: &SnapshotRecord,
     args_map: &Map<String, Value>,
     started: Instant,
-) -> Result<Arc<ContractIndex>, ToolOutcome> {
+) -> Result<
+    (
+        Arc<ContractIndex>,
+        Arc<crate::federation::contracts::snapshots::SnapshotFederation>,
+        crate::federation::contracts::snapshots::manager::HoldGuard,
+    ),
+    ToolOutcome,
+> {
     let mgr = ctx.snapshots.ok_or_else(|| {
         error_outcome(
             "snapshot_manager_unavailable",
@@ -458,7 +771,7 @@ fn snapshot_contract_index(
             .unwrap_or(5_000),
         60_000,
     );
-    let (fed, _guard) = mgr
+    let (fed, guard) = mgr
         .from_snapshot_with_wait_ms(record, wait_ms)
         .map_err(|e| {
             error_outcome(
@@ -470,7 +783,7 @@ fn snapshot_contract_index(
             )
         })?;
     let ci = fed.contract_index.read().clone();
-    ci.ok_or_else(|| {
+    let index = ci.ok_or_else(|| {
         error_outcome(
             "snapshot_not_ready",
             "snapshot has no contract index",
@@ -478,7 +791,8 @@ fn snapshot_contract_index(
             &record.id,
             started,
         )
-    })
+    })?;
+    Ok((index, fed, guard))
 }
 
 fn build_scope(head: &SnapshotRecord) -> DiffScope {
@@ -578,6 +892,8 @@ fn impact_to_value(
     service: &ServiceName,
     compat: Compat,
     _cap: usize,
+    head_index: &ContractIndex,
+    enclosing_sender: Option<&(String, String)>,
 ) -> Value {
     let mut affected: Vec<Value> = Vec::new();
     for a in &impact.affected {
@@ -594,7 +910,7 @@ fn impact_to_value(
         | ChangeKind::ConsumerRebound { .. } => "consumer",
         _ => "provider",
     };
-    let endpoint = endpoint_from_change(kind, service);
+    let endpoint = endpoint_from_change(kind, service, head_index);
     let mut value = json!({
         "side": side,
         "endpoint": endpoint,
@@ -609,6 +925,28 @@ fn impact_to_value(
         "paths": [],
         "truncated": false,
     });
+    // Consumer-side changes name the consumer itself (§15.2
+    // scenario 20 / ground truth).
+    if let ChangeKind::ConsumerEndpointUnmatched { consumer }
+    | ChangeKind::ConsumerFieldUnmatched { consumer, .. }
+    | ChangeKind::ConsumerRebound { consumer, .. } = kind
+    {
+        // §15.2 scenario 20: `symbol` is the *enclosing function*
+        // (the `SendsHttp` source), not the call node — the
+        // consumer key's `caller.name` is the URL template.
+        let (file, symbol) = enclosing_sender
+            .map(|(p, n)| (p.as_str(), n.as_str()))
+            .unwrap_or((consumer.caller.path.as_str(), consumer.caller.name.as_str()));
+        value["consumer"] = json!({
+            "service": service.0,
+            "repo": consumer.caller.repo.as_str(),
+            "file": file,
+            "symbol": symbol,
+        });
+    }
+    if let ChangeKind::ConsumerFieldUnmatched { field, .. } = kind {
+        value["field"] = json!(field.to_string());
+    }
     if let ChangeKind::FieldRemoved {
         direction, path, ..
     }
@@ -665,10 +1003,18 @@ fn impact_to_value(
     value
 }
 
-fn endpoint_from_change(kind: &ChangeKind, service: &ServiceName) -> Value {
-    let key = match kind {
-        ChangeKind::EndpointRemoved { key } | ChangeKind::EndpointAdded { key } => key.clone(),
-        ChangeKind::PathChanged { to, .. } | ChangeKind::MethodChanged { to, .. } => to.clone(),
+fn endpoint_from_change(
+    kind: &ChangeKind,
+    service: &ServiceName,
+    head_index: &ContractIndex,
+) -> Value {
+    let (endpoint_service, key) = match kind {
+        ChangeKind::EndpointRemoved { key } | ChangeKind::EndpointAdded { key } => {
+            (service.clone(), key.clone())
+        }
+        ChangeKind::PathChanged { to, .. } | ChangeKind::MethodChanged { to, .. } => {
+            (service.clone(), to.clone())
+        }
         ChangeKind::FieldRemoved { endpoint, .. }
         | ChangeKind::FieldAdded { endpoint, .. }
         | ChangeKind::FieldRenamed { endpoint, .. }
@@ -677,18 +1023,278 @@ fn endpoint_from_change(kind: &ChangeKind, service: &ServiceName) -> Value {
         | ChangeKind::NullabilityChanged { endpoint, .. }
         | ChangeKind::EnumValueRemoved { endpoint, .. }
         | ChangeKind::EnumValueAdded { endpoint, .. }
-        | ChangeKind::ChangedWithoutSchema { endpoint } => endpoint.1.clone(),
-        ChangeKind::ConsumerEndpointUnmatched { .. }
-        | ChangeKind::ConsumerFieldUnmatched { .. }
-        | ChangeKind::ConsumerRebound { .. } => ContractKey::Http {
-            method: MethodSpec::Unknown,
-            template: String::new(),
-        },
+        | ChangeKind::ChangedWithoutSchema { endpoint } => (endpoint.0.clone(), endpoint.1.clone()),
+        ChangeKind::ConsumerEndpointUnmatched { consumer }
+        | ChangeKind::ConsumerFieldUnmatched { consumer, .. }
+        | ChangeKind::ConsumerRebound { consumer, .. } => {
+            // §15.2 scenarios 3/20: a consumer-side change reports
+            // the *provider's* endpoint — resolve the service that
+            // provides the consumer's target key in the head view.
+            let target = match &consumer.target {
+                crate::federation::contracts::diff::ConsumerTargetKey::Contract(k) => k.clone(),
+                _ => ContractKey::Http {
+                    method: MethodSpec::Unknown,
+                    template: String::new(),
+                },
+            };
+            let resolved = head_index
+                .endpoints
+                .keys()
+                .find(|id| id.1 == target)
+                .map(|id| id.0.clone())
+                .unwrap_or_else(|| service.clone());
+            (resolved, target)
+        }
     };
     json!({
-        "service": service.0,
+        "service": endpoint_service.0,
         "key": key.to_string(),
     })
+}
+
+/// Attach §9.5 impact `paths` to one change. Provider-side changes
+/// trace in the **base** view (the old contract and its consumers);
+/// consumer-side changes trace in the **head** view up from the
+/// consumer's calling function. A field change starts at the
+/// changed `Field`; an endpoint change starts at the endpoint's
+/// provider nodes.
+#[allow(clippy::too_many_arguments)]
+fn attach_change_paths(
+    value: &mut Value,
+    kind: &ChangeKind,
+    service: &ServiceName,
+    base_index: &ContractIndex,
+    base_fed: &crate::federation::contracts::snapshots::SnapshotFederation,
+    head_fed: &crate::federation::contracts::snapshots::SnapshotFederation,
+    cap: usize,
+    label: &str,
+    started: Instant,
+) -> Result<(), ToolOutcome> {
+    let consumer_side = matches!(
+        kind,
+        ChangeKind::ConsumerEndpointUnmatched { .. }
+            | ChangeKind::ConsumerFieldUnmatched { .. }
+            | ChangeKind::ConsumerRebound { .. }
+    );
+    let starts: Vec<String> = if consumer_side {
+        let caller = match kind {
+            ChangeKind::ConsumerEndpointUnmatched { consumer }
+            | ChangeKind::ConsumerFieldUnmatched { consumer, .. }
+            | ChangeKind::ConsumerRebound { consumer, .. } => &consumer.caller,
+            _ => unreachable!(),
+        };
+        caller_node_id(head_fed.backend.as_ref(), caller)
+            .map(|id| vec![id])
+            .unwrap_or_default()
+    } else {
+        provider_trace_starts(kind, service, base_index, base_fed.backend.as_ref())
+    };
+    if starts.is_empty() {
+        // Nothing to trace from (e.g. an endpoint the view does not
+        // list): the wire keeps the empty `paths` array.
+        return Ok(());
+    }
+    let backend = if consumer_side {
+        &head_fed.backend
+    } else {
+        &base_fed.backend
+    };
+    let start_refs: Vec<&str> = starts.iter().map(String::as_str).collect();
+    let outcome: ImpactResult =
+        backend
+            .traverse_impact(&start_refs, 10, cap, 0.0)
+            .map_err(|e| {
+                error_outcome(
+                    "invalid_argument",
+                    format!("traverse_impact failed: {e}"),
+                    None,
+                    label,
+                    started,
+                )
+            })?;
+    let mut paths = outcome.paths;
+    paths.sort_by(|a, b| {
+        b.min_confidence
+            .partial_cmp(&a.min_confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.hops.len().cmp(&b.hops.len()))
+            .then_with(|| {
+                let ak = leaf_id(a).unwrap_or("");
+                let bk = leaf_id(b).unwrap_or("");
+                ak.cmp(bk)
+            })
+    });
+    let truncated = outcome.truncated || paths.len() > cap;
+    if paths.len() > cap {
+        paths.truncate(cap);
+    }
+    let path_values: Vec<Value> = paths.iter().map(graph_path_to_value).collect();
+    value["paths"] = json!(path_values);
+    value["truncated"] = json!(truncated);
+    Ok(())
+}
+
+/// Start nodes for a provider-side change in the **base** view:
+/// the changed `Field` when it exists (§9.5 "from the changed Field
+/// if it exists in base"), otherwise the endpoint's provider nodes.
+fn provider_trace_starts(
+    kind: &ChangeKind,
+    service: &ServiceName,
+    index: &ContractIndex,
+    backend: &dyn GraphBackend,
+) -> Vec<String> {
+    let endpoint = change_endpoint_id(kind, service);
+    if let Some((direction, path)) = field_change_of(kind) {
+        if let Some(eid) = endpoint.as_ref() {
+            if let Some(fid) = find_field_node(backend, index, eid, direction, &path.to_string()) {
+                return vec![fid];
+            }
+        }
+    }
+    if let Some(eid) = endpoint {
+        if let Some(ep) = index.endpoints.get(&eid) {
+            let ids: Vec<String> = ep
+                .providers
+                .iter()
+                .map(|p| p.node_id.as_str().to_string())
+                .collect();
+            if !ids.is_empty() {
+                return ids;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// `(direction, path)` for the field-bearing change kinds; the
+/// rename traces from the `from` side, which is the field that
+/// exists in base.
+fn field_change_of(
+    kind: &ChangeKind,
+) -> Option<(Direction, crate::federation::contracts::model::JsonPath)> {
+    match kind {
+        ChangeKind::FieldRemoved {
+            direction, path, ..
+        }
+        | ChangeKind::FieldAdded {
+            direction, path, ..
+        }
+        | ChangeKind::FieldTypeChanged {
+            direction, path, ..
+        }
+        | ChangeKind::RequirednessChanged {
+            direction, path, ..
+        }
+        | ChangeKind::NullabilityChanged {
+            direction, path, ..
+        }
+        | ChangeKind::EnumValueRemoved {
+            direction, path, ..
+        }
+        | ChangeKind::EnumValueAdded {
+            direction, path, ..
+        } => Some((*direction, path.clone())),
+        ChangeKind::FieldRenamed {
+            direction, from, ..
+        } => Some((*direction, from.clone())),
+        _ => None,
+    }
+}
+
+/// The GlobalId of a consumer's calling function in `backend`.
+fn caller_node_id(
+    backend: &dyn GraphBackend,
+    caller: &crate::federation::contracts::model::SymbolKey,
+) -> Option<String> {
+    let nodes = backend.find_nodes_by_name(&caller.name).ok()?;
+    nodes
+        .into_iter()
+        .filter(|n| {
+            n.path == caller.path
+                && GlobalId::parse(&n.id)
+                    .map(|g| g.repo_id() == caller.repo.as_str())
+                    .unwrap_or(false)
+        })
+        .map(|n| n.id)
+        .min()
+}
+
+/// The wire's `consumer.file` / `consumer.symbol` (§15.2 scenario
+/// 20: `symbol: build_invoice`, and §8 ground-truth `binds` list
+/// `caller: build_invoice`). Preference order:
+/// 1. the *reader* — the source of a `ReadsField` edge into a
+///    `FieldRef` that `ReadsFrom` this call (the rule-5 caller that
+///    consumes the response);
+/// 2. the `SendsHttp` source (the sending function S).
+fn enclosing_sender(
+    backend: &dyn GraphBackend,
+    caller: &crate::federation::contracts::model::SymbolKey,
+) -> Option<(String, String)> {
+    let nodes = backend.find_nodes_by_name(&caller.name).ok()?;
+    let call_ids: Vec<String> = nodes
+        .iter()
+        .filter(|n| {
+            n.node_type == crate::schema::NodeType::HttpClientCall
+                && n.path == caller.path
+                && GlobalId::parse(&n.id)
+                    .map(|g| g.repo_id() == caller.repo.as_str())
+                    .unwrap_or(false)
+        })
+        .map(|n| n.id.clone())
+        .collect();
+    if call_ids.is_empty() {
+        return None;
+    }
+    let edges = backend.all_edges().ok()?;
+    // FieldRefs that read from this call.
+    let field_refs: Vec<String> = edges
+        .iter()
+        .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsFrom)
+        .filter(|e| call_ids.contains(&e.target_id))
+        .map(|e| e.source_id.clone())
+        .collect();
+    let mut readers: Vec<String> = edges
+        .iter()
+        .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsField)
+        .filter(|e| field_refs.contains(&e.target_id))
+        .map(|e| e.source_id.clone())
+        .collect();
+    readers.sort();
+    let mut senders: Vec<String> = edges
+        .iter()
+        .filter(|e| e.edge_type == crate::schema::EdgeType::SendsHttp)
+        .filter(|e| call_ids.contains(&e.target_id))
+        .map(|e| e.source_id.clone())
+        .collect();
+    senders.sort();
+    let sender = senders.first().cloned();
+    // Candidate readers: functions other than the sending function
+    // (the ground truth's consumer is the rule-5 caller that reads
+    // the response, not S), never a File fallback node; then any
+    // reader; then S.
+    let non_sender: Vec<&String> = readers
+        .iter()
+        .filter(|r| Some(*r) != sender.as_ref())
+        .collect();
+    let resolve = |ids: &[String]| -> Option<(String, String)> {
+        for id in ids {
+            if let Ok(Some(node)) = backend.get_node(id) {
+                if node.node_type != crate::schema::NodeType::File {
+                    return Some((node.path.clone(), node.name.clone()));
+                }
+            }
+        }
+        None
+    };
+    if let Some(found) = resolve(&non_sender.iter().map(|s| (*s).clone()).collect::<Vec<_>>()) {
+        return Some(found);
+    }
+    if let Some(found) = resolve(&readers) {
+        return Some(found);
+    }
+    let src = sender?;
+    let node = backend.get_node(&src).ok().flatten()?;
+    Some((node.path.clone(), node.name.clone()))
 }
 
 fn kind_label(kind: &ChangeKind) -> &'static str {
@@ -864,7 +1470,7 @@ async fn run_trace_impact(
         ));
     }
 
-    let _ = match resolve_view(ctx, &args_map, started).await? {
+    let view_index = match resolve_view(ctx, &args_map, started).await? {
         ViewHandle::Empty(_) => {
             return Err(error_outcome(
                 "contract_not_found",
@@ -875,6 +1481,22 @@ async fn run_trace_impact(
             ));
         }
         ViewHandle::Index { index, .. } => index,
+    };
+
+    // The traversal backend doubles as the view the field arm
+    // resolves `Field` node ids from (§9.5 traces field changes
+    // from the changed `Field`).
+    let backend = match ctx.federation {
+        Some(fed) => fed.backend(),
+        None => {
+            return Err(error_outcome(
+                "federation_disabled",
+                "federation backend unavailable",
+                None,
+                &snap_label,
+                started,
+            ));
+        }
     };
 
     // Find starting node ids.
@@ -897,15 +1519,64 @@ async fn run_trace_impact(
         let field = from.get("field").cloned().unwrap_or(Value::Null);
         let endpoint = field.get("endpoint").cloned().unwrap_or(Value::Null);
         let endpoint_pair = parse_endpoint_for_trace(&endpoint)?;
-        let _direction = field
+        let endpoint_id = (
+            ServiceName(endpoint_pair.0.clone()),
+            ContractKey::from_str(&endpoint_pair.1).map_err(|e| {
+                error_outcome(
+                    "invalid_argument",
+                    format!("malformed field.endpoint.key: {e}"),
+                    Some(json!({"arg": "from.field.endpoint.key"})),
+                    &snap_label,
+                    started,
+                )
+            })?,
+        );
+        let direction_raw = field
             .get("direction")
             .and_then(|v| v.as_str())
             .unwrap_or("response");
-        let _path = field
+        let direction = match direction_raw {
+            "request" => Direction::Request,
+            "response" => Direction::Response,
+            "payload" => Direction::Payload,
+            other => {
+                return Err(error_outcome(
+                    "invalid_argument",
+                    format!("invalid field.direction: {other:?}"),
+                    Some(json!({"arg": "from.field.direction"})),
+                    &snap_label,
+                    started,
+                ));
+            }
+        };
+        let json_path = field
             .get("json_path")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        starts.push(endpoint_pair.0.clone());
+        let field_id = find_field_node(
+            backend.as_ref(),
+            &view_index,
+            &endpoint_id,
+            direction,
+            json_path,
+        )
+        .ok_or_else(|| {
+            error_outcome(
+                "contract_not_found",
+                format!("field {json_path:?} not found on endpoint"),
+                Some(json!({
+                    "endpoint": {
+                        "service": endpoint_pair.0,
+                        "key": endpoint_pair.1,
+                    },
+                    "direction": direction_raw,
+                    "json_path": json_path,
+                })),
+                &snap_label,
+                started,
+            )
+        })?;
+        starts.push(field_id);
     } else {
         let symbol = from.get("symbol").and_then(|v| v.as_str()).ok_or_else(|| {
             error_outcome(
@@ -918,19 +1589,6 @@ async fn run_trace_impact(
         })?;
         starts.push(symbol.to_string());
     }
-
-    let backend = match ctx.federation {
-        Some(fed) => fed.backend(),
-        None => {
-            return Err(error_outcome(
-                "federation_disabled",
-                "federation backend unavailable",
-                None,
-                &snap_label,
-                started,
-            ));
-        }
-    };
 
     let impact_outcome: ImpactResult = {
         let refs: Vec<&str> = starts.iter().map(String::as_str).collect();
@@ -1326,6 +1984,8 @@ mod tests {
             &ServiceName("billing".into()),
             Compat::Breaking,
             50,
+            &ContractIndex::default(),
+            None,
         );
         assert_eq!(value["side"], "consumer");
         assert_eq!(value["compat"], "Breaking");

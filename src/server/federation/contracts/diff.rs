@@ -19,6 +19,7 @@
 //! `ChangedFilesSource::from_git` (marked `// TODO(PR 13)`).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -141,14 +142,28 @@ impl ContractSurface {
                 .insert(endpoint_id.clone(), endpoint_to_def(endpoint));
         }
         // Project every consumer. Field reads (`field_refs`) are
-        // recorded for the §9.5 `reads` set; the call↔chain link
-        // lives on `ReadsFrom` edges which the surface-level tests
-        // construct explicitly. Pure-function tests build their
-        // surfaces by hand (the joiner's `Binds(FieldRef → Field)`
-        // wiring is exercised in `field_join_tests` and the
-        // scenarios below). Surface reads stay empty by default;
-        // tests populate them directly.
-        let reads_by_call: BTreeMap<GlobalId, BTreeSet<JsonPath>> = BTreeMap::new();
+        // recorded for the §9.5 `reads` set: each `FieldRefResolution`
+        // carries the `ReadsFrom` call id, and the read chain is
+        // the FieldRef's node name (§4.4 JsonPath grammar).
+        // Unbound reads count too — §9.3's `ConsumerFieldUnmatched`
+        // fires on a head read the schema never covered (scenario
+        // 20's `discount`).
+        let mut reads_by_call: BTreeMap<GlobalId, BTreeSet<JsonPath>> = BTreeMap::new();
+        for (fid, fr) in &index.field_refs {
+            if fr.call.is_empty() {
+                continue;
+            }
+            let Ok(call_id) = GlobalId::parse(&fr.call) else {
+                continue;
+            };
+            let Some(name) = fid.name() else {
+                continue;
+            };
+            let Ok(path) = JsonPath::from_str(&name) else {
+                continue;
+            };
+            reads_by_call.entry(call_id).or_default().insert(path);
+        }
         for (call_id, resolution) in &index.consumers {
             let def = consumer_to_def(call_id, resolution, &reads_by_call);
             let key = consumer_key(call_id, resolution);
@@ -174,11 +189,25 @@ fn endpoint_to_def(endpoint: &Endpoint) -> EndpointDef {
         schemas.insert(*dir, fields);
     }
     let has_schema = !schemas.is_empty() && schemas.values().any(|f| !f.is_empty());
+    // §9.2 `ChangedWithoutSchema`: the union of every route/spec/
+    // handler file the join observed — provider node paths (code
+    // routes, openapi paths) plus schema node paths.
+    let mut source_files: BTreeSet<String> = BTreeSet::new();
+    for p in &endpoint.providers {
+        if let Some(path) = p.node_id.path() {
+            source_files.insert(path);
+        }
+    }
+    for schema in endpoint.schemas.values() {
+        if let Some(path) = schema.node_id.path() {
+            source_files.insert(path);
+        }
+    }
     EndpointDef {
         providers,
         schemas,
         has_schema,
-        source_files: BTreeSet::new(),
+        source_files,
     }
 }
 
@@ -189,7 +218,7 @@ fn schema_to_fields(schema: &EndpointSchema) -> BTreeMap<JsonPath, FieldMeta> {
 fn consumer_to_def(
     call_id: &GlobalId,
     resolution: &ConsumerResolution,
-    _reads_by_call: &BTreeMap<GlobalId, BTreeSet<JsonPath>>,
+    reads_by_call: &BTreeMap<GlobalId, BTreeSet<JsonPath>>,
 ) -> ConsumerDef {
     let surface_resolution = match &resolution.target {
         Some(IndexConsumerTarget::Binds { provenance, .. }) => SurfaceResolution::Binds {
@@ -214,7 +243,7 @@ fn consumer_to_def(
     ConsumerDef {
         call: call_id.clone(),
         resolution: surface_resolution,
-        reads: BTreeSet::new(),
+        reads: reads_by_call.get(call_id).cloned().unwrap_or_default(),
         reads_complete: resolution.reads_complete,
     }
 }
@@ -1044,34 +1073,40 @@ pub fn diff_consumers(base: &ContractSurface, head: &ContractSurface) -> Vec<Cha
                 }
                 // ConsumerFieldUnmatched — bound endpoint has a
                 // schema, head reads a path that schema does not
-                // contain, and base did not.
-                if base_def.is_none_or(|b| b.reads.is_empty()) {
-                    for endpoint_id in endpoints {
-                        if let Some(endpoint) = head.endpoints.get(endpoint_id) {
-                            if !endpoint.has_schema {
+                // contain, and base did not read it. The base-read
+                // check matters now that the surface carries real
+                // reads: a read that was already unmatched in base
+                // (e.g. the sensor's `r.json()` chain) is not a
+                // *change*, while scenario 20's new `discount` read
+                // is.
+                let base_reads: BTreeSet<crate::federation::contracts::model::JsonPath> =
+                    base_def.map(|b| b.reads.clone()).unwrap_or_default();
+                for endpoint_id in endpoints {
+                    if let Some(endpoint) = head.endpoints.get(endpoint_id) {
+                        if !endpoint.has_schema {
+                            continue;
+                        }
+                        for read in &head_def.reads {
+                            if base_reads.contains(read) {
                                 continue;
                             }
-                            for read in &head_def.reads {
-                                let in_head_schema = endpoint
-                                    .schemas
-                                    .values()
-                                    .any(|fields| fields.contains_key(read));
-                                let in_base_schema = base
-                                    .endpoints
-                                    .get(endpoint_id)
-                                    .map(|e| {
-                                        e.schemas.values().any(|fields| fields.contains_key(read))
-                                    })
-                                    .unwrap_or(false);
-                                if !in_head_schema && !in_base_schema {
-                                    out.push(Change {
-                                        service: consumer_service(key),
-                                        kind: ChangeKind::ConsumerFieldUnmatched {
-                                            consumer: key.clone(),
-                                            field: read.clone(),
-                                        },
-                                    });
-                                }
+                            let in_head_schema = endpoint
+                                .schemas
+                                .values()
+                                .any(|fields| fields.contains_key(read));
+                            let in_base_schema = base
+                                .endpoints
+                                .get(endpoint_id)
+                                .map(|e| e.schemas.values().any(|fields| fields.contains_key(read)))
+                                .unwrap_or(false);
+                            if !in_head_schema && !in_base_schema {
+                                out.push(Change {
+                                    service: consumer_service(key),
+                                    kind: ChangeKind::ConsumerFieldUnmatched {
+                                        consumer: key.clone(),
+                                        field: read.clone(),
+                                    },
+                                });
                             }
                         }
                     }
@@ -1518,6 +1553,12 @@ pub fn evaluate(
                 compatible_changes = 1;
                 class_overall = Class::NoKnownImpact;
                 reason_overall = None;
+            } else if matches!(compat, Compat::BreakingIfSent) {
+                // §15.2 row 19: a `BreakingIfSent` change is a lead
+                // even when no bound consumer exists to enumerate —
+                //0.9 cannot model what callers send.
+                class_overall = Class::NeedsInvestigation;
+                reason_overall = Some(Reason::SendsNotModeled);
             } else {
                 class_overall = Class::NoKnownImpact;
                 reason_overall = None;
@@ -1526,6 +1567,9 @@ pub fn evaluate(
             compatible_changes = 1;
             class_overall = Class::NoKnownImpact;
             reason_overall = None;
+        } else if matches!(compat, Compat::BreakingIfSent) {
+            class_overall = Class::NeedsInvestigation;
+            reason_overall = Some(Reason::SendsNotModeled);
         } else {
             class_overall = Class::NoKnownImpact;
             reason_overall = None;

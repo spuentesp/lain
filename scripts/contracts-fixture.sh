@@ -2196,10 +2196,14 @@ services:
   - name: shipping
     repo: platform
     paths: [services/shipping/]
-    env: [INVENTORY_URL]
   - name: inventory
     repo: platform
     paths: [services/inventory/]
+    # Section 7.1: env names resolve TO this service's host -
+    # shipping's code reads INVENTORY_URL to reach inventory, so
+    # the entry lives here (the same way ORDERS_URL lives on
+    # orders). No backticks: this heredoc is unquoted.
+    env: [INVENTORY_URL]
 http_clients: []
 generic_keys:
   - GET /health

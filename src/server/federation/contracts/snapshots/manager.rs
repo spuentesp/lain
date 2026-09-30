@@ -1446,6 +1446,66 @@ pub fn build_snapshot_contract_index(
     let contract_nodes: Vec<GraphNode> =
         nodes.into_iter().filter(|n| n.contract.is_some()).collect();
     let out = ContractJoiner::run(&contract_nodes, &contract_edges, config);
+
+    // Persist the join's `Binds` edges into the snapshot backend,
+    // exactly as the live `rejoin_contracts` does. §9.5 traces
+    // (`Field ← Binds ← FieldRef`, `HttpRoute ← Binds ←
+    // HttpClientCall`) and the command-center views read them from
+    // the graph; without this the snapshot's impact paths stop at
+    // the changed node.
+    let desired: std::collections::BTreeSet<(String, String)> = out
+        .binds
+        .iter()
+        .map(|b| {
+            (
+                b.consumer.as_str().to_string(),
+                b.provider.as_str().to_string(),
+            )
+        })
+        .collect();
+    let stored_edges: Vec<GraphEdge> = backend
+        .all_edges()?
+        .into_iter()
+        .filter(|e| e.edge_type == crate::schema::EdgeType::Binds)
+        .collect();
+    let stored: std::collections::BTreeSet<(String, String)> = stored_edges
+        .iter()
+        .map(|e| (e.source_id.clone(), e.target_id.clone()))
+        .collect();
+    let to_add: Vec<GraphEdge> = out
+        .binds
+        .iter()
+        .filter(|b| {
+            !stored.contains(&(
+                b.consumer.as_str().to_string(),
+                b.provider.as_str().to_string(),
+            ))
+        })
+        .map(|b| GraphEdge {
+            edge_type: crate::schema::EdgeType::Binds,
+            source_id: b.consumer.as_str().to_string(),
+            target_id: b.provider.as_str().to_string(),
+            weight: Some(b.confidence),
+            cross_repo: b.consumer_service != b.provider_service
+                && b.consumer.repo_id() != b.provider.repo_id(),
+            provenance: Some(b.provenance.clone()),
+            site: None,
+            detail: Some(crate::schema::EdgeDetail {
+                route_match: Some(b.route_match),
+                stripped_prefix: b.stripped_prefix.clone(),
+            }),
+        })
+        .collect();
+    let to_remove: Vec<GraphEdge> = stored_edges
+        .into_iter()
+        .filter(|e| !desired.contains(&(e.source_id.clone(), e.target_id.clone())))
+        .collect();
+    if !to_add.is_empty() {
+        backend.upsert_edges_batch(&to_add)?;
+    }
+    if !to_remove.is_empty() {
+        backend.remove_edges(&to_remove)?;
+    }
     Ok(out.index)
 }
 

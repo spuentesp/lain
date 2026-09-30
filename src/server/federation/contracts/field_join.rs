@@ -45,6 +45,12 @@ pub(crate) struct EndpointSchemas {
     /// direction §7.5 reads against. `Request` is recorded for the
     /// eventual request-side diff; PR 9 only joins against response.
     pub by_endpoint: BTreeMap<EndpointId, BTreeMap<Direction, Vec<ResponseField>>>,
+    /// `EndpointId → Direction → Schema node id` — the openapi
+    /// `Schema` node the direction's fields hang off (`HasField`).
+    /// `EndpointSchema::node_id` carries this so tools can walk
+    /// `Schema → Field` (e.g. `trace_impact`'s field arm) instead
+    /// of mistaking the provider route for the schema.
+    pub schema_node: BTreeMap<EndpointId, BTreeMap<Direction, GlobalId>>,
 }
 
 /// One flattened field of a response schema. The `(node_id, path)`
@@ -147,6 +153,7 @@ pub(crate) fn collect_endpoint_schemas(
     //    federation can't route them.
     let mut by_endpoint: BTreeMap<EndpointId, BTreeMap<Direction, Vec<ResponseField>>> =
         BTreeMap::new();
+    let mut schema_node: BTreeMap<EndpointId, BTreeMap<Direction, GlobalId>> = BTreeMap::new();
     for (route_id, schemas) in schemas_by_route {
         let Some(svc) = assignments.get(&route_id) else {
             continue;
@@ -164,8 +171,12 @@ pub(crate) fn collect_endpoint_schemas(
             template: p.template.clone(),
         };
         let endpoint_id: EndpointId = (svc.clone(), key);
-        let bucket = by_endpoint.entry(endpoint_id).or_default();
+        let bucket = by_endpoint.entry(endpoint_id.clone()).or_default();
+        let mut node_map: BTreeMap<Direction, GlobalId> = BTreeMap::new();
         for (dir, schema_id) in schemas {
+            if let Ok(gid) = GlobalId::parse(&schema_id) {
+                node_map.entry(dir).or_insert(gid);
+            }
             if let Some(fields) = fields_by_schema.get(&schema_id) {
                 bucket
                     .entry(dir)
@@ -173,9 +184,15 @@ pub(crate) fn collect_endpoint_schemas(
                     .extend(fields.iter().cloned());
             }
         }
+        if !node_map.is_empty() {
+            schema_node.insert(endpoint_id, node_map);
+        }
     }
 
-    EndpointSchemas { by_endpoint }
+    EndpointSchemas {
+        by_endpoint,
+        schema_node,
+    }
 }
 
 /// Resolve every `FieldRef` against the bound endpoints of its
@@ -277,6 +294,7 @@ pub(crate) fn resolve_field_refs(
                 service: ServiceName("unknown".into()),
                 bound_fields: Vec::new(),
                 unknown: true,
+                call: String::new(),
             };
             out.insert(fid.clone(), resolution);
             unknown_field_refs.insert(fid);
@@ -292,6 +310,7 @@ pub(crate) fn resolve_field_refs(
                 service: ServiceName("unknown".into()),
                 bound_fields: Vec::new(),
                 unknown: true,
+                call: call_id.clone(),
             };
             out.insert(fid.clone(), resolution);
             unknown_field_refs.insert(fid);
@@ -402,6 +421,7 @@ pub(crate) fn resolve_field_refs(
                 service: endpoint_service(endpoints),
                 bound_fields,
                 unknown: false,
+                call: call_id.clone(),
             }
         } else {
             // No bound field — either every endpoint was schemaless
@@ -415,6 +435,7 @@ pub(crate) fn resolve_field_refs(
                 service: endpoint_service(endpoints),
                 bound_fields: Vec::new(),
                 unknown: unknown_any,
+                call: call_id.clone(),
             }
         };
         if resolution.unknown {
@@ -636,7 +657,10 @@ mod tests {
         let mut dir_map: BTreeMap<Direction, Vec<ResponseField>> = BTreeMap::new();
         dir_map.insert(Direction::Response, fields);
         by_endpoint.insert(endpoint, dir_map);
-        EndpointSchemas { by_endpoint }
+        EndpointSchemas {
+            by_endpoint,
+            schema_node: BTreeMap::new(),
+        }
     }
 
     #[test]

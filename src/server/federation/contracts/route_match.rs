@@ -75,12 +75,15 @@ pub fn match_route(
 
     // Try direct match first.
     if segments_match(&consumer_segs, &provider_segs) {
-        let kind = if consumer_segs.iter().any(|s| *s == "{}" || *s == "{**}")
-            || provider_segs.iter().any(|s| *s == "{}" || *s == "{**}")
-        {
-            RouteMatch::Pattern
-        } else {
+        // `Exact` means the templates are *identical* (same
+        // literals, same `{}` positions — §15.1 ground truth binds
+        // record `match: exact` for `/api/orders/{}` ↔
+        // `/api/orders/{}`); `Pattern` is the compatible-but-not-
+        // identical case (`/api/orders/42` vs `/api/orders/{}`).
+        let kind = if consumer_segs == provider_segs {
             RouteMatch::Exact
+        } else {
+            RouteMatch::Pattern
         };
         return MatchOutcome::Match(MatchDetail {
             kind,
@@ -319,7 +322,18 @@ mod tests {
 
     #[test]
     fn same_segments_match() {
+        // Identical templates (including `{}` positions) are an
+        // `Exact` match (§15.1 ground truth: `match: exact` for
+        // `/api/orders/{}` ↔ `/api/orders/{}`).
         let m = match_get("/api/orders/{}", "/api/orders/{}");
+        assert!(matches!(m, MatchOutcome::Match(ref d) if d.kind == RouteMatch::Exact));
+    }
+
+    #[test]
+    fn compatible_but_different_templates_are_pattern() {
+        // Literal consumer segment vs provider `{}` — pairwise
+        // compatible, but not the same template.
+        let m = match_get("/api/orders/42", "/api/orders/{}");
         assert!(matches!(m, MatchOutcome::Match(ref d) if d.kind == RouteMatch::Pattern));
     }
 

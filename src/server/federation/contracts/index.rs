@@ -146,14 +146,22 @@ pub enum UnresolvedReason {
     Unnormalized,
 }
 
-/// Field read resolution. Empty for PR 7 (no `FieldRef` nodes yet);
-/// the joiner fills the map with the §7.5 product in PR 9.
+/// Field read resolution (§7.5). `bound_fields` carries the joined
+/// `Binds(FieldRef → Field)` product; `call` is the id of the
+/// `HttpClientCall` the FieldRef `ReadsFrom` (empty when the
+/// FieldRef is orphaned). The index carries the link so tools and
+/// `ContractSurface::from_index` can rebuild each consumer's
+/// `reads` set without re-reading graph edges (§4.3: "everything
+/// else the tools need lives in `ContractIndex`").
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldRefResolution {
     pub field_ref_id: GlobalId,
     pub service: ServiceName,
     pub bound_fields: Vec<BoundField>,
     pub unknown: bool,
+    /// The `ReadsFrom` target: the `HttpClientCall` GlobalId this
+    /// read belongs to. Empty when no `ReadsFrom` edge exists.
+    pub call: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
