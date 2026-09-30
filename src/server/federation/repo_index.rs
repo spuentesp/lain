@@ -566,14 +566,15 @@ impl RepoIndex {
             index_one_repo(crate::server::ingest::ingestion::IndexRequest {
                 path: &path,
                 graph: db,
-                lsp_pool: &lsp,
+                lsp_pool: Some(&lsp),
                 git: &self.git,
-                overlay: &overlay,
+                overlay: Some(&overlay),
                 resolver: resolver_ref,
                 source_repo: Some(source_repo),
                 namespace: &self.id_namespace,
                 force: false,
                 cancel: &self.cancel,
+                mode: crate::server::ingest::ingestion::IndexMode::Live,
             })
             .await
         };
@@ -700,14 +701,15 @@ impl RepoIndex {
             index_one_repo(crate::server::ingest::ingestion::IndexRequest {
                 path: &path,
                 graph: db,
-                lsp_pool: &lsp,
+                lsp_pool: Some(&lsp),
                 git: &self.git,
-                overlay: &overlay,
+                overlay: Some(&overlay),
                 resolver: resolver_ref,
                 source_repo: Some(source_repo),
                 namespace: &self.id_namespace,
                 force: true,
                 cancel: &self.cancel,
+                mode: crate::server::ingest::ingestion::IndexMode::Live,
             })
             .await
         };

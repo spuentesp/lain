@@ -109,11 +109,18 @@ fn extract_tree_sitter_file(path: &Path, content: &str) -> TreeSitterFile {
 }
 
 /// Pure structural scan without side effects (Map)
+///
+/// `lsp_mux` is `None` in snapshot mode (`§8.2`): the per-repo
+/// DB is built from tree-sitter symbols + static resolve + sensors
+/// alone, with no LSP round trip. The LSP-fallback code path that
+/// runs tree-sitter on empty results is the same one snapshot
+/// mode uses; the only difference is the absence of an LSP
+/// multiplexer to dial in the first place.
 #[allow(clippy::too_many_arguments)]
 pub async fn scan_file_structure(
     path: PathBuf,
     workspace: PathBuf,
-    lsp_mux: Arc<AsyncMutex<LspMultiplexer>>,
+    lsp_mux: Option<Arc<AsyncMutex<LspMultiplexer>>>,
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
@@ -199,6 +206,12 @@ pub async fn scan_file_structure(
     //    header get one round trip, not two. The cache lives
     //    inside `scan_file_batch` and drops at the end of the
     //    pass.
+    //
+    //    Snapshot mode (`§8.2`) skips the LSP step entirely: the
+    //    indexer never constructs an `LspMultiplexer`, so `lsp_mux`
+    //    is `None`, and the call below is short-circuited to a
+    //    tree-sitter-only walk that mirrors the LSP-fallback code
+    //    path that runs tree-sitter on empty results.
     let symbols_result = {
         // Compute the file's content hash once. `std::fs::read` is
         // a single syscall; the LSP round trip below is orders of
@@ -213,7 +226,7 @@ pub async fn scan_file_structure(
                 // treat it as if the LSP returned the symbols.
                 let _ = hash;
                 Ok(cached_symbols)
-            } else {
+            } else if let Some(lsp_mux) = lsp_mux.as_ref() {
                 let mut lsp = lsp_mux.lock().await;
                 let ns = crate::schema::RepoNamespace::for_test();
                 let result = tokio::select! {
@@ -239,8 +252,13 @@ pub async fn scan_file_structure(
                     cache.put(&path, hash, syms);
                 }
                 result
+            } else {
+                // Snapshot mode + cache hit miss: there is no LSP
+                // server to round-trip and the cache did not have
+                // this file. Tree-sitter is the fallback by design.
+                Ok(Vec::new())
             }
-        } else {
+        } else if let Some(lsp_mux) = lsp_mux.as_ref() {
             let mut lsp = lsp_mux.lock().await;
             let ns = crate::schema::RepoNamespace::for_test();
             tokio::select! {
@@ -260,6 +278,10 @@ pub async fn scan_file_structure(
                     &ns,
                 ) => result,
             }
+        } else {
+            // Snapshot mode + no cache: skip LSP, fall through to
+            // tree-sitter below.
+            Ok(Vec::new())
         }
     };
 
@@ -328,15 +350,24 @@ pub async fn scan_file_structure(
     //    identifies the declaration whose references we want. Pair each
     //    returned reference with the symbol's node id so the resolve
     //    phase can build caller -> callee edges.
-    for (callee_id, sel_line, sel_col) in selection_positions {
-        let refs = {
-            let mut lsp = lsp_mux.lock().await;
-            lsp.get_references(&path, sel_line, sel_col)
-                .await
-                .unwrap_or_default()
-        };
-        for r in refs {
-            external_references.push((callee_id.clone(), r));
+    //
+    //    Snapshot mode (`§8.2`) skips this step: `lsp_mux` is `None`,
+    //    so no LSP round trips and no cross-process references are
+    //    added to `external_references`. The resolve phase downstream
+    //    runs with whatever tree-sitter produced; that is exactly
+    //    what `§8.2` mandates (no cross-repo resolver, no
+    //    LSP-derived cross-process `Calls`).
+    if let Some(lsp_mux) = lsp_mux.as_ref() {
+        for (callee_id, sel_line, sel_col) in selection_positions {
+            let refs = {
+                let mut lsp = lsp_mux.lock().await;
+                lsp.get_references(&path, sel_line, sel_col)
+                    .await
+                    .unwrap_or_default()
+            };
+            for r in refs {
+                external_references.push((callee_id.clone(), r));
+            }
         }
     }
 
@@ -424,11 +455,15 @@ pub async fn scan_file_structure(
 }
 
 /// Scan multiple files in a single task (batch processing for reduced task overhead)
+///
+/// `lsp_mux` is `Option<…>` so snapshot mode (`§8.2`) can pass
+/// `None` and skip LSP entirely. The live federation path always
+/// passes `Some(lsp_mux)`.
 #[allow(clippy::too_many_arguments)]
 pub async fn scan_file_batch(
     paths: Vec<PathBuf>,
     workspace: PathBuf,
-    lsp_mux: Arc<AsyncMutex<LspMultiplexer>>,
+    lsp_mux: Option<Arc<AsyncMutex<LspMultiplexer>>>,
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
@@ -445,7 +480,7 @@ pub async fn scan_file_batch(
         let result = scan_file_structure(
             path,
             workspace.clone(),
-            Arc::clone(&lsp_mux),
+            lsp_mux.as_ref().map(Arc::clone),
             lsp_sync,
             git_sync,
             commit_hash.clone(),
@@ -861,7 +896,7 @@ mod tests {
         let result = scan_file_structure(
             file,
             tmp.path().to_path_buf(),
-            lsp,
+            Some(lsp),
             0,
             0,
             "abc".to_string(),
@@ -930,7 +965,7 @@ mod tests {
         let result = scan_file_structure(
             file,
             tmp.path().to_path_buf(),
-            lsp,
+            Some(lsp),
             0,
             0,
             "abc".to_string(),
@@ -1182,7 +1217,7 @@ mod tests {
         let result = scan_file_structure(
             file.clone(),
             tmp.path().to_path_buf(),
-            lsp,
+            Some(lsp),
             0,
             0,
             "abc".to_string(),
@@ -1269,7 +1304,7 @@ mod tests {
         let result = scan_file_structure(
             file.clone(),
             tmp.path().to_path_buf(),
-            lsp,
+            Some(lsp),
             0,
             0,
             "abc".to_string(),
@@ -1374,7 +1409,7 @@ mod tests {
         let result = scan_file_structure(
             file.clone(),
             tmp.path().to_path_buf(),
-            lsp,
+            Some(lsp),
             0,
             0,
             "abc".to_string(),
@@ -1547,7 +1582,7 @@ mod lsp_cancel_tests {
         let result = scan_file_structure(
             file,
             tmp.path().to_path_buf(),
-            lsp,
+            Some(lsp),
             0,
             0,
             "abc".to_string(),
@@ -1677,7 +1712,7 @@ mod lsp_scan_cache_tests {
         let result = scan_file_structure(
             file,
             tmp.path().to_path_buf(),
-            lsp,
+            Some(lsp),
             0,
             0,
             "abc".to_string(),
