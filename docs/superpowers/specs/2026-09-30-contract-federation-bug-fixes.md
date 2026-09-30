@@ -58,13 +58,17 @@ not the whole module file. Two parts:
   contains the handler's `SymbolKey` (when `handler` is set), not every
   file the provider's `enrich_*` pass walks. For code-only handlers the
   list is exactly that one file.
-- **Diff-side (`contracts/diff.rs` + `changed_files.rs`):** keep the
-  git2-backed `MirrorChangedFiles` (§9.2 ground truth from PR 13), but
-  pass the endpoint's `source_files` set into the rule check so the
-  intersection is "files that changed AND are in this endpoint's
-  source files". The `ChangedFilesSource` trait stays unchanged
-  (returns the full diff); the rule filters by endpoint's
-  `source_files`. This makes `source_files` precision the lever.
+- **Diff-side (`contracts/diff.rs` `ChangedWithoutSchema` rule):** keep
+  the `ChangedFilesSource` trait shape unchanged (the trait returns the
+  union of every repo's changed files; the rule filters). In the rule:
+  ```rust
+  let changed = changed_files.changed_files(base, head);
+  let touched = !changed.intersection(&endpoint.source_files).is_empty();
+  if !has_schema && touched { ... emit ChangedWithoutSchema ... }
+  ```
+  i.e. fire only when at least one file in `endpoint.source_files`
+  actually changed. Existing call sites continue to pass `MultiRepoChangedFiles`
+  / `RepoScopedChangedFiles` unchanged.
 
 **Tests.**
 - New discriminated test in `field_access_sensor.rs`-equivalent
@@ -107,14 +111,17 @@ list.
 **Fix shape.** Distinguish method calls from field reads in the
 Python and TS walkers. Two parts:
 
-- **Deny-list approach:** `handle_python_call` and `handle_tsjs_call`
-  must check the called method name against a fixed deny-list of
-  well-known HTTP-response / Response-object methods that return a
-  *parsed body* or *metadata*, not a field. When the method is on the
-  deny-list, do NOT emit a `FieldRef`. Allowlist-shaped:
+- **Deny-list approach in the call walkers:** `handle_python_call`
+  and `handle_tsjs_call` must check the called method name against a
+  fixed deny-list of well-known HTTP-response / Response-object methods
+  that return a *parsed body* or *metadata*, not a field. When the
+  method is on the deny-list AND the receiver is bound, return without
+  emitting a `FieldRef`. The attribute walker (`handle_attribute`) is
+  for `x.k` (a subscript-like access), not `x.k(…)`; the deny-list
+  lives only in the call walkers:
   ```rust
   const RESPONSE_METHOD_DENYLIST: &[&str] = &[
-      // body parsing (covered by rule 2)
+      // body parsing (covered by rule 2 chain_unwrap_call)
       "json", "text", "data", "body",
       // metadata (never field reads)
       "status_code", "headers", "url", "encoding", "content",
@@ -124,15 +131,12 @@ Python and TS walkers. Two parts:
       "headers", "status", "ok", "redirected", "url",
   ];
   ```
-  When `handle_*_call`'s function name is on the list AND the receiver
-  is bound, return without emitting a `FieldRef`. (Existing rule-2
-  rebind handling in `chain_unwrap_call` stays as-is.)
-- **Apply consistently** in `handle_python_call`, `handle_tsjs_call`,
-  and the attribute walker (`handle_attribute`) — the latter currently
-  reads `x.status_code` etc. as fields because it can't tell methods
-  from attributes at the syntax level. The simplest fix that survives
-  existing tests: when the call form is `<bound>.<method>(...)`, treat
-  the method name as a method (deny-list gate), not a field.
+  In `handle_*_call`: when the function is a member expression
+  (`attribute` / `member_expression`), the receiver is bound, AND the
+  method name is on the deny-list, return early — no `FieldRef`
+  emitted. (The existing rule-2 chain-unwrap in `chain_unwrap_call`
+  stays as-is; the deny-list only suppresses the FieldRef emission for
+  the same shape, the rebind path is unchanged.)
 
 **Tests.**
 - New discriminating test: `fetch_order_v2 = await fetch(…); x =
