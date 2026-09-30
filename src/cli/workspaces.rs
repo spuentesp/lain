@@ -118,8 +118,12 @@ fn workspaces_file_for(config: &Path) -> PathBuf {
 /// Limitation: the sibling is matched by the hardcoded `repos.yaml`
 /// basename. A server started with `--config myrepos.yaml` listens on a
 /// socket named after `myrepos`, so these commands dial a socket nobody
-/// owns and the reload is silently missed. Sockets are path-hashed, so
-/// the misfire cannot reach another project's server either.
+/// owns and the reload is silently missed. The same trap applies to
+/// `--config myworkspaces.yaml` when a sibling `repos.yaml` exists:
+/// `reload_target` resolves to `repos.sock` (the sibling) while the
+/// server listens on the path-canonicalized socket for
+/// `myworkspaces.yaml`. Sockets are path-hashed, so the misfire cannot
+/// reach another project's server either.
 fn reload_target(workspaces_yaml: &Path) -> PathBuf {
     let sibling = workspaces_yaml
         .parent()
@@ -661,6 +665,65 @@ mod tests {
         assert_eq!(received, "reload\n");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_forget_warns_when_active_workspace_is_forgotten() {
+        use std::process::Command;
+
+        // Capture stderr from `lain workspaces forget` by running it as a
+        // subprocess: the codebase has no in-process stderr capture helper
+        // and adding one would require `libc`/`nix` (forbidden by the
+        // Scorecard dep policy). Locating the binary from `current_exe()`
+        // works because `cargo test` lays the test runner and `lain`
+        // under the same `<target>/<profile>/`.
+        let lain_bin = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .and_then(|p| p.parent().map(|p| p.join("lain")))
+            .filter(|p| p.is_file());
+        let Some(lain_bin) = lain_bin else {
+            eprintln!(
+                "skip: `lain` binary not found; run `cargo build --bin lain` \
+                 before this test (or run `cargo test --workspace`, which \
+                 builds it for you)"
+            );
+            return;
+        };
+
+        let _g = crate::state::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let project = tempfile::tempdir().unwrap();
+        let ws = project.path().join("workspaces.yaml");
+        std::fs::write(
+            &ws,
+            "workspaces:\n  - name: doomed\n    members: [repo-a]\n",
+        )
+        .unwrap();
+        let cfg_home = tempfile::tempdir().unwrap();
+        let lain_cfg = cfg_home.path().join("lain");
+        std::fs::create_dir_all(&lain_cfg).unwrap();
+        std::fs::write(lain_cfg.join("active_workspace"), "doomed\n").unwrap();
+
+        let out = Command::new(&lain_bin)
+            .args(["workspaces", "--config"])
+            .arg(&ws)
+            .args(["forget", "doomed"])
+            .env("XDG_CONFIG_HOME", cfg_home.path())
+            .env_remove("LAIN_HOME")
+            .output()
+            .expect("spawn lain workspaces forget");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "lain workspaces forget failed: {stderr}"
+        );
+        assert!(
+            stderr.contains("doomed") && stderr.contains("serving"),
+            "forgetting the active workspace must warn on stderr, got: {stderr}"
+        );
+    }
+
     #[test]
     fn forgetting_the_active_workspace_warns_about_the_running_server() {
         let _g = crate::state::TEST_LOCK
@@ -679,6 +742,50 @@ mod tests {
         assert!(warning.contains("doomed"), "{warning}");
         assert!(warning.contains("serving"), "{warning}");
         assert!(forgetting_active_workspace_warning("other").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_create_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(&ws, "workspaces: []\n").unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| {
+            run_create("new", None, vec!["r".into()], Some(ws_path))
+        });
+        assert_eq!(received, "reload\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_add_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(
+            &ws,
+            "workspaces:\n  - name: w\n    members: [r1]\n",
+        )
+        .unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| {
+            run_add("w", "r2", Some(ws_path))
+        });
+        assert_eq!(received, "reload\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_remove_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(
+            &ws,
+            "workspaces:\n  - name: w\n    members: [r1, r2]\n",
+        )
+        .unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| {
+            run_remove("w", "r2", Some(ws_path))
+        });
+        assert_eq!(received, "reload\n");
     }
 
     #[cfg(unix)]
