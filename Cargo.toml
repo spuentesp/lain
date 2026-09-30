@@ -95,7 +95,7 @@ once_cell = "1.19"
 inventory = "0.2"
 
 # Directory management
-dirs = "5.0"
+dirs = "7.0"
 parking_lot = "0.12.5"
 which = "8.0.2"
 
