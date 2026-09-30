@@ -372,7 +372,11 @@ impl EdgeType {
             | EdgeType::ResponseSchema
             | EdgeType::PayloadSchema
             | EdgeType::HasField => false,
-            EdgeType::ReadsField | EdgeType::ReadsFrom | EdgeType::Binds => false,
+            // `ReadsField` / `ReadsFrom` are produced by the wired
+            // `field_access_sensor` (§6.5); `Binds` is the joiner's
+            // cross-service edge (§5.3). All three are real
+            // indexed data on every contract-tool surface (`§10.1`).
+            EdgeType::ReadsField | EdgeType::ReadsFrom | EdgeType::Binds => true,
             // No producer anywhere in the codebase. `Imports` in
             // particular reads like a core relationship and has never
             // been emitted by any indexer.

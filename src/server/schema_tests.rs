@@ -390,10 +390,12 @@ fn test_edge_type_all_includes_contract_variants() {
 }
 
 /// `is_indexed()` is the "does any sensor actually emit this today?"
-/// flag. Contract nodes and edges are reserved here — sensors land
-/// in later PRs — so they must report `false` (so
-/// `describe_schema` says "known but not yet wired up") until their
-/// producers get registered.
+/// flag. The contract-edge types that the wired pipeline now emits
+/// (`ReadsField`, `ReadsFrom`, `Binds` — PR 13 owns this flip) must
+/// report `true`. The node types and the schema-bearing edges still
+/// report `false` because their producer graph is not wired into
+/// the default ingest pipeline (the schema/edge information is
+/// reconstructed at joiner time, not at sensor time).
 #[test]
 fn test_contract_nodes_and_edges_are_marked_unindexed_until_wired() {
     assert!(!NodeType::HttpClientCall.is_indexed());
@@ -405,14 +407,17 @@ fn test_contract_nodes_and_edges_are_marked_unindexed_until_wired() {
         EdgeType::ResponseSchema,
         EdgeType::PayloadSchema,
         EdgeType::HasField,
-        EdgeType::ReadsField,
-        EdgeType::ReadsFrom,
-        EdgeType::Binds,
     ] {
         assert!(
             !e.is_indexed(),
             "{e} has no producer in this codebase yet (sensor lands later)"
         );
+    }
+    // PR 13: the contract-edge pipeline (`field_access_sensor`,
+    // `ContractJoiner`) is wired; flip the flags so `describe_schema`
+    // advertises them.
+    for e in [EdgeType::ReadsField, EdgeType::ReadsFrom, EdgeType::Binds] {
+        assert!(e.is_indexed(), "{e} is wired and must be marked indexed");
     }
 }
 
