@@ -1,5 +1,5 @@
 use crate::federation::repo_id::GlobalId;
-use crate::schema::GraphNode;
+use crate::schema::{EdgeType, GraphNode};
 
 /// Tokens that don't carry parameter / type information and shouldn't
 /// contribute to cross-repo signature similarity.

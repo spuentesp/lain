@@ -108,6 +108,21 @@ fn workspaces_file_for(config: &Path) -> PathBuf {
     }
 }
 
+/// Which config path should carry the reload signal.
+///
+/// `signal::socket_path_for` names the socket after the file stem, and a
+/// server started with `--config repos.yaml` therefore listens on
+/// `repos.sock`. Workspaces mutations live in `workspaces.yaml`, so signal
+/// through the sibling `repos.yaml` when there is one; otherwise fall back
+/// to the given path so a standalone `workspaces.yaml` still works.
+fn reload_target(workspaces_yaml: &Path) -> PathBuf {
+    let sibling = workspaces_yaml
+        .parent()
+        .map(|p| p.join("repos.yaml"))
+        .filter(|p| p.is_file());
+    sibling.unwrap_or_else(|| workspaces_yaml.to_path_buf())
+}
+
 /// Resolve a `workspaces.yaml` path. The CLI accepts an explicit `--config`
 /// flag; if absent, walk up from cwd looking for a `workspaces.yaml` next
 /// to a `repos.yaml`, then a standalone `workspaces.yaml`. Fall back to
@@ -212,7 +227,7 @@ pub fn run_create(
     });
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
-    crate::cli::signal::signal_reload(&path)
+    crate::cli::signal::signal_reload(&reload_target(&path))
         .map_err(|e| anyhow!("signal reload after creating '{name}': {e}"))?;
     println!("Created workspace '{name}' in {}", path.display());
     Ok(())
@@ -236,7 +251,7 @@ pub fn run_add(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
     }
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
-    crate::cli::signal::signal_reload(&path)
+    crate::cli::signal::signal_reload(&reload_target(&path))
         .map_err(|e| anyhow!("signal reload after adding '{repo}' to '{name}': {e}"))?;
     println!("Added repo '{repo}' to workspace '{name}'");
     Ok(())
@@ -261,7 +276,7 @@ pub fn run_remove(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
     ws.members.retain(|m| m != repo);
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
-    crate::cli::signal::signal_reload(&path)
+    crate::cli::signal::signal_reload(&reload_target(&path))
         .map_err(|e| anyhow!("signal reload after removing '{repo}' from '{name}': {e}"))?;
     println!("Removed repo '{repo}' from workspace '{name}'");
     Ok(())
@@ -286,7 +301,7 @@ pub fn run_import(name: &str, from: &Path, config: Option<&Path>) -> Result<()> 
     f.workspaces.push(imported);
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
-    crate::cli::signal::signal_reload(&path)
+    crate::cli::signal::signal_reload(&reload_target(&path))
         .map_err(|e| anyhow!("signal reload after importing '{name}': {e}"))?;
     println!("Imported workspace '{name}' into {}", path.display());
     Ok(())
@@ -527,5 +542,28 @@ mod tests {
             workspaces_file_for(Path::new("./repos.yaml")),
             Path::new("./workspaces.yaml")
         );
+    }
+
+    #[test]
+    fn reload_signal_targets_the_repos_socket_not_the_workspaces_one() {
+        // A server started with `--config repos.yaml` listens on
+        // `repos.sock`, named after the file stem. A workspaces command
+        // that signalled `workspaces.sock` would never reach it and the
+        // federation would silently go stale.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        let repos = dir.path().join("repos.yaml");
+        std::fs::write(&ws, "workspaces: []\n").unwrap();
+        std::fs::write(&repos, "repos: []\n").unwrap();
+
+        assert_eq!(reload_target(&ws), repos);
+    }
+
+    #[test]
+    fn reload_signal_falls_back_to_the_given_path_without_a_repos_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(&ws, "workspaces: []\n").unwrap();
+        assert_eq!(reload_target(&ws), ws);
     }
 }
