@@ -43,6 +43,7 @@
 //!   `tests/contracts_analyzer_digest.rs` to pin the
 //!   sensor / normalizer / joiner output shape.
 
+pub mod changed_files;
 pub mod config;
 pub mod diff;
 pub mod digest;

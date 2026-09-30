@@ -356,9 +356,10 @@ pub enum ChangeKind {
 
 // ─── changed-files source injection ──────────────────────────────────
 
-/// Injected source for the `ChangedWithoutSchema` rule (§9.2). PR 13
-/// will implement a git2/mirror-backed version; the trait is the
-/// pure-function seam.
+/// Injected source for the `ChangedWithoutSchema` rule (§9.2). The
+/// `git2`-backed mirror implementation lives in
+/// [`crate::federation::contracts::changed_files`]; the trait is the
+/// pure-function seam tests use.
 pub trait ChangedFilesSource {
     fn changed_files(&self, base: &str, head: &str) -> BTreeSet<String>;
 }
