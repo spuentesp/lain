@@ -10,6 +10,7 @@
 //! `dispatch_tool_call`-style match ladder to grow. See
 //! [`docs/CONTRIBUTING_AGENTS.md`](../../../docs/CONTRIBUTING_AGENTS.md#sensor-pattern-one-concern-per-file-one-trait-shared).
 
+pub mod codeowners_sensor;
 pub mod dynamic_dispatch_sensor;
 pub mod entry_point_sensor;
 pub mod event_sensor;

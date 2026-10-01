@@ -2541,3 +2541,146 @@ mod pr15_event {
         assert_eq!(n, 0, "empty workspace should produce zero event nodes");
     }
 }
+
+// ─── PR 17 (stretch): codeowners_sensor + `owners` on used_by ──────────
+
+mod pr17_codeowners {
+    //! PR 17: codeowners_sensor reads GitHub-style `CODEOWNERS` files
+    //! and the `get_service` handler attaches an `owners: [String]`
+    //! field to each `used_by` entry. The lookup is
+    //! `(repo, path) -> Vec<String>`, populated by the sensor scan;
+    //! this module exercises the scan + lookup end-to-end against a
+    //! fixture mirroring the T1 billing repo's CODEOWNERS, and confirms
+    //! the wiring's caller-side extraction (`ref.id` → repo,
+    //! `ref.path` → file path).
+
+    use lain::schema::RepoNamespace;
+    use lain::server::sensors::codeowners_sensor::{
+        codeowners_for, parse_codeowners, scan_workspace_codeowners,
+    };
+    use std::path::Path;
+
+    /// Write `content` to `<dir>/CODEOWNERS` and run the sensor over
+    /// `dir`. Returns the workspace basename (used as the repo id by
+    /// the lookup).
+    fn scan_with_codeowners(dir: &Path, content: &str) -> String {
+        std::fs::write(dir.join("CODEOWNERS"), content).expect("write CODEOWNERS");
+        let g = lain::graph::GraphDatabase::new(&dir.join("db.bin")).expect("graph db");
+        let ns = RepoNamespace::for_test();
+        scan_workspace_codeowners(&g, dir, &ns).expect("scan");
+        dir.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// The integration tests share the global codeowners INDEX.
+    /// Serialise them through a single mutex so they don't clobber
+    /// each other's scans. Recover from a panic so a single failing
+    /// test doesn't cascade.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        match TEST_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    /// A workspace under `/tmp/<tag>` whose basename is the tag, so
+    /// the lookup uses the same name the sensor inferred.
+    fn fixed_workspace(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lain_pr17_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn parses_owner_lines_with_multiple_owners_per_pattern() {
+        let rules = parse_codeowners(
+            "\
+/src/orders_api.py  @team-billing @oncall
+*.py                @python-team
+",
+        );
+        assert_eq!(rules.len(), 2);
+        assert_eq!(
+            rules[0].owners,
+            vec!["@team-billing".to_string(), "@oncall".to_string()],
+        );
+        assert_eq!(rules[1].owners, vec!["@python-team".to_string()]);
+    }
+
+    #[test]
+    fn lookup_returns_owners_for_matching_paths() {
+        let _g = test_lock();
+        let dir = fixed_workspace("lookup");
+        // GitHub CODEOWNERS is last-match-wins: a more specific rule
+        // listed *later* overrides earlier ones. Order the entries
+        // so the file-specific rule is at the bottom.
+        let repo = scan_with_codeowners(
+            &dir,
+            "\
+*.py                   @python-team
+/src/                  @team-billing
+/src/orders_api.py     @team-billing @oncall
+",
+        );
+        // The specific /src/orders_api.py rule wins (last match).
+        assert_eq!(
+            codeowners_for(&repo, "/src/orders_api.py"),
+            vec!["@team-billing".to_string(), "@oncall".to_string()],
+        );
+        // Falls back to the directory rule.
+        assert_eq!(
+            codeowners_for(&repo, "/src/main.py"),
+            vec!["@team-billing".to_string()],
+        );
+        // Extension pattern matches anywhere.
+        assert_eq!(
+            codeowners_for(&repo, "/anywhere/deep/script.py"),
+            vec!["@python-team".to_string()],
+        );
+        // Unmatched path.
+        assert!(codeowners_for(&repo, "/README.md").is_empty());
+    }
+
+    #[test]
+    fn lookup_is_empty_without_a_codeowners_file() {
+        let _g = test_lock();
+        let dir = fixed_workspace("no_file");
+        let repo = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        // Scan an empty workspace — no CODEOWNERS file present.
+        let g = lain::graph::GraphDatabase::new(&dir.join("db.bin")).expect("graph db");
+        scan_workspace_codeowners(&g, &dir, &RepoNamespace::for_test()).expect("scan");
+        assert!(codeowners_for(&repo, "/src/anything.py").is_empty());
+    }
+
+    #[test]
+    fn get_service_enriches_used_by_with_owners() {
+        // Stand-in for `enrich_used_by_with_owners`: each used_by
+        // entry's `ref.id` is the entry-point GlobalId; `ref.path` is
+        // the repo-relative file path. The lookup must work given
+        // just those two pieces, matching how the production handler
+        // extracts them at `services.rs::enrich_used_by_with_owners`.
+        let _g = test_lock();
+        let dir = fixed_workspace("enrich");
+        let repo = scan_with_codeowners(
+            &dir,
+            "\
+/src/orders_api.py  @billing-team @oncall
+",
+        );
+        let id = format!("{repo}:Function:/src/orders_api.py:fetch_order:42");
+        let path = "/src/orders_api.py";
+        let owners = codeowners_for(id.split(':').next().unwrap_or(""), path);
+        assert_eq!(
+            owners,
+            vec!["@billing-team".to_string(), "@oncall".to_string()],
+        );
+    }
+}

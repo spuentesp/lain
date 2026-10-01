@@ -35,6 +35,7 @@ use crate::federation::health::RepoHealth;
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::EdgeType;
 use crate::server::mcp::handler::McpContext;
+use crate::server::sensors::codeowners_sensor::codeowners_for;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -524,7 +525,8 @@ fn build_consumer_rows(
             },
         };
         let used_by_truncated = used_by.truncated;
-        let used_by_entries = used_by.entries.clone();
+        let mut used_by_entries = used_by.entries.clone();
+        enrich_used_by_with_owners(&mut used_by_entries);
 
         let fields = collect_fields(idx, endpoint);
         let reads_complete = resolution.reads_complete;
@@ -680,6 +682,29 @@ fn caller_node_evidence(caller: &CallerNode) -> Value {
         "line": caller.line,
         "text": "",
     })
+}
+
+/// Attach `owners: [String]` to every `used_by` entry (§10.9, PR 17).
+/// Each entry's `ref.id` is the entry-point's `GlobalId`; the repo is
+/// the first segment, the path comes from `ref.path`. `codeowners_for`
+/// returns an empty list when the repo has no `CODEOWNERS` or the path
+/// doesn't match — in that case the field is omitted to keep the
+/// output minimal.
+fn enrich_used_by_with_owners(entries: &mut [Value]) {
+    for entry in entries.iter_mut() {
+        let Some(ref_obj) = entry.get_mut("ref").and_then(|v| v.as_object_mut()) else {
+            continue;
+        };
+        let Some(id) = ref_obj.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let repo = id.split(':').next().unwrap_or("");
+        let path = ref_obj.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let owners = codeowners_for(repo, path);
+        if !owners.is_empty() {
+            entry["owners"] = json!(owners);
+        }
+    }
 }
 
 fn provenance_to_json(p: &crate::schema::EdgeProvenance) -> Value {

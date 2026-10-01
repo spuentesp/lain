@@ -1667,6 +1667,24 @@ def start_order_created_listener() -> None:
 EOF
 }
 
+# PR 17 (stretch): GitHub-style CODEOWNERS for billing. The
+# `codeowners_sensor` reads it; `get_service(orders)`'s `used_by`
+# entries attach the owners from the consumer's file. Declared
+# before `make_commit` below so the file lands in `base` and every
+# fixture branch inherits it.
+write_billing_codeowners() {
+  mkdir -p "$BILLING_DIR/.github"
+  cat > "$BILLING_DIR/.github/CODEOWNERS" <<'EOF'
+# PR 17 fixture: owners used by `get_service(orders).used_by`.
+# Last match wins (GitHub semantics). `/src/main.py` is more
+# specific than `*.py` and is declared later.
+*                          @billing-leads
+/src/                       @billing-team
+/src/main.py                @billing-oncall @billing-leads
+/src/orders_api.py          @billing-team @oncall
+EOF
+}
+
 write_billing() {
   mkdir -p "$BILLING_DIR/src"
   cd "$BILLING_DIR"
@@ -1677,6 +1695,7 @@ write_billing() {
   write_billing_requirements
   write_billing_main_base
   write_billing_event_consumer
+  write_billing_codeowners
   make_commit "billing: base" 0
   git tag base
 
