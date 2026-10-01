@@ -79,7 +79,7 @@ pub mod snapshots;
 /// combines the build version and the analyzer revision. Two
 /// different builds of the same analyzer revision share a cache
 /// entry; one analyzer revision's cache is invisible to the next.
-pub const CONTRACT_ANALYZER_REV: u32 = 2;
+pub const CONTRACT_ANALYZER_REV: u32 = 3;
 
 /// Build the analyzer-version string used as the cache-entry name
 /// suffix and embedded in the snapshot record (`§8.3` + `§8.4`).

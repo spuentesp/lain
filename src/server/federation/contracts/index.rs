@@ -212,6 +212,12 @@ pub fn node_type_of(fact: &ContractFact) -> NodeType {
         ContractFact::Schema { .. } => NodeType::Schema,
         ContractFact::Field(_) => NodeType::Field,
         ContractFact::FieldRead(_) => NodeType::FieldRef,
+        // §6.7 (stretch): topic subscribers ride on `TopicConsumer`.
+        // We surface them as a fresh node type so tools can ask the
+        // graph "which functions subscribe to which topics?" without
+        // parsing edges. The schema carries `NodeType::Topic` for
+        // the producer-side; consumers are still function-shaped.
+        ContractFact::TopicConsumer(_) => NodeType::Function,
     }
 }
 

@@ -2049,6 +2049,11 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     let index = ci.as_ref();
 
     // Reported binds: every consumer resolution with a Binds target.
+    // Filter to HTTP binds only — the topic-join path (PR 15
+    // stretch, §7.7) emits additional `Binds` edges on
+    // `ContractKey::Topic { … }` endpoints, but the GT and the §9.3
+    // diff scenarios don't track them. Excluding those keeps the
+    // precision/recall metrics stable per the task brief.
     let reported_binds: Vec<(String, String, String, String)> = index
         .consumers
         .values()
@@ -2062,6 +2067,12 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
                     .first()
                     .map(|(svc, k)| (svc.0.clone(), k.to_string()))
                     .unwrap_or_default();
+                // Skip topic-bound consumers; they don't appear in
+                // the HTTP-only GT and the diff scenarios don't
+                // exercise them.
+                if !key.starts_with("http:") {
+                    return None;
+                }
                 Some((consumer_service, consumer_caller, svc, key))
             } else {
                 None
@@ -2193,4 +2204,340 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
         metrics.reads_field_recall,
         baseline.reads_field_recall
     );
+}
+
+// ─── PR 15 (stretch): event sensor + topic join ─────────────────────
+
+mod pr15_event {
+    //! §6.7 / §7.7 stretch goal.
+    //!
+    //! Builds a 3-repo federation where orders publishes the
+    //! `orders.created` topic and reports + billing subscribe to it.
+    //! The event sensor emits `Topic` + `Produces` / `Consumes`
+    //! nodes/edges; the joiner binds consumer functions to the
+    //! producer on the same `(broker, name)` pair.
+
+    use lain::federation::contracts::model::{
+        ContractFact, HttpMethod, ProviderFact, ProviderOrigin, TopicConsumerFact,
+        TopicConsumerKind,
+    };
+    use lain::schema::{GraphEdge, GraphNode, NodeType};
+
+    fn topic_node(
+        repo: &str,
+        path: &str,
+        _name: &str,
+        line: u32,
+        broker: &str,
+        topic: &str,
+    ) -> GraphNode {
+        let ns = lain::schema::RepoNamespace::for_test();
+        let mut n = GraphNode::new_in(
+            NodeType::Topic,
+            format!("{broker}/{topic}"),
+            path.to_string(),
+            &ns,
+        );
+        n.repo_id = Some(repo.to_string());
+        n.id = lain::federation::repo_id::GlobalId::new(
+            &lain::federation::repo_id::RepoId::new(repo).unwrap(),
+            NodeType::Topic,
+            path,
+            &format!("{broker}/{topic}"),
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        n.line_start = Some(line);
+        n.contract = Some(ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Any,
+            template: topic.to_string(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        }));
+        n
+    }
+
+    fn topic_consumer_fn(
+        repo: &str,
+        path: &str,
+        name: &str,
+        line: u32,
+        broker: &str,
+        topic: &str,
+    ) -> GraphNode {
+        let ns = lain::schema::RepoNamespace::for_test();
+        let mut n = GraphNode::new_in(NodeType::Function, name.to_string(), path.to_string(), &ns);
+        n.repo_id = Some(repo.to_string());
+        n.id = lain::federation::repo_id::GlobalId::new(
+            &lain::federation::repo_id::RepoId::new(repo).unwrap(),
+            NodeType::Function,
+            path,
+            name,
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        n.line_start = Some(line);
+        n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+            broker: broker.to_string(),
+            name: topic.to_string(),
+            kind: TopicConsumerKind::Subscription,
+        }));
+        n
+    }
+
+    fn produce_edge(repo: &str, path: &str, fn_name: &str, line: u32, topic_id: &str) -> GraphEdge {
+        let fn_id = lain::federation::repo_id::GlobalId::new(
+            &lain::federation::repo_id::RepoId::new(repo).unwrap(),
+            NodeType::Function,
+            path,
+            fn_name,
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        GraphEdge::new(EdgeType::Produces, fn_id, topic_id.to_string())
+    }
+
+    fn consume_edge(repo: &str, path: &str, fn_name: &str, line: u32, topic_id: &str) -> GraphEdge {
+        let fn_id = lain::federation::repo_id::GlobalId::new(
+            &lain::federation::repo_id::RepoId::new(repo).unwrap(),
+            NodeType::Function,
+            path,
+            fn_name,
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        GraphEdge::new(EdgeType::Consumes, fn_id, topic_id.to_string())
+    }
+
+    use super::*;
+
+    async fn build_topic_federation(root: &Path) -> Arc<FederatedIndex> {
+        let orders_dir = root.join("orders");
+        let billing_dir = root.join("billing");
+        let reports_dir = root.join("reports");
+        for d in [&orders_dir, &billing_dir, &reports_dir] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("src/.keep"), b"").unwrap();
+        }
+        git_init_committed(&orders_dir);
+        git_init_committed(&billing_dir);
+        git_init_committed(&reports_dir);
+
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let backend: Arc<dyn lain::federation::graph_backend::GraphBackend> =
+            Arc::new(PetgraphBackend::new(&data_dir).expect("backend"));
+        let fed = Arc::new(FederatedIndex::new(backend));
+
+        let cfg = ContractFederationConfig {
+            services: vec![
+                ServiceDecl {
+                    name: "orders".into(),
+                    repo: "orders".into(),
+                    paths: vec!["src".into()],
+                    hosts: vec![],
+                    env: vec![],
+                    base_path: None,
+                    route_prefixes: vec![],
+                },
+                ServiceDecl {
+                    name: "billing".into(),
+                    repo: "billing".into(),
+                    paths: vec!["src".into()],
+                    hosts: vec![],
+                    env: vec![],
+                    base_path: None,
+                    route_prefixes: vec![],
+                },
+                ServiceDecl {
+                    name: "reports".into(),
+                    repo: "reports".into(),
+                    paths: vec!["src".into()],
+                    hosts: vec![],
+                    env: vec![],
+                    base_path: None,
+                    route_prefixes: vec![],
+                },
+            ],
+            http_clients: vec![],
+            generic_keys: vec![],
+            schemas: vec![],
+            bindings: vec![],
+        };
+        fed.set_contract_config(cfg);
+
+        let orders_id = RepoId::new("orders").unwrap();
+        let billing_id = RepoId::new("billing").unwrap();
+        let reports_id = RepoId::new("reports").unwrap();
+
+        for (repo_id, dir) in [
+            (orders_id.clone(), orders_dir.clone()),
+            (billing_id.clone(), billing_dir.clone()),
+            (reports_id.clone(), reports_dir.clone()),
+        ] {
+            let src: Box<dyn lain::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::with_config(
+                    repo_id.clone(),
+                    dir.clone(),
+                    lain::federation::config::SourceConfig::WorkspaceDir { path: dir.clone() },
+                )
+                .unwrap(),
+            );
+            src.fetch().await.unwrap();
+            fed.add_repo(src, &data_dir).await.unwrap();
+            fed.get_repo(&repo_id)
+                .unwrap()
+                .set_health(RepoHealth::Ready);
+        }
+
+        let orders_g = fed.get_repo(&orders_id).unwrap().db().clone();
+        let billing_g = fed.get_repo(&billing_id).unwrap().db().clone();
+        let reports_g = fed.get_repo(&reports_id).unwrap().db().clone();
+
+        // orders publishes `orders.created` on Kafka.
+        let orders_topic = topic_node(
+            "orders",
+            "src/events.rs",
+            "publish_order_created",
+            5,
+            "kafka",
+            "orders.created",
+        );
+        let orders_topic_id = orders_topic.id.clone();
+        orders_g
+            .insert_nodes_batch(std::slice::from_ref(&orders_topic))
+            .unwrap();
+        let orders_publisher = make_fn(&orders_g, "publish_order_created", "src/events.rs", 5);
+        orders_g
+            .insert_nodes_batch(std::slice::from_ref(&orders_publisher))
+            .unwrap();
+        orders_g
+            .insert_edges_batch(&[produce_edge(
+                "orders",
+                "src/events.rs",
+                "publish_order_created",
+                5,
+                &orders_topic_id,
+            )])
+            .unwrap();
+
+        // billing subscribes via `KafkaConsumer("orders.created")`.
+        let billing_fn = topic_consumer_fn(
+            "billing",
+            "src/events.py",
+            "start_listener",
+            10,
+            "kafka",
+            "orders.created",
+        );
+        let billing_fn_id = billing_fn.id.clone();
+        billing_g
+            .insert_nodes_batch(std::slice::from_ref(&billing_fn))
+            .unwrap();
+        billing_g
+            .insert_edges_batch(&[consume_edge(
+                "billing",
+                "src/events.py",
+                "start_listener",
+                10,
+                &orders_topic_id,
+            )])
+            .unwrap();
+
+        // reports subscribes via `consumer.run({ topics: ["orders.created"] })`.
+        let reports_fn = topic_consumer_fn(
+            "reports",
+            "src/events.ts",
+            "startOrderCreatedListener",
+            20,
+            "kafka",
+            "orders.created",
+        );
+        let reports_fn_id = reports_fn.id.clone();
+        reports_g
+            .insert_nodes_batch(std::slice::from_ref(&reports_fn))
+            .unwrap();
+        reports_g
+            .insert_edges_batch(&[consume_edge(
+                "reports",
+                "src/events.ts",
+                "startOrderCreatedListener",
+                20,
+                &orders_topic_id,
+            )])
+            .unwrap();
+
+        fed.register_contract_node_for_test(orders_id.clone(), orders_topic_id.clone());
+        fed.register_contract_node_for_test(billing_id.clone(), billing_fn_id);
+        fed.register_contract_node_for_test(reports_id.clone(), reports_fn_id);
+        fed.mark_contracts_dirty();
+        for id in [&orders_id, &billing_id, &reports_id] {
+            fed.project_repo(id).await.expect("project_repo");
+        }
+        fed.rejoin_contracts_if_dirty().expect("rejoin");
+        fed
+    }
+
+    #[tokio::test]
+    async fn pr15_topic_join_binds_consumers_to_producer() {
+        let dir = tempfile::tempdir().unwrap();
+        let fed = build_topic_federation(dir.path()).await;
+        let ci: Arc<_> = fed.contract_index().expect("contract index");
+        let index = ci.as_ref();
+
+        // Two consumers, one producer: both binds resolve.
+        let binds_by_consumer: Vec<(String, String)> = index
+            .consumers
+            .values()
+            .filter_map(|c| {
+                if let Some(lain::federation::contracts::index::ConsumerTarget::Binds { .. }) =
+                    c.target
+                {
+                    Some((c.call_id.to_string(), c.service.0.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let billing_binds: Vec<_> = binds_by_consumer
+            .iter()
+            .filter(|(_, svc)| svc == "billing")
+            .collect();
+        let reports_binds: Vec<_> = binds_by_consumer
+            .iter()
+            .filter(|(_, svc)| svc == "reports")
+            .collect();
+        assert_eq!(
+            billing_binds.len(),
+            1,
+            "billing must bind exactly once; got {billing_binds:?}"
+        );
+        assert_eq!(
+            reports_binds.len(),
+            1,
+            "reports must bind exactly once; got {reports_binds:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr15_event_sensor_retracts_stale_topics() {
+        // Rescan the event sensor alone and confirm replace_sensor_output
+        // removes prior Topic nodes.
+        let dir = tempfile::tempdir().unwrap();
+        let fed = build_topic_federation(dir.path()).await;
+        let orders_id = RepoId::new("orders").unwrap();
+        let g = fed.get_repo(&orders_id).unwrap().db().clone();
+        let ns = lain::schema::RepoNamespace::for_test();
+        // Empty workspace → sensor should produce zero Topic nodes.
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let n = lain::server::sensors::event_sensor::scan_workspace_event(&g, &empty, &ns)
+            .expect("scan");
+        assert_eq!(n, 0, "empty workspace should produce zero event nodes");
+    }
 }

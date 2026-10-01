@@ -1222,6 +1222,26 @@ write_orders_openapi_s21() {
   write_orders_openapi_base
 }
 
+# Stretch (PR 15): publishes an `orders.created` Kafka topic from
+# `create_order` via rdkafka's `FutureRecord::to(...)`. The event
+# sensor detects this and emits a `Topic` node + `Produces` edge;
+# the joiner (§7.7) binds consumers on the same `(broker, name)`.
+write_orders_event_publisher() {
+  cat > "$ORDERS_DIR/src/orders/events.rs" <<'EOF'
+use std::time::Duration;
+
+pub fn publish_order_created(order_id: &str) {
+    // rdkafka's FutureRecord::to("topic") is the canonical publish
+    // shape. The event sensor's Rust detector looks for the literal
+    // topic string in the FutureRecord argument.
+    let _record = FutureRecord::to("orders.created")
+        .key(order_id)
+        .payload(order_id.as_bytes());
+    let _timeout = Duration::from_secs(1);
+}
+EOF
+}
+
 write_orders() {
   mkdir -p "$ORDERS_DIR/src/orders"
   cd "$ORDERS_DIR"
@@ -1232,6 +1252,7 @@ write_orders() {
   write_orders_cargo
   write_orders_main_base
   write_orders_openapi_base
+  write_orders_event_publisher
   make_commit "orders: base" 0
   git tag base
 
@@ -1364,6 +1385,7 @@ fastapi==0.110.0
 httpx==0.27.0
 pydantic==2.6.0
 uvicorn==0.29.0
+aiokafka==0.10.0
 EOF
 }
 
@@ -1625,6 +1647,26 @@ def get_invoice(invoice_id: str) -> Invoice:
 EOF
 }
 
+# Stretch (PR 15): subscribes to `orders.created` via aiokafka's
+# `KafkaConsumer(topic)` constructor. The event sensor pulls the
+# topic name from the positional argument; the joiner (§7.7) binds
+# this consumer to the orders-side producer on the same `(broker,
+# name)` pair.
+write_billing_event_consumer() {
+  cat > "$BILLING_DIR/src/events.py" <<'EOF'
+"""Billing event subscriptions."""
+import asyncio
+
+
+def start_order_created_listener() -> None:
+    # aiokafka's `KafkaConsumer("topic")` constructor — the topic
+    # name is the first positional argument. The event sensor's
+    # Python detector matches this pattern.
+    consumer = KafkaConsumer("orders.created", bootstrap_servers="localhost:9092")
+    return consumer
+EOF
+}
+
 write_billing() {
   mkdir -p "$BILLING_DIR/src"
   cd "$BILLING_DIR"
@@ -1634,6 +1676,7 @@ write_billing() {
 
   write_billing_requirements
   write_billing_main_base
+  write_billing_event_consumer
   make_commit "billing: base" 0
   git tag base
 
@@ -1674,7 +1717,8 @@ write_reports_package() {
   "private": true,
   "dependencies": {
     "express": "^4.18.0",
-    "node-cron": "^3.0.0"
+    "node-cron": "^3.0.0",
+    "kafkajs": "^2.2.0"
   }
 }
 EOF
@@ -1711,6 +1755,30 @@ app.listen(PORT);
 EOF
 }
 
+# Stretch (PR 15): subscribes to `orders.created` via kafkajs's
+# `consumer.run({ topics: [...] })` form. The event sensor pulls the
+# topic name from the array literal; the joiner (§7.7) binds this
+# consumer to the orders-side producer on the same `(broker, name)`.
+write_reports_event_consumer() {
+  cat > "$REPORTS_DIR/src/events.ts" <<'EOF'
+import { Kafka, Consumer } from "kafkajs";
+
+const kafka = new Kafka({ clientId: "reports", brokers: ["localhost:9092"] });
+const consumer: Consumer = kafka.consumer({ groupId: "reports-billing" });
+
+export async function startOrderCreatedListener(): Promise<void> {
+  // kafkajs: `consumer.run({ topics: [...] })`. The event sensor's
+  // TS detector extracts the literal topic from the array.
+  await consumer.run({
+    topics: ["orders.created"],
+    eachMessage: async () => {
+      // no-op for the fixture
+    },
+  });
+}
+EOF
+}
+
 write_reports() {
   mkdir -p "$REPORTS_DIR/src"
   cd "$REPORTS_DIR"
@@ -1720,6 +1788,7 @@ write_reports() {
 
   write_reports_package
   write_reports_main
+  write_reports_event_consumer
   make_commit "reports: base" 0
   git tag base
 

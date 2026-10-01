@@ -82,6 +82,10 @@ pub enum SensorOwner {
     HttpClientSensor,
     FieldAccessSensor,
     EntryPointSensor,
+    /// §6.7 / §7.7 (stretch): the event sensor owns `Topic` nodes
+    /// plus `Produces` / `Consumes` edges. Its `replace_sensor_output`
+    /// call retracts only those.
+    EventSensor,
 }
 
 /// Map a node to its sensor owner (§6.1 derivation rules). Returns
@@ -99,6 +103,10 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         (NodeType::Field, Some(ContractFact::Field(_))) => Some(SensorOwner::OpenApiSensor),
         (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
         (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
+        (NodeType::Topic, _) => Some(SensorOwner::EventSensor),
+        // §6.7 (stretch): the consumer-side function node carries a
+        // `TopicConsumer` contract fact; the event sensor owns it.
+        (_, Some(ContractFact::TopicConsumer(_))) => Some(SensorOwner::EventSensor),
         _ => None,
     }
 }

@@ -43,6 +43,13 @@ pub enum ContractFact {
     Field(FieldMeta),
     /// One field read from a call's response.
     FieldRead(FieldReadFact),
+    /// Topic subscription / publication site (§6.7, stretch). Emitted
+    /// by `event_sensor` on the consuming function (the function
+    /// whose body contains a `consumer.run` / `SubscribeTopics` /
+    /// `@Cron` / Celery-`@app.task` site). The joiner (§7.7) matches
+    /// these against producer-side `Provider` facts whose underlying
+    /// `Topic` node carries the same `(broker, name)`.
+    TopicConsumer(TopicConsumerFact),
 }
 
 // ─── HTTP provider ────────────────────────────────────────────────────
@@ -114,6 +121,27 @@ pub enum MethodSpec {
 pub struct NormalizedUrl {
     pub host: HostPart, // None | Literal(String) | Env(Vec<String>) | Expr(String)
     pub template: Option<String>, // None = dynamic path
+}
+
+/// Topic-side subscription or scheduler (§6.7, stretch). Mirrors the
+/// `(broker, name)` of the producer-side `Topic` node. `kind` says
+/// whether this consumer is a regular event subscriber
+/// (`Subscription`) or a scheduled task (`Scheduled`, e.g. NestJS
+/// `@Cron` / Celery `@app.task`). The joiner (`§7.7`) matches by
+/// `(broker, name)` regardless of `kind`, so the variant is purely
+/// descriptive — it lets tools render "subscription" vs "schedule"
+/// without re-deriving the discriminator from the broker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TopicConsumerFact {
+    pub broker: String,
+    pub name: String,
+    pub kind: TopicConsumerKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TopicConsumerKind {
+    Subscription,
+    Scheduled,
 }
 
 /// The host side of a `NormalizedUrl`. `Env` is the list of env-var

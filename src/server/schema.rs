@@ -934,6 +934,10 @@ pub enum EdgeProvenance {
 pub enum StaticSource {
     TreeSitter,
     Lsp,
+    /// Regex-first detector (event sensor, dynamic dispatch, etc.).
+    /// The exact `&str` regex isn't recorded; only that the edge came
+    /// from a static regex pass.
+    Regex,
 }
 
 /// Per-edge join metadata. Carried on `GraphEdge.detail` for `Binds`

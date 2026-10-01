@@ -16,7 +16,7 @@ use crate::federation::contracts::model::{
     NormalizedUrl, ProviderFact, ProviderOrigin,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
-use crate::schema::{EdgeProvenance, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{EdgeProvenance, GraphNode, NodeType, RepoNamespace, RouteMatch};
 use std::collections::BTreeSet;
 
 // ─── Builders ─────────────────────────────────────────────────────────
@@ -1149,6 +1149,309 @@ fn service_name_is_valid_predicate() {
     assert!(!crate::federation::contracts::model::service_name_is_valid(
         "-leading"
     ));
+}
+
+// ─── §7.7 topic join (stretch, PR 15) ────────────────────────────────
+
+fn topic_provider_node(
+    repo: &str,
+    path: &str,
+    _name: &str,
+    line: u32,
+    topic_name: &str,
+) -> GraphNode {
+    let mut n = GraphNode::new_in(
+        NodeType::Topic,
+        format!("kafka/{topic_name}"),
+        path.to_string(),
+        &repo_ns(),
+    );
+    n.repo_id = Some(repo.to_string());
+    n.id = make_id(
+        repo,
+        NodeType::Topic,
+        path,
+        &format!("kafka/{topic_name}"),
+        line,
+    );
+    n.line_start = Some(line);
+    n.contract = Some(ContractFact::Provider(ProviderFact {
+        method: HttpMethod::Any,
+        template: topic_name.to_string(),
+        handler: None,
+        operation_id: None,
+        origin: ProviderOrigin::Code,
+    }));
+    n
+}
+
+fn topic_consumer_node(
+    repo: &str,
+    path: &str,
+    name: &str,
+    line: u32,
+    broker: &str,
+    topic_name: &str,
+) -> GraphNode {
+    use crate::federation::contracts::model::{TopicConsumerFact, TopicConsumerKind};
+    let mut n = GraphNode::new_in(
+        NodeType::Function,
+        name.to_string(),
+        path.to_string(),
+        &repo_ns(),
+    );
+    n.repo_id = Some(repo.to_string());
+    n.id = make_id(repo, NodeType::Function, path, name, line);
+    n.line_start = Some(line);
+    n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+        broker: broker.to_string(),
+        name: topic_name.to_string(),
+        kind: TopicConsumerKind::Subscription,
+    }));
+    n
+}
+
+fn two_service_topic_config() -> ContractFederationConfig {
+    ContractFederationConfig {
+        services: vec![
+            ServiceDecl {
+                name: "orders".into(),
+                repo: "orders".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+            ServiceDecl {
+                name: "billing".into(),
+                repo: "billing".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+        ],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+    }
+}
+
+#[test]
+fn topic_join_same_broker_same_name_binds() {
+    let provider = topic_provider_node("orders", "src/p.rs", "publish", 1, "orders.created");
+    let consumer = topic_consumer_node(
+        "billing",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "kafka",
+        "orders.created",
+    );
+    let cfg = two_service_topic_config();
+    let out = ContractJoiner::run(&[provider.clone(), consumer.clone()], &[], &cfg);
+    assert!(
+        !out.binds.is_empty(),
+        "topic-join must produce a Binds edge; got {:?}",
+        out.binds
+    );
+    let bind = &out.binds[0];
+    assert_eq!(bind.consumer_service.0, "billing");
+    assert_eq!(bind.provider_service.0, "orders");
+    assert_eq!(bind.confidence, 1.0);
+    let (svc, key) = &bind.target_endpoint;
+    assert_eq!(svc.0, "orders");
+    match key {
+        ContractKey::Topic { broker, name } => {
+            assert_eq!(broker, "kafka");
+            assert_eq!(name, "orders.created");
+        }
+        other => panic!("expected ContractKey::Topic, got {other:?}"),
+    }
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    match &res.target {
+        Some(ConsumerTarget::Binds {
+            confidence,
+            route_match,
+            ..
+        }) => {
+            assert_eq!(*confidence, 1.0);
+            assert!(matches!(route_match, RouteMatch::Exact));
+        }
+        other => panic!("expected Binds, got {other:?}"),
+    }
+    assert_eq!(res.bound_endpoints.len(), 1);
+}
+
+#[test]
+fn topic_join_different_broker_is_unresolved() {
+    let provider = topic_provider_node("orders", "src/p.rs", "publish", 1, "orders.created");
+    let consumer = topic_consumer_node(
+        "billing",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "rabbitmq",
+        "orders.created",
+    );
+    let cfg = two_service_topic_config();
+    let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "different broker must NOT bind; got {:?}",
+        out.binds
+    );
+    let cid = GlobalId::parse(&make_id(
+        "billing",
+        NodeType::Function,
+        "src/c.rs",
+        "subscribe",
+        5,
+    ))
+    .unwrap();
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    match &res.target {
+        Some(ConsumerTarget::Unresolved { reason, .. }) => {
+            assert!(matches!(reason, UnresolvedReason::NoMatch));
+        }
+        other => panic!("expected Unresolved/NoMatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn topic_join_different_name_is_unresolved() {
+    let provider = topic_provider_node("orders", "src/p.rs", "publish", 1, "orders.created");
+    let consumer = topic_consumer_node(
+        "billing",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "kafka",
+        "orders.updated",
+    );
+    let cfg = two_service_topic_config();
+    let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "different name must NOT bind; got {:?}",
+        out.binds
+    );
+    let cid = GlobalId::parse(&make_id(
+        "billing",
+        NodeType::Function,
+        "src/c.rs",
+        "subscribe",
+        5,
+    ))
+    .unwrap();
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    match &res.target {
+        Some(ConsumerTarget::Unresolved { reason, .. }) => {
+            assert!(matches!(reason, UnresolvedReason::NoMatch));
+        }
+        other => panic!("expected Unresolved/NoMatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn topic_join_no_producer_is_unresolved() {
+    // No Topic provider node at all.
+    let consumer = topic_consumer_node(
+        "billing",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "kafka",
+        "orders.created",
+    );
+    let cfg = two_service_topic_config();
+    let out = ContractJoiner::run(&[consumer], &[], &cfg);
+    assert!(out.binds.is_empty());
+    let cid = GlobalId::parse(&make_id(
+        "billing",
+        NodeType::Function,
+        "src/c.rs",
+        "subscribe",
+        5,
+    ))
+    .unwrap();
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(matches!(
+        res.target,
+        Some(ConsumerTarget::Unresolved { .. })
+    ));
+}
+
+#[test]
+fn topic_join_same_topic_in_two_services_binds_to_both() {
+    let provider1 = topic_provider_node("orders", "src/p1.rs", "publish", 1, "orders.created");
+    let provider2 = topic_provider_node("billing", "src/p2.rs", "publish", 1, "orders.created");
+    let consumer = topic_consumer_node(
+        "reports",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "kafka",
+        "orders.created",
+    );
+    let mut cfg = two_service_topic_config();
+    cfg.services.push(ServiceDecl {
+        name: "reports".into(),
+        repo: "reports".into(),
+        paths: vec![],
+        hosts: vec![],
+        env: vec![],
+        base_path: None,
+        route_prefixes: vec![],
+    });
+    let out = ContractJoiner::run(&[provider1, provider2, consumer], &[], &cfg);
+    assert_eq!(
+        out.binds.len(),
+        2,
+        "two producers with the same key bind both; got {:?}",
+        out.binds
+    );
+}
+
+#[test]
+fn topic_join_skips_own_service_endpoint() {
+    // Same service publishes and consumes the topic — no edge,
+    // because the joiner's `own_service` is not the producer here.
+    let provider = topic_provider_node("orders", "src/p.rs", "publish", 1, "orders.created");
+    let consumer = topic_consumer_node(
+        "orders",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "kafka",
+        "orders.created",
+    );
+    let cfg = ContractFederationConfig {
+        services: vec![ServiceDecl {
+            name: "orders".into(),
+            repo: "orders".into(),
+            paths: vec![],
+            hosts: vec![],
+            env: vec![],
+            base_path: None,
+            route_prefixes: vec![],
+        }],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+    };
+    let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
+    // §7.8: every Binds edge connects two different services; an
+    // in-service consumer must not bind to its own producer.
+    assert!(
+        out.binds.is_empty(),
+        "intra-service topic consumption must not bind"
+    );
 }
 
 // Silence unused-imports from churn.

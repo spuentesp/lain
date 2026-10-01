@@ -29,7 +29,7 @@ use crate::federation::contracts::index::{
 };
 use crate::federation::contracts::model::{
     CallVia, ContractFact, ContractKey, Direction, HostPart, HttpMethod, MethodSpec, ProviderFact,
-    ProviderOrigin, ServiceName,
+    ProviderOrigin, ServiceName, TopicConsumerFact,
 };
 use crate::federation::contracts::route_match::{
     compare_specificity, match_route, MatchDetail, MatchOutcome,
@@ -102,6 +102,28 @@ impl ContractJoiner {
         let mut unnormalized: Vec<GlobalId> = Vec::new();
         let mut binds: Vec<BindsEdge> = Vec::new();
         for node in nodes {
+            // §7.7 (stretch): topic consumers take the topic-join
+            // path. The HTTP §7.3 table does not apply — topics have
+            // no `HostPart` / template, only `(broker, name)`.
+            if let Some(ContractFact::TopicConsumer(topic_consumer)) = node.contract.as_ref() {
+                let call_id = match GlobalId::parse(&node.id) {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                let own_service = assignments
+                    .get(call_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| implicit_service(node));
+                let resolution = resolve_topic_consumer(
+                    &call_id,
+                    topic_consumer,
+                    &own_service,
+                    &endpoint_table,
+                    &mut binds,
+                );
+                consumers.insert(call_id.clone(), resolution);
+                continue;
+            }
             let Some(ContractFact::Consumer(consumer)) = node.contract.as_ref() else {
                 continue;
             };
@@ -497,7 +519,9 @@ fn implicit_service(node: &GraphNode) -> ServiceName {
 
 /// Step 2: group provider nodes into endpoints. A code route and an
 /// OpenAPI operation with the same `(service, method, template)`
-/// merge into one endpoint with two providers.
+/// merge into one endpoint with two providers. Topic providers (§6.7)
+/// are keyed by `(service, ContractKey::Topic { broker, name })` so
+/// the topic-join path can match them later.
 fn build_endpoints(
     nodes: &[GraphNode],
     assignments: &BTreeMap<String, ServiceName>,
@@ -506,9 +530,6 @@ fn build_endpoints(
     let mut table: BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>> =
         BTreeMap::new();
     for node in nodes {
-        let Some(ContractFact::Provider(provider)) = node.contract.as_ref() else {
-            continue;
-        };
         let Ok(gid) = GlobalId::parse(&node.id) else {
             continue;
         };
@@ -516,42 +537,82 @@ fn build_endpoints(
             Some(s) => s,
             None => continue,
         };
-        // Resolve the service decl (or fall back to a zeroed one for
-        // implicit services that the config did not declare).
-        let service_decl: ServiceDecl = config
-            .services
-            .iter()
-            .find(|s| s.name == svc.0)
-            .cloned()
-            .unwrap_or_else(|| ServiceDecl {
-                name: svc.0.clone(),
-                repo: svc.0.clone(),
-                paths: Vec::new(),
-                hosts: Vec::new(),
-                env: Vec::new(),
-                base_path: None,
-                route_prefixes: Vec::new(),
-            });
-        let full_template = endpoint_template_for(provider, &node.path, &service_decl);
-        let method = match &provider.method {
-            HttpMethod::Any => HttpMethod::Any,
-            other => *other,
-        };
-        let key = ContractKey::Http {
-            method: MethodSpec::Known(method),
-            template: full_template.clone(),
-        };
-        table
-            .entry((svc.clone(), key))
-            .or_default()
-            .push(EndpointProviderRecord {
-                id: gid,
-                fact: Some(ContractFact::Provider(provider.clone())),
-                template: full_template,
-                method,
-            });
+        match node.contract.as_ref() {
+            Some(ContractFact::Provider(provider)) => {
+                // Resolve the service decl (or fall back to a zeroed one for
+                // implicit services that the config did not declare).
+                let service_decl: ServiceDecl = config
+                    .services
+                    .iter()
+                    .find(|s| s.name == svc.0)
+                    .cloned()
+                    .unwrap_or_else(|| ServiceDecl {
+                        name: svc.0.clone(),
+                        repo: svc.0.clone(),
+                        paths: Vec::new(),
+                        hosts: Vec::new(),
+                        env: Vec::new(),
+                        base_path: None,
+                        route_prefixes: Vec::new(),
+                    });
+                let full_template = endpoint_template_for(provider, &node.path, &service_decl);
+                let method = match &provider.method {
+                    HttpMethod::Any => HttpMethod::Any,
+                    other => *other,
+                };
+                // §6.7: producers on `Topic` nodes use the
+                // `ContractKey::Topic { broker, name }` form so the
+                // topic-join path can match them by `(broker, name)`.
+                // The template carries the topic name verbatim;
+                // `provider.template` is what the event sensor wrote
+                // (`topic_name`) and it is never prefixed — topics
+                // don't participate in `route_prefixes` / `base_path`.
+                if matches!(node.node_type, crate::schema::NodeType::Topic) {
+                    let broker = default_broker_for(node);
+                    let key = ContractKey::Topic {
+                        broker,
+                        name: full_template.clone(),
+                    };
+                    table
+                        .entry((svc.clone(), key))
+                        .or_default()
+                        .push(EndpointProviderRecord {
+                            id: gid,
+                            fact: Some(ContractFact::Provider(provider.clone())),
+                            template: full_template,
+                            method,
+                        });
+                    continue;
+                }
+                let key = ContractKey::Http {
+                    method: MethodSpec::Known(method),
+                    template: full_template.clone(),
+                };
+                table
+                    .entry((svc.clone(), key))
+                    .or_default()
+                    .push(EndpointProviderRecord {
+                        id: gid,
+                        fact: Some(ContractFact::Provider(provider.clone())),
+                        template: full_template,
+                        method,
+                    });
+            }
+            _ => continue,
+        }
     }
     table
+}
+
+/// §7.7: a topic without a declared broker is `kafka`.
+fn default_broker_for(node: &GraphNode) -> String {
+    let name = &node.name;
+    if let Some((broker, _)) = name.split_once('/') {
+        if !broker.is_empty() {
+            return broker.to_string();
+        }
+    }
+    "kafka".to_string()
 }
 
 fn is_wrapper_candidate(consumer: &crate::federation::contracts::model::ConsumerFact) -> bool {
@@ -637,6 +698,86 @@ fn host_is_external_exempt(host: &str) -> bool {
         host,
         "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]" | "host.docker.internal"
     )
+}
+
+/// §7.7 (stretch, PR 15): resolve a topic consumer. Same broker AND
+/// same name = `Binds { route_match: Exact, confidence: 1.0 }`. Any
+/// mismatch (different broker, different name, no producer-side
+/// endpoint) = `Unresolved { reason: NoMatch }`. The HTTP §7.3
+/// table doesn't apply — topics don't have hosts / templates, only
+/// the `(broker, name)` pair. Mirrors `resolve_consumer` in spirit
+/// but skips host / env / http_clients dispatch.
+///
+/// §7.8 invariant: every `Binds` edge connects two different
+/// services. An in-service topic consumer must NOT bind to its own
+/// service's producer endpoint — same rule §7.3 rule 6 enforces
+/// for HTTP consumers.
+fn resolve_topic_consumer(
+    call_id: &GlobalId,
+    consumer: &TopicConsumerFact,
+    own_service: &ServiceName,
+    endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
+    binds: &mut Vec<BindsEdge>,
+) -> ConsumerResolution {
+    let key = ContractKey::Topic {
+        broker: consumer.broker.clone(),
+        name: consumer.name.clone(),
+    };
+    // Find every producer-side endpoint with the same `(broker, name)`.
+    let mut bound: Vec<EndpointId> = Vec::new();
+    for ((svc, k), providers) in endpoints {
+        if k != &key {
+            continue;
+        }
+        // §7.8: in-service calls are not a contract between
+        // services. Skip own-service producers.
+        if svc == own_service {
+            continue;
+        }
+        if let Some(provider) = providers.first() {
+            binds.push(BindsEdge {
+                consumer: call_id.clone(),
+                provider: provider.id.clone(),
+                consumer_service: own_service.clone(),
+                provider_service: svc.clone(),
+                target_endpoint: (svc.clone(), k.clone()),
+                provenance: EdgeProvenance::Static {
+                    source: crate::schema::StaticSource::Regex,
+                },
+                confidence: 1.0,
+                route_match: RouteMatch::Exact,
+                stripped_prefix: None,
+            });
+            bound.push((svc.clone(), k.clone()));
+        }
+    }
+    bound.sort_by(|a, b| {
+        a.0 .0
+            .cmp(&b.0 .0)
+            .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
+    });
+    let target = if bound.is_empty() {
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::NoMatch,
+            target_service: None,
+        })
+    } else {
+        Some(ConsumerTarget::Binds {
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::Regex,
+            },
+            confidence: 1.0,
+            route_match: RouteMatch::Exact,
+            stripped_prefix: None,
+        })
+    };
+    ConsumerResolution {
+        call_id: call_id.clone(),
+        service: own_service.clone(),
+        target,
+        bound_endpoints: bound,
+        reads_complete: true,
+    }
 }
 
 /// Resolve one consumer. Returns a `ConsumerResolution` and appends

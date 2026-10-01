@@ -97,6 +97,49 @@ fn contract_index_default_is_empty() {
     assert!(idx.unnormalized.is_empty());
 }
 
+/// §7.7 (stretch): a `ContractKey::Topic { broker, name }` endpoint
+/// key is orderable and distinct from an HTTP endpoint key. The
+/// `EndpointId` `(ServiceName, ContractKey)` tuple is what the
+/// joiner indexes topic endpoints by.
+#[test]
+fn topic_endpoint_id_is_hashable_and_orderable() {
+    let svc = ServiceName("orders".into());
+    let a: EndpointId = (
+        svc.clone(),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "orders.created".into(),
+        },
+    );
+    let b: EndpointId = (
+        svc.clone(),
+        ContractKey::Topic {
+            broker: "rabbitmq".into(),
+            name: "orders.created".into(),
+        },
+    );
+    let c: EndpointId = (
+        svc.clone(),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "orders.updated".into(),
+        },
+    );
+    let mut map: BTreeMap<EndpointId, u32> = BTreeMap::new();
+    map.insert(a.clone(), 1);
+    map.insert(b.clone(), 2);
+    map.insert(c.clone(), 3);
+    assert_eq!(map.len(), 3, "three distinct topic keys");
+    assert_eq!(map.get(&a), Some(&1));
+    assert_eq!(map.get(&b), Some(&2));
+    assert_eq!(map.get(&c), Some(&3));
+    // Display round-trip — the `topic:` prefix distinguishes Topic
+    // keys from HTTP keys in the wire form (§4.4).
+    let parsed: ContractKey = a.1.to_string().parse().unwrap();
+    assert_eq!(parsed, a.1);
+    assert!(a.1.to_string().starts_with("topic:"));
+}
+
 #[test]
 fn round_trip_constructed_index_through_partial_eq() {
     let a = make_index();
