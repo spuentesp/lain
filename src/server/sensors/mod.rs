@@ -21,6 +21,7 @@ pub mod http_sensor;
 pub mod openapi_line_index;
 pub mod openapi_schema;
 pub mod openapi_sensor;
+pub mod patterns;
 pub mod proto_sensor;
 pub mod util;
 pub mod websocket_sensor;

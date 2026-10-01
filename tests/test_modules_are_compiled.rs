@@ -32,8 +32,11 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
             // `lib.rs` and `main.rs` are crate roots and `mod.rs` declares
             // its own directory; none of them is declared from elsewhere.
+            // `build.rs` is a Cargo build script — cargo invokes it
+            // directly via the `build = "..."` manifest setting; it is
+            // not a regular lib module and is excluded here.
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !matches!(name, "lib.rs" | "main.rs" | "mod.rs") {
+            if !matches!(name, "lib.rs" | "main.rs" | "mod.rs" | "build.rs") {
                 out.push(p);
             }
         }
