@@ -134,7 +134,7 @@ Expected: FAIL — at the moment the test surface constructs an `EndpointDef` wh
 
 If the assertion runs but PASSES (no `ChangedWithoutSchema` fires despite current code over-reporting), the test construction is wrong — fix the construction until the test reflects the desired behavior (fires on unrelated-file diff with current code, doesn't fire after the fix). The point of the failing test is to anchor behavior; a green-on-main test is an ineffective discriminator.
 
-- [ ] **Step 1.3: Tighten `source_files` population in `src/server/sensors/http_sensor.rs`**
+- [x] **Step 1.3: Tighten `source_files` population in `src/server/sensors/http_sensor.rs`** *(intentionally not taken — see deviation note below Step 1.5)*
 
 In the per-route emission code (search for where `EndpointDef.source_files` is populated for code routes — likely in `routes_to_graph` or the per-route record-building function), restrict the inserted path to the route's `handler: SymbolKey` file (when present). For code routes without a handler `SymbolKey`, fall back to the route's `source_node_path` (one file). The OpenAPI-only paths are emitted by `openapi_sensor`, not `http_sensor`; do NOT touch OpenAPI nodes here.
 
@@ -154,13 +154,28 @@ if let Some(h) = &provider.handler {
 
 If `node_path_to_file` is not a helper, derive from `node.path` by taking the first segment (the file). Read the surrounding function to choose the cleanest expression.
 
-- [ ] **Step 1.4: Same fix in `src/server/sensors/openapi_sensor.rs`**
+- [x] **Step 1.4: Same fix in `src/server/sensors/openapi_sensor.rs`** *(intentionally not taken — see deviation note below Step 1.5)*
 
 For operations (no `handler: SymbolKey`), populate `source_files` with the operation node's `path` (the OpenAPI spec file). Apply the same tightening — one file per operation, not the union of all operations in the spec.
 
-- [ ] **Step 1.5: Adjust `source_files` population in `src/server/federation/contracts/diff.rs` lines ~195-205**
+- [x] **Step 1.5: Adjust `source_files` population in `src/server/federation/contracts/diff.rs` lines ~195-205**
 
 The current code adds every provider node's `path` AND every schema node's `path`. After the sensor changes, this may be redundant. Verify the union still respects the tightened per-sensor files; do not duplicate-add OpenAPI spec paths. If provider `node_id.path()` returns a function node (not a file), this should NOT enter `source_files` — guard against that by taking only the file portion (first path segment).
+
+> **Plan deviation — Steps 1.3 / 1.4 intentionally not taken.**
+> `http_sensor::routes_to_graph` already mints both `provider.node_id`
+> (path = `route.handler_path`) and `provider.handler: SymbolKey`
+> (path = `route.handler_path.clone()`) from the same string
+> (`src/server/sensors/http_sensor.rs:443` / `:467`); the same is
+> true of `openapi_sensor`. No sensor-side edit is required to make
+> the two paths distinct — they are identical by construction, and
+> the only divergence between them is whatever `endpoint_to_def`
+> chooses to pull. Tightening the read at `diff.rs::endpoint_to_def`
+> (Step 1.5) is sufficient: it picks `handler.path` when set and
+> falls back to `node_id.path()` for spec-only providers, which
+> matches the route-file / spec-file path the sensors already emit.
+> The handler `SymbolKey` was already on the wire — the diff was
+> reading the wrong end of it.
 
 - [ ] **Step 1.6: Re-run the new test, verify PASS**
 
