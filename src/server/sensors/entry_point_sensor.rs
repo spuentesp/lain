@@ -70,7 +70,11 @@ pub fn scan_workspace_entry_points(
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !["rs", "py", "ts", "js", "go"].contains(&ext) {
+        if ![
+            "rs", "py", "ts", "js", "go", "java", "cs", "rb", "kt", "kts",
+        ]
+        .contains(&ext)
+        {
             continue;
         }
         let content = match std::fs::read_to_string(path) {
@@ -134,7 +138,158 @@ fn detect_in_file(content: &str, _path: &str, ext: &str) -> FileDetections {
     detect_scheduled(content, ext, &mut out);
     detect_cli(content, ext, &mut out);
     detect_main(content, ext, &mut out);
+    detect_http_handler(content, ext, &mut out);
     out
+}
+
+// ─── HTTP handler (annotation-based controllers) ───────────────
+//
+// Workstream 5 — for languages where the HTTP route is a method
+// annotation (Java Spring / JAX-RS, C# ASP.NET) the
+// `HttpHandler` entry point follows the same wiring as Python's
+// `@app.route` → handler: the function name appears on the line
+// immediately below the annotation. The regex here piggybacks on
+// the existing `for_each_def_with_decorators` walker so the
+// nearest-decorator-line logic already covers stacked Spring
+// annotations (`@RestController` over `@GetMapping` etc.).
+fn detect_http_handler(content: &str, ext: &str, out: &mut FileDetections) {
+    // Java Spring / JAX-RS: `@GetMapping("/x")` on a method, with
+    // the public method on the next non-blank line. We delegate to
+    // `for_each_def_with_decorators`-style walking inline because
+    // Java's `method_declaration` is not a `def`.
+    if ext == "java" {
+        detect_java_http_handler(content, out);
+        return;
+    }
+    // C# ASP.NET: `[HttpGet("/x")]` on a method.
+    if ext == "cs" {
+        detect_csharp_http_handler(content, out);
+        return;
+    }
+    // Ruby Rails: action methods (`def index`, `def show`, `def
+    // create`, …) inside `app/controllers/*.rb`.
+    if ext == "rb" {
+        detect_ruby_rails_controller(content, out);
+        return;
+    }
+    // Kotlin Ktor: handler functions inside `routing { get("/x") { … } }`
+    // blocks. Detected via the matching `HttpRoute` node the
+    // http_sensor emits with a sentinel handler name
+    // (`Kt doRoute<R>block`); no in-source regex needed here — the
+    // `CallsHttp` edge from `http_sensor` resolves via the
+    // entry-point's CallsHttp-pair sweep.
+    if ext == "kt" || ext == "kts" {
+        // No in-source detection; Kotlin entry points are surfaced
+        // either by `detect_main` (functions named `main`) or by
+        // the CallsHttp-edge resolution in step B of
+        // `scan_workspace_entry_points`.
+        let _ = content;
+    }
+}
+
+fn detect_java_http_handler(content: &str, out: &mut FileDetections) {
+    // Match `@GetMapping("/x")` / `@PostMapping(...)` /
+    // `@RequestMapping("/x")` on a line, with the next non-blank
+    // line being `public <type> <name>(...)`.
+    let deco_re = regex_cached(
+        r"(?m)^\s*@(?i:(?:GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping))\s*\([^)]*\)\s*$",
+    );
+    let method_re = regex_cached(r"(?m)^\s*public\s+[\w<>,\s]+\s+(\w+)\s*\(");
+    for cap in deco_re.captures_iter(content) {
+        let m = cap.get(0).unwrap();
+        let line = line_of_match(content, m.start());
+        // Walk forward from the line AFTER the annotation.
+        let after = &content[line_end_byte(content, m.end())..];
+        let lines: Vec<&str> = after.lines().take(6).collect();
+        for (i, line_text) in lines.iter().enumerate() {
+            if line_text.trim().is_empty() {
+                continue;
+            }
+            if let Some(method_cap) = method_re.captures(line_text) {
+                let name = method_cap[1].to_string();
+                let method_line = line + 1 + i as u32;
+                out.entry((name, method_line))
+                    .or_insert(EntryKind::HttpHandler);
+                break;
+            }
+            if line_text.trim_start().starts_with('@') {
+                continue;
+            }
+            break;
+        }
+    }
+}
+
+fn detect_csharp_http_handler(content: &str, out: &mut FileDetections) {
+    // Match `[HttpGet("/x")]`, `[HttpPost]` etc. on a line, with
+    // the next non-blank line being a method declaration
+    // `(<visibility>)? <return> <name>(...)`.
+    let deco_re = regex_cached(
+        r"(?m)^\s*\[(?i:(?:HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch|HttpHead|HttpOptions))",
+    );
+    let method_re = regex_cached(
+        r"(?m)^\s*(?:public|private|internal|protected|async)\s+[\w<>,\s\[\]?]+\s+(\w+)\s*\(",
+    );
+    for cap in deco_re.captures_iter(content) {
+        let m = cap.get(0).unwrap();
+        let line = line_of_match(content, m.start());
+        let after = &content[line_end_byte(content, m.end())..];
+        let lines: Vec<&str> = after.lines().take(6).collect();
+        for (i, line_text) in lines.iter().enumerate() {
+            if line_text.trim().is_empty() {
+                continue;
+            }
+            if let Some(method_cap) = method_re.captures(line_text) {
+                let name = method_cap[1].to_string();
+                let method_line = line + 1 + i as u32;
+                out.entry((name, method_line))
+                    .or_insert(EntryKind::HttpHandler);
+                break;
+            }
+            if line_text.trim_start().starts_with('[') {
+                continue;
+            }
+            break;
+        }
+    }
+}
+
+/// Return the byte offset of the newline that ends the line
+/// containing `byte_offset`. If the line isn't terminated, returns
+/// `byte_offset`. Used by Java/C# HTTP-handler detectors to step
+/// past the annotation's argument list before scanning forward
+/// for the method declaration.
+fn line_end_byte(content: &str, byte_offset: usize) -> usize {
+    match content[byte_offset..].find('\n') {
+        Some(n) => byte_offset + n + 1,
+        None => content.len(),
+    }
+}
+
+fn detect_ruby_rails_controller(content: &str, out: &mut FileDetections) {
+    // Rails controllers expose their action handlers as public
+    // methods on a `*Controller` class. The entry-point sensor
+    // names the method `HttpHandler` so the `CallsHttp` edges
+    // from `http_sensor` (Ruby `ruby-rails` routes) resolve to
+    // the action method by name.
+    let method_re = regex_cached(r"(?m)^\s*def\s+([A-Za-z_][A-Za-z0-9_]*[!?]?)\s*(?:\(|;|\s*$)");
+    let controller_re = regex_cached(r"class\s+\w+Controller\s*<");
+    // Only treat as a controller if `extends ApplicationController`
+    // / `< ApplicationController` appears in the same file.
+    let is_controller = controller_re.is_match(content);
+    if !is_controller {
+        return;
+    }
+    for cap in method_re.captures_iter(content) {
+        let name = cap[1].to_string();
+        // Skip DSL-shaped method definitions (private / protected /
+        // class macros). The regex captures `def foo(...)` only.
+        if matches!(name.as_str(), "initialize" | "self" | "method_missing") {
+            continue;
+        }
+        let line = line_of_match(content, cap.get(0).unwrap().start());
+        out.entry((name, line)).or_insert(EntryKind::HttpHandler);
+    }
 }
 
 /// Walk every `def name(` in `content`. For each, collect the
@@ -1034,5 +1189,98 @@ def main():
         assert!(r2.contains(&("a".to_string(), EntryKind::Scheduled)));
         assert!(r2.contains(&("b".to_string(), EntryKind::Scheduled)));
         assert!(r2.contains(&("main".to_string(), EntryKind::Main)));
+    }
+
+    // ─── Workstream 5: Java Spring / C# ASP.NET / Ruby Rails entry points.
+
+    #[test]
+    fn detects_java_spring_getmapping_handler() {
+        let (tmp, g) = temp_graph("java_spring_handler");
+        write_src(
+            &tmp,
+            "src/main/java/com/example/FooController.java",
+            "\
+@RestController
+public class FooController {
+    @GetMapping(\"/api/users\")
+    public String listUsers() {
+        return \"\";
+    }
+}
+",
+        );
+        let f = make_function(
+            &g,
+            "listUsers",
+            "src/main/java/com/example/FooController.java",
+            5,
+        );
+        g.insert_nodes_batch(&[f]).unwrap();
+        let _ = run_scan(&g, &tmp);
+        let entries = entries_named(&g, "listUsers");
+        assert!(
+            entries
+                .iter()
+                .any(|n| n.entry == Some(EntryKind::HttpHandler)),
+            "listUsers must be tagged HttpHandler: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn detects_csharp_httpget_handler() {
+        let (tmp, g) = temp_graph("csharp_httpget_handler");
+        write_src(
+            &tmp,
+            "src/Controllers/FooController.cs",
+            "\
+[ApiController]
+public class FooController : Controller {
+    [HttpGet(\"/api/users/{id}\")]
+    public IActionResult Get(int id) { return null; }
+}
+",
+        );
+        let f = make_function(&g, "Get", "src/Controllers/FooController.cs", 5);
+        g.insert_nodes_batch(&[f]).unwrap();
+        let _ = run_scan(&g, &tmp);
+        let entries = entries_named(&g, "Get");
+        assert!(
+            entries
+                .iter()
+                .any(|n| n.entry == Some(EntryKind::HttpHandler)),
+            "Get must be tagged HttpHandler: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn detects_ruby_rails_controller_actions() {
+        let (tmp, g) = temp_graph("ruby_rails_actions");
+        write_src(
+            &tmp,
+            "app/controllers/users_controller.rb",
+            "\
+class UsersController < ApplicationController
+  def index
+    @users = User.all
+  end
+  def show
+    @user = User.find(params[:id])
+  end
+end
+",
+        );
+        let idx = make_function(&g, "index", "app/controllers/users_controller.rb", 3);
+        let show = make_function(&g, "show", "app/controllers/users_controller.rb", 6);
+        g.insert_nodes_batch(&[idx, show]).unwrap();
+        let _ = run_scan(&g, &tmp);
+        for name in ["index", "show"] {
+            let entries = entries_named(&g, name);
+            assert!(
+                entries
+                    .iter()
+                    .any(|n| n.entry == Some(EntryKind::HttpHandler)),
+                "{name} must be tagged HttpHandler: {entries:?}"
+            );
+        }
     }
 }

@@ -6,6 +6,162 @@
 use crate::graph::GraphDatabase;
 use crate::schema::GraphNode;
 use std::path::Path;
+use tree_sitter::{Language, Parser, Tree};
+
+// ─── Language classification ────────────────────────────────────
+
+/// Source-file language for sensors that walk code. PR 14 added Rust +
+/// Go; PR 16 (Workstream 5) adds Java, C#, Ruby, Kotlin. The shared
+/// [`lang_for_path`] and [`parse_for_lang`] helpers (per sensor
+/// wrapper) keep every sensor's per-language walker pointed at the
+/// right tree-sitter grammar without duplicating the lookup table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
+    Python,
+    TsJs,
+    Ts,
+    Tsx,
+    Rust,
+    Go,
+    Java,
+    CSharp,
+    Ruby,
+    Kotlin,
+}
+
+/// Map a source-file path's extension to a [`Lang`]. `None` for files
+/// no sensor in this crate parses. The order is fixed (it's the
+/// identity test the §8.3 determinism contract checks for).
+pub fn lang_for_path(path: &str) -> Option<Lang> {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "py" => Some(Lang::Python),
+        "ts" => Some(Lang::Ts),
+        "tsx" => Some(Lang::Tsx),
+        "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
+        "rs" => Some(Lang::Rust),
+        "go" => Some(Lang::Go),
+        "java" => Some(Lang::Java),
+        "cs" => Some(Lang::CSharp),
+        "rb" => Some(Lang::Ruby),
+        "kts" | "kt" => Some(Lang::Kotlin),
+        _ => None,
+    }
+}
+
+/// Build a tree-sitter [`Tree`] for `lang`. Each sensor's per-language
+/// parser consumes this — none of them re-implement the grammar
+/// lookup. Returns `None` when the grammar refuses to set (shouldn't
+/// happen for the ten languages above) or the parser returns no tree.
+pub fn parse_for_lang(lang: Lang, src: &str) -> Option<Tree> {
+    let mut parser = Parser::new();
+    let grammar: Language = grammar_for(lang);
+    parser.set_language(&grammar).ok()?;
+    parser.parse(src, None)
+}
+
+fn grammar_for(lang: Lang) -> Language {
+    match lang {
+        Lang::Python => tree_sitter_python::LANGUAGE.into(),
+        Lang::TsJs => tree_sitter_javascript::LANGUAGE.into(),
+        Lang::Ts => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
+        Lang::Go => tree_sitter_go::LANGUAGE.into(),
+        Lang::Java => tree_sitter_java::LANGUAGE.into(),
+        Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+        Lang::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+    }
+}
+
+// ─── Response-metadata denylist (Workstream 5, §6.5) ─────────────
+
+/// Method / property names whose access on a bound HTTP response is
+/// never a payload-field read. Bug B of the contract-federation bug
+/// fixes; the sensor's attribute walker suppresses `ReadsField`
+/// emission when the attribute on a bound receiver is in this list.
+///
+/// `field_access_sensor` owns the policy; this list lives in
+/// `sensors/util.rs` because Workstream 5 expanded it with
+/// language-specific entries (Java `getStatusCode()`, C# `StatusCode`,
+/// Ruby `code`, Kotlin `statusCode`, …) and the cross-sensor helper
+/// needs the same surface.
+pub const RESPONSE_METHOD_DENYLIST: &[&str] = &[
+    // body parsing (rule 2 already rebinds to the same path)
+    "json",
+    "text",
+    "data",
+    "body",
+    // HTTP-response / Fetch-API metadata
+    "status_code",
+    "headers",
+    "url",
+    "encoding",
+    "content",
+    "raise_for_status",
+    "is_redirect",
+    "ok",
+    "elapsed",
+    // TS / JS Fetch equivalents
+    "blob",
+    "arrayBuffer",
+    "formData",
+    "status",
+    "redirected",
+    // Go body decoding / metadata — see pre-PR-14 comment.
+    "decode",
+    "Decode",
+    "Close",
+    "Body",
+    "StatusCode",
+    "Status",
+    "Header",
+    "Proto",
+    "Request",
+    "TLS",
+    "Trailer",
+    "ContentLength",
+    // Java HttpResponse / `okhttp3.Response` metadata
+    // (`HttpResponse.statusCode()`, `Response.headers()`, etc.). These
+    // are method-form getters — `getStatusCode()` is the Java-Bean
+    // spelling, `statusCode()` is the record-style. The body of a
+    // Java response is the `body()` method (not in this list — it
+    // already rebinds via rule 2). Headers, status, and code / message
+    // are response metadata, not payload fields.
+    "getStatusCode",
+    "statusCode",
+    "getBody",
+    "getHeaders",
+    "headers",
+    "firstValue",
+    "getMessage",
+    "message",
+    // C# `HttpResponseMessage` / `HttpClient` properties. `StatusCode`
+    // and `IsSuccessStatusCode` are response metadata; `Headers` and
+    // `GetValues` are response-header access. Body decoding is
+    // `ReadAsStringAsync` / `ReadFromJsonAsync` (treated as body
+    // parsers — `Body` is in the list above).
+    "IsSuccessStatusCode",
+    "StatusCode",
+    "Headers",
+    "GetValues",
+    "DownloadString",
+    "DownloadStringTaskAsync",
+    // Ruby `Net::HTTPResponse` / `HTTParty::Response` accessors. The
+    // `code` and `message` methods are status / status-text;
+    // `body` is the response payload — but `body` is already in the
+    // body-parser list above and gets the rule-2 rebind.
+    "code",
+    "message",
+    "read_body",
+    "back",
+    // Kotlin Ktor `HttpResponse` properties.
+    "statusCode",
+    "call",
+    "headers",
+    "body",
+];
 
 /// A file found by [`walk_workspace`].
 pub struct WalkedFile(std::path::PathBuf);

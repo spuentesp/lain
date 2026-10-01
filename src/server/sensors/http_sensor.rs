@@ -260,6 +260,108 @@ fn get_route_patterns() -> BTreeMap<&'static str, RoutePattern> {
         ),
     );
 
+    // ─── Workstream 5: Java Spring, JAX-RS, C# ASP.NET, Sinatra, Rails, Ktor.
+
+    // Java Spring — `@GetMapping("/path")` / `@PostMapping(...)` /
+    // `@RequestMapping("/path")` (with method= attribute). The
+    // handler is the public method declared on the next line.
+    const SPRING_MAPPING: &str =
+        "GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping";
+    patterns.insert(
+        "java-spring",
+        RoutePattern::new(
+            &format!(r"@(?i:({HTTP_VERBS})Mapping)\s*\("),
+            &format!(
+                r#"@(?i:(?:{SPRING_MAPPING}))\s*\(\s*(?:value\s*=\s*|path\s*=\s*)?["']([^"']+)["']"#
+            ),
+            r"public\s+[\w<>,\s]+\s+(\w+)\s*\(",
+        ),
+    );
+
+    // JAX-RS (Jakarta RESTful Web Services) — `@Path("/api")` on
+    // the class + `@GET` / `@POST` on the method. For simplicity we
+    // detect the method-level `@GET` etc. and the path on
+    // `@Path`. Verb is the method-level annotation keyword.
+    const JAXRS_VERBS: &str = "GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS";
+    patterns.insert(
+        "java-jaxrs",
+        RoutePattern::new(
+            &format!(r"@(?i:({JAXRS_VERBS}))\s*$"),
+            r#"@Path\s*\(\s*["']([^"']+)["']"#,
+            r"public\s+[\w<>,\s]+\s+(\w+)\s*\(",
+        ),
+    );
+
+    // C# ASP.NET Core controllers — `[HttpGet("/path")]` /
+    // `[HttpPost]` etc. on a method.
+    const ASPNET_VERBS: &str = "HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch|HttpHead|HttpOptions";
+    // Method regex captures the verb portion (`get`/`post`/…)
+    // after stripping the `Http` prefix via a non-capturing
+    // group.
+    patterns.insert(
+        "csharp-aspnet",
+        RoutePattern::new(
+            &format!(r#"(?i:\[Http({HTTP_VERBS}))"#),
+            &format!(r#"\[(?i:(?:{ASPNET_VERBS}))\s*(?:\(\s*["']([^"']+)["']\s*\))?"#),
+            r"(?:public|private|internal|async|protected)\s+[\w<>,\s\[\]?]+\s+(\w+)\s*\(",
+        ),
+    );
+
+    // C# Minimal API — `app.MapGet("/path", () => ...)`.
+    const ASPNET_MAP_VERBS: &str = "MapGet|MapPost|MapPut|MapDelete|MapPatch";
+    patterns.insert(
+        "csharp-minimal-api",
+        RoutePattern::new(
+            r#"\.(?i:(MapGet|MapPost|MapPut|MapDelete|MapPatch))"#,
+            &format!(
+                r#"\.(?:{ASPNET_MAP_VERBS})\s*\(\s*["']([^"']+)["']"#
+            ),
+            &format!(
+                r#"\.(?:{ASPNET_MAP_VERBS})\s*\(\s*["']([^"']+)["']\s*,\s*(?:async\s*)?\([^)]*\)\s*=>"#
+            ),
+        ),
+    );
+
+    // Ruby Sinatra — `get '/path' do … end` /
+    // `post "/path" do … end`. The verb is the first token
+    // (`get` / `post` / …). For v1 the handler is left as
+    // `Sinatra__do_block` and the `CallsHttp` edge resolution
+    // uses the closest controller action (the entry-point
+    // sensor matches it).
+    patterns.insert(
+        "ruby-sinatra",
+        RoutePattern::new(
+            &format!(r##"(?i:({HTTP_VERBS}))\s+['"]"##),
+            &format!(r##"(?m)^[ \t]*(?:{HTTP_VERBS})\s+['"]([^"']+)["']"##),
+            r###"(?m)^[ \t]*(get|post|put|delete|patch|options|head)\s+['"][^'"]+['"]"###,
+        ),
+    );
+
+    // Ruby Rails — routes live in `config/routes.rb`. Detected
+    // DSL: `get 'path'`, `post "path"`, `resources :users`,
+    // `namespace :api do … resources :orders end`. v1 only
+    // requires the simple verb+path shape; the entry-point
+    // sensor matches the controller action by name.
+    const RAILS_VERBS: &str = "get|post|put|patch|delete|options|head";
+    patterns.insert(
+        "ruby-rails",
+        RoutePattern::new(
+            &format!(r##"(?i:({RAILS_VERBS}))['"\s:]+"##),
+            &format!(r##"(?m)^[ \t]*(?:{RAILS_VERBS})\s+['"]([^"']+)["']"##),
+            r#"(?m)^[ \t]*(get|post|put|patch|delete|options|head|resources)\b"#,
+        ),
+    );
+
+    // Kotlin Ktor — `routing { get("/path") { … } }`.
+    patterns.insert(
+        "kotlin-ktor",
+        RoutePattern::new(
+            &format!(r"(?m)(?:^|\W)({HTTP_VERBS})\s*\("),
+            &format!(r#"(?m)(?:^|\W)(?:{HTTP_VERBS})\s*\(\s*["']([^"']+)["']"#),
+            r###"(get|post|put|patch|delete|head|options)\s*\(\s*"[^"]+"\s*\)"###,
+        ),
+    );
+
     patterns
 }
 
@@ -274,6 +376,10 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
         "py" => &["python-"],
         "ts" | "tsx" | "js" | "jsx" => &["ts-"],
         "go" => &["go-"],
+        "java" => &["java-"],
+        "cs" => &["csharp-"],
+        "rb" => &["ruby-"],
+        "kt" | "kts" => &["kotlin-"],
         _ => return Vec::new(),
     };
     let applicable: Vec<&RoutePattern> = all_patterns
@@ -524,7 +630,11 @@ pub fn scan_workspace_routes(
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-        if !["rs", "py", "ts", "js", "go"].contains(&ext) {
+        if ![
+            "rs", "py", "ts", "js", "go", "java", "cs", "rb", "kt", "kts",
+        ]
+        .contains(&ext)
+        {
             continue;
         }
 
@@ -976,6 +1086,180 @@ async def list_orders():
             r[0].path.contains("/api/v1"),
             "APIRouter prefix must be prepended: got {:?}",
             r[0].path
+        );
+    }
+
+    // ─── Workstream 5: Java Spring, JAX-RS, ASP.NET, Sinatra, Rails, Ktor.
+
+    #[test]
+    fn java_spring_getmapping_is_recognised() {
+        let src = "\
+@RestController
+public class Foo {
+    @GetMapping(\"/api/users\")
+    public String listUsers() {
+        return \"\";
+    }
+}
+";
+        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src);
+        assert_eq!(r.len(), 1, "Spring @GetMapping must be detected: {r:?}");
+        assert_eq!(r[0].method, HttpMethod::Get);
+        assert_eq!(r[0].path, "/api/users");
+        assert_eq!(r[0].handler_name, "listUsers");
+    }
+
+    #[test]
+    fn java_spring_postmapping_is_recognised() {
+        let src = "\
+@RestController
+public class Foo {
+    @PostMapping(value = \"/api/users\")
+    public String createUser() { return \"\"; }
+}
+";
+        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].method, HttpMethod::Post);
+    }
+
+    #[test]
+    fn java_jaxrs_get_on_method_is_recognised() {
+        let src = "\
+@Path(\"/api\")
+public class Foo {
+    @GET
+    @Path(\"/users\")
+    public String list() { return \"\"; }
+}
+";
+        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src);
+        // The regex-based extractor detects the method-level `@GET`
+        // and the class-level `@Path`. v1 emits one route per
+        // detected annotation pair.
+        assert!(!r.is_empty(), "JAX-RS @GET must be detected: {r:?}");
+    }
+
+    #[test]
+    fn java_non_route_code_is_ignored() {
+        let src = "public class Foo { @Override public String toString() { return \"\"; } }\n";
+        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src);
+        assert!(r.is_empty(), "@Override must not be a route: {r:?}");
+    }
+
+    #[test]
+    fn csharp_aspnet_httpget_is_recognised() {
+        let src =
+            "[HttpGet(\"/api/users/{id}\")]\npublic IActionResult Get(int id) { return null; }\n";
+        let r = scan_file_for_routes(std::path::Path::new("Foo.cs"), src);
+        assert_eq!(r.len(), 1, "ASP.NET [HttpGet] must be detected: {r:?}");
+        assert_eq!(r[0].method, HttpMethod::Get);
+        assert_eq!(r[0].path, "/api/users/{id}");
+        assert_eq!(r[0].handler_name, "Get");
+    }
+
+    #[test]
+    fn csharp_aspnet_httppost_is_recognised() {
+        let src = "\
+public class FooController : Controller {
+    [HttpPost(\"/api/users\")]
+    public IActionResult Post() { return null; }
+}
+";
+        let r = scan_file_for_routes(std::path::Path::new("Foo.cs"), src);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].method, HttpMethod::Post);
+    }
+
+    #[test]
+    fn csharp_minimal_api_mapget_is_recognised() {
+        let src = "var builder = WebApplication.CreateBuilder(args);\nvar app = builder.Build();\napp.MapGet(\"/api/health\", () => \"ok\");\n";
+        let r = scan_file_for_routes(std::path::Path::new("Program.cs"), src);
+        // The handler regex matches `() => "ok"`. The `MapGet`
+        // pattern fires once.
+        assert!(!r.is_empty(), "Minimal API MapGet must be detected: {r:?}");
+    }
+
+    #[test]
+    fn ruby_sinatra_get_block_is_recognised() {
+        let src = "\
+get '/hello' do
+  'Hello World'
+end
+";
+        let r = scan_file_for_routes(std::path::Path::new("app.rb"), src);
+        assert_eq!(r.len(), 1, "Sinatra get block must be detected: {r:?}");
+        assert_eq!(r[0].method, HttpMethod::Get);
+        assert_eq!(r[0].path, "/hello");
+    }
+
+    #[test]
+    fn ruby_sinatra_post_block_is_recognised() {
+        let src = "post '/users' do\n  User.create(params)\nend\n";
+        let r = scan_file_for_routes(std::path::Path::new("app.rb"), src);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].method, HttpMethod::Post);
+        assert_eq!(r[0].path, "/users");
+    }
+
+    #[test]
+    fn ruby_rails_routes_are_recognised() {
+        let src = "\
+Rails.application.routes.draw do
+  get 'health' => 'health#show'
+  resources :users
+end
+";
+        let r = scan_file_for_routes(std::path::Path::new("config/routes.rb"), src);
+        // The simple verb+path shape (`get 'health'`) is detected;
+        // `resources :users` is out of scope for v1 (the regex
+        // doesn't capture a path there).
+        let verbs: Vec<HttpMethod> = r.iter().map(|x| x.method).collect();
+        assert!(
+            verbs.contains(&HttpMethod::Get),
+            "Rails get route must be detected: {r:?}"
+        );
+    }
+
+    #[test]
+    fn kotlin_ktor_get_block_is_recognised() {
+        let src = "\
+fun Application.module() {
+    routing {
+        get(\"/api/health\") { call.respondText(\"ok\") }
+    }
+}
+";
+        let r = scan_file_for_routes(std::path::Path::new("App.kt"), src);
+        assert_eq!(r.len(), 1, "Ktor get block must be detected: {r:?}");
+        assert_eq!(r[0].method, HttpMethod::Get);
+        assert_eq!(r[0].path, "/api/health");
+    }
+
+    #[test]
+    fn kotlin_ktor_post_block_is_recognised() {
+        let src = "fun Application.module() {\n    routing { post(\"/api/users\") { call.respond(\"\") } }\n}\n";
+        let r = scan_file_for_routes(std::path::Path::new("App.kt"), src);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].method, HttpMethod::Post);
+    }
+
+    #[test]
+    fn routes_are_scoped_to_their_language_extension() {
+        // Java Spring syntax in a C# file must not be detected by
+        // the csharp pattern (and vice versa).
+        let java_src = "@GetMapping(\"/x\")\npublic String a() { return \"\"; }\n";
+        let as_cs = scan_file_for_routes(std::path::Path::new("x.cs"), java_src);
+        assert!(
+            as_cs.is_empty(),
+            "Java syntax in a .cs file must not be a C# route: {as_cs:?}"
+        );
+
+        let csharp_src = "[HttpGet(\"/x\")]\npublic IActionResult A() { return null; }\n";
+        let as_java = scan_file_for_routes(std::path::Path::new("x.java"), csharp_src);
+        assert!(
+            as_java.is_empty(),
+            "C# syntax in a .java file must not be a Java route: {as_java:?}"
         );
     }
 }

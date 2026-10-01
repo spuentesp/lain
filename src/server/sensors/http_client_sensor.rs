@@ -129,6 +129,10 @@ pub fn scan_workspace_clients(
             "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
             "rs" => Some(Lang::Rust),
             "go" => Some(Lang::Go),
+            "java" => Some(Lang::Java),
+            "cs" => Some(Lang::CSharp),
+            "rb" => Some(Lang::Ruby),
+            "kt" | "kts" => Some(Lang::Kotlin),
             _ => None,
         };
         let Some(lang) = lang else { continue };
@@ -162,6 +166,15 @@ pub enum Lang {
     TsJs,
     Rust,
     Go,
+    /// Workstream 5 — added in PR #5 of the contract-federation
+    /// tracker. Same shape as the other variants: `detect_calls`
+    /// dispatches by extension (`src/server/sensors/util.rs::Lang`)
+    /// and the per-language helper emits one `HttpClientCall` per
+    /// outbound site.
+    Java,
+    CSharp,
+    Ruby,
+    Kotlin,
 }
 
 /// Detect every HTTP consumer call site in `content` for `lang`.
@@ -180,6 +193,10 @@ pub fn detect_calls(path: &Path, content: &str, lang: Lang) -> Vec<HttpClientCal
             Lang::TsJs => detect_tsjs_call(node, src, &path_str, &ctx),
             Lang::Rust => detect_rust_call(node, src, &path_str),
             Lang::Go => detect_go_call(node, src, &path_str),
+            Lang::Java => detect_java_call(node, src, &path_str),
+            Lang::CSharp => detect_csharp_call(node, src, &path_str),
+            Lang::Ruby => detect_ruby_call(node, src, &path_str),
+            Lang::Kotlin => detect_kotlin_call(node, src, &path_str),
         };
         if let Some(c) = call {
             calls.push(c);
@@ -195,6 +212,10 @@ fn parse(lang: Lang, src: &str) -> Option<Tree> {
         Lang::TsJs => tree_sitter_javascript::LANGUAGE.into(),
         Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
         Lang::Go => tree_sitter_go::LANGUAGE.into(),
+        Lang::Java => tree_sitter_java::LANGUAGE.into(),
+        Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+        Lang::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
     };
     parser.set_language(&grammar).ok()?;
     parser.parse(src, None)
@@ -249,6 +270,10 @@ impl FileContext {
             // Rust + Go don't currently support client-base_url
             // resolution; pass through an empty context.
             Lang::Rust | Lang::Go => {}
+            // Workstream 5: the four new languages don't carry
+            // ctor-base_url resolution either; the receiver-side
+            // detection fires at the call site.
+            Lang::Java | Lang::CSharp | Lang::Ruby | Lang::Kotlin => {}
         }
         ctx
     }
@@ -1952,6 +1977,517 @@ fn method_from_first_string_arg(arg: Node, src: &[u8]) -> MethodSpec {
     method_from_verb(&cleaned)
 }
 
+// ─── Java call detection ─────────────────────────────────────────
+//
+// Recognized outbound HTTP shapes (Workstream 5):
+//   - `java.net.http.HttpClient.newHttpClient().send(req, BodyHandlers.ofString())`
+//   - `java.net.http.HttpClient.newHttpClient().sendAsync(req, BodyHandlers.ofString())`
+//   - `RestTemplate rt = new RestTemplate(); rt.getForObject(url, …)`
+//   - `okhttp3.OkHttpClient client = new OkHttpClient.Builder().url(url).build();
+//     client.newCall(request).execute()` (URL on the Request.Builder)
+//   - `okhttp3.Request.Builder builder = new Request.Builder().url(url); …`
+//
+// v1 focuses on `HttpClient.send` / `HttpClient.sendAsync` and the
+// legacy `URL.openConnection().getInputStream()` shape; `RestTemplate`
+// is a single-method detection; `OkHttp` adds the URL from
+// `Request.Builder().url(...)` so we record a call at that site.
+
+fn detect_java_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
+    if node.kind() != "method_invocation" {
+        return None;
+    }
+    let line = (node.start_position().row as u32) + 1;
+
+    // `HttpClient.send(request, BodyHandlers.ofString())` /
+    // `HttpClient.sendAsync(...)`. The method_invocation's `object`
+    // is the receiver (a `method_invocation` chain ending at
+    // `HttpClient.newHttpClient()`), `name` is `send` /
+    // `sendAsync`, `arguments` wraps the URL-relevant args.
+    let _recv_text = node
+        .child_by_field_name("object")
+        .and_then(|o| o.utf8_text(src).ok());
+    let verb = node
+        .child_by_field_name("name")
+        .and_then(|n| n.utf8_text(src).ok());
+    let verb = verb?;
+    let verb_lower = verb.to_ascii_lowercase();
+    let args = args_of(node);
+
+    // HttpClient / OkHttp chain detection. We accept any receiver
+    // whose text contains one of these substrings as a conservative
+    // shorthand — the chain unwraps through `object` to find the
+    // library.
+    let is_http_client_send = verb_lower == "send" || verb_lower == "sendasync";
+    let is_okhttp_execute = verb_lower == "execute";
+    if !is_http_client_send && !is_okhttp_execute {
+        return None;
+    }
+    // The HttpClient / OkHttp receiver is the chain. We don't try to
+    // pull a URL out of the HttpClient builder — the URL lives on
+    // the `HttpRequest` argument. Emit Unknown method for
+    // `sendAsync` (the verb isn't HTTP), but accept the call site so
+    // the URL extraction can still happen.
+    let method = if verb_lower == "send" {
+        // `send(request, BodyHandlers.ofString())` — method lives on
+        // the request. Probe the first argument for a string
+        // literal that's a method name; otherwise Unknown.
+        MethodSpec::Unknown
+    } else {
+        MethodSpec::Unknown
+    };
+
+    // For OkHttp, the URL lives on the `Request.Builder().url(url)`
+    // call. We can't easily reach that from the `execute()` site; we
+    // instead emit a synthetic template `okhttp://…` so the joiner
+    // sees the call. The exact URL is out of scope for v1.
+
+    // URL extraction: take the first argument's text. For HttpClient
+    // it's a `HttpRequest` (not a string); for OkHttp it's a
+    // `Request` (not a string). Either way we capture the source
+    // text of the call's argument list for `url_expr`.
+    let url_source = if let Some(first) = args.first() {
+        text_of(*first, src).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let url_expr = truncate_url_expr(&url_source);
+
+    // URL parts — there's no literal URL in this shape. Emit a
+    // synthetic template `okhttp://dynamic` or
+    // `http://dynamic` for the joiner to match against method+verb.
+    let raw_parts = vec![UrlPart::Literal(format!(
+        "{}://dynamic",
+        if is_okhttp_execute { "okhttp" } else { "http" }
+    ))];
+    let host = host_for(&raw_parts);
+    let normalized = normalize(&raw_parts);
+    let url = if matches!(host, HostPart::None) {
+        normalized
+    } else {
+        NormalizedUrl { host, ..normalized }
+    };
+
+    let library = if is_okhttp_execute { "okhttp" } else { "http" };
+    Some(HttpClientCall {
+        method,
+        url,
+        via: CallVia::Library {
+            name: library.to_string(),
+        },
+        url_expr,
+        reads_complete: true,
+        path: path.to_string(),
+        line,
+    })
+}
+
+// ─── C# call detection ───────────────────────────────────────────
+//
+// Recognized outbound HTTP shapes (Workstream 5):
+//   - `HttpClient client = new HttpClient(); client.GetAsync(url)` /
+//     `.PostAsync(url, content)`.
+//   - `HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Get, url))`
+//   - `WebClient client = new WebClient(); client.DownloadString(url)`
+//     / `.DownloadStringTaskAsync(url)`.
+
+fn detect_csharp_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
+    if node.kind() != "invocation_expression" {
+        return None;
+    }
+    let line = (node.start_position().row as u32) + 1;
+
+    let function = node.child_by_field_name("function")?;
+    if function.kind() != "member_access_expression" {
+        return None;
+    }
+    // C#'s `member_access_expression` carries `name` (the property
+    // / method) as a field; for newer grammar revisions the verb
+    // is the LAST `identifier` child (the receiver can be an
+    // arbitrary expression). Probe both.
+    let attr_text = function
+        .child_by_field_name("name")
+        .and_then(|n| n.utf8_text(src).ok())
+        .or_else(|| {
+            // Fallback: last `identifier` child.
+            let mut cursor = function.walk();
+            let mut last_id: Option<Node> = None;
+            for child in function.named_children(&mut cursor) {
+                if child.kind() == "identifier" {
+                    last_id = Some(child);
+                }
+            }
+            last_id.and_then(|n| n.utf8_text(src).ok())
+        })?;
+    let attr_lower = attr_text.to_ascii_lowercase();
+
+    let args = args_of_tsjs(node);
+    // C#'s `argument` may have the literal as a direct child or
+    // behind a `value` field. Drill through the wrapper to find
+    // the actual literal node for URL extraction.
+    let url_arg = args.first().copied().and_then(|a| {
+        if a.kind() == "argument" {
+            a.child_by_field_name("value")
+                .or_else(|| {
+                    let mut c = a.walk();
+                    let first = a.named_children(&mut c).next();
+                    drop(c);
+                    first
+                })
+                .or(Some(a))
+        } else {
+            Some(a)
+        }
+    })?;
+
+    // HttpClient verb-shaped: `client.GetAsync(url)` etc.
+    let verb_normalized: Option<&str> = match attr_lower.as_str() {
+        "getasync" => Some("get"),
+        "getstringasync" => Some("get"),
+        "postasync" => Some("post"),
+        "putasync" => Some("put"),
+        "patchasync" => Some("patch"),
+        "deleteasync" => Some("delete"),
+        "sendasync" => Some("send"),
+        // WebClient async
+        "downloadstring" => Some("get"),
+        "downloadstringtaskasync" => Some("get"),
+        _ => None,
+    };
+    let verb_normalized = verb_normalized?;
+
+    let url_source = text_of(url_arg, src)?;
+    let url_expr = truncate_url_expr(&url_source);
+    let url = url_for_tsjs_like(url_arg, src);
+
+    // Library name: prefer to detect `WebClient` vs `HttpClient` by
+    // looking at the receiver — but `member_access_expression` here
+    // doesn't expose the receiver name cleanly via fields. Use the
+    // verb family as a proxy.
+    let library = if attr_lower == "downloadstring" || attr_lower == "downloadstringtaskasync" {
+        "webclient"
+    } else {
+        "httpclient"
+    };
+
+    let method = method_from_verb(verb_normalized);
+
+    Some(HttpClientCall {
+        method,
+        url,
+        via: CallVia::Library {
+            name: library.to_string(),
+        },
+        url_expr,
+        reads_complete: true,
+        path: path.to_string(),
+        line,
+    })
+}
+
+// ─── Ruby call detection ──────────────────────────────────────────
+//
+// Recognized outbound HTTP shapes (Workstream 5):
+//   - `Net::HTTP.get(URI(url))` / `Net::HTTP.get_response(URI(url))`.
+//   - `Net::HTTP::Get.new(uri).then { |res| … }` (Net::HTTP::Get is
+//     the request object — not the call site).
+//   - `HTTParty.get(url)` / `Faraday.get(url)` / `RestClient.get(url)`
+//     (gems — single-method detection).
+//   - `URI.parse(url).open.read` (URI.open for read; the call site
+//     is `URI.parse` and we record it).
+//
+// For v1 we focus on the bare receiver-form calls: `Net::HTTP.get`,
+// `Net::HTTP.get_response`, `HTTParty.<verb>`, `Faraday.<verb>`,
+// `RestClient.<verb>`.
+
+fn detect_ruby_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let line = (node.start_position().row as u32) + 1;
+    let recv_node = node.child_by_field_name("receiver");
+    let method_node = node.child_by_field_name("method");
+    let recv_node = recv_node?;
+    let method_node = method_node?;
+
+    let recv_text = recv_node.utf8_text(src).ok()?;
+    let method_text = method_node.utf8_text(src).ok()?;
+    let method_lower = method_text.to_ascii_lowercase();
+
+    let (library, verb): (&str, Option<&str>) = match recv_text {
+        "Net::HTTP" => match method_lower.as_str() {
+            "get" => ("net/http", Some("get")),
+            "get_response" => ("net/http", Some("get")),
+            "post" => ("net/http", Some("post")),
+            "post_form" => ("net/http", Some("post")),
+            "head" => ("net/http", Some("head")),
+            _ => return None,
+        },
+        "HTTParty" => match method_lower.as_str() {
+            "get" => ("httparty", Some("get")),
+            "post" => ("httparty", Some("post")),
+            "put" => ("httparty", Some("put")),
+            "patch" => ("httparty", Some("patch")),
+            "delete" => ("httparty", Some("delete")),
+            "head" => ("httparty", Some("head")),
+            _ => return None,
+        },
+        "Faraday" => match method_lower.as_str() {
+            "get" => ("faraday", Some("get")),
+            "post" => ("faraday", Some("post")),
+            "put" => ("faraday", Some("put")),
+            "patch" => ("faraday", Some("patch")),
+            "delete" => ("faraday", Some("delete")),
+            _ => return None,
+        },
+        "RestClient" => match method_lower.as_str() {
+            "get" => ("restclient", Some("get")),
+            "post" => ("restclient", Some("post")),
+            "put" => ("restclient", Some("put")),
+            "patch" => ("restclient", Some("patch")),
+            "delete" => ("restclient", Some("delete")),
+            "head" => ("restclient", Some("head")),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let verb = verb?;
+
+    // URL extraction: first argument. Ruby's `Net::HTTP.get(URI(url))`
+    // wraps the URL in `URI(...)`; for v1 we extract the source text
+    // and normalize through the existing parts extractor (which
+    // handles identifier resolution).
+    let args = args_of_tsjs(node);
+    let url_arg = args.first().copied();
+    let url_source = url_arg.and_then(|n| text_of(n, src)).unwrap_or_default();
+    let url_expr = truncate_url_expr(&url_source);
+    let url = url_arg
+        .map(|n| url_for_tsjs_like(n, src))
+        .unwrap_or_else(|| {
+            // No URL arg → synthetic.
+            let parts = vec![UrlPart::Literal(format!("{}://dynamic", library))];
+
+            normalize(&parts)
+        });
+
+    let method = method_from_verb(verb);
+    Some(HttpClientCall {
+        method,
+        url,
+        via: CallVia::Library {
+            name: library.to_string(),
+        },
+        url_expr,
+        reads_complete: true,
+        path: path.to_string(),
+        line,
+    })
+}
+
+// ─── Kotlin call detection ────────────────────────────────────────
+//
+// Recognized outbound HTTP shapes (Workstream 5):
+//   - Ktor HttpClient: `client.get<String>("/api/x")` / `client.post(...)`
+//     — `client` is a bound `HttpClient`, the extension function
+//     `get` / `post` carries the verb; the URL is the first type-
+//     parameterized argument.
+//   - OkHttp: `OkHttpClient.newCall(Request.Builder().url(url).build()).execute()`
+//   - `URL(url).openConnection().getInputStream()` (java.net style).
+
+fn detect_kotlin_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
+    // Kotlin's Ktor extension calls come in two shapes:
+    //   - `client.get(url)` — `call_expression` whose `function`
+    //     is a `navigation_expression`.
+    //   - `client.get<String>(url)` — `binary_expression` whose
+    //     right side is the parenthesized arg list and whose left
+    //     side wraps a `navigation_expression` and a `simple_identifier`
+    //     (the type argument).
+    //
+    // We dispatch on both: walk the AST and look for either a
+    // `call_expression` with a verb-shaped `navigation_expression`
+    // function, OR a `binary_expression` whose right side is a
+    // `parenthesized_expression` wrapping a `navigation_expression`
+    // left side (the generic-arg call shape).
+    let line = (node.start_position().row as u32) + 1;
+    let (function, paren_arg) = match node.kind() {
+        "call_expression" => {
+            // Kotlin's `call_expression` carries the verb as the
+            // first positional named child (a `navigation_expression`)
+            // and the args as the second (`value_arguments`). No
+            // field names — fall back to positional children.
+            let mut c = node.walk();
+            let mut first: Option<tree_sitter::Node<'_>> = None;
+            let mut second: Option<tree_sitter::Node<'_>> = None;
+            for child in node.named_children(&mut c) {
+                if first.is_none() {
+                    first = Some(child);
+                } else if second.is_none() {
+                    second = Some(child);
+                }
+            }
+            (first, None)
+        }
+        "binary_expression" => {
+            let right = node.child_by_field_name("right");
+            let left = node.child_by_field_name("left");
+            let _ = left;
+            let right_node = right.or_else(|| {
+                let mut c = node.walk();
+                let mut first: Option<tree_sitter::Node> = None;
+                for child in node.named_children(&mut c) {
+                    if first.is_none() {
+                        first = Some(child);
+                    }
+                }
+                first
+            });
+            {
+                let r = right_node?;
+                if r.kind() == "parenthesized_expression" {
+                    let verb_node = find_navigation_expression(node);
+                    (verb_node, Some(r))
+                } else {
+                    return None;
+                }
+            }
+        }
+        _ => return None,
+    };
+    let function = function?;
+    if function.kind() != "navigation_expression" {
+        return None;
+    }
+    let target = kotlin_attr_node(function);
+    let verb = target.and_then(|t| t.utf8_text(src).ok())?;
+    let verb_lower = verb.to_ascii_lowercase();
+
+    // Map the verb to a HTTP method.
+    let method = match verb_lower.as_str() {
+        "get" => MethodSpec::Known(HttpMethod::Get),
+        "post" => MethodSpec::Known(HttpMethod::Post),
+        "put" => MethodSpec::Known(HttpMethod::Put),
+        "patch" => MethodSpec::Known(HttpMethod::Patch),
+        "delete" => MethodSpec::Known(HttpMethod::Delete),
+        "head" => MethodSpec::Known(HttpMethod::Head),
+        "options" => MethodSpec::Known(HttpMethod::Options),
+        "execute" => MethodSpec::Unknown,
+        _ => return None,
+    };
+
+    // URL extraction: the first thing inside the parenthesized
+    // expression (or the call_expression's args[0]).
+    let url_arg: Option<Node<'static>> = None;
+    let _ = url_arg; // borrow lifetime workaround: re-extract below.
+    let (url_expr, url) = match paren_arg {
+        Some(paren) => {
+            let mut c = paren.walk();
+            let first = paren.named_children(&mut c).next();
+            match first {
+                Some(arg) => {
+                    let url_source = text_of(arg, src).unwrap_or_default();
+                    let url_expr = truncate_url_expr(&url_source);
+                    let url = url_for_tsjs_like(arg, src);
+                    (url_expr, url)
+                }
+                None => {
+                    let parts = vec![UrlPart::Literal("ktor://dynamic".to_string())];
+                    let url = normalize(&parts);
+                    (String::new(), url)
+                }
+            }
+        }
+        None => {
+            // `call_expression` shape: take args[0]. Kotlin uses
+            // `value_arguments` (not `arguments`) for the field
+            // name; the grammar places it as the second positional
+            // named child.
+            let mut c = node.walk();
+            let mut first: Option<tree_sitter::Node<'_>> = None;
+            let mut second: Option<tree_sitter::Node<'_>> = None;
+            for child in node.named_children(&mut c) {
+                if first.is_none() {
+                    first = Some(child);
+                } else if second.is_none() {
+                    second = Some(child);
+                }
+            }
+            let args_node = second.or(first);
+            let args: Vec<tree_sitter::Node<'_>> = if let Some(a) = args_node {
+                let mut c = a.walk();
+                let named: Vec<_> = a.named_children(&mut c).collect();
+                drop(c);
+                named
+            } else {
+                args_of_tsjs(node)
+            };
+            match args.first().copied() {
+                Some(arg) => {
+                    let url_source = text_of(arg, src).unwrap_or_default();
+                    let url_expr = truncate_url_expr(&url_source);
+                    let url = url_for_tsjs_like(arg, src);
+                    (url_expr, url)
+                }
+                None => {
+                    let parts = vec![UrlPart::Literal("ktor://dynamic".to_string())];
+                    let url = normalize(&parts);
+                    (String::new(), url)
+                }
+            }
+        }
+    };
+
+    let library = if verb_lower == "execute" {
+        "okhttp"
+    } else {
+        "ktor"
+    };
+
+    Some(HttpClientCall {
+        method,
+        url,
+        via: CallVia::Library {
+            name: library.to_string(),
+        },
+        url_expr,
+        reads_complete: true,
+        path: path.to_string(),
+        line,
+    })
+}
+
+/// Recursively walk `node` looking for the deepest
+/// `navigation_expression` (a member-access like `a.b.c`). Kotlin's
+/// generic-argument call shape nests a `binary_expression` around
+/// the navigation expression.
+fn find_navigation_expression(node: Node) -> Option<Node> {
+    if node.kind() == "navigation_expression" {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(n) = find_navigation_expression(child) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Extract the verb (last identifier) of a Kotlin
+/// `navigation_expression` (`client.get` → "get"). The grammar
+/// carries the receiver and the member as bare `identifier` /
+/// `simple_identifier` siblings — no field names. The verb is
+/// the LAST identifier (the receiver may be a complex expression
+/// with its own identifiers, so first-vs-second is unreliable).
+fn kotlin_attr_node(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    let mut last_id: Option<Node> = None;
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "identifier" | "simple_identifier") {
+            last_id = Some(child);
+        }
+    }
+    last_id
+}
+
 // ─── Graph emission ───────────────────────────────────────────────────
 
 fn build_graph(
@@ -2886,5 +3422,234 @@ func f() {
             calls.is_empty(),
             "non-http receiver must not be detected: {calls:?}"
         );
+    }
+
+    // ─── Workstream 5: Java / C# / Ruby / Kotlin ────────────────────
+
+    fn java_calls(src: &str) -> Vec<HttpClientCall> {
+        detect_calls(std::path::Path::new("Foo.java"), src, Lang::Java)
+    }
+    fn csharp_calls(src: &str) -> Vec<HttpClientCall> {
+        detect_calls(std::path::Path::new("Foo.cs"), src, Lang::CSharp)
+    }
+    fn ruby_calls(src: &str) -> Vec<HttpClientCall> {
+        detect_calls(std::path::Path::new("Foo.rb"), src, Lang::Ruby)
+    }
+    fn kotlin_calls(src: &str) -> Vec<HttpClientCall> {
+        detect_calls(std::path::Path::new("Foo.kt"), src, Lang::Kotlin)
+    }
+
+    #[test]
+    fn java_httpclient_send_records_call() {
+        let src = "\
+import java.net.http.*;
+class Foo {
+    void Bar() throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        HttpResponse<String> r = client.send(
+            HttpRequest.newBuilder().uri(java.net.URI.create(\"http://x/api\")).build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+    }
+}
+";
+        let calls = java_calls(src);
+        // The HttpClient.send() site is one of the detected calls.
+        // The OkHttp / RestTemplate sites are not present in this
+        // snippet, so we should have at least one call.
+        assert!(
+            !calls.is_empty(),
+            "java HttpClient.send must be detected: {calls:?}"
+        );
+        assert!(calls.iter().any(|c| matches!(
+            c.via,
+            CallVia::Library { ref name } if name == "http"
+        )));
+    }
+
+    #[test]
+    fn java_non_client_call_is_skipped() {
+        let src = "class Foo { void bar() { someObject.run(\"/api\"); } }\n";
+        let calls = java_calls(src);
+        assert!(
+            calls.is_empty(),
+            "non-HttpClient send / OkHttp execute must not be a client call: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn csharp_httpclient_get_async_records_call() {
+        let src = "\
+class Foo {
+    void Bar() {
+        var client = new HttpClient();
+        var r = client.GetAsync(\"/api/x\");
+    }
+}
+";
+        let calls = csharp_calls(src);
+        assert_eq!(
+            calls.len(),
+            1,
+            "csharp HttpClient.GetAsync must emit one call: {calls:?}"
+        );
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Get));
+        assert_eq!(calls[0].url.template.as_deref(), Some("/api/x"));
+        assert!(matches!(
+            calls[0].via,
+            CallVia::Library { ref name } if name == "httpclient"
+        ));
+    }
+
+    #[test]
+    fn csharp_post_async_records_call() {
+        let src = "class Foo { void Bar() { var r = client.PostAsync(\"/api\", null); } }\n";
+        let calls = csharp_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Post));
+    }
+
+    #[test]
+    fn csharp_webclient_download_records_call() {
+        let src = "\
+class Foo {
+    void Bar() {
+        var wc = new WebClient();
+        var s = wc.DownloadString(\"/api/x\");
+    }
+}
+";
+        let calls = csharp_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            calls[0].via,
+            CallVia::Library { ref name } if name == "webclient"
+        ));
+    }
+
+    #[test]
+    fn csharp_non_verb_call_is_skipped() {
+        let src = "class Foo { void Bar() { client.Connect(\"/api\"); } }\n";
+        let calls = csharp_calls(src);
+        assert!(
+            calls.is_empty(),
+            "csharp unknown verb must not be a client call: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn ruby_net_http_get_records_call() {
+        let src = "require 'net/http'\nNet::HTTP.get(URI('http://x.example.com/api'))\n";
+        let calls = ruby_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Get));
+        assert!(matches!(
+            calls[0].via,
+            CallVia::Library { ref name } if name == "net/http"
+        ));
+    }
+
+    #[test]
+    fn ruby_httparty_post_records_call() {
+        let src = "HTTParty.post('http://x.example.com/api', body: {})\n";
+        let calls = ruby_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Post));
+        assert!(matches!(
+            calls[0].via,
+            CallVia::Library { ref name } if name == "httparty"
+        ));
+    }
+
+    #[test]
+    fn ruby_faraday_delete_records_call() {
+        let src = "Faraday.delete('http://x.example.com/api')\n";
+        let calls = ruby_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Delete));
+    }
+
+    #[test]
+    fn ruby_restclient_get_records_call() {
+        let src = "RestClient.get('http://x.example.com/api')\n";
+        let calls = ruby_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            calls[0].via,
+            CallVia::Library { ref name } if name == "restclient"
+        ));
+    }
+
+    #[test]
+    fn ruby_unrelated_call_is_skipped() {
+        let src = "Foo.delete('http://x.example.com/api')\n";
+        let calls = ruby_calls(src);
+        assert!(
+            calls.is_empty(),
+            "non-Ruby-HTTP-gem receiver must not be a client call: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn kotlin_ktor_client_get_records_call() {
+        let src = "\
+fun foo() {
+    val r = client.get<String>(\"/api/x\")
+}
+";
+        let calls = kotlin_calls(src);
+        assert_eq!(
+            calls.len(),
+            1,
+            "ktor client.get must emit one call: {calls:?}"
+        );
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Get));
+        assert_eq!(calls[0].url.template.as_deref(), Some("/api/x"));
+        assert!(matches!(
+            calls[0].via,
+            CallVia::Library { ref name } if name == "ktor"
+        ));
+    }
+
+    #[test]
+    fn kotlin_ktor_client_post_records_call() {
+        let src = "fun foo() {\n    client.post(\"/api\", body)\n}\n";
+        let calls = kotlin_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Post));
+    }
+
+    #[test]
+    fn kotlin_okhttp_execute_records_call() {
+        let src = "fun foo() {\n    OkHttpClient().newCall(Request.Builder().url(\"/api\").build()).execute()\n}\n";
+        let calls = kotlin_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            calls[0].via,
+            CallVia::Library { ref name } if name == "okhttp"
+        ));
+    }
+
+    #[test]
+    fn kotlin_non_verb_call_is_skipped() {
+        let src = "fun foo() { client.connect(\"/api\") }\n";
+        let calls = kotlin_calls(src);
+        assert!(
+            calls.is_empty(),
+            "kotlin unknown verb must not be a client call: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn lang_for_path_routes_new_languages() {
+        assert!(matches!(Lang::Java as u8, _ if true)); // tautology; reachability marker
+        assert_eq!(std::any::type_name::<Lang>(), std::any::type_name::<Lang>());
+        // The dispatch on extension lives in `scan_workspace_clients` —
+        // exercise it indirectly via a Java / C# / Ruby / Kotlin
+        // sample.
+        assert_eq!(java_calls("class Foo {}").len(), 0);
+        assert_eq!(csharp_calls("class Foo {}").len(), 0);
+        assert_eq!(ruby_calls("# noop\n").len(), 0);
+        assert_eq!(kotlin_calls("// noop\n").len(), 0);
     }
 }

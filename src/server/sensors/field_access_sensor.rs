@@ -50,66 +50,17 @@ use crate::federation::contracts::model::{ContractFact, FieldReadFact, JsonPath,
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::util::{
+    lang_for_path as lang_for_path_shared, parse_for_lang, Lang, RESPONSE_METHOD_DENYLIST,
+};
 use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{Node, Tree};
 
-/// Method names whose access on a bound HTTP response is never a
-/// payload-field read. The first four are body parsers covered by
-/// rule 2's `chain_unwrap_call` rebind (the rebind path is
-/// unchanged). The rest are HTTP-response / Fetch-API metadata —
-/// `r.status_code`, `r.headers`, `r.blob()`, etc. — that the brief
-/// and ground truth do not treat as field reads. `handle_attribute`
-/// suppresses `ReadsField` emission when the attribute name on a
-/// bound receiver is in this list.
-///
-/// Bug B of the contract-federation bug fixes. Without this gate the
-/// attribute walker treats `r.json` (the function attribute inside
-/// the call `r.json()`) as a field read of `json` on `r`, which
-/// drove `reads_field_precision` down to 0.500 in the T1 fixture.
-const RESPONSE_METHOD_DENYLIST: &[&str] = &[
-    // body parsing (rule 2 already rebinds to the same path)
-    "json",
-    "text",
-    "data",
-    "body",
-    // HTTP-response / Fetch-API metadata
-    "status_code",
-    "headers",
-    "url",
-    "encoding",
-    "content",
-    "raise_for_status",
-    "is_redirect",
-    "ok",
-    "elapsed",
-    // TS / JS Fetch equivalents
-    "blob",
-    "arrayBuffer",
-    "formData",
-    "status",
-    "redirected",
-    // Go body decoding: `json.NewDecoder(...).Decode(&v)` is the
-    // closest Go analog to `r.json()` — it consumes the response,
-    // not a payload field. `resp.Body.Close()` and the metadata
-    // surface (`resp.StatusCode`, `resp.Header`, `resp.Body`) are
-    // response metadata, not payload fields.
-    // `decode` covers Python bytes' `.decode()` too (bytes → str is
-    // not a payload read).
-    "decode",
-    "Decode",
-    "Close",
-    "Body",
-    "StatusCode",
-    "Status",
-    "Header",
-    "Proto",
-    "Request",
-    "TLS",
-    "Trailer",
-    "ContentLength",
-];
+pub use crate::server::sensors::util::Lang as _LangAlias;
+#[doc(hidden)]
+pub type _Lang = Lang;
 
 // ─── `SensorOwner` extension ────────────────────────────────────
 
@@ -290,38 +241,29 @@ pub fn scan_workspace_field_access(
 
 // ─── Per-language detection ─────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lang {
-    Python,
-    TsJs,
-    Ts,
-    Tsx,
-    Rust,
-    Go,
-}
-
+/// `Lang` is re-exported from `sensors::util` via the `use` clause at
+/// the top of this file. Workstream 5 (this PR) extends the enum
+/// with `Java`, `CSharp`, `Ruby`, `Kotlin`; the in-module parse
+/// wrapper is in this file for parity with the prior per-sensor
+/// layout, but the language-resolution and grammar-lookup both live
+/// in `sensors::util`.
 /// Language for a source path by extension; `None` for files this
-/// sensor does not parse.
+/// sensor does not parse. Shared with the rest of the sensors via
+/// `sensors::util::lang_for_path`.
 fn lang_for_path(path: &str) -> Option<Lang> {
-    let ext = path.rsplit('.').next().unwrap_or("");
-    match ext {
-        "py" => Some(Lang::Python),
-        "ts" => Some(Lang::Ts),
-        "tsx" => Some(Lang::Tsx),
-        "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
-        "rs" => Some(Lang::Rust),
-        "go" => Some(Lang::Go),
-        _ => None,
-    }
+    lang_for_path_shared(path)
 }
 
 // ─── Cross-language AST helpers (Rust + Go) ───────────────────
 //
 // `recv_node` finds the receiver of an attribute-like access across
 // languages: Python/TS use `object`, Rust uses `value`, Go uses
-// `operand`. `attr_node` finds the attribute name: TS uses
-// `property`, Python uses `attribute`, Rust uses a bare
-// `field_identifier` child, Go uses a bare `field_identifier` child.
+// `operand`. Workstream 5 added Java's `field_access` (no field
+// names — `identifier`+`identifier` children), C#'s
+// `member_access_expression` (same), Kotlin's
+// `navigation_expression` (same). The fallback for those last three
+// is to take the first two `identifier`-class children in source
+// order.
 
 fn recv_node(node: Node) -> Option<Node> {
     if let Some(a) = node.child_by_field_name("object") {
@@ -332,6 +274,20 @@ fn recv_node(node: Node) -> Option<Node> {
     }
     if let Some(a) = node.child_by_field_name("value") {
         return Some(a);
+    }
+    if let Some(a) = node.child_by_field_name("expression") {
+        return Some(a);
+    }
+    // Java `field_access` / C# `member_access_expression` /
+    // Kotlin `navigation_expression`: no field names, just two
+    // `identifier` (or `simple_identifier`) siblings. The receiver
+    // is the first.
+    if matches!(
+        node.kind(),
+        "field_access" | "member_access_expression" | "navigation_expression"
+    ) {
+        let mut cursor = node.walk();
+        return node.named_children(&mut cursor).next();
     }
     None
 }
@@ -346,10 +302,36 @@ fn attr_node(node: Node) -> Option<Node> {
     if let Some(a) = node.child_by_field_name("field") {
         return Some(a);
     }
+    if let Some(a) = node.child_by_field_name("target") {
+        return Some(a);
+    }
+    if let Some(a) = node.child_by_field_name("navigation_suffix") {
+        return Some(a);
+    }
+    if let Some(a) = node.child_by_field_name("name") {
+        return Some(a);
+    }
     let mut cursor = node.walk();
+    let mut first_id: Option<Node> = None;
     for c in node.named_children(&mut cursor) {
         if matches!(c.kind(), "field_identifier" | "property_identifier") {
             return Some(c);
+        }
+        // Java / C# / Kotlin shapes: two identifier children. The
+        // first is the receiver, the second is the member. We
+        // return the second. The `recv_node` fallback grabs the
+        // first.
+        if matches!(c.kind(), "identifier" | "simple_identifier")
+            && matches!(
+                node.kind(),
+                "field_access" | "member_access_expression" | "navigation_expression"
+            )
+        {
+            if first_id.is_none() {
+                first_id = Some(c);
+            } else {
+                return Some(c);
+            }
         }
     }
     None
@@ -457,17 +439,7 @@ pub fn detect_emissions(
 }
 
 fn parse(lang: Lang, src: &str) -> Option<Tree> {
-    let mut parser = Parser::new();
-    let grammar: tree_sitter::Language = match lang {
-        Lang::Python => tree_sitter_python::LANGUAGE.into(),
-        Lang::TsJs => tree_sitter_javascript::LANGUAGE.into(),
-        Lang::Ts => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
-        Lang::Go => tree_sitter_go::LANGUAGE.into(),
-    };
-    parser.set_language(&grammar).ok()?;
-    parser.parse(src, None)
+    parse_for_lang(lang, src)
 }
 
 // ─── Per-function analysis ───────────────────────────────────────
@@ -636,6 +608,14 @@ fn walk<'a>(
         }
         Lang::Rust => handle_rust_node(node, src, bound, reads, escapes, file_path, line, frame),
         Lang::Go => handle_go_node(node, src, bound, reads, escapes, file_path, line, frame),
+        Lang::Java => handle_java_node(node, src, bound, reads, escapes, file_path, line, frame),
+        Lang::CSharp => {
+            handle_csharp_node(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        Lang::Ruby => handle_ruby_node(node, src, bound, reads, escapes, file_path, line, frame),
+        Lang::Kotlin => {
+            handle_kotlin_node(node, src, bound, reads, escapes, file_path, line, frame)
+        }
     }
 }
 
@@ -2340,6 +2320,1006 @@ fn handle_go_call(
     }
 }
 
+// ─── Java walker ────────────────────────────────────────────────
+//
+// Tree-sitter Java node shapes:
+//   `local_variable_declaration` — `String r = client.get(url);`. The
+//       declaration wraps a `type` and a `variable_declarator` whose
+//       `name` is the LHS and `value` is the RHS. Field access is
+//       `field_access` (receiver + name).
+//   `method_invocation` — `client.get(url)` / `r.statusCode()`. The
+//       `object` field is the receiver (when present), the `name`
+//       field is the method name.
+//   `field_access` — `r.statusCode` / `r.body`. Receiver is
+//       `object`, name is the bare `identifier` child (no `attribute`
+//       wrapper). When followed by `()` it's a `method_invocation`,
+//       when bare it's `field_access`.
+//   `assignment_expression` — `r = x` rebind.
+//   `return_statement` — `return r;`.
+
+#[allow(clippy::too_many_arguments)]
+fn handle_java_node(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    match node.kind() {
+        "local_variable_declaration" => {
+            handle_java_var_decl(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        "assignment_expression" => {
+            handle_java_assignment(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        "return_statement" => handle_java_return(node, src, bound, escapes, frame),
+        "method_invocation" => handle_java_call(node, src, bound, reads, escapes, file_path, line),
+        "field_access" => handle_attribute(node, src, bound, reads, escapes, file_path, line),
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_java_var_decl(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    // Java's `local_variable_declaration` has its initializer as a
+    // `variable_declarator` child. Walk the declarators and apply
+    // rules 1–4 to each — same shape as Python's `assignment` but
+    // through a wrapper.
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "variable_declarator" {
+            continue;
+        }
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(value) = child.child_by_field_name("value") else {
+            continue;
+        };
+        handle_java_bind(
+            name_node, value, src, bound, reads, escapes, file_path, line, frame,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_java_assignment(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    let Some(left) = node.child_by_field_name("left") else {
+        return;
+    };
+    let Some(right) = node.child_by_field_name("right") else {
+        return;
+    };
+    handle_java_bind(
+        left, right, src, bound, reads, escapes, file_path, line, frame,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_java_bind(
+    left: Node,
+    right: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    _reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    _file_path: &str,
+    _line: u32,
+    frame: FrameCtx<'_>,
+) {
+    // Storing into a sub-field flips the escape flag.
+    if matches!(left.kind(), "field_access") && expression_uses_bound(right, src, bound) {
+        escapes.insert(Escape::Stored);
+        return;
+    }
+    // Rule 1: bind LHS when RHS is a client call.
+    if is_client_call_like(right, src, bound, frame) {
+        bind_lhs(left, src, &JsonPath(Vec::new()), bound);
+        return;
+    }
+    // Rule 2: response-method rebind.
+    if let Some((_, new_path)) = chain_unwrap_call(right, src, bound) {
+        bind_lhs(left, src, &new_path, bound);
+        return;
+    }
+    // `y = x.body` — attribute rebind.
+    if let Some(prefix) = chain_unwrap_dot_data(right, src, bound) {
+        bind_lhs(left, src, &prefix, bound);
+        return;
+    }
+    // Rule 3: sub-path bind.
+    if let Some((_, new_path, _, key_ok)) = chain_unwrap_subscript_or_attr(right, src, bound) {
+        bind_lhs(left, src, &new_path, bound);
+        if !key_ok {
+            escapes.insert(Escape::Stored);
+        }
+        return;
+    }
+    // Rule 4: DTO wrappers.
+    if let Some(source_name) = chain_unwrap_dto_call(right, src, bound) {
+        if let Some(path) = bound.get(&source_name).cloned() {
+            bind_lhs(left, src, &path, bound);
+        }
+    }
+}
+
+fn handle_java_return(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    escapes: &mut BTreeSet<Escape>,
+    frame: FrameCtx<'_>,
+) {
+    if !frame.is_caller_of_s {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if returns_bound_identifier(child, src, bound) {
+            escapes.insert(Escape::Returned);
+        }
+    }
+}
+
+fn handle_java_call(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    _reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    _file_path: &str,
+    _line: u32,
+) {
+    // Detect serialization / spread escapes the same way the other
+    // walkers do: a method invocation whose name is a known
+    // serializer on a bound receiver.
+    let function = node.child_by_field_name("function");
+    let (mut func_name, mut receiver) = (None::<String>, None::<String>);
+    if let Some(func) = function {
+        match func.kind() {
+            "identifier" => {
+                func_name = func.utf8_text(src).ok().map(|s| s.to_string());
+            }
+            "field_access" => {
+                let recv = func
+                    .child_by_field_name("object")
+                    .or_else(|| func.child_by_field_name("value"));
+                let attr = func
+                    .child_by_field_name("field")
+                    .or_else(|| func.child_by_field_name("attribute"))
+                    .or_else(|| func.child_by_field_name("name"));
+                if let Some(a) = attr {
+                    func_name = a.utf8_text(src).ok().map(|s| s.to_string());
+                }
+                if let Some(r) = recv {
+                    receiver = r.utf8_text(src).ok().map(|s| s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(name) = func_name {
+        // Jackson `ObjectMapper.writeValueAsString(x)` /
+        // Gson `.toJson(x)` / `JSONObject.toString()` /
+        // `okhttp3.ResponseBody.string()` (last is a body parser;
+        // not a payload field read). Conservative — match the same
+        // shape as the Go / Rust walkers.
+        if matches!(
+            name.as_str(),
+            "writeValueAsString"
+                | "writeValueAsBytes"
+                | "toJson"
+                | "toString"
+                | "string"
+                | "bytes"
+                | "close"
+        ) {
+            for_each_arg(src, node, |value_text| {
+                if bound.contains_key(value_text) {
+                    escapes.insert(Escape::Serialized);
+                }
+            });
+        }
+        // Allow `receiver == "ObjectMapper" | "Gson" | …` to flag
+        // the form `<recv>.toJson(x)` even when the verb is just
+        // `toJson`. Already covered by the name match.
+        let _ = receiver;
+    }
+}
+
+// ─── C# walker ──────────────────────────────────────────────────
+//
+// Tree-sitter C# node shapes:
+//   `local_declaration_statement` — `var r = client.GetAsync(url);`
+//       wraps a `variable_declaration` whose `name` is the LHS and
+//       whose `value` is the RHS.
+//   `assignment_expression` — `r = expr` rebind.
+//   `invocation_expression` — `client.GetAsync(url)`. The
+//       `function` field is a `member_access_expression` whose
+//       `expression` is the receiver and `name` is the verb.
+//   `member_access_expression` — `r.StatusCode` / `r.Body`.
+//       `expression` is the receiver, `name` is the field.
+//   `element_access_expression` — `r["k"]`. `expression` is the
+//       receiver, `index` is the key (an `argument_list` wrapping
+//       one argument).
+//   `return_statement` — `return r;`.
+
+#[allow(clippy::too_many_arguments)]
+fn handle_csharp_node(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    match node.kind() {
+        "local_declaration_statement" => {
+            handle_csharp_var_decl(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        "assignment_expression" => {
+            handle_csharp_assignment(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        "return_statement" => handle_csharp_return(node, src, bound, escapes, frame),
+        "invocation_expression" => {
+            handle_csharp_call(node, src, bound, reads, escapes, file_path, line)
+        }
+        "member_access_expression" => {
+            handle_attribute(node, src, bound, reads, escapes, file_path, line)
+        }
+        "element_access_expression" => {
+            handle_csharp_subscript(node, src, bound, reads, escapes, file_path, line)
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_csharp_var_decl(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    // `var r = client.GetAsync(...)` — `local_declaration_statement`
+    // wraps a `variable_declaration` whose `variable_declarator`
+    // grandchild carries `name` as a field but the value as the
+    // second named child (`identifier`/`invocation_expression`/…),
+    // not as a `value` field.
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "variable_declaration" {
+            continue;
+        }
+        let mut c2 = child.walk();
+        for d in child.named_children(&mut c2) {
+            if d.kind() != "variable_declarator" {
+                continue;
+            }
+            let Some(name_node) = d.child_by_field_name("name") else {
+                continue;
+            };
+            // C#'s `variable_declarator` has the value as the second
+            // named child (after the name). Take the last named
+            // child that isn't the name.
+            let mut dcursor = d.walk();
+            let mut value: Option<Node> = None;
+            for decl_child in d.named_children(&mut dcursor) {
+                if decl_child.id() != name_node.id() {
+                    value = Some(decl_child);
+                }
+            }
+            let Some(value) = value else {
+                continue;
+            };
+            handle_csharp_bind(
+                name_node, value, src, bound, reads, escapes, file_path, line, frame,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_csharp_assignment(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    let Some(left) = node.child_by_field_name("left") else {
+        return;
+    };
+    let Some(right) = node.child_by_field_name("right") else {
+        return;
+    };
+    handle_csharp_bind(
+        left, right, src, bound, reads, escapes, file_path, line, frame,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_csharp_bind(
+    left: Node,
+    right: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    _reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    _file_path: &str,
+    _line: u32,
+    frame: FrameCtx<'_>,
+) {
+    if matches!(
+        left.kind(),
+        "member_access_expression" | "element_access_expression"
+    ) && expression_uses_bound(right, src, bound)
+    {
+        escapes.insert(Escape::Stored);
+        return;
+    }
+    if is_client_call_like(right, src, bound, frame) {
+        bind_lhs(left, src, &JsonPath(Vec::new()), bound);
+        return;
+    }
+    if let Some((_, new_path)) = chain_unwrap_call(right, src, bound) {
+        bind_lhs(left, src, &new_path, bound);
+        return;
+    }
+    if let Some(prefix) = chain_unwrap_dot_data(right, src, bound) {
+        bind_lhs(left, src, &prefix, bound);
+        return;
+    }
+    if let Some((_, new_path, _, key_ok)) = chain_unwrap_subscript_or_attr(right, src, bound) {
+        bind_lhs(left, src, &new_path, bound);
+        if !key_ok {
+            escapes.insert(Escape::Stored);
+        }
+        return;
+    }
+    if let Some(source_name) = chain_unwrap_dto_call(right, src, bound) {
+        if let Some(path) = bound.get(&source_name).cloned() {
+            bind_lhs(left, src, &path, bound);
+        }
+    }
+}
+
+fn handle_csharp_return(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    escapes: &mut BTreeSet<Escape>,
+    frame: FrameCtx<'_>,
+) {
+    if !frame.is_caller_of_s {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if returns_bound_identifier(child, src, bound) {
+            escapes.insert(Escape::Returned);
+        }
+    }
+}
+
+fn handle_csharp_call(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    _reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    _file_path: &str,
+    _line: u32,
+) {
+    let function = node.child_by_field_name("function");
+    let (mut func_name, mut receiver) = (None::<String>, None::<String>);
+    if let Some(func) = function {
+        match func.kind() {
+            "identifier" => {
+                func_name = func.utf8_text(src).ok().map(|s| s.to_string());
+            }
+            "member_access_expression" => {
+                let recv = func
+                    .child_by_field_name("expression")
+                    .or_else(|| func.child_by_field_name("object"));
+                let attr = func
+                    .child_by_field_name("name")
+                    .or_else(|| func.child_by_field_name("field"))
+                    .or_else(|| func.child_by_field_name("property"))
+                    .or_else(|| func.child_by_field_name("attribute"));
+                if let Some(a) = attr {
+                    func_name = a.utf8_text(src).ok().map(|s| s.to_string());
+                }
+                if let Some(r) = recv {
+                    receiver = r.utf8_text(src).ok().map(|s| s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(name) = func_name {
+        if matches!(
+            name.as_str(),
+            "SerializeObject"
+                | "Serialize"
+                | "ToJson"
+                | "ReadAsStringAsync"
+                | "ReadFromJsonAsync"
+                | "ToString"
+                | "Dispose"
+        ) {
+            for_each_arg(src, node, |value_text| {
+                if bound.contains_key(value_text) {
+                    escapes.insert(Escape::Serialized);
+                }
+            });
+        }
+        let _ = receiver;
+    }
+}
+
+fn handle_csharp_subscript(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+) {
+    // `r["k"]` — C#'s `element_access_expression` has the receiver
+    // as the first named child and a `bracketed_argument_list` as
+    // the second. Drill into the bracket list to find the literal
+    // key.
+    let mut cursor = node.walk();
+    let mut value: Option<Node> = None;
+    let mut key_node: Option<Node> = None;
+    for child in node.named_children(&mut cursor) {
+        if value.is_none() {
+            value = Some(child);
+        } else if key_node.is_none() {
+            key_node = Some(child);
+            break;
+        }
+    }
+    let (Some(value), Some(key_node)) = (value, key_node) else {
+        return;
+    };
+    let value_text = match value.utf8_text(src) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let Some(prefix) = bound.get(value_text) else {
+        return;
+    };
+    // C# wraps the bracket contents in `bracketed_argument_list`
+    // → `argument`. Recurse into the first argument.
+    let key_node = if key_node.kind() == "bracketed_argument_list" {
+        let mut c = key_node.walk();
+        let mut arg_node = None;
+        for arg in key_node.named_children(&mut c) {
+            if matches!(arg.kind(), "argument" | "identifier" | "string_literal") {
+                arg_node = Some(arg);
+                break;
+            }
+        }
+        arg_node
+    } else {
+        Some(key_node)
+    };
+    let Some(key_node) = key_node else {
+        escapes.insert(Escape::Stored);
+        return;
+    };
+    let key_node = if key_node.kind() == "argument" {
+        // C#'s `argument` either exposes a `value` field OR has the
+        // literal as its first named child. Try both.
+        key_node
+            .child_by_field_name("value")
+            .or_else(|| {
+                let mut c = key_node.walk();
+                let first = key_node.named_children(&mut c).next();
+                drop(c);
+                first
+            })
+            .unwrap_or(key_node)
+    } else {
+        key_node
+    };
+    let (key_text, exact) = match key_node.kind() {
+        "string_literal" => {
+            let raw = key_node.utf8_text(src).unwrap_or_default();
+            let trimmed = raw.trim_matches('"');
+            (trimmed.to_string(), true)
+        }
+        "integer_literal" | "number_literal" => (
+            key_node.utf8_text(src).unwrap_or_default().to_string(),
+            true,
+        ),
+        _ => (String::new(), false),
+    };
+    if !exact {
+        escapes.insert(Escape::Stored);
+        return;
+    }
+    let mut chain = prefix.0.clone();
+    chain.push(PathSegment::Name(key_text));
+    reads.push(FieldRead {
+        chain: JsonPath(chain),
+        exact: true,
+        path: file_path.to_string(),
+        line,
+        reader_id: "self".to_string(),
+    });
+}
+
+// ─── Ruby walker ────────────────────────────────────────────────
+//
+// Tree-sitter Ruby node shapes:
+//   `assignment` — `r = Net::HTTP.get(...)`. LHS is `identifier`
+//       (or `instance_variable` / `class_variable`), RHS is the
+//       value. The `operator` field carries `=` / `+=` / etc.
+//   `method` / `singleton_method_method_definition` — top-level
+//       `def name`. The `name` field is the identifier; the body
+//       lives inside `body_statement`.
+//   `call` — `HTTParty.get(url).body` / `r.body` / `puts r.body`.
+//       The `receiver` field is the left side, the `method` field is
+//       the verb (an `identifier` or `constant`), the `arguments`
+//       field is the arg list. A bare `r.body` is a `call` with
+//       `receiver = identifier r` and `method = identifier body`.
+//   `return` / `return_statement` — `return r`.
+
+#[allow(clippy::too_many_arguments)]
+fn handle_ruby_node(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    match node.kind() {
+        "assignment" => {
+            handle_ruby_assignment(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        "return" | "return_statement" => handle_ruby_return(node, src, bound, escapes, frame),
+        "call" => handle_ruby_call(node, src, bound, reads, escapes, file_path, line),
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_ruby_assignment(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    let Some(left) = node.child_by_field_name("left") else {
+        return;
+    };
+    let Some(right) = node.child_by_field_name("right") else {
+        return;
+    };
+    if matches!(left.kind(), "call" | "instance_variable_write")
+        && expression_uses_bound(right, src, bound)
+    {
+        escapes.insert(Escape::Stored);
+        return;
+    }
+    if is_client_call_like(right, src, bound, frame) {
+        bind_lhs(left, src, &JsonPath(Vec::new()), bound);
+        return;
+    }
+    if let Some((_, new_path)) = chain_unwrap_call(right, src, bound) {
+        bind_lhs(left, src, &new_path, bound);
+        return;
+    }
+    if let Some(prefix) = chain_unwrap_dot_data(right, src, bound) {
+        bind_lhs(left, src, &prefix, bound);
+        return;
+    }
+    if let Some((_, new_path, _, key_ok)) = chain_unwrap_subscript_or_attr(right, src, bound) {
+        bind_lhs(left, src, &new_path, bound);
+        if !key_ok {
+            escapes.insert(Escape::Stored);
+        }
+        return;
+    }
+    if let Some(source_name) = chain_unwrap_dto_call(right, src, bound) {
+        if let Some(path) = bound.get(&source_name).cloned() {
+            bind_lhs(left, src, &path, bound);
+            return;
+        }
+    }
+    let _ = (reads, file_path, line);
+}
+
+fn handle_ruby_return(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    escapes: &mut BTreeSet<Escape>,
+    frame: FrameCtx<'_>,
+) {
+    if !frame.is_caller_of_s {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if returns_bound_identifier(child, src, bound) {
+            escapes.insert(Escape::Returned);
+        }
+    }
+}
+
+fn handle_ruby_call(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+) {
+    // Ruby `r.body` is `call` with `receiver = identifier r` and
+    // `method = identifier body`. The same node also represents
+    // `puts(r.body)` — the call walker handles each sub-call.
+    //
+    // First: detect serialization escapes (Net::HTTPResponse.read_body
+    // / `JSON.dump(x)` / `Marshal.dump(x)` / `to_json`). Body of the
+    // if-let is the bare name extraction.
+    let (mut func_name, mut receiver) = (None::<String>, None::<String>);
+    if let Some(method) = node.child_by_field_name("method") {
+        func_name = method.utf8_text(src).ok().map(|s| s.to_string());
+    }
+    if let Some(recv) = node.child_by_field_name("receiver") {
+        receiver = recv.utf8_text(src).ok().map(|s| s.to_string());
+    }
+    if let Some(name) = func_name.as_deref() {
+        if matches!(
+            name,
+            "to_json"
+                | "dump"
+                | "generate"
+                | "read_body"
+                | "merge"
+                | "merge!"
+                | "update"
+                | "update!"
+                | "store"
+        ) {
+            for_each_arg(src, node, |value_text| {
+                if bound.contains_key(value_text) {
+                    escapes.insert(Escape::Serialized);
+                }
+            });
+        }
+    }
+    let _ = receiver;
+
+    // Field read: `r.body` — receiver is in bound, method name is
+    // not in the denylist. Tree-sitter Ruby emits this as `call`
+    // with `receiver` field set to the LHS and `method` field set to
+    // the verb. Reuse `handle_attribute`-style logic by treating the
+    // `receiver` as the value and `method` as the attribute.
+    if let (Some(recv_node), Some(method_node)) = (
+        node.child_by_field_name("receiver"),
+        node.child_by_field_name("method"),
+    ) {
+        let value_text = match recv_node.utf8_text(src) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let key_text = method_node.utf8_text(src).unwrap_or_default().to_string();
+        if let Some(prefix) = bound.get(value_text) {
+            if key_text.is_empty() {
+                return;
+            }
+            if RESPONSE_METHOD_DENYLIST.contains(&key_text.as_str()) {
+                return;
+            }
+            let mut chain = prefix.0.clone();
+            chain.push(PathSegment::Name(key_text));
+            reads.push(FieldRead {
+                chain: JsonPath(chain),
+                exact: true,
+                path: file_path.to_string(),
+                line,
+                reader_id: "self".to_string(),
+            });
+        }
+    }
+}
+
+// ─── Kotlin walker ──────────────────────────────────────────────
+//
+// Tree-sitter Kotlin (`tree-sitter-kotlin-ng`) node shapes:
+//   `property_declaration` — `val r = client.get("/x")`. The
+//       `binding_pattern` / `variable_declaration` carries the name
+//       and the `value` is the RHS. The `name` field is a
+//       `simple_identifier`.
+//   `assignment` — `r = expr`. `left` field is a `simple_identifier`,
+//       `right` is the value.
+//   `call_expression` — `client.get<String>("/x")` / `r.body()`.
+//       The `function` field is either a `navigation_expression`
+//       (receiver + name) or a `identifier` (bare call).
+//   `navigation_expression` — `r.body` / `client.get`. `expression`
+//       is the receiver; `target` / `navigation_suffix` carries the
+//       member name.
+//   `indexing_expression` — `r["k"]`. `operand` / `target` is the
+//       receiver, the `index` arguments follow.
+//   `return` — `return r;`.
+
+#[allow(clippy::too_many_arguments)]
+fn handle_kotlin_node(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    match node.kind() {
+        "property_declaration" => {
+            handle_kotlin_var_decl(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        "assignment" => {
+            handle_kotlin_assignment(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        "return" => handle_kotlin_return(node, src, bound, escapes, frame),
+        "call_expression" => handle_kotlin_call(node, src, bound, reads, escapes, file_path, line),
+        "navigation_expression" => {
+            handle_kotlin_navigation(node, src, bound, reads, escapes, file_path, line)
+        }
+        "indexing_expression" => {
+            handle_subscript(node, src, bound, reads, escapes, file_path, line)
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_kotlin_var_decl(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    // Kotlin's `property_declaration` has the `val` / `var` keyword
+    // and a `variable_declaration` child carrying the `identifier`
+    // (name), then `=` and the initializer. The probe shows:
+    //   property_declaration
+    //     variable_declaration
+    //       identifier (name)
+    //     <initializer expression>
+    let mut name_node: Option<Node> = None;
+    let mut value: Option<Node> = None;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "variable_declaration" {
+            let mut c2 = child.walk();
+            for gc in child.named_children(&mut c2) {
+                if gc.kind() == "identifier" || gc.kind() == "simple_identifier" {
+                    name_node = Some(gc);
+                }
+            }
+        } else if child.kind() == "="
+            || child.kind() == "call_expression"
+            || child.kind() == "navigation_expression"
+            || child.kind() == "string_literal"
+            || child.kind() == "simple_identifier"
+            || child.kind() == "integer_literal"
+        {
+            value = Some(child);
+        }
+    }
+    let (Some(name_node), Some(value)) = (name_node, value) else {
+        return;
+    };
+    handle_kotlin_bind(
+        name_node, value, src, bound, reads, escapes, file_path, line, frame,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_kotlin_assignment(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    let Some(left) = node.child_by_field_name("left") else {
+        return;
+    };
+    let Some(right) = node.child_by_field_name("right") else {
+        return;
+    };
+    handle_kotlin_bind(
+        left, right, src, bound, reads, escapes, file_path, line, frame,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_kotlin_bind(
+    left: Node,
+    right: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    _reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    _file_path: &str,
+    _line: u32,
+    frame: FrameCtx<'_>,
+) {
+    if matches!(left.kind(), "navigation_expression" | "indexing_expression")
+        && expression_uses_bound(right, src, bound)
+    {
+        escapes.insert(Escape::Stored);
+        return;
+    }
+    if is_client_call_like(right, src, bound, frame) {
+        bind_lhs(left, src, &JsonPath(Vec::new()), bound);
+        return;
+    }
+    if let Some((_, new_path)) = chain_unwrap_call(right, src, bound) {
+        bind_lhs(left, src, &new_path, bound);
+        return;
+    }
+    if let Some(prefix) = chain_unwrap_dot_data(right, src, bound) {
+        bind_lhs(left, src, &prefix, bound);
+        return;
+    }
+    if let Some((_, new_path, _, key_ok)) = chain_unwrap_subscript_or_attr(right, src, bound) {
+        bind_lhs(left, src, &new_path, bound);
+        if !key_ok {
+            escapes.insert(Escape::Stored);
+        }
+        return;
+    }
+    if let Some(source_name) = chain_unwrap_dto_call(right, src, bound) {
+        if let Some(path) = bound.get(&source_name).cloned() {
+            bind_lhs(left, src, &path, bound);
+        }
+    }
+}
+
+fn handle_kotlin_return(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    escapes: &mut BTreeSet<Escape>,
+    frame: FrameCtx<'_>,
+) {
+    if !frame.is_caller_of_s {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if returns_bound_identifier(child, src, bound) {
+            escapes.insert(Escape::Returned);
+        }
+    }
+}
+
+fn handle_kotlin_call(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    _reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    _file_path: &str,
+    _line: u32,
+) {
+    let function = node.child_by_field_name("function");
+    let (mut func_name, mut receiver) = (None::<String>, None::<String>);
+    if let Some(func) = function {
+        match func.kind() {
+            "identifier" | "simple_identifier" => {
+                func_name = func.utf8_text(src).ok().map(|s| s.to_string());
+            }
+            "navigation_expression" => {
+                let recv = func
+                    .child_by_field_name("expression")
+                    .or_else(|| func.child_by_field_name("operand"))
+                    .or_else(|| func.child_by_field_name("object"));
+                let target = func
+                    .child_by_field_name("target")
+                    .or_else(|| func.child_by_field_name("navigation_suffix"))
+                    .or_else(|| func.child_by_field_name("name"))
+                    .or_else(|| func.child_by_field_name("field"))
+                    .or_else(|| func.child_by_field_name("attribute"));
+                if let Some(t) = target {
+                    func_name = t.utf8_text(src).ok().map(|s| s.to_string());
+                }
+                if let Some(r) = recv {
+                    receiver = r.utf8_text(src).ok().map(|s| s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(name) = func_name {
+        // Ktor `Json.encodeToString(x)` / `toJson(x)` /
+        // `ObjectMapper.writeValueAsString(x)` / `okio.Buffer.write`
+        // (last is a serialization sink).
+        if matches!(
+            name.as_str(),
+            "writeValueAsString" | "toJson" | "encodeToString" | "string" | "bytes" | "close"
+        ) {
+            for_each_arg(src, node, |value_text| {
+                if bound.contains_key(value_text) {
+                    escapes.insert(Escape::Serialized);
+                }
+            });
+        }
+        let _ = receiver;
+    }
+}
+
+fn handle_kotlin_navigation(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+) {
+    // `r.body` is a Kotlin `navigation_expression`. The shared
+    // `handle_attribute` already handles this shape (C# / Java /
+    // Kotlin all use bare identifier + identifier children) — defer
+    // to it.
+    handle_attribute(node, src, bound, reads, escapes, file_path, line);
+    let _ = (escapes, bound);
+}
+
 // ─── Chain unwrappers (rules 2, 3, 4) ───────────────────────────
 
 fn chain_unwrap_call<'a>(
@@ -2444,6 +3424,64 @@ fn chain_unwrap_subscript_or_attr(
             }
             return None;
         }
+        // C#'s `element_access_expression` (`r["k"]`). Receiver is
+        // the first named child; the key lives inside the second
+        // named child, a `bracketed_argument_list` wrapping one
+        // `argument` (whose `value` is the literal).
+        "element_access_expression" => {
+            let mut cursor = node.walk();
+            let mut value: Option<Node> = None;
+            let mut bracket: Option<Node> = None;
+            for child in node.named_children(&mut cursor) {
+                if value.is_none() {
+                    value = Some(child);
+                } else {
+                    bracket = Some(child);
+                    break;
+                }
+            }
+            let (Some(value), Some(bracket)) = (value, bracket) else {
+                return None;
+            };
+            let recv_text = match value.utf8_text(src) {
+                Ok(t) => t,
+                Err(_) => return None,
+            };
+            let key_node = if bracket.kind() == "bracketed_argument_list" {
+                let mut c = bracket.walk();
+                let mut arg_node: Option<Node> = None;
+                for arg in bracket.named_children(&mut c) {
+                    if matches!(arg.kind(), "argument" | "string_literal" | "identifier") {
+                        arg_node = Some(arg);
+                        break;
+                    }
+                }
+                arg_node
+            } else {
+                Some(bracket)
+            };
+            let key_node = key_node.and_then(|n| {
+                if n.kind() == "argument" {
+                    n.child_by_field_name("value").or(Some(n))
+                } else {
+                    Some(n)
+                }
+            });
+            let key_node = key_node?;
+            let (key_text, exact) = match key_node.kind() {
+                "string_literal" => {
+                    let raw = key_node.utf8_text(src).ok()?;
+                    let trimmed = raw.trim_matches('"');
+                    (trimmed.to_string(), true)
+                }
+                "integer_literal" | "number_literal" => {
+                    (key_node.utf8_text(src).ok()?.to_string(), true)
+                }
+                _ => (String::new(), false),
+            };
+            let key_ok = !key_text.is_empty();
+            (recv_text.to_string(), key_text, exact, key_ok)
+        }
         "subscript" | "subscript_expression" => {
             // Python `subscript` uses positional children: the
             // receiver is the first named child, the index is the
@@ -2473,14 +3511,14 @@ fn chain_unwrap_subscript_or_attr(
                 _ => (String::new(), false),
             };
             let key_ok = !key_text.is_empty();
-            (recv_text, key_text, exact, key_ok)
+            (recv_text.to_string(), key_text, exact, key_ok)
         }
         "attribute" | "member_expression" | "field_expression" | "selector_expression" => {
             let recv = recv_node(node)?;
             let attr = attr_node(node)?;
             let recv_text = recv.utf8_text(src).ok()?;
             let attr_text = attr.utf8_text(src).ok()?;
-            (recv_text, attr_text.to_string(), true, true)
+            (recv_text.to_string(), attr_text.to_string(), true, true)
         }
         "call" | "call_expression" => {
             // `x.get("k")` → bound to sub-path `k`. If the receiver is
@@ -2522,7 +3560,7 @@ fn chain_unwrap_subscript_or_attr(
         }
         _ => return None,
     };
-    let prefix = bound.get::<str>(recv)?;
+    let prefix = bound.get::<str>(recv.as_str())?;
     let mut new_path = prefix.0.clone();
     new_path.push(PathSegment::Name(key_text));
     Some((recv.to_string(), JsonPath(new_path), exact, key_ok))
@@ -2673,17 +3711,45 @@ fn is_client_call_like<'a>(
         }
         return false;
     }
-    if kind != "call" && kind != "call_expression" {
+    // §6.5 Workstream 5 — the same over-binding rule applies to
+    // every language's outbound-call node kind:
+    //   `call`                  (Python)
+    //   `call_expression`       (TS/JS, Kotlin)
+    //   `method_invocation`     (Java)
+    //   `invocation_expression` (C#)
+    //   `call`                  (Ruby — reuses Python's node kind)
+    if !matches!(
+        kind,
+        "call" | "call_expression" | "method_invocation" | "invocation_expression"
+    ) {
         return false;
     }
     let function = match node.child_by_field_name("function") {
         Some(f) => f,
-        None => return false,
+        None => {
+            // Languages without a `function` field on their call node
+            // (Java `method_invocation`, Ruby `call`) — treat the
+            // whole call as a member-call whose receiver comes from
+            // the per-language field.
+            return java_or_ruby_member_call(node, src, bound, frame);
+        }
     };
     let func_kind = function.kind();
     if matches!(
         func_kind,
-        "attribute" | "member_expression" | "field_expression" | "selector_expression"
+        "attribute"
+            | "member_expression"
+            | "field_expression"
+            | "selector_expression"
+            // Java: `field_access` is the receiver-of-method node
+            // (e.g. `client.get` in `client.get(url)`).
+            | "field_access"
+            // C#: `member_access_expression` is `client.GetAsync` in
+            // `client.GetAsync(url)`.
+            | "member_access_expression"
+            // Kotlin: `navigation_expression` is `client.get` in
+            // `client.get<String>(url)`.
+            | "navigation_expression"
     ) {
         if !frame.is_sender {
             // A scope frame's own member client call (another
@@ -2694,6 +3760,7 @@ fn is_client_call_like<'a>(
             .child_by_field_name("object")
             .or_else(|| function.child_by_field_name("operand"))
             .or_else(|| function.child_by_field_name("value"))
+            .or_else(|| function.child_by_field_name("expression"))
         {
             let recv_in_bound = recv
                 .utf8_text(src)
@@ -2712,6 +3779,20 @@ fn is_client_call_like<'a>(
         }
         return true;
     }
+    // Java shape: `method_invocation` carries `object` + `name`
+    // directly on the call node (no `function` wrapper). The
+    // receiver is the `object` field; treat that as the bound
+    // check.
+    if func_kind == "identifier" || func_kind == "simple_identifier" {
+        // Bare identifier (e.g. `fetch(url)` / `get(url)`).
+        if frame.is_sender {
+            return true;
+        }
+        return matches!(
+            function.utf8_text(src),
+            Ok(name) if name == frame.sender_name
+        );
+    }
     // Bare call: sender frame over-binds (rule 1 seed); a scope
     // frame only seeds for `S` itself (rule 5).
     if frame.is_sender {
@@ -2721,6 +3802,46 @@ fn is_client_call_like<'a>(
         function.utf8_text(src),
         Ok(name) if name == frame.sender_name
     )
+}
+
+/// Detect the "is the call a client call" shape for languages
+/// whose call nodes carry `object`+`name` (Java) or
+/// `receiver`+`method` (Ruby) instead of a `function` wrapper. The
+/// same over-binding / scope rules apply.
+fn java_or_ruby_member_call<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    frame: FrameCtx<'_>,
+) -> bool {
+    if !frame.is_sender {
+        // Scope frames only seed via rule 5 (bare `o = S(…)`), and
+        // both languages' bare identifier check covers that path.
+        return false;
+    }
+    let recv_text = node
+        .child_by_field_name("object")
+        .or_else(|| node.child_by_field_name("receiver"))
+        .or_else(|| node.child_by_field_name("operand"))
+        .and_then(|n| n.utf8_text(src).ok());
+    if let Some(name) = recv_text {
+        if bound.contains_key(name) {
+            return false;
+        }
+        if chain_unwrap_call(node, src, bound)
+            .map(|(bound_name, _)| bound.contains_key(&bound_name))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        return true;
+    }
+    // Bare identifier call: only fires for `o = S(…)` in scope
+    // frames; for the sender frame any bare call seeds.
+    if frame.is_sender {
+        return true;
+    }
+    false
 }
 
 fn bind_lhs(node: Node, src: &[u8], path: &JsonPath, bound: &mut BTreeMap<String, JsonPath>) {
@@ -3775,6 +4896,14 @@ fn walk_with_metadata<'a>(
         }
         Lang::Rust => handle_rust_node(node, src, bound, reads, escapes, file_path, line, frame),
         Lang::Go => handle_go_node(node, src, bound, reads, escapes, file_path, line, frame),
+        Lang::Java => handle_java_node(node, src, bound, reads, escapes, file_path, line, frame),
+        Lang::CSharp => {
+            handle_csharp_node(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        Lang::Ruby => handle_ruby_node(node, src, bound, reads, escapes, file_path, line, frame),
+        Lang::Kotlin => {
+            handle_kotlin_node(node, src, bound, reads, escapes, file_path, line, frame)
+        }
     }
     // …then the interprocedural rules, so a precise rule-5 sub-path
     // binding overrides the rule-1 root bind on the same node.
@@ -5657,5 +6786,457 @@ func f() {
     fn lang_for_path_routes_rs_and_go() {
         assert_eq!(lang_for_path("src/main.rs"), Some(Lang::Rust));
         assert_eq!(lang_for_path("main.go"), Some(Lang::Go));
+    }
+
+    // ─── Java walker tests (Workstream 5) ───────────────────────────
+
+    #[test]
+    fn java_string_r_equal_client_call_binds_r() {
+        let src = "\
+class Foo {
+    String getOrder() {
+        HttpResponse<String> r = client.get(\"/api/x\");
+        return r;
+    }
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Java, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Java,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "Foo.java",
+        );
+        assert!(
+            bound.contains_key("r"),
+            "rule 1 must bind r to the response root: {bound:?}"
+        );
+        assert_eq!(bound.get("r").unwrap().0, Vec::<PathSegment>::new());
+    }
+
+    #[test]
+    fn java_field_access_records_payload_read() {
+        // Seed r so the walker treats it as the response.
+        let src = "class Foo { void bar() { System.out.println(r.id); } }\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        bound.insert("r".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Java, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Java,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "Foo.java",
+        );
+        assert!(
+            reads.iter().any(|r| r.chain.to_string() == "id"),
+            "r.id must emit a FieldRef: {reads:?}"
+        );
+    }
+
+    #[test]
+    fn java_status_code_method_does_not_emit_field_ref() {
+        // `r.statusCode()` is the HttpResponse metadata accessor.
+        let src = "\
+class Foo {
+    void bar() {
+        HttpResponse<String> r = client.get(\"/api\");
+        int code = r.statusCode();
+    }
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Java, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Java,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "Foo.java",
+        );
+        let bad = reads
+            .iter()
+            .filter(|r| {
+                r.chain.0.iter().any(|s| {
+                    matches!(
+                        s, PathSegment::Name(n) if n == "statusCode" || n == "getStatusCode"
+                    )
+                })
+            })
+            .count();
+        assert_eq!(
+            bad, 0,
+            "deny-listed statusCode / getStatusCode must not emit a ReadsField: {reads:?}"
+        );
+    }
+
+    // ─── C# walker tests (Workstream 5) ────────────────────────────
+
+    #[test]
+    fn csharp_var_r_equal_client_call_binds_r() {
+        let src = "\
+class Foo {
+    void Bar() {
+        var r = client.GetAsync(\"/api/x\");
+        var n = r.Id;
+    }
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::CSharp, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::CSharp,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "Foo.cs",
+        );
+        assert!(
+            bound.contains_key("r"),
+            "rule 1 must bind r to the response root: {bound:?}"
+        );
+        assert_eq!(bound.get("r").unwrap().0, Vec::<PathSegment>::new());
+        // The `r.Id` read emits a FieldRef (Id is not in the
+        // denylist).
+        assert!(
+            reads.iter().any(|r| r.chain.to_string() == "Id"),
+            "r.Id must emit a FieldRef: {reads:?}"
+        );
+    }
+
+    #[test]
+    fn csharp_status_code_property_does_not_emit_field_ref() {
+        let src = "\
+class Foo {
+    void Bar() {
+        var r = client.GetAsync(\"/api\");
+        var sc = r.StatusCode;
+        var ok = r.IsSuccessStatusCode;
+    }
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::CSharp, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::CSharp,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "Foo.cs",
+        );
+        for key in ["StatusCode", "IsSuccessStatusCode", "Headers"] {
+            let bad = reads
+                .iter()
+                .filter(|r| {
+                    r.chain
+                        .0
+                        .iter()
+                        .any(|s| matches!(s, PathSegment::Name(n) if n == key))
+                })
+                .count();
+            assert_eq!(
+                bad, 0,
+                "deny-listed {key:?} must not emit a ReadsField: {reads:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn csharp_subscript_records_payload_read() {
+        let src = "\
+class Foo {
+    void Bar() {
+        var r = client.GetAsync(\"/api\");
+        var id = r[\"id\"];
+    }
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::CSharp, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::CSharp,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "Foo.cs",
+        );
+        assert!(
+            reads.iter().any(|r| r.chain.to_string() == "id"),
+            "r[\"id\"] must emit a FieldRef: {reads:?}"
+        );
+    }
+
+    // ─── Ruby walker tests (Workstream 5) ──────────────────────────
+
+    #[test]
+    fn ruby_r_equal_call_binds_r() {
+        let src = "\
+def fetch
+  r = Net::HTTP.get(URI('http://orders/api'))
+  r.body
+end
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Ruby, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Ruby,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "fetch.rb",
+        );
+        assert!(bound.contains_key("r"), "rule 1 must bind r: {bound:?}");
+        assert_eq!(bound.get("r").unwrap().0, Vec::<PathSegment>::new());
+    }
+
+    #[test]
+    fn ruby_r_body_records_payload_read() {
+        let src = "def f\n  r = Net::HTTP.get(URI('http://x'))\n  puts r.body\nend\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Ruby, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Ruby,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "f.rb",
+        );
+        // `puts r.body` — the inner `r.body` is a `call` with
+        // receiver=r, method=body. The walker must record a read.
+        let bad = reads
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "body"))
+            })
+            .count();
+        // `body` is in the rule-2 denylist — `puts r.body` does NOT
+        // emit a FieldRef on `body` (per §6.5 rule 2 rebind).
+        // However the `body` itself doesn't have to be a rebind here
+        // (the function `puts` consumes it). The chain check is
+        // exactly what we need: no `body` FieldRef.
+        assert_eq!(
+            bad, 0,
+            "body is a body-parser accessor; rule 2 should rebind, not emit: {reads:?}"
+        );
+        // But a non-denylist field DOES emit.
+        let mut bound2: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound2.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads2 = Vec::new();
+        let mut escapes2 = BTreeSet::new();
+        let src2 = "def f\n  r = Net::HTTP.get(URI('http://x'))\n  puts r.customer_id\nend\n";
+        let tree2 = parse(Lang::Ruby, src2).unwrap();
+        walk_tree(
+            tree2.root_node(),
+            src2.as_bytes(),
+            Lang::Ruby,
+            &mut bound2,
+            &mut reads2,
+            &mut escapes2,
+            "f.rb",
+        );
+        assert!(
+            reads2.iter().any(|r| r.chain.to_string() == "customer_id"),
+            "r.customer_id must emit a FieldRef: {reads2:?}"
+        );
+    }
+
+    #[test]
+    fn ruby_r_code_does_not_emit_field_ref() {
+        // `r.code` is the Net::HTTPResponse status code — deny-listed.
+        let src = "def f\n  r = Net::HTTP.get(URI('http://x'))\n  puts r.code\nend\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Ruby, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Ruby,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "f.rb",
+        );
+        let bad = reads
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "code"))
+            })
+            .count();
+        assert_eq!(
+            bad, 0,
+            "deny-listed `code` must not emit a ReadsField: {reads:?}"
+        );
+    }
+
+    // ─── Kotlin walker tests (Workstream 5) ────────────────────────
+
+    #[test]
+    fn kotlin_val_r_equal_client_get_binds_r() {
+        let src = "\
+fun foo() {
+    val r = client.get(\"/api/x\")
+    println(r.body)
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Kotlin, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Kotlin,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "Foo.kt",
+        );
+        assert!(bound.contains_key("r"), "rule 1 must bind r: {bound:?}");
+        assert_eq!(bound.get("r").unwrap().0, Vec::<PathSegment>::new());
+    }
+
+    #[test]
+    fn kotlin_r_body_records_payload_read() {
+        let src = "fun foo() {\n    val r = client.get(\"/api\")\n    println(r.body)\n}\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Kotlin, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Kotlin,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "Foo.kt",
+        );
+        // `body` is deny-listed → no FieldRef.
+        let bad = reads
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "body"))
+            })
+            .count();
+        assert_eq!(
+            bad, 0,
+            "deny-listed body must not emit a ReadsField: {reads:?}"
+        );
+        // And the payload field does emit.
+        let mut bound2: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound2.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads2 = Vec::new();
+        let mut escapes2 = BTreeSet::new();
+        let src2 = "fun foo() {\n    val r = client.get(\"/api\")\n    println(r.customer_id)\n}\n";
+        let tree2 = parse(Lang::Kotlin, src2).unwrap();
+        walk_tree(
+            tree2.root_node(),
+            src2.as_bytes(),
+            Lang::Kotlin,
+            &mut bound2,
+            &mut reads2,
+            &mut escapes2,
+            "Foo.kt",
+        );
+        assert!(
+            reads2.iter().any(|r| r.chain.to_string() == "customer_id"),
+            "r.customer_id must emit a FieldRef: {reads2:?}"
+        );
+    }
+
+    #[test]
+    fn kotlin_status_code_does_not_emit_field_ref() {
+        let src = "fun foo() {\n    val r = client.get(\"/api\")\n    println(r.statusCode)\n}\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Kotlin, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Kotlin,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "Foo.kt",
+        );
+        let bad = reads
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "statusCode"))
+            })
+            .count();
+        assert_eq!(
+            bad, 0,
+            "deny-listed statusCode must not emit a ReadsField: {reads:?}"
+        );
+    }
+
+    #[test]
+    fn lang_for_path_routes_new_languages() {
+        assert_eq!(lang_for_path("Foo.java"), Some(Lang::Java));
+        assert_eq!(lang_for_path("Foo.cs"), Some(Lang::CSharp));
+        assert_eq!(lang_for_path("foo.rb"), Some(Lang::Ruby));
+        assert_eq!(lang_for_path("Foo.kt"), Some(Lang::Kotlin));
+        assert_eq!(lang_for_path("build.gradle.kts"), Some(Lang::Kotlin));
     }
 }
