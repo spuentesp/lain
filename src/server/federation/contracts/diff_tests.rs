@@ -2306,84 +2306,107 @@ fn source_files_uses_bound_handler_path_not_provider_node_id_path() {
     );
 }
 
+// Pipeline-level discriminator (replaces the two hand-constructed
+// tests removed in review round 1). Goes through the production
+// extraction path (`ContractSurface::from_index` → `endpoint_to_def`)
+// and then `diff_contracts` with `StaticChangedFiles`, so the fix
+// at `diff.rs:199-208` is exercised end-to-end. Pre-fix, `endpoint_to_def`
+// populates `source_files` from `provider.node_id.path()` so
+// `source_files = {src/routes.py}`; an edit to `src/routes.py` would
+// falsely intersect and fire the rule, while an edit to the handler
+// file alone would not. Post-fix, `source_files = {src/handlers/label.py}`.
+
 #[test]
-fn source_files_falls_back_to_provider_node_path_when_handler_missing() {
-    // Spec-only route (no `handler: SymbolKey`) — fall back to the
-    // route node's path. The fallback is the spec file for OpenAPI
-    // operations, and the routing-table file for declarative routes.
+fn changed_without_schema_does_not_fire_on_routing_table_edit() {
+    // Production-shaped: endpoint whose HttpRoute declaration is in
+    // `src/routes.py` but whose bound handler function is in
+    // `src/handlers/label.py`. An edit to `src/routes.py` MUST NOT
+    // fire ChangedWithoutSchema for this endpoint.
     let mut index = ContractIndex::default();
-    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/me");
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/handlers/label.py".into(),
+        container: None,
+        name: "print_label".into(),
+    };
     let node_id = id(
         "orders",
         "HttpRoute",
-        "openapi.yaml",
-        "GET /api/orders/me",
-        10,
+        "src/routes.py",
+        "GET /api/orders/{}/label",
+        5,
     );
     index.endpoints.insert(
         endpoint.clone(),
         Endpoint {
             id: endpoint.clone(),
             method: HttpMethod::Get,
-            template: "/api/orders/me".into(),
+            template: "/api/orders/{}/label".into(),
             providers: vec![EndpointProvider {
                 node_id: node_id.clone(),
-                origin: ProviderOrigin::OpenApi,
-                handler: None,
-                operation_id: Some("getMe".into()),
+                origin: ProviderOrigin::Code,
+                handler: Some(handler.clone()),
+                operation_id: None,
             }],
             schemas: BTreeMap::new(),
         },
     );
     let surface = ContractSurface::from_index(&index);
-    let def = &surface.endpoints[&endpoint];
-    assert_eq!(
-        def.source_files,
-        BTreeSet::from(["openapi.yaml".to_string()]),
-        "spec-only route must fall back to the route node's path",
+    let base = surface.clone();
+    let head = surface;
+    let mut changed = BTreeSet::new();
+    changed.insert("src/routes.py".to_string());
+    let src = StaticChangedFiles(changed);
+    let changes = diff_contracts(&base, &head, &src);
+    let fired = changes
+        .iter()
+        .any(|c| matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. }));
+    assert!(
+        !fired,
+        "ChangedWithoutSchema fired on a routing-table edit; \
+         source_files must be tied to the handler file, not the route \
+         declaration file. got {changes:?}"
     );
 }
 
 #[test]
-fn changed_without_schema_does_not_fire_when_unrelated_file_changes() {
-    // Endpoint with source_files = {src/handlers/label.py} only.
-    // `ChangedFilesSource` reports a change to `src/routes.py`
-    // (an unrelated file). The rule MUST NOT fire — the contract
-    // for this endpoint did not change.
-    use crate::federation::contracts::diff::diff_contracts as run_diff;
-    let consumer_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
-    let mut endpoint_def = empty_endpoint_def();
-    endpoint_def
-        .source_files
-        .insert("src/handlers/label.py".to_string());
-    let mut head = ContractSurface::default();
-    head.endpoints
-        .insert(consumer_endpoint.clone(), endpoint_def);
-    let base = head.clone();
-    // ChangedFilesSource reports an unrelated file.
-    let mut changed = BTreeSet::new();
-    changed.insert("src/routes.py".to_string());
-    let src = StaticChangedFiles(changed);
-    let changes = run_diff(&base, &head, &src);
-    let bad = changes
-        .iter()
-        .any(|c| matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. }));
-    assert!(!bad, "rule fired for an unrelated-file diff: {changes:?}");
-}
-
-#[test]
-fn changed_without_schema_fires_when_bound_handler_file_changes() {
-    // Endpoint with source_files = {src/handlers/label.py}. The
-    // handler file is reported as changed. The rule MUST fire.
-    let consumer_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
-    let mut endpoint_def = empty_endpoint_def();
-    endpoint_def
-        .source_files
-        .insert("src/handlers/label.py".to_string());
-    let mut head = ContractSurface::default();
-    head.endpoints
-        .insert(consumer_endpoint.clone(), endpoint_def);
-    let base = head.clone();
+fn changed_without_schema_fires_on_handler_file_edit() {
+    // Production-shaped: same endpoint as above; edit to the handler
+    // file MUST fire ChangedWithoutSchema.
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/handlers/label.py".into(),
+        container: None,
+        name: "print_label".into(),
+    };
+    let node_id = id(
+        "orders",
+        "HttpRoute",
+        "src/routes.py",
+        "GET /api/orders/{}/label",
+        5,
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/{}/label".into(),
+            providers: vec![EndpointProvider {
+                node_id: node_id.clone(),
+                origin: ProviderOrigin::Code,
+                handler: Some(handler.clone()),
+                operation_id: None,
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+    let surface = ContractSurface::from_index(&index);
+    let base = surface.clone();
+    let head = surface;
     let mut changed = BTreeSet::new();
     changed.insert("src/handlers/label.py".to_string());
     let src = StaticChangedFiles(changed);
@@ -2394,5 +2417,68 @@ fn changed_without_schema_fires_when_bound_handler_file_changes() {
     assert!(
         matched.is_some(),
         "expected ChangedWithoutSchema when the handler file changes, got {changes:?}"
+    );
+}
+
+// Edge case from Bug A's spec Review Focus: when neither
+// `handler: SymbolKey` nor a spec node resolves to a path,
+// `source_files` ends up empty. The `ChangedWithoutSchema` rule must
+// NOT fire on a no-files endpoint (no diff can match an empty set).
+// This test pins that behaviour so the intersection filter's empty
+// short-circuit cannot regress.
+
+#[test]
+fn source_files_empty_does_not_fire_changed_without_schema() {
+    // Production-shaped: a spec-only provider whose node id was
+    // minted via `from_canonical` with fewer than five segments, so
+    // `GlobalId::path()` returns `None`. There is also no
+    // `handler: SymbolKey`. `endpoint_to_def` therefore inserts no
+    // file into `source_files`. With `has_schema = false`, the
+    // rule's gate fires only if `source_files ∩ changed_files` is
+    // non-empty — which is impossible when `source_files` is empty.
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/me");
+    let node_id = GlobalId::from_canonical("orders:HttpRoute:orphan");
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/me".into(),
+            providers: vec![EndpointProvider {
+                node_id,
+                origin: ProviderOrigin::OpenApi,
+                handler: None,
+                operation_id: Some("getMe".into()),
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+    let surface = ContractSurface::from_index(&index);
+    let def = &surface.endpoints[&endpoint];
+    assert!(
+        def.source_files.is_empty(),
+        "expected empty source_files for handler-less provider with no path, got {:?}",
+        def.source_files
+    );
+    assert!(
+        !def.has_schema,
+        "expected no schema for this endpoint, got {:?}",
+        def.schemas
+    );
+    let base = surface.clone();
+    let head = surface;
+    let mut changed = BTreeSet::new();
+    changed.insert("src/whatever.py".to_string());
+    let src = StaticChangedFiles(changed);
+    let changes = diff_contracts(&base, &head, &src);
+    let fired = changes
+        .iter()
+        .any(|c| matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. }));
+    assert!(
+        !fired,
+        "ChangedWithoutSchema fired on a no-files endpoint (source_files \
+         empty, has_schema=false); an empty intersection must not produce \
+         a change. got {changes:?}"
     );
 }
