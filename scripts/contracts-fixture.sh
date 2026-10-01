@@ -100,40 +100,74 @@ EOF
 write_orders_main_base() {
   cat > "$ORDERS_DIR/src/main.rs" <<'EOF'
 use axum::{
-    extract::Path,
     routing::{get, post},
-    Json, Router,
+    Router,
 };
+
+mod orders;
+
+use orders::create::create_order;
+use orders::label::router as label_router;
+use orders::list::get_order;
+use orders::me::get_me;
+
+#[tokio::main]
+async fn main() {
+    let app = Router::new()
+        .merge(label_router())
+        .route("/api/orders/:id", get(get_order))
+        .route("/api/orders/me", get(get_me))
+        .route("/api/orders", post(create_order));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+EOF
+
+  cat > "$ORDERS_DIR/src/orders/mod.rs" <<'EOF'
+pub mod create;
+pub mod label;
+pub mod list;
+pub mod me;
+pub mod models;
+EOF
+
+  cat > "$ORDERS_DIR/src/orders/models.rs" <<'EOF'
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
-struct Order {
-    customer_id: String,
-    total: i64,
-    status: OrderStatus,
-    items: Vec<OrderItem>,
+pub struct Order {
+    pub customer_id: String,
+    pub total: i64,
+    pub status: OrderStatus,
+    pub items: Vec<OrderItem>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum OrderStatus {
+pub enum OrderStatus {
     Open,
     Paid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct OrderItem {
-    sku: String,
+pub struct OrderItem {
+    pub sku: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct CreateOrder {
-    customer_id: String,
-    items: Vec<OrderItem>,
-    note: Option<String>,
+pub struct CreateOrder {
+    pub customer_id: String,
+    pub items: Vec<OrderItem>,
+    pub note: Option<String>,
 }
+EOF
 
-async fn get_order(Path(id): Path<String>) -> Json<Order> {
+  cat > "$ORDERS_DIR/src/orders/list.rs" <<'EOF'
+use axum::{extract::Path, Json};
+
+use super::models::{Order, OrderItem, OrderStatus};
+
+pub async fn get_order(Path(id): Path<String>) -> Json<Order> {
     Json(Order {
         customer_id: id,
         total: 100,
@@ -141,8 +175,14 @@ async fn get_order(Path(id): Path<String>) -> Json<Order> {
         items: vec![OrderItem { sku: "sku-1".to_string() }],
     })
 }
+EOF
 
-async fn get_me() -> Json<Order> {
+  cat > "$ORDERS_DIR/src/orders/me.rs" <<'EOF'
+use axum::Json;
+
+use super::models::{Order, OrderStatus};
+
+pub async fn get_me() -> Json<Order> {
     Json(Order {
         customer_id: "me".to_string(),
         total: 0,
@@ -150,8 +190,14 @@ async fn get_me() -> Json<Order> {
         items: vec![],
     })
 }
+EOF
 
-async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
+  cat > "$ORDERS_DIR/src/orders/create.rs" <<'EOF'
+use axum::Json;
+
+use super::models::{CreateOrder, Order, OrderItem, OrderStatus};
+
+pub async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
     Json(Order {
         customer_id: body.customer_id,
         total: 100,
@@ -159,20 +205,17 @@ async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
         items: body.items,
     })
 }
+EOF
 
-async fn get_order_label(Path(id): Path<String>) -> String {
+  cat > "$ORDERS_DIR/src/orders/label.rs" <<'EOF'
+use axum::{extract::Path, routing::get, Router};
+
+pub async fn get_order_label(Path(id): Path<String>) -> String {
     format!("label-{id}")
 }
 
-#[tokio::main]
-async fn main() {
-    let app = Router::new()
-        .route("/api/orders/:id", get(get_order))
-        .route("/api/orders/me", get(get_me))
-        .route("/api/orders", post(create_order))
-        .route("/api/orders/:id/label", get(get_order_label));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+pub fn router() -> Router {
+    Router::new().route("/api/orders/:id/label", get(get_order_label))
 }
 EOF
 }
@@ -272,77 +315,33 @@ EOF
 
 # s1-remove-customer-id: drop customer_id from response struct + schema.
 write_orders_main_s1() {
-  cat > "$ORDERS_DIR/src/main.rs" <<'EOF'
-use axum::{
-    extract::Path,
-    routing::{get, post},
-    Json, Router,
-};
+  cat > "$ORDERS_DIR/src/orders/models.rs" <<'EOF'
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
-struct Order {
-    total: i64,
-    status: OrderStatus,
-    items: Vec<OrderItem>,
+pub struct Order {
+    pub total: i64,
+    pub status: OrderStatus,
+    pub items: Vec<OrderItem>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum OrderStatus {
+pub enum OrderStatus {
     Open,
     Paid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct OrderItem {
-    sku: String,
+pub struct OrderItem {
+    pub sku: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct CreateOrder {
-    customer_id: String,
-    items: Vec<OrderItem>,
-    note: Option<String>,
-}
-
-async fn get_order(Path(id): Path<String>) -> Json<Order> {
-    Json(Order {
-        total: 100,
-        status: OrderStatus::Open,
-        items: vec![OrderItem { sku: "sku-1".to_string() }],
-    })
-}
-
-async fn get_me() -> Json<Order> {
-    Json(Order {
-        total: 0,
-        status: OrderStatus::Open,
-        items: vec![],
-    })
-}
-
-async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
-    Json(Order {
-        total: 100,
-        status: OrderStatus::Open,
-        items: body.items,
-    })
-}
-
-async fn get_order_label(Path(id): Path<String>) -> String {
-    format!("label-{id}")
-}
-
-#[tokio::main]
-async fn main() {
-    let app = Router::new()
-        .route("/api/orders/:id", get(get_order))
-        .route("/api/orders/me", get(get_me))
-        .route("/api/orders", post(create_order))
-        .route("/api/orders/:id/label", get(get_order_label));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+pub struct CreateOrder {
+    pub customer_id: String,
+    pub items: Vec<OrderItem>,
+    pub note: Option<String>,
 }
 EOF
 }
@@ -440,85 +439,35 @@ EOF
 
 # s2-add-currency: append optional `currency` to the response struct + schema.
 write_orders_main_s2() {
-  cat > "$ORDERS_DIR/src/main.rs" <<'EOF'
-use axum::{
-    extract::Path,
-    routing::{get, post},
-    Json, Router,
-};
+  cat > "$ORDERS_DIR/src/orders/models.rs" <<'EOF'
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
-struct Order {
-    customer_id: String,
-    total: i64,
-    status: OrderStatus,
-    items: Vec<OrderItem>,
-    currency: Option<String>,
+pub struct Order {
+    pub customer_id: String,
+    pub total: i64,
+    pub status: OrderStatus,
+    pub items: Vec<OrderItem>,
+    pub currency: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum OrderStatus {
+pub enum OrderStatus {
     Open,
     Paid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct OrderItem {
-    sku: String,
+pub struct OrderItem {
+    pub sku: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct CreateOrder {
-    customer_id: String,
-    items: Vec<OrderItem>,
-    note: Option<String>,
-}
-
-async fn get_order(Path(id): Path<String>) -> Json<Order> {
-    Json(Order {
-        customer_id: id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: vec![OrderItem { sku: "sku-1".to_string() }],
-        currency: Some("USD".to_string()),
-    })
-}
-
-async fn get_me() -> Json<Order> {
-    Json(Order {
-        customer_id: "me".to_string(),
-        total: 0,
-        status: OrderStatus::Open,
-        items: vec![],
-        currency: Some("USD".to_string()),
-    })
-}
-
-async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
-    Json(Order {
-        customer_id: body.customer_id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: body.items,
-        currency: Some("USD".to_string()),
-    })
-}
-
-async fn get_order_label(Path(id): Path<String>) -> String {
-    format!("label-{id}")
-}
-
-#[tokio::main]
-async fn main() {
-    let app = Router::new()
-        .route("/api/orders/:id", get(get_order))
-        .route("/api/orders/me", get(get_me))
-        .route("/api/orders", post(create_order))
-        .route("/api/orders/:id/label", get(get_order_label));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+pub struct CreateOrder {
+    pub customer_id: String,
+    pub items: Vec<OrderItem>,
+    pub note: Option<String>,
 }
 EOF
 }
@@ -620,82 +569,35 @@ EOF
 
 # s5-enum-value: add `Refunded` variant + `refunded` enum value.
 write_orders_main_s5() {
-  cat > "$ORDERS_DIR/src/main.rs" <<'EOF'
-use axum::{
-    extract::Path,
-    routing::{get, post},
-    Json, Router,
-};
+  cat > "$ORDERS_DIR/src/orders/models.rs" <<'EOF'
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
-struct Order {
-    customer_id: String,
-    total: i64,
-    status: OrderStatus,
-    items: Vec<OrderItem>,
+pub struct Order {
+    pub customer_id: String,
+    pub total: i64,
+    pub status: OrderStatus,
+    pub items: Vec<OrderItem>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum OrderStatus {
+pub enum OrderStatus {
     Open,
     Paid,
     Refunded,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct OrderItem {
-    sku: String,
+pub struct OrderItem {
+    pub sku: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct CreateOrder {
-    customer_id: String,
-    items: Vec<OrderItem>,
-    note: Option<String>,
-}
-
-async fn get_order(Path(id): Path<String>) -> Json<Order> {
-    Json(Order {
-        customer_id: id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: vec![OrderItem { sku: "sku-1".to_string() }],
-    })
-}
-
-async fn get_me() -> Json<Order> {
-    Json(Order {
-        customer_id: "me".to_string(),
-        total: 0,
-        status: OrderStatus::Open,
-        items: vec![],
-    })
-}
-
-async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
-    Json(Order {
-        customer_id: body.customer_id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: body.items,
-    })
-}
-
-async fn get_order_label(Path(id): Path<String>) -> String {
-    format!("label-{id}")
-}
-
-#[tokio::main]
-async fn main() {
-    let app = Router::new()
-        .route("/api/orders/:id", get(get_order))
-        .route("/api/orders/me", get(get_me))
-        .route("/api/orders", post(create_order))
-        .route("/api/orders/:id/label", get(get_order_label));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+pub struct CreateOrder {
+    pub customer_id: String,
+    pub items: Vec<OrderItem>,
+    pub note: Option<String>,
 }
 EOF
 }
@@ -797,77 +699,24 @@ EOF
 write_orders_main_s6() {
   cat > "$ORDERS_DIR/src/main.rs" <<'EOF'
 use axum::{
-    extract::Path,
     routing::{get, post},
-    Json, Router,
+    Router,
 };
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize)]
-struct Order {
-    customer_id: String,
-    total: i64,
-    status: OrderStatus,
-    items: Vec<OrderItem>,
-}
+mod orders;
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum OrderStatus {
-    Open,
-    Paid,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct OrderItem {
-    sku: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct CreateOrder {
-    customer_id: String,
-    items: Vec<OrderItem>,
-    note: Option<String>,
-}
-
-async fn get_order(Path(id): Path<String>) -> Json<Order> {
-    Json(Order {
-        customer_id: id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: vec![OrderItem { sku: "sku-1".to_string() }],
-    })
-}
-
-async fn get_me() -> Json<Order> {
-    Json(Order {
-        customer_id: "me".to_string(),
-        total: 0,
-        status: OrderStatus::Open,
-        items: vec![],
-    })
-}
-
-async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
-    Json(Order {
-        customer_id: body.customer_id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: body.items,
-    })
-}
-
-async fn get_order_label(Path(id): Path<String>) -> String {
-    format!("label-{id}")
-}
+use orders::create::create_order;
+use orders::label::router as label_router;
+use orders::list::get_order;
+use orders::me::get_me;
 
 #[tokio::main]
 async fn main() {
     let app = Router::new()
+        .merge(label_router())
         .route("/api/order/:id", get(get_order))
         .route("/api/orders/me", get(get_me))
-        .route("/api/orders", post(create_order))
-        .route("/api/orders/:id/label", get(get_order_label));
+        .route("/api/orders", post(create_order));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
@@ -969,82 +818,35 @@ EOF
 
 # s11-rename-field: customer_id → customerId (same type).
 write_orders_main_s11() {
-  cat > "$ORDERS_DIR/src/main.rs" <<'EOF'
-use axum::{
-    extract::Path,
-    routing::{get, post},
-    Json, Router,
-};
+  cat > "$ORDERS_DIR/src/orders/models.rs" <<'EOF'
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
-struct Order {
+pub struct Order {
     #[serde(rename = "customerId")]
-    customer_id: String,
-    total: i64,
-    status: OrderStatus,
-    items: Vec<OrderItem>,
+    pub customer_id: String,
+    pub total: i64,
+    pub status: OrderStatus,
+    pub items: Vec<OrderItem>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum OrderStatus {
+pub enum OrderStatus {
     Open,
     Paid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct OrderItem {
-    sku: String,
+pub struct OrderItem {
+    pub sku: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct CreateOrder {
-    customer_id: String,
-    items: Vec<OrderItem>,
-    note: Option<String>,
-}
-
-async fn get_order(Path(id): Path<String>) -> Json<Order> {
-    Json(Order {
-        customer_id: id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: vec![OrderItem { sku: "sku-1".to_string() }],
-    })
-}
-
-async fn get_me() -> Json<Order> {
-    Json(Order {
-        customer_id: "me".to_string(),
-        total: 0,
-        status: OrderStatus::Open,
-        items: vec![],
-    })
-}
-
-async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
-    Json(Order {
-        customer_id: body.customer_id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: body.items,
-    })
-}
-
-async fn get_order_label(Path(id): Path<String>) -> String {
-    format!("label-{id}")
-}
-
-#[tokio::main]
-async fn main() {
-    let app = Router::new()
-        .route("/api/orders/:id", get(get_order))
-        .route("/api/orders/me", get(get_me))
-        .route("/api/orders", post(create_order))
-        .route("/api/orders/:id/label", get(get_order_label));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+pub struct CreateOrder {
+    pub customer_id: String,
+    pub items: Vec<OrderItem>,
+    pub note: Option<String>,
 }
 EOF
 }
@@ -1144,82 +946,35 @@ EOF
 
 # s12-rename-retype: customer_id → customerId AND type string → integer.
 write_orders_main_s12() {
-  cat > "$ORDERS_DIR/src/main.rs" <<'EOF'
-use axum::{
-    extract::Path,
-    routing::{get, post},
-    Json, Router,
-};
+  cat > "$ORDERS_DIR/src/orders/models.rs" <<'EOF'
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
-struct Order {
+pub struct Order {
     #[serde(rename = "customerId")]
-    customer_id: i64,
-    total: i64,
-    status: OrderStatus,
-    items: Vec<OrderItem>,
+    pub customer_id: i64,
+    pub total: i64,
+    pub status: OrderStatus,
+    pub items: Vec<OrderItem>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum OrderStatus {
+pub enum OrderStatus {
     Open,
     Paid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct OrderItem {
-    sku: String,
+pub struct OrderItem {
+    pub sku: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct CreateOrder {
-    customer_id: String,
-    items: Vec<OrderItem>,
-    note: Option<String>,
-}
-
-async fn get_order(Path(id): Path<String>) -> Json<Order> {
-    Json(Order {
-        customer_id: 42,
-        total: 100,
-        status: OrderStatus::Open,
-        items: vec![OrderItem { sku: "sku-1".to_string() }],
-    })
-}
-
-async fn get_me() -> Json<Order> {
-    Json(Order {
-        customer_id: 0,
-        total: 0,
-        status: OrderStatus::Open,
-        items: vec![],
-    })
-}
-
-async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
-    Json(Order {
-        customer_id: 0,
-        total: 100,
-        status: OrderStatus::Open,
-        items: body.items,
-    })
-}
-
-async fn get_order_label(Path(id): Path<String>) -> String {
-    format!("label-{id}")
-}
-
-#[tokio::main]
-async fn main() {
-    let app = Router::new()
-        .route("/api/orders/:id", get(get_order))
-        .route("/api/orders/me", get(get_me))
-        .route("/api/orders", post(create_order))
-        .route("/api/orders/:id/label", get(get_order_label));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+pub struct CreateOrder {
+    pub customer_id: String,
+    pub items: Vec<OrderItem>,
+    pub note: Option<String>,
 }
 EOF
 }
@@ -1319,81 +1074,34 @@ EOF
 
 # s19-optional-request-type: optional request field `note` type change.
 write_orders_main_s19() {
-  cat > "$ORDERS_DIR/src/main.rs" <<'EOF'
-use axum::{
-    extract::Path,
-    routing::{get, post},
-    Json, Router,
-};
+  cat > "$ORDERS_DIR/src/orders/models.rs" <<'EOF'
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
-struct Order {
-    customer_id: String,
-    total: i64,
-    status: OrderStatus,
-    items: Vec<OrderItem>,
+pub struct Order {
+    pub customer_id: String,
+    pub total: i64,
+    pub status: OrderStatus,
+    pub items: Vec<OrderItem>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum OrderStatus {
+pub enum OrderStatus {
     Open,
     Paid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct OrderItem {
-    sku: String,
+pub struct OrderItem {
+    pub sku: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct CreateOrder {
-    customer_id: String,
-    items: Vec<OrderItem>,
-    note: Option<i64>,
-}
-
-async fn get_order(Path(id): Path<String>) -> Json<Order> {
-    Json(Order {
-        customer_id: id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: vec![OrderItem { sku: "sku-1".to_string() }],
-    })
-}
-
-async fn get_me() -> Json<Order> {
-    Json(Order {
-        customer_id: "me".to_string(),
-        total: 0,
-        status: OrderStatus::Open,
-        items: vec![],
-    })
-}
-
-async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
-    Json(Order {
-        customer_id: body.customer_id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: body.items,
-    })
-}
-
-async fn get_order_label(Path(id): Path<String>) -> String {
-    format!("label-{id}")
-}
-
-#[tokio::main]
-async fn main() {
-    let app = Router::new()
-        .route("/api/orders/:id", get(get_order))
-        .route("/api/orders/me", get(get_me))
-        .route("/api/orders", post(create_order))
-        .route("/api/orders/:id/label", get(get_order_label));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+pub struct CreateOrder {
+    pub customer_id: String,
+    pub items: Vec<OrderItem>,
+    pub note: Option<i64>,
 }
 EOF
 }
@@ -1492,84 +1200,19 @@ EOF
 }
 
 # s21-code-only-handler: change body of get_order_label (code-only route,
-# no schema). Triggers ChangedWithoutSchema because a source file differs
+# no schema). Triggers ChangedWithoutSchema because the handler's source
+# file (`src/orders/label.rs`) — which also declares the route — differs
 # between base and head.
 write_orders_main_s21() {
-  cat > "$ORDERS_DIR/src/main.rs" <<'EOF'
-use axum::{
-    extract::Path,
-    routing::{get, post},
-    Json, Router,
-};
-use serde::{Deserialize, Serialize};
+  cat > "$ORDERS_DIR/src/orders/label.rs" <<'EOF'
+use axum::{extract::Path, routing::get, Router};
 
-#[derive(Clone, Debug, Serialize)]
-struct Order {
-    customer_id: String,
-    total: i64,
-    status: OrderStatus,
-    items: Vec<OrderItem>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum OrderStatus {
-    Open,
-    Paid,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct OrderItem {
-    sku: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct CreateOrder {
-    customer_id: String,
-    items: Vec<OrderItem>,
-    note: Option<String>,
-}
-
-async fn get_order(Path(id): Path<String>) -> Json<Order> {
-    Json(Order {
-        customer_id: id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: vec![OrderItem { sku: "sku-1".to_string() }],
-    })
-}
-
-async fn get_me() -> Json<Order> {
-    Json(Order {
-        customer_id: "me".to_string(),
-        total: 0,
-        status: OrderStatus::Open,
-        items: vec![],
-    })
-}
-
-async fn create_order(Json(body): Json<CreateOrder>) -> Json<Order> {
-    Json(Order {
-        customer_id: body.customer_id,
-        total: 100,
-        status: OrderStatus::Open,
-        items: body.items,
-    })
-}
-
-async fn get_order_label(Path(id): Path<String>) -> String {
+pub async fn get_order_label(Path(id): Path<String>) -> String {
     format!("label-{id}-v2")
 }
 
-#[tokio::main]
-async fn main() {
-    let app = Router::new()
-        .route("/api/orders/:id", get(get_order))
-        .route("/api/orders/me", get(get_me))
-        .route("/api/orders", post(create_order))
-        .route("/api/orders/:id/label", get(get_order_label));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+pub fn router() -> Router {
+    Router::new().route("/api/orders/:id/label", get(get_order_label))
 }
 EOF
 }
@@ -1580,7 +1223,7 @@ write_orders_openapi_s21() {
 }
 
 write_orders() {
-  mkdir -p "$ORDERS_DIR/src"
+  mkdir -p "$ORDERS_DIR/src/orders"
   cd "$ORDERS_DIR"
   git init -q -b main
   git config user.name "$GIT_AUTHOR_NAME"
@@ -1757,7 +1400,7 @@ def fetch_order(order_id: str) -> dict[str, Any]:
 
 
 def compute_base() -> str:
-    return ORDERS_URL
+    return _UNMAPPED_BASE_VAR
 
 
 def build_invoice(order_id: str) -> Invoice:

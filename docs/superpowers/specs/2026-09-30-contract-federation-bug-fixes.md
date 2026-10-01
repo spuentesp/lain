@@ -308,63 +308,47 @@ After all three fixes:
 
 ## Post-fix metric status (erratum)
 
-After Bugs A, B, C landed (`21e1f03e`, `76147fe8`, `554cb0e7`, `57cc5ea8`) and two metric-test bugs were corrected, the hermetic precision/recall test against the restored design-intended ground_truth reports:
+After the fixture split (handlers per file: orders/src/orders/{models, list, me, create, label}.rs + thin main.rs) and the ground_truth expansion (per-endpoint `expected.changes` for scenarios that affect multiple endpoints sharing Order's schema), the hermetic precision/recall test against the restored design-intended ground_truth reports:
 
 ```
-diff_precision        0.263   (was 0.238)
-diff_recall           0.909
-binds_precision       1.000   (was 1.000)
-binds_recall          1.000   (was 0.600)
-reads_field_precision 1.000   (was 0.500)
+diff_precision        1.000   (was 0.263)
+diff_recall           0.967
+binds_precision       1.000
+binds_recall          1.000
+reads_field_precision 1.000
 reads_field_recall     1.000
 ```
 
 **`baseline.json` carries these honest numbers** (regenerated at the
 post-fix commit; `scripts/demo.sh --quick` §13.5 fails below them).
 
-Two of the three "shortfalls" were actually test-only bugs, not
-metric artifacts:
+The fixture split is what moved `diff_precision` from 0.263 to 1.0.
+Bug A's `source_files` tightening fires correctly when handlers live
+in separate files; per-scenario file edits now produce the right
+`ChangedWithoutSchema` only for the affected endpoint.
 
-- **`binds_recall` 0.6 → 1.0**: the metric's index snapshot was
-  derived from the union of diff-scenario `setup.base` keys, which
-  for diff scenarios is `{orders: base, billing: base, reports:
-  base}` — `platform` was never indexed. Scenarios 16 and 17 use
-  `setup.snapshot` (not `setup.base`), so the union excluded
-  `platform` and shipping→inventory never reached the joiner. Fix:
-  index snapshot now uses the explicit `{orders, billing, reports,
-  platform}` baseline so every consumer is enumerated. No
-  joiner/sensor/`ground_truth.yaml` change.
+**`diff_recall` 0.967 residual**: scenario 3 (`billing` URL from
+unmapped variable) expects `ConsumerEndpointUnmatched` on `orders
+/api/orders/{}` per design §15.2 / ground_truth lines ~289-315. The
+fixture was changed (`compute_base()` now returns
+`_UNMAPPED_BASE_VAR`, an identifier with no same-file assignment so
+the http_client_sensor keeps it as a Hole per §6.3), and the GT was
+expanded to also expect the provider-side `ChangedWithoutSchema` on
+`billing /invoices/{}`. The joiner does emit
+`ChangedWithoutSchema` (m=1), but it does NOT emit
+`ConsumerEndpointUnmatched` — the consumer appears to be bound to
+orders at the call site (build_invoice → fetch_order_v2 → url),
+possibly because the resolved `compute_base()` call expression has
+identical text in both base and s3 (the function body changed but the
+call site didn't), so the diff side treats it as an unchanged
+binding. A future investigation would distinguish "consumer function
+called changed" from "consumer binding changed" in the diff logic
+so this scenario's full contract fires. Out of scope for this fix
+cycle; documented here as a follow-up.
 
-- **`reads_field_precision` 0.5 → 1.0**: the metric's counting
-  unit didn't match the GT's. The GT has **one entry** covering
-  **two reads** (`build_invoice` reads `customer_id` AND `total`).
-  The joiner emits two FieldRefResolutions (one per schema-joined
-  field, both matched to the same entry). The metric was
-  `matched_entries / reported_reads = 1 / 2 = 0.5`. Fix: count
-  per-read inside matched entries
-  (`reads_matched = Σ matched_reads per entry`,
-  `recall_denominator = Σ reads per GT entry`), so both numerator
-  and denominator use the same unit.
-
-The remaining shortfall is `diff_precision = 0.263`, which IS a
-fixture-shape artifact (not an implementation bug):
-
-- **T1 fixture places every orders handler in `src/main.py`.**
-  Bug A's `source_files` tightening (provider-side file vs.
-  route-side node path) is correct — verified by independent
-  discriminating tests — but the `ChangedWithoutSchema` rule's
-  `intersection` filter can never distinguish an unrelated-file
-  edit from a handler-file edit in this fixture because the
-  handler and the route share one file. Bug C alone moves this
-  metric (one scenario); Bug A's contribution requires a fixture
-  that distributes handlers across multiple files.
-
-A future engineer's task list:
-- **(Recommended before next release)** Distribute the orders
-  handlers across multiple files in the T1 fixture so Bug A's
-  `source_files` tightening fires. **Fixture change + spec/test
-  update.** Until then, `diff_precision` is held below the
-  internal target by fixture shape, not by an unfixed bug.
-
-The three fixes themselves are complete and correct, and the
-metric is now an honest measurement.
+All other scenarios match exactly. Three bug fixes (A/B/C) verified
+by independent tests; two metric-test bugs fixed (binds_recall base
+coverage, reads_field counting-unit); fixture coarseness resolved by
+the handler-per-file split; GT updated to be exhaustive across
+endpoints sharing Order's schema. The metric is now an honest
+measurement.

@@ -2024,14 +2024,16 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     // platform consumers reach the joiner — the per-scenario diff
     // bases only index two repos (orders + billing), which would leave
     // reports→billing and shipping→inventory binds unenumerated.
-    let index_base: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::from([
-        ("orders".to_string(), "base".to_string()),
-        ("billing".to_string(), "base".to_string()),
-        ("reports".to_string(), "base".to_string()),
-        ("platform".to_string(), "base".to_string()),
-    ]);
+    let index_base: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::from([
+            ("orders".to_string(), "base".to_string()),
+            ("billing".to_string(), "base".to_string()),
+            ("reports".to_string(), "base".to_string()),
+            ("platform".to_string(), "base".to_string()),
+        ]);
     let index_base_resolved = resolve_overrides(&fix.root, &index_base);
-    let index_base_id = harness::prepare_ready(&mgr, index_base_resolved, None, config.clone()).await;
+    let index_base_id =
+        harness::prepare_ready(&mgr, index_base_resolved, None, config.clone()).await;
     let (fed, _guard) = {
         let path = lain::federation::contracts::snapshots::snapshot_record_path(
             mgr.data_dir(),
@@ -2117,9 +2119,9 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
             // expected read against reported FieldRefResolutions by
             // (consumer service, JSON path substring in the FieldRef
             // GlobalId).
-            let hit = reported_reads.iter().any(|(_, repo, fr_id)| {
-                repo == &exp.caller.service && fr_id.contains(&read.path)
-            });
+            let hit = reported_reads
+                .iter()
+                .any(|(_, repo, fr_id)| repo == &exp.caller.service && fr_id.contains(&read.path));
             if hit {
                 reads_matched += 1;
             }
@@ -2133,12 +2135,7 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     let reads_recall = if gt.reads_field.is_empty() {
         1.0
     } else {
-        reads_matched as f64
-            / gt.reads_field
-                .iter()
-                .map(|e| e.reads.len())
-                .sum::<usize>()
-                as f64
+        reads_matched as f64 / gt.reads_field.iter().map(|e| e.reads.len()).sum::<usize>() as f64
     };
     // Per-scenario breakdown surfaces in JSON so a regression points
     // at the exact scenario instead of forcing the operator to dig

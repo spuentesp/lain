@@ -262,6 +262,40 @@ scenarios:
               class: Verified
               reasons: []
               transitive: true
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+            - service: reports       # transitively, via billing
+              class: Verified
+              reasons: []
+              transitive: true
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+            - service: reports       # transitively, via billing
+              class: Verified
+              reasons: []
+              transitive: true
       compatible_changes: 0
       coverage:
         complete: true
@@ -301,6 +335,17 @@ scenarios:
           impact:
             class: NeedsInvestigation
             reasons: [unresolved_candidates]
+        - side: provider
+          endpoint: { service: billing, key: "http:GET /invoices/{}" }
+          kind: ChangedWithoutSchema
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [no_schema]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [no_schema]
     tool_also: list_unresolved
     expected_list_unresolved:
       contains:
@@ -321,10 +366,46 @@ scenarios:
       exclude: [reports]
     tool: diff_contracts
     expected:
-      impact:
-        class: NoKnownImpact
-        reasons: []
-      changes: []   # nothing bound, so no change is reported
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
       compatible_changes: 0
       coverage:
         complete: false
@@ -357,6 +438,34 @@ scenarios:
               reviewed:    [orders, billing, reports, platform]
               unreviewed:  []
               configured_only: true
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NoKnownImpact
+            reasons: []
+            scope:
+              reviewed:    [orders, billing, reports, platform]
+              unreviewed:  []
+              configured_only: true
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NoKnownImpact
+            reasons: []
+            scope:
+              reviewed:    [orders, billing, reports, platform]
+              unreviewed:  []
+              configured_only: true
     setup_with_billing_status:
       base:  { orders: base,  billing: s5b-read-status }
       head:  { orders: s5-enum-value, billing: s5b-read-status }
@@ -364,6 +473,34 @@ scenarios:
       changes:
         - side: provider
           endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [needs_review]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [needs_review]
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [needs_review]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [needs_review]
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
           kind: EnumValueAdded
           direction: response
           field: status
@@ -398,6 +535,13 @@ scenarios:
             - service: billing
               class: Verified
               reasons: []
+        - side: consumer
+          endpoint: { service: billing, key: "http:UNKNOWN " }
+          kind: ConsumerEndpointUnmatched
+          compat: Breaking
+          impact:
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
 
   "7":
     title: "resolve_evidence receives a forged ref"
@@ -484,6 +628,34 @@ scenarios:
             - service: billing
               class: Verified
               reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRenamed
+          direction: response
+          from: customer_id
+          to:   customerId
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRenamed
+          direction: response
+          from: customer_id
+          to:   customerId
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
 
   "12":
     title: "Same rename with a type change"
@@ -507,7 +679,63 @@ scenarios:
               class: Verified
               reasons: []
         - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
           endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: FieldAdded
+          direction: response
+          field: customerId
+          type: integer
+          required: true
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldAdded
+          direction: response
+          field: customerId
+          type: integer
+          required: true
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
           kind: FieldAdded
           direction: response
           field: customerId
@@ -654,6 +882,17 @@ scenarios:
           impact:
             class: Verified
             reasons: []
+        - side: provider
+          endpoint: { service: billing, key: "http:GET /invoices/{}" }
+          kind: ChangedWithoutSchema
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [no_schema]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [no_schema]
 
   "21":
     title: "orders changes the handler of GET /api/orders/{}/label"
@@ -699,6 +938,43 @@ scenarios:
             - service: billing
               class: NeedsInvestigation
               reasons: [reads_not_fully_traced]
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: NeedsInvestigation
+            reasons: [reads_not_fully_traced]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [reads_not_fully_traced]
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: NeedsInvestigation
+            reasons: [reads_not_fully_traced]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [reads_not_fully_traced]
+        - side: provider
+          endpoint: { service: billing, key: "http:GET /invoices/{}" }
+          kind: ChangedWithoutSchema
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [no_schema]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [no_schema]
       # `_CACHE[order_id] = r.json()` is the §6.5 escape rule for
       # "stored into a collection", which sets `reads_complete = false`
       # on the consumer fact. BreakingIfRead + reads_complete=false
