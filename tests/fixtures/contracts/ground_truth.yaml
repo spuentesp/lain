@@ -536,7 +536,7 @@ scenarios:
               class: Verified
               reasons: []
         - side: consumer
-          endpoint: { service: billing, key: "http:UNKNOWN " }
+          endpoint: { service: billing, key: "http:GET /api/orders/{}" }
           kind: ConsumerEndpointUnmatched
           compat: Breaking
           impact:

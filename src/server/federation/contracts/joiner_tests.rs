@@ -741,6 +741,68 @@ fn rule_6_skips_generic_keys() {
 }
 
 #[test]
+fn rule_6_prefix_stripped_match_is_unresolved_with_unknown_target() {
+    // Scenario 3 regression: a billing consumer whose host resolves
+    // to nothing (`HostPart::Expr`) and whose template is
+    // `/v1/api/orders/{}` would otherwise rule-6-bind to orders's
+    // `/api/orders/{}` via prefix-strip (with the consumer marked
+    // `Heuristic 0.6` rather than unresolved). That hides the
+    // scenario-3 `ConsumerEndpointUnmatched` change from
+    // `diff_consumers`. The fix mirrors rule-3: prefix-stripped
+    // matches are could-match hints, not binds.
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "get_order",
+        10,
+        HttpMethod::Get,
+        "/api/orders/{}",
+    );
+    let c = consumer_node(
+        "billing",
+        "src/billing.py",
+        "build_invoice",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(
+            HostPart::Expr("_UNMAPPED_BASE_VAR".into()),
+            Some("/v1/api/orders/{}"),
+        ),
+        CallVia::Library {
+            name: "httpx".into(),
+        },
+    );
+    let mut cfg = default_config();
+    cfg.services.clear(); // no env host → target_service unknown
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "rule 6 prefix tolerance must not produce a bind: {binds:?}",
+        binds = out.binds
+    );
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out
+        .index
+        .consumers
+        .get(&call_id)
+        .expect("consumer resolution");
+    match &resolution.target {
+        Some(ConsumerTarget::Unresolved {
+            reason,
+            target_service,
+        }) => {
+            assert_eq!(*reason, UnresolvedReason::NoMatch);
+            assert!(
+                target_service.is_none(),
+                "rule 6 keeps unknown target_service on the unresolved verdict"
+            );
+        }
+        other => panic!("expected Unresolved/NoMatch, got {other:?}"),
+    }
+    assert!(resolution.bound_endpoints.is_empty());
+}
+
+#[test]
 fn rule_6_unbound_host_with_one_match_gives_0_6_confidence() {
     let p = provider_node(
         "orders",

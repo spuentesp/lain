@@ -744,7 +744,15 @@ fn resolve_consumer(
 
     // Rule 6 — fall back to every service except own, skipping
     // generic keys. The own-skip rule means c's own service routes
-    // are not auto-resolved.
+    // are not auto-resolved. Prefix-stripped matches (route_match
+    // == PrefixStripped) are NOT counted as binds — per §7.4 they
+    // are could-match hints surfaced through `diff::could_match`,
+    // matching the rule-3 prefix-tolerance behavior above. Without
+    // this gate, scenario 3's `/v1/api/orders/{}` consumer would
+    // bind to orders via prefix strip instead of staying
+    // Unresolved; `diff_consumers` would then key it by the
+    // bound endpoint's ContractKey and miss the
+    // ConsumerEndpointUnmatched change.
     let generic_keys: BTreeSet<ContractKey> = config
         .all_generic_keys()
         .into_iter()
@@ -755,6 +763,7 @@ fn resolve_consumer(
         if svc == own_service {
             continue;
         }
+        let mut strong_hit = false;
         for provider in providers {
             let pk = ContractKey::Http {
                 method: MethodSpec::Known(provider.method),
@@ -770,11 +779,16 @@ fn resolve_consumer(
                     provider.method,
                     &provider.template,
                 );
-                if outcome.is_match() {
-                    hits.push(svc.clone());
-                    break;
+                if let MatchOutcome::Match(detail) = outcome {
+                    if detail.kind != RouteMatch::PrefixStripped {
+                        strong_hit = true;
+                        break;
+                    }
                 }
             }
+        }
+        if strong_hit {
+            hits.push(svc.clone());
         }
     }
     hits.sort();

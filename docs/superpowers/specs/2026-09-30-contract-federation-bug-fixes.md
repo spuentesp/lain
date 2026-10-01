@@ -308,11 +308,11 @@ After all three fixes:
 
 ## Post-fix metric status (erratum)
 
-After the fixture split (handlers per file: orders/src/orders/{models, list, me, create, label}.rs + thin main.rs) and the ground_truth expansion (per-endpoint `expected.changes` for scenarios that affect multiple endpoints sharing Order's schema), the hermetic precision/recall test against the restored design-intended ground_truth reports:
+After the fixture split (handlers per file: orders/src/orders/{models, list, me, create, label}.rs + thin main.rs), the ground_truth expansion (per-endpoint `expected.changes` for scenarios that affect multiple endpoints sharing Order's schema), and the final joiner/analysis fixes (`federation/contracts/joiner.rs` rule 6 now skips `PrefixStripped` matches so consumers in head-only resolve as unresolved; `mcp/contract_tools/analysis.rs` resolves the JSON `endpoint` for `UrlExpr`-keyed consumers via `template_matches_with_prefix`), the hermetic precision/recall test against the restored design-intended ground_truth reports:
 
 ```
-diff_precision        1.000   (was 0.263)
-diff_recall           0.967
+diff_precision        1.000
+diff_recall           1.000
 binds_precision       1.000
 binds_recall          1.000
 reads_field_precision 1.000
@@ -322,33 +322,23 @@ reads_field_recall     1.000
 **`baseline.json` carries these honest numbers** (regenerated at the
 post-fix commit; `scripts/demo.sh --quick` §13.5 fails below them).
 
-The fixture split is what moved `diff_precision` from 0.263 to 1.0.
-Bug A's `source_files` tightening fires correctly when handlers live
-in separate files; per-scenario file edits now produce the right
-`ChangedWithoutSchema` only for the affected endpoint.
+All six metrics hit 1.000. The fixture split is what moved
+`diff_precision` from 0.263 to 1.0 — Bug A's `source_files` tightening
+fires correctly when handlers live in separate files; per-scenario
+file edits now produce the right `ChangedWithoutSchema` only for the
+affected endpoint.
 
-**`diff_recall` 0.967 residual**: scenario 3 (`billing` URL from
-unmapped variable) expects `ConsumerEndpointUnmatched` on `orders
-/api/orders/{}` per design §15.2 / ground_truth lines ~289-315. The
-fixture was changed (`compute_base()` now returns
-`_UNMAPPED_BASE_VAR`, an identifier with no same-file assignment so
-the http_client_sensor keeps it as a Hole per §6.3), and the GT was
-expanded to also expect the provider-side `ChangedWithoutSchema` on
-`billing /invoices/{}`. The joiner does emit
-`ChangedWithoutSchema` (m=1), but it does NOT emit
-`ConsumerEndpointUnmatched` — the consumer appears to be bound to
-orders at the call site (build_invoice → fetch_order_v2 → url),
-possibly because the resolved `compute_base()` call expression has
-identical text in both base and s3 (the function body changed but the
-call site didn't), so the diff side treats it as an unchanged
-binding. A future investigation would distinguish "consumer function
-called changed" from "consumer binding changed" in the diff logic
-so this scenario's full contract fires. Out of scope for this fix
-cycle; documented here as a follow-up.
+The remaining gap (recall 0.967) was a real bug, not a fixture or
+metric artifact: `ContractJoiner::resolve_consumer` rule 6 was still
+consuming `PrefixStripped` matches as confident binds
+(`Heuristic { detector: "unbound_host", confidence: 0.6 }`), which
+hid `ConsumerEndpointUnmatched` behind a `Binds` resolution that
+keyed the head consumer by the same endpoint as the base consumer.
+The fix: rule 6 now skips `PrefixStripped` matches (mirroring the
+rule-3 prefix-tolerance fix from earlier), and
+`mcp/contract_tools/analysis.rs::endpoint_from_change` resolves the
+JSON `endpoint` for `UrlExpr`-keyed consumers via
+`template_matches_with_prefix` so the diff output carries the correct
+`endpoint.service/key` instead of the `http:UNKNOWN` placeholder.
 
-All other scenarios match exactly. Three bug fixes (A/B/C) verified
-by independent tests; two metric-test bugs fixed (binds_recall base
-coverage, reads_field counting-unit); fixture coarseness resolved by
-the handler-per-file split; GT updated to be exhaustive across
-endpoints sharing Order's schema. The metric is now an honest
-measurement.
+The metric is now an honest measurement at 1.0 across the board.

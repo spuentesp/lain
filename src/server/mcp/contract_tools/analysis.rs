@@ -1030,26 +1030,139 @@ fn endpoint_from_change(
             // §15.2 scenarios 3/20: a consumer-side change reports
             // the *provider's* endpoint — resolve the service that
             // provides the consumer's target key in the head view.
-            let target = match &consumer.target {
-                crate::federation::contracts::diff::ConsumerTargetKey::Contract(k) => k.clone(),
-                _ => ContractKey::Http {
-                    method: MethodSpec::Unknown,
-                    template: String::new(),
-                },
-            };
-            let resolved = head_index
-                .endpoints
-                .keys()
-                .find(|id| id.1 == target)
-                .map(|id| id.0.clone())
-                .unwrap_or_else(|| service.clone());
-            (resolved, target)
+            // For unresolved consumers (`UrlExpr`), the consumer's
+            // name carries `"<METHOD> <template>"`; surface the
+            // could-match endpoint by template_matches (including
+            // prefix-stripped, matching §7.4 + §9.7). This is what
+            // scenario 3 needs to point at orders's
+            // `/api/orders/{}` despite the consumer's
+            // `/v1/api/orders/{}` template.
+            match &consumer.target {
+                crate::federation::contracts::diff::ConsumerTargetKey::Contract(k) => {
+                    let resolved = head_index
+                        .endpoints
+                        .keys()
+                        .find(|id| id.1 == *k)
+                        .map(|id| id.0.clone())
+                        .unwrap_or_else(|| service.clone());
+                    (resolved, k.clone())
+                }
+                crate::federation::contracts::diff::ConsumerTargetKey::UrlExpr(name) => {
+                    let (m, tmpl) = parse_method_template(name);
+                    if let Some(t) = tmpl {
+                        let mut best: Option<&EndpointId> = None;
+                        for id in head_index.endpoints.keys() {
+                            let (id_method, id_tmpl) = match &id.1 {
+                                ContractKey::Http { method, template } => {
+                                    (method.clone(), template.clone())
+                                }
+                                ContractKey::Topic { .. } => continue,
+                            };
+                            if !method_compatible(&m, &id_method) {
+                                continue;
+                            }
+                            if template_matches_with_prefix(&t, &id_tmpl) {
+                                best = Some(id);
+                                break;
+                            }
+                        }
+                        if let Some(id) = best {
+                            (id.0.clone(), id.1.clone())
+                        } else {
+                            (
+                                service.clone(),
+                                ContractKey::Http {
+                                    method: m,
+                                    template: t,
+                                },
+                            )
+                        }
+                    } else {
+                        (
+                            service.clone(),
+                            ContractKey::Http {
+                                method: m,
+                                template: String::new(),
+                            },
+                        )
+                    }
+                }
+            }
         }
     };
     json!({
         "service": endpoint_service.0,
         "key": key.to_string(),
     })
+}
+
+/// Parse `"<METHOD> <template>"` from the HttpClientCall name (the
+/// shape `http_client_sensor` builds). `method = Unknown` and
+/// `template = None` when the name is empty or doesn't match.
+fn parse_method_template(name: &str) -> (MethodSpec, Option<String>) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return (MethodSpec::Unknown, None);
+    }
+    let mut parts = trimmed.splitn(2, ' ');
+    let verb = parts.next().unwrap_or("");
+    let tmpl = parts.next().map(str::to_string);
+    let method = match verb.to_ascii_uppercase().as_str() {
+        "GET" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Get),
+        "POST" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Post),
+        "PUT" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Put),
+        "PATCH" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Patch),
+        "DELETE" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Delete),
+        "HEAD" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Head),
+        "OPTIONS" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Options),
+        "ANY" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any),
+        _ => MethodSpec::Unknown,
+    };
+    (method, tmpl)
+}
+
+fn method_compatible(consumer: &MethodSpec, provider: &MethodSpec) -> bool {
+    use crate::federation::contracts::model::HttpMethod;
+    match (consumer, provider) {
+        (MethodSpec::Unknown, _) => true,
+        (MethodSpec::Known(_), MethodSpec::Unknown) => true,
+        (MethodSpec::Known(a), MethodSpec::Known(b)) => *a == *b || matches!(*b, HttpMethod::Any),
+    }
+}
+
+/// §7.4 template matching with prefix tolerance (up to 3 leading
+/// literal segments). Mirrors `diff::template_matches` so an
+/// unresolved consumer's `UrlExpr` name can find a candidate
+/// endpoint for the consumer-side change payload.
+fn template_matches_with_prefix(consumer: &str, provider: &str) -> bool {
+    use crate::federation::contracts::route_match::match_route;
+    let outcome = match_route(
+        MethodSpec::Unknown,
+        consumer,
+        crate::federation::contracts::model::HttpMethod::Any,
+        provider,
+    );
+    if outcome.is_match() {
+        return true;
+    }
+    let segs: Vec<&str> = consumer.split('/').collect();
+    for k in 1..=3 {
+        if k + 1 > segs.len() - 1 {
+            break;
+        }
+        let rest = segs[k + 1..].join("/");
+        let stripped = format!("/{rest}");
+        let outcome = match_route(
+            MethodSpec::Unknown,
+            &stripped,
+            crate::federation::contracts::model::HttpMethod::Any,
+            provider,
+        );
+        if outcome.is_match() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Attach §9.5 impact `paths` to one change. Provider-side changes
