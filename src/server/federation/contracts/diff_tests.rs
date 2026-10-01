@@ -1412,6 +1412,93 @@ fn could_match_accepts_provider_any_method() {
     assert!(could_match(&key, &target, &head));
 }
 
+// PR 18 — operationId candidate. An unresolved consumer whose URL
+// template does not match any provider's template, but whose
+// function name (`UrlExpr(name)`) equals a provider's OpenAPI
+// `operationId`, is a could-match candidate. The URL check fails
+// first; the operationId check then runs and returns true.
+#[test]
+fn could_match_accepts_operation_id_when_url_no_match() {
+    let call = id("billing", "HttpClientCall", "src/sdk.ts", "getOrderById", 1);
+    let mut head = ContractSurface::default();
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service: Some(svc("orders")),
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    // The unresolved consumer's `ConsumerKey.target` is `UrlExpr(name)`
+    // per `consumer_key` (uses `call_id.name()`). Use a `UrlExpr`
+    // key directly so the operationId candidate check fires.
+    let key = ConsumerKey {
+        caller: SymbolKey {
+            repo: repo("billing"),
+            path: "src/sdk.ts".into(),
+            container: None,
+            name: "getOrderById".into(),
+        },
+        target: ConsumerTargetKey::UrlExpr("getOrderById".into()),
+    };
+    head.consumers.insert(key.clone(), consumer_def);
+    let target = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let mut endpoint_def = empty_endpoint_def();
+    endpoint_def
+        .providers
+        .push(crate::federation::contracts::diff::ProviderRef {
+            node_id: id("orders", "HttpRoute", "openapi.yaml", "getOrderById", 100),
+            handler: None,
+            operation_id: Some("getOrderById".into()),
+        });
+    head.endpoints.insert(target.clone(), endpoint_def);
+    assert!(
+        could_match(&key, &target, &head),
+        "operationId match must surface as could-match even when URL doesn't match"
+    );
+}
+
+// PR 18 — operationId candidate negative. The consumer's URL
+// template does not match, and no provider has the matching
+// operationId. The template check fails first, so the function
+// returns false before reaching the operationId check.
+#[test]
+fn could_match_rejects_operation_id_mismatch() {
+    let call = id("billing", "HttpClientCall", "src/sdk.ts", "getMe", 1);
+    let mut head = ContractSurface::default();
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service: Some(svc("orders")),
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    // Use a Contract key (with a template) so the template check
+    // runs. The template is `/api/orders/{}` and the provider's is
+    // `/api/v2/orders/{}` — they don't match. The provider's
+    // `operation_id == "getOrderById"` also doesn't match the
+    // consumer's function name `getMe`.
+    let key = consumer_key_for_call(&call, http_key(HttpMethod::Get, "/api/orders/{}"));
+    head.consumers.insert(key.clone(), consumer_def);
+    let target = endpoint_id("orders", HttpMethod::Get, "/api/v2/orders/{}");
+    let mut endpoint_def = empty_endpoint_def();
+    endpoint_def
+        .providers
+        .push(crate::federation::contracts::diff::ProviderRef {
+            node_id: id("orders", "HttpRoute", "openapi.yaml", "getOrderById", 5),
+            handler: None,
+            operation_id: Some("getOrderById".into()),
+        });
+    head.endpoints.insert(target.clone(), endpoint_def);
+    assert!(
+        !could_match(&key, &target, &head),
+        "no URL match + no operationId match (consumer name != provider operationId) → not a candidate"
+    );
+}
+
 // ─── Property: diff(a, a) is empty ──────────────────────────────────
 
 #[test]

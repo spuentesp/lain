@@ -64,6 +64,17 @@ pub struct BindsEdge {
     pub stripped_prefix: Option<String>,
 }
 
+/// Confidence assigned to an `operationId`-only bind (PR 18).
+///
+/// Higher than prefix-stripped (0.5) and unbound-host (0.6); lower
+/// than the rule-3 URL match (Static 1.0). OperationIds are unique
+/// within an OpenAPI spec, so the name match is strong evidence, but
+/// the URL does not actually match, so it cannot be `Static`. Per
+/// §4.6, a `Heuristic` provenance does not count as "certain" for
+/// `Verified` — keeping room for a `NeedsInvestigation` verdict when
+/// the bind is used in a critical change.
+const OPERATION_ID_CONFIDENCE: f32 = 0.9;
+
 /// The joiner.
 pub struct ContractJoiner;
 
@@ -1061,6 +1072,37 @@ fn host_matches_pattern(pattern: &str, host: &str) -> bool {
     }
 }
 
+/// PR 18 — operationId fallback for generated SDK clients. Find the
+/// first `(service, key)` in `endpoints` whose providers carry an
+/// `operation_id == fn_name`. Returns the matched endpoint's
+/// `ContractKey` and the provider node's `GlobalId`.
+///
+/// Determinism: iterates the `BTreeMap` in its canonical order; the
+/// first match wins (operationIds are expected to be unique within
+/// a service, so subsequent matches would be the same provider's
+/// spec/code split).
+fn find_endpoint_by_operation_id(
+    service: &ServiceName,
+    fn_name: &str,
+    endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
+) -> Option<(ContractKey, GlobalId)> {
+    for ((svc, key), providers) in endpoints {
+        if svc != service {
+            continue;
+        }
+        for p in providers {
+            let op_id = match p.fact.as_ref() {
+                Some(ContractFact::Provider(pf)) => pf.operation_id.as_deref(),
+                _ => None,
+            };
+            if op_id == Some(fn_name) {
+                return Some((key.clone(), p.id.clone()));
+            }
+        }
+    }
+    None
+}
+
 /// Match the consumer's `(method, template)` against every provider
 /// in `target_service`. Picks the most specific match (§7.4
 /// specificity). Records the `Binds` edge in `binds` and returns a
@@ -1091,16 +1133,58 @@ fn match_one_service(
     };
     let best = best_provider_for_in(&target_service, target_method, template, rule_3, endpoints);
     match best {
-        None => ConsumerResolution {
-            call_id: call_id.clone(),
-            service: own_service.clone(),
-            target: Some(ConsumerTarget::Unresolved {
-                reason: UnresolvedReason::NoRouteInService,
-                target_service: Some(target_service.clone()),
-            }),
-            bound_endpoints: Vec::new(),
-            reads_complete: consumer.reads_complete,
-        },
+        None => {
+            // PR 18 — operationId fallback. Generated SDK clients
+            // (`client.orders.getOrderById({id})`) call a method
+            // whose name corresponds to the OpenAPI `operationId`,
+            // not the URL. When the URL match fails outright, fall
+            // back to a name match. Only `CallVia::Receiver` carries
+            // the SDK method identity (`fn_name`); library calls
+            // (e.g. `requests.get(...)`) have no name to match.
+            if let CallVia::Receiver { fn_name, .. } = &consumer.via {
+                if let Some((key, provider_id)) =
+                    find_endpoint_by_operation_id(&target_service, fn_name, endpoints)
+                {
+                    let provenance = EdgeProvenance::Heuristic {
+                        detector: "operation_id".into(),
+                        confidence: OPERATION_ID_CONFIDENCE,
+                    };
+                    binds.push(BindsEdge {
+                        consumer: call_id.clone(),
+                        provider: provider_id,
+                        consumer_service: own_service.clone(),
+                        provider_service: target_service.clone(),
+                        target_endpoint: (target_service.clone(), key.clone()),
+                        provenance: provenance.clone(),
+                        confidence: OPERATION_ID_CONFIDENCE,
+                        route_match: RouteMatch::Exact,
+                        stripped_prefix: None,
+                    });
+                    return ConsumerResolution {
+                        call_id: call_id.clone(),
+                        service: own_service.clone(),
+                        target: Some(ConsumerTarget::Binds {
+                            provenance,
+                            confidence: OPERATION_ID_CONFIDENCE,
+                            route_match: RouteMatch::Exact,
+                            stripped_prefix: None,
+                        }),
+                        bound_endpoints: vec![(target_service, key)],
+                        reads_complete: consumer.reads_complete,
+                    };
+                }
+            }
+            ConsumerResolution {
+                call_id: call_id.clone(),
+                service: own_service.clone(),
+                target: Some(ConsumerTarget::Unresolved {
+                    reason: UnresolvedReason::NoRouteInService,
+                    target_service: Some(target_service.clone()),
+                }),
+                bound_endpoints: Vec::new(),
+                reads_complete: consumer.reads_complete,
+            }
+        }
         Some((key, detail)) => {
             // Bug C: rule-3 prefix tolerance is a could-match hint,
             // not a bind. The consumer stays Unresolved with the
@@ -1110,6 +1194,46 @@ fn match_one_service(
             // before. Rule 6 keeps its existing suppressor at
             // `best_provider_for_in`.
             if detail.kind == RouteMatch::PrefixStripped {
+                // PR 18 — operationId fallback can override a
+                // prefix-stripped URL match when the SDK method
+                // name matches a provider's operationId exactly.
+                // The bind is still `Heuristic 0.9`, but it is exact
+                // on the operationId dimension — stronger evidence
+                // than a prefix-stripped URL match (which would have
+                // been `Heuristic 0.5`).
+                if let CallVia::Receiver { fn_name, .. } = &consumer.via {
+                    if let Some((op_key, op_provider_id)) =
+                        find_endpoint_by_operation_id(&target_service, fn_name, endpoints)
+                    {
+                        let provenance = EdgeProvenance::Heuristic {
+                            detector: "operation_id".into(),
+                            confidence: OPERATION_ID_CONFIDENCE,
+                        };
+                        binds.push(BindsEdge {
+                            consumer: call_id.clone(),
+                            provider: op_provider_id,
+                            consumer_service: own_service.clone(),
+                            provider_service: target_service.clone(),
+                            target_endpoint: (target_service.clone(), op_key.clone()),
+                            provenance: provenance.clone(),
+                            confidence: OPERATION_ID_CONFIDENCE,
+                            route_match: RouteMatch::Exact,
+                            stripped_prefix: None,
+                        });
+                        return ConsumerResolution {
+                            call_id: call_id.clone(),
+                            service: own_service.clone(),
+                            target: Some(ConsumerTarget::Binds {
+                                provenance,
+                                confidence: OPERATION_ID_CONFIDENCE,
+                                route_match: RouteMatch::Exact,
+                                stripped_prefix: None,
+                            }),
+                            bound_endpoints: vec![(target_service, op_key)],
+                            reads_complete: consumer.reads_complete,
+                        };
+                    }
+                }
                 return ConsumerResolution {
                     call_id: call_id.clone(),
                     service: own_service.clone(),

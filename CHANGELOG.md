@@ -125,6 +125,25 @@ the minimum acceptable contract for this release. Future work
 that touches the joiner, sensors, or fixture must keep
 `baseline.json` in sync.
 
+### Generated-client matching by `operationId` (PR 18)
+
+- The joiner now falls back to OpenAPI `operationId` matching when
+  a consumer's URL does not match any provider by plain or
+  prefix-stripped URL match. Generated SDK clients (e.g. a
+  TypeScript SDK generated from an OpenAPI spec) call a method
+  whose name corresponds to the `operationId`, not the URL —
+  `client.orders.getOrderById({id})` is the SDK's call into
+  `getOrderById`. The fallback fires only for `CallVia::Receiver`
+  consumers whose `fn_name` equals a provider's `operation_id`,
+  and emits a `Binds` edge with `Heuristic { detector:
+  "operation_id", confidence: 0.9 }`. URL matches still take
+  priority (Static 1.0). `diff::could_match` also surfaces the
+  operationId match as a `could_match` candidate for unresolved
+  consumers.
+- The hermetic precision/recall baseline is unchanged: all six
+  metrics remain at 1.000 because the T1 fixture does not exercise
+  the generated-client path.
+
 ### Federation schema v3 (PR 3)
 
 - New `NodeType` variants: `HttpClientCall`, `Field`, `FieldRef`

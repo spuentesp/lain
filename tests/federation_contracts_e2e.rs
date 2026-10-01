@@ -2544,6 +2544,296 @@ mod pr15_event {
 
 // ─── PR 17 (stretch): codeowners_sensor + `owners` on used_by ──────────
 
+// ─── PR 18 (stretch): operationId fallback for generated SDK clients ───
+
+mod pr18_operation_id {
+    //! PR 18 closes the recall gap for generated SDK clients. A
+    //! consumer's URL might not match any provider, but its method name
+    //! corresponds to the OpenAPI `operationId`. The joiner falls
+    //! back to operationId matching when the URL match fails, and
+    //! surfaces the operationId match as a `could_match` candidate
+    //! for unresolved consumers in `diff::could_match`.
+
+    use lain::federation::contracts::config::{HttpClientDecl, ServiceDecl};
+    use lain::federation::contracts::index::{ConsumerResolution, ConsumerTarget};
+    use lain::federation::contracts::joiner::ContractJoiner;
+    use lain::federation::contracts::model::{
+        CallVia, ConsumerFact, ContractFact, HttpMethod, MethodSpec, NormalizedUrl, ProviderFact,
+        ProviderOrigin,
+    };
+    use lain::schema::{GraphNode, NodeType, RepoNamespace};
+    use std::collections::BTreeMap;
+
+    fn ns() -> RepoNamespace {
+        RepoNamespace::for_test()
+    }
+
+    fn provider_with_op_id(
+        repo: &str,
+        path: &str,
+        name: &str,
+        line: u32,
+        method: HttpMethod,
+        template: &str,
+        operation_id: &str,
+    ) -> GraphNode {
+        let mut n = GraphNode::new_in(
+            NodeType::HttpRoute,
+            name.to_string(),
+            path.to_string(),
+            &ns(),
+        );
+        n.repo_id = Some(repo.to_string());
+        n.id = format!("{repo}:HttpRoute:{path}:{name}:{line}");
+        n.line_start = Some(line);
+        n.contract = Some(ContractFact::Provider(ProviderFact {
+            method,
+            template: template.to_string(),
+            handler: None,
+            operation_id: Some(operation_id.to_string()),
+            origin: ProviderOrigin::OpenApi,
+        }));
+        n
+    }
+
+    fn sdk_consumer(repo: &str, path: &str, name: &str, line: u32, fn_name: &str) -> GraphNode {
+        let mut n = GraphNode::new_in(
+            NodeType::HttpClientCall,
+            name.to_string(),
+            path.to_string(),
+            &ns(),
+        );
+        n.repo_id = Some(repo.to_string());
+        n.id = format!("{repo}:HttpClientCall:{path}:{name}:{line}");
+        n.line_start = Some(line);
+        n.contract = Some(ContractFact::Consumer(ConsumerFact {
+            method: MethodSpec::Known(HttpMethod::Get),
+            url: NormalizedUrl {
+                host: lain::federation::contracts::model::HostPart::Literal("orders.svc".into()),
+                // URL deliberately different from any provider
+                // template — the joiner must fall back to operationId.
+                template: Some("/api/v1/orders/42".to_string()),
+            },
+            via: CallVia::Receiver {
+                expr: "client.orders".into(),
+                fn_name: fn_name.into(),
+            },
+            url_expr: "client.orders.getOrderById({id: 42})".to_string(),
+            reads_complete: true,
+        }));
+        n
+    }
+
+    fn sdk_config() -> lain::federation::contracts::config::ContractFederationConfig {
+        lain::federation::contracts::config::ContractFederationConfig {
+            services: vec![ServiceDecl {
+                name: "orders".into(),
+                repo: "orders".into(),
+                paths: vec![],
+                hosts: vec!["orders.svc".into()],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            }],
+            http_clients: vec![HttpClientDecl {
+                call: "client.orders.{method}".into(),
+                service: "orders".into(),
+                method: None,
+                path_arg: None,
+            }],
+            generic_keys: vec![],
+            schemas: vec![],
+            bindings: vec![],
+        }
+    }
+
+    #[test]
+    fn operation_id_fallback_binds_via_join_output() {
+        // PR 18 — end-to-end exercise through ContractJoiner::run.
+        // The provider is a pure-OpenAPI operation with `operation_id
+        // == "getOrderById"`. The consumer is a generated-SDK call
+        // (`client.orders.getOrderById({id})`) with a URL that does
+        // not match any provider. The joiner must produce a single
+        // `Binds` edge with `Heuristic { detector: "operation_id",
+        // confidence: 0.9 }`.
+        let provider = provider_with_op_id(
+            "orders",
+            "openapi.yaml",
+            "getOrderById",
+            1,
+            HttpMethod::Get,
+            "/api/orders/{}",
+            "getOrderById",
+        );
+        let consumer = sdk_consumer("billing", "src/sdk.ts", "getOrderById", 1, "getOrderById");
+        let out = ContractJoiner::run(&[provider.clone(), consumer.clone()], &[], &sdk_config());
+
+        assert_eq!(
+            out.binds.len(),
+            1,
+            "operationId fallback must produce exactly one bind; got {:?}",
+            out.binds
+        );
+        let edge = &out.binds[0];
+        let lain::schema::EdgeProvenance::Heuristic {
+            detector,
+            confidence,
+        } = &edge.provenance
+        else {
+            panic!("expected Heuristic provenance, got {:?}", edge.provenance);
+        };
+        assert_eq!(detector, "operation_id");
+        assert!(
+            (confidence - 0.9).abs() < f32::EPSILON,
+            "operationId confidence must be 0.9, got {confidence}"
+        );
+        assert_eq!(edge.provider_service.0, "orders");
+        assert_eq!(edge.consumer_service.0, "billing");
+
+        // The consumer resolution carries the same Binds/Heuristic.
+        let cid = lain::federation::repo_id::GlobalId::from_string(&consumer.id);
+        let resolution: &ConsumerResolution = out
+            .index
+            .consumers
+            .get(&cid)
+            .expect("consumer resolution present");
+        match &resolution.target {
+            Some(ConsumerTarget::Binds {
+                provenance,
+                confidence,
+                ..
+            }) => {
+                let lain::schema::EdgeProvenance::Heuristic { detector, .. } = provenance else {
+                    panic!("target provenance must be Heuristic");
+                };
+                assert_eq!(detector, "operation_id");
+                assert!((*confidence - 0.9).abs() < f32::EPSILON);
+            }
+            other => panic!("expected Binds/operation_id, got {other:?}"),
+        }
+        assert_eq!(
+            resolution.bound_endpoints.len(),
+            1,
+            "operationId fallback must record one bound endpoint"
+        );
+    }
+
+    #[test]
+    fn operation_id_fallback_skips_when_no_op_id_provider() {
+        // Same SDK call shape, but the provider has no `operation_id`.
+        // The joiner must NOT bind — operationId fallback requires
+        // the provider's `operation_id == Some(fn_name)`.
+        let provider = {
+            let mut n = GraphNode::new_in(
+                NodeType::HttpRoute,
+                "getOrder".to_string(),
+                "openapi.yaml".to_string(),
+                &ns(),
+            );
+            n.repo_id = Some("orders".into());
+            n.id = "orders:HttpRoute:openapi.yaml:getOrder:1".into();
+            n.line_start = Some(1);
+            n.contract = Some(ContractFact::Provider(ProviderFact {
+                method: HttpMethod::Get,
+                template: "/api/orders/{}".to_string(),
+                handler: None,
+                operation_id: None,
+                origin: ProviderOrigin::OpenApi,
+            }));
+            n
+        };
+        let consumer = sdk_consumer("billing", "src/sdk.ts", "getOrderById", 1, "getOrderById");
+        let out = ContractJoiner::run(&[provider, consumer], &[], &sdk_config());
+        assert!(
+            out.binds.is_empty(),
+            "operationId fallback must NOT bind when provider has no operation_id: {binds:?}",
+            binds = out.binds
+        );
+    }
+
+    #[test]
+    fn operation_id_fallback_does_not_alter_other_endpoints() {
+        // A second, unrelated provider must not be affected by the
+        // operationId fallback. The bind fires only against the
+        // matched endpoint.
+        let orders_provider = provider_with_op_id(
+            "orders",
+            "openapi.yaml",
+            "getOrderById",
+            1,
+            HttpMethod::Get,
+            "/api/orders/{}",
+            "getOrderById",
+        );
+        let unrelated_provider = {
+            let mut n = GraphNode::new_in(
+                NodeType::HttpRoute,
+                "list_invoices".to_string(),
+                "openapi.yaml".to_string(),
+                &ns(),
+            );
+            n.repo_id = Some("billing".into());
+            n.id = "billing:HttpRoute:openapi.yaml:list_invoices:2".into();
+            n.line_start = Some(2);
+            n.contract = Some(ContractFact::Provider(ProviderFact {
+                method: HttpMethod::Get,
+                template: "/invoices".to_string(),
+                handler: None,
+                operation_id: Some("list_invoices".to_string()),
+                origin: ProviderOrigin::OpenApi,
+            }));
+            n
+        };
+        let consumer = sdk_consumer("orders", "src/sdk.ts", "getOrderById", 1, "getOrderById");
+        let out = ContractJoiner::run(
+            &[orders_provider, unrelated_provider, consumer],
+            &[],
+            &sdk_config(),
+        );
+        // Exactly one bind fires (against the orders provider whose
+        // operation_id matches). The billing provider's template is
+        // unrelated, and operationId != "getOrderById".
+        assert_eq!(out.binds.len(), 1);
+        let edge = &out.binds[0];
+        assert_eq!(edge.provider_service.0, "orders");
+    }
+
+    #[test]
+    fn operation_id_fallback_dedups_across_runs() {
+        // Idempotence: running the joiner twice with the same
+        // operationId inputs produces byte-identical output, even
+        // though the operationId fallback is a heuristic step.
+        let provider = provider_with_op_id(
+            "orders",
+            "openapi.yaml",
+            "getOrderById",
+            1,
+            HttpMethod::Get,
+            "/api/orders/{}",
+            "getOrderById",
+        );
+        let consumer = sdk_consumer("billing", "src/sdk.ts", "getOrderById", 1, "getOrderById");
+        let a = ContractJoiner::run(&[provider.clone(), consumer.clone()], &[], &sdk_config());
+        let b = ContractJoiner::run(&[provider, consumer], &[], &sdk_config());
+        assert_eq!(a, b, "operationId fallback is deterministic across runs");
+        // Determinism on the index side too: same operation_id
+        // placement must produce identical bound endpoints.
+        let a_endpoints: BTreeMap<_, _> = a
+            .index
+            .consumers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.bound_endpoints.clone()))
+            .collect();
+        let b_endpoints: BTreeMap<_, _> = b
+            .index
+            .consumers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.bound_endpoints.clone()))
+            .collect();
+        assert_eq!(a_endpoints, b_endpoints);
+    }
+}
+
 mod pr17_codeowners {
     //! PR 17: codeowners_sensor reads GitHub-style `CODEOWNERS` files
     //! and the `get_service` handler attaches an `owners: [String]`

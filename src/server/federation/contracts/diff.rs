@@ -1916,6 +1916,25 @@ pub fn could_match(
             return false;
         }
     }
+    // PR 18 — operationId candidate. The URL did not match any
+    // endpoint, but the consumer's `via.fn_name` (recorded on the
+    // `ConsumerKey.target` as a `UrlExpr`) equals the endpoint's
+    // provider's OpenAPI `operationId`. Generated SDK clients
+    // (`client.orders.getOrderById({id})`) carry the operationId in
+    // their method name; surfacing this candidate lets a tool
+    // operator close the gap with a `bindings` entry rather than
+    // guessing by URL.
+    if let ConsumerTargetKey::UrlExpr(name) = &consumer_key.target {
+        if let Some(endpoint_def) = head.endpoints.get(endpoint) {
+            if endpoint_def
+                .providers
+                .iter()
+                .any(|p| p.operation_id.as_deref() == Some(name.as_str()))
+            {
+                return true;
+            }
+        }
+    }
     true
 }
 

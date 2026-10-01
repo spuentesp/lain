@@ -450,6 +450,22 @@ For each `HttpClientCall` c, the first matching row decides:
 
 A service calling its own routes is not a contract between services, so rule 6 skips c's own service; an explicit rule 3 target that happens to be c's own service is honoured.
 
+**OperationId fallback (PR 18).** When the URL match fails entirely
+(no plain match, no prefix-stripped match) and the consumer is a
+`CallVia::Receiver` (a wrapper candidate that survived rule 1),
+the joiner tries a name match against the target service's
+providers' OpenAPI `operation_id`. The first provider whose
+`operation_id == fn_name` wins; the joiner emits a `Binds` edge
+with `Heuristic { detector: "operation_id", confidence: 0.9 }`
+and `route_match = Exact`. This closes the recall gap for
+generated SDK clients (`client.orders.getOrderById({id})`) whose
+URL does not match any provider but whose method name matches
+the provider's OpenAPI `operationId`. URL matches still take
+priority — the fallback only fires when no URL match is found.
+The same fallback overrides a `PrefixStripped` URL match (which
+would otherwise stay unresolved, per Bug C), because the
+operationId is exact on the name dimension.
+
 ### 7.4 Route matching
 
 Consumer template C matches provider template P when:
@@ -578,6 +594,22 @@ For repos whose commit differs between base and head, compare `base.consumers` w
 | `ConsumerEndpointUnmatched` | A consumer key present in head but not in base, unresolved in head (`no_route_in_service` or `no_match`) |
 | `ConsumerFieldUnmatched { field }` | A head consumer bound to an endpoint with a schema reads a path the schema does not contain (§7.5 step 4), and base did not |
 | `ConsumerRebound` | Same consumer key bound to a different endpoint; informational, `Compatible` |
+
+**OperationId (PR 18).** A consumer whose URL does not match any
+provider but whose `via.fn_name` equals a provider's OpenAPI
+`operation_id` is bound by the joiner's operationId fallback
+(§7.3). The bind is `ConsumerTarget::Binds` with `Heuristic
+{ detector: "operation_id", confidence: 0.9 }`. When the fallback
+binds in head but base was unresolved (or bound to a different
+endpoint), the change is reported as `ConsumerRebound` or
+`ConsumerEndpointUnmatched` per the table above; no new
+`ChangeKind` is needed — the operationId is just a richer
+target identification on the same `ConsumerEndpointUnmatched` /
+`ConsumerRebound` rows. `diff::could_match` also surfaces
+operationId matches as candidates: an unresolved consumer with
+`ConsumerTargetKey::UrlExpr(name)` whose name equals some
+provider's `operation_id` is a could-match candidate against
+that endpoint.
 
 ### 9.4 Classification — `classify(kind, direction) -> Compat`
 

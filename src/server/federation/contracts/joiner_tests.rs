@@ -1151,6 +1151,297 @@ fn service_name_is_valid_predicate() {
     ));
 }
 
+// ─── PR 18 — operationId fallback (generated SDK clients) ──────────
+
+fn provider_node_with_operation_id(
+    repo: &str,
+    path: &str,
+    name: &str,
+    line: u32,
+    method: HttpMethod,
+    template: &str,
+    operation_id: Option<&str>,
+) -> GraphNode {
+    let mut n = provider_node(repo, path, name, line, method, template);
+    if let Some(ContractFact::Provider(pf)) = n.contract.as_mut() {
+        pf.operation_id = operation_id.map(str::to_string);
+        pf.origin = ProviderOrigin::OpenApi;
+    }
+    n
+}
+
+/// Build a config with a `client.orders.{method}` wrapper registered
+/// against the `orders` service. This is the SDK wrapper case: the
+/// generated client's method-name member is the operationId.
+fn sdk_wrapper_config() -> ContractFederationConfig {
+    use crate::federation::contracts::config::HttpClientDecl;
+    ContractFederationConfig {
+        services: default_config().services,
+        http_clients: vec![HttpClientDecl {
+            call: "client.orders.{method}".into(),
+            service: "orders".into(),
+            method: None,
+            path_arg: None,
+        }],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+    }
+}
+
+#[test]
+fn rule_3_operation_id_fallback_binds_when_url_no_match() {
+    // A generated SDK client calls `client.orders.getOrderById({id})`.
+    // The URL `/api/v1/orders/42` does not match the provider's
+    // `/api/orders/{}` even after prefix strip, but the OpenAPI
+    // operationId is `getOrderById`. The joiner must bind via
+    // operationId fallback (§7.3 rule 3, PR 18).
+    let p = provider_node_with_operation_id(
+        "orders",
+        "openapi.yaml",
+        "getOrderById",
+        100,
+        HttpMethod::Get,
+        "/api/orders/{}",
+        Some("getOrderById"),
+    );
+    let c = consumer_node(
+        "billing",
+        "src/sdk.ts",
+        "getOrderById",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/v1/orders/42"),
+        ),
+        CallVia::Receiver {
+            expr: "client.orders".into(),
+            fn_name: "getOrderById".into(),
+        },
+    );
+    let cfg = sdk_wrapper_config();
+    let out = ContractJoiner::run(&[p.clone(), c.clone()], &[], &cfg);
+    assert_eq!(
+        out.binds.len(),
+        1,
+        "operationId fallback must bind: {binds:?}",
+        binds = out.binds
+    );
+    let edge = &out.binds[0];
+    let (
+        EdgeProvenance::Heuristic {
+            detector,
+            confidence,
+        },
+        _,
+    ) = (edge.provenance.clone(), ())
+    else {
+        panic!("expected Heuristic, got {:?}", edge.provenance);
+    };
+    assert_eq!(detector, "operation_id");
+    assert!((confidence - 0.9).abs() < f32::EPSILON, "got {confidence}");
+    assert!(matches!(edge.route_match, RouteMatch::Exact));
+    assert_eq!(edge.provider_service.0, "orders");
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out
+        .index
+        .consumers
+        .get(&call_id)
+        .expect("consumer resolution");
+    match &resolution.target {
+        Some(ConsumerTarget::Binds {
+            provenance,
+            confidence,
+            route_match,
+            ..
+        }) => {
+            let EdgeProvenance::Heuristic { detector, .. } = provenance else {
+                panic!("expected Heuristic provenance on target");
+            };
+            assert_eq!(detector, "operation_id");
+            assert!((*confidence - 0.9).abs() < f32::EPSILON);
+            assert!(matches!(route_match, RouteMatch::Exact));
+        }
+        other => panic!("expected Binds/operation_id, got {other:?}"),
+    }
+    assert_eq!(resolution.bound_endpoints.len(), 1);
+}
+
+#[test]
+fn rule_3_operation_id_fallback_skips_library_via() {
+    // The operationId fallback only fires for `CallVia::Receiver`
+    // (SDK wrappers). Library calls (e.g. `requests.get(...)`) have
+    // no SDK-method identity to match against — `via.fn_name` does
+    // not exist on `Library`, so the fallback gate rejects the call
+    // and the consumer stays unresolved.
+    let p = provider_node_with_operation_id(
+        "orders",
+        "openapi.yaml",
+        "getOrderById",
+        100,
+        HttpMethod::Get,
+        "/api/orders/{}",
+        Some("getOrderById"),
+    );
+    let c = consumer_node(
+        "billing",
+        "src/billing.py",
+        "fetch_order",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/v1/orders/42"),
+        ),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    let cfg = default_config();
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "library calls don't get operationId fallback"
+    );
+}
+
+#[test]
+fn rule_3_operation_id_fallback_no_match_stays_unresolved() {
+    // No provider carries `operation_id == "someUnknown"`. The
+    // consumer stays unresolved with the known target service.
+    let p = provider_node_with_operation_id(
+        "orders",
+        "openapi.yaml",
+        "getOrderById",
+        100,
+        HttpMethod::Get,
+        "/api/orders/{}",
+        Some("getOrderById"),
+    );
+    let c = consumer_node(
+        "billing",
+        "src/sdk.ts",
+        "someUnknown",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/v1/orders/42"),
+        ),
+        CallVia::Receiver {
+            expr: "client.orders".into(),
+            fn_name: "someUnknown".into(),
+        },
+    );
+    let cfg = sdk_wrapper_config();
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "no operationId match → unresolved, got {binds:?}",
+        binds = out.binds
+    );
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out
+        .index
+        .consumers
+        .get(&call_id)
+        .expect("consumer resolution");
+    assert!(matches!(
+        resolution.target,
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn rule_3_url_match_still_wins_over_operation_id_fallback() {
+    // URL match at full confidence (Static 1.0) takes priority over
+    // the operationId fallback (Heuristic 0.9). Even though
+    // `fn_name == operationId`, the URL already matches exactly, so
+    // §7.3 rule 3 fires first.
+    let p = provider_node_with_operation_id(
+        "orders",
+        "openapi.yaml",
+        "getOrderById",
+        100,
+        HttpMethod::Get,
+        "/api/orders/{}",
+        Some("getOrderById"),
+    );
+    let c = consumer_node(
+        "billing",
+        "src/sdk.ts",
+        "getOrderById",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
+        CallVia::Receiver {
+            expr: "client.orders".into(),
+            fn_name: "getOrderById".into(),
+        },
+    );
+    let cfg = sdk_wrapper_config();
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
+    assert_eq!(out.binds.len(), 1);
+    let edge = &out.binds[0];
+    assert!(
+        matches!(edge.provenance, EdgeProvenance::Static { .. }),
+        "URL match wins → Static provenance, got {:?}",
+        edge.provenance
+    );
+    assert!((edge.confidence - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn rule_3_operation_id_fallback_overrides_prefix_stripped_url_match() {
+    // URL prefix-strip would yield a `PrefixStripped` match
+    // (Heuristic 0.5), but operationId matches exactly. PR 18 says
+    // operationId wins because the bind is exact on the name
+    // dimension — stronger than a prefix-stripped URL.
+    let p = provider_node_with_operation_id(
+        "orders",
+        "openapi.yaml",
+        "getOrderById",
+        100,
+        HttpMethod::Get,
+        "/orders/{}",
+        Some("getOrderById"),
+    );
+    let c = consumer_node(
+        "billing",
+        "src/sdk.ts",
+        "getOrderById",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
+        CallVia::Receiver {
+            expr: "client.orders".into(),
+            fn_name: "getOrderById".into(),
+        },
+    );
+    let cfg = sdk_wrapper_config();
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
+    assert_eq!(out.binds.len(), 1);
+    let edge = &out.binds[0];
+    let EdgeProvenance::Heuristic { detector, .. } = &edge.provenance else {
+        panic!("expected Heuristic");
+    };
+    assert_eq!(
+        detector, "operation_id",
+        "operationId wins over prefix-stripped URL"
+    );
+    assert!((edge.confidence - 0.9).abs() < f32::EPSILON);
+}
+
 // ─── §7.7 topic join (stretch, PR 15) ────────────────────────────────
 
 fn topic_provider_node(
