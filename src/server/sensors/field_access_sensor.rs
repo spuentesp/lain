@@ -1866,7 +1866,7 @@ fn chain_unwrap_call<'a>(
                 .or_else(|| function.child_by_field_name("attribute"))?;
             let recv_text = recv.utf8_text(src).ok()?;
             let attr_text = attr.utf8_text(src).ok()?;
-            if matches!(attr_text, "json" | "data" | "body") {
+            if matches!(attr_text, "json" | "data" | "body" | "text") {
                 if let Some(prefix) = bound.get(recv_text) {
                     return Some((recv_text.to_string(), prefix.clone()));
                 }
@@ -1973,13 +1973,16 @@ fn chain_unwrap_subscript_or_attr(
             (recv_text, attr_text.to_string(), true, true)
         }
         "call" | "call_expression" => {
-            // `x.get("k")` → bound to sub-path `k`.
+            // `x.get("k")` → bound to sub-path `k`. If the receiver is
+            // itself an `x.json()` / `x.text()` rebind chain (rule 2),
+            // forward that rebind path; otherwise fall back to a direct
+            // bound lookup on `recv_text`.
             let function = node.child_by_field_name("function")?;
             let recv = function.child_by_field_name("object")?;
             let attr = function
                 .child_by_field_name("property")
                 .or_else(|| function.child_by_field_name("attribute"))?;
-            let recv_text = recv.utf8_text(src).ok()?;
+            let recv_text = recv.utf8_text(src).ok()?.to_string();
             let attr_text = attr.utf8_text(src).ok()?;
             if attr_text != "get" {
                 return None;
@@ -1999,7 +2002,15 @@ fn chain_unwrap_subscript_or_attr(
                 _ => (String::new(), false),
             };
             let key_ok = !key_text.is_empty();
-            (recv_text, key_text, exact, key_ok)
+            let recv_path: JsonPath =
+                if let Some((_, rebind_path)) = chain_unwrap_call(recv, src, bound) {
+                    rebind_path
+                } else {
+                    bound.get(recv_text.as_str())?.clone()
+                };
+            let mut new_path = recv_path.0.clone();
+            new_path.push(PathSegment::Name(key_text.clone()));
+            return Some((recv_text, JsonPath(new_path), exact, key_ok));
         }
         _ => return None,
     };
@@ -2165,10 +2176,19 @@ fn is_client_call_like<'a>(
             return false;
         }
         if let Some(recv) = function.child_by_field_name("object") {
-            if let Some(recv_text) = recv.utf8_text(src).ok().map(|s| s.to_string()) {
-                if bound.contains_key(&recv_text) {
-                    return false;
-                }
+            let recv_in_bound = recv
+                .utf8_text(src)
+                .ok()
+                .map(|s| bound.contains_key(s))
+                .unwrap_or(false);
+            // Rule 2 chain: `r.json()` etc. resolve to `r`'s path —
+            // if that resolves to a bound identifier, the member call
+            // is on a rebound value, not a fresh client request.
+            let recv_resolves_to_bound = chain_unwrap_call(recv, src, bound)
+                .map(|(name, _)| bound.contains_key(&name))
+                .unwrap_or(false);
+            if recv_in_bound || recv_resolves_to_bound {
+                return false;
             }
         }
         return true;
@@ -4675,14 +4695,16 @@ async function caller() {
     }
 
     /// Bug B edge from the plan / spec: `r.json().get("data")` must
-    /// suppress only the `json` FieldRef. (The `get("data")` chain is
-    /// not currently produced by the walker because rule 3's
-    /// `chain_unwrap_subscript_or_attr` resolves the receiver text
-    /// as `r.json()` — not in bound — and returns None; this test
-    /// pins that the json step doesn't leak through, regardless.)
+    /// suppress only the `json` FieldRef AND must rebind `y` to the
+    /// `data` sub-path (rule 2 chain through rule 3's call branch).
+    /// A subsequent `y.id` read then records the `data` FieldRef.
+    /// Pre-fix `chain_unwrap_subscript_or_attr` resolved the
+    /// receiver text as `r.json()` (not in bound), so `y` was never
+    /// rebound and no `data` read was emitted — the deny-list only
+    /// suppressed the `json` step.
     #[test]
     fn chained_response_method_then_get_does_not_emit_json_read() {
-        let src = "r = fetch(\"/a\")\ny = r.json().get(\"data\")\n";
+        let src = "r = fetch(\"/a\")\ny = r.json().get(\"data\")\nz = y.id\n";
         let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
         bound.insert("__response__".to_string(), JsonPath(Vec::new()));
         let mut reads = Vec::new();
@@ -4709,6 +4731,77 @@ async function caller() {
         assert_eq!(
             json_reads, 0,
             "the json step must not leak into the read chain: {reads:?}"
+        );
+        // After the fix, `y` is bound to `[data]` and `z = y.id`
+        // emits a FieldRef whose chain contains `data`.
+        assert!(
+            bound.contains_key("y"),
+            "rule 2 chain through rule 3 must rebind y to the data sub-path: {bound:?}"
+        );
+        let data_reads = reads
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "data"))
+            })
+            .count();
+        assert!(
+            data_reads >= 1,
+            "y.id must emit a FieldRef containing data after the chained rebind: {reads:?}"
+        );
+    }
+
+    /// Bug B review edge: `z = r.text()` must rebind `z` to r's path
+    /// via rule 2's `chain_unwrap_call`. Pre-fix the rebind arm
+    /// matched only `json | data | body`, so `z` was never bound to
+    /// r's path and a downstream `z.id` would not record a read.
+    #[test]
+    fn text_response_method_rebind_binds_z_to_r_path() {
+        let src = "r = fetch(\"/a\")\nz = r.text()\nw = z.id\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Python, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Python,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "src/billing.py",
+        );
+        // Sanity: r is bound to the response root path (empty).
+        let r_path = bound
+            .get("r")
+            .expect("rule 1 must bind r to the response root")
+            .clone();
+        // Discriminator: z must be bound to the SAME path as r
+        // (rule 2 rebind), not None / not a different path.
+        let z_path = bound
+            .get("z")
+            .expect("rule 2 must rebind z to r's path via r.text(): {bound:?}")
+            .clone();
+        assert_eq!(
+            z_path, r_path,
+            "r.text() must rebind z to r's path (rule 2): {bound:?}"
+        );
+        // Downstream `z.id` must record a FieldRef — pre-fix `z` was
+        // never bound and no read was emitted.
+        assert!(
+            !reads.is_empty(),
+            "z.id must emit a FieldRef after rule 2 rebinds z to r's path: {reads:?}"
+        );
+        assert!(
+            reads.iter().any(|r| r
+                .chain
+                .0
+                .iter()
+                .any(|s| matches!(s, PathSegment::Name(n) if n == "id"))),
+            "the recorded FieldRef must contain the id sub-path: {reads:?}"
         );
     }
 
