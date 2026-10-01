@@ -1,5 +1,5 @@
 {
-  "diff_precision": 0.23809523809523808,
+  "diff_precision": 0.2631578947368421,
   "diff_recall": 0.9090909090909091,
   "binds_precision": 1.0,
   "binds_recall": 0.6,
