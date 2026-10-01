@@ -16,7 +16,7 @@ use crate::federation::contracts::model::{
     NormalizedUrl, ProviderFact, ProviderOrigin,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
-use crate::schema::{EdgeProvenance, GraphNode, NodeType, RepoNamespace, RouteMatch};
+use crate::schema::{EdgeProvenance, GraphNode, NodeType, RepoNamespace};
 use std::collections::BTreeSet;
 
 // ─── Builders ─────────────────────────────────────────────────────────
@@ -420,10 +420,14 @@ fn rule_3_method_unknown_caps_confidence_at_0_6() {
 }
 
 #[test]
-fn rule_3_prefix_stripped_caps_confidence_at_0_5() {
-    // The provider template is "/orders/{}" (no base_path); the
-    // consumer comes in with "/api/orders/42" — prefix stripping
-    // is the only way they match.
+fn rule_3_prefix_stripped_match_is_unresolved_with_known_target() {
+    // Bug C. The provider template is "/orders/{}" (no base_path);
+    // the consumer comes in with "/api/orders/42" — prefix
+    // stripping is the only way they match. Rule 3 must NOT bind:
+    // the consumer is unresolved with the known target service
+    // retained, and the orders endpoint surfaces as a could-match
+    // candidate through `diff::could_match`. A plain match (no
+    // prefix strip) still binds — see other tests for that.
     let p = provider_node(
         "orders",
         "src/orders.py",
@@ -447,23 +451,32 @@ fn rule_3_prefix_stripped_caps_confidence_at_0_5() {
         },
     );
     let cfg = default_config();
-    let out = ContractJoiner::run(&[p, c], &[], &cfg);
-    assert_eq!(out.binds.len(), 1);
-    let edge = &out.binds[0];
-    let (
-        EdgeProvenance::Heuristic {
-            detector,
-            confidence,
-        },
-        _,
-    ) = (edge.provenance.clone(), ())
-    else {
-        panic!("expected Heuristic");
-    };
-    assert_eq!(detector, "prefix_stripped");
-    assert!((confidence - 0.5).abs() < f32::EPSILON);
-    assert_eq!(edge.route_match, RouteMatch::PrefixStripped);
-    assert_eq!(edge.stripped_prefix.as_deref(), Some("/api"));
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "rule 3 prefix tolerance must not produce a bind: {binds:?}",
+        binds = out.binds
+    );
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out
+        .index
+        .consumers
+        .get(&call_id)
+        .expect("consumer resolution");
+    match &resolution.target {
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service,
+        }) => {
+            assert_eq!(
+                target_service.as_ref().map(|s| &s.0),
+                Some(&"orders".to_string()),
+                "rule 3 keeps the known target service on the unresolved verdict"
+            );
+        }
+        other => panic!("expected Unresolved/NoRouteInService, got {other:?}"),
+    }
+    assert!(resolution.bound_endpoints.is_empty());
 }
 
 #[test]
@@ -977,6 +990,70 @@ fn run_returns_the_join_output_struct() {
     // shape is sound.
     assert!(out.binds.is_empty());
     let _ = EndpointId::clone;
+}
+
+#[test]
+fn rule3_prefix_stripped_match_leaves_consumer_unresolved_with_could_match() {
+    // Bug C. The consumer template `/v1/api/orders/{}` (3 segments)
+    // does not direct-match the provider `/api/orders/{}` (2
+    // segments). §7.4 prefix tolerance strips `/v1` and matches, but
+    // rule 3 must NOT bind: the consumer is unresolved (the prefix
+    // is a hint, not a contract), and `diff::could_match` is the
+    // channel that surfaces orders as a candidate.
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "get_order",
+        10,
+        HttpMethod::Get,
+        "/api/orders/{}",
+    );
+    let c = consumer_node(
+        "billing",
+        "src/billing.py",
+        "build_invoice",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/v1/api/orders/{}"),
+        ),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    let cfg = default_config();
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
+    // The consumer must be Unresolved, NOT a PrefixStripped bind.
+    assert!(
+        out.binds.is_empty(),
+        "rule 3 prefix tolerance must not produce a bind: {binds:?}",
+        binds = out.binds
+    );
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out
+        .index
+        .consumers
+        .get(&call_id)
+        .expect("consumer resolution");
+    match &resolution.target {
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service,
+        }) => {
+            assert_eq!(
+                target_service.as_ref().map(|s| &s.0),
+                Some(&"orders".to_string()),
+                "rule 3 keeps the known target service on the unresolved verdict"
+            );
+        }
+        other => panic!("expected Unresolved/NoRouteInService, got {other:?}"),
+    }
+    assert!(
+        resolution.bound_endpoints.is_empty(),
+        "unresolved consumer must carry no bound_endpoints: {:?}",
+        resolution.bound_endpoints
+    );
 }
 
 #[test]

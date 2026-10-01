@@ -1364,6 +1364,35 @@ fn could_match_accepts_unresolved_with_matching_target() {
     assert!(could_match(&key, &target, &head));
 }
 
+// Bug C: rule-3 prefix tolerance must surface the orders endpoint
+// as a could-match candidate even when the consumer's
+// `target_service` is known (`Some(orders)`). §7.4 prefix tolerance
+// strips `/v1` from `/v1/api/orders/{}`, leaving `/api/orders/{}`,
+// which direct-matches the provider. The consumer stays
+// `Unresolved` (rule 3 must not bind via prefix strip); the
+// endpoint is a `could_match` candidate.
+#[test]
+fn could_match_accepts_prefix_stripped_template_with_known_target_service() {
+    let call = id("billing", "HttpClientCall", "src/b.py", "build_invoice", 1);
+    let mut head = ContractSurface::default();
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service: Some(svc("orders")),
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let key = consumer_key_for_call(&call, http_key(HttpMethod::Get, "/v1/api/orders/{}"));
+    head.consumers.insert(key.clone(), consumer_def);
+    let target = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    assert!(
+        could_match(&key, &target, &head),
+        "rule-3 prefix-stripped consumer must surface orders as a could-match candidate"
+    );
+}
+
 #[test]
 fn could_match_accepts_provider_any_method() {
     let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);

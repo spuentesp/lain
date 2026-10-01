@@ -947,6 +947,25 @@ fn match_one_service(
             reads_complete: consumer.reads_complete,
         },
         Some((key, detail)) => {
+            // Bug C: rule-3 prefix tolerance is a could-match hint,
+            // not a bind. The consumer stays Unresolved with the
+            // known target service; `diff::could_match` surfaces the
+            // candidate endpoint from the template prefix-strip.
+            // Direct matches (no `stripped_prefix`) still bind as
+            // before. Rule 6 keeps its existing suppressor at
+            // `best_provider_for_in`.
+            if detail.kind == RouteMatch::PrefixStripped {
+                return ConsumerResolution {
+                    call_id: call_id.clone(),
+                    service: own_service.clone(),
+                    target: Some(ConsumerTarget::Unresolved {
+                        reason: UnresolvedReason::NoRouteInService,
+                        target_service: Some(target_service.clone()),
+                    }),
+                    bound_endpoints: Vec::new(),
+                    reads_complete: consumer.reads_complete,
+                };
+            }
             let provider = provider_node_id(endpoints, &target_service, &key);
             let (provenance, confidence) = provenance_for_detail(&detail, consumer);
             // The resolution carries the same provenance as the
