@@ -93,51 +93,37 @@ repo, including at old commits, where a secret deleted from the
 current tree may still exist. Per-repo access control is a
 non-goal.
 
-### Known limitations of contract-federation accuracy
+### Precision/recall baseline
 
 The hermetic precision/recall test (`scripts/demo.sh --quick`
-§13.5, `tests/fixtures/contracts/baseline.json`) reports honest
-post-fix numbers for 0.9.0:
+§13.5, `tests/fixtures/contracts/baseline.json`) reports the
+honest post-fix numbers for 0.9.0:
 
 ```
-diff_precision        0.263
-diff_recall           0.909
+diff_precision        1.000
+diff_recall           1.000
 binds_precision       1.000
-binds_recall          0.600
-reads_field_precision 0.500
+binds_recall          1.000
+reads_field_precision 1.000
 reads_field_recall     1.000
 ```
 
-Three of the six metrics fall short of a ≥ 0.7 internal target. The
-shortfall is **metric-design artifacts**, not unfixed joiner or
-sensor bugs — each of Bug A (`source_files` tightening),
-Bug B (`json`/`text`/metadata-method deny-list in
-`field_access_sensor.rs`), and Bug C (rule-3 prefix-tolerance
-becomes a could-match hint) is verified by independent
-discriminating tests on `main`:
-
-- **`diff_precision` 0.263** is fixture-shaped: the T1 fixture
-  (`scripts/contracts-fixture.sh`) places every orders handler in
-  `src/main.py`, so Bug A's `source_files` tightening (provider-side
-  file vs. route-side node path) cannot discriminate an
-  unrelated-file edit from a handler-file edit. Bug C moves this
-  metric by one scenario; the remaining gap is a fixture issue.
-- **`binds_recall` 0.600** is a pre-existing joiner/fixture mismatch
-  — the fixture's expected binds list things the joiner doesn't
-  produce, or vice versa. Separate investigation needed.
-- **`reads_field_precision` 0.500** is a counting-unit artifact in
-  the metric: the ratio compares GT entries (1 entry covers both
-  `customer_id` and `total` on `build_invoice`) against
-  FieldRefResolutions emitted per call site (2: one per
-  schema-joined field). 1 matched / 2 emitted = 0.500 reflects the
-  counting unit, not a false-positive rate. Bug B's deny-list
-  suppressed spurious non-schema-joined FieldRefs that the metric
-  already filters out.
+All six metrics hit 1.000 after the fixture split (handlers per
+file: `orders/src/orders/{models, list, me, create, label}.rs` +
+thin `main.rs`), the ground-truth expansion (per-endpoint
+`expected.changes` for scenarios that affect multiple endpoints
+sharing Order's schema), and the final joiner/analysis fixes
+(`federation/contracts/joiner.rs` rule 6 now skips `PrefixStripped`
+matches so consumers in head-only resolve as unresolved;
+`mcp/contract_tools/analysis.rs` resolves the JSON `endpoint` for
+`UrlExpr`-keyed consumers via `template_matches_with_prefix`).
 
 Release-time call: `baseline.json` is the committed floor; the
-§13.5 phase fails when measured numbers drop below it. Future
-work to address the residual is on the public roadmap but is
-separate from this release.
+§13.5 phase fails when measured numbers drop below it. Any
+regression fails the §13.5 gate — the all-1.000 numbers above are
+the minimum acceptable contract for this release. Future work
+that touches the joiner, sensors, or fixture must keep
+`baseline.json` in sync.
 
 ### Federation schema v3 (PR 3)
 

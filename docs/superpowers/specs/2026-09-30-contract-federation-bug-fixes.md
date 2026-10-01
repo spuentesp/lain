@@ -342,3 +342,19 @@ JSON `endpoint` for `UrlExpr`-keyed consumers via
 `endpoint.service/key` instead of the `http:UNKNOWN` placeholder.
 
 The metric is now an honest measurement at 1.0 across the board.
+
+**Spec self-correction (added post-`21f4b071`).** The
+"Cross-cutting concerns → No schema version bumps" section above
+was true at commit `57cc5ea8` (Bug C) but is no longer accurate
+in full: the final rule-6 fix in `21f4b071` also changed the
+joiner (rule 6 skips `PrefixStripped`), which per §8.3 alters the
+per-repo graph shape and therefore requires `CONTRACT_ANALYZER_REV`
+to bump and `tests/fixtures/contracts/analyzer_digest.txt` to be
+regenerated. The constant is now 2 (was 1); the committed digest
+matches the post-rule-6 sensor/normalizer/joiner output. No
+`FEDERATION_GRAPH_VERSION` or `PATH_FORMAT_VERSION` change was
+needed — the `Binds`/`ReadsField` edges are still structurally the
+same shape, only the joiner's `ConsumerResolution` outcome for a
+`PrefixStripped`-only consumer changed from `Binds(0.6)` to
+`Unresolved { reason: NoMatch }` (see `federation/contracts/joiner.rs`
+rule 6).
