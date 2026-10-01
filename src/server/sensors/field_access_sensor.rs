@@ -90,6 +90,25 @@ const RESPONSE_METHOD_DENYLIST: &[&str] = &[
     "formData",
     "status",
     "redirected",
+    // Go body decoding: `json.NewDecoder(...).Decode(&v)` is the
+    // closest Go analog to `r.json()` — it consumes the response,
+    // not a payload field. `resp.Body.Close()` and the metadata
+    // surface (`resp.StatusCode`, `resp.Header`, `resp.Body`) are
+    // response metadata, not payload fields.
+    // `decode` covers Python bytes' `.decode()` too (bytes → str is
+    // not a payload read).
+    "decode",
+    "Decode",
+    "Close",
+    "Body",
+    "StatusCode",
+    "Status",
+    "Header",
+    "Proto",
+    "Request",
+    "TLS",
+    "Trailer",
+    "ContentLength",
 ];
 
 // ─── `SensorOwner` extension ────────────────────────────────────
@@ -277,6 +296,8 @@ pub enum Lang {
     TsJs,
     Ts,
     Tsx,
+    Rust,
+    Go,
 }
 
 /// Language for a source path by extension; `None` for files this
@@ -288,8 +309,50 @@ fn lang_for_path(path: &str) -> Option<Lang> {
         "ts" => Some(Lang::Ts),
         "tsx" => Some(Lang::Tsx),
         "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
+        "rs" => Some(Lang::Rust),
+        "go" => Some(Lang::Go),
         _ => None,
     }
+}
+
+// ─── Cross-language AST helpers (Rust + Go) ───────────────────
+//
+// `recv_node` finds the receiver of an attribute-like access across
+// languages: Python/TS use `object`, Rust uses `value`, Go uses
+// `operand`. `attr_node` finds the attribute name: TS uses
+// `property`, Python uses `attribute`, Rust uses a bare
+// `field_identifier` child, Go uses a bare `field_identifier` child.
+
+fn recv_node(node: Node) -> Option<Node> {
+    if let Some(a) = node.child_by_field_name("object") {
+        return Some(a);
+    }
+    if let Some(a) = node.child_by_field_name("operand") {
+        return Some(a);
+    }
+    if let Some(a) = node.child_by_field_name("value") {
+        return Some(a);
+    }
+    None
+}
+
+fn attr_node(node: Node) -> Option<Node> {
+    if let Some(a) = node.child_by_field_name("attribute") {
+        return Some(a);
+    }
+    if let Some(a) = node.child_by_field_name("property") {
+        return Some(a);
+    }
+    if let Some(a) = node.child_by_field_name("field") {
+        return Some(a);
+    }
+    let mut cursor = node.walk();
+    for c in node.named_children(&mut cursor) {
+        if matches!(c.kind(), "field_identifier" | "property_identifier") {
+            return Some(c);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Default)]
@@ -400,6 +463,8 @@ fn parse(lang: Lang, src: &str) -> Option<Tree> {
         Lang::TsJs => tree_sitter_javascript::LANGUAGE.into(),
         Lang::Ts => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
+        Lang::Go => tree_sitter_go::LANGUAGE.into(),
     };
     parser.set_language(&grammar).ok()?;
     parser.parse(src, None)
@@ -569,6 +634,8 @@ fn walk<'a>(
         Lang::TsJs | Lang::Ts | Lang::Tsx => {
             handle_tsjs_node(node, src, bound, reads, escapes, file_path, line, frame)
         }
+        Lang::Rust => handle_rust_node(node, src, bound, reads, escapes, file_path, line, frame),
+        Lang::Go => handle_go_node(node, src, bound, reads, escapes, file_path, line, frame),
     }
 }
 
@@ -1025,6 +1092,12 @@ fn handle_subscript<'a>(
         node.child_by_field_name("index"),
     ) {
         (v, i)
+    } else if let (Some(v), Some(i)) = (
+        // Go's `index_expression` uses `operand` + `index`.
+        node.child_by_field_name("operand"),
+        node.child_by_field_name("index"),
+    ) {
+        (v, i)
     } else {
         // Fallback: positional children.
         let mut cursor = node.walk();
@@ -1082,22 +1155,26 @@ fn handle_attribute<'a>(
     // identifier (named leftmost). Multi-level chains like `r.json()`
     // are handled in `chain_unwrap_call` instead. Python `attribute`
     // uses positional children; TS `member_expression` uses fields.
-    let (value, attr) = match (
-        node.child_by_field_name("object"),
-        node.child_by_field_name("attribute")
-            .or_else(|| node.child_by_field_name("property")),
-    ) {
+    let (value, attr) = match (recv_node(node), attr_node(node)) {
         (Some(v), Some(a)) => (v, a),
         _ => {
-            let mut cursor = node.walk();
-            let named: Vec<Node> = node.named_children(&mut cursor).collect();
-            let Some(v) = named.first().copied() else {
-                return;
-            };
-            let Some(a) = named.get(1).copied() else {
-                return;
-            };
-            (v, a)
+            // Try Go's `operand` + `field`, then positional.
+            if let (Some(v), Some(a)) = (
+                node.child_by_field_name("operand"),
+                node.child_by_field_name("field"),
+            ) {
+                (v, a)
+            } else {
+                let mut cursor = node.walk();
+                let named: Vec<Node> = node.named_children(&mut cursor).collect();
+                let Some(v) = named.first().copied() else {
+                    return;
+                };
+                let Some(a) = named.get(1).copied() else {
+                    return;
+                };
+                (v, a)
+            }
         }
     };
     let Some(value_text) = value.utf8_text(src).ok() else {
@@ -1837,6 +1914,432 @@ fn handle_tsjs_object_pattern(
     }
 }
 
+// ─── Rust walker ──────────────────────────────────────────────
+//
+// Tree-sitter Rust node shapes the walker dispatches on:
+//   `let_declaration` — `let x = expr;` (LHS is `pattern`/`identifier`,
+//       RHS is the assigned expression). When `expr` is a known
+//       outbound client call the LHS is bound to the response (rule 1);
+//       when it's an `x.json()` / `x.text()` / `.json().await` chain,
+//       the LHS rebinds to the receiver's path (rule 2); sub-paths
+//       and rebinds via `chain_unwrap_subscript_or_attr` follow rule 3.
+//   `assignment_expression` — `x = expr;` (rebind).
+//   `call_expression` — `client.get(url)` / `x.json()` /
+//       `x.text()`. The body of `client.get(...)` is a
+//       `field_expression`. The serialization / spread escape rules
+//       (e.g. `serde_json::to_string(&x)`) match the same shapes as
+//       Python.
+//   `field_expression` — `x.field`. The denylist suppresses
+//       metadata fields (`status`, `headers`, etc.); otherwise emit a
+//       `FieldRef`.
+//   `index_expression` — `x[0]` / `x["k"]`. Same as `field_index`
+//       but with bracket syntax.
+
+#[allow(clippy::too_many_arguments)]
+fn handle_rust_node(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    match node.kind() {
+        "let_declaration" | "assignment_expression" => {
+            handle_rust_assignment(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        "return_expression" | "return" => handle_rust_return(node, src, bound, escapes, frame),
+        "call_expression" => handle_rust_call(node, src, bound, reads, escapes, file_path, line),
+        "index_expression" => handle_subscript(node, src, bound, reads, escapes, file_path, line),
+        "field_expression" => handle_attribute(node, src, bound, reads, escapes, file_path, line),
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_rust_assignment(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    // `let_declaration` / `assignment_expression` LHS+RHS.
+    let (left, right) = match (
+        node.child_by_field_name("pattern")
+            .or_else(|| node.child_by_field_name("left")),
+        node.child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("right")),
+    ) {
+        (Some(l), Some(r)) => (l, r),
+        _ => {
+            let mut cursor = node.walk();
+            let named: Vec<Node> = node.named_children(&mut cursor).collect();
+            let Some(l) = named.first().copied() else {
+                return;
+            };
+            let Some(r) = named.get(1).copied() else {
+                return;
+            };
+            (l, r)
+        }
+    };
+    // Storing into a container (attribute / index) flips the escape
+    // flag — same rule as Python.
+    if matches!(left.kind(), "field_expression" | "index_expression")
+        && expression_uses_bound(right, src, bound)
+    {
+        escapes.insert(Escape::Stored);
+        return;
+    }
+    // Rule 1: `let x = <client call>` binds x.
+    if is_client_call_like(right, src, bound, frame) {
+        bind_lhs(left, src, &JsonPath(Vec::new()), bound);
+        return;
+    }
+    // Rule 2: rebind via response method chain.
+    if let Some((source_name, new_path)) = chain_unwrap_call(right, src, bound) {
+        bind_lhs(left, src, &new_path, bound);
+        let _ = (source_name, reads, escapes, file_path, line);
+        return;
+    }
+    // `let y = x.data` — attribute rebind.
+    if let Some(prefix) = chain_unwrap_dot_data(right, src, bound) {
+        bind_lhs(left, src, &prefix, bound);
+        return;
+    }
+    // Rule 3: sub-path bind.
+    if let Some((_src_name, new_path, _, key_ok)) =
+        chain_unwrap_subscript_or_attr(right, src, bound)
+    {
+        bind_lhs(left, src, &new_path, bound);
+        if !key_ok {
+            escapes.insert(Escape::Stored);
+        }
+        return;
+    }
+    // Rule 4: DTO wrappers.
+    if let Some(source_name) = chain_unwrap_dto_call(right, src, bound) {
+        if let Some(path) = bound.get(&source_name).cloned() {
+            bind_lhs(left, src, &path, bound);
+            return;
+        }
+    }
+    let _ = (file_path, line);
+}
+
+fn handle_rust_return(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    escapes: &mut BTreeSet<Escape>,
+    frame: FrameCtx<'_>,
+) {
+    if !frame.is_caller_of_s {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if returns_bound_identifier(child, src, bound) {
+            escapes.insert(Escape::Returned);
+        }
+    }
+}
+
+fn handle_rust_call(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    _reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    _file_path: &str,
+    _line: u32,
+) {
+    // Spread / serialization detection: `serde_json::to_string(&x)`,
+    // `format!("{:?}", x)` etc. We piggy-back on Python's
+    // `for_each_arg` helper which already accepts `call_expression`
+    // nodes. The receiver-of-method shape (`o.to_string()`,
+    // `o.dump()`) is detected the same way.
+    let function = node.child_by_field_name("function");
+    let (mut func_name, mut receiver) = (None::<String>, None::<String>);
+    if let Some(func) = function {
+        match func.kind() {
+            "identifier" => {
+                func_name = func.utf8_text(src).ok().map(|s| s.to_string());
+            }
+            "field_expression" | "selector_expression" | "attribute" | "member_expression" => {
+                let recv = func
+                    .child_by_field_name("object")
+                    .or_else(|| func.child_by_field_name("operand"));
+                let attr = func
+                    .child_by_field_name("field")
+                    .or_else(|| func.child_by_field_name("attribute"))
+                    .or_else(|| func.child_by_field_name("property"));
+                if let Some(a) = attr {
+                    func_name = a.utf8_text(src).ok().map(|s| s.to_string());
+                }
+                if let Some(r) = recv {
+                    receiver = r.utf8_text(src).ok().map(|s| s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(name) = func_name {
+        // Spread: `vec![…]` / `btreemap![…]` are macro forms. Treat
+        // any bare `<recv>.collect()` / `.into_iter()` as a spread
+        // candidate when a bound identifier is the source.
+        if matches!(
+            name.as_str(),
+            "to_string" | "to_json" | "to_vec" | "into_iter" | "collect"
+        ) {
+            for_each_arg(src, node, |value_text| {
+                if bound.contains_key(value_text) {
+                    escapes.insert(Escape::Spread);
+                }
+            });
+        }
+        // Serialization: `serde_json::to_string(&x)`,
+        // `serde_json::to_string_pretty(&x)`.
+        let is_serialize = matches!(
+            name.as_str(),
+            "to_string" | "to_string_pretty" | "to_json" | "to_json_value" | "to_bytes"
+        ) || matches!(receiver.as_deref(), Some("serde_json") | Some("json"))
+            && matches!(name.as_str(), "to_string" | "to_vec" | "to_writer");
+        if is_serialize {
+            for_each_arg(src, node, |value_text| {
+                if bound.contains_key(value_text) {
+                    escapes.insert(Escape::Serialized);
+                }
+            });
+        }
+    }
+}
+
+// ─── Go walker ───────────────────────────────────────────────
+//
+// Tree-sitter Go node shapes:
+//   `short_var_declaration` — `x, _ := expr;`. The LHS is an
+//       `expression_list` of identifiers; the RHS is the value. We
+//       bind the first identifier (rule 1 / 2 / 3).
+//   `assignment_statement` — `x = expr;` (rebind). Same shape as
+//       Python's `assignment`.
+//   `var_declaration` — `var x T = expr`. Treat as a binding: the
+//       `var_spec` carries `name` and `value`.
+//   `call_expression` — `client.Do(req)` / `http.Get(url)`. The
+//       function is a `selector_expression` (operand + field).
+//   `selector_expression` — `x.field`. Receiver is `operand`, name
+//       is `field` (NOT `object`/`property`).
+//   `index_expression` — `x[0]`. Receiver is `operand`, key is
+//       `index`.
+
+#[allow(clippy::too_many_arguments)]
+fn handle_go_node(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    match node.kind() {
+        "short_var_declaration" | "assignment_statement" => {
+            handle_go_assignment(node, src, bound, reads, escapes, file_path, line, frame)
+        }
+        "var_declaration" => handle_go_var_decl(node, src, bound),
+        "return_statement" => handle_go_return(node, src, bound, escapes, frame),
+        "call_expression" => handle_go_call(node, src, bound, reads, escapes, file_path, line),
+        "index_expression" => handle_subscript(node, src, bound, reads, escapes, file_path, line),
+        "selector_expression" => {
+            handle_attribute(node, src, bound, reads, escapes, file_path, line)
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_go_assignment(
+    node: Node,
+    src: &[u8],
+    bound: &mut BTreeMap<String, JsonPath>,
+    reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    file_path: &str,
+    line: u32,
+    frame: FrameCtx<'_>,
+) {
+    // Go's LHS is an `expression_list` (a `short_var_declaration` can
+    // bind multiple names — `x, _ := ...`); the RHS is also an
+    // `expression_list` but only the first RHS is the value we care
+    // about for the first LHS binding. We extract the LHS's first
+    // identifier and the RHS's first expression.
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.named_children(&mut cursor).collect();
+    // Skip `:=` or `=` — it's an unnamed node, so positional names are
+    // LHS expression_list, RHS expression_list.
+    let lhs_list = children.iter().find(|c| c.kind() == "expression_list");
+    let rhs_list = children
+        .iter()
+        .rev()
+        .find(|c| c.kind() == "expression_list");
+    let (lhs_list, rhs_list) = match (lhs_list, rhs_list) {
+        (Some(l), Some(r)) if !std::ptr::eq(l, r) => (*l, *r),
+        _ => return,
+    };
+    let mut lcursor = lhs_list.walk();
+    let lhs = match lhs_list.named_children(&mut lcursor).next() {
+        Some(n) => n,
+        None => return,
+    };
+    let mut rcursor = rhs_list.walk();
+    let right = match rhs_list.named_children(&mut rcursor).next() {
+        Some(n) => n,
+        None => return,
+    };
+    // Rule 1: bind the LHS if the RHS is a client call.
+    if is_client_call_like(right, src, bound, frame) {
+        bind_lhs(lhs, src, &JsonPath(Vec::new()), bound);
+        return;
+    }
+    // Rule 2: rebind via response method chain.
+    if let Some((_, new_path)) = chain_unwrap_call(right, src, bound) {
+        bind_lhs(lhs, src, &new_path, bound);
+        let _ = (reads, escapes, file_path, line);
+        return;
+    }
+    // `y = x.data` attribute rebind (Go rarely has this, but keep parity).
+    if let Some(prefix) = chain_unwrap_dot_data(right, src, bound) {
+        bind_lhs(lhs, src, &prefix, bound);
+        return;
+    }
+    // Rule 3: sub-path bind.
+    if let Some((_, new_path, _, key_ok)) = chain_unwrap_subscript_or_attr(right, src, bound) {
+        bind_lhs(lhs, src, &new_path, bound);
+        if !key_ok {
+            escapes.insert(Escape::Stored);
+        }
+        return;
+    }
+    // Rule 4: DTO wrappers — `json.Unmarshal(body, &v)` rebinds v.
+    if let Some(source_name) = chain_unwrap_dto_call(right, src, bound) {
+        if let Some(path) = bound.get(&source_name).cloned() {
+            bind_lhs(lhs, src, &path, bound);
+            return;
+        }
+    }
+    let _ = (file_path, line);
+}
+
+fn handle_go_var_decl(node: Node, src: &[u8], _bound: &mut BTreeMap<String, JsonPath>) {
+    // `var v SomeStruct` / `var v = expr`. The `var_spec` child has
+    // `name` and `value` (when initialized). Without a value, the
+    // binding doesn't take a step.
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "var_spec" {
+            continue;
+        }
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(value) = child.child_by_field_name("value") else {
+            continue;
+        };
+        // No rule-1 client seeding here (no `frame`); `var x = …`
+        // without an explicit client call doesn't establish a binding
+        // we can chase — leave `bound` unchanged.
+        let _ = (&src, &name_node, &value);
+    }
+}
+
+fn handle_go_return(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    escapes: &mut BTreeSet<Escape>,
+    frame: FrameCtx<'_>,
+) {
+    if !frame.is_caller_of_s {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if returns_bound_identifier(child, src, bound) {
+            escapes.insert(Escape::Returned);
+        }
+    }
+}
+
+fn handle_go_call(
+    node: Node,
+    src: &[u8],
+    bound: &BTreeMap<String, JsonPath>,
+    _reads: &mut Vec<FieldRead>,
+    escapes: &mut BTreeSet<Escape>,
+    _file_path: &str,
+    _line: u32,
+) {
+    let function = node.child_by_field_name("function");
+    let (mut func_name, mut receiver) = (None::<String>, None::<String>);
+    if let Some(func) = function {
+        match func.kind() {
+            "identifier" => {
+                func_name = func.utf8_text(src).ok().map(|s| s.to_string());
+            }
+            "selector_expression" | "field_expression" | "attribute" | "member_expression" => {
+                let recv = func
+                    .child_by_field_name("operand")
+                    .or_else(|| func.child_by_field_name("object"));
+                let attr = func
+                    .child_by_field_name("field")
+                    .or_else(|| func.child_by_field_name("attribute"))
+                    .or_else(|| func.child_by_field_name("property"));
+                if let Some(a) = attr {
+                    func_name = a.utf8_text(src).ok().map(|s| s.to_string());
+                }
+                if let Some(r) = recv {
+                    receiver = r.utf8_text(src).ok().map(|s| s.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(name) = func_name {
+        // Spread: any value-consuming operation on a bound identifier
+        // (e.g. `append(bound, x)`) — conservative.
+        if matches!(
+            name.as_str(),
+            "append" | "copy" | "Marshal" | "MarshalIndent"
+        ) {
+            for_each_arg(src, node, |value_text| {
+                if bound.contains_key(value_text) {
+                    escapes.insert(Escape::Serialized);
+                }
+            });
+        }
+        // Serialization: `json.Marshal(x)`, `encoding/json`'s
+        // `Marshal`. Receiver form `o.Marshal()` is uncommon in stdlib
+        // — the receiver would be a Marshaler; conservative.
+        let is_serialize = matches!(name.as_str(), "Marshal" | "MarshalIndent" | "Encode")
+            || matches!(receiver.as_deref(), Some("json") | Some("encoding"))
+                && matches!(name.as_str(), "Marshal" | "NewEncoder");
+        if is_serialize {
+            for_each_arg(src, node, |value_text| {
+                if bound.contains_key(value_text) {
+                    escapes.insert(Escape::Serialized);
+                }
+            });
+        }
+    }
+}
+
 // ─── Chain unwrappers (rules 2, 3, 4) ───────────────────────────
 
 fn chain_unwrap_call<'a>(
@@ -1859,14 +2362,21 @@ fn chain_unwrap_call<'a>(
     }
     if kind == "call" || kind == "call_expression" {
         let function = node.child_by_field_name("function")?;
-        if function.kind() == "attribute" || function.kind() == "member_expression" {
-            let recv = function.child_by_field_name("object")?;
-            let attr = function
-                .child_by_field_name("property")
-                .or_else(|| function.child_by_field_name("attribute"))?;
+        // Rust: `client.get(url).json()` — function is a
+        // `field_expression`; Go: `http.Get(url)` is a
+        // `selector_expression`; both carry a receiver + method.
+        if matches!(
+            function.kind(),
+            "attribute" | "member_expression" | "field_expression" | "selector_expression"
+        ) {
+            let recv = recv_node(function)?;
+            let attr = attr_node(function)?;
             let recv_text = recv.utf8_text(src).ok()?;
             let attr_text = attr.utf8_text(src).ok()?;
-            if matches!(attr_text, "json" | "data" | "body" | "text") {
+            // Rule 2 rebind methods. Go's `Decode` is included so
+            // `json.NewDecoder(r).Decode(&v)` binds v to r's path
+            // — the Go analog of `r.json()` rebinding.
+            if matches!(attr_text, "json" | "data" | "body" | "text" | "Decode") {
                 if let Some(prefix) = bound.get(recv_text) {
                     return Some((recv_text.to_string(), prefix.clone()));
                 }
@@ -1896,11 +2406,13 @@ fn chain_unwrap_dot_data<'a>(
         }
         return None;
     }
-    if kind == "attribute" || kind == "member_expression" {
-        let recv = node.child_by_field_name("object")?;
-        let attr = node
-            .child_by_field_name("attribute")
-            .or_else(|| node.child_by_field_name("property"))?;
+    if kind == "attribute"
+        || kind == "member_expression"
+        || kind == "field_expression"
+        || kind == "selector_expression"
+    {
+        let recv = recv_node(node)?;
+        let attr = attr_node(node)?;
         let attr_text = attr.utf8_text(src).ok()?;
         if !matches!(attr_text, "json" | "data" | "body") {
             return None;
@@ -1963,11 +2475,9 @@ fn chain_unwrap_subscript_or_attr(
             let key_ok = !key_text.is_empty();
             (recv_text, key_text, exact, key_ok)
         }
-        "attribute" | "member_expression" => {
-            let recv = node.child_by_field_name("object")?;
-            let attr = node
-                .child_by_field_name("attribute")
-                .or_else(|| node.child_by_field_name("property"))?;
+        "attribute" | "member_expression" | "field_expression" | "selector_expression" => {
+            let recv = recv_node(node)?;
+            let attr = attr_node(node)?;
             let recv_text = recv.utf8_text(src).ok()?;
             let attr_text = attr.utf8_text(src).ok()?;
             (recv_text, attr_text.to_string(), true, true)
@@ -1978,10 +2488,8 @@ fn chain_unwrap_subscript_or_attr(
             // forward that rebind path; otherwise fall back to a direct
             // bound lookup on `recv_text`.
             let function = node.child_by_field_name("function")?;
-            let recv = function.child_by_field_name("object")?;
-            let attr = function
-                .child_by_field_name("property")
-                .or_else(|| function.child_by_field_name("attribute"))?;
+            let recv = recv_node(function)?;
+            let attr = attr_node(function)?;
             let recv_text = recv.utf8_text(src).ok()?.to_string();
             let attr_text = attr.utf8_text(src).ok()?;
             if attr_text != "get" {
@@ -2041,10 +2549,14 @@ fn chain_unwrap_dto_call<'a>(
         let function = node.child_by_field_name("function")?;
         let func_text = function.utf8_text(src).ok()?;
         // `Dto.model_validate(x)` / `Dto.parse_obj(x)`.
-        if function.kind() == "attribute" || function.kind() == "member_expression" {
+        if matches!(
+            function.kind(),
+            "attribute" | "member_expression" | "field_expression" | "selector_expression"
+        ) {
             let attr = function
                 .child_by_field_name("property")
-                .or_else(|| function.child_by_field_name("attribute"))?;
+                .or_else(|| function.child_by_field_name("attribute"))
+                .or_else(|| function.child_by_field_name("field"))?;
             if let Ok(attr_text) = attr.utf8_text(src) {
                 if matches!(
                     attr_text,
@@ -2169,13 +2681,20 @@ fn is_client_call_like<'a>(
         None => return false,
     };
     let func_kind = function.kind();
-    if func_kind == "attribute" || func_kind == "member_expression" {
+    if matches!(
+        func_kind,
+        "attribute" | "member_expression" | "field_expression" | "selector_expression"
+    ) {
         if !frame.is_sender {
             // A scope frame's own member client call (another
             // sender's HTTP request) never seeds here.
             return false;
         }
-        if let Some(recv) = function.child_by_field_name("object") {
+        if let Some(recv) = function
+            .child_by_field_name("object")
+            .or_else(|| function.child_by_field_name("operand"))
+            .or_else(|| function.child_by_field_name("value"))
+        {
             let recv_in_bound = recv
                 .utf8_text(src)
                 .ok()
@@ -3254,6 +3773,8 @@ fn walk_with_metadata<'a>(
         Lang::TsJs | Lang::Ts | Lang::Tsx => {
             handle_tsjs_node(node, src, bound, reads, escapes, file_path, line, frame)
         }
+        Lang::Rust => handle_rust_node(node, src, bound, reads, escapes, file_path, line, frame),
+        Lang::Go => handle_go_node(node, src, bound, reads, escapes, file_path, line, frame),
     }
     // …then the interprocedural rules, so a precise rule-5 sub-path
     // binding overrides the rule-1 root bind on the same node.
@@ -3285,10 +3806,12 @@ fn called_function_name(value: Node, src: &[u8]) -> Option<String> {
     let function = inner.child_by_field_name("function")?;
     match function.kind() {
         "identifier" | "type_identifier" => function.utf8_text(src).ok().map(String::from),
-        "member_expression" | "attribute" => function
+        "member_expression" | "attribute" | "field_expression" | "selector_expression" => function
             .child_by_field_name("property")
             .or_else(|| function.child_by_field_name("attribute"))
+            .or_else(|| function.child_by_field_name("field"))
             .or_else(|| function.child_by_field_name("name"))
+            .or(Some(function).and_then(|f| attr_node(f)))
             .and_then(|n| n.utf8_text(src).ok().map(String::from)),
         _ => None,
     }
@@ -3310,14 +3833,22 @@ fn apply_rule5_tsjs<'a>(
     // `assignment_expression`; Python: `assignment`.
     if !matches!(
         node.kind(),
-        "variable_declarator" | "assignment_expression" | "assignment"
+        "variable_declarator"
+            | "assignment_expression"
+            | "assignment"
+            // Rust: `let body = …;`
+            | "let_declaration"
+            // Go: `x, _ := …;` / `x = …;`
+            | "short_var_declaration"
+            | "assignment_statement"
     ) {
         return;
     }
     // LHS / value, with Python's positional fallback.
     let lhs = node
         .child_by_field_name("name")
-        .or_else(|| node.child_by_field_name("left"));
+        .or_else(|| node.child_by_field_name("left"))
+        .or_else(|| node.child_by_field_name("pattern"));
     let value = node
         .child_by_field_name("value")
         .or_else(|| node.child_by_field_name("right"));
@@ -3369,21 +3900,19 @@ fn apply_rule6_tsjs<'a>(
     if node.kind() != "call_expression" && node.kind() != "call" {
         return;
     }
+    // For Go, `arguments` field is on `argument_list` — `arguments`
+    // is set by tree-sitter-go too.
     let function = match node.child_by_field_name("function") {
         Some(f) => f,
         None => return,
     };
     let called_name = match function.kind() {
         "identifier" => function.utf8_text(src).ok().map(|s| s.to_string()),
-        "member_expression" | "attribute" => function
-            .child_by_field_name("object")
-            .and_then(|_| {
-                function
-                    .child_by_field_name("property")
-                    .or_else(|| function.child_by_field_name("attribute"))
-                    .or_else(|| function.child_by_field_name("name"))
-            })
-            .and_then(|n| n.utf8_text(src).ok().map(|s| s.to_string())),
+        "member_expression" | "attribute" | "field_expression" | "selector_expression" => {
+            let _ = recv_node(function);
+            attr_node(function)
+        }
+        .and_then(|n| n.utf8_text(src).ok().map(|s| s.to_string())),
         _ => None,
     };
     let Some(called_name) = called_name else {
@@ -4857,5 +5386,276 @@ async function caller() {
                 "deny-listed attribute {key:?} must not emit a ReadsField: {reads:?}"
             );
         }
+    }
+
+    // ─── Rust walker tests (§6.5 PR 14) ────────────────────────
+
+    #[test]
+    fn rust_let_x_equal_call_binds_x_to_response_root() {
+        let src = "fn main() { let r = reqwest::get(\"http://x/api\").unwrap(); }\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Rust, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Rust,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "x.rs",
+        );
+        assert!(bound.contains_key("r"), "rule 1 must bind r: {bound:?}");
+        assert_eq!(bound.get("r").unwrap().0, Vec::<PathSegment>::new());
+    }
+
+    #[test]
+    fn rust_y_equal_x_json_rebinds_y_to_x_path() {
+        let src = "\
+async fn f() {
+    let r = reqwest::get(\"http://x/api\").unwrap();
+    let body = r.json().await;
+    let id = body.id;
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Rust, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Rust,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "x.rs",
+        );
+        assert!(bound.contains_key("body"), "rule 2 rebind: {bound:?}");
+        assert_eq!(bound.get("body").unwrap().0, Vec::<PathSegment>::new());
+        // The body.id read emits a FieldRef with chain "id"; the
+        // deny-list suppresses `json` so no spurious `json` chain.
+        assert!(
+            reads.iter().any(|r| r.chain.to_string() == "id"),
+            "body.id must emit FieldRef: {reads:?}"
+        );
+        let bad = reads
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "json"))
+            })
+            .count();
+        assert_eq!(bad, 0, "deny-list must suppress json: {reads:?}");
+    }
+
+    #[test]
+    fn rust_z_equal_x_dot_k_binds_z_to_subpath() {
+        let src = "\
+async fn f() {
+    let r = reqwest::get(\"http://x/api\").unwrap();
+    let body = r.json().await;
+    let id = body.customer_id;
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Rust, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Rust,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "x.rs",
+        );
+        assert!(bound.contains_key("id"));
+        assert_eq!(
+            bound.get("id").unwrap().to_string(),
+            "customer_id",
+            "rule 3 binds id to customer_id sub-path: {bound:?}"
+        );
+    }
+
+    #[test]
+    fn rust_status_and_headers_metadata_do_not_emit_field_ref() {
+        let src = "\
+async fn f() {
+    let r = reqwest::get(\"http://x/api\").unwrap();
+    let s = r.status();
+    let h = r.headers();
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Rust, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Rust,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "x.rs",
+        );
+        for key in ["status", "headers", "url"] {
+            let count = reads
+                .iter()
+                .filter(|r| {
+                    r.chain
+                        .0
+                        .iter()
+                        .any(|s| matches!(s, PathSegment::Name(n) if n == key))
+                })
+                .count();
+            assert_eq!(
+                count, 0,
+                "deny-listed method {key:?} must not emit a ReadsField: {reads:?}"
+            );
+        }
+    }
+
+    // ─── Go walker tests (§6.5 PR 14) ──────────────────────────
+
+    #[test]
+    fn go_resp_get_binds_resp_to_response_root() {
+        let src = "\
+package main
+
+func f() {
+    resp, _ := http.Get(\"http://x/api\")
+    _ = resp
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Go, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Go,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "x.go",
+        );
+        assert!(
+            bound.contains_key("resp"),
+            "rule 1 must bind resp: {bound:?}"
+        );
+        assert_eq!(bound.get("resp").unwrap().0, Vec::<PathSegment>::new());
+    }
+
+    #[test]
+    fn go_v_dot_field_records_a_read() {
+        // For v to be bound, the test seeds `v` directly. The brief
+        // notes `json.NewDecoder(...).Decode(&v)` as the Go analog of
+        // `r.json()` rebinding, but tracking through that chain would
+        // require resolving the freshly-built `*Decoder` — out of scope
+        // for v1. The denylist suppresses the metadata noise instead.
+        let src = "\
+package main
+
+func f() {
+    resp, _ := http.Get(\"http://x/api\")
+    var v SomeStruct
+    json.NewDecoder(resp.Body).Decode(&v)
+    _ = v.Field
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        // Seed `v` as if it were bound by Decode — the brief's
+        // intended semantic. The walker then walks the body and the
+        // `v.Field` read becomes a `FieldRef`.
+        bound.insert("v".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Go, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Go,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "x.go",
+        );
+        assert!(
+            reads.iter().any(|r| r.chain.to_string() == "Field"),
+            "v.Field must emit a FieldRef: {reads:?}"
+        );
+        // `Decode` is deny-listed — must NOT appear in any read chain.
+        let bad = reads
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "Decode"))
+            })
+            .count();
+        assert_eq!(bad, 0, "deny-listed Decode must suppress: {reads:?}");
+    }
+
+    #[test]
+    fn go_resp_status_code_and_header_get_do_not_emit_field_ref() {
+        let src = "\
+package main
+
+func f() {
+    resp, _ := http.Get(\"http://x/api\")
+    _ = resp.StatusCode
+    h := resp.Header.Get(\"X-Trace\")
+    _ = h
+}
+";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Go, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Go,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "x.go",
+        );
+        for key in ["StatusCode", "Get"] {
+            let count = reads
+                .iter()
+                .filter(|r| {
+                    r.chain
+                        .0
+                        .iter()
+                        .any(|s| matches!(s, PathSegment::Name(n) if n == key))
+                })
+                .count();
+            assert_eq!(
+                count, 0,
+                "deny-listed {key:?} must not emit a ReadsField: {reads:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lang_for_path_routes_rs_and_go() {
+        assert_eq!(lang_for_path("src/main.rs"), Some(Lang::Rust));
+        assert_eq!(lang_for_path("main.go"), Some(Lang::Go));
     }
 }

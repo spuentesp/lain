@@ -671,6 +671,20 @@ mod tests {
         }
     }
 
+    /// Echo routes use the same shape as Gin (`e.GET("/path", h)`);
+    /// the existing gin regex covers them.
+    #[test]
+    fn echo_routes_are_covered_by_the_gin_regex() {
+        for src in [
+            "e.GET(\"/api/users\", listUsers)\n",
+            "e.POST(\"/api/login\", authHandler)\n",
+        ] {
+            let r = scan_file_for_routes(std::path::Path::new("routes.go"), src);
+            assert_eq!(r.len(), 1, "echo route should be found in {src:?}: {r:?}");
+            assert!(r[0].method != HttpMethod::Any, "echo carries a verb: {r:?}");
+        }
+    }
+
     #[test]
     fn a_declaration_does_not_claim_a_distant_function() {
         let mut src = String::from("#[get(\"/api/users\")]\n");

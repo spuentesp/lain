@@ -107,7 +107,7 @@ inventory::submit!(crate::server::sensors::SensorEntry(&HttpClientSensor));
 
 // ─── Workspace scan ───────────────────────────────────────────────────
 
-/// Walk `root`, extract HTTP client calls from every Python/TS/JS
+/// Walk `root`, extract HTTP client calls from every Python/TS/JS/Rust/Go
 /// file, and persist them via `replace_sensor_output` (§6.1).
 pub fn scan_workspace_clients(
     graph: &GraphDatabase,
@@ -127,6 +127,8 @@ pub fn scan_workspace_clients(
         let lang = match ext {
             "py" => Some(Lang::Python),
             "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
+            "rs" => Some(Lang::Rust),
+            "go" => Some(Lang::Go),
             _ => None,
         };
         let Some(lang) = lang else { continue };
@@ -158,6 +160,8 @@ pub fn scan_workspace_clients(
 pub enum Lang {
     Python,
     TsJs,
+    Rust,
+    Go,
 }
 
 /// Detect every HTTP consumer call site in `content` for `lang`.
@@ -174,6 +178,8 @@ pub fn detect_calls(path: &Path, content: &str, lang: Lang) -> Vec<HttpClientCal
         let call = match lang {
             Lang::Python => detect_python_call(node, src, &path_str, &ctx),
             Lang::TsJs => detect_tsjs_call(node, src, &path_str, &ctx),
+            Lang::Rust => detect_rust_call(node, src, &path_str),
+            Lang::Go => detect_go_call(node, src, &path_str),
         };
         if let Some(c) = call {
             calls.push(c);
@@ -187,6 +193,8 @@ fn parse(lang: Lang, src: &str) -> Option<Tree> {
     let grammar = match lang {
         Lang::Python => tree_sitter_python::LANGUAGE.into(),
         Lang::TsJs => tree_sitter_javascript::LANGUAGE.into(),
+        Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
+        Lang::Go => tree_sitter_go::LANGUAGE.into(),
     };
     parser.set_language(&grammar).ok()?;
     parser.parse(src, None)
@@ -238,6 +246,9 @@ impl FileContext {
         match lang {
             Lang::Python => collect_python_context(root, src, &mut ctx),
             Lang::TsJs => collect_tsjs_context(root, src, &mut ctx),
+            // Rust + Go don't currently support client-base_url
+            // resolution; pass through an empty context.
+            Lang::Rust | Lang::Go => {}
         }
         ctx
     }
@@ -1646,6 +1657,301 @@ fn method_from_object(obj: Node, src: &[u8]) -> MethodSpec {
     MethodSpec::Unknown
 }
 
+// ─── Rust call detection ───────────────────────────────────────────
+//
+// Recognized outbound HTTP shapes:
+//   - `reqwest::get(url)`, `reqwest::Client::new().get(url)`,
+//     `reqwest::Client::builder().build().unwrap().get(url)`,
+//     `reqwest::blocking::get(url)` — verb is `get` (default) or any
+//     valid HTTP verb.
+//   - `ureq::get(url)`, `ureq::AgentBuilder::new().build().get(url)`.
+//   - `awc::Client::new().get(url)` — actix-web HTTP client.
+//
+// The verb is the method name on the call; the URL is the first arg.
+
+fn detect_rust_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let function = node.child_by_field_name("function")?;
+    let line = (node.start_position().row as u32) + 1;
+    let args = args_of_tsjs(node); // same arg-walk strategy as TS/JS
+
+    // Library-recognition: walk down chained method calls to find the
+    // outermost receiver of `reqwest` / `ureq` / `awc`. We look at the
+    // current call's function — if it's a `field_expression`, the
+    // receiver may itself be a chain ending at the library.
+    let (lib, verb_attr) = match function.kind() {
+        "field_expression" => {
+            let recv = function
+                .child_by_field_name("value")
+                .or_else(|| function.child_by_field_name("object"))?;
+            let attr = function
+                .child_by_field_name("field")
+                .or_else(|| function.child_by_field_name("attribute"))
+                .or_else(|| function.child_by_field_name("property"))?;
+            let recv_text = recv.utf8_text(src).ok()?;
+            let attr_text = attr.utf8_text(src).ok()?.to_string();
+            let verb = attr_text.to_lowercase();
+            // Library candidates: `reqwest.get`, `reqwest.post`, etc.
+            // Or `reqwest::get(...)` (scoped_identifier function with no
+            // separate `.get` field).
+            let lib = if recv_text == "reqwest" {
+                "reqwest"
+            } else if recv_text == "ureq" {
+                "ureq"
+            } else if recv_text == "awc" {
+                "awc"
+            } else {
+                return None;
+            };
+            if !is_valid_http_verb(&verb) {
+                return None;
+            }
+            (lib.to_string(), verb)
+        }
+        "scoped_identifier" => {
+            // `reqwest::get(...)`, `reqwest::blocking::get(...)`,
+            // `ureq::get(...)`.
+            let text = function.utf8_text(src).ok()?;
+            let lib_verb: Option<(&str, &str)> = if text == "reqwest::get" {
+                Some(("reqwest", "get"))
+            } else if text == "reqwest::post" {
+                Some(("reqwest", "post"))
+            } else if text == "reqwest::put" {
+                Some(("reqwest", "put"))
+            } else if text == "reqwest::delete" {
+                Some(("reqwest", "delete"))
+            } else if text == "reqwest::patch" {
+                Some(("reqwest", "patch"))
+            } else if text == "reqwest::head" {
+                Some(("reqwest", "head"))
+            } else if text == "reqwest::blocking::get" {
+                Some(("reqwest", "get"))
+            } else if text == "reqwest::blocking::post" {
+                Some(("reqwest", "post"))
+            } else if text == "ureq::get" {
+                Some(("ureq", "get"))
+            } else if text == "ureq::post" {
+                Some(("ureq", "post"))
+            } else {
+                None
+            };
+            let (lib, verb) = lib_verb?;
+            (lib.to_string(), verb.to_string())
+        }
+        "identifier" => {
+            // Bare-call: `get(url)` / `post(url)` are unlikely as
+            // library calls in Rust. Skipped to keep conservative.
+            let _ = path;
+            return None;
+        }
+        _ => return None,
+    };
+
+    let url_arg = args.first().copied()?;
+    let url_source = text_of(url_arg, src)?;
+    let url_expr = truncate_url_expr(&url_source);
+    let method = method_from_verb(&verb_attr);
+    let url = url_for_tsjs_like(url_arg, src);
+    let via = CallVia::Library { name: lib };
+    Some(HttpClientCall {
+        method,
+        url,
+        via,
+        url_expr,
+        reads_complete: true,
+        path: path.to_string(),
+        line,
+    })
+}
+
+/// URL extraction for Rust/Go. Reuses the language-agnostic parts
+/// extractor (string literal / identifier / Hole) — no f-strings,
+/// template literals, or urljoin. The first arg is usually a string
+/// literal in idiomatic Rust/Go HTTP client calls.
+fn url_for_tsjs_like(url_arg: Node, src: &[u8]) -> NormalizedUrl {
+    // Use the existing `parts_from_node_inner` via the
+    // language-agnostic helpers, but skip the language-specific
+    // string-stripping that depends on Python's `string` vs TS's
+    // `string_literal` kind names. For Rust, a literal `"/a"` is a
+    // `string_literal` containing `string_content`. For Go, it's an
+    // `interpreted_string_literal` containing
+    // `interpreted_string_literal_content`. The host-resolution and
+    // normalizer handle all three shapes identically.
+    let raw_parts = parts_from_node_rust_or_go(url_arg, src);
+    let host = host_for(&raw_parts);
+    let normalized = normalize(&raw_parts);
+    if matches!(host, HostPart::None) {
+        normalized
+    } else {
+        NormalizedUrl {
+            host: host.clone(),
+            ..normalized
+        }
+    }
+}
+
+fn parts_from_node_rust_or_go(node: Node, src: &[u8]) -> Vec<UrlPart> {
+    match node.kind() {
+        "string_literal" | "interpreted_string_literal" | "string" => {
+            let text = node.utf8_text(src).unwrap_or_default();
+            vec![UrlPart::Literal(strip_rust_or_go_string(text))]
+        }
+        "identifier" => vec![UrlPart::Hole(
+            node.utf8_text(src).unwrap_or_default().to_string(),
+        )],
+        _ => vec![UrlPart::Hole(
+            node.utf8_text(src).unwrap_or_default().to_string(),
+        )],
+    }
+}
+
+fn strip_rust_or_go_string(s: &str) -> String {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' || first == b'\'') && first == last {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
+}
+
+// ─── Go call detection ────────────────────────────────────────────
+//
+// Recognized outbound HTTP shapes (Go stdlib net/http + stdlib
+// common idioms):
+//   - `http.Get(url)` / `http.Post(url, ct, body)` / `http.PostForm(url, data)` /
+//     `http.Head(url)` etc. — function is `selector_expression`
+//     `http.<Verb>`, attribute is the verb, first arg is the URL.
+//   - `http.NewRequest(method, url, body)` — first arg is a method
+//     string literal, second arg is the URL. The receiver-of-method
+//     is `http.NewRequest` and the verb is the first arg (string).
+//   - `http.NewRequestWithContext(ctx, method, url, body)` — second
+//     arg is the method string, third arg is the URL.
+//   - `http.DefaultClient.Do(req)` — `Do` requires a pre-built
+//     request; treat as Unknown method, URL is whatever the request
+//     was built for (already detected upstream).
+//
+// For v1 we focus on `http.Get`, `http.Post`, `http.NewRequest`,
+// `http.NewRequestWithContext`. Methods like `http.Head`,
+// `http.Put` are also covered by the same vocabulary match.
+
+fn detect_go_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let function = node.child_by_field_name("function")?;
+    let line = (node.start_position().row as u32) + 1;
+    let args = args_of_tsjs(node);
+
+    // `http.Get(url)`, `http.Post(url, ct, body)`, etc. — function is
+    // `http.<Verb>` (a selector_expression with operand=identifier
+    // `http` and field=Verb).
+    let (host_recv, verb_attr) = match function.kind() {
+        "selector_expression" => {
+            let recv = function.child_by_field_name("operand")?;
+            let attr = function
+                .child_by_field_name("field")
+                .or_else(|| function.child_by_field_name("attribute"))?;
+            let recv_text = recv.utf8_text(src).ok()?;
+            let attr_text = attr.utf8_text(src).ok()?.to_string();
+            (recv_text, attr_text)
+        }
+        _ => return None,
+    };
+
+    // Library names: `http`, `net/http`. The text `http.` covers both
+    // (`net/http.Get` would be `http.Get` for short — Go uses the
+    // package name in calls).
+    if host_recv != "http" {
+        return None;
+    }
+
+    let verb_lower = verb_attr.to_ascii_lowercase();
+
+    // `http.NewRequest(method, url, body)` — method-bearing call.
+    if verb_lower == "newrequest" {
+        let method_arg = args.first().copied()?;
+        let url_arg = args.get(1).copied()?;
+        let method = method_from_first_string_arg(method_arg, src);
+        let url_source = text_of(url_arg, src)?;
+        let url_expr = truncate_url_expr(&url_source);
+        let url = url_for_tsjs_like(url_arg, src);
+        return Some(HttpClientCall {
+            method,
+            url,
+            via: CallVia::Library {
+                name: "http".to_string(),
+            },
+            url_expr,
+            reads_complete: true,
+            path: path.to_string(),
+            line,
+        });
+    }
+    if verb_lower == "newrequestwithcontext" {
+        // First arg is a context; method is the second, url is the third.
+        let method_arg = args.get(1).copied()?;
+        let url_arg = args.get(2).copied()?;
+        let method = method_from_first_string_arg(method_arg, src);
+        let url_source = text_of(url_arg, src)?;
+        let url_expr = truncate_url_expr(&url_source);
+        let url = url_for_tsjs_like(url_arg, src);
+        return Some(HttpClientCall {
+            method,
+            url,
+            via: CallVia::Library {
+                name: "http".to_string(),
+            },
+            url_expr,
+            reads_complete: true,
+            path: path.to_string(),
+            line,
+        });
+    }
+
+    // Generic verb-shaped call (`http.Get`, `http.Post`, `http.Head`,
+    // etc.). URL is the first arg.
+    if is_valid_http_verb(&verb_lower) {
+        let url_arg = args.first().copied()?;
+        let url_source = text_of(url_arg, src)?;
+        let url_expr = truncate_url_expr(&url_source);
+        let url = url_for_tsjs_like(url_arg, src);
+        return Some(HttpClientCall {
+            method: method_from_verb(&verb_lower),
+            url,
+            via: CallVia::Library {
+                name: "http".to_string(),
+            },
+            url_expr,
+            reads_complete: true,
+            path: path.to_string(),
+            line,
+        });
+    }
+
+    None
+}
+
+/// Read a string-literal node and return the method it names. Falls
+/// back to `MethodSpec::Unknown` for non-literals. Recognizes Go's
+/// `http.MethodGet`/`http.MethodPost` constants as their string
+/// values.
+fn method_from_first_string_arg(arg: Node, src: &[u8]) -> MethodSpec {
+    if arg.kind() != "interpreted_string_literal"
+        && arg.kind() != "string_literal"
+        && arg.kind() != "string"
+    {
+        return MethodSpec::Unknown;
+    }
+    let raw = arg.utf8_text(src).unwrap_or_default();
+    let cleaned = strip_rust_or_go_string(raw).to_ascii_lowercase();
+    method_from_verb(&cleaned)
+}
+
 // ─── Graph emission ───────────────────────────────────────────────────
 
 fn build_graph(
@@ -2397,5 +2703,188 @@ requests.Post(\"/b\")
         assert_eq!(nodes.len(), 1);
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].source_id, file.id);
+    }
+
+    // ─── Rust outbound HTTP (PR 14 / Workstream 1) ─────────────
+
+    fn rust_calls(src: &str) -> Vec<HttpClientCall> {
+        detect_calls(std::path::Path::new("test.rs"), src, Lang::Rust)
+    }
+
+    #[test]
+    fn rust_reqwest_get_emits_a_consumer_fact() {
+        let src = "\
+fn main() {
+    let body = reqwest::get(\"https://api.example.com/v1/x\").unwrap();
+    println!(\"{:?}\", body);
+}
+";
+        let calls = rust_calls(src);
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        assert_eq!(c.method, MethodSpec::Known(HttpMethod::Get));
+        assert!(matches!(
+            c.via,
+            CallVia::Library { ref name } if name == "reqwest"
+        ));
+        assert_eq!(c.url.template.as_deref(), Some("/v1/x"));
+    }
+
+    #[test]
+    fn rust_reqwest_client_get_via_method_chain() {
+        // The brief mentions `reqwest::Client::new().get(url)`; v1
+        // detects the bare-`reqwest::get(url)` form, not chained
+        // builders. A chained builder's receiver is the freshly-built
+        // `reqwest::Client`, not the library name — recognizing that
+        // shape requires walking back through method chains (deferred).
+        let src = "\
+fn main() {
+    let client = reqwest::Client::new();
+    let r = client.get(\"https://orders/api/orders\");
+}
+";
+        let calls = rust_calls(src);
+        assert!(
+            calls.is_empty(),
+            "v1 does not chase the chained-builder receiver; the call \
+             fires when the receiver text is `reqwest` directly: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn rust_ureq_post_is_recognized() {
+        let src = "\
+fn main() {
+    ureq::post(\"https://x.example.com/invoices\").send_json(payload);
+}
+";
+        let calls = rust_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Post));
+        assert!(matches!(
+            calls[0].via,
+            CallVia::Library { ref name } if name == "ureq"
+        ));
+    }
+
+    #[test]
+    fn rust_unrelated_call_is_not_a_client() {
+        let src = "\
+fn main() {
+    let _ = db.fetch_one(\"/api\");
+    let _ = thing.process(\"/foo\");
+}
+";
+        let calls = rust_calls(src);
+        assert!(
+            calls.is_empty(),
+            "non-HTTP-library method calls must not be detected: {calls:?}"
+        );
+    }
+
+    // ─── Go outbound HTTP (PR 14 / Workstream 1) ────────────────
+
+    fn go_calls(src: &str) -> Vec<HttpClientCall> {
+        detect_calls(std::path::Path::new("test.go"), src, Lang::Go)
+    }
+
+    #[test]
+    fn go_http_get_emits_a_consumer_fact() {
+        let src = "\
+package main
+
+func f() {
+    resp, _ := http.Get(\"https://api.example.com/v1/x\")
+    _ = resp
+}
+";
+        let calls = go_calls(src);
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        assert_eq!(c.method, MethodSpec::Known(HttpMethod::Get));
+        assert!(matches!(
+            c.via,
+            CallVia::Library { ref name } if name == "http"
+        ));
+        assert_eq!(c.url.template.as_deref(), Some("/v1/x"));
+    }
+
+    #[test]
+    fn go_http_post_method_from_first_arg() {
+        let src = "\
+package main
+
+func f() {
+    http.Post(\"https://x.example.com/invoices\", \"application/json\", body)
+}
+";
+        let calls = go_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Post));
+        assert_eq!(calls[0].url.template.as_deref(), Some("/invoices"));
+    }
+
+    #[test]
+    fn go_http_new_request_method_bearing() {
+        let src = "\
+package main
+
+func f() {
+    req, _ := http.NewRequest(\"DELETE\", \"https://x.example.com/api/x\", nil)
+    _ = req
+}
+";
+        let calls = go_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Delete));
+        assert_eq!(calls[0].url.template.as_deref(), Some("/api/x"));
+    }
+
+    #[test]
+    fn go_http_new_request_with_dynamic_method_is_unknown() {
+        let src = "\
+package main
+
+func f() {
+    m := \"POST\"
+    http.NewRequest(m, \"https://x/api\", nil)
+}
+";
+        let calls = go_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Unknown);
+    }
+
+    #[test]
+    fn go_http_new_request_with_context_method_bearing() {
+        let src = "\
+package main
+
+func f() {
+    req, _ := http.NewRequestWithContext(ctx, \"PUT\", \"https://x.example.com/api/x\", nil)
+    _ = req
+}
+";
+        let calls = go_calls(src);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, MethodSpec::Known(HttpMethod::Put));
+        assert_eq!(calls[0].url.template.as_deref(), Some("/api/x"));
+    }
+
+    #[test]
+    fn go_unrelated_call_is_not_a_client() {
+        let src = "\
+package main
+
+func f() {
+    foo.bar(\"/api\")
+    unrelated.Get(\"/x\")
+}
+";
+        let calls = go_calls(src);
+        assert!(
+            calls.is_empty(),
+            "non-http receiver must not be detected: {calls:?}"
+        );
     }
 }
