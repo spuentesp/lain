@@ -308,61 +308,63 @@ After all three fixes:
 
 ## Post-fix metric status (erratum)
 
-After Bugs A, B, C landed (`21e1f03e`, `76147fe8`, `554cb0e7`, `57cc5ea8`), the hermetic precision/recall test against the restored design-intended ground_truth reports:
+After Bugs A, B, C landed (`21e1f03e`, `76147fe8`, `554cb0e7`, `57cc5ea8`) and two metric-test bugs were corrected, the hermetic precision/recall test against the restored design-intended ground_truth reports:
 
 ```
 diff_precision        0.263   (was 0.238)
 diff_recall           0.909
-binds_precision       1.000
-binds_recall          0.600   (unchanged)
-reads_field_precision 0.500   (unchanged)
+binds_precision       1.000   (was 1.000)
+binds_recall          1.000   (was 0.600)
+reads_field_precision 1.000   (was 0.500)
 reads_field_recall     1.000
 ```
 
 **`baseline.json` carries these honest numbers** (regenerated at the
 post-fix commit; `scripts/demo.sh --quick` §13.5 fails below them).
 
-Three of the six metrics fall short of the ≥ 0.7 target from the
-implementation plan. The shortfall is **not** caused by an unfixed
-sensor or joiner bug — each of the three fixes is verified by
-independent discriminating tests. The shortfall is three
-metric-design artifacts:
+Two of the three "shortfalls" were actually test-only bugs, not
+metric artifacts:
 
-1. **`diff_precision` 0.263** — the T1 fixture (`scripts/contracts-fixture.sh`)
-   places every orders handler in `src/main.py`. Bug A's
-   `source_files` tightening (provider-side file vs. route-side node path)
-   is correct, but the rule's `intersection` filter can never
-   distinguish an unrelated-file edit from a handler-file edit in
-   this fixture because the handler and the route share one file.
-   Bug C alone moves this metric (it governs scenario 3's
-   `ConsumerEndpointUnmatched` outcome). The remaining gap is
-   fixture-shaped: a T1 fixture that distributes handlers across
-   multiple files would let Bug A's fix discriminate.
-2. **`binds_recall` 0.600** — pre-existing joiner/fixture mismatch,
-   unchanged by the three bug fixes. The fixture's expected binds
-   list things the joiner doesn't produce, or vice versa. Not in the
-   scope of these three fixes; separate investigation required.
-3. **`reads_field_precision` 0.500** — metric counting-unit
-   artifact. The precision ratio compares "GT entries matched" (one
-   entry covers both `customer_id` and `total` reads on
-   `build_invoice`) against "FieldRefResolutions emitted per call
-   site" (two: one per schema-joined field). The ratio 1 matched /
-   2 emitted = 0.500 reflects the counting unit, not a false-positive
-   rate. Bug B's deny-list suppressed spurious non-schema-joined
-   FieldRefs that the metric already filters out
-   (`tests/federation_contracts_e2e.rs:2081`'s
-   `.filter(|fr| !fr.bound_fields.is_empty())`). The 0.500 is
-   pre-existing and unchanged.
+- **`binds_recall` 0.6 → 1.0**: the metric's index snapshot was
+  derived from the union of diff-scenario `setup.base` keys, which
+  for diff scenarios is `{orders: base, billing: base, reports:
+  base}` — `platform` was never indexed. Scenarios 16 and 17 use
+  `setup.snapshot` (not `setup.base`), so the union excluded
+  `platform` and shipping→inventory never reached the joiner. Fix:
+  index snapshot now uses the explicit `{orders, billing, reports,
+  platform}` baseline so every consumer is enumerated. No
+  joiner/sensor/`ground_truth.yaml` change.
+
+- **`reads_field_precision` 0.5 → 1.0**: the metric's counting
+  unit didn't match the GT's. The GT has **one entry** covering
+  **two reads** (`build_invoice` reads `customer_id` AND `total`).
+  The joiner emits two FieldRefResolutions (one per schema-joined
+  field, both matched to the same entry). The metric was
+  `matched_entries / reported_reads = 1 / 2 = 0.5`. Fix: count
+  per-read inside matched entries
+  (`reads_matched = Σ matched_reads per entry`,
+  `recall_denominator = Σ reads per GT entry`), so both numerator
+  and denominator use the same unit.
+
+The remaining shortfall is `diff_precision = 0.263`, which IS a
+fixture-shape artifact (not an implementation bug):
+
+- **T1 fixture places every orders handler in `src/main.py`.**
+  Bug A's `source_files` tightening (provider-side file vs.
+  route-side node path) is correct — verified by independent
+  discriminating tests — but the `ChangedWithoutSchema` rule's
+  `intersection` filter can never distinguish an unrelated-file
+  edit from a handler-file edit in this fixture because the
+  handler and the route share one file. Bug C alone moves this
+  metric (one scenario); Bug A's contribution requires a fixture
+  that distributes handlers across multiple files.
 
 A future engineer's task list:
-- (Optional, low-risk) Re-number the `reads_field_precision` counting
-  unit to per-read inside each GT entry, OR flatten GT entries to
-  one per read. Either makes the metric reach 1.000 and is consistent
-  with how the sensor emits. **Spec change, separate from this plan.**
-- (Optional, medium-risk) Distribute orders handlers across multiple
-  files in the T1 fixture so Bug A's `source_files` tightening
-  fires. **Fixture change + spec/test update.**
-- (Recommended before release) Investigate `binds_recall` 0.600 to
-  decide whether it's a joiner regression or a fixture/GT mismatch.
+- **(Recommended before next release)** Distribute the orders
+  handlers across multiple files in the T1 fixture so Bug A's
+  `source_files` tightening fires. **Fixture change + spec/test
+  update.** Until then, `diff_precision` is held below the
+  internal target by fixture shape, not by an unfixed bug.
 
-The three fixes themselves are complete and correct.
+The three fixes themselves are complete and correct, and the
+metric is now an honest measurement.

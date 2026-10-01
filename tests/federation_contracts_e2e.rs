@@ -1800,6 +1800,20 @@ struct BindsProvider {
 #[allow(dead_code)]
 struct ReadsFieldExpected {
     caller: ReadsFieldCaller,
+    #[serde(default)]
+    reads: Vec<ReadsFieldRead>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct ReadsFieldRead {
+    path: String,
+    #[allow(dead_code)]
+    binds_to: String,
+    #[serde(default, rename = "provenance")]
+    _provenance: serde::de::IgnoredAny,
+    #[serde(default)]
+    exact: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -2006,19 +2020,26 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     };
 
     // ── Binds / ReadsField precision/recall from the ContractIndex ──
-    let first_base_key = diff_scenarios
-        .first()
-        .map(|(_, s)| extract_overrides(&s.setup).0)
-        .expect("at least one diff scenario");
-    let first_base_id = base_ids.get(&first_base_key).expect("first base id");
+    // Build an index snapshot that includes every repo so reports and
+    // platform consumers reach the joiner — the per-scenario diff
+    // bases only index two repos (orders + billing), which would leave
+    // reports→billing and shipping→inventory binds unenumerated.
+    let index_base: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::from([
+        ("orders".to_string(), "base".to_string()),
+        ("billing".to_string(), "base".to_string()),
+        ("reports".to_string(), "base".to_string()),
+        ("platform".to_string(), "base".to_string()),
+    ]);
+    let index_base_resolved = resolve_overrides(&fix.root, &index_base);
+    let index_base_id = harness::prepare_ready(&mgr, index_base_resolved, None, config.clone()).await;
     let (fed, _guard) = {
         let path = lain::federation::contracts::snapshots::snapshot_record_path(
             mgr.data_dir(),
-            first_base_id,
+            &index_base_id,
         );
-        let raw = std::fs::read(&path).expect("read base snapshot record");
+        let raw = std::fs::read(&path).expect("read index base snapshot record");
         let record: lain::federation::contracts::snapshots::SnapshotRecord =
-            serde_json::from_slice(&raw).expect("parse base snapshot record");
+            serde_json::from_slice(&raw).expect("parse index base snapshot record");
         mgr.from_snapshot_with_wait_ms(&record, 5_000)
             .expect("from_snapshot for index")
     };
@@ -2089,11 +2110,19 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
 
     let mut reads_matched = 0usize;
     for exp in &gt.reads_field {
-        let hit = reported_reads
-            .iter()
-            .any(|(_provider, repo, _fr)| repo == &exp.caller.service);
-        if hit {
-            reads_matched += 1;
+        for read in &exp.reads {
+            // Per-read match (counting-unit fix): GT's `reads_field`
+            // entries may cover multiple reads; the joiner emits one
+            // FieldRefResolution per schema-joined read. Match each
+            // expected read against reported FieldRefResolutions by
+            // (consumer service, JSON path substring in the FieldRef
+            // GlobalId).
+            let hit = reported_reads.iter().any(|(_, repo, fr_id)| {
+                repo == &exp.caller.service && fr_id.contains(&read.path)
+            });
+            if hit {
+                reads_matched += 1;
+            }
         }
     }
     let reads_precision = if reported_reads.is_empty() {
@@ -2104,7 +2133,12 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     let reads_recall = if gt.reads_field.is_empty() {
         1.0
     } else {
-        reads_matched as f64 / gt.reads_field.len() as f64
+        reads_matched as f64
+            / gt.reads_field
+                .iter()
+                .map(|e| e.reads.len())
+                .sum::<usize>()
+                as f64
     };
     // Per-scenario breakdown surfaces in JSON so a regression points
     // at the exact scenario instead of forcing the operator to dig
