@@ -60,6 +60,14 @@ pub fn parse_for_lang(lang: Lang, src: &str) -> Option<Tree> {
     parser.parse(src, None)
 }
 
+/// Resolve the tree-sitter [`Language`] for `lang` without parsing.
+/// Used by the http_sensor's tree-sitter walker (Task 2 §3) to
+/// compile `.scm` queries via `tree_sitter::Query::new` before
+/// running them against a parsed tree.
+pub fn language_for(lang: Lang) -> Language {
+    grammar_for(lang)
+}
+
 fn grammar_for(lang: Lang) -> Language {
     match lang {
         Lang::Python => tree_sitter_python::LANGUAGE.into(),

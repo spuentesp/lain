@@ -22,6 +22,15 @@
 //! Determinism: `get_route_patterns` returns a `BTreeMap`, not a
 //! `HashMap` (§6.1). Every map iterated by a sensor is sorted so the
 //! §8.3 determinism test holds across runs.
+//!
+//! Data-driven patterns (Task 2 of the sensor-patterns plan):
+//! route frameworks are listed in `frameworks.yaml` and reached
+//! through `Patterns::route_patterns(Lang)`. The framework-specific
+//! regex strings — which the YAML schema can't express — live in
+//! `route_pattern_for` / `method_capture_for`. Adding a new
+//! framework is a YAML change plus, when the framework's call shape
+//! needs a custom verb capture, one match arm in
+//! `method_capture_for`.
 
 use crate::error::LainError;
 use crate::federation::contracts::model::{HttpMethod, ProviderFact, ProviderOrigin, SymbolKey};
@@ -29,7 +38,10 @@ use crate::federation::contracts::normalize::{normalize, UrlPart};
 use crate::federation::repo_id::RepoId;
 use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::patterns::{FrameworkDef, Patterns};
+use crate::server::sensors::util::Lang;
 use std::collections::BTreeMap;
+use tree_sitter::StreamingIterator;
 
 /// A detected HTTP route, in the shape the regex extractor produces
 /// before normalization.
@@ -59,42 +71,6 @@ struct RoutePattern {
 }
 
 impl RoutePattern {
-    fn new(method_pat: &str, path_pat: &str, handler_pat: &str) -> Self {
-        Self {
-            method_regex: Some(regex::Regex::new(method_pat).unwrap()),
-            path_regex: regex::Regex::new(path_pat).unwrap(),
-            handler_fn_regex: regex::Regex::new(handler_pat).unwrap(),
-            default_method: HttpMethod::Any,
-        }
-    }
-
-    /// Construct with an explicit default method. Use `default_method:
-    /// HttpMethod::Get` for Flask (`methods=` may be absent).
-    fn with_default(
-        method_pat: &str,
-        path_pat: &str,
-        handler_pat: &str,
-        default_method: HttpMethod,
-    ) -> Self {
-        Self {
-            method_regex: Some(regex::Regex::new(method_pat).unwrap()),
-            path_regex: regex::Regex::new(path_pat).unwrap(),
-            handler_fn_regex: regex::Regex::new(handler_pat).unwrap(),
-            default_method,
-        }
-    }
-
-    /// For route APIs with no verb at the call site; routes default to
-    /// `Any` per §6.2.
-    fn without_method(path_pat: &str, handler_pat: &str) -> Self {
-        Self {
-            method_regex: None,
-            path_regex: regex::Regex::new(path_pat).unwrap(),
-            handler_fn_regex: regex::Regex::new(handler_pat).unwrap(),
-            default_method: HttpMethod::Any,
-        }
-    }
-
     /// Extract routes from `content`.
     fn extract(&self, content: &str, file_path: &str) -> Vec<HttpRoute> {
         const HANDLER_LOOKAHEAD: usize = 6;
@@ -179,190 +155,252 @@ fn method_from_str(s: String) -> HttpMethod {
 
 /// All supported route patterns. `BTreeMap` (was `HashMap` pre-§6.1)
 /// so the registry's iteration order is deterministic across runs.
+///
+/// Task 2 of the data-driven sensor-patterns plan wired this to
+/// consume `Patterns::route_patterns(Lang)` (built in Task 1) instead
+/// of an inline `BTreeMap`. The framework-specific regex strings
+/// live in [`route_pattern_for`] — one override per (lang, framework)
+/// — because the YAML schema can't express some framework quirks
+/// (Flask's `methods=["POST"]` shape, Go-std's verbless routes).
 fn get_route_patterns() -> BTreeMap<&'static str, RoutePattern> {
     let mut patterns = BTreeMap::new();
 
-    const HTTP_VERBS: &str = "get|post|put|delete|patch|options|head";
+    let registry = Patterns::patterns();
 
-    // Rust: axum — `.route("/path", get(handler))`
-    patterns.insert(
-        "rust-axum",
-        RoutePattern::new(
-            &format!(r"\.route\s*\([^,]*,\s*(?i:({HTTP_VERBS}))\s*\("),
-            r#"\.route\s*\(\s*"([^"]+)""#,
-            &format!(r"(?i:(?:{HTTP_VERBS}))\s*\(\s*(\w+)\s*[,)]"),
-        ),
-    );
+    // Walk every language the http_sensor recognises. The order
+    // (sorted by lang_key, then by YAML load order inside each
+    // bucket) is the determinism contract §8.3 requires; the
+    // `BTreeMap` keeps the iteration order stable across runs.
+    let langs: [Lang; 8] = [
+        Lang::Rust,
+        Lang::Python,
+        Lang::TsJs,
+        Lang::Go,
+        Lang::Java,
+        Lang::CSharp,
+        Lang::Ruby,
+        Lang::Kotlin,
+    ];
 
-    // Rust: actix-web — `#[get("/path")]` or `#[get(path = "/path")]`.
-    patterns.insert(
-        "rust-actix",
-        RoutePattern::new(
-            &format!(r"#\[(?i:({HTTP_VERBS}))\s*\("),
-            &format!(r#"#\[(?i:(?:{HTTP_VERBS}))\s*\(\s*(?:path\s*=\s*)?"([^"]+)""#),
-            r"(?:async\s+)?fn\s+(\w+)\s*[(<]",
-        ),
-    );
-
-    // Python: FastAPI — `@app.get("/path")` then `async def handler(...)`.
-    // Per §6.2 `APIRouter(prefix=…)` is the same-file prefix path:
-    // decorated `@router.get("/path")` inherits the prefix when
-    // `router` is `APIRouter(prefix="…")`.
-    patterns.insert(
-        "python-fastapi",
-        RoutePattern::new(
-            &format!(r"@[\w\.]+\.({HTTP_VERBS})\s*\("),
-            &format!(r#"@[\w\.]+\.(?:{HTTP_VERBS})\s*\(\s*["']([^"']+)["']"#),
-            r"(?:async\s+)?def\s+(\w+)\s*\(",
-        ),
-    );
-
-    // Python: Flask — `@app.route("/path", methods=["POST"])` then `def
-    // handler(...)`. §6.2: Flask defaults to GET when `methods=` is
-    // absent, so `default_method` is `Get` rather than `Any`.
-    patterns.insert(
-        "python-flask",
-        RoutePattern::with_default(
-            r#"methods\s*=\s*\[\s*["'](\w+)"#,
-            r#"@[\w\.]+\.route\s*\(\s*["']([^"']+)["']"#,
-            r"def\s+(\w+)\s*\(",
-            HttpMethod::Get,
-        ),
-    );
-
-    // TypeScript/JS: Express / Fastify — `router.post("/path", handler)`
-    patterns.insert(
-        "ts-express",
-        RoutePattern::new(
-            &format!(r"\.({HTTP_VERBS})\s*\("),
-            &format!(r#"\.(?:{HTTP_VERBS})\s*\(\s*["'`]([^"'`]+)["'`]"#),
-            &format!(r#"\.(?:{HTTP_VERBS})\s*\(\s*["'`][^"'`]+["'`]\s*,\s*(?:async\s*)?(\w+)"#),
-        ),
-    );
-
-    // Go: net/http — `http.HandleFunc("/path", handler)`; carries no
-    // verb at the call site (§6.2 → `Any`, was `GET` in 0.8).
-    patterns.insert(
-        "go-std",
-        RoutePattern::without_method(
-            r#"HandleFunc\s*\(\s*"([^"]+)""#,
-            r#"HandleFunc\s*\(\s*"[^"]+"\s*,\s*(\w+)"#,
-        ),
-    );
-
-    // Go: Gin / Echo — `router.GET("/path", handler)`.
-    patterns.insert(
-        "go-gin",
-        RoutePattern::new(
-            r"\.(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(",
-            r#"\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"([^"]+)""#,
-            r#"\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"[^"]+"\s*,\s*(\w+)"#,
-        ),
-    );
-
-    // ─── Workstream 5: Java Spring, JAX-RS, C# ASP.NET, Sinatra, Rails, Ktor.
-
-    // Java Spring — `@GetMapping("/path")` / `@PostMapping(...)` /
-    // `@RequestMapping("/path")` (with method= attribute). The
-    // handler is the public method declared on the next line.
-    const SPRING_MAPPING: &str =
-        "GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping";
-    patterns.insert(
-        "java-spring",
-        RoutePattern::new(
-            &format!(r"@(?i:({HTTP_VERBS})Mapping)\s*\("),
-            &format!(
-                r#"@(?i:(?:{SPRING_MAPPING}))\s*\(\s*(?:value\s*=\s*|path\s*=\s*)?["']([^"']+)["']"#
-            ),
-            r"public\s+[\w<>,\s]+\s+(\w+)\s*\(",
-        ),
-    );
-
-    // JAX-RS (Jakarta RESTful Web Services) — `@Path("/api")` on
-    // the class + `@GET` / `@POST` on the method. For simplicity we
-    // detect the method-level `@GET` etc. and the path on
-    // `@Path`. Verb is the method-level annotation keyword.
-    const JAXRS_VERBS: &str = "GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS";
-    patterns.insert(
-        "java-jaxrs",
-        RoutePattern::new(
-            &format!(r"@(?i:({JAXRS_VERBS}))\s*$"),
-            r#"@Path\s*\(\s*["']([^"']+)["']"#,
-            r"public\s+[\w<>,\s]+\s+(\w+)\s*\(",
-        ),
-    );
-
-    // C# ASP.NET Core controllers — `[HttpGet("/path")]` /
-    // `[HttpPost]` etc. on a method.
-    const ASPNET_VERBS: &str = "HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch|HttpHead|HttpOptions";
-    // Method regex captures the verb portion (`get`/`post`/…)
-    // after stripping the `Http` prefix via a non-capturing
-    // group.
-    patterns.insert(
-        "csharp-aspnet",
-        RoutePattern::new(
-            &format!(r#"(?i:\[Http({HTTP_VERBS}))"#),
-            &format!(r#"\[(?i:(?:{ASPNET_VERBS}))\s*(?:\(\s*["']([^"']+)["']\s*\))?"#),
-            r"(?:public|private|internal|async|protected)\s+[\w<>,\s\[\]?]+\s+(\w+)\s*\(",
-        ),
-    );
-
-    // C# Minimal API — `app.MapGet("/path", () => ...)`.
-    const ASPNET_MAP_VERBS: &str = "MapGet|MapPost|MapPut|MapDelete|MapPatch";
-    patterns.insert(
-        "csharp-minimal-api",
-        RoutePattern::new(
-            r#"\.(?i:(MapGet|MapPost|MapPut|MapDelete|MapPatch))"#,
-            &format!(
-                r#"\.(?:{ASPNET_MAP_VERBS})\s*\(\s*["']([^"']+)["']"#
-            ),
-            &format!(
-                r#"\.(?:{ASPNET_MAP_VERBS})\s*\(\s*["']([^"']+)["']\s*,\s*(?:async\s*)?\([^)]*\)\s*=>"#
-            ),
-        ),
-    );
-
-    // Ruby Sinatra — `get '/path' do … end` /
-    // `post "/path" do … end`. The verb is the first token
-    // (`get` / `post` / …). For v1 the handler is left as
-    // `Sinatra__do_block` and the `CallsHttp` edge resolution
-    // uses the closest controller action (the entry-point
-    // sensor matches it).
-    patterns.insert(
-        "ruby-sinatra",
-        RoutePattern::new(
-            &format!(r##"(?i:({HTTP_VERBS}))\s+['"]"##),
-            &format!(r##"(?m)^[ \t]*(?:{HTTP_VERBS})\s+['"]([^"']+)["']"##),
-            r###"(?m)^[ \t]*(get|post|put|delete|patch|options|head)\s+['"][^'"]+['"]"###,
-        ),
-    );
-
-    // Ruby Rails — routes live in `config/routes.rb`. Detected
-    // DSL: `get 'path'`, `post "path"`, `resources :users`,
-    // `namespace :api do … resources :orders end`. v1 only
-    // requires the simple verb+path shape; the entry-point
-    // sensor matches the controller action by name.
-    const RAILS_VERBS: &str = "get|post|put|patch|delete|options|head";
-    patterns.insert(
-        "ruby-rails",
-        RoutePattern::new(
-            &format!(r##"(?i:({RAILS_VERBS}))['"\s:]+"##),
-            &format!(r##"(?m)^[ \t]*(?:{RAILS_VERBS})\s+['"]([^"']+)["']"##),
-            r#"(?m)^[ \t]*(get|post|put|patch|delete|options|head|resources)\b"#,
-        ),
-    );
-
-    // Kotlin Ktor — `routing { get("/path") { … } }`.
-    patterns.insert(
-        "kotlin-ktor",
-        RoutePattern::new(
-            &format!(r"(?m)(?:^|\W)({HTTP_VERBS})\s*\("),
-            &format!(r#"(?m)(?:^|\W)(?:{HTTP_VERBS})\s*\(\s*["']([^"']+)["']"#),
-            r###"(get|post|put|patch|delete|head|options)\s*\(\s*"[^"]+"\s*\)"###,
-        ),
-    );
+    for lang in langs {
+        for def in registry.route_patterns(lang) {
+            let Some(rp) = route_pattern_for(def) else {
+                continue;
+            };
+            let key = route_pattern_key(lang, def);
+            patterns.insert(key, rp);
+        }
+    }
 
     patterns
+}
+
+/// Stable map key for a (lang, framework) pair. Mirrors the inline
+/// table's `<lang-prefix>-<framework-tail>` shape so existing call
+/// sites (tests, the `prefixes` slice in `scan_file_for_routes`)
+/// keep matching.
+fn route_pattern_key(lang: Lang, def: &FrameworkDef) -> &'static str {
+    let prefix = match lang {
+        Lang::Rust => "rust",
+        Lang::Python => "python",
+        Lang::TsJs | Lang::Ts | Lang::Tsx => "ts",
+        Lang::Go => "go",
+        Lang::Java => "java",
+        Lang::CSharp => "csharp",
+        Lang::Ruby => "ruby",
+        Lang::Kotlin => "kotlin",
+    };
+    let id = def.id.clone();
+    let key = format!("{prefix}-{id}");
+    Box::leak(key.into_boxed_str())
+}
+
+/// Build a [`RoutePattern`] for one `FrameworkDef` from the bundled
+/// YAML, layering framework-specific regex overrides that the YAML
+/// schema can't encode (Flask's `methods=["POST"]` kwarg, the
+/// verbless `http.HandleFunc` shape, etc.).
+///
+/// `None` is returned when the framework is missing the
+/// `path_regex` field — the walker then has nothing to match
+/// against, and the framework is silently skipped. The same was
+/// true of the pre-Task-2 inline table: frameworks without a path
+/// regex just weren't listed.
+fn route_pattern_for(def: &FrameworkDef) -> Option<RoutePattern> {
+    let path_re = def.path_regex.as_deref()?;
+    let handler_re = handler_regex_for(def);
+
+    let (method_re, default) = method_capture_for(def);
+
+    let path_regex = regex::Regex::new(path_re)
+        .unwrap_or_else(|e| panic!("{}: invalid path_regex {:?}: {e}", def.id, path_re));
+    let handler_fn_regex = regex::Regex::new(handler_re)
+        .unwrap_or_else(|e| panic!("{}: invalid handler_regex {:?}: {e}", def.id, handler_re));
+    let method_regex = method_re.map(|s| {
+        regex::Regex::new(s)
+            .unwrap_or_else(|e| panic!("{}: invalid method_regex {:?}: {e}", def.id, s))
+    });
+
+    Some(RoutePattern {
+        method_regex,
+        path_regex,
+        handler_fn_regex,
+        default_method: default,
+    })
+}
+
+/// Resolve the handler-capture regex for `def`. Returns the YAML's
+/// `handler_regex` when it has a useful capture group, or a
+/// framework-specific override when the YAML regex was simplified
+/// (the original inline regex had capture groups the YAML lost in
+/// Task 1's data conversion).
+fn handler_regex_for(def: &FrameworkDef) -> &'static str {
+    match def.id.as_str() {
+        // Sinatra — the inline regex captured the verb on the
+        // declaring line as the handler name (`Sinatra__do_block`
+        // per the §6.2 comment). YAML's `do\s*$` has no capture.
+        "sinatra-route" => {
+            Box::leak(
+                r#"(?m)^[ \t]*(get|post|put|delete|patch|options|head)\s+['"][^'"]+['"]"#
+                    .to_string()
+                    .into_boxed_str(),
+            )
+        }
+        // Minimal API — the inline regex captured the entire
+        // quoted path (group 1 = `"/api/health"`). YAML's
+        // simplified regex has no capture group; we restore the
+        // capture here so the `RoutePattern::extract` look-ahead
+        // finds a non-empty handler name on the same line.
+        "minimal-api-route" => {
+            Box::leak(
+                r#"\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*(['"][^'"]+['"])\s*,\s*(?:async\s*)?\([^)]*\)\s*=>"#
+                    .to_string()
+                    .into_boxed_str(),
+            )
+        }
+        // Rails — no handler_regex in YAML; capture the verb (or
+        // the word following the path) as the handler.
+        "rails-route" => {
+            Box::leak(
+                r"(?m)^[ \t]*(get|post|put|patch|delete|options|head|resources)\b"
+                    .to_string()
+                    .into_boxed_str(),
+            )
+        }
+        // Default — use the YAML's handler_regex as-is, or fall
+        // back to a word-boundary placeholder that captures any
+        // identifier on the line.
+        _ => Box::leak(
+            def.handler_regex
+                .as_deref()
+                .unwrap_or(r"\b\w+\b")
+                .to_string()
+                .into_boxed_str(),
+        ),
+    }
+}
+
+/// Per-framework `method_regex` + `default_method`. The YAML's
+/// `verbs` field drives the verb list; the surrounding syntax is
+/// framework-specific and lives here. Returns `None` for verbless
+/// APIs (Go-std `HandleFunc`) — those default to
+/// [`HttpMethod::Any`] per §6.2.
+fn method_capture_for(def: &FrameworkDef) -> (Option<&'static str>, HttpMethod) {
+    let verbs = def.verbs.join("|");
+    match def.id.as_str() {
+        // Flask — the verb lives in `methods=["POST"]`, not in the
+        // `@app.route("/…")` decorator.
+        "flask-route" => (Some(r#"methods\s*=\s*\[\s*["'](\w+)"#), HttpMethod::Get),
+        // Go stdlib — `http.HandleFunc` declares no verb at the
+        // call site; routes emit `HttpMethod::Any`.
+        "stdlib-http-route" => (None, HttpMethod::Any),
+        // Kotlin — `routing { get("/path") { … } }` puts the verb
+        // before the parenthesised path.
+        "ktor-route" => (
+            Some(Box::leak(
+                format!(r"(?m)(?:^|\W)({verbs})\s*\(").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // Rails — `get 'path' do … end` style. The verb may be
+        // followed by a quote (path), a colon (resources), or
+        // whitespace.
+        "rails-route" => (
+            Some(Box::leak(
+                format!(r#"(?i:({verbs}))['"\s:]+"#).into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // C# Minimal API — the verb is baked into `MapGet` /
+        // `MapPost` etc., not a separate token.
+        "minimal-api-route" => (
+            Some(r"\.(?i:(MapGet|MapPost|MapPut|MapDelete|MapPatch))"),
+            HttpMethod::Any,
+        ),
+        // C# ASP.NET controllers — `[HttpGet]` etc. with the verb
+        // baked into the attribute name.
+        "aspnet-route" => (
+            Some(Box::leak(format!(r"(?i:\[Http({verbs}))").into_boxed_str())),
+            HttpMethod::Any,
+        ),
+        // JAX-RS — `@GET` / `@POST` on its own line, just above
+        // the method declaration.
+        "jaxrs-route" => (
+            Some(Box::leak(format!(r"@(?i:({verbs}))\s*$").into_boxed_str())),
+            HttpMethod::Any,
+        ),
+        // Spring — `@GetMapping` / `@PostMapping` / etc.
+        "spring-route" => (
+            Some(Box::leak(
+                format!(r"@(?i:({verbs}))Mapping").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // axum — `.route("/path", get(handler))` — verb appears
+        // as the second argument to `.route()`.
+        "axum-route" => (
+            Some(Box::leak(
+                format!(r"\.route\s*\([^,]*,\s*(?i:({verbs}))\s*\(").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // actix-web — `#[get("/path")]` attribute on a function.
+        "actix-route" => (
+            Some(Box::leak(
+                format!(r"#\[(?i:({verbs}))\s*\(").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // FastAPI — `@app.get("/path")` decorator.
+        "fastapi-route" => (
+            Some(Box::leak(
+                format!(r"@[\w\.]+\.({verbs})\s*\(").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // Sinatra — `get '/path' do … end`.
+        "sinatra-route" => (
+            Some(Box::leak(
+                format!(r#"(?i:({verbs}))\s+['"]"#).into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // Gin / Echo — `r.GET("/path", handler)`. The verb is
+        // uppercase at the call site (verbs in the YAML are
+        // already uppercase).
+        "gin-route" => (
+            Some(Box::leak(format!(r"\.({verbs})\s*\(").into_boxed_str())),
+            HttpMethod::Any,
+        ),
+        // Express / Fastify — `router.post("/path", handler)`.
+        "express-route" | "fastify-route" => (
+            Some(Box::leak(format!(r"\.({verbs})\s*\(").into_boxed_str())),
+            HttpMethod::Any,
+        ),
+        // Unknown framework — leave the method regex unset and
+        // rely on `default_method`. Future frameworks opt in by
+        // adding a match arm above.
+        _ => (None, HttpMethod::Any),
+    }
 }
 
 /// Scan a file for HTTP routes, after applying same-file router
@@ -382,22 +420,37 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
         "kt" | "kts" => &["kotlin-"],
         _ => return Vec::new(),
     };
-    let applicable: Vec<&RoutePattern> = all_patterns
+    let applicable: Vec<(&'static str, &RoutePattern)> = all_patterns
         .iter()
         .filter(|(k, _)| prefixes.iter().any(|p| k.starts_with(p)))
-        .map(|(_, v)| v)
+        .map(|(k, v)| (*k, v))
         .collect();
 
     let mut all_routes = Vec::new();
     let router_prefixes = extract_router_prefixes(content, extension);
 
-    for pattern in applicable {
+    // Per-framework regex extraction — the primary path. The
+    // `BTreeMap` keeps iteration deterministic across runs.
+    for (key, pattern) in &applicable {
         let routes = pattern.extract(content, &path.to_string_lossy());
         for mut r in routes {
             if let Some(prefix) = router_prefix_for_receiver(&r, &router_prefixes) {
                 r.path = join_prefix(prefix.as_str(), &r.path);
             }
             all_routes.push(r);
+        }
+        // Tree-sitter supplementary path (Task 2 §3): for each
+        // framework whose `.scm` body is non-empty, run the
+        // compiled query and union any new (method, path) pairs
+        // the regex missed. An empty body (just a comment line)
+        // skips tree-sitter entirely.
+        if let Some(ts) = try_treesitter_extract(key, content, path) {
+            for mut r in ts {
+                if let Some(prefix) = router_prefix_for_receiver(&r, &router_prefixes) {
+                    r.path = join_prefix(prefix.as_str(), &r.path);
+                }
+                all_routes.push(r);
+            }
         }
     }
 
@@ -410,6 +463,135 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
     all_routes.retain(|r| seen.insert((r.method, r.path.clone())));
 
     all_routes
+}
+
+/// Run the tree-sitter query for one (lang, framework) pair, if its
+/// `.scm` body is non-empty. Captures follow the spec's standardised
+/// names — `@path` (string literal node), `@verb` (HTTP verb token),
+/// `@handler` (handler function name). Anything else is ignored and
+/// the regex path remains authoritative.
+fn try_treesitter_extract(
+    pattern_key: &str,
+    content: &str,
+    path: &std::path::Path,
+) -> Option<Vec<HttpRoute>> {
+    let (lang_yaml, framework) = pattern_key.split_once('-')?;
+    let lang = lang_for_yaml_key(lang_yaml)?;
+
+    // The compiled queries use `<lang>/<framework>.scm`. Resolve
+    // the framework id by stripping the `-route` / `-outbound` /
+    // etc. tail; for now only `*-route` frameworks are mapped.
+    let framework_id = framework.strip_suffix("-route")?;
+    let scm_key = format!("{lang_yaml}/{framework_id}-route.scm");
+
+    let body = Patterns::patterns()
+        .compiled_queries()
+        .iter()
+        .find(|(k, _, _, _)| *k == scm_key)
+        .map(|(_, _, _, body)| *body)?;
+
+    // Empty body or comment-only — the brief's fallback case.
+    let has_query = body.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.is_empty() && !trimmed.starts_with(';')
+    });
+    if !has_query {
+        return None;
+    }
+
+    let tree = crate::server::sensors::util::parse_for_lang(lang, content)?;
+    let grammar = crate::server::sensors::util::language_for(lang);
+    let query = tree_sitter::Query::new(&grammar, body).ok()?;
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), content.as_bytes());
+
+    let mut routes = Vec::new();
+    let mut path_idx: Option<u32> = None;
+    let mut verb_idx: Option<u32> = None;
+    let mut handler_idx: Option<u32> = None;
+    for (i, name) in query.capture_names().iter().enumerate() {
+        match *name {
+            "path" => path_idx = Some(i as u32),
+            "verb" => verb_idx = Some(i as u32),
+            "handler" => handler_idx = Some(i as u32),
+            _ => {}
+        }
+    }
+
+    while let Some(m) = matches.next() {
+        let path_text = path_idx
+            .and_then(|i| m.nodes_for_capture_index(i).next())
+            .and_then(|n| text_for_node(n, content));
+        let verb_text = verb_idx
+            .and_then(|i| m.nodes_for_capture_index(i).next())
+            .and_then(|n| text_for_node(n, content));
+        let handler_text = handler_idx
+            .and_then(|i| m.nodes_for_capture_index(i).next())
+            .and_then(|n| text_for_node(n, content));
+        let (Some(path_text), Some(handler_text)) = (path_text, handler_text) else {
+            continue;
+        };
+
+        let method = verb_text
+            .map(|v| method_from_str(v.to_uppercase()))
+            .unwrap_or(HttpMethod::Any);
+
+        let line = path_idx
+            .and_then(|i| m.nodes_for_capture_index(i).next())
+            .map(|n| n.start_position().row as u32 + 1)
+            .unwrap_or(1);
+
+        routes.push(HttpRoute {
+            method,
+            path: strip_quotes(path_text),
+            handler_path: path.to_string_lossy().into_owned(),
+            handler_name: handler_text.to_string(),
+            line,
+        });
+    }
+
+    Some(routes)
+}
+
+/// Map the http_sensor pattern key's lang prefix to the
+/// tree-sitter [`Lang`] variant. `ts` covers `.ts`, `.tsx`, `.js`,
+/// `.jsx` via `lang_for_path`, but the walker only knows the
+/// abstract [`Lang`].
+fn lang_for_yaml_key(key: &str) -> Option<Lang> {
+    match key {
+        "rust" => Some(Lang::Rust),
+        "python" => Some(Lang::Python),
+        "ts" => Some(Lang::TsJs),
+        "go" => Some(Lang::Go),
+        "java" => Some(Lang::Java),
+        "csharp" => Some(Lang::CSharp),
+        "ruby" => Some(Lang::Ruby),
+        "kotlin" => Some(Lang::Kotlin),
+        _ => None,
+    }
+}
+
+/// Extract the source text covered by `node` from `content`.
+fn text_for_node<'a>(node: tree_sitter::Node, content: &'a str) -> Option<&'a str> {
+    let start = node.start_byte();
+    let end = node.end_byte();
+    content.get(start..end)
+}
+
+/// Strip a single pair of surrounding quotes (`"` or `'`) from a
+/// string-literal capture. The .scm queries bind `@path` to the
+/// raw `string_literal` node, which carries its delimiters; the
+/// walker needs the unwrapped content to match the regex path's
+/// behaviour (which already strips quotes).
+fn strip_quotes(s: &str) -> String {
+    let trimmed = s.trim();
+    if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+    {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 // ─── Same-file router prefixes (§6.2) ─────────────────────────────────
@@ -704,7 +886,8 @@ mod tests {
     fn every_route_pattern_compiles() {
         let patterns = get_route_patterns();
         assert!(
-            patterns.contains_key("python-fastapi") && patterns.contains_key("python-flask"),
+            patterns.contains_key("python-fastapi-route")
+                && patterns.contains_key("python-flask-route"),
             "the two patterns whose raw strings were malformed must be present"
         );
     }
