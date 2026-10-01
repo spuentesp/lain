@@ -3,7 +3,7 @@
 //!
 //! The brief (`task-1-brief.md` §1.1) requires three checks:
 //!   1. The bundled `frameworks.yaml` parses via `Patterns::from_yaml_str`
-//!      and `Patterns::load_default()`.
+//!      and `Patterns::patterns()`.
 //!   2. A malformed YAML yields a structured `serde_yaml` error (not a
 //!      panic, not an opaque string).
 //!   3. The route / outbound dispatch tables return the expected
@@ -14,7 +14,7 @@
 //! All five existing per-sensor regression suites must stay green —
 //! this file only asserts the loader shape, not the walker behaviour.
 
-use lain::server::sensors::patterns::{FrameworkDef, FrameworkKind, Patterns, YamlFile};
+use lain::server::sensors::patterns::{self, FrameworkDef, FrameworkKind, Patterns, YamlFile};
 
 const MINIMAL_YAML: &str = r#"
 languages:
@@ -30,7 +30,7 @@ languages:
 
 #[test]
 fn bundled_yaml_loads_and_validates() {
-    let patterns = Patterns::load_default();
+    let patterns = Patterns::patterns();
     // The bundled YAML must parse. A bare `Ok` is the smoke test — if
     // any entry violates the schema, this panics during init.
     let _ = patterns;
@@ -107,12 +107,12 @@ fn deny_methods_for_returns_the_matching_libs_methods() {
     use lain::server::sensors::util::Lang;
     let p = Patterns::from_yaml_str(MINIMAL_YAML).expect("minimal YAML is valid");
     // The minimal YAML declares `requests` with [json, text].
-    let deny = p.deny_methods_for(Lang::Python, "requests");
+    let deny = p.deny_methods_for(Lang::Python, "requests", "get");
     assert!(deny.iter().any(|m| m == "json"));
     assert!(deny.iter().any(|m| m == "text"));
 
     // A library that no `lib_match` regex accepts returns nothing.
-    let none = p.deny_methods_for(Lang::Python, "unrelated");
+    let none = p.deny_methods_for(Lang::Python, "unrelated", "get");
     assert!(none.is_empty(), "no lib_match → no deny methods");
 }
 
@@ -137,7 +137,7 @@ languages:
     )
     .expect("write override");
 
-    let mut p = Patterns::load_default().clone();
+    let mut p = Patterns::patterns().clone();
     let starlette_before = p.framework("starlette-route").is_some();
     assert!(
         !starlette_before,
@@ -156,4 +156,69 @@ fn yml_file_round_trips_through_a_minimal_document() {
     // Parsing the minimal doc as a `YamlFile` directly must succeed.
     let _original: YamlFile =
         serde_yaml::from_str(MINIMAL_YAML).expect("minimal YAML parses as a YamlFile");
+}
+
+// ── Fix-round-1 regression tests ──────────────────────────────────
+//
+// These pin the four contract surfaces the brief required:
+//   * `Patterns::patterns()` singleton accessor (rename of
+//     `load_default`).
+//   * The generated query map covers ALL eight languages — 34
+//     `.scm` files in total (the previous LANG_DIRS hard-coded only
+//     six, silently dropping python + tsjs).
+//   * `Patterns::generated::queries::get(key)` resolves a key for
+//     every bundled language (Tasks 2-4 depend on this).
+//   * `deny_methods_for(lang, lib, verb)` accepts the verb parameter
+//     for forward compatibility.
+
+#[test]
+fn patterns_singleton_is_callable_as_patterns() {
+    // The brief pins `pub fn patterns() -> &'static Patterns` as the
+    // canonical accessor. `load_default` is kept as a deprecated
+    // alias. Both must point at the same data.
+    let via_new = Patterns::patterns();
+    #[allow(deprecated)]
+    let via_old = Patterns::load_default();
+    assert!(
+        std::ptr::eq(via_new as *const _, via_old as *const _),
+        "Patterns::patterns() and Patterns::load_default() must share the same backing instance"
+    );
+}
+
+#[test]
+fn generated_queries_cover_all_eight_languages() {
+    // 5 (rust) + 3 (go) + 4 (java) + 3 (csharp) + 6 (ruby) + 3 (kotlin)
+    // + 5 (python) + 5 (tsjs) = 34 .scm files.
+    assert_eq!(
+        patterns::generated::LEN,
+        34,
+        "the generated query map must include python + tsjs; \
+         the prior LANG_DIRS hard-coded only six languages and \
+         silently dropped 10 entries"
+    );
+}
+
+#[test]
+fn generated_queries_resolves_keys_for_python_and_tsjs() {
+    // Tasks 2-4 consume compiled_queries() across ALL eight
+    // languages. A missing python or tsjs entry would silently fail
+    // lookups during route / outbound detection.
+    assert!(
+        patterns::generated::get("python/fastapi-route.scm").is_some(),
+        "python/fastapi-route.scm must be present in the generated map"
+    );
+    assert!(
+        patterns::generated::get("tsjs/express-route.scm").is_some(),
+        "tsjs/express-route.scm must be present in the generated map"
+    );
+}
+
+#[test]
+fn deny_methods_for_accepts_a_verb_argument() {
+    // The signature now takes `&str` for the verb; the parameter is
+    // unused today but reserves the position so callers in Tasks 2-3
+    // can pass it without an API break.
+    use lain::server::sensors::util::Lang;
+    let p = Patterns::from_yaml_str(MINIMAL_YAML).expect("minimal YAML is valid");
+    let _ = p.deny_methods_for(Lang::Python, "requests", "get");
 }

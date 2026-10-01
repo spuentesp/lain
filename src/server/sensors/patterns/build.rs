@@ -8,16 +8,17 @@
 //!    entry point here.
 //!
 //! 2. Generate `OUT_DIR/queries.rs` from the bundled `.scm` files
-//!    under `src/server/sensors/patterns/{lang}/*.scm`. The main
+//!    under `src/server/sensors/patterns/<lang>/*.scm`. The main
 //!    crate pulls the file in via
 //!    `include!(env!("LAIN_PATTERNS_GENERATED_QUERIES"))`.
 //!
 //! ## Generated output shape
 //!
-//! A static sorted slice of `(lang, framework, body)` triples — one
-//! per `.scm` file. The key in the lookup API is
-//! `<lang>/<framework>.scm` (e.g. `rust/axum-route.scm`); the
-//! runtime consumer binary-searches the slice for O(log n) lookup.
+//! A static sorted slice of `(key, lang, framework, body)` tuples —
+//! one per `.scm` file. `key` is the precomputed
+//! `<lang>/<framework>.scm` string, so the binary-search lookup
+//! compares a `&str` directly without allocating. Tasks 2-4
+//! iterate the slice and parse each body via `tree_sitter::Query`.
 //!
 //! Why a sorted slice, not a `phf::Map`? `phf` is not in the existing
 //! dependency graph and adding a runtime crate for a small set of
@@ -26,15 +27,15 @@
 //! ## Re-emit triggers
 //!
 //! `cargo:rerun-if-changed=` covers: `build.rs`, `frameworks.yaml`,
-//! `src`, `.git/HEAD`, and every `<lang>/` directory so any `.scm`
-//! edit triggers a rebuild.
+//! `.git/HEAD`, and every `<lang>/` directory so any `.scm` edit
+//! triggers a rebuild. The dir-list walk runs unconditionally; the
+//! `rerun-if-changed` lines are emitted for each discovered
+//! sub-directory at build time.
 
 use std::env as env_mod;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-
-const LANG_DIRS: &[&str] = &["rust", "go", "java", "csharp", "ruby", "kotlin"];
 
 fn main() {
     // ── Phase 1: git SHA capture (moved from the package-root
@@ -69,16 +70,19 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=frameworks.yaml");
-    for lang in LANG_DIRS {
+
+    // Walk `patterns/<lang>/` instead of hard-coding a denylist of
+    // language directories. New languages are picked up automatically;
+    // a hidden sub-directory (`.foo`) is skipped so a future scratch
+    // dir doesn't get enumerated as a language.
+    let lang_dirs = discover_lang_dirs(&patterns_root);
+    for lang in &lang_dirs {
         println!("cargo:rerun-if-changed={lang}");
     }
 
     let mut entries: Vec<(String, String)> = Vec::new();
-    for lang in LANG_DIRS {
+    for lang in &lang_dirs {
         let dir = patterns_root.join(lang);
-        if !dir.is_dir() {
-            continue;
-        }
         let read_dir = match fs::read_dir(&dir) {
             Ok(d) => d,
             Err(e) => panic!(
@@ -116,36 +120,57 @@ fn main() {
     println!("cargo:rustc-env=LAIN_PATTERNS_GENERATED_QUERIES={out_str}");
 }
 
+/// Enumerate the language sub-directories under `patterns_root`,
+/// sorted lexicographically. Hidden directories (`.foo`) are skipped
+/// so a future scratch dir doesn't get enumerated as a language.
+fn discover_lang_dirs(patterns_root: &PathBuf) -> Vec<String> {
+    let read_dir = match fs::read_dir(patterns_root) {
+        Ok(d) => d,
+        Err(e) => panic!(
+            "patterns/build.rs: cannot read patterns root {}: {e}",
+            patterns_root.display()
+        ),
+    };
+    let mut langs: Vec<String> = read_dir
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    langs.sort();
+    langs
+}
+
 /// Build the text of `OUT_DIR/queries.rs`.
 ///
 /// The generated module exposes:
 ///
 /// ```text
 /// pub struct Query { pub lang: &'static str, pub framework: &'static str, pub body: &'static str }
-/// pub static QUERIES: &[(&'static str, &'static str, &'static str)]   // sorted by key
-/// pub fn get(key: &str) -> Option<Query>                              // binary search
+/// pub static QUERIES: &[(&'static str, &'static str, &'static str, &'static str)]
+///                     // sorted by key (lang/framework.scm)
+/// pub fn get(key: &str) -> Option<Query>     // binary search over the precomputed key
 /// pub const LEN: usize
 /// ```
 fn render(entries: &[(String, String)]) -> String {
     use std::fmt::Write;
 
     // Leak the strings so they have a `'static` lifetime.
-    let leaked: Vec<(&'static str, &'static str, &'static str)> = entries
+    let leaked: Vec<(&'static str, &'static str, &'static str, &'static str)> = entries
         .iter()
         .map(|(key, body)| {
             let (lang, framework) = key.split_once('/').unwrap_or((key.as_str(), ""));
+            let key_static: &'static str = Box::leak(key.clone().into_boxed_str());
             let lang_static: &'static str = Box::leak(lang.to_string().into_boxed_str());
             let framework_static: &'static str = Box::leak(framework.to_string().into_boxed_str());
             let body_static: &'static str = Box::leak(body.clone().into_boxed_str());
-            (lang_static, framework_static, body_static)
+            (key_static, lang_static, framework_static, body_static)
         })
         .collect();
 
     let mut out = String::new();
     out.push_str("// Generated by patterns/build.rs — do not edit.\n");
-    out.push_str(
-        "// Source: src/server/sensors/patterns/{rust,go,java,csharp,ruby,kotlin}/*.scm\n",
-    );
+    out.push_str("// Source: src/server/sensors/patterns/<lang>/*.scm (walked at build time).\n");
     out.push_str("// Re-generated when build.rs, frameworks.yaml, or any .scm file changes.\n\n");
 
     out.push_str(
@@ -160,23 +185,26 @@ fn render(entries: &[(String, String)]) -> String {
 
     out.push_str(
         "/// Every `.scm` file compiled into the binary, sorted by `<lang>/<framework>.scm`.\n\
-         pub static QUERIES: &[(&str, &str, &str)] = &[\n",
+         pub static QUERIES: &[(&str, &str, &str, &str)] = &[\n",
     );
-    for (lang, framework, body) in &leaked {
+    for (key, lang, framework, body) in &leaked {
         let body_lit = body.replace('\\', "\\\\").replace('"', "\\\"");
-        writeln!(out, "    (\"{lang}\", \"{framework}\", \"{body_lit}\"),").unwrap();
+        writeln!(
+            out,
+            "    (\"{key}\", \"{lang}\", \"{framework}\", \"{body_lit}\"),"
+        )
+        .unwrap();
     }
     out.push_str("];\n\n");
 
     out.push_str(
-        "/// Binary-search lookup by `<lang>/<framework>.scm` key.\n\
+        "/// Binary-search lookup by `<lang>/<framework>.scm` key. The key is\n\
+         /// precomputed into each tuple's first element, so the comparison\n\
+         /// is `&str`-vs-`&str` with no per-call allocation.\n\
          pub fn get(key: &str) -> Option<Query> {\n\
-         match QUERIES.binary_search_by(|(l, f, _)| {\n\
-         let candidate: String = format!(\"{}/{}\", l, f);\n\
-         candidate.as_str().cmp(key)\n\
-         }) {\n\
+         match QUERIES.binary_search_by(|(k, _, _, _)| k.cmp(&key)) {\n\
          Ok(idx) => {\n\
-         let (l, f, b) = QUERIES[idx];\n\
+         let (_, l, f, b) = QUERIES[idx];\n\
          Some(Query { lang: l, framework: f, body: b })\n\
          }\n\
          Err(_) => None,\n\

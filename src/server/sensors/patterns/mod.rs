@@ -9,7 +9,7 @@
 //!
 //! ## Lifecycle
 //!
-//! [`Patterns::load_default`] returns a `&'static Patterns` initialised
+//! [`Patterns::patterns`] returns a `&'static Patterns` initialised
 //! once via [`OnceLock`] from the bundled YAML. After the per-sensor
 //! walkers consume it (Tasks 2-4), [`Patterns::load_overrides`] layers
 //! `<repo>/.lain/patterns/*.{yaml,scm}` on top so an org can extend or
@@ -135,7 +135,7 @@ impl YamlFile {
 }
 
 /// The pattern registry. One instance per process, loaded once via
-/// [`Patterns::load_default`]. Per-repo overrides are layered on top via
+/// [`Patterns::patterns`]. Per-repo overrides are layered on top via
 /// [`Patterns::load_overrides`].
 ///
 /// All accessors return `&FrameworkDef` borrowed from `&'static` data
@@ -172,7 +172,8 @@ impl Patterns {
     /// `frameworks.yaml`; every later call shares the same instance
     /// (the underlying YAML is `include_str!`'d so the parsed data
     /// lives in static storage).
-    pub fn load_default() -> &'static Self {
+    #[allow(clippy::self_named_constructors)]
+    pub fn patterns() -> &'static Self {
         static DEFAULT: OnceLock<Patterns> = OnceLock::new();
         DEFAULT.get_or_init(|| {
             Self::from_yaml_str(include_str!("frameworks.yaml"))
@@ -180,11 +181,32 @@ impl Patterns {
         })
     }
 
+    /// Deprecated alias for [`Patterns::patterns`]. Kept so existing
+    /// callers (and the prior task's tests) keep compiling while the
+    /// canonical name lands.
+    #[deprecated(note = "use Patterns::patterns() instead")]
+    pub fn load_default() -> &'static Self {
+        Self::patterns()
+    }
+
+    /// Return every compiled (Camp-B) `.scm` query bundled into the
+    /// binary. Each entry is `(key, lang, framework, body)` where
+    /// `key = "<lang>/<framework>.scm"`. The slice is sorted by key
+    /// so a binary search (`generated::get`) is `O(log n)`.
+    ///
+    /// Tasks 2-4 iterate this slice and parse each body via
+    /// `tree_sitter::Query::new`.
+    pub fn compiled_queries(
+        &self,
+    ) -> &'static [(&'static str, &'static str, &'static str, &'static str)] {
+        generated::QUERIES
+    }
+
     /// Clone the bundled singleton into an owned [`Patterns`] so
     /// callers can layer overrides without touching the global
     /// default. `load_overrides` mutates the cloned value.
     pub fn clone_default() -> Self {
-        Self::load_default().clone()
+        Self::patterns().clone()
     }
 
     /// Look up a framework by `id` across every language.
@@ -244,10 +266,14 @@ impl Patterns {
     /// Return the union of `deny_methods` across every outbound
     /// definition whose `lib_match` regex accepts `lib`.
     ///
+    /// `_verb` is reserved for forward compatibility — Tasks 2-4 may
+    /// narrow the deny surface by verb (e.g. only deny `requests.get`
+    /// but not `requests.post`). Today the parameter is unused.
+    ///
     /// No regex match (`lib_match` is `None`) means "any library
     /// matches"; this preserves the framework's deny surface even
     /// when the framework doesn't pin a specific library name.
-    pub fn deny_methods_for(&self, lang: Lang, lib: &str) -> Vec<String> {
+    pub fn deny_methods_for(&self, lang: Lang, lib: &str, _verb: &str) -> Vec<String> {
         let key = lang_key(lang);
         let mut out = Vec::new();
         if let Some(list) = self.yaml.languages.get(key) {
