@@ -55,6 +55,43 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
+/// Method names whose access on a bound HTTP response is never a
+/// payload-field read. The first four are body parsers covered by
+/// rule 2's `chain_unwrap_call` rebind (the rebind path is
+/// unchanged). The rest are HTTP-response / Fetch-API metadata —
+/// `r.status_code`, `r.headers`, `r.blob()`, etc. — that the brief
+/// and ground truth do not treat as field reads. `handle_attribute`
+/// suppresses `ReadsField` emission when the attribute name on a
+/// bound receiver is in this list.
+///
+/// Bug B of the contract-federation bug fixes. Without this gate the
+/// attribute walker treats `r.json` (the function attribute inside
+/// the call `r.json()`) as a field read of `json` on `r`, which
+/// drove `reads_field_precision` down to 0.500 in the T1 fixture.
+const RESPONSE_METHOD_DENYLIST: &[&str] = &[
+    // body parsing (rule 2 already rebinds to the same path)
+    "json",
+    "text",
+    "data",
+    "body",
+    // HTTP-response / Fetch-API metadata
+    "status_code",
+    "headers",
+    "url",
+    "encoding",
+    "content",
+    "raise_for_status",
+    "is_redirect",
+    "ok",
+    "elapsed",
+    // TS / JS Fetch equivalents
+    "blob",
+    "arrayBuffer",
+    "formData",
+    "status",
+    "redirected",
+];
+
 // ─── `SensorOwner` extension ────────────────────────────────────
 
 /// Trait extension so the field-access sensor can stand in for
@@ -1069,6 +1106,18 @@ fn handle_attribute<'a>(
     if let Some(prefix) = bound.get(value_text) {
         let key = attr.utf8_text(src).ok().unwrap_or_default().to_string();
         if key.is_empty() {
+            return;
+        }
+        // Bug B gate: HTTP-response / Fetch-API metadata methods on
+        // a bound receiver never produce a payload-field read. The
+        // call walker recurses into the function attribute, so this
+        // is where the spurious `FieldRead { chain: "json" }` would
+        // otherwise be emitted for `r.json()`. Rule 2's rebind in
+        // `chain_unwrap_call` / `chain_unwrap_dot_data` already
+        // handles `json` / `text` / `data` / `body` at the assignment
+        // site, so suppressing the FieldRef here doesn't lose any
+        // rebind information.
+        if RESPONSE_METHOD_DENYLIST.contains(&key.as_str()) {
             return;
         }
         let mut chain = prefix.0.clone();
@@ -4545,5 +4594,175 @@ async function caller() {
             chains.contains(&"data.id".to_string()),
             "rule 5 must bind the returned sub-path: chains = {chains:?}"
         );
+    }
+
+    /// Bug B: `r.json()` / `r.text()` / `r.status_code` / etc. on a
+    /// bound response must NOT emit a `ReadsField` (they're body
+    /// parsers covered by rule 2's rebind, or HTTP-response metadata
+    /// that isn't a payload field). Without the deny-list, the
+    /// attribute walker treats `r.json` (the function attribute inside
+    /// the call) as a field read of `json` on `r`.
+    #[test]
+    fn response_method_call_on_bound_does_not_emit_field_ref() {
+        // The exact discriminator from the spec/plan: a `body =
+        // r.json()` shape where `r` is bound to the response root.
+        let src = "r = fetch(\"/a\")\nbody = r.json()\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Python, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Python,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "src/billing.py",
+        );
+        // Sanity: rule 2's rebind still binds `body` to the same path
+        // as `r` (empty path).
+        assert!(bound.contains_key("body"), "rule 2 must rebind body");
+        assert_eq!(bound.get("body").unwrap().0, Vec::<PathSegment>::new());
+        // The discriminator: no chain may contain "json" — rule 2
+        // already handled the rebind, and the deny-list suppresses
+        // the spurious FieldRef.
+        let bad = reads
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "json"))
+            })
+            .count();
+        assert_eq!(
+            bad, 0,
+            "r.json() must not emit a ReadsField with chain 'json': {reads:?}"
+        );
+
+        // Also: a TS/JS equivalent. The fixture uses Fetch API
+        // (`response.json()`); the deny-list covers both grammars.
+        let ts_src = "const r = await fetch(\"/a\");\nconst body = r.json();\n";
+        let mut bound2: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound2.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads2 = Vec::new();
+        let mut escapes2 = BTreeSet::new();
+        let tree2 = parse(Lang::TsJs, ts_src).unwrap();
+        walk_tree(
+            tree2.root_node(),
+            ts_src.as_bytes(),
+            Lang::TsJs,
+            &mut bound2,
+            &mut reads2,
+            &mut escapes2,
+            "src/billing.ts",
+        );
+        let bad_ts = reads2
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "json"))
+            })
+            .count();
+        assert_eq!(
+            bad_ts, 0,
+            "r.json() must not emit a ReadsField with chain 'json' (TS): {reads2:?}"
+        );
+    }
+
+    /// Bug B edge from the plan / spec: `r.json().get("data")` must
+    /// suppress only the `json` FieldRef. (The `get("data")` chain is
+    /// not currently produced by the walker because rule 3's
+    /// `chain_unwrap_subscript_or_attr` resolves the receiver text
+    /// as `r.json()` — not in bound — and returns None; this test
+    /// pins that the json step doesn't leak through, regardless.)
+    #[test]
+    fn chained_response_method_then_get_does_not_emit_json_read() {
+        let src = "r = fetch(\"/a\")\ny = r.json().get(\"data\")\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Python, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Python,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "src/billing.py",
+        );
+        let json_reads = reads
+            .iter()
+            .filter(|r| {
+                r.chain
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, PathSegment::Name(n) if n == "json"))
+            })
+            .count();
+        assert_eq!(
+            json_reads, 0,
+            "the json step must not leak into the read chain: {reads:?}"
+        );
+    }
+
+    /// Bug B: HTTP-response metadata methods on a bound receiver must
+    /// not emit ReadsField entries. Without the fix, `r.status_code`
+    /// (no call) would emit chain `status_code` as a FieldRef, which
+    /// is metadata, not a payload field.
+    #[test]
+    fn response_metadata_methods_do_not_emit_field_ref() {
+        // Mix of methods and a bare property read.
+        let src = "r = fetch(\"/a\")\nx = r.status_code\ny = r.headers\nz = r.text()\n";
+        let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
+        bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+        let mut reads = Vec::new();
+        let mut escapes = BTreeSet::new();
+        let tree = parse(Lang::Python, src).unwrap();
+        walk_tree(
+            tree.root_node(),
+            src.as_bytes(),
+            Lang::Python,
+            &mut bound,
+            &mut reads,
+            &mut escapes,
+            "src/billing.py",
+        );
+        let deny_keys = [
+            "status_code",
+            "headers",
+            "url",
+            "encoding",
+            "content",
+            "raise_for_status",
+            "is_redirect",
+            "ok",
+            "elapsed",
+            "json",
+            "text",
+            "data",
+            "body",
+        ];
+        for key in deny_keys {
+            let count = reads
+                .iter()
+                .filter(|r| {
+                    r.chain
+                        .0
+                        .iter()
+                        .any(|s| matches!(s, PathSegment::Name(n) if n == key))
+                })
+                .count();
+            assert_eq!(
+                count, 0,
+                "deny-listed attribute {key:?} must not emit a ReadsField: {reads:?}"
+            );
+        }
     }
 }
