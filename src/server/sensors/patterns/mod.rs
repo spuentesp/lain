@@ -1020,10 +1020,10 @@ fn route_pattern_for(def: &FrameworkDef) -> Option<RoutePattern> {
 
     let path_regex = regex::Regex::new(path_re)
         .unwrap_or_else(|e| panic!("{}: invalid path_regex {:?}: {e}", def.id, path_re));
-    let handler_fn_regex = regex::Regex::new(handler_re)
+    let handler_fn_regex = regex::Regex::new(&handler_re)
         .unwrap_or_else(|e| panic!("{}: invalid handler_regex {:?}: {e}", def.id, handler_re));
     let method_regex = method_re.map(|s| {
-        regex::Regex::new(s)
+        regex::Regex::new(&s)
             .unwrap_or_else(|e| panic!("{}: invalid method_regex {:?}: {e}", def.id, s))
     });
 
@@ -1041,53 +1041,39 @@ fn route_pattern_for(def: &FrameworkDef) -> Option<RoutePattern> {
 /// (the original inline regex had capture groups the YAML lost in
 /// Task 1's data conversion).
 ///
-/// Each `Box::leak` here is bounded — one per framework per
-/// `route_pattern_for` call, which itself runs once per
-/// `Patterns::route_patterns_map` build (cached thereafter). The
-/// leak is not per-scan.
-fn handler_regex_for(def: &FrameworkDef) -> &'static str {
+/// Returns a `Cow<'_, str>` so literals borrow from the binary
+/// (zero allocation) and `def.handler_regex` borrows from `def`.
+/// The caller (`route_pattern_for`) compiles the regex
+/// immediately and drops the source string before the function
+/// returns — no allocation escapes this call.
+fn handler_regex_for(def: &FrameworkDef) -> Cow<'_, str> {
     match def.id.as_str() {
         // Sinatra — the inline regex captured the verb on the
         // declaring line as the handler name (`Sinatra__do_block`
         // per the §6.2 comment). YAML's `do\s*$` has no capture.
         "sinatra-route" => {
-            Box::leak(
-                r#"(?m)^[ \t]*(get|post|put|delete|patch|options|head)\s+['"][^'"]+['"]"#
-                    .to_string()
-                    .into_boxed_str(),
-            )
+            Cow::Borrowed(r#"(?m)^[ \t]*(get|post|put|delete|patch|options|head)\s+['"][^'"]+['"]"#)
         }
         // Minimal API — the inline regex captured the entire
         // quoted path (group 1 = `"/api/health"`). YAML's
         // simplified regex has no capture group; we restore the
         // capture here so the `RoutePattern::extract` look-ahead
         // finds a non-empty handler name on the same line.
-        "minimal-api-route" => {
-            Box::leak(
-                r#"\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*(['"][^'"]+['"])\s*,\s*(?:async\s*)?\([^)]*\)\s*=>"#
-                    .to_string()
-                    .into_boxed_str(),
-            )
-        }
+        "minimal-api-route" => Cow::Borrowed(
+            r#"\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*(['"][^'"]+['"])\s*,\s*(?:async\s*)?\([^)]*\)\s*=>"#,
+        ),
         // Rails — no handler_regex in YAML; capture the verb (or
         // the word following the path) as the handler.
         "rails-route" => {
-            Box::leak(
-                r"(?m)^[ \t]*(get|post|put|patch|delete|options|head|resources)\b"
-                    .to_string()
-                    .into_boxed_str(),
-            )
+            Cow::Borrowed(r"(?m)^[ \t]*(get|post|put|patch|delete|options|head|resources)\b")
         }
         // Default — use the YAML's handler_regex as-is, or fall
         // back to a word-boundary placeholder that captures any
         // identifier on the line.
-        _ => Box::leak(
-            def.handler_regex
-                .as_deref()
-                .unwrap_or(r"\b\w+\b")
-                .to_string()
-                .into_boxed_str(),
-        ),
+        _ => match def.handler_regex.as_deref() {
+            Some(s) => Cow::Borrowed(s),
+            None => Cow::Borrowed(r"\b\w+\b"),
+        },
     }
 }
 
@@ -1097,98 +1083,94 @@ fn handler_regex_for(def: &FrameworkDef) -> &'static str {
 /// APIs (Go-std `HandleFunc`) — those default to
 /// [`HttpMethod::Any`] per §6.2.
 ///
-/// Each `Box::leak` here is bounded — one per framework per
-/// `route_pattern_for` call (see `handler_regex_for`).
-fn method_capture_for(def: &FrameworkDef) -> (Option<&'static str>, HttpMethod) {
+/// Returns `Cow<'_, str>` so literals borrow from the binary and
+/// `format!`-built sources allocate a `String` that's dropped
+/// when the caller finishes compiling. The caller
+/// (`route_pattern_for`) compiles each regex and discards the
+/// source before returning — no allocation escapes.
+fn method_capture_for(def: &FrameworkDef) -> (Option<Cow<'_, str>>, HttpMethod) {
     let verbs = def.verbs.join("|");
     match def.id.as_str() {
         // Flask — the verb lives in `methods=["POST"]`, not in the
         // `@app.route("/…")` decorator.
-        "flask-route" => (Some(r#"methods\s*=\s*\[\s*["'](\w+)"#), HttpMethod::Get),
+        "flask-route" => (
+            Some(Cow::Borrowed(r#"methods\s*=\s*\[\s*["'](\w+)"#)),
+            HttpMethod::Get,
+        ),
         // Go stdlib — `http.HandleFunc` declares no verb at the
         // call site; routes emit `HttpMethod::Any`.
         "stdlib-http-route" => (None, HttpMethod::Any),
         // Kotlin — `routing { get("/path") { … } }` puts the verb
         // before the parenthesised path.
         "ktor-route" => (
-            Some(Box::leak(
-                format!(r"(?m)(?:^|\W)({verbs})\s*\(").into_boxed_str(),
-            )),
+            Some(Cow::Owned(format!(r"(?m)(?:^|\W)({verbs})\s*\("))),
             HttpMethod::Any,
         ),
         // Rails — `get 'path' do … end` style. The verb may be
         // followed by a quote (path), a colon (resources), or
         // whitespace.
         "rails-route" => (
-            Some(Box::leak(
-                format!(r#"(?i:({verbs}))['"\s:]+"#).into_boxed_str(),
-            )),
+            Some(Cow::Owned(format!(r#"(?i:({verbs}))['"\s:]+"#))),
             HttpMethod::Any,
         ),
         // C# Minimal API — the verb is baked into `MapGet` /
         // `MapPost` etc., not a separate token.
         "minimal-api-route" => (
-            Some(r"\.(?i:(MapGet|MapPost|MapPut|MapDelete|MapPatch))"),
+            Some(Cow::Borrowed(
+                r"\.(?i:(MapGet|MapPost|MapPut|MapDelete|MapPatch))",
+            )),
             HttpMethod::Any,
         ),
         // C# ASP.NET controllers — `[HttpGet]` etc. with the verb
         // baked into the attribute name.
         "aspnet-route" => (
-            Some(Box::leak(format!(r"(?i:\[Http({verbs}))").into_boxed_str())),
+            Some(Cow::Owned(format!(r"(?i:\[Http({verbs}))"))),
             HttpMethod::Any,
         ),
         // JAX-RS — `@GET` / `@POST` on its own line, just above
         // the method declaration.
         "jaxrs-route" => (
-            Some(Box::leak(format!(r"@(?i:({verbs}))\s*$").into_boxed_str())),
+            Some(Cow::Owned(format!(r"@(?i:({verbs}))\s*$"))),
             HttpMethod::Any,
         ),
         // Spring — `@GetMapping` / `@PostMapping` / etc.
         "spring-route" => (
-            Some(Box::leak(
-                format!(r"@(?i:({verbs}))Mapping").into_boxed_str(),
-            )),
+            Some(Cow::Owned(format!(r"@(?i:({verbs}))Mapping"))),
             HttpMethod::Any,
         ),
         // axum — `.route("/path", get(handler))` — verb appears
         // as the second argument to `.route()`.
         "axum-route" => (
-            Some(Box::leak(
-                format!(r"\.route\s*\([^,]*,\s*(?i:({verbs}))\s*\(").into_boxed_str(),
-            )),
+            Some(Cow::Owned(format!(
+                r"\.route\s*\([^,]*,\s*(?i:({verbs}))\s*\("
+            ))),
             HttpMethod::Any,
         ),
         // actix-web — `#[get("/path")]` attribute on a function.
         "actix-route" => (
-            Some(Box::leak(
-                format!(r"#\[(?i:({verbs}))\s*\(").into_boxed_str(),
-            )),
+            Some(Cow::Owned(format!(r"#\[(?i:({verbs}))\s*\("))),
             HttpMethod::Any,
         ),
         // FastAPI — `@app.get("/path")` decorator.
         "fastapi-route" => (
-            Some(Box::leak(
-                format!(r"@[\w\.]+\.({verbs})\s*\(").into_boxed_str(),
-            )),
+            Some(Cow::Owned(format!(r"@[\w\.]+\.({verbs})\s*\("))),
             HttpMethod::Any,
         ),
         // Sinatra — `get '/path' do … end`.
         "sinatra-route" => (
-            Some(Box::leak(
-                format!(r#"(?i:({verbs}))\s+['"]"#).into_boxed_str(),
-            )),
+            Some(Cow::Owned(format!(r#"(?i:({verbs}))\s+['"]"#))),
             HttpMethod::Any,
         ),
         // Gin / Echo — `r.GET("/path", handler)`. The verb is
         // uppercase at the call site (verbs in the YAML are
         // already uppercase).
         "gin-route" => (
-            Some(Box::leak(format!(r"\.({verbs})\s*\(").into_boxed_str())),
+            Some(Cow::Owned(format!(r"\.({verbs})\s*\("))),
             HttpMethod::Any,
         ),
         // Express / Fastify — `router.post("/path", handler)`.
         "express-route" | "fastify-route" => (
-            Some(Box::leak(format!(r"\.({verbs})\s*\(").into_boxed_str())),
+            Some(Cow::Owned(format!(r"\.({verbs})\s*\("))),
             HttpMethod::Any,
         ),
         // Unknown framework — leave the method regex unset and
