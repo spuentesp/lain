@@ -39,9 +39,26 @@ use crate::federation::repo_id::RepoId;
 use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::patterns::{FrameworkDef, Patterns};
-use crate::server::sensors::util::Lang;
+use crate::server::sensors::util::{parse_for_lang, Lang};
+use std::cell::Cell;
 use std::collections::BTreeMap;
-use tree_sitter::StreamingIterator;
+use tree_sitter::{StreamingIterator, Tree};
+
+/// Test-only instrumentation for the per-call-loop hoist. The
+/// counter is incremented exactly once per `scan_file_for_routes`
+/// call when tree-sitter parsing is invoked on the calling
+/// thread. Each test thread sees its own counter (no global
+/// state), so concurrent sensor tests cannot false-positive the
+/// assertion.
+thread_local! {
+    pub(crate) static SCAN_PARSE_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Current value of the per-thread parse counter. Tests read
+/// `before` and `after` around a scan call to compute the delta.
+pub fn scan_parse_count() -> usize {
+    SCAN_PARSE_COUNT.with(|c| c.get())
+}
 
 /// A detected HTTP route, in the shape the regex extractor produces
 /// before normalization.
@@ -452,6 +469,24 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
     let mut all_routes = Vec::new();
     let router_prefixes = extract_router_prefixes(content, extension);
 
+    // Parse the file once up front. `lang_for_yaml_key` (used by
+    // `try_treesitter_extract`) maps the prefix back to a `Lang`
+    // — we use the same mapping here so the parsed tree matches the
+    // grammar the `.scm` query is compiled against. A file with N
+    // applicable frameworks now parses exactly once instead of N
+    // times. The `SCAN_PARSE_COUNT` instrumentation lets tests pin
+    // this contract on a per-thread basis (concurrent tests cannot
+    // false-positive the count).
+    let parsed_tree: Option<Tree> = applicable
+        .first()
+        .map(|(key, _)| key)
+        .and_then(|key| key.split_once('-').map(|(prefix, _)| prefix))
+        .and_then(lang_for_yaml_key)
+        .and_then(|lang| {
+            SCAN_PARSE_COUNT.with(|c| c.set(c.get() + 1));
+            parse_for_lang(lang, content)
+        });
+
     // Per-framework regex extraction — the primary path. The
     // `BTreeMap` keeps iteration deterministic across runs.
     for (key, pattern) in &applicable {
@@ -466,8 +501,9 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
         // framework whose `.scm` body is non-empty, run the
         // compiled query and union any new (method, path) pairs
         // the regex missed. An empty body (just a comment line)
-        // skips tree-sitter entirely.
-        if let Some(ts) = try_treesitter_extract(key, content, path) {
+        // skips tree-sitter entirely. The pre-parsed tree is
+        // reused — `parse_for_lang` ran exactly once above.
+        if let Some(ts) = try_treesitter_extract(key, content, path, parsed_tree.as_ref()) {
             for mut r in ts {
                 if let Some(prefix) = router_prefix_for_receiver(&r, &router_prefixes) {
                     r.path = join_prefix(prefix.as_str(), &r.path);
@@ -493,13 +529,20 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
 /// names — `@path` (string literal node), `@verb` (HTTP verb token),
 /// `@handler` (handler function name). Anything else is ignored and
 /// the regex path remains authoritative.
+///
+/// `tree` is the file's pre-parsed tree (built once per scan in
+/// [`scan_file_for_routes`]); the caller hoists
+/// [`parse_for_lang`] out of the per-framework loop so a file with
+/// N applicable frameworks parses exactly once.
 fn try_treesitter_extract(
     pattern_key: &str,
     content: &str,
     path: &std::path::Path,
+    tree: Option<&Tree>,
 ) -> Option<Vec<HttpRoute>> {
     let (lang_yaml, framework) = pattern_key.split_once('-')?;
     let lang = lang_for_yaml_key(lang_yaml)?;
+    let tree = tree?;
 
     // The compiled queries use `<lang>/<framework>.scm`. Resolve
     // the framework id by stripping the `-route` / `-outbound` /
@@ -523,7 +566,6 @@ fn try_treesitter_extract(
         return None;
     }
 
-    let tree = crate::server::sensors::util::parse_for_lang(lang, content)?;
     let grammar = crate::server::sensors::util::language_for(lang);
     let query = tree_sitter::Query::new(&grammar, body).ok()?;
     let mut cursor = tree_sitter::QueryCursor::new();
