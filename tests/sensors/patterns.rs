@@ -185,20 +185,73 @@ fn patterns_singleton_is_callable_as_patterns() {
     );
 }
 
+/// Walk `<patterns>/` recursively and count `.scm` files.
+fn count_scm_files(patterns_dir: &std::path::Path) -> usize {
+    let mut count = 0usize;
+    let entries = match std::fs::read_dir(patterns_dir) {
+        Ok(it) => it,
+        Err(_) => return 0,
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let ft = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            count += count_scm_files(&path);
+        } else if path.extension().map(|x| x == "scm").unwrap_or(false) {
+            count += 1;
+        }
+    }
+    count
+}
+
 #[test]
 fn generated_queries_cover_all_eight_languages() {
-    // 5 (rust) + 3 (go) + 5 (java) + 4 (csharp) + 7 (ruby) + 3 (kotlin)
-    // + 6 (python) + 5 (tsjs) = 38 .scm files. Task 4 added the three
-    // entry-point patterns (`spring-entry-point`,
-    // `aspnet-entry-point`, `rails-entry-point`); Task 8 added the
-    // Django `path("…", view)` / `re_path(r"…", view)` constructor
-    // pattern (`django-route`).
+    // Two cross-checks so the LEN isn't pinned to a brittle magic
+    // number:
+    //
+    //   1. The generated LEN must equal the on-disk count of bundled
+    //      `<lang>/<framework>.scm` files under
+    //      `src/server/sensors/patterns/`. A `.scm` left on disk
+    //      without a matching `frameworks.yaml` entry still gets
+    //      build-time compiled — that's fine; the walker just won't
+    //      dispatch it without a YAML framework def.
+    //
+    //   2. The generated LEN must be ≥ the count of YAML framework
+    //      ids. Every framework is expected to ship exactly one
+    //      `.scm` body, so the two counts must agree. The
+    //      inequality is intentional so a future framework that
+    //      ships multiple `.scm` files (one per route shape) still
+    //      passes.
+    //
+    // The previous LANG_DIRS hard-coded only six languages and
+    // silently dropped 10 entries; the present check covers
+    // python + tsjs and stays accurate through future framework
+    // additions.
+    let patterns_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/server/sensors/patterns");
+    let on_disk_count = count_scm_files(&patterns_dir);
     assert_eq!(
         patterns::generated::LEN,
-        38,
-        "the generated query map must include python + tsjs; \
-         the prior LANG_DIRS hard-coded only six languages and \
-         silently dropped 10 entries"
+        on_disk_count,
+        "the generated LEN must equal the on-disk count of bundled `.scm` files at {patterns_dir:?}",
+    );
+
+    let yaml_text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/server/sensors/patterns/frameworks.yaml"),
+    )
+    .expect("frameworks.yaml readable");
+    let yaml_id_count = yaml_text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("- id:"))
+        .count();
+    assert!(
+        patterns::generated::LEN >= yaml_id_count,
+        "the generated LEN ({}) must be ≥ the YAML framework count ({yaml_id_count})",
+        patterns::generated::LEN,
     );
 }
 
