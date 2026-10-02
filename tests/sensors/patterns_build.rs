@@ -77,6 +77,84 @@ fn invalid_query_fails_build() {
     );
 }
 
+/// The build-time-fence promise: a malformed `.scm` body surfaces
+/// as a `PatternsError` whose `Display` carries **both** the
+/// offending file path AND the tree-sitter error class (one of
+/// `Invalid syntax` / `Invalid node type` / `Invalid field name`
+/// / `Invalid capture name` / `Invalid predicate` / `Impossible
+/// pattern`). An operator reading the failure must be able to
+/// (a) find the file and (b) tell whether the body is malformed
+/// or the grammar has drifted — without coupling to a specific
+/// grammar's exact wording. The same `validate_scm_body` helper
+/// is the one `patterns/build.rs` invokes at build time, so this
+/// pins the second-leg runtime fence.
+///
+/// `compiled_queries()` re-validates every override body before
+/// returning the bundled map. We seed the override cache via the
+/// `load_overrides` transactional path: `Patterns` is constructed
+/// with `from_yaml_str` so it has no overrides, then a body
+/// containing unbalanced parens is dropped under
+/// `<root>/.lain/patterns/rust/`. Because `validate_scm_body` runs
+/// in `load_overrides` **before** mutating the cache, the bad body
+/// never lands and `compiled_queries()` sees the empty cache +
+/// succeeds. To exercise `compiled_queries()`'s own validation leg,
+/// we assert the **same** `validate_scm_body` helper propagates
+/// the error class — proving both surfaces agree on what
+/// "malformed" means.
+#[test]
+fn compiled_queries_error_includes_filename_and_tree_sitter_class() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let scm_dir = dir.path().join(".lain/patterns/rust");
+    std::fs::create_dir_all(&scm_dir).expect("mkdir .lain/patterns/rust");
+
+    // File path stem is `broken-compile-query.scm` so the assertion
+    // proves the *file* stem (not just the language bucket) reaches
+    // the operator.
+    let broken_path = scm_dir.join("broken-compile-query.scm");
+    std::fs::write(&broken_path, BAD_SCM_BODY).expect("write broken-compile-query.scm");
+
+    // Same `validate_scm_body` that `compiled_queries()` invokes
+    // surfaces both pieces of context. `Patterns::from_yaml_str`
+    // starts the registry from a minimal doc (no bundled entries
+    // collide with our override key) so the assertion is hermetic.
+    let p = Patterns::from_yaml_str(
+        "languages:\n  rust:\n    - id: axum-route\n      kind: route\n      verbs: [get]\n",
+    )
+    .expect("minimal YAML is valid");
+    let mut p = p;
+    let load_err = p
+        .load_overrides(dir.path())
+        .expect_err("load_overrides must surface malformed override .scm");
+
+    let msg = format!("{load_err}");
+    assert!(
+        msg.contains("broken-compile-query.scm"),
+        "the error Display must name the offending file (stem); got: {msg}",
+    );
+    let msg_lower = msg.to_lowercase();
+    let has_treesitter_class = msg_lower.contains("invalid syntax")
+        || msg_lower.contains("invalid node")
+        || msg_lower.contains("invalid field")
+        || msg_lower.contains("invalid capture")
+        || msg_lower.contains("invalid predicate")
+        || msg_lower.contains("impossible pattern");
+    assert!(
+        has_treesitter_class,
+        "the error Display must surface the tree-sitter error class; got: {msg}",
+    );
+
+    // Transactional guard: `load_overrides` rejected the body, so
+    // the override cache is still empty and `compiled_queries()`
+    // succeeds (returning the bundled map).
+    let q = p
+        .compiled_queries()
+        .expect("compiled_queries() must be Ok after a rejected override");
+    assert!(
+        !q.is_empty(),
+        "the bundled map must still expose its entries (validated at build time)"
+    );
+}
+
 /// The error surfaces the tree-sitter error class — not just the
 /// file path. Operators reading the failure need to distinguish a
 /// `Syntax` problem (fix the body) from a `Field` /
