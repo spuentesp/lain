@@ -443,16 +443,24 @@ fn process_outbound_match(
             return None;
         }
         let via_lib = match (framework.id.as_str(), lang) {
-            ("okhttp-outbound", _) => "okhttp".to_string(),
-            ("ktor-client-outbound", _) => "ktor".to_string(),
+            // Java's HttpClient lives on a different gem-name
+            // (`http`, the JDK package) than the display_name
+            // `httpclient`; keep this arm explicit.
             ("httpclient-outbound", Lang::Java) => "http".to_string(),
+            // C#'s `downloadstring` / `downloadstringtaskasync` are
+            // WebClient methods, not HttpClient — keep the
+            // per-call branch. The non-downloadstring branch
+            // resolves to the framework's effective_id (httpclient).
             ("httpclient-outbound", Lang::CSharp) => {
                 if verb_text == "downloadstring" || verb_text == "downloadstringtaskasync" {
                     "webclient".to_string()
                 } else {
-                    "httpclient".to_string()
+                    framework.effective_id().to_string()
                 }
             }
+            // Ktor / OkHttp — effective_id() returns the public
+            // name declared in frameworks.yaml
+            // (`display_name: ktor` / `display_name: okhttp`).
             _ => framework.effective_id().to_string(),
         };
         return build_call(

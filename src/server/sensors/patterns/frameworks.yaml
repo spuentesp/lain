@@ -142,10 +142,12 @@ languages:
       handler_regex: 'public\s+[\w<>,\s]+\s+(\w+)\s*\('
     - id: okhttp-outbound
       kind: outbound
+      display_name: okhttp
       lib_match: '^(OkHttpClient|.*OkHttpClient.*|okhttp3\..*)$'
       deny_methods: [getStatusCode, statusCode, getHeaders, headers, firstValue, getMessage, message, body, code]
     - id: httpclient-outbound
       kind: outbound
+      display_name: httpclient
       lib_match: '^HttpClient$'
       deny_methods: [getStatusCode, statusCode, getHeaders, headers, firstValue, getMessage, message, body, code]
 
@@ -165,6 +167,7 @@ languages:
       handler_regex: '\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*["''][^"'']+["'']\s*,\s*(?:async\s*)?\([^)]*\)\s*=>'
     - id: httpclient-outbound
       kind: outbound
+      display_name: httpclient
       lib_match: '^(HttpClient|.*HttpClient.*|WebClient.*)$'
       deny_methods: [IsSuccessStatusCode, StatusCode, Headers, GetValues, DownloadString, DownloadStringTaskAsync]
 
@@ -205,9 +208,11 @@ languages:
       handler_regex: '(get|post|put|patch|delete|head|options)\s*\(\s*"[^"]+"\s*\)'
     - id: ktor-client-outbound
       kind: outbound
+      display_name: ktor
       lib_match: '^(HttpClient|OkHttpClient)$'
       deny_methods: [statusCode, call, headers, body]
     - id: okhttp-outbound
       kind: outbound
+      display_name: okhttp
       lib_match: '^OkHttpClient$'
       deny_methods: [statusCode, call, headers, body]
