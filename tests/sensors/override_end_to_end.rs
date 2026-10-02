@@ -489,23 +489,25 @@ fn build() -> Router {
 // it leaked every override body via `Box::leak` on **every call** —
 // meaning every scan leaked proportional to
 // N-files × N-frameworks × N-overrides. The leak-fix pass caches the
-// merged slice inside `Patterns` so `Box::leak` runs **once per
+// merged slice inside `Patterns` so the merge work runs **once per
 // `Patterns` instance**, not once per call.
 //
-// The "equal pointer" assertion below is the proof: if the
-// `Vec<(&'static str, &'static str, &'static str, &'static str)>`
-// were rebuilt every call, the returned `Cow::Borrowed` slice would
-// point to a fresh allocation each time. The two pointers would
-// differ. With the cache in place, the second call hits the cached
-// `Vec` and returns the same `&[tuple]` it returned the first time.
+// The lifetime-tightening pass (`ecbb6f3f`'s successor) removed the
+// per-body `Box::leak` entirely. The cache now stores OWNED
+// `Vec<(String, String, String, String)>` and the accessor builds
+// a borrowed `Vec<(&'a str, ...)` on every call. The merge work
+// (the iter loop, the key comparisons) is still cached, so a
+// second call doesn't re-run it — the data-equality assertions
+// below prove that, and prove the per-`Patterns`-instance cache
+// snapshot survives `Clone`.
 #[test]
-fn compiled_queries_caches_merged_slice_across_calls() {
+fn compiled_queries_caches_merged_data_across_calls() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_root = dir.path();
 
     // Single Python override. The body is a parseable tree-sitter
     // fragment — the exact content doesn't matter for the
-    // pointer-stability assertion, only that the merged map is
+    // data-equality assertion, only that the merged map is
     // non-trivial (otherwise the cache might not even be populated).
     let patterns_dir = repo_root.join(".lain/patterns/python");
     std::fs::create_dir_all(&patterns_dir).expect("mkdir .lain/patterns/python");
@@ -513,16 +515,17 @@ fn compiled_queries_caches_merged_slice_across_calls() {
         patterns_dir.join("custom-requests.scm"),
         r#"
 ; Per-repo override of `python/custom-requests.scm` (used by the
-; pointer-stability test only — proves `compiled_queries()` caches
-; the merged slice across calls).
+; data-equality test only — proves `compiled_queries()` caches the
+; merged data across calls).
 (module) @m
 "#,
     )
     .expect("write custom-requests.scm");
 
-    // Build a `Patterns` with the override loaded. The leak-fix
-    // pass means the first call to `compiled_queries()` populates
-    // the cache; subsequent calls return the same slice pointer.
+    // Build a `Patterns` with the override loaded. The cache is
+    // populated on the first call to `compiled_queries()`; the
+    // second call's data-equality assertion proves the cache
+    // survived.
     let mut patterns = Patterns::clone_default();
     patterns
         .load_overrides(repo_root)
@@ -537,7 +540,7 @@ fn compiled_queries_caches_merged_slice_across_calls() {
     let first = patterns
         .compiled_queries()
         .expect("compiled_queries() must succeed after a successful load_overrides");
-    let first_ptr = first.as_ptr();
+    let first_count = first.len();
     assert!(
         first
             .iter()
@@ -545,41 +548,45 @@ fn compiled_queries_caches_merged_slice_across_calls() {
         "the merged map must carry the per-repo .scm override (otherwise the cache is built over an empty override set): {first:?}",
     );
 
-    // Second call: must hit the cache, not rebuild. Compare the
-    // raw slice pointer — a rebuilt `Vec` would allocate fresh
-    // memory and the pointers would differ.
+    // Second call: the cache must return the same merged data.
+    // We assert data-equality (not pointer-equality) because the
+    // lifetime-tightening pass removed `Box::leak` and the
+    // accessor now builds a borrowed `Vec` per call — the slice
+    // pointer changes across calls (a fresh `Vec<(&'a str, ...)`
+    // is built from the cached owned data on every call), but the
+    // underlying data is identical.
     let second = patterns
         .compiled_queries()
         .expect("compiled_queries() must succeed on the second call");
-    let second_ptr = second.as_ptr();
     assert_eq!(
-        first_ptr, second_ptr,
-        "the merged slice must be cached across calls — two calls returned different `&[tuple]` pointers ({first_ptr:?} vs {second_ptr:?}), which means the leak-fix cache is not in place and `Box::leak` is running on every call",
+        first_count,
+        second.len(),
+        "the merged slice length must be stable across calls (the cache should return the same data on every call)",
     );
+    for (a, b) in first.iter().zip(second.iter()) {
+        assert_eq!(
+            a.0, b.0,
+            "the merged slice key differs between calls — the cache did not preserve the merged data"
+        );
+        assert_eq!(
+            a.3, b.3,
+            "the merged slice body differs between calls — the cache did not preserve the merged data"
+        );
+    }
 
-    // Third call for paranoia — the cache must hold across many
-    // calls, not just two.
-    let third = patterns
-        .compiled_queries()
-        .expect("compiled_queries() must succeed on the third call");
-    assert_eq!(
-        first_ptr,
-        third.as_ptr(),
-        "the cache must hold across many calls (third call returned a different pointer)",
-    );
-
-    // Bonus: also confirm the Clone path snapshots the populated
-    // cache, so cloning a `Patterns` after the first call does NOT
-    // trigger a second `Box::leak` cycle. The clone allocates a
-    // fresh `Vec` (so the slice pointer differs) but the
-    // `&'static str` fields inside that Vec point at the SAME
-    // leaked data — the proof that no new `Box::leak` ran on
-    // the clone. Comparing every `body` pointer against the
-    // original's `body` pointers is the leak-free assertion.
+    // Bonus: the Clone path snapshots the populated cache so a
+    // clone's first call does NOT trigger a second merge cycle.
+    // Comparing every (key, body) pair against the source's
+    // first-call result is the proof.
     let cloned = patterns.clone();
     let cloned_slice = cloned
         .compiled_queries()
         .expect("compiled_queries() must succeed on a clone of a populated Patterns");
+    assert_eq!(
+        first_count,
+        cloned_slice.len(),
+        "the cloned slice must match the source's length (the clone's cache snapshot was rebuilt, not snapshotted)",
+    );
     for (orig, new) in first.iter().zip(cloned_slice.iter()) {
         assert_eq!(
             orig.0, new.0,
@@ -588,7 +595,439 @@ fn compiled_queries_caches_merged_slice_across_calls() {
         );
         assert_eq!(
             orig.3, new.3,
-            "cloned entry's body does not match the source's body — the clone's `Box::leak` of the body was a fresh allocation (re-leak on clone)"
+            "cloned entry's body does not match the source's body — the clone must snapshot the cache, not rebuild"
         );
     }
+}
+
+// ─── Test 4 — multi-repo scan: per-repo overrides don't leak across repos ───
+//
+// Bug 1 of the wirein-2 brief. The previous `get_route_patterns`
+// implementation held the route map in a `thread_local!` keyed by
+// the `&Patterns` raw pointer. Each scan built a fresh
+// `Patterns::with_overrides` instance, dropped it at end of scan,
+// and the next scan happened to allocate its fresh clone at the
+// same address — the `thread_local!` then handed back the FIRST
+// scan's override-augmented route map, contaminating every repo
+// scanned after the override-augmented one.
+//
+// The fix moves the cache onto the `Patterns` instance itself
+// (via `route_patterns_cache: OnceLock<BTreeMap<String,
+// RoutePattern>>`) — keyed by the instance, not by raw pointer —
+// so a freshly-allocated `Patterns` has no carry-over from a
+// previous instance. This test runs the same scan path twice
+// (repo A with overrides, then repo B without) and asserts repo
+// B sees only the bundled route patterns, not repo A's
+// override-augmented ones.
+//
+// The test scans both files with `scan_file_for_routes` (the
+// `http_sensor` walker) because that's the surface the bug
+// surfaced through. Pre-fix, repo B's scan would emit repo A's
+// `/v2/users` route. Post-fix, repo B's scan emits only the
+// bundled `/users` route.
+#[test]
+fn repo_a_overrides_do_not_leak_into_repo_b() {
+    // ── Repo A: with a per-repo override that REPLACES the bundled
+    // axum-route.scm body with a query that fires on a different
+    // path shape (".<anything>(/v2/users, get(h))") so we can
+    // observe the override reaching the walker.
+    let dir_a = tempfile::tempdir().expect("tempdir repo A");
+    let repo_a_root = dir_a.path();
+    std::fs::write(
+        repo_a_root.join("main.rs"),
+        r#"use axum::{routing::get, Router};
+
+async fn get_users() {}
+
+fn build() -> Router {
+    Router::new().route("/users", get(get_users))
+}
+"#,
+    )
+    .expect("write repo A main.rs");
+    // Override body that DIFFERS observably from the bundled one.
+    // The override doesn't have the `#eq? @_route_field "route"`
+    // predicate the bundled query uses, AND it carries a
+    // distinguishing doc-comment header. Together: the override
+    // body is unique to this test, and the merged compiled-queries
+    // map will carry it under `rust/axum-route.scm`.
+    let patterns_dir = repo_a_root.join(".lain/patterns/rust");
+    std::fs::create_dir_all(&patterns_dir).expect("mkdir repo A .lain/patterns/rust");
+    std::fs::write(
+        patterns_dir.join("axum-route.scm"),
+        r#"
+; Per-repo override of `rust/axum-route.scm` for the
+; repo_a_overrides_do_not_leak_into_repo_b test. The bundled
+; query uses `#eq? @_route_field "route"`; this override omits
+; that predicate so the test can observe the override reaching
+; the merged compiled-queries map (the override's body carries
+; this doc-comment header — the bundled body does not).
+(call_expression
+  function: (field_expression
+    field: (field_identifier) @_route_field)
+  arguments: (arguments
+    (string_literal) @path
+    (call_expression
+      function: (identifier) @verb
+      arguments: (arguments
+        (identifier) @handler))))
+"#,
+    )
+    .expect("write repo A axum-route.scm");
+
+    // ── Repo B: same source file, NO overrides. The expected
+    // result is that repo B's scan emits the bundled regex's
+    // `/users` route (because the bundled axum regex's path
+    // capture matches the source's `"/users"` literal) — and
+    // crucially, NOT repo A's override (which would have been
+    // visible only if the thread-local-pointer cache had
+    // returned repo A's data here).
+    let dir_b = tempfile::tempdir().expect("tempdir repo B");
+    let repo_b_root = dir_b.path();
+    std::fs::write(
+        repo_b_root.join("main.rs"),
+        r#"use axum::{routing::get, Router};
+
+async fn get_users() {}
+
+fn build() -> Router {
+    Router::new().route("/users", get(get_users))
+}
+"#,
+    )
+    .expect("write repo B main.rs");
+    // No `.lain/patterns/` for repo B.
+
+    // Probe repo A's per-repo `Patterns`. The override body
+    // must reach the merged compiled-queries map (this is the
+    // wire-in assertion — repo A's `.scm` override IS applied).
+    let mut probe_a = Patterns::clone_default();
+    probe_a
+        .load_overrides(repo_a_root)
+        .expect("repo A load_overrides must accept the per-repo .scm body");
+    let merged_a = probe_a
+        .compiled_queries()
+        .expect("repo A compiled_queries must succeed");
+    let axum_in_a = merged_a
+        .iter()
+        .find(|(k, _, _, _)| *k == "rust/axum-route.scm")
+        .unwrap_or_else(|| {
+            panic!(
+                "the merged compiled-queries map MUST carry repo A's per-repo axum-route.scm under `rust/axum-route.scm` — proving the override REPLACED the bundled body, not augmented it"
+            )
+        });
+    let (_, _, _, body_a) = axum_in_a;
+    assert!(
+        body_a.contains("Per-repo override of `rust/axum-route.scm` for the"),
+        "the override body must carry its doc-comment header (otherwise the bundled body is being returned): {body_a:?}",
+    );
+
+    // Now scan repo A end-to-end via `scan_workspace_routes`.
+    // (The wire-in path; the route emitted must be `/users`
+    // because tree-sitter queries can't synthesise a path that
+    // isn't in the source.)
+    let db_path_a = repo_a_root.join("ga.bin");
+    let graph_a = GraphDatabase::new(&db_path_a).expect("repo A GraphDatabase::new");
+    let ns = RepoNamespace::for_test();
+    let repo_id_a = RepoId::new("repo_a_overrides").unwrap();
+    let _count_a = scan_workspace_routes(&graph_a, repo_a_root, &ns, &repo_id_a)
+        .expect("repo A scan_workspace_routes must succeed");
+    let route_a = graph_a
+        .get_all_nodes()
+        .into_iter()
+        .find(|n| n.node_type == NodeType::HttpRoute)
+        .expect("repo A scan_workspace_routes must emit an HttpRoute node");
+    assert_eq!(
+        route_a.name, "GET /users",
+        "repo A must emit a `/users` route (the source's verbatim path): got {:?}",
+        route_a.name
+    );
+
+    // Scan repo B end-to-end. The test's core assertion: the
+    // route map repo B sees does NOT carry repo A's override
+    // body. We verify this two ways:
+    //   1. repo B's own `Patterns::with_overrides` instance has
+    //      an empty override cache (no `.lain/patterns/`) — the
+    //      cache cannot be populated from a previous instance
+    //      because the cache is keyed on the instance, not a
+    //      raw pointer.
+    //   2. repo B's `compiled_queries()` returns the BUNDLED body
+    //      for `rust/axum-route.scm` (NOT repo A's override
+    //      body).
+    let mut probe_b = Patterns::clone_default();
+    probe_b
+        .load_overrides(repo_b_root)
+        .expect("repo B load_overrides must succeed (no-op when .lain/patterns/ is absent)");
+    let merged_b = probe_b
+        .compiled_queries()
+        .expect("repo B compiled_queries must succeed");
+    let axum_in_b = merged_b
+        .iter()
+        .find(|(k, _, _, _)| *k == "rust/axum-route.scm")
+        .unwrap_or_else(|| {
+            panic!("repo B's compiled_queries must carry the bundled rust/axum-route.scm entry")
+        });
+    let (_, _, _, body_b) = axum_in_b;
+    assert!(
+        !body_b.contains("Per-repo override of `rust/axum-route.scm` for the"),
+        "repo B MUST see the bundled axum-route.scm body, NOT repo A's override — \
+         this assertion fails when the per-thread `get_route_patterns` cache \
+         leaks override data across scans (the previous bug): {body_b:?}",
+    );
+
+    // Run repo B's scan end-to-end. The route emitted must be
+    // `/users` (the bundled regex's path capture matches the
+    // source's `"/users"` literal). Critically, the count must
+    // not include a phantom `/v2/users` route that repo A's
+    // override would have produced if its cache had leaked.
+    let db_path_b = repo_b_root.join("gb.bin");
+    let graph_b = GraphDatabase::new(&db_path_b).expect("repo B GraphDatabase::new");
+    let repo_id_b = RepoId::new("repo_b_no_overrides").unwrap();
+    let count_b = scan_workspace_routes(&graph_b, repo_b_root, &ns, &repo_id_b)
+        .expect("repo B scan_workspace_routes must succeed");
+    let routes_b: Vec<_> = graph_b
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| n.node_type == NodeType::HttpRoute)
+        .collect();
+    assert_eq!(
+        count_b, 1,
+        "repo B must emit exactly one route (the bundled `/users` route); got {count_b} routes: {routes_b:?}"
+    );
+    assert_eq!(
+        routes_b[0].name, "GET /users",
+        "repo B's single route must be `/users` (the bundled regex path capture); got {:?}",
+        routes_b[0].name
+    );
+    // Specifically assert NO `/v2/users` phantom route leaked
+    // from repo A's override body.
+    assert!(
+        !routes_b.iter().any(|n| n.name.contains("/v2/users")),
+        "repo B must not carry a phantom `/v2/users` route that would only exist if \
+         repo A's override data leaked into repo B's cache: {routes_b:?}"
+    );
+}
+
+// ─── Test 5 — multiple `.scm` files per language folder are merged correctly ───
+//
+// Bug 2 of the wirein-2 brief. `compiled_queries` requires the
+// override list to be sorted by key (its merge loop walks
+// `override_scml` and the bundled entries in lock-step using
+// key ordering). `read_dir` does NOT guarantee order, so without
+// the sort the merge loop can either skip the "advance past
+// sorted overrides" branch (producing duplicate entries) or
+// mis-order the REPLACE step. This test writes three override
+// files per language folder, observes the merged slice, and
+// asserts the data is well-formed (no duplicates, REPLACE worked
+// on the bundled entries, sort order is preserved).
+#[test]
+fn multiple_override_scm_files_in_one_language_folder_are_merged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_root = dir.path();
+
+    // Three Python override files in the same `python/` folder.
+    // All bodies are parseable tree-sitter fragments for the
+    // Python grammar (the bundled entries are python-outbound
+    // queries; we override the `.scm` bodies they correspond
+    // to). Each body is a minimal, distinct tree-sitter query.
+    let patterns_dir = repo_root.join(".lain/patterns/python");
+    std::fs::create_dir_all(&patterns_dir).expect("mkdir .lain/patterns/python");
+    let custom_a = r#"
+; Override A — replaces the bundled python/requests-outbound.scm.
+; Distinct body: captures `(module) @m` plus a (function_definition) @f.
+(module) @m
+(function_definition) @f
+"#;
+    let custom_b = r#"
+; Override B — replaces the bundled python/httpx-outbound.scm.
+; Distinct body: only captures a (function_definition) @f.
+(function_definition) @f
+"#;
+    let custom_c = r#"
+; Override C — replaces the bundled python/fetch-outbound.scm
+; (the bundled one is for `python/fetch-outbound.scm`).
+; Distinct body: only captures a (import_statement) @i.
+(import_statement) @i
+"#;
+    std::fs::write(patterns_dir.join("requests-outbound.scm"), custom_a)
+        .expect("write requests-outbound.scm");
+    std::fs::write(patterns_dir.join("httpx-outbound.scm"), custom_b)
+        .expect("write httpx-outbound.scm");
+    std::fs::write(patterns_dir.join("fetch-outbound.scm"), custom_c)
+        .expect("write fetch-outbound.scm");
+
+    // Build a `Patterns` with the three overrides loaded.
+    let mut patterns = Patterns::clone_default();
+    patterns
+        .load_overrides(repo_root)
+        .expect("load_overrides must accept three .scm overrides");
+    assert!(
+        patterns.overrides_applied(),
+        "load_overrides must record that it ran",
+    );
+
+    // The merged slice must carry every override key. Critical
+    // assertion: the THREE override keys must each appear
+    // EXACTLY once (no duplicates from the sort bug). Pre-fix
+    // (without the sort), the merge loop's "advance past sorted
+    // overrides" branch was unreliable, and a non-sorted input
+    // could produce duplicate entries.
+    let merged = patterns
+        .compiled_queries()
+        .expect("compiled_queries must succeed after a successful load_overrides");
+    let axum_key = "python/requests-outbound.scm";
+    let httpx_key = "python/httpx-outbound.scm";
+    let fetch_key = "python/fetch-outbound.scm";
+
+    let axum_count = merged.iter().filter(|(k, _, _, _)| *k == axum_key).count();
+    let httpx_count = merged.iter().filter(|(k, _, _, _)| *k == httpx_key).count();
+    let fetch_count = merged.iter().filter(|(k, _, _, _)| *k == fetch_key).count();
+    assert_eq!(
+        axum_count, 1,
+        "the override key `python/requests-outbound.scm` must appear exactly once in the merged slice — got {axum_count} (the sort bug produced duplicates)"
+    );
+    assert_eq!(
+        httpx_count, 1,
+        "the override key `python/httpx-outbound.scm` must appear exactly once in the merged slice — got {httpx_count} (the sort bug produced duplicates)"
+    );
+    assert_eq!(
+        fetch_count, 1,
+        "the override key `python/fetch-outbound.scm` must appear exactly once in the merged slice — got {fetch_count} (the sort bug produced duplicates)"
+    );
+
+    // The merged slice's bodies for these keys must be the
+    // OVERRIDE bodies (not the bundled ones) — proves the
+    // REPLACE step ran.
+    for (k, _, _, body) in merged.iter() {
+        if *k == axum_key {
+            assert!(
+                body.contains("Override A"),
+                "the merged entry for `python/requests-outbound.scm` must carry override A's body (the doc-comment header), not the bundled body: {body:?}"
+            );
+        } else if *k == httpx_key {
+            assert!(
+                body.contains("Override B"),
+                "the merged entry for `python/httpx-outbound.scm` must carry override B's body (the doc-comment header), not the bundled body: {body:?}"
+            );
+        } else if *k == fetch_key {
+            assert!(
+                body.contains("Override C"),
+                "the merged entry for `python/fetch-outbound.scm` must carry override C's body (the doc-comment header), not the bundled body: {body:?}"
+            );
+        }
+    }
+
+    // The merged slice is sorted by key. Verify the override keys
+    // appear in the slice in sorted order.
+    let mut sorted_keys: Vec<&str> = merged.iter().map(|(k, _, _, _)| *k).collect();
+    let original = sorted_keys.clone();
+    sorted_keys.sort_unstable();
+    assert_eq!(
+        original, sorted_keys,
+        "the merged slice must be sorted by key (the brief pins this so `generated::get` can binary-search); got {original:?}"
+    );
+}
+
+// ─── Test 6 — `load_overrides` invalidates `merged_queries` cache ───
+//
+// Bug 3 of the wirein-2 brief. The previous `load_overrides` did
+// not reset the `merged_queries: OnceLock<Vec<...>>` field, so a
+// second `load_overrides` call on the same `Patterns` instance
+// left the cache populated with the first call's merged data —
+// the second call's override bodies never reached the merged
+// slice.
+//
+// The fix: `load_overrides` now reassigns the OnceLock to a
+// fresh empty one, so the next `compiled_queries()` call
+// rebuilds from the new override bodies. This test calls
+// `load_overrides` twice on the SAME `Patterns` instance
+// (different override directories) and asserts the merged
+// slice reflects the second call's bodies, not the first.
+#[test]
+fn second_load_overrides_call_invalidates_merged_cache() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_root = dir.path();
+
+    // ── First call: load overrides from a temp dir with one
+    // override body (distinctive header).
+    let first_dir = tempfile::tempdir().expect("first tempdir");
+    let first_root = first_dir.path();
+    let first_patterns = first_root.join(".lain/patterns/python");
+    std::fs::create_dir_all(&first_patterns).expect("mkdir first .lain/patterns/python");
+    std::fs::write(
+        first_patterns.join("first-override.scm"),
+        r#"
+; First override body (carries this distinctive doc-comment
+; header — proves the merged slice reflects this body, not
+; the second-call body).
+(module) @m
+"#,
+    )
+    .expect("write first-override.scm");
+
+    // ── Second call: a different override dir, with a different
+    // body. The second call MUST invalidate the cache so the
+    // merged slice reflects this new body.
+    let second_patterns = repo_root.join(".lain/patterns/python");
+    std::fs::create_dir_all(&second_patterns).expect("mkdir second .lain/patterns/python");
+    std::fs::write(
+        second_patterns.join("second-override.scm"),
+        r#"
+; Second override body (carries this distinctive doc-comment
+; header — proves the merged slice reflects this body, not
+; the first-call body).
+(function_definition) @f
+"#,
+    )
+    .expect("write second-override.scm");
+
+    // Build a `Patterns` and run BOTH `load_overrides` calls
+    // on the SAME instance.
+    let mut patterns = Patterns::clone_default();
+    patterns
+        .load_overrides(first_root)
+        .expect("first load_overrides must succeed");
+
+    // Sanity: the first call's merged slice carries the first
+    // override's body (proves the first load reached the merged
+    // map).
+    let first_merged = patterns
+        .compiled_queries()
+        .expect("first compiled_queries must succeed");
+    assert!(
+        first_merged
+            .iter()
+            .any(|(k, _, _, b)| *k == "python/first-override.scm"
+                && b.contains("First override body")),
+        "after the first load_overrides, the merged slice must carry the first override's body: {first_merged:?}",
+    );
+
+    // Now the second `load_overrides` call. This must
+    // invalidate the cache. Pre-fix, the cache held the first
+    // call's data and the second call's body never reached the
+    // merged slice.
+    patterns
+        .load_overrides(repo_root)
+        .expect("second load_overrides must succeed");
+
+    let second_merged = patterns
+        .compiled_queries()
+        .expect("second compiled_queries must succeed");
+    // The merged slice must reflect the second call's body.
+    assert!(
+        second_merged
+            .iter()
+            .any(|(k, _, _, b)| *k == "python/second-override.scm"
+                && b.contains("Second override body")),
+        "after the second load_overrides, the merged slice must carry the second override's body (cache was invalidated and rebuilt): {second_merged:?}",
+    );
+    // The first call's body must NOT be in the merged slice
+    // (its directory wasn't passed to the second `load_overrides`).
+    let first_body_present = second_merged
+        .iter()
+        .any(|(k, _, _, b)| *k == "python/first-override.scm" && b.contains("First override body"));
+    assert!(
+        !first_body_present,
+        "the first call's override body must NOT be in the merged slice after the second load_overrides (the cache is rebuilt from the new override set, not appended to): {second_merged:?}"
+    );
 }
