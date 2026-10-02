@@ -76,7 +76,12 @@ fn outbound_query_for_call_site() {
     //    captured URL — exactly what the prior `detect_rust_call`
     //    did, but now data-driven through Patterns.
     let src = "fn main() { let _ = reqwest::get(\"https://api.example.com/users\"); }\n";
-    let calls = detect_calls(std::path::Path::new("main.rs"), src, Lang::Rust);
+    let calls = detect_calls(
+        std::path::Path::new("main.rs"),
+        src,
+        Lang::Rust,
+        Patterns::patterns(),
+    );
     assert_eq!(
         calls.len(),
         1,

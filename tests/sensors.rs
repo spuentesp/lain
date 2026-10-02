@@ -32,6 +32,9 @@ mod patterns;
 #[path = "sensors/patterns_build.rs"]
 mod patterns_build;
 
+#[path = "sensors/override_end_to_end.rs"]
+mod override_end_to_end;
+
 #[path = "sensors/patterns_override.rs"]
 mod patterns_override;
 

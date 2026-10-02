@@ -47,14 +47,25 @@
 
 use lain::server::federation::contracts::model::{CallVia, HttpMethod, MethodSpec};
 use lain::server::sensors::http_client_sensor::detect_calls;
+use lain::server::sensors::patterns::Patterns;
 use lain::server::sensors::util::Lang;
 
 fn ruby_calls(src: &str) -> Vec<lain::server::sensors::http_client_sensor::HttpClientCall> {
-    detect_calls(std::path::Path::new("test.rb"), src, Lang::Ruby)
+    detect_calls(
+        std::path::Path::new("test.rb"),
+        src,
+        Lang::Ruby,
+        Patterns::patterns(),
+    )
 }
 
 fn java_calls(src: &str) -> Vec<lain::server::sensors::http_client_sensor::HttpClientCall> {
-    detect_calls(std::path::Path::new("Test.java"), src, Lang::Java)
+    detect_calls(
+        std::path::Path::new("Test.java"),
+        src,
+        Lang::Java,
+        Patterns::patterns(),
+    )
 }
 
 /// HTTParty.get direct — `display_name: httparty` resolves to

@@ -55,6 +55,13 @@ type FileDetections = BTreeMap<(String, u32), EntryKind>;
 /// wipes every node's `entry` field up front (T5 scaffolding, step 3),
 /// then this function re-applies the freshly-detected set. The owner
 /// owns no nodes, so the stale-id removal in steps 1/2 is a no-op.
+///
+/// Layering per-repo overrides from `<root>/.lain/patterns/` happens
+/// at the top of this function via [`Patterns::with_overrides`]: the
+/// per-repo YAML + `.scm` overrides are merged into the bundled
+/// registry before any walker code runs, so the
+/// Java/ASP.NET/Rails entry-point walkers see override-augmented
+/// `.scm` queries via `Patterns::compiled_queries`.
 pub fn scan_workspace_entry_points(
     graph: &GraphDatabase,
     root: &std::path::Path,
@@ -69,6 +76,7 @@ pub fn scan_workspace_entry_points(
     graph.replace_sensor_output(SensorOwner::EntryPointSensor, &[], &[])?;
 
     let mut by_id: BTreeMap<String, (String, EntryKind)> = BTreeMap::new();
+    let patterns = Patterns::with_overrides(root)?;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
@@ -85,7 +93,7 @@ pub fn scan_workspace_entry_points(
             Err(_) => continue,
         };
         let graph_path = crate::graph::graph_path(root, path);
-        let detections = detect_in_file(&content, &graph_path, ext);
+        let detections = detect_in_file(&content, &graph_path, ext, &patterns);
         for ((name, _line), kind) in detections {
             // Resolve the name to a graph node id. The scanner may
             // have produced multiple `Function` nodes for the same
@@ -136,12 +144,12 @@ fn find_function_node(graph: &GraphDatabase, path: &str, name: &str) -> Option<G
 
 /// All §6.6 detectors applied to one file's content. Returns a map of
 /// `(function_name, first_occurrence_line)` → `EntryKind`.
-fn detect_in_file(content: &str, _path: &str, ext: &str) -> FileDetections {
+fn detect_in_file(content: &str, _path: &str, ext: &str, patterns: &Patterns) -> FileDetections {
     let mut out: FileDetections = BTreeMap::new();
     detect_scheduled(content, ext, &mut out);
     detect_cli(content, ext, &mut out);
     detect_main(content, ext, &mut out);
-    detect_http_handler(content, ext, &mut out);
+    detect_http_handler(content, ext, &mut out, patterns);
     out
 }
 
@@ -159,18 +167,18 @@ fn detect_in_file(content: &str, _path: &str, ext: &str) -> FileDetections {
 // `detect_ruby_rails_controller_regex`) is retained for the case
 // where a `.scm` body is missing or empty — keeps the walker
 // resilient to partial migrations.
-fn detect_http_handler(content: &str, ext: &str, out: &mut FileDetections) {
+fn detect_http_handler(content: &str, ext: &str, out: &mut FileDetections, patterns: &Patterns) {
     // Java Spring / JAX-RS: `@GetMapping("/x")` on a method, with
     // the public method on the next non-blank line.
     if ext == "java" {
-        if !detect_java_http_handler(content, out) {
+        if !detect_java_http_handler(content, out, patterns) {
             detect_java_http_handler_regex(content, out);
         }
         return;
     }
     // C# ASP.NET: `[HttpGet("/x")]` on a method.
     if ext == "cs" {
-        if !detect_csharp_http_handler(content, out) {
+        if !detect_csharp_http_handler(content, out, patterns) {
             detect_csharp_http_handler_regex(content, out);
         }
         return;
@@ -178,7 +186,7 @@ fn detect_http_handler(content: &str, ext: &str, out: &mut FileDetections) {
     // Ruby Rails: action methods (`def index`, `def show`, `def
     // create`, …) inside `app/controllers/*.rb`.
     if ext == "rb" {
-        if !detect_ruby_rails_controller(content, out) {
+        if !detect_ruby_rails_controller(content, out, patterns) {
             detect_ruby_rails_controller_regex(content, out);
         }
         return;
@@ -208,13 +216,28 @@ fn detect_http_handler(content: &str, ext: &str, out: &mut FileDetections) {
 /// structured error at load time; this accessor flattens the `Err`
 /// to `None` so the walker keeps going and the sensor's per-file
 /// scan does not 500 the whole pipeline on a single broken override.
-fn entry_point_query_body(key: &str) -> Option<&'static str> {
-    Patterns::patterns()
+///
+/// The runtime-override wire-in (this PR) takes `&Patterns` so the
+/// per-repo overrides layered on the scanner's `Patterns` instance
+/// are visible to the entry-point walker. The bundled-singleton path
+/// (`Patterns::patterns()`) is preserved as a no-arg compatibility
+/// helper below.
+fn entry_point_query_body(patterns: &Patterns, key: &str) -> Option<&'static str> {
+    patterns
         .compiled_queries()
         .ok()?
         .iter()
         .find(|(k, _, _, _)| *k == key)
         .map(|(_, _, _, body)| *body)
+}
+
+/// Backward-compatible wrapper that resolves against the bundled
+/// singleton. Used by lib tests that don't go through
+/// `scan_workspace_entry_points` and therefore don't have a
+/// per-repo patterns instance to thread.
+#[allow(dead_code)]
+fn entry_point_query_body_singleton(key: &str) -> Option<&'static str> {
+    entry_point_query_body(Patterns::patterns(), key)
 }
 
 /// Returns `true` when the .scm body has at least one non-comment
@@ -242,8 +265,8 @@ fn text_for_node<'a>(node: tree_sitter::Node, content: &'a str) -> Option<&'a st
 /// this returns `false`. Returns `false` if the file is missing,
 /// has an empty query, fails to compile, fails to parse, or has a
 /// tree-sitter error.
-fn detect_java_http_handler(content: &str, out: &mut FileDetections) -> bool {
-    let Some(body) = entry_point_query_body("java/spring-entry-point.scm") else {
+fn detect_java_http_handler(content: &str, out: &mut FileDetections, patterns: &Patterns) -> bool {
+    let Some(body) = entry_point_query_body(patterns, "java/spring-entry-point.scm") else {
         return false;
     };
     if !scm_has_query(body) {
@@ -310,8 +333,12 @@ fn is_spring_route_annotation(verb: &str) -> bool {
 /// back to the regex detector when this returns `false`. Returns
 /// `false` if the file is missing, has an empty query, fails to
 /// compile, fails to parse, or has a tree-sitter error.
-fn detect_csharp_http_handler(content: &str, out: &mut FileDetections) -> bool {
-    let Some(body) = entry_point_query_body("csharp/aspnet-entry-point.scm") else {
+fn detect_csharp_http_handler(
+    content: &str,
+    out: &mut FileDetections,
+    patterns: &Patterns,
+) -> bool {
+    let Some(body) = entry_point_query_body(patterns, "csharp/aspnet-entry-point.scm") else {
         return false;
     };
     if !scm_has_query(body) {
@@ -381,8 +408,12 @@ fn is_aspnet_route_attribute(verb: &str) -> bool {
 /// back to the regex detector when this returns `false`. Returns
 /// `false` if the file is missing, has an empty query, fails to
 /// compile, fails to parse, or has a tree-sitter error.
-fn detect_ruby_rails_controller(content: &str, out: &mut FileDetections) -> bool {
-    let Some(body) = entry_point_query_body("ruby/rails-entry-point.scm") else {
+fn detect_ruby_rails_controller(
+    content: &str,
+    out: &mut FileDetections,
+    patterns: &Patterns,
+) -> bool {
+    let Some(body) = entry_point_query_body(patterns, "ruby/rails-entry-point.scm") else {
         return false;
     };
     if !scm_has_query(body) {

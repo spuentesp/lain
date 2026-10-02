@@ -111,6 +111,14 @@ inventory::submit!(crate::server::sensors::SensorEntry(&HttpClientSensor));
 
 /// Walk `root`, extract HTTP client calls from every Python/TS/JS/Rust/Go
 /// file, and persist them via `replace_sensor_output` (§6.1).
+///
+/// Layering per-repo overrides from `<root>/.lain/patterns/` happens
+/// at the top of this function via [`Patterns::with_overrides`]:
+/// the per-repo YAML + `.scm` overrides are merged into the bundled
+/// registry before any walker code runs, so the walker sees
+/// override-augmented `Patterns::outbound_patterns` and
+/// `Patterns::compiled_queries` data without each walker function
+/// having to call `load_overrides` itself.
 pub fn scan_workspace_clients(
     graph: &GraphDatabase,
     root: &Path,
@@ -122,6 +130,7 @@ pub fn scan_workspace_clients(
     }
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
+    let patterns = Patterns::with_overrides(root)?;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
@@ -143,7 +152,7 @@ pub fn scan_workspace_clients(
             Ok(c) => c,
             Err(_) => continue,
         };
-        let calls = detect_calls(path, &content, lang);
+        let calls = detect_calls(path, &content, lang, &patterns);
         for mut call in calls {
             call.path = graph_path(root, Path::new(&call.path));
             let (nodes, edges) = build_graph(graph, &call, namespace);
@@ -183,7 +192,12 @@ pub fn scan_workspace_clients(
 ///      captures, classifies the library, and emits an
 ///      [`HttpClientCall`] via the existing language-agnostic
 ///      URL-parts extractor + host resolver.
-pub fn detect_calls(path: &Path, content: &str, lang: Lang) -> Vec<HttpClientCall> {
+pub fn detect_calls(
+    path: &Path,
+    content: &str,
+    lang: Lang,
+    patterns: &Patterns,
+) -> Vec<HttpClientCall> {
     let Some(tree) = parse_for_lang(lang, content) else {
         return Vec::new();
     };
@@ -193,7 +207,6 @@ pub fn detect_calls(path: &Path, content: &str, lang: Lang) -> Vec<HttpClientCal
 
     let mut calls: Vec<HttpClientCall> = Vec::new();
     let grammar = language_for(lang);
-    let patterns = Patterns::patterns();
     let lang_yaml = lang_yaml_key(lang);
 
     // Track calls we've already emitted by (path, line) so the
@@ -2103,10 +2116,20 @@ mod tests {
     // ─── Per-shape detection tests ────────────────────────────────
 
     fn py_calls(src: &str) -> Vec<HttpClientCall> {
-        detect_calls(std::path::Path::new("test.py"), src, Lang::Python)
+        detect_calls(
+            std::path::Path::new("test.py"),
+            src,
+            Lang::Python,
+            Patterns::patterns(),
+        )
     }
     fn ts_calls(src: &str) -> Vec<HttpClientCall> {
-        detect_calls(std::path::Path::new("test.ts"), src, Lang::TsJs)
+        detect_calls(
+            std::path::Path::new("test.ts"),
+            src,
+            Lang::TsJs,
+            Patterns::patterns(),
+        )
     }
 
     #[test]
@@ -2627,7 +2650,12 @@ requests.Post(\"/b\")
     // ─── Rust outbound HTTP (PR 14 / Workstream 1) ─────────────
 
     fn rust_calls(src: &str) -> Vec<HttpClientCall> {
-        detect_calls(std::path::Path::new("test.rs"), src, Lang::Rust)
+        detect_calls(
+            std::path::Path::new("test.rs"),
+            src,
+            Lang::Rust,
+            Patterns::patterns(),
+        )
     }
 
     #[test]
@@ -2704,7 +2732,12 @@ fn main() {
     // ─── Go outbound HTTP (PR 14 / Workstream 1) ────────────────
 
     fn go_calls(src: &str) -> Vec<HttpClientCall> {
-        detect_calls(std::path::Path::new("test.go"), src, Lang::Go)
+        detect_calls(
+            std::path::Path::new("test.go"),
+            src,
+            Lang::Go,
+            Patterns::patterns(),
+        )
     }
 
     #[test]
@@ -2810,17 +2843,37 @@ func f() {
     // ─── Workstream 5: Java / C# / Ruby / Kotlin ────────────────────
 
     fn java_calls(src: &str) -> Vec<HttpClientCall> {
-        detect_calls(std::path::Path::new("Foo.java"), src, Lang::Java)
+        detect_calls(
+            std::path::Path::new("Foo.java"),
+            src,
+            Lang::Java,
+            Patterns::patterns(),
+        )
     }
     fn csharp_calls(src: &str) -> Vec<HttpClientCall> {
-        detect_calls(std::path::Path::new("Foo.cs"), src, Lang::CSharp)
+        detect_calls(
+            std::path::Path::new("Foo.cs"),
+            src,
+            Lang::CSharp,
+            Patterns::patterns(),
+        )
     }
 
     fn ruby_calls(src: &str) -> Vec<HttpClientCall> {
-        detect_calls(std::path::Path::new("Foo.rb"), src, Lang::Ruby)
+        detect_calls(
+            std::path::Path::new("Foo.rb"),
+            src,
+            Lang::Ruby,
+            Patterns::patterns(),
+        )
     }
     fn kotlin_calls(src: &str) -> Vec<HttpClientCall> {
-        detect_calls(std::path::Path::new("Foo.kt"), src, Lang::Kotlin)
+        detect_calls(
+            std::path::Path::new("Foo.kt"),
+            src,
+            Lang::Kotlin,
+            Patterns::patterns(),
+        )
     }
 
     #[test]

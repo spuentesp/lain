@@ -50,6 +50,7 @@ use crate::federation::contracts::model::{ContractFact, FieldReadFact, JsonPath,
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util::{
     is_deny_method, lang_for_path as lang_for_path_shared, parse_for_lang, Lang,
 };
@@ -179,6 +180,7 @@ pub fn scan_workspace_field_access(
     if graph.is_read_only() {
         return Ok(0);
     }
+    let patterns = Patterns::with_overrides(root)?;
 
     // Phase 2 needs the joiner to have run. The graph has the
     // `Binds` edges by the time the field-access sensor sees it —
@@ -186,36 +188,44 @@ pub fn scan_workspace_field_access(
     // callee relationships.
     let calls_by_function: BTreeMap<String, BTreeSet<String>> = collect_calls_by_function(graph);
 
+    // Wrap the per-file emission + scope walk in
+    // `with_current_patterns` so the deep walker helpers
+    // (`handle_attribute` → `is_deny_method`) read the override-
+    // augmented deny set. Without this wrapper, the deny set
+    // would be the bundled singleton and per-repo YAML overrides
+    // would have no effect on field-access suppression.
+    let (emissions, _) = super::util::with_current_patterns(&patterns, || {
+        let mut emissions: Vec<FieldAccessEmission> = Vec::new();
+        for entry in crate::server::sensors::util::walk_workspace(root) {
+            let path = entry.path();
+            let Some(lang) = lang_for_path(&path.to_string_lossy()) else {
+                continue;
+            };
+
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let path_str = graph_path(root, path);
+            emissions.extend(detect_emissions(
+                &path_str,
+                &content,
+                lang,
+                graph,
+                &calls_by_function,
+            ));
+        }
+
+        // §6.5 interprocedural pass: extend every emission with the reads
+        // of the sending function's direct callers and callees (rules
+        // 5/6) over the repo `Calls` graph (`Static{TreeSitter}`/`None`
+        // provenance only — filtered in `collect_calls_by_function`).
+        extend_emissions_with_scope(root, graph, &calls_by_function, &mut emissions);
+        (emissions, ())
+    });
+
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
-    let mut emissions: Vec<FieldAccessEmission> = Vec::new();
-
-    for entry in crate::server::sensors::util::walk_workspace(root) {
-        let path = entry.path();
-        let Some(lang) = lang_for_path(&path.to_string_lossy()) else {
-            continue;
-        };
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let path_str = graph_path(root, path);
-        emissions.extend(detect_emissions(
-            &path_str,
-            &content,
-            lang,
-            graph,
-            &calls_by_function,
-        ));
-    }
-
-    // §6.5 interprocedural pass: extend every emission with the reads
-    // of the sending function's direct callers and callees (rules
-    // 5/6) over the repo `Calls` graph (`Static{TreeSitter}`/`None`
-    // provenance only — filtered in `collect_calls_by_function`).
-    extend_emissions_with_scope(root, graph, &calls_by_function, &mut emissions);
-
     for emission in &emissions {
         // §6.5: an escape flips the call's `ConsumerFact` in place.
         // The node is owned by the phase-1 `http_client_sensor`, so

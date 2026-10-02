@@ -100,7 +100,7 @@ urlpatterns = [
     re_path(r"^users/$", list_users),
 ]
 "#;
-    let routes = scan_file_for_routes(std::path::Path::new("urls.py"), src);
+    let routes = scan_file_for_routes(std::path::Path::new("urls.py"), src, Patterns::patterns());
 
     // Two distinct (method, path) pairs are emitted. The verb is
     // `Any` because Django is not in `http_sensor::method_capture_for`'s
@@ -155,7 +155,7 @@ def health_view(request):
 
 re_path(r"^api/health$", health_view)
 "#;
-    let routes = scan_file_for_routes(std::path::Path::new("health.py"), src);
+    let routes = scan_file_for_routes(std::path::Path::new("health.py"), src, Patterns::patterns());
 
     let health = routes
         .iter()

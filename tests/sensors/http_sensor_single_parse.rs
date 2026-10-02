@@ -23,6 +23,7 @@
 
 use lain::server::federation::contracts::model::HttpMethod;
 use lain::server::sensors::http_sensor::{scan_file_for_routes, scan_parse_count};
+use lain::server::sensors::patterns::Patterns;
 // Note: `scan_parse_count` is a per-thread counter (Cell-local),
 // so concurrent sensor tests cannot false-positive the delta.
 
@@ -50,7 +51,7 @@ server.get('/api/orders', listOrders);
 "#;
 
     let before = scan_parse_count();
-    let routes = scan_file_for_routes(std::path::Path::new("routes.ts"), src);
+    let routes = scan_file_for_routes(std::path::Path::new("routes.ts"), src, Patterns::patterns());
     let after = scan_parse_count();
 
     assert_eq!(
@@ -101,7 +102,7 @@ fn parse_count_increments_per_scan_call() {
     let src = "import express from 'express';\napp.get('/x', handler);\n";
 
     let before_first = scan_parse_count();
-    let _ = scan_file_for_routes(std::path::Path::new("a.ts"), src);
+    let _ = scan_file_for_routes(std::path::Path::new("a.ts"), src, Patterns::patterns());
     let after_first = scan_parse_count();
     assert_eq!(
         after_first - before_first,
@@ -110,7 +111,7 @@ fn parse_count_increments_per_scan_call() {
     );
 
     let before_second = scan_parse_count();
-    let _ = scan_file_for_routes(std::path::Path::new("b.ts"), src);
+    let _ = scan_file_for_routes(std::path::Path::new("b.ts"), src, Patterns::patterns());
     let after_second = scan_parse_count();
     assert_eq!(
         after_second - before_second,
@@ -132,7 +133,7 @@ fn no_parse_when_no_route_framework_applies() {
     let src = "this is not source code\n";
 
     let before = scan_parse_count();
-    let routes = scan_file_for_routes(std::path::Path::new("notes.txt"), src);
+    let routes = scan_file_for_routes(std::path::Path::new("notes.txt"), src, Patterns::patterns());
     let after = scan_parse_count();
 
     assert!(

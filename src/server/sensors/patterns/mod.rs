@@ -17,6 +17,7 @@
 
 use crate::server::sensors::util::Lang;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -180,15 +181,17 @@ impl YamlFile {
 /// `load_overrides` with a structured `PatternsError::OverrideQuerySyntax`
 /// and never reaches the compiled-queries surface.
 ///
-/// The cache is a [`OnceLock`] rather than a `Mutex<Vec<...>>`:
-/// [`Self::load_overrides`] runs at most once per `Patterns` instance
-/// (a startup-only path), so once the bodies are validated and
-/// inserted, every subsequent [`Self::compiled_queries`] call reads
-/// them lock-free. Cloning the registry snapshots the current bodies
-/// into a fresh `OnceLock`; a clone that runs `load_overrides` does
-/// not perturb the original's cache. This is the same "lock-free in
-/// the hot path" shape as `Patterns::patterns` itself, which is a
-/// `OnceLock<&'static Patterns>`.
+/// The cache is a plain `Vec<(String, String)>` rather than a
+/// `OnceLock<Vec<…>>` (the parked-2 cleanup pass's choice): a second
+/// `load_overrides` call legitimately re-loads (the all-or-nothing
+/// semantic is the wholesale replace — old bodies are dropped, new
+/// bodies take their place — not the "second call is a no-op" of the
+/// previous design). The walker code is single-threaded per scan, so
+/// the cache mutation is contained to the calling scan; concurrent
+/// scans from different threads each hold their own `Patterns` clone.
+/// Cloning the registry snapshots the current bodies into a fresh
+/// `Vec`; a clone that runs `load_overrides` does not perturb the
+/// original's cache.
 #[derive(Debug)]
 pub struct Patterns {
     yaml: YamlFile,
@@ -197,28 +200,23 @@ pub struct Patterns {
     /// Each entry is `(key, body)` where `key = "<lang>/<framework>.scm"`.
     /// Validation happened when the entry was inserted; the cache only
     /// stores bodies that already passed `tree_sitter::Query::new`.
-    /// Populated exactly once per `Patterns` instance — see
-    /// [`Self::load_overrides`].
-    override_scml: OnceLock<Vec<(String, String)>>,
+    /// Replaced wholesale by [`Self::load_overrides`] on every call —
+    /// see the field-level doc-comment for the all-or-nothing
+    /// rationale.
+    override_scml: Vec<(String, String)>,
 }
 
 impl Clone for Patterns {
     fn clone(&self) -> Self {
-        // Snapshot the current override bodies into a fresh
-        // `OnceLock`. The clone is independent: a subsequent
-        // `load_overrides` on the clone populates the clone's
-        // OnceLock (or warns if it was already populated) without
-        // touching the original. This matches the previous
-        // `Mutex<Vec<...>>::clone()` semantics — each clone has its
-        // own backing store — without holding the lock.
-        let new_scml = OnceLock::new();
-        if let Some(v) = self.override_scml.get() {
-            let _ = new_scml.set(v.clone());
-        }
+        // Snapshot the current override bodies into a fresh `Vec`.
+        // The clone is independent: a subsequent `load_overrides` on
+        // the clone mutates only the clone's cache. This matches the
+        // `Mutex<Vec<...>>::clone()` semantics the parked-2 cleanup
+        // pass replaced — each clone has its own backing store.
         Self {
             yaml: self.yaml.clone(),
             overrides_applied: self.overrides_applied,
-            override_scml: new_scml,
+            override_scml: self.override_scml.clone(),
         }
     }
 }
@@ -232,7 +230,7 @@ impl Patterns {
         Ok(Self {
             yaml,
             overrides_applied: false,
-            override_scml: OnceLock::new(),
+            override_scml: Vec::new(),
         })
     }
 
@@ -277,24 +275,108 @@ impl Patterns {
     /// `patterns/build.rs` so a syntax error there fails `cargo build`
     /// rather than reaching this method. Override bodies loaded by
     /// [`Self::load_overrides`] are validated against their grammar
-    /// **before** they land in the [`OnceLock`] — once inserted, the
-    /// cache is lock-free and this method reads it without acquiring
-    /// a mutex.
+    /// **before** they land in the cache — once inserted, the cache
+    /// is self-consistent and this method does not re-validate.
     ///
-    /// On success returns the static, build-validated map. The
-    /// override cache is consulted only via [`OnceLock::get`], which
-    /// is `O(1)` and never blocks.
+    /// When no overrides are loaded (the common case), the returned
+    /// slice is a `Cow::Borrowed` of the bundled static — zero cost.
+    /// When overrides are present, the method builds an owned slice
+    /// containing the bundled entries plus the override entries
+    /// (overrides **replace** bundled entries with the same key,
+    /// append for keys not present in the bundled set), and returns
+    /// it as `Cow::Owned`. The override bodies are `String` (not
+    /// `&'static str`), so each unique body is `Box::leak`'d once
+    /// per `compiled_queries()` call to fit the
+    /// `(key, lang, framework, body)` tuple type. This is a single
+    /// leak per unique body — much better than the per-scan leaks
+    /// the cleanup pass addressed.
+    ///
+    /// On success returns the merged map (Cow::Borrowed from the
+    /// bundled static when empty, `Cow::Owned(merged)` otherwise).
+    /// The `Result` is kept for API compatibility — bodies are
+    /// validated at `load_overrides` time, so the `Err` arm is
+    /// unreachable; callers continue to match on `Result`.
     pub fn compiled_queries(
         &self,
-    ) -> Result<&'static [(&'static str, &'static str, &'static str, &'static str)], PatternsError>
-    {
-        // Touch the override cache once so callers reading it via
-        // `OnceLock::get` (lock-free) see the validated bodies.
-        // Bodies inserted by `load_overrides` are guaranteed to
-        // pass `validate_scm_body`; the cache is therefore always
-        // self-consistent and no re-validation is needed here.
-        let _ = self.override_scml.get();
-        Ok(generated::QUERIES)
+    ) -> Result<
+        Cow<'static, [(&'static str, &'static str, &'static str, &'static str)]>,
+        PatternsError,
+    > {
+        // Fast path — the common case where no overrides are loaded.
+        // Return the bundled static directly with no allocation and
+        // no leaks.
+        if self.override_scml.is_empty() {
+            return Ok(Cow::Borrowed(generated::QUERIES));
+        }
+
+        // Build a merged slice: bundled entries + override entries,
+        // with overrides REPLACING bundled entries on key conflict
+        // and APPENDING for fresh keys. The result is sorted by key
+        // (a property the bundled slice already preserves) so the
+        // binary search lookup (`generated::get`) keeps working.
+        //
+        // The override bodies are leaked once per unique body via
+        // `Box::leak` to fit the `&'static str` field. This is one
+        // leak per unique body per `compiled_queries()` call, not
+        // per scan — much better than the original per-scan leaks.
+        let bundled = generated::QUERIES;
+        let mut merged: Vec<(&'static str, &'static str, &'static str, &'static str)> =
+            Vec::with_capacity(bundled.len() + self.override_scml.len());
+
+        // Iterate the bundled entries; for each, look up an override
+        // with the same key. If present, emit the override body
+        // (which REPLACES the bundled body); if not, emit the
+        // bundled entry verbatim.
+        let mut override_iter = self.override_scml.iter();
+        let mut next_override: Option<&(String, String)> = override_iter.next();
+        for entry in bundled {
+            let (key, lang, framework, body) = *entry;
+            // Advance through any overrides whose key sorts before
+            // the current bundled key (those are appends).
+            while let Some(ov) = next_override {
+                if ov.0.as_str() < key {
+                    let leaked_key: &'static str = Box::leak(ov.0.clone().into_boxed_str());
+                    let (lang_part, framework_part) =
+                        leaked_key.split_once('/').unwrap_or((leaked_key, ""));
+                    let leaked_lang: &'static str =
+                        Box::leak(lang_part.to_string().into_boxed_str());
+                    let leaked_framework: &'static str =
+                        Box::leak(framework_part.to_string().into_boxed_str());
+                    let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
+                    merged.push((leaked_key, leaked_lang, leaked_framework, leaked_body));
+                    next_override = override_iter.next();
+                } else {
+                    break;
+                }
+            }
+            // If the next override matches this bundled key, emit
+            // the override body (REPLACE); otherwise emit the bundled
+            // entry verbatim.
+            if let Some(ov) = next_override {
+                if ov.0.as_str() == key {
+                    let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
+                    merged.push((key, lang, framework, leaked_body));
+                    next_override = override_iter.next();
+                    continue;
+                }
+            }
+            merged.push((key, lang, framework, body));
+        }
+        // Append any overrides whose keys sorted past every bundled
+        // entry.
+        while let Some(ov) = next_override {
+            let leaked_key: &'static str = Box::leak(ov.0.clone().into_boxed_str());
+            let (lang_part, framework_part) =
+                leaked_key.split_once('/').unwrap_or((leaked_key, ""));
+            let leaked_lang: &'static str = Box::leak(lang_part.to_string().into_boxed_str());
+            let leaked_framework: &'static str =
+                Box::leak(framework_part.to_string().into_boxed_str());
+            let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
+            merged.push((leaked_key, leaked_lang, leaked_framework, leaked_body));
+            next_override = override_iter.next();
+        }
+
+        Ok(Cow::Owned(merged))
     }
 
     /// Clone the bundled singleton into an owned [`Patterns`] so
@@ -302,6 +384,26 @@ impl Patterns {
     /// default. `load_overrides` mutates the cloned value.
     pub fn clone_default() -> Self {
         Self::patterns().clone()
+    }
+
+    /// Build an owned [`Patterns`] cloned from the bundled singleton
+    /// and immediately layer per-repo overrides from
+    /// `<root>/.lain/patterns/` via [`Self::load_overrides`]. This is
+    /// the canonical helper a sensor's `scan_workspace_*` calls at
+    /// the top of its scan loop so the walker code can use the
+    /// returned value in place of [`Self::patterns`] and observe
+    /// override-augmented data.
+    ///
+    /// `Err` propagates a `load_overrides` failure (malformed YAML,
+    /// malformed `.scm` body, unreadable override directory). When
+    /// `<root>/.lain/patterns/` is absent, `load_overrides` is a
+    /// no-op so this helper still returns `Ok(_)` — the returned
+    /// `Patterns` is a clean singleton with `overrides_applied = true`
+    /// (the flag flips regardless so diagnostics know the loader ran).
+    pub fn with_overrides(root: &Path) -> Result<Self, PatternsError> {
+        let mut patterns = Self::clone_default();
+        patterns.load_overrides(root)?;
+        Ok(patterns)
     }
 
     /// Look up a framework by `id` across every language.
@@ -473,19 +575,16 @@ impl Patterns {
                 }
             }
         }
-        // Populate the override cache exactly once. Bodies were
-        // validated above (Step 1); the OnceLock guards against
-        // double-load — a second `load_overrides` on the same
-        // `Patterns` instance is treated as a no-op with a warning,
-        // matching the brief's "startup-only path" rationale.
-        if self.override_scml.get().is_some() {
-            eprintln!(
-                "warning: Patterns::load_overrides called twice on the same instance — \
-                   second call ignored; the per-instance cache was already populated from the first load"
-            );
-        } else {
-            let _ = self.override_scml.set(pending_scml);
-        }
+        // Populate the override cache. Bodies were validated above
+        // (Step 1); the cache is a plain `Vec` so the second-call
+        // behaviour is **all-or-nothing**: a subsequent
+        // `load_overrides` on the same `Patterns` instance legitimately
+        // re-loads — old bodies are dropped, new bodies take their
+        // place. The walker code is single-threaded per scan, so the
+        // cache mutation is contained to the calling scan; concurrent
+        // scans from different threads each hold their own `Patterns`
+        // clone.
+        self.override_scml = pending_scml;
 
         self.overrides_applied = true;
         Ok(())

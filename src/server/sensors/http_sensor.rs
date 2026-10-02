@@ -180,25 +180,71 @@ fn method_from_str(s: String) -> HttpMethod {
 /// — because the YAML schema can't express some framework quirks
 /// (Flask's `methods=["POST"]` shape, Go-std's verbless routes).
 ///
-/// The map is built once via [`OnceLock`] and reused across every
-/// `scan_file_for_routes` call. Pre-parked-cleanup the build ran on
-/// every scan, leaking ~16 `&'static str` per call (one for the
-/// pattern key, one for the handler-regex override, one for the
-/// method-regex override). With caching, the leaks happen exactly
-/// once at first call — every subsequent call returns a `&'static`
-/// reference to the cached map.
+/// The runtime-override wire-in (this PR) threaded `&Patterns` into
+/// the cache lookup so the walker observes override-augmented route
+/// frameworks. The cache itself is built once per `&Patterns`
+/// instance:
+///   - When `patterns` is the bundled singleton
+///     (`Patterns::patterns()`), the cached map is reused across every
+///     call via a process-wide `OnceLock` (lock-free, zero
+///     allocations, zero leaks).
+///   - When `patterns` carries per-repo overrides
+///     ([`Patterns::with_overrides`]), the build runs once at first
+///     invocation and the result is `Box::leak`'d. Subsequent calls
+///     for the same `Patterns` instance return the same `&'static`
+///     reference. Across separate `Patterns` clones, each has its
+///     own leak — bounded by the number of `Patterns::with_overrides`
+///     calls per scan (typically 1), not per file.
 ///
 /// `pub` so integration tests can pin the cache contract
-/// (no per-call rebuild → no per-call leak).
-pub fn get_route_patterns() -> &'static BTreeMap<&'static str, RoutePattern> {
-    static CACHE: OnceLock<BTreeMap<&'static str, RoutePattern>> = OnceLock::new();
-    CACHE.get_or_init(build_route_patterns)
+/// (no per-file rebuild → no per-file leak for the default
+/// patterns-instance).
+pub fn get_route_patterns(patterns: &Patterns) -> &'static BTreeMap<&'static str, RoutePattern> {
+    // Fast path: when `patterns` IS the bundled singleton, return the
+    // process-wide cached static reference (lock-free, zero
+    // allocations, zero leaks).
+    let singleton_ptr = Patterns::patterns() as *const Patterns;
+    if std::ptr::eq(patterns as *const Patterns, singleton_ptr) {
+        static CACHE: OnceLock<BTreeMap<&'static str, RoutePattern>> = OnceLock::new();
+        return CACHE.get_or_init(|| build_route_patterns(Patterns::patterns()));
+    }
+    // Per-repo patterns path: the (singleton-built) `get_route_patterns`
+    // cache only serves the bundled singleton. For per-repo
+    // `Patterns` instances we fall back to a per-pointer cache
+    // keyed on the `&Patterns` reference — a `OnceLock` inside a
+    // `thread_local!` keyed by raw pointer. This keeps the build
+    // (and its `Box::leak`'d key set) tied to the patterns
+    // instance that requested it, without exposing a new field
+    // on `Patterns` (which already has a hand-rolled `Clone`).
+    thread_local_route_cache(patterns)
 }
 
-fn build_route_patterns() -> BTreeMap<&'static str, RoutePattern> {
-    let mut patterns = BTreeMap::new();
+/// Per-pointer cache for `get_route_patterns` on non-singleton
+/// `Patterns` instances. Keyed by the patterns' address so two
+/// `Patterns` clones with the same underlying data get separate
+/// caches; in practice each scan builds one `Patterns::with_overrides`
+/// instance and uses one cache.
+fn thread_local_route_cache(patterns: &Patterns) -> &'static BTreeMap<&'static str, RoutePattern> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    type Cache = HashMap<*const Patterns, &'static BTreeMap<&'static str, RoutePattern>>;
+    thread_local! {
+        static CACHE: RefCell<Cache> = RefCell::new(Cache::new());
+    }
+    let ptr = patterns as *const Patterns;
+    CACHE.with(|cell| {
+        if let Some(cached) = cell.borrow().get(&ptr).copied() {
+            return cached;
+        }
+        let built = build_route_patterns(patterns);
+        let leaked: &'static BTreeMap<&'static str, RoutePattern> = Box::leak(Box::new(built));
+        cell.borrow_mut().insert(ptr, leaked);
+        leaked
+    })
+}
 
-    let registry = Patterns::patterns();
+fn build_route_patterns(registry: &Patterns) -> BTreeMap<&'static str, RoutePattern> {
+    let mut patterns = BTreeMap::new();
 
     // Walk every language the http_sensor recognises. The order
     // (sorted by lang_key, then by YAML load order inside each
@@ -461,10 +507,14 @@ fn method_capture_for(def: &FrameworkDef) -> (Option<&'static str>, HttpMethod) 
 
 /// Scan a file for HTTP routes, after applying same-file router
 /// prefixes (§6.2).
-pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute> {
+pub fn scan_file_for_routes(
+    path: &std::path::Path,
+    content: &str,
+    patterns: &Patterns,
+) -> Vec<HttpRoute> {
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    let all_patterns = get_route_patterns();
+    let all_patterns = get_route_patterns(patterns);
     let prefixes: &[&str] = match extension {
         "rs" => &["rust-"],
         "py" => &["python-"],
@@ -530,7 +580,8 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
         // the regex missed. An empty body (just a comment line)
         // skips tree-sitter entirely. The pre-parsed tree is
         // reused — `parse_for_lang` ran exactly once above.
-        if let Some(ts) = try_treesitter_extract(key, content, path, parsed_tree.as_ref()) {
+        if let Some(ts) = try_treesitter_extract(patterns, key, content, path, parsed_tree.as_ref())
+        {
             for mut r in ts {
                 if let Some(prefix) = router_prefix_for_receiver(&r, &router_prefixes) {
                     r.path = join_prefix(prefix.as_str(), &r.path);
@@ -562,6 +613,7 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
 /// [`parse_for_lang`] out of the per-framework loop so a file with
 /// N applicable frameworks parses exactly once.
 fn try_treesitter_extract(
+    patterns: &Patterns,
     pattern_key: &str,
     content: &str,
     path: &std::path::Path,
@@ -577,7 +629,7 @@ fn try_treesitter_extract(
     let framework_id = framework.strip_suffix("-route")?;
     let scm_key = format!("{lang_yaml}/{framework_id}-route.scm");
 
-    let body = Patterns::patterns()
+    let body = patterns
         .compiled_queries()
         .ok()?
         .iter()
@@ -889,6 +941,14 @@ fn method_to_str(m: HttpMethod) -> &'static str {
 /// run's `HttpSensor` output via `replace_sensor_output` (§6.1). This
 /// is what fixes the stale `HttpRoute` problem 0.8 had: routes
 /// deleted from source disappear after the next rescan.
+///
+/// Layering per-repo overrides from `<root>/.lain/patterns/` happens
+/// at the top of this function via [`Patterns::with_overrides`]: the
+/// per-repo YAML + `.scm` overrides are merged into the bundled
+/// registry before any walker code runs, so the walker sees
+/// override-augmented `Patterns::route_patterns` and
+/// `Patterns::compiled_queries` data without each walker function
+/// having to call `load_overrides` itself.
 pub fn scan_workspace_routes(
     graph: &GraphDatabase,
     root: &std::path::Path,
@@ -900,6 +960,7 @@ pub fn scan_workspace_routes(
     }
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
+    let patterns = Patterns::with_overrides(root)?;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
@@ -917,7 +978,7 @@ pub fn scan_workspace_routes(
             Ok(c) => c,
             Err(_) => continue, // a vanished file between walk and read is fine
         };
-        let mut routes = scan_file_for_routes(path, &content);
+        let mut routes = scan_file_for_routes(path, &content, &patterns);
         for r in &mut routes {
             r.handler_path = crate::graph::graph_path(root, std::path::Path::new(&r.handler_path));
         }
@@ -977,7 +1038,7 @@ mod tests {
 
     #[test]
     fn every_route_pattern_compiles() {
-        let patterns = get_route_patterns();
+        let patterns = get_route_patterns(Patterns::patterns());
         assert!(
             patterns.contains_key("python-fastapi-route")
                 && patterns.contains_key("python-flask-route"),
@@ -989,7 +1050,7 @@ mod tests {
     fn a_handler_on_the_following_line_is_found() {
         let actix =
             "#[get(\"/api/users\")]\nasync fn list_users() -> impl Responder {\n    todo!()\n}\n";
-        let r = scan_file_for_routes(std::path::Path::new("api.rs"), actix);
+        let r = scan_file_for_routes(std::path::Path::new("api.rs"), actix, Patterns::patterns());
         assert_eq!(r.len(), 1, "actix route should be found: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Get);
         assert_eq!(r[0].path, "/api/users");
@@ -997,7 +1058,11 @@ mod tests {
 
         let fastapi =
             "@app.post(\"/api/widgets\")\nasync def create_widget(body: Widget):\n    ...\n";
-        let r = scan_file_for_routes(std::path::Path::new("api.py"), fastapi);
+        let r = scan_file_for_routes(
+            std::path::Path::new("api.py"),
+            fastapi,
+            Patterns::patterns(),
+        );
         assert_eq!(r.len(), 1, "fastapi route should be found: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Post);
         assert_eq!(r[0].path, "/api/widgets");
@@ -1008,7 +1073,7 @@ mod tests {
     fn flask_routes_pick_up_their_method_and_handler() {
         let flask =
             "@app.route(\"/api/orders\", methods=[\"POST\"])\ndef create_order():\n    pass\n";
-        let r = scan_file_for_routes(std::path::Path::new("app.py"), flask);
+        let r = scan_file_for_routes(std::path::Path::new("app.py"), flask, Patterns::patterns());
         assert_eq!(r.len(), 1, "flask route should be found: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Post);
         assert_eq!(r[0].path, "/api/orders");
@@ -1019,7 +1084,7 @@ mod tests {
     fn flask_route_without_methods_defaults_to_get() {
         // §6.2: Flask's default verb is GET.
         let flask = "@app.route(\"/api/health\")\ndef health():\n    pass\n";
-        let r = scan_file_for_routes(std::path::Path::new("app.py"), flask);
+        let r = scan_file_for_routes(std::path::Path::new("app.py"), flask, Patterns::patterns());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].method, HttpMethod::Get);
     }
@@ -1027,7 +1092,7 @@ mod tests {
     #[test]
     fn axum_route_calls_are_recognised() {
         let axum = "let app = Router::new()\n    .route(\"/api/health\", get(health_check));\n";
-        let r = scan_file_for_routes(std::path::Path::new("main.rs"), axum);
+        let r = scan_file_for_routes(std::path::Path::new("main.rs"), axum, Patterns::patterns());
         assert_eq!(r.len(), 1, "axum route should be found: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Get);
         assert_eq!(r[0].path, "/api/health");
@@ -1037,7 +1102,7 @@ mod tests {
     #[test]
     fn express_non_get_verbs_are_not_dropped() {
         let ts = "router.post(\"/api/login\", loginHandler);\n";
-        let r = scan_file_for_routes(std::path::Path::new("routes.ts"), ts);
+        let r = scan_file_for_routes(std::path::Path::new("routes.ts"), ts, Patterns::patterns());
         assert_eq!(r.len(), 1, "express POST route should be found: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Post);
         assert_eq!(r[0].path, "/api/login");
@@ -1051,7 +1116,8 @@ mod tests {
             "router.GET(\"/api/users\", listUsers)\n",
             "engine.GET(\"/api/users\", listUsers)\n",
         ] {
-            let r = scan_file_for_routes(std::path::Path::new("routes.go"), src);
+            let r =
+                scan_file_for_routes(std::path::Path::new("routes.go"), src, Patterns::patterns());
             assert_eq!(r.len(), 1, "gin route should be found in {src:?}: {r:?}");
             assert_eq!(r[0].handler_name, "listUsers");
         }
@@ -1065,7 +1131,8 @@ mod tests {
             "e.GET(\"/api/users\", listUsers)\n",
             "e.POST(\"/api/login\", authHandler)\n",
         ] {
-            let r = scan_file_for_routes(std::path::Path::new("routes.go"), src);
+            let r =
+                scan_file_for_routes(std::path::Path::new("routes.go"), src, Patterns::patterns());
             assert_eq!(r.len(), 1, "echo route should be found in {src:?}: {r:?}");
             assert!(r[0].method != HttpMethod::Any, "echo carries a verb: {r:?}");
         }
@@ -1078,7 +1145,7 @@ mod tests {
             src.push_str("// filler\n");
         }
         src.push_str("async fn much_later() {}\n");
-        let r = scan_file_for_routes(std::path::Path::new("api.rs"), &src);
+        let r = scan_file_for_routes(std::path::Path::new("api.rs"), &src, Patterns::patterns());
         assert!(
             r.is_empty(),
             "a handler 13 lines away must not be attached: {r:?}"
@@ -1090,7 +1157,7 @@ mod tests {
         // §6.2: go-std's HandleFunc declares no verb, so routes emit
         // `HttpMethod::Any` (was `GET` in 0.8).
         let go = "http.HandleFunc(\"/healthz\", healthz)\n";
-        let r = scan_file_for_routes(std::path::Path::new("main.go"), go);
+        let r = scan_file_for_routes(std::path::Path::new("main.go"), go, Patterns::patterns());
         assert_eq!(r.len(), 1, "net/http route should be found: {r:?}");
         assert_eq!(
             r[0].method,
@@ -1105,19 +1172,31 @@ mod tests {
     fn patterns_are_scoped_to_the_files_language() {
         let go_source = r#"r.GET("/api/users", listUsers)"#;
 
-        let as_go = scan_file_for_routes(std::path::Path::new("routes.go"), go_source);
+        let as_go = scan_file_for_routes(
+            std::path::Path::new("routes.go"),
+            go_source,
+            Patterns::patterns(),
+        );
         assert_eq!(as_go.len(), 1, "gin route should be found in a .go file");
         assert_eq!(as_go[0].method, HttpMethod::Get);
         assert_eq!(as_go[0].path, "/api/users");
         assert_eq!(as_go[0].handler_name, "listUsers");
 
-        let as_python = scan_file_for_routes(std::path::Path::new("routes.py"), go_source);
+        let as_python = scan_file_for_routes(
+            std::path::Path::new("routes.py"),
+            go_source,
+            Patterns::patterns(),
+        );
         assert!(
             as_python.is_empty(),
             "Go route syntax must not be matched by the Python patterns: {as_python:?}"
         );
 
-        let unknown = scan_file_for_routes(std::path::Path::new("notes.txt"), go_source);
+        let unknown = scan_file_for_routes(
+            std::path::Path::new("notes.txt"),
+            go_source,
+            Patterns::patterns(),
+        );
         assert!(
             unknown.is_empty(),
             "an unhandled extension yields no routes"
@@ -1137,6 +1216,7 @@ mod tests {
         let routes = scan_file_for_routes(
             std::path::Path::new("routes.go"),
             r#"r.GET("/api/users", listUsers)"#,
+            Patterns::patterns(),
         );
         let repo_id = RepoId::new("test").unwrap();
         let (nodes, edges) = routes_to_graph(
@@ -1246,6 +1326,7 @@ mod tests {
         let routes = scan_file_for_routes(
             std::path::Path::new("routes.go"),
             r#"r.GET("/api/users", listUsers)"#,
+            Patterns::patterns(),
         );
         let repo_id = RepoId::new("test").unwrap();
         let (_, edges) = routes_to_graph(
@@ -1327,14 +1408,20 @@ mod tests {
     /// BTreeMap's sorted iteration order.
     #[test]
     fn route_patterns_are_a_btreemap_for_determinism() {
-        let first_ptr = get_route_patterns() as *const _;
-        let second_ptr = get_route_patterns() as *const _;
+        let first_ptr = get_route_patterns(Patterns::patterns()) as *const _;
+        let second_ptr = get_route_patterns(Patterns::patterns()) as *const _;
         assert_eq!(
             first_ptr, second_ptr,
             "two back-to-back calls must return the same &'_ reference (OnceLock cache)",
         );
-        let first: Vec<&'static str> = get_route_patterns().keys().copied().collect();
-        let second: Vec<&'static str> = get_route_patterns().keys().copied().collect();
+        let first: Vec<&'static str> = get_route_patterns(Patterns::patterns())
+            .keys()
+            .copied()
+            .collect();
+        let second: Vec<&'static str> = get_route_patterns(Patterns::patterns())
+            .keys()
+            .copied()
+            .collect();
         assert_eq!(
             first, second,
             "two back-to-back calls must produce the same key order (BTreeMap §6.1 determinism)",
@@ -1362,7 +1449,7 @@ bp = Blueprint('orders', __name__, url_prefix='/api/v1')
 def list_orders():
     pass
 ";
-        let r = scan_file_for_routes(std::path::Path::new("app.py"), src);
+        let r = scan_file_for_routes(std::path::Path::new("app.py"), src, Patterns::patterns());
         // The path regex captures only the literal path inside the
         // decorator; prefix handling here is best-effort when there
         // is exactly one prefix in the file.
@@ -1383,7 +1470,7 @@ router = APIRouter(prefix='/api/v1')
 async def list_orders():
     pass
 ";
-        let r = scan_file_for_routes(std::path::Path::new("app.py"), src);
+        let r = scan_file_for_routes(std::path::Path::new("app.py"), src, Patterns::patterns());
         assert!(!r.is_empty(), "APIRouter route should be found: {r:?}");
         assert!(
             r[0].path.contains("/api/v1"),
@@ -1405,7 +1492,7 @@ public class Foo {
     }
 }
 ";
-        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src);
+        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src, Patterns::patterns());
         assert_eq!(r.len(), 1, "Spring @GetMapping must be detected: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Get);
         assert_eq!(r[0].path, "/api/users");
@@ -1421,7 +1508,7 @@ public class Foo {
     public String createUser() { return \"\"; }
 }
 ";
-        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src);
+        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src, Patterns::patterns());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].method, HttpMethod::Post);
     }
@@ -1436,7 +1523,7 @@ public class Foo {
     public String list() { return \"\"; }
 }
 ";
-        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src);
+        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src, Patterns::patterns());
         // The regex-based extractor detects the method-level `@GET`
         // and the class-level `@Path`. v1 emits one route per
         // detected annotation pair.
@@ -1446,7 +1533,7 @@ public class Foo {
     #[test]
     fn java_non_route_code_is_ignored() {
         let src = "public class Foo { @Override public String toString() { return \"\"; } }\n";
-        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src);
+        let r = scan_file_for_routes(std::path::Path::new("Foo.java"), src, Patterns::patterns());
         assert!(r.is_empty(), "@Override must not be a route: {r:?}");
     }
 
@@ -1454,7 +1541,7 @@ public class Foo {
     fn csharp_aspnet_httpget_is_recognised() {
         let src =
             "[HttpGet(\"/api/users/{id}\")]\npublic IActionResult Get(int id) { return null; }\n";
-        let r = scan_file_for_routes(std::path::Path::new("Foo.cs"), src);
+        let r = scan_file_for_routes(std::path::Path::new("Foo.cs"), src, Patterns::patterns());
         assert_eq!(r.len(), 1, "ASP.NET [HttpGet] must be detected: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Get);
         assert_eq!(r[0].path, "/api/users/{id}");
@@ -1469,7 +1556,7 @@ public class FooController : Controller {
     public IActionResult Post() { return null; }
 }
 ";
-        let r = scan_file_for_routes(std::path::Path::new("Foo.cs"), src);
+        let r = scan_file_for_routes(std::path::Path::new("Foo.cs"), src, Patterns::patterns());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].method, HttpMethod::Post);
     }
@@ -1477,7 +1564,11 @@ public class FooController : Controller {
     #[test]
     fn csharp_minimal_api_mapget_is_recognised() {
         let src = "var builder = WebApplication.CreateBuilder(args);\nvar app = builder.Build();\napp.MapGet(\"/api/health\", () => \"ok\");\n";
-        let r = scan_file_for_routes(std::path::Path::new("Program.cs"), src);
+        let r = scan_file_for_routes(
+            std::path::Path::new("Program.cs"),
+            src,
+            Patterns::patterns(),
+        );
         // The handler regex matches `() => "ok"`. The `MapGet`
         // pattern fires once.
         assert!(!r.is_empty(), "Minimal API MapGet must be detected: {r:?}");
@@ -1490,7 +1581,7 @@ get '/hello' do
   'Hello World'
 end
 ";
-        let r = scan_file_for_routes(std::path::Path::new("app.rb"), src);
+        let r = scan_file_for_routes(std::path::Path::new("app.rb"), src, Patterns::patterns());
         assert_eq!(r.len(), 1, "Sinatra get block must be detected: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Get);
         assert_eq!(r[0].path, "/hello");
@@ -1499,7 +1590,7 @@ end
     #[test]
     fn ruby_sinatra_post_block_is_recognised() {
         let src = "post '/users' do\n  User.create(params)\nend\n";
-        let r = scan_file_for_routes(std::path::Path::new("app.rb"), src);
+        let r = scan_file_for_routes(std::path::Path::new("app.rb"), src, Patterns::patterns());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].method, HttpMethod::Post);
         assert_eq!(r[0].path, "/users");
@@ -1513,7 +1604,11 @@ Rails.application.routes.draw do
   resources :users
 end
 ";
-        let r = scan_file_for_routes(std::path::Path::new("config/routes.rb"), src);
+        let r = scan_file_for_routes(
+            std::path::Path::new("config/routes.rb"),
+            src,
+            Patterns::patterns(),
+        );
         // The simple verb+path shape (`get 'health'`) is detected;
         // `resources :users` is out of scope for v1 (the regex
         // doesn't capture a path there).
@@ -1533,7 +1628,7 @@ fun Application.module() {
     }
 }
 ";
-        let r = scan_file_for_routes(std::path::Path::new("App.kt"), src);
+        let r = scan_file_for_routes(std::path::Path::new("App.kt"), src, Patterns::patterns());
         assert_eq!(r.len(), 1, "Ktor get block must be detected: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Get);
         assert_eq!(r[0].path, "/api/health");
@@ -1542,7 +1637,7 @@ fun Application.module() {
     #[test]
     fn kotlin_ktor_post_block_is_recognised() {
         let src = "fun Application.module() {\n    routing { post(\"/api/users\") { call.respond(\"\") } }\n}\n";
-        let r = scan_file_for_routes(std::path::Path::new("App.kt"), src);
+        let r = scan_file_for_routes(std::path::Path::new("App.kt"), src, Patterns::patterns());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].method, HttpMethod::Post);
     }
@@ -1552,14 +1647,19 @@ fun Application.module() {
         // Java Spring syntax in a C# file must not be detected by
         // the csharp pattern (and vice versa).
         let java_src = "@GetMapping(\"/x\")\npublic String a() { return \"\"; }\n";
-        let as_cs = scan_file_for_routes(std::path::Path::new("x.cs"), java_src);
+        let as_cs =
+            scan_file_for_routes(std::path::Path::new("x.cs"), java_src, Patterns::patterns());
         assert!(
             as_cs.is_empty(),
             "Java syntax in a .cs file must not be a C# route: {as_cs:?}"
         );
 
         let csharp_src = "[HttpGet(\"/x\")]\npublic IActionResult A() { return null; }\n";
-        let as_java = scan_file_for_routes(std::path::Path::new("x.java"), csharp_src);
+        let as_java = scan_file_for_routes(
+            std::path::Path::new("x.java"),
+            csharp_src,
+            Patterns::patterns(),
+        );
         assert!(
             as_java.is_empty(),
             "C# syntax in a .java file must not be a Java route: {as_java:?}"

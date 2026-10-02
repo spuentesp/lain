@@ -58,7 +58,11 @@ fn route_detection_uses_patterns_yaml() {
     //    YAML-driven patterns (the inline `get_route_patterns` table
     //    is gone after the Task 2 refactor).
     let axum_src = "let app = Router::new().route(\"/users\", get(get_users));\n";
-    let axum = scan_file_for_routes(std::path::Path::new("main.rs"), axum_src);
+    let axum = scan_file_for_routes(
+        std::path::Path::new("main.rs"),
+        axum_src,
+        Patterns::patterns(),
+    );
     assert_eq!(
         axum.len(),
         1,
@@ -69,7 +73,11 @@ fn route_detection_uses_patterns_yaml() {
     assert_eq!(axum[0].handler_name, "get_users");
 
     let gin_src = "r.GET(\"/foo\", baz)\n";
-    let gin = scan_file_for_routes(std::path::Path::new("routes.go"), gin_src);
+    let gin = scan_file_for_routes(
+        std::path::Path::new("routes.go"),
+        gin_src,
+        Patterns::patterns(),
+    );
     assert_eq!(
         gin.len(),
         1,

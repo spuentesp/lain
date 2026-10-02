@@ -106,10 +106,73 @@ fn grammar_for(lang: Lang) -> Language {
 ///
 /// The per-language union matches the old list for every language the
 /// sensor supports, so existing walker tests stay green.
+///
+/// **Per-scan override wiring:** when a sensor's `scan_workspace_*`
+/// function has loaded per-repo overrides (via
+/// [`crate::server::sensors::patterns::Patterns::with_overrides`]),
+/// it sets the thread-local current patterns via
+/// [`with_current_patterns`]. The walker code (which can't easily
+/// thread a `&Patterns` through every helper — `handle_attribute`,
+/// `handle_ruby_node`, etc., are 8 deep and are called from
+/// recursive tree-sitter walks) reads from this thread-local. When
+/// the thread-local is unset, this falls back to the bundled
+/// singleton (`Patterns::patterns()`), preserving the no-override
+/// baseline.
 pub fn is_deny_method(lang: Lang, key: &str) -> bool {
-    Patterns::patterns()
+    let patterns: &'static Patterns = current_patterns().unwrap_or_else(Patterns::patterns);
+    patterns
         .outbound_patterns(lang)
         .any(|def| def.deny_methods.iter().any(|m| m == key))
+}
+
+// Thread-local `Patterns` reference for the currently-running
+// sensor's scan. [`with_current_patterns`] (used by the four
+// `scan_workspace_*` functions) sets it at the top of each scan and
+// clears it at the bottom. Helper functions like [`is_deny_method`]
+// read from here so the override-augmented deny set is visible to
+// deep walker helpers that can't easily accept a `&Patterns`
+// parameter.
+thread_local! {
+    static CURRENT_PATTERNS: std::cell::RefCell<*const Patterns> =
+        const { std::cell::RefCell::new(std::ptr::null()) };
+}
+
+/// Read the thread-local `&Patterns` if one was installed via
+/// [`with_current_patterns`] for the current sensor scan. Returns
+/// `None` for callers outside a scan (e.g., lib tests that exercise
+/// the walker without going through `scan_workspace_*`).
+pub fn current_patterns() -> Option<&'static Patterns> {
+    CURRENT_PATTERNS.with(|c| {
+        let ptr = *c.borrow();
+        if ptr.is_null() {
+            None
+        } else {
+            // SAFETY: The pointer was installed by
+            // `with_current_patterns` for the duration of a single
+            // `scan_workspace_*` call. The `Patterns` `f` outlives
+            // the scan (it's a local in the caller), and the
+            // thread-local is cleared before `f` is dropped, so
+            // any read of the thread-local pointer is well-defined.
+            Some(unsafe { &*ptr })
+        }
+    })
+}
+
+/// Run `f` with `patterns` installed as the thread-local current
+/// patterns. The thread-local is cleared on return regardless of
+/// `f`'s outcome (panic, early return, normal completion).
+pub fn with_current_patterns<R>(patterns: &Patterns, f: impl FnOnce() -> R) -> R {
+    let prev = CURRENT_PATTERNS.with(|c| {
+        let prev = *c.borrow();
+        *c.borrow_mut() = patterns as *const Patterns;
+        prev
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    CURRENT_PATTERNS.with(|c| *c.borrow_mut() = prev);
+    match result {
+        Ok(v) => v,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 /// A file found by [`walk_workspace`].
