@@ -40,3 +40,6 @@ mod patterns_override;
 
 #[path = "sensors/patterns_new_framework.rs"]
 mod patterns_new_framework;
+
+#[path = "sensors/adversarial.rs"]
+mod adversarial;
