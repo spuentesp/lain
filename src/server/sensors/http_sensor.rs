@@ -192,7 +192,7 @@ fn method_from_str(s: String) -> HttpMethod {
 /// (no per-call rebuild → no per-call leak).
 pub fn get_route_patterns() -> &'static BTreeMap<&'static str, RoutePattern> {
     static CACHE: OnceLock<BTreeMap<&'static str, RoutePattern>> = OnceLock::new();
-    CACHE.get_or_init(|| build_route_patterns())
+    CACHE.get_or_init(build_route_patterns)
 }
 
 fn build_route_patterns() -> BTreeMap<&'static str, RoutePattern> {
