@@ -187,11 +187,13 @@ fn patterns_singleton_is_callable_as_patterns() {
 
 #[test]
 fn generated_queries_cover_all_eight_languages() {
-    // 5 (rust) + 3 (go) + 4 (java) + 3 (csharp) + 6 (ruby) + 3 (kotlin)
-    // + 5 (python) + 5 (tsjs) = 34 .scm files.
+    // 5 (rust) + 3 (go) + 5 (java) + 4 (csharp) + 7 (ruby) + 3 (kotlin)
+    // + 5 (python) + 5 (tsjs) = 37 .scm files. Task 4 added the three
+    // entry-point patterns (`spring-entry-point`,
+    // `aspnet-entry-point`, `rails-entry-point`).
     assert_eq!(
         patterns::generated::LEN,
-        34,
+        37,
         "the generated query map must include python + tsjs; \
          the prior LANG_DIRS hard-coded only six languages and \
          silently dropped 10 entries"

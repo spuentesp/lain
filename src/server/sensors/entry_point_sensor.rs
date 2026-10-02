@@ -35,10 +35,13 @@ use crate::error::LainError;
 use crate::federation::contracts::model::EntryKind;
 use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::patterns::Patterns;
+use crate::server::sensors::util::{language_for, parse_for_lang, Lang};
 use crate::server::sensors::SensorEntry;
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
+use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
 /// The detected entry points in one file: `(function_name_in_file, line)`
 /// → `EntryKind`. Multi-detection (rare in practice) keeps the first
@@ -148,28 +151,36 @@ fn detect_in_file(content: &str, _path: &str, ext: &str) -> FileDetections {
 // annotation (Java Spring / JAX-RS, C# ASP.NET) the
 // `HttpHandler` entry point follows the same wiring as Python's
 // `@app.route` → handler: the function name appears on the line
-// immediately below the annotation. The regex here piggybacks on
-// the existing `for_each_def_with_decorators` walker so the
-// nearest-decorator-line logic already covers stacked Spring
-// annotations (`@RestController` over `@GetMapping` etc.).
+// immediately below the annotation. Task 4 of the data-driven
+// sensor-patterns plan replaced the inline regex tables with
+// tree-sitter queries loaded via `Patterns::compiled_queries()`. The
+// regex fallback below (`detect_java_http_handler_regex`,
+// `detect_csharp_http_handler_regex`,
+// `detect_ruby_rails_controller_regex`) is retained for the case
+// where a `.scm` body is missing or empty — keeps the walker
+// resilient to partial migrations.
 fn detect_http_handler(content: &str, ext: &str, out: &mut FileDetections) {
     // Java Spring / JAX-RS: `@GetMapping("/x")` on a method, with
-    // the public method on the next non-blank line. We delegate to
-    // `for_each_def_with_decorators`-style walking inline because
-    // Java's `method_declaration` is not a `def`.
+    // the public method on the next non-blank line.
     if ext == "java" {
-        detect_java_http_handler(content, out);
+        if !detect_java_http_handler(content, out) {
+            detect_java_http_handler_regex(content, out);
+        }
         return;
     }
     // C# ASP.NET: `[HttpGet("/x")]` on a method.
     if ext == "cs" {
-        detect_csharp_http_handler(content, out);
+        if !detect_csharp_http_handler(content, out) {
+            detect_csharp_http_handler_regex(content, out);
+        }
         return;
     }
     // Ruby Rails: action methods (`def index`, `def show`, `def
     // create`, …) inside `app/controllers/*.rb`.
     if ext == "rb" {
-        detect_ruby_rails_controller(content, out);
+        if !detect_ruby_rails_controller(content, out) {
+            detect_ruby_rails_controller_regex(content, out);
+        }
         return;
     }
     // Kotlin Ktor: handler functions inside `routing { get("/x") { … } }`
@@ -187,10 +198,242 @@ fn detect_http_handler(content: &str, ext: &str, out: &mut FileDetections) {
     }
 }
 
-fn detect_java_http_handler(content: &str, out: &mut FileDetections) {
-    // Match `@GetMapping("/x")` / `@PostMapping(...)` /
-    // `@RequestMapping("/x")` on a line, with the next non-blank
-    // line being `public <type> <name>(...)`.
+/// Find a `.scm` query body by its `<lang>/<framework>.scm` key
+/// via `Patterns::compiled_queries()`. Returns `None` when the key
+/// isn't in the registry; callers fall back to their inline regex
+/// path so a partial migration still works.
+fn entry_point_query_body(key: &str) -> Option<&'static str> {
+    Patterns::patterns()
+        .compiled_queries()
+        .iter()
+        .find(|(k, _, _, _)| *k == key)
+        .map(|(_, _, _, body)| *body)
+}
+
+/// Returns `true` when the .scm body has at least one non-comment
+/// line. Comment-only stubs short-circuit to the regex fallback.
+fn scm_has_query(query: &str) -> bool {
+    query.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.is_empty() && !trimmed.starts_with(';')
+    })
+}
+
+/// Extract the source text covered by `node` from `content`.
+fn text_for_node<'a>(node: tree_sitter::Node, content: &'a str) -> Option<&'a str> {
+    content.get(node.start_byte()..node.end_byte())
+}
+
+/// Query-driven Spring `@GetMapping` / `@PostMapping` /
+/// `@RequestMapping` handler detection. Runs the
+/// `java/spring-entry-point.scm` query body against the parsed
+/// Java tree. Captures `@verb` (annotation name), `@path` (path
+/// literal), and `@handler` (method name).
+///
+/// Returns `true` when the query ran successfully and was not
+/// missing/empty; the caller falls back to the regex detector when
+/// this returns `false`. Returns `false` if the file is missing,
+/// has an empty query, fails to compile, fails to parse, or has a
+/// tree-sitter error.
+fn detect_java_http_handler(content: &str, out: &mut FileDetections) -> bool {
+    let Some(body) = entry_point_query_body("java/spring-entry-point.scm") else {
+        return false;
+    };
+    if !scm_has_query(body) {
+        return false;
+    }
+    let Some(tree) = parse_for_lang(Lang::Java, content) else {
+        return false;
+    };
+    let grammar = language_for(Lang::Java);
+    let Ok(query) = Query::new(&grammar, body) else {
+        return false;
+    };
+    let idxs = capture_indices(&query, &["verb", "path", "handler"]);
+    let verb_idx = idxs[0];
+    let path_idx = idxs[1];
+    let handler_idx = idxs[2];
+    let mut cursor = QueryCursor::new();
+    let src = content.as_bytes();
+    let mut matches = cursor.matches(&query, tree.root_node(), src);
+    while let Some(m) = matches.next() {
+        let verb = verb_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+        let handler = handler_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+        let path = path_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+        let (Some(verb), Some(handler)) = (verb, handler) else {
+            continue;
+        };
+        let (Some(verb_text), Some(handler_text)) = (
+            text_for_node(verb, content),
+            text_for_node(handler, content),
+        ) else {
+            continue;
+        };
+        if !is_spring_route_annotation(verb_text) {
+            continue;
+        }
+        let _ = text_for_node(path.unwrap_or(verb), content);
+        let line = (handler.start_position().row as u32) + 1;
+        out.entry((handler_text.to_string(), line))
+            .or_insert(EntryKind::HttpHandler);
+    }
+    true
+}
+
+/// `true` when `verb` is a Spring route annotation
+/// (`@GetMapping`, `@PostMapping`, `@PutMapping`, `@DeleteMapping`,
+/// `@PatchMapping`, `@RequestMapping`).
+fn is_spring_route_annotation(verb: &str) -> bool {
+    matches!(
+        verb,
+        "GetMapping"
+            | "PostMapping"
+            | "PutMapping"
+            | "DeleteMapping"
+            | "PatchMapping"
+            | "RequestMapping"
+    )
+}
+
+/// Query-driven ASP.NET `[HttpGet]` / `[HttpPost]` /
+/// `[HttpPatch]` / `[HttpDelete]` etc. handler detection via
+/// `csharp/aspnet-entry-point.scm`.
+///
+/// Returns `true` when the query ran successfully; the caller falls
+/// back to the regex detector when this returns `false`. Returns
+/// `false` if the file is missing, has an empty query, fails to
+/// compile, fails to parse, or has a tree-sitter error.
+fn detect_csharp_http_handler(content: &str, out: &mut FileDetections) -> bool {
+    let Some(body) = entry_point_query_body("csharp/aspnet-entry-point.scm") else {
+        return false;
+    };
+    if !scm_has_query(body) {
+        return false;
+    }
+    let Some(tree) = parse_for_lang(Lang::CSharp, content) else {
+        return false;
+    };
+    let grammar = language_for(Lang::CSharp);
+    let Ok(query) = Query::new(&grammar, body) else {
+        return false;
+    };
+    let idxs = capture_indices(&query, &["verb", "path", "handler"]);
+    let verb_idx = idxs[0];
+    let path_idx = idxs[1];
+    let handler_idx = idxs[2];
+    let mut cursor = QueryCursor::new();
+    let src = content.as_bytes();
+    let mut matches = cursor.matches(&query, tree.root_node(), src);
+    while let Some(m) = matches.next() {
+        let verb = verb_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+        let handler = handler_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+        let path = path_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+        let (Some(verb), Some(handler)) = (verb, handler) else {
+            continue;
+        };
+        let (Some(verb_text), Some(handler_text)) = (
+            text_for_node(verb, content),
+            text_for_node(handler, content),
+        ) else {
+            continue;
+        };
+        if !is_aspnet_route_attribute(verb_text) {
+            continue;
+        }
+        let _ = text_for_node(path.unwrap_or(verb), content);
+        let line = (handler.start_position().row as u32) + 1;
+        out.entry((handler_text.to_string(), line))
+            .or_insert(EntryKind::HttpHandler);
+    }
+    true
+}
+
+/// `true` when `verb` is an ASP.NET route attribute
+/// (`HttpGet`, `HttpPost`, `HttpPut`, `HttpDelete`, `HttpPatch`,
+/// `HttpHead`, `HttpOptions`, `HttpRequest`).
+fn is_aspnet_route_attribute(verb: &str) -> bool {
+    matches!(
+        verb,
+        "HttpGet"
+            | "HttpPost"
+            | "HttpPut"
+            | "HttpDelete"
+            | "HttpPatch"
+            | "HttpHead"
+            | "HttpOptions"
+            | "HttpRequest"
+    )
+}
+
+/// Query-driven Rails controller-action detection via
+/// `ruby/rails-entry-point.scm`. Matches every `def` inside a
+/// `*Controller` class. Captures `@class_name` (e.g. `UsersController`)
+/// and `@handler` (action method name).
+///
+/// Returns `true` when the query ran successfully; the caller falls
+/// back to the regex detector when this returns `false`. Returns
+/// `false` if the file is missing, has an empty query, fails to
+/// compile, fails to parse, or has a tree-sitter error.
+fn detect_ruby_rails_controller(content: &str, out: &mut FileDetections) -> bool {
+    let Some(body) = entry_point_query_body("ruby/rails-entry-point.scm") else {
+        return false;
+    };
+    if !scm_has_query(body) {
+        return false;
+    }
+    let Some(tree) = parse_for_lang(Lang::Ruby, content) else {
+        return false;
+    };
+    let grammar = language_for(Lang::Ruby);
+    let Ok(query) = Query::new(&grammar, body) else {
+        return false;
+    };
+    let idxs = capture_indices(&query, &["handler", "class_name"]);
+    let handler_idx = idxs[0];
+    let class_name_idx = idxs[1];
+    let mut cursor = QueryCursor::new();
+    let src = content.as_bytes();
+    let mut matches = cursor.matches(&query, tree.root_node(), src);
+    while let Some(m) = matches.next() {
+        let handler = handler_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+        let class_name = class_name_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+        let Some(handler) = handler else {
+            continue;
+        };
+        let Some(handler_text) = text_for_node(handler, content) else {
+            continue;
+        };
+        let _ = class_name;
+        // Skip DSL-shaped method definitions (private / protected /
+        // class macros).
+        if matches!(handler_text, "initialize" | "self" | "method_missing") {
+            continue;
+        }
+        let line = (handler.start_position().row as u32) + 1;
+        out.entry((handler_text.to_string(), line))
+            .or_insert(EntryKind::HttpHandler);
+    }
+    true
+}
+
+/// Resolve a list of capture names to their index in the query. Any
+/// name not bound by the query returns `None` for that slot.
+fn capture_indices(query: &Query, names: &[&str]) -> Vec<Option<u32>> {
+    let mut idxs = vec![None; names.len()];
+    for (i, name) in query.capture_names().iter().enumerate() {
+        if let Some(pos) = names.iter().position(|n| *n == *name) {
+            idxs[pos] = Some(i as u32);
+        }
+    }
+    idxs
+}
+
+/// Regex fallback for Java Spring detection — used only when the
+/// `.scm` query body is missing, empty, fails to parse, or fails to
+/// compile. Preserves the Workstream 5 behaviour so a partial
+/// migration (`.scm` not yet authored) still produces correct
+/// detections.
+fn detect_java_http_handler_regex(content: &str, out: &mut FileDetections) {
     let deco_re = regex_cached(
         r"(?m)^\s*@(?i:(?:GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping))\s*\([^)]*\)\s*$",
     );
@@ -198,7 +441,6 @@ fn detect_java_http_handler(content: &str, out: &mut FileDetections) {
     for cap in deco_re.captures_iter(content) {
         let m = cap.get(0).unwrap();
         let line = line_of_match(content, m.start());
-        // Walk forward from the line AFTER the annotation.
         let after = &content[line_end_byte(content, m.end())..];
         let lines: Vec<&str> = after.lines().take(6).collect();
         for (i, line_text) in lines.iter().enumerate() {
@@ -220,10 +462,10 @@ fn detect_java_http_handler(content: &str, out: &mut FileDetections) {
     }
 }
 
-fn detect_csharp_http_handler(content: &str, out: &mut FileDetections) {
-    // Match `[HttpGet("/x")]`, `[HttpPost]` etc. on a line, with
-    // the next non-blank line being a method declaration
-    // `(<visibility>)? <return> <name>(...)`.
+/// Regex fallback for C# ASP.NET detection — used only when the
+/// `.scm` query body is missing, empty, fails to parse, or fails to
+/// compile. Preserves the Workstream 5 behaviour.
+fn detect_csharp_http_handler_regex(content: &str, out: &mut FileDetections) {
     let deco_re = regex_cached(
         r"(?m)^\s*\[(?i:(?:HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch|HttpHead|HttpOptions))",
     );
@@ -256,8 +498,8 @@ fn detect_csharp_http_handler(content: &str, out: &mut FileDetections) {
 
 /// Return the byte offset of the newline that ends the line
 /// containing `byte_offset`. If the line isn't terminated, returns
-/// `byte_offset`. Used by Java/C# HTTP-handler detectors to step
-/// past the annotation's argument list before scanning forward
+/// `byte_offset`. Used by Java/C# HTTP-handler regex fallbacks to
+/// step past the annotation's argument list before scanning forward
 /// for the method declaration.
 fn line_end_byte(content: &str, byte_offset: usize) -> usize {
     match content[byte_offset..].find('\n') {
@@ -266,24 +508,18 @@ fn line_end_byte(content: &str, byte_offset: usize) -> usize {
     }
 }
 
-fn detect_ruby_rails_controller(content: &str, out: &mut FileDetections) {
-    // Rails controllers expose their action handlers as public
-    // methods on a `*Controller` class. The entry-point sensor
-    // names the method `HttpHandler` so the `CallsHttp` edges
-    // from `http_sensor` (Ruby `ruby-rails` routes) resolve to
-    // the action method by name.
+/// Regex fallback for Ruby Rails controller-action detection. Used only
+/// when the `.scm` query body is missing, empty, fails to parse,
+/// or fails to compile. Preserves the Workstream 5 behaviour.
+fn detect_ruby_rails_controller_regex(content: &str, out: &mut FileDetections) {
     let method_re = regex_cached(r"(?m)^\s*def\s+([A-Za-z_][A-Za-z0-9_]*[!?]?)\s*(?:\(|;|\s*$)");
     let controller_re = regex_cached(r"class\s+\w+Controller\s*<");
-    // Only treat as a controller if `extends ApplicationController`
-    // / `< ApplicationController` appears in the same file.
     let is_controller = controller_re.is_match(content);
     if !is_controller {
         return;
     }
     for cap in method_re.captures_iter(content) {
         let name = cap[1].to_string();
-        // Skip DSL-shaped method definitions (private / protected /
-        // class macros). The regex captures `def foo(...)` only.
         if matches!(name.as_str(), "initialize" | "self" | "method_missing") {
             continue;
         }

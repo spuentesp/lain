@@ -5,6 +5,9 @@
 //! integration test crates, so this thin file uses `#[path]` to wire
 //! the per-sensor test files in. Mirror the `use_cases.rs` shape.
 
+#[path = "sensors/entry_point_patterns.rs"]
+mod entry_point_patterns;
+
 #[path = "sensors/http_client_sensor_patterns.rs"]
 mod http_client_sensor_patterns;
 
