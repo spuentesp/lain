@@ -143,14 +143,25 @@ inventory = "0.2"
 jsonschema = { version = "0.29", default-features = false }
 
 # Build-deps for the data-driven patterns infrastructure
-# (`src/server/sensors/patterns/build.rs`). `tree-sitter-cli` brings
-# the Tree-sitter grammar runtime so a future task can compile every
-# bundled `.scm` against the real grammar at build time. Today only
-# the file-discovery + `OUT_DIR` write — leaving `tree-sitter-cli` in
-# here is an explicit allow-rule in the data-driven-sensor-patterns
-# task brief (`task-1-brief.md` §"Hard rules"): no runtime version
-# bump, build-dep additions permitted.
+# (`src/server/sensors/patterns/build.rs`). Task 6 wires
+# build-time `tree_sitter::Query::new` validation so every bundled
+# `.scm` body is parsed against its real grammar before it ever
+# reaches the binary — a syntax error fails `cargo build` with the
+# filename + the tree-sitter parse error. The grammar crates match
+# the runtime mappings in `src/server/sensors/util.rs::grammar_for`,
+# and the `tree-sitter-cli` dep stays in place for its
+# `query_testing` / `highlight` helpers.
 [build-dependencies]
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-kotlin-ng = "1.1"
 tree-sitter-cli = "0.25"
 
 [lib]

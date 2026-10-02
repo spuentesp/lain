@@ -262,11 +262,11 @@ fn compiled_query_body(
     framework_id: &str,
 ) -> Option<&'static str> {
     let key = format!("{lang_yaml}/{framework_id}.scm");
-    patterns
-        .compiled_queries()
-        .iter()
-        .find(|(k, _, _, _)| *k == key)
-        .map(|(_, _, _, body)| *body)
+    patterns.compiled_queries().ok().and_then(|q| {
+        q.iter()
+            .find(|(k, _, _, _)| *k == key)
+            .map(|(_, _, _, body)| *body)
+    })
 }
 
 fn has_query_content(body: &str) -> bool {

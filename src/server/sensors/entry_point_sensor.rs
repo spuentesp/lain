@@ -200,11 +200,18 @@ fn detect_http_handler(content: &str, ext: &str, out: &mut FileDetections) {
 
 /// Find a `.scm` query body by its `<lang>/<framework>.scm` key
 /// via `Patterns::compiled_queries()`. Returns `None` when the key
-/// isn't in the registry; callers fall back to their inline regex
-/// path so a partial migration still works.
+/// isn't in the registry or when a malformed override `.scm` body
+/// failed validation at load time; callers fall back to their inline
+/// regex path so a partial migration still works. Task 6 of the
+/// data-driven-sensor-patterns plan switched `compiled_queries()` to
+/// return `Result` so that an uncompilable override surfaces a
+/// structured error at load time; this accessor flattens the `Err`
+/// to `None` so the walker keeps going and the sensor's per-file
+/// scan does not 500 the whole pipeline on a single broken override.
 fn entry_point_query_body(key: &str) -> Option<&'static str> {
     Patterns::patterns()
         .compiled_queries()
+        .ok()?
         .iter()
         .find(|(k, _, _, _)| *k == key)
         .map(|(_, _, _, body)| *body)
@@ -395,23 +402,31 @@ fn detect_ruby_rails_controller(content: &str, out: &mut FileDetections) -> bool
     let src = content.as_bytes();
     let mut matches = cursor.matches(&query, tree.root_node(), src);
     while let Some(m) = matches.next() {
-        let handler = handler_idx.and_then(|i| m.nodes_for_capture_index(i).next());
         let class_name = class_name_idx.and_then(|i| m.nodes_for_capture_index(i).next());
-        let Some(handler) = handler else {
+        let Some(handler_idx) = handler_idx else {
             continue;
         };
-        let Some(handler_text) = text_for_node(handler, content) else {
-            continue;
-        };
-        let _ = class_name;
-        // Skip DSL-shaped method definitions (private / protected /
-        // class macros).
-        if matches!(handler_text, "initialize" | "self" | "method_missing") {
-            continue;
+        // The rails-entry-point.scm query uses the `(method …)+`
+        // quantifier so every action method inside the controller
+        // body produces its own `@handler` capture under the same
+        // class-level match. Iterate over every captured node —
+        // `nodes_for_capture_index(...).next()` only emits the first
+        // and would silently drop `def show`, `def create`, … in
+        // multi-action controllers.
+        for handler in m.nodes_for_capture_index(handler_idx) {
+            let Some(handler_text) = text_for_node(handler, content) else {
+                continue;
+            };
+            let _ = class_name;
+            // Skip DSL-shaped method definitions (private / protected /
+            // class macros).
+            if matches!(handler_text, "initialize" | "self" | "method_missing") {
+                continue;
+            }
+            let line = (handler.start_position().row as u32) + 1;
+            out.entry((handler_text.to_string(), line))
+                .or_insert(EntryKind::HttpHandler);
         }
-        let line = (handler.start_position().row as u32) + 1;
-        out.entry((handler_text.to_string(), line))
-            .or_insert(EntryKind::HttpHandler);
     }
     true
 }

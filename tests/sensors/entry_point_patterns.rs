@@ -110,7 +110,9 @@ fn every_entry_point_framework_has_a_compiled_scm_body() {
         "csharp/aspnet-entry-point.scm",
         "ruby/rails-entry-point.scm",
     ];
-    let compiled = lain::server::sensors::patterns::Patterns::patterns().compiled_queries();
+    let compiled = lain::server::sensors::patterns::Patterns::patterns()
+        .compiled_queries()
+        .expect("compiled_queries() must succeed for the bundled map");
     for key in keys {
         let body = compiled
             .iter()

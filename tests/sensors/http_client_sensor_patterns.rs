@@ -32,11 +32,11 @@ fn outbound_ids_for(lang: Lang) -> Vec<String> {
 }
 
 fn compiled_query_body(key: &str) -> Option<&'static str> {
-    Patterns::patterns()
-        .compiled_queries()
-        .iter()
-        .find(|(k, _, _, _)| *k == key)
-        .map(|(_, _, _, body)| *body)
+    Patterns::patterns().compiled_queries().ok().and_then(|q| {
+        q.iter()
+            .find(|(k, _, _, _)| *k == key)
+            .map(|(_, _, _, body)| *body)
+    })
 }
 
 fn has_query_content(body: &str) -> bool {

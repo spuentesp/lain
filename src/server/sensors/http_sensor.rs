@@ -486,6 +486,7 @@ fn try_treesitter_extract(
 
     let body = Patterns::patterns()
         .compiled_queries()
+        .ok()?
         .iter()
         .find(|(k, _, _, _)| *k == scm_key)
         .map(|(_, _, _, body)| *body)?;

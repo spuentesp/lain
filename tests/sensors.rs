@@ -19,3 +19,9 @@ mod http_sensor_patterns;
 
 #[path = "sensors/patterns.rs"]
 mod patterns;
+
+#[path = "sensors/patterns_build.rs"]
+mod patterns_build;
+
+#[path = "sensors/patterns_override.rs"]
+mod patterns_override;
