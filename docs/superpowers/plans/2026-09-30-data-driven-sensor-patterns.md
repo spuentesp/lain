@@ -25,6 +25,7 @@ Failure modes the spec implies but no single task's tests cover:
 1. **Tree-sitter query syntax bugs in `.scm` files** — pin with per-pattern regression tests in Task 1 (compile step catches them at build, but capture-name mismatches are runtime).
 2. **YAML schema drift** (Camp A) — pin in Task 1 with a schema-validation test on the bundled `frameworks.yaml`.
 3. **Runtime override path failing silently** — pin in Task 7 with an end-to-end override test that asserts org files REPLACE (not augment) bundled entries by `id`.
+   - **Post-`runtime-override wire-in` pass (2026-10-02):** failure mode #3 had a *second* dimension that the original pin did NOT catch — the override was loaded and stored correctly, but never reached the walkers because no `scan_workspace_*` ever called `load_overrides`. The wire-in pass closed this gap (see Item C of `.superpowers/sdd/2026-09-30-data-driven-sensor-patterns/task-wirein-report.md`). New end-to-end coverage lives in `tests/sensors/override_end_to_end.rs`.
 4. **Adding a new framework as a data-only change** — pin in Task 8 (proof task).
 5. **`field_access_sensor.rs` walker semantics unchanged** — pin by the existing `field_access_sensor` test suite (regression; do not change walker code).
 

@@ -149,6 +149,16 @@ Tree-sitter query captures are bound to Rust identifiers (`@Router_new`, `@path`
 
 **Runtime override path:** A second `Patterns::load_overrides(path)` method reads `<repo_root>/.lain/patterns/*.yaml` + `*.scm` at sensor init. Override files have the same schema as the bundled ones. They REPLACE (not augment) entries with matching `id`. Missing keys from the override fall back to bundled.
 
+**Override wiring (post-`runtime-override wire-in` pass, 2026-10-02):** Before this PR, override bodies were validated and stored by `Patterns::load_overrides` but never reached the walkers — no `scan_workspace_*` ever called `load_overrides`, and `compiled_queries()` returned only the bundled static. This was a load-bearing gap: per-repo overrides at `<repo_root>/.lain/patterns/` were checked at test time but never reached production scans.
+
+The wire-in closes the gap:
+1. `Patterns::with_overrides(root)` is a new helper that clones the bundled singleton and runs `load_overrides(root)` on it.
+2. Every `scan_workspace_*` (routes, clients, field_access, entry_points) opens its scan with `Patterns::with_overrides(root)?` after the read-only guard. The walker code consumes the per-scan instance via `&patterns`, replacing every `Patterns::patterns()` call site that was previously reading the bundled singleton.
+3. `Patterns::compiled_queries()` now returns `Result<Cow<'static, [(key, lang, framework, body)]>, PatternsError>` — `Cow::Borrowed(generated::QUERIES)` when no overrides are loaded (zero cost fast path), `Cow::Owned(merged)` when overrides are loaded. Override bodies are `Box::leak`'d once per unique body so they fit the `&'static str` tuple field.
+4. `field_access_sensor.rs`'s deny-gate (`util::is_deny_method`) is the one accessor that can't easily take a `&Patterns` parameter (it's called from deep walker helpers 8 levels deep in `handle_python_node` / `handle_attribute`). The wire-in installs a thread-local `Patterns` reference at the top of `scan_workspace_field_access` via `util::with_current_patterns`; `is_deny_method` reads from there (falling back to the bundled singleton when no thread-local is set).
+
+End-to-end coverage: `tests/sensors/override_end_to_end.rs` pins both halves (YAML override flips `json` off the Python deny surface; `.scm` override replaces the bundled `axum-route.scm` body).
+
 ## File layout (after refactor)
 
 ```
