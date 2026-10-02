@@ -77,6 +77,7 @@ pub fn scan_workspace_entry_points(
 
     let mut by_id: BTreeMap<String, (String, EntryKind)> = BTreeMap::new();
     let patterns = Patterns::with_overrides(root)?;
+    let patterns = &*patterns;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();

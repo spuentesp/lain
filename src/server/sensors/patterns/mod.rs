@@ -15,6 +15,7 @@
 //! `<repo>/.lain/patterns/*.{yaml,scm}` on top so an org can extend or
 //! replace a bundled pattern without rebuilding LAIN.
 
+use crate::federation::contracts::model::HttpMethod;
 use crate::server::sensors::util::Lang;
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -206,12 +207,28 @@ pub struct Patterns {
     override_scml: Vec<(String, String)>,
     /// Cache of the merged query map (`bundled + override` bodies,
     /// with overrides replacing bundled entries on key conflict and
-    /// appending for fresh keys). Populated exactly once per
-    /// `Patterns` instance on the first `compiled_queries()` call
-    /// that finds non-empty overrides. The closure inside
-    /// `compiled_queries()` is where the `Box::leak` calls happen —
-    /// running once instead of per-call closes the per-scan leak.
-    merged_queries: OnceLock<Vec<(&'static str, &'static str, &'static str, &'static str)>>,
+    /// appending for fresh keys). Stores OWNED strings so the
+    /// `compiled_queries` accessor can return a slice with `&'a str`
+    /// elements borrowing from `&self` (no `Box::leak` needed).
+    /// Populated lazily on the first `compiled_queries()` call that
+    /// finds non-empty overrides; invalidated on every successful
+    /// `load_overrides` so the next call rebuilds with the new
+    /// override bodies.
+    merged_queries: OnceLock<Vec<(String, String, String, String)>>,
+    /// Cache of the compiled route-pattern `BTreeMap` keyed by
+    /// `<lang>-<framework>`. The map is built once per `Patterns`
+    /// instance and reused by every `get_route_patterns` /
+    /// `route_patterns_map` call. Storing the cache on the
+    /// `Patterns` instance (rather than a per-pointer
+    /// `thread_local!` keyed on the patterns' raw address) closes
+    /// the leak-across-scans bug where two consecutive scans
+    /// happened to allocate their `Patterns` clones at the same
+    /// address and the second scan inherited the first scan's
+    /// override-augmented route map. Invalidation on
+    /// `load_overrides` is required because override `.yaml` files
+    /// can replace or append framework entries the route-patterns
+    /// builder consumes (`route_patterns(Lang)`).
+    route_patterns_cache: OnceLock<BTreeMap<String, RoutePattern>>,
 }
 
 impl Clone for Patterns {
@@ -224,13 +241,12 @@ impl Clone for Patterns {
         //
         // The merged-queries cache is carried over too — if the
         // source has already populated it, the clone reuses the
-        // same `Vec` (so the `Box::leak` work doesn't repeat). The
-        // returned `&[tuple]` from `compiled_queries()` borrows
-        // from `merged_queries` (an `OnceLock` field), so the leak
-        // is the only `&'static` allocation and stays valid for
-        // the clone's lifetime. When the source's cache is empty,
-        // the clone starts fresh — `compiled_queries()` will
-        // rebuild on its first call.
+        // same owned data so the merge work doesn't repeat. The
+        // returned slice from `compiled_queries()` borrows from
+        // `&self`, so the clone's lifetime ties the slice to the
+        // clone. When the source's cache is empty, the clone starts
+        // fresh — `compiled_queries()` will rebuild on its first
+        // call.
         let merged_queries = self
             .merged_queries
             .get()
@@ -243,11 +259,27 @@ impl Clone for Patterns {
                 once
             })
             .unwrap_or_default();
+        // The route-patterns cache is a `OnceLock<BTreeMap<String,
+        // RoutePattern>>` with no lifetime params (keys are owned
+        // `String` and values own their `regex::Regex`); cloning
+        // an already-populated cache snapshot the populated
+        // BTreeMap into the clone so the `route_patterns_map()`
+        // call on the clone doesn't rebuild from scratch.
+        let route_patterns_cache = self
+            .route_patterns_cache
+            .get()
+            .map(|m| {
+                let once = OnceLock::new();
+                let _ = once.set(m.clone());
+                once
+            })
+            .unwrap_or_default();
         Self {
             yaml: self.yaml.clone(),
             overrides_applied: self.overrides_applied,
             override_scml: self.override_scml.clone(),
             merged_queries,
+            route_patterns_cache,
         }
     }
 }
@@ -263,6 +295,7 @@ impl Patterns {
             overrides_applied: false,
             override_scml: Vec::new(),
             merged_queries: OnceLock::new(),
+            route_patterns_cache: OnceLock::new(),
         })
     }
 
@@ -312,20 +345,22 @@ impl Patterns {
     ///
     /// When no overrides are loaded (the common case), the returned
     /// slice is a `Cow::Borrowed` of the bundled static — zero cost.
-    /// When overrides are present, the method returns a `Cow::Borrowed`
-    /// slice backed by the per-instance `merged_queries` cache. The
-    /// cache is populated lazily on the first call that finds
-    /// non-empty overrides; subsequent calls hit the cached `Vec`
-    /// without rebuilding or re-leaking.
+    /// When overrides are present, the method returns a `Cow::Owned`
+    /// slice whose elements are `&'a str` slices borrowed from
+    /// `&self.override_scml` (overrides) and `generated::QUERIES`
+    /// (bundled). No `Box::leak` is involved: the cache stores
+    /// owned `String`s and the slice borrows from them, with its
+    /// lifetime tied to `&self`. A small per-call `Vec::with_capacity`
+    /// + borrow-copy is the only allocation the override path
+    /// performs.
     ///
-    /// The override bodies are `String` (not `&'static str`), so the
-    /// cache build uses `Box::leak` once per unique body to fit the
-    /// `&'static str` field of the `(key, lang, framework, body)`
-    /// tuple. The closure inside `merged_queries.get_or_init` runs
-    /// exactly once per `Patterns` instance — a single leak per
-    /// unique body per `Patterns` instance, not per scan. This
-    /// closes the per-scan leak the previous
-    /// `Box::leak`-on-every-call design re-introduced.
+    /// The cached merged data (`merged_queries: OnceLock<Vec<(String, String, String, String)>>`)
+    /// is invalidated on every successful `load_overrides` (a fresh
+    /// `OnceLock` is installed) so the next call rebuilds from the
+    /// new override bodies. Cloning a `Patterns` after the cache is
+    /// populated snapshots the populated `Vec` into the clone (the
+    /// `Clone` impl), so the clone's first call doesn't re-run the
+    /// merge.
     ///
     /// The returned `Cow` borrows from `&self`, so its lifetime is
     /// tied to the `Patterns` instance (not `'static`). The three
@@ -335,16 +370,14 @@ impl Patterns {
     /// reference in a `'static` slot — so the tightened lifetime is
     /// invisible at the call site.
     ///
-    /// On success returns the merged map (`Cow::Borrowed` from the
-    /// bundled static when empty, `Cow::Borrowed` from the cache
-    /// otherwise). The `Result` is kept for API compatibility —
-    /// bodies are validated at `load_overrides` time, so the `Err`
-    /// arm is unreachable; callers continue to match on `Result`.
+    /// On success returns the merged map. The `Result` is kept for
+    /// API compatibility — bodies are validated at `load_overrides`
+    /// time, so the `Err` arm is unreachable; callers continue to
+    /// match on `Result`.
     #[allow(clippy::type_complexity)]
     pub fn compiled_queries<'a>(
         &'a self,
-    ) -> Result<Cow<'a, [(&'static str, &'static str, &'static str, &'static str)]>, PatternsError>
-    {
+    ) -> Result<Cow<'a, [(&'a str, &'a str, &'a str, &'a str)]>, PatternsError> {
         // Fast path — the common case where no overrides are loaded.
         // Return the bundled static directly with no allocation and
         // no leaks.
@@ -352,21 +385,19 @@ impl Patterns {
             return Ok(Cow::Borrowed(generated::QUERIES));
         }
 
-        // Build (once) and reuse the merged slice. The closure runs
-        // exactly once per `Patterns` instance — every later call
-        // returns the cached `Vec` without re-leaking. Cloning a
-        // `Patterns` after the first call snapshots the populated
-        // cache into the clone (the `Clone` impl below), so clones
-        // don't re-leak either.
-        let cached = self.merged_queries.get_or_init(|| {
+        // Populate the cache on the first call that finds non-empty
+        // overrides. The cache stores OWNED strings so the returned
+        // slice can borrow `&'a str` from `&self` without `Box::leak`.
+        // Re-entered on a second call: the OnceLock is already
+        // populated, so the closure is skipped.
+        if self.merged_queries.get().is_none() {
             let bundled = generated::QUERIES;
-            let mut merged: Vec<(&'static str, &'static str, &'static str, &'static str)> =
+            let mut merged: Vec<(String, String, String, String)> =
                 Vec::with_capacity(bundled.len() + self.override_scml.len());
 
-            // Iterate the bundled entries; for each, look up an
-            // override with the same key. If present, emit the
-            // override body (which REPLACES the bundled body); if
-            // not, emit the bundled entry verbatim.
+            // `override_scml` is sorted by key (see
+            // `load_overrides`), so the merge loop's "advance past
+            // sorted overrides" logic is correct.
             let mut override_iter = self.override_scml.iter();
             let mut next_override: Option<&(String, String)> = override_iter.next();
             for entry in bundled {
@@ -376,15 +407,14 @@ impl Patterns {
                 // appends).
                 while let Some(ov) = next_override {
                     if ov.0.as_str() < key {
-                        let leaked_key: &'static str = Box::leak(ov.0.clone().into_boxed_str());
                         let (lang_part, framework_part) =
-                            leaked_key.split_once('/').unwrap_or((leaked_key, ""));
-                        let leaked_lang: &'static str =
-                            Box::leak(lang_part.to_string().into_boxed_str());
-                        let leaked_framework: &'static str =
-                            Box::leak(framework_part.to_string().into_boxed_str());
-                        let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
-                        merged.push((leaked_key, leaked_lang, leaked_framework, leaked_body));
+                            ov.0.split_once('/').unwrap_or((ov.0.as_str(), ""));
+                        merged.push((
+                            ov.0.clone(),
+                            lang_part.to_string(),
+                            framework_part.to_string(),
+                            ov.1.clone(),
+                        ));
                         next_override = override_iter.next();
                     } else {
                         break;
@@ -395,32 +425,56 @@ impl Patterns {
                 // the bundled entry verbatim.
                 if let Some(ov) = next_override {
                     if ov.0.as_str() == key {
-                        let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
-                        merged.push((key, lang, framework, leaked_body));
+                        merged.push((
+                            key.to_string(),
+                            lang.to_string(),
+                            framework.to_string(),
+                            ov.1.clone(),
+                        ));
                         next_override = override_iter.next();
                         continue;
                     }
                 }
-                merged.push((key, lang, framework, body));
+                merged.push((
+                    key.to_string(),
+                    lang.to_string(),
+                    framework.to_string(),
+                    body.to_string(),
+                ));
             }
             // Append any overrides whose keys sorted past every
             // bundled entry.
             while let Some(ov) = next_override {
-                let leaked_key: &'static str = Box::leak(ov.0.clone().into_boxed_str());
                 let (lang_part, framework_part) =
-                    leaked_key.split_once('/').unwrap_or((leaked_key, ""));
-                let leaked_lang: &'static str = Box::leak(lang_part.to_string().into_boxed_str());
-                let leaked_framework: &'static str =
-                    Box::leak(framework_part.to_string().into_boxed_str());
-                let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
-                merged.push((leaked_key, leaked_lang, leaked_framework, leaked_body));
+                    ov.0.split_once('/').unwrap_or((ov.0.as_str(), ""));
+                merged.push((
+                    ov.0.clone(),
+                    lang_part.to_string(),
+                    framework_part.to_string(),
+                    ov.1.clone(),
+                ));
                 next_override = override_iter.next();
             }
 
-            merged
-        });
+            // `set` cannot fail here — the OnceLock was just
+            // checked for emptiness.
+            let _ = self.merged_queries.set(merged);
+        }
 
-        Ok(Cow::Borrowed(cached.as_slice()))
+        // Build a borrowed slice from the cached owned data. The
+        // lifetime of the `&'a str` references is tied to `&self`
+        // (the cached data lives in `self.merged_queries`). The
+        // `Vec` is local but the references it holds are valid for
+        // `'a` because the source `String`s live in `&self`.
+        let cached = self
+            .merged_queries
+            .get()
+            .expect("merged_queries was just populated above");
+        let borrowed: Vec<(&'a str, &'a str, &'a str, &'a str)> = cached
+            .iter()
+            .map(|(k, l, f, b)| (k.as_str(), l.as_str(), f.as_str(), b.as_str()))
+            .collect();
+        Ok(Cow::Owned(borrowed))
     }
 
     /// Clone the bundled singleton into an owned [`Patterns`] so
@@ -430,24 +484,30 @@ impl Patterns {
         Self::patterns().clone()
     }
 
-    /// Build an owned [`Patterns`] cloned from the bundled singleton
-    /// and immediately layer per-repo overrides from
-    /// `<root>/.lain/patterns/` via [`Self::load_overrides`]. This is
-    /// the canonical helper a sensor's `scan_workspace_*` calls at
-    /// the top of its scan loop so the walker code can use the
-    /// returned value in place of [`Self::patterns`] and observe
-    /// override-augmented data.
+    /// Build a per-repo [`Patterns`] view from `<root>/.lain/patterns/`.
+    /// When the override directory is absent, returns
+    /// `Cow::Borrowed(&'static Patterns)` pointing at the bundled
+    /// singleton — no allocation, no clone, no override-augmented
+    /// data. When overrides are present, returns
+    /// `Cow::Owned(Patterns)` with the override bodies layered on.
+    ///
+    /// This is the canonical helper a sensor's `scan_workspace_*`
+    /// calls at the top of its scan loop so the walker code can use
+    /// the returned value in place of [`Self::patterns`] and observe
+    /// override-augmented data. The `Cow` deref-to-`&Patterns`
+    /// pattern lets every downstream consumer keep the same
+    /// `&Patterns` signature they had pre-wire-in.
     ///
     /// `Err` propagates a `load_overrides` failure (malformed YAML,
-    /// malformed `.scm` body, unreadable override directory). When
-    /// `<root>/.lain/patterns/` is absent, `load_overrides` is a
-    /// no-op so this helper still returns `Ok(_)` — the returned
-    /// `Patterns` is a clean singleton with `overrides_applied = true`
-    /// (the flag flips regardless so diagnostics know the loader ran).
-    pub fn with_overrides(root: &Path) -> Result<Self, PatternsError> {
-        let mut patterns = Self::clone_default();
-        patterns.load_overrides(root)?;
-        Ok(patterns)
+    /// malformed `.scm` body, unreadable override directory).
+    pub fn with_overrides(root: &Path) -> Result<Cow<'_, Patterns>, PatternsError> {
+        let dir = root.join(".lain").join("patterns");
+        if !dir.exists() {
+            return Ok(Cow::Borrowed(Patterns::patterns()));
+        }
+        let mut p = Patterns::clone_default();
+        p.load_overrides(root)?;
+        Ok(Cow::Owned(p))
     }
 
     /// Look up a framework by `id` across every language.
@@ -538,6 +598,26 @@ impl Patterns {
         out
     }
 
+    /// Return the cached route-pattern [`BTreeMap`] keyed by
+    /// `<lang>-<framework>`. The map is built once per `Patterns`
+    /// instance (the first time this method is called) and reused
+    /// on every subsequent call. The cache is invalidated on
+    /// [`Self::load_overrides`] so a second load (a different
+    /// `<root>/.lain/patterns/`) rebuilds the map with the new
+    /// override-augmented `route_patterns(Lang)` data.
+    ///
+    /// Storing the cache on the `Patterns` instance (rather than a
+    /// per-pointer `thread_local!` keyed on the patterns' raw
+    /// address) closes the leak-across-scans bug where two
+    /// consecutive scans happened to allocate their
+    /// `Patterns::with_overrides` clones at the same address and
+    /// the second scan inherited the first scan's override-
+    /// augmented route map.
+    pub fn route_patterns_map(&self) -> &BTreeMap<String, RoutePattern> {
+        self.route_patterns_cache
+            .get_or_init(|| build_route_patterns(self))
+    }
+
     /// Layer per-repo overrides from `<root>/.lain/patterns/`.
     ///
     /// Transactional: a single bad body in either the YAML entries or
@@ -603,6 +683,15 @@ impl Patterns {
             }
         }
 
+        // `read_dir` order is platform-dependent. `compiled_queries`
+        // assumes the override list is sorted by key (its merge loop
+        // walks `override_scml` and the bundled entries in lock-step
+        // using key ordering — unsorted overrides would skip the
+        // "advance past sorted overrides" emit branch and either
+        // duplicate entries or miss replacements). Sort here so
+        // every later consumer sees a stable, ordered view.
+        pending_scml.sort_by(|a, b| a.0.cmp(&b.0));
+
         // Step 2: parse + apply. Validation here only catches YAML
         // structure errors; the `.scm` validation already ran above.
         let overrides = YamlFile::load_from_dir(&dir)?;
@@ -629,6 +718,27 @@ impl Patterns {
         // scans from different threads each hold their own `Patterns`
         // clone.
         self.override_scml = pending_scml;
+
+        // Invalidate the cached merged queries so the next
+        // `compiled_queries()` call rebuilds with the new override
+        // bodies. Without this invalidation, a second
+        // `load_overrides` on the same `Patterns` instance leaves a
+        // stale cache (the first-load bodies, not the second-load
+        // bodies), which is the bug the third regression test
+        // (`second_load_overrides_call_invalidates_merged_cache`)
+        // pins.
+        self.merged_queries = OnceLock::new();
+
+        // The route-patterns cache is built from
+        // `self.yaml.languages` (the override-augmented YAML
+        // registry). A new `load_overrides` call that replaces a
+        // route framework's YAML entry must invalidate the cache so
+        // the next `route_patterns_map()` call rebuilds with the
+        // override's data. The brief pins this on bug 1's
+        // regression surface — without invalidation, a repo that
+        // re-overrides a framework's regex would still see the
+        // bundled regex.
+        self.route_patterns_cache = OnceLock::new();
 
         self.overrides_applied = true;
         Ok(())
@@ -790,6 +900,321 @@ fn regex_match(pattern: &str, lib: &str) -> bool {
         // entry surfaces immediately.
         Err(_) => false,
     }
+}
+
+// ─── RoutePattern (http_sensor walker) ────────────────────────────
+//
+// `RoutePattern` lived in `http_sensor.rs` historically, but the
+// runtime-override wire-in (this PR) moved the build-and-cache surface
+// onto `Patterns` itself so the cache is per-instance (and therefore
+// cannot leak across scans that happen to allocate a fresh
+// `Patterns::with_overrides` at the same address as a previous
+// scan's). The struct and its builders live here for that reason;
+// the `extract` method that consumes the per-line text and emits
+// `HttpRoute` records stays in `http_sensor.rs` (it depends on
+// `HttpRoute`, which is a sensor-local type).
+
+/// HTTP route patterns per language
+pub struct RoutePattern {
+    /// `None` for APIs that carry no verb at the call site (Go's
+    /// `http.HandleFunc`). Per §6.2 these routes are emitted as
+    /// `HttpMethod::Any` (was `GET` in 0.8).
+    method_regex: Option<regex::Regex>,
+    path_regex: regex::Regex,
+    handler_fn_regex: regex::Regex,
+    /// What to emit when the regex above did not capture a verb.
+    /// `HttpMethod::Any` for go-std (the route declares no verb);
+    /// `HttpMethod::Get` for Flask (whose default verb is GET even
+    /// when `methods=` is absent, §6.2).
+    default_method: HttpMethod,
+}
+
+impl RoutePattern {
+    pub fn default_method(&self) -> HttpMethod {
+        self.default_method
+    }
+    pub fn path_regex(&self) -> &regex::Regex {
+        &self.path_regex
+    }
+    pub fn method_regex(&self) -> Option<&regex::Regex> {
+        self.method_regex.as_ref()
+    }
+    pub fn handler_fn_regex(&self) -> &regex::Regex {
+        &self.handler_fn_regex
+    }
+}
+
+/// Stable map key for a (lang, framework) pair. Mirrors the inline
+/// table's `<lang-prefix>-<framework-tail>` shape so existing call
+/// sites (tests, the `prefixes` slice in `scan_file_for_routes`)
+/// keep matching.
+///
+/// Returns `String` (was `&'static str` with `Box::leak`); the
+/// lifetime-tightening pass removed the leak so the keys borrow
+/// from the cache on the `Patterns` instance.
+fn route_pattern_key(lang: Lang, def: &FrameworkDef) -> String {
+    let prefix = match lang {
+        Lang::Rust => "rust",
+        Lang::Python => "python",
+        Lang::TsJs | Lang::Ts | Lang::Tsx => "tsjs",
+        Lang::Go => "go",
+        Lang::Java => "java",
+        Lang::CSharp => "csharp",
+        Lang::Ruby => "ruby",
+        Lang::Kotlin => "kotlin",
+    };
+    format!("{prefix}-{}", def.id)
+}
+
+/// Build a [`RoutePattern`] for one `FrameworkDef` from the bundled
+/// YAML, layering framework-specific regex overrides that the YAML
+/// schema can't encode (Flask's `methods=["POST"]` kwarg, the
+/// verbless `http.HandleFunc` shape, etc.).
+///
+/// Contract:
+///   - `Some(_)` is returned when `def.path_regex` is present; the
+///     walker has something to match against and the framework is
+///     emitted as a candidate route pattern.
+///   - `None` is returned when `def.path_regex` is missing — the
+///     walker has nothing to match against, and the framework is
+///     silently skipped (the same was true of the pre-Task-2 inline
+///     table: frameworks without a path regex just weren't listed).
+///
+/// Fields read from [`FrameworkDef`]:
+///   - `def.path_regex` — the route-template regex; panics at
+///     construction if it fails to compile (so a malformed YAML entry
+///     crashes the binary loudly rather than corrupting the walker).
+///   - `def.handler_regex` — captured by [`handler_regex_for`]; for
+///     most frameworks it's used as-is, but Sinatra / Minimal API /
+///     Rails need a framework-specific override (the YAML's regex
+///     lost a capture group during the Task-1 data conversion).
+///   - `def.verbs` — joined into a `(verb|verb|verb)` alternation
+///     inside [`method_capture_for`] to build `method_regex`. The
+///     escape order is the YAML's verbatim order, so framework ids
+///     that put `GET` / `POST` first in `verbs` match `GET` before
+///     `POST`.
+///
+/// The returned `RoutePattern`'s `default_method` is the framework's
+/// verb when the method regex is unambiguous (`HttpMethod::Get` for
+/// "verbed" frameworks) and `HttpMethod::Any` when the framework
+/// admits any HTTP verb or has an empty `verbs:` list (verbless
+/// APIs like Go-std `HandleFunc`).
+fn route_pattern_for(def: &FrameworkDef) -> Option<RoutePattern> {
+    let path_re = def.path_regex.as_deref()?;
+    let handler_re = handler_regex_for(def);
+
+    let (method_re, default) = method_capture_for(def);
+
+    let path_regex = regex::Regex::new(path_re)
+        .unwrap_or_else(|e| panic!("{}: invalid path_regex {:?}: {e}", def.id, path_re));
+    let handler_fn_regex = regex::Regex::new(handler_re)
+        .unwrap_or_else(|e| panic!("{}: invalid handler_regex {:?}: {e}", def.id, handler_re));
+    let method_regex = method_re.map(|s| {
+        regex::Regex::new(s)
+            .unwrap_or_else(|e| panic!("{}: invalid method_regex {:?}: {e}", def.id, s))
+    });
+
+    Some(RoutePattern {
+        method_regex,
+        path_regex,
+        handler_fn_regex,
+        default_method: default,
+    })
+}
+
+/// Resolve the handler-capture regex for `def`. Returns the YAML's
+/// `handler_regex` when it has a useful capture group, or a
+/// framework-specific override when the YAML regex was simplified
+/// (the original inline regex had capture groups the YAML lost in
+/// Task 1's data conversion).
+///
+/// Each `Box::leak` here is bounded — one per framework per
+/// `route_pattern_for` call, which itself runs once per
+/// `Patterns::route_patterns_map` build (cached thereafter). The
+/// leak is not per-scan.
+fn handler_regex_for(def: &FrameworkDef) -> &'static str {
+    match def.id.as_str() {
+        // Sinatra — the inline regex captured the verb on the
+        // declaring line as the handler name (`Sinatra__do_block`
+        // per the §6.2 comment). YAML's `do\s*$` has no capture.
+        "sinatra-route" => {
+            Box::leak(
+                r#"(?m)^[ \t]*(get|post|put|delete|patch|options|head)\s+['"][^'"]+['"]"#
+                    .to_string()
+                    .into_boxed_str(),
+            )
+        }
+        // Minimal API — the inline regex captured the entire
+        // quoted path (group 1 = `"/api/health"`). YAML's
+        // simplified regex has no capture group; we restore the
+        // capture here so the `RoutePattern::extract` look-ahead
+        // finds a non-empty handler name on the same line.
+        "minimal-api-route" => {
+            Box::leak(
+                r#"\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*(['"][^'"]+['"])\s*,\s*(?:async\s*)?\([^)]*\)\s*=>"#
+                    .to_string()
+                    .into_boxed_str(),
+            )
+        }
+        // Rails — no handler_regex in YAML; capture the verb (or
+        // the word following the path) as the handler.
+        "rails-route" => {
+            Box::leak(
+                r"(?m)^[ \t]*(get|post|put|patch|delete|options|head|resources)\b"
+                    .to_string()
+                    .into_boxed_str(),
+            )
+        }
+        // Default — use the YAML's handler_regex as-is, or fall
+        // back to a word-boundary placeholder that captures any
+        // identifier on the line.
+        _ => Box::leak(
+            def.handler_regex
+                .as_deref()
+                .unwrap_or(r"\b\w+\b")
+                .to_string()
+                .into_boxed_str(),
+        ),
+    }
+}
+
+/// Per-framework `method_regex` + `default_method`. The YAML's
+/// `verbs` field drives the verb list; the surrounding syntax is
+/// framework-specific and lives here. Returns `None` for verbless
+/// APIs (Go-std `HandleFunc`) — those default to
+/// [`HttpMethod::Any`] per §6.2.
+///
+/// Each `Box::leak` here is bounded — one per framework per
+/// `route_pattern_for` call (see `handler_regex_for`).
+fn method_capture_for(def: &FrameworkDef) -> (Option<&'static str>, HttpMethod) {
+    let verbs = def.verbs.join("|");
+    match def.id.as_str() {
+        // Flask — the verb lives in `methods=["POST"]`, not in the
+        // `@app.route("/…")` decorator.
+        "flask-route" => (Some(r#"methods\s*=\s*\[\s*["'](\w+)"#), HttpMethod::Get),
+        // Go stdlib — `http.HandleFunc` declares no verb at the
+        // call site; routes emit `HttpMethod::Any`.
+        "stdlib-http-route" => (None, HttpMethod::Any),
+        // Kotlin — `routing { get("/path") { … } }` puts the verb
+        // before the parenthesised path.
+        "ktor-route" => (
+            Some(Box::leak(
+                format!(r"(?m)(?:^|\W)({verbs})\s*\(").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // Rails — `get 'path' do … end` style. The verb may be
+        // followed by a quote (path), a colon (resources), or
+        // whitespace.
+        "rails-route" => (
+            Some(Box::leak(
+                format!(r#"(?i:({verbs}))['"\s:]+"#).into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // C# Minimal API — the verb is baked into `MapGet` /
+        // `MapPost` etc., not a separate token.
+        "minimal-api-route" => (
+            Some(r"\.(?i:(MapGet|MapPost|MapPut|MapDelete|MapPatch))"),
+            HttpMethod::Any,
+        ),
+        // C# ASP.NET controllers — `[HttpGet]` etc. with the verb
+        // baked into the attribute name.
+        "aspnet-route" => (
+            Some(Box::leak(format!(r"(?i:\[Http({verbs}))").into_boxed_str())),
+            HttpMethod::Any,
+        ),
+        // JAX-RS — `@GET` / `@POST` on its own line, just above
+        // the method declaration.
+        "jaxrs-route" => (
+            Some(Box::leak(format!(r"@(?i:({verbs}))\s*$").into_boxed_str())),
+            HttpMethod::Any,
+        ),
+        // Spring — `@GetMapping` / `@PostMapping` / etc.
+        "spring-route" => (
+            Some(Box::leak(
+                format!(r"@(?i:({verbs}))Mapping").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // axum — `.route("/path", get(handler))` — verb appears
+        // as the second argument to `.route()`.
+        "axum-route" => (
+            Some(Box::leak(
+                format!(r"\.route\s*\([^,]*,\s*(?i:({verbs}))\s*\(").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // actix-web — `#[get("/path")]` attribute on a function.
+        "actix-route" => (
+            Some(Box::leak(
+                format!(r"#\[(?i:({verbs}))\s*\(").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // FastAPI — `@app.get("/path")` decorator.
+        "fastapi-route" => (
+            Some(Box::leak(
+                format!(r"@[\w\.]+\.({verbs})\s*\(").into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // Sinatra — `get '/path' do … end`.
+        "sinatra-route" => (
+            Some(Box::leak(
+                format!(r#"(?i:({verbs}))\s+['"]"#).into_boxed_str(),
+            )),
+            HttpMethod::Any,
+        ),
+        // Gin / Echo — `r.GET("/path", handler)`. The verb is
+        // uppercase at the call site (verbs in the YAML are
+        // already uppercase).
+        "gin-route" => (
+            Some(Box::leak(format!(r"\.({verbs})\s*\(").into_boxed_str())),
+            HttpMethod::Any,
+        ),
+        // Express / Fastify — `router.post("/path", handler)`.
+        "express-route" | "fastify-route" => (
+            Some(Box::leak(format!(r"\.({verbs})\s*\(").into_boxed_str())),
+            HttpMethod::Any,
+        ),
+        // Unknown framework — leave the method regex unset and
+        // rely on `default_method`. Future frameworks opt in by
+        // adding a match arm above.
+        _ => (None, HttpMethod::Any),
+    }
+}
+
+/// Build the route-pattern `BTreeMap` for the given `registry`. The
+/// map is keyed by `<lang>-<framework>` and stores a `RoutePattern`
+/// per route framework the registry knows about. Iteration order
+/// is sorted by key (`BTreeMap` §6.1) so the §8.3 determinism
+/// contract holds across runs.
+fn build_route_patterns(registry: &Patterns) -> BTreeMap<String, RoutePattern> {
+    let mut patterns = BTreeMap::new();
+
+    let langs: [Lang; 8] = [
+        Lang::Rust,
+        Lang::Python,
+        Lang::TsJs,
+        Lang::Go,
+        Lang::Java,
+        Lang::CSharp,
+        Lang::Ruby,
+        Lang::Kotlin,
+    ];
+
+    for lang in langs {
+        for def in registry.route_patterns(lang) {
+            let Some(rp) = route_pattern_for(def) else {
+                continue;
+            };
+            let key = route_pattern_key(lang, def);
+            patterns.insert(key, rp);
+        }
+    }
+
+    patterns
 }
 
 #[cfg(test)]

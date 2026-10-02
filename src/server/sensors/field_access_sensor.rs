@@ -181,6 +181,7 @@ pub fn scan_workspace_field_access(
         return Ok(0);
     }
     let patterns = Patterns::with_overrides(root)?;
+    let patterns = &*patterns;
 
     // Phase 2 needs the joiner to have run. The graph has the
     // `Binds` edges by the time the field-access sensor sees it —

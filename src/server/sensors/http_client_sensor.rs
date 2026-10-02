@@ -131,6 +131,7 @@ pub fn scan_workspace_clients(
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     let patterns = Patterns::with_overrides(root)?;
+    let patterns = &*patterns;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();

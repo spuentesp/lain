@@ -38,11 +38,10 @@ use crate::federation::contracts::normalize::{normalize, UrlPart};
 use crate::federation::repo_id::RepoId;
 use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
-use crate::server::sensors::patterns::{FrameworkDef, Patterns};
+use crate::server::sensors::patterns::{Patterns, RoutePattern};
 use crate::server::sensors::util::{parse_for_lang, Lang};
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
 use tree_sitter::{StreamingIterator, Tree};
 
 // Test-only instrumentation for the per-call-loop hoist. The
@@ -72,89 +71,77 @@ pub struct HttpRoute {
     pub line: u32,
 }
 
-/// HTTP route patterns per language
-pub struct RoutePattern {
-    /// `None` for APIs that carry no verb at the call site (Go's
-    /// `http.HandleFunc`). Per §6.2 these routes are emitted as
-    /// `HttpMethod::Any` (was `GET` in 0.8).
-    method_regex: Option<regex::Regex>,
-    path_regex: regex::Regex,
-    handler_fn_regex: regex::Regex,
-    /// What to emit when the regex above did not capture a verb.
-    /// `HttpMethod::Any` for go-std (the route declares no verb);
-    /// `HttpMethod::Get` for Flask (whose default verb is GET even
-    /// when `methods=` is absent, §6.2).
-    default_method: HttpMethod,
-}
+/// Extract routes from `content` for one [`RoutePattern`].
+///
+/// The `RoutePattern` struct lives in `crate::server::sensors::patterns`
+/// (the data-driven patterns module) so the cache that stores
+/// `BTreeMap<String, RoutePattern>` can sit on `Patterns` itself
+/// without circular imports. The extraction walker stays here
+/// because it depends on `HttpRoute` (a sensor-local type).
+fn extract_routes(pattern: &RoutePattern, content: &str, file_path: &str) -> Vec<HttpRoute> {
+    const HANDLER_LOOKAHEAD: usize = 6;
 
-impl RoutePattern {
-    /// Extract routes from `content`.
-    fn extract(&self, content: &str, file_path: &str) -> Vec<HttpRoute> {
-        const HANDLER_LOOKAHEAD: usize = 6;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut routes = Vec::new();
 
-        let lines: Vec<&str> = content.lines().collect();
-        let mut routes = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let Some(path) = pattern
+            .path_regex()
+            .captures(line)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string())
+        else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
 
-        for (idx, line) in lines.iter().enumerate() {
-            let Some(path) = self
-                .path_regex
-                .captures(line)
-                .and_then(|c| c.get(1))
-                .map(|m| m.as_str().to_string())
-            else {
-                continue;
-            };
-            if path.is_empty() {
-                continue;
-            }
+        let method = pattern
+            .method_regex()
+            .and_then(|re| re.captures(line))
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_uppercase())
+            .map(method_from_str)
+            .unwrap_or_else(|| pattern.default_method());
 
-            let method = self
-                .method_regex
-                .as_ref()
-                .and_then(|re| re.captures(line))
-                .and_then(|c| c.get(1))
-                .map(|m| m.as_str().to_uppercase())
-                .map(method_from_str)
-                .unwrap_or(self.default_method);
+        // Prefer a handler on the declaring line (Gin, Express);
+        // otherwise look ahead for the function it decorates
+        // (Actix, FastAPI, Flask).
+        let mut handler = pattern
+            .handler_fn_regex()
+            .captures(line)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string());
 
-            // Prefer a handler on the declaring line (Gin, Express);
-            // otherwise look ahead for the function it decorates
-            // (Actix, FastAPI, Flask).
-            let mut handler = self
-                .handler_fn_regex
-                .captures(line)
-                .and_then(|c| c.get(1))
-                .map(|m| m.as_str().to_string());
-
-            if handler.is_none() {
-                for look in lines.iter().skip(idx + 1).take(HANDLER_LOOKAHEAD) {
-                    if let Some(h) = self
-                        .handler_fn_regex
-                        .captures(look)
-                        .and_then(|c| c.get(1))
-                        .map(|m| m.as_str().to_string())
-                    {
-                        handler = Some(h);
-                        break;
-                    }
+        if handler.is_none() {
+            for look in lines.iter().skip(idx + 1).take(HANDLER_LOOKAHEAD) {
+                if let Some(h) = pattern
+                    .handler_fn_regex()
+                    .captures(look)
+                    .and_then(|c| c.get(1))
+                    .map(|m| m.as_str().to_string())
+                {
+                    handler = Some(h);
+                    break;
                 }
             }
-
-            let Some(handler) = handler else { continue };
-            if handler.is_empty() {
-                continue;
-            }
-
-            routes.push(HttpRoute {
-                method,
-                path,
-                handler_path: file_path.to_string(),
-                handler_name: handler,
-                line: idx as u32 + 1,
-            });
         }
-        routes
+
+        let Some(handler) = handler else { continue };
+        if handler.is_empty() {
+            continue;
+        }
+
+        routes.push(HttpRoute {
+            method,
+            path,
+            handler_path: file_path.to_string(),
+            handler_name: handler,
+            line: idx as u32 + 1,
+        });
     }
+    routes
 }
 
 fn method_from_str(s: String) -> HttpMethod {
@@ -176,333 +163,26 @@ fn method_from_str(s: String) -> HttpMethod {
 /// Task 2 of the data-driven sensor-patterns plan wired this to
 /// consume `Patterns::route_patterns(Lang)` (built in Task 1) instead
 /// of an inline `BTreeMap`. The framework-specific regex strings
-/// live in [`route_pattern_for`] — one override per (lang, framework)
-/// — because the YAML schema can't express some framework quirks
-/// (Flask's `methods=["POST"]` shape, Go-std's verbless routes).
+/// live in `crate::server::sensors::patterns` (moved out of
+/// `http_sensor` in the runtime-override wire-in so the cache can
+/// sit on `Patterns` without circular imports).
 ///
-/// The runtime-override wire-in (this PR) threaded `&Patterns` into
-/// the cache lookup so the walker observes override-augmented route
-/// frameworks. The cache itself is built once per `&Patterns`
-/// instance:
-///   - When `patterns` is the bundled singleton
-///     (`Patterns::patterns()`), the cached map is reused across every
-///     call via a process-wide `OnceLock` (lock-free, zero
-///     allocations, zero leaks).
-///   - When `patterns` carries per-repo overrides
-///     ([`Patterns::with_overrides`]), the build runs once at first
-///     invocation and the result is `Box::leak`'d. Subsequent calls
-///     for the same `Patterns` instance return the same `&'static`
-///     reference. Across separate `Patterns` clones, each has its
-///     own leak — bounded by the number of `Patterns::with_overrides`
-///     calls per scan (typically 1), not per file.
+/// The cache itself lives on the `Patterns` instance (see
+/// [`crate::server::sensors::patterns::Patterns::route_patterns_map`]).
+/// Storing it on `Patterns` — keyed by the instance, not by raw
+/// pointer — closes the leak-across-scans bug where two
+/// consecutive scans happened to allocate their
+/// `Patterns::with_overrides` clones at the same address and the
+/// second scan inherited the first scan's override-augmented route
+/// map. The cache is invalidated on every `load_overrides` so a
+/// second load (a different `<root>/.lain/patterns/`) rebuilds the
+/// map with the new override data.
 ///
 /// `pub` so integration tests can pin the cache contract
 /// (no per-file rebuild → no per-file leak for the default
 /// patterns-instance).
-pub fn get_route_patterns(patterns: &Patterns) -> &'static BTreeMap<&'static str, RoutePattern> {
-    // Fast path: when `patterns` IS the bundled singleton, return the
-    // process-wide cached static reference (lock-free, zero
-    // allocations, zero leaks).
-    let singleton_ptr = Patterns::patterns() as *const Patterns;
-    if std::ptr::eq(patterns as *const Patterns, singleton_ptr) {
-        static CACHE: OnceLock<BTreeMap<&'static str, RoutePattern>> = OnceLock::new();
-        return CACHE.get_or_init(|| build_route_patterns(Patterns::patterns()));
-    }
-    // Per-repo patterns path: the (singleton-built) `get_route_patterns`
-    // cache only serves the bundled singleton. For per-repo
-    // `Patterns` instances we fall back to a per-pointer cache
-    // keyed on the `&Patterns` reference — a `OnceLock` inside a
-    // `thread_local!` keyed by raw pointer. This keeps the build
-    // (and its `Box::leak`'d key set) tied to the patterns
-    // instance that requested it, without exposing a new field
-    // on `Patterns` (which already has a hand-rolled `Clone`).
-    thread_local_route_cache(patterns)
-}
-
-/// Per-pointer cache for `get_route_patterns` on non-singleton
-/// `Patterns` instances. Keyed by the patterns' address so two
-/// `Patterns` clones with the same underlying data get separate
-/// caches; in practice each scan builds one `Patterns::with_overrides`
-/// instance and uses one cache.
-fn thread_local_route_cache(patterns: &Patterns) -> &'static BTreeMap<&'static str, RoutePattern> {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    type Cache = HashMap<*const Patterns, &'static BTreeMap<&'static str, RoutePattern>>;
-    thread_local! {
-        static CACHE: RefCell<Cache> = RefCell::new(Cache::new());
-    }
-    let ptr = patterns as *const Patterns;
-    CACHE.with(|cell| {
-        if let Some(cached) = cell.borrow().get(&ptr).copied() {
-            return cached;
-        }
-        let built = build_route_patterns(patterns);
-        let leaked: &'static BTreeMap<&'static str, RoutePattern> = Box::leak(Box::new(built));
-        cell.borrow_mut().insert(ptr, leaked);
-        leaked
-    })
-}
-
-fn build_route_patterns(registry: &Patterns) -> BTreeMap<&'static str, RoutePattern> {
-    let mut patterns = BTreeMap::new();
-
-    // Walk every language the http_sensor recognises. The order
-    // (sorted by lang_key, then by YAML load order inside each
-    // bucket) is the determinism contract §8.3 requires; the
-    // `BTreeMap` keeps the iteration order stable across runs.
-    let langs: [Lang; 8] = [
-        Lang::Rust,
-        Lang::Python,
-        Lang::TsJs,
-        Lang::Go,
-        Lang::Java,
-        Lang::CSharp,
-        Lang::Ruby,
-        Lang::Kotlin,
-    ];
-
-    for lang in langs {
-        for def in registry.route_patterns(lang) {
-            let Some(rp) = route_pattern_for(def) else {
-                continue;
-            };
-            let key = route_pattern_key(lang, def);
-            patterns.insert(key, rp);
-        }
-    }
-
-    patterns
-}
-
-/// Stable map key for a (lang, framework) pair. Mirrors the inline
-/// table's `<lang-prefix>-<framework-tail>` shape so existing call
-/// sites (tests, the `prefixes` slice in `scan_file_for_routes`)
-/// keep matching.
-fn route_pattern_key(lang: Lang, def: &FrameworkDef) -> &'static str {
-    let prefix = match lang {
-        Lang::Rust => "rust",
-        Lang::Python => "python",
-        Lang::TsJs | Lang::Ts | Lang::Tsx => "tsjs",
-        Lang::Go => "go",
-        Lang::Java => "java",
-        Lang::CSharp => "csharp",
-        Lang::Ruby => "ruby",
-        Lang::Kotlin => "kotlin",
-    };
-    let id = def.id.clone();
-    let key = format!("{prefix}-{id}");
-    Box::leak(key.into_boxed_str())
-}
-
-/// Build a [`RoutePattern`] for one `FrameworkDef` from the bundled
-/// YAML, layering framework-specific regex overrides that the YAML
-/// schema can't encode (Flask's `methods=["POST"]` kwarg, the
-/// verbless `http.HandleFunc` shape, etc.).
-///
-/// Contract:
-///   - `Some(_)` is returned when `def.path_regex` is present; the
-///     walker has something to match against and the framework is
-///     emitted as a candidate route pattern.
-///   - `None` is returned when `def.path_regex` is missing — the
-///     walker has nothing to match against, and the framework is
-///     silently skipped (the same was true of the pre-Task-2 inline
-///     table: frameworks without a path regex just weren't listed).
-///
-/// Fields read from [`FrameworkDef`]:
-///   - `def.path_regex` — the route-template regex; panics at
-///     construction if it fails to compile (so a malformed YAML entry
-///     crashes the binary loudly rather than corrupting the walker).
-///   - `def.handler_regex` — captured by [`handler_regex_for`]; for
-///     most frameworks it's used as-is, but Sinatra / Minimal API /
-///     Rails need a framework-specific override (the YAML's regex
-///     lost a capture group during the Task-1 data conversion).
-///   - `def.verbs` — joined into a `(verb|verb|verb)` alternation
-///     inside [`method_capture_for`] to build `method_regex`. The
-///     escape order is the YAML's verbatim order, so framework ids
-///     that put `GET` / `POST` first in `verbs` match `GET` before
-///     `POST`.
-///
-/// The returned `RoutePattern`'s `default_method` is the framework's
-/// verb when the method regex is unambiguous (`HttpMethod::Get` for
-/// "verbed" frameworks) and `HttpMethod::Any` when the framework
-/// admits any HTTP verb or has an empty `verbs:` list (verbless
-/// APIs like Go-std `HandleFunc`).
-fn route_pattern_for(def: &FrameworkDef) -> Option<RoutePattern> {
-    let path_re = def.path_regex.as_deref()?;
-    let handler_re = handler_regex_for(def);
-
-    let (method_re, default) = method_capture_for(def);
-
-    let path_regex = regex::Regex::new(path_re)
-        .unwrap_or_else(|e| panic!("{}: invalid path_regex {:?}: {e}", def.id, path_re));
-    let handler_fn_regex = regex::Regex::new(handler_re)
-        .unwrap_or_else(|e| panic!("{}: invalid handler_regex {:?}: {e}", def.id, handler_re));
-    let method_regex = method_re.map(|s| {
-        regex::Regex::new(s)
-            .unwrap_or_else(|e| panic!("{}: invalid method_regex {:?}: {e}", def.id, s))
-    });
-
-    Some(RoutePattern {
-        method_regex,
-        path_regex,
-        handler_fn_regex,
-        default_method: default,
-    })
-}
-
-/// Resolve the handler-capture regex for `def`. Returns the YAML's
-/// `handler_regex` when it has a useful capture group, or a
-/// framework-specific override when the YAML regex was simplified
-/// (the original inline regex had capture groups the YAML lost in
-/// Task 1's data conversion).
-fn handler_regex_for(def: &FrameworkDef) -> &'static str {
-    match def.id.as_str() {
-        // Sinatra — the inline regex captured the verb on the
-        // declaring line as the handler name (`Sinatra__do_block`
-        // per the §6.2 comment). YAML's `do\s*$` has no capture.
-        "sinatra-route" => {
-            Box::leak(
-                r#"(?m)^[ \t]*(get|post|put|delete|patch|options|head)\s+['"][^'"]+['"]"#
-                    .to_string()
-                    .into_boxed_str(),
-            )
-        }
-        // Minimal API — the inline regex captured the entire
-        // quoted path (group 1 = `"/api/health"`). YAML's
-        // simplified regex has no capture group; we restore the
-        // capture here so the `RoutePattern::extract` look-ahead
-        // finds a non-empty handler name on the same line.
-        "minimal-api-route" => {
-            Box::leak(
-                r#"\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*(['"][^'"]+['"])\s*,\s*(?:async\s*)?\([^)]*\)\s*=>"#
-                    .to_string()
-                    .into_boxed_str(),
-            )
-        }
-        // Rails — no handler_regex in YAML; capture the verb (or
-        // the word following the path) as the handler.
-        "rails-route" => {
-            Box::leak(
-                r"(?m)^[ \t]*(get|post|put|patch|delete|options|head|resources)\b"
-                    .to_string()
-                    .into_boxed_str(),
-            )
-        }
-        // Default — use the YAML's handler_regex as-is, or fall
-        // back to a word-boundary placeholder that captures any
-        // identifier on the line.
-        _ => Box::leak(
-            def.handler_regex
-                .as_deref()
-                .unwrap_or(r"\b\w+\b")
-                .to_string()
-                .into_boxed_str(),
-        ),
-    }
-}
-
-/// Per-framework `method_regex` + `default_method`. The YAML's
-/// `verbs` field drives the verb list; the surrounding syntax is
-/// framework-specific and lives here. Returns `None` for verbless
-/// APIs (Go-std `HandleFunc`) — those default to
-/// [`HttpMethod::Any`] per §6.2.
-fn method_capture_for(def: &FrameworkDef) -> (Option<&'static str>, HttpMethod) {
-    let verbs = def.verbs.join("|");
-    match def.id.as_str() {
-        // Flask — the verb lives in `methods=["POST"]`, not in the
-        // `@app.route("/…")` decorator.
-        "flask-route" => (Some(r#"methods\s*=\s*\[\s*["'](\w+)"#), HttpMethod::Get),
-        // Go stdlib — `http.HandleFunc` declares no verb at the
-        // call site; routes emit `HttpMethod::Any`.
-        "stdlib-http-route" => (None, HttpMethod::Any),
-        // Kotlin — `routing { get("/path") { … } }` puts the verb
-        // before the parenthesised path.
-        "ktor-route" => (
-            Some(Box::leak(
-                format!(r"(?m)(?:^|\W)({verbs})\s*\(").into_boxed_str(),
-            )),
-            HttpMethod::Any,
-        ),
-        // Rails — `get 'path' do … end` style. The verb may be
-        // followed by a quote (path), a colon (resources), or
-        // whitespace.
-        "rails-route" => (
-            Some(Box::leak(
-                format!(r#"(?i:({verbs}))['"\s:]+"#).into_boxed_str(),
-            )),
-            HttpMethod::Any,
-        ),
-        // C# Minimal API — the verb is baked into `MapGet` /
-        // `MapPost` etc., not a separate token.
-        "minimal-api-route" => (
-            Some(r"\.(?i:(MapGet|MapPost|MapPut|MapDelete|MapPatch))"),
-            HttpMethod::Any,
-        ),
-        // C# ASP.NET controllers — `[HttpGet]` etc. with the verb
-        // baked into the attribute name.
-        "aspnet-route" => (
-            Some(Box::leak(format!(r"(?i:\[Http({verbs}))").into_boxed_str())),
-            HttpMethod::Any,
-        ),
-        // JAX-RS — `@GET` / `@POST` on its own line, just above
-        // the method declaration.
-        "jaxrs-route" => (
-            Some(Box::leak(format!(r"@(?i:({verbs}))\s*$").into_boxed_str())),
-            HttpMethod::Any,
-        ),
-        // Spring — `@GetMapping` / `@PostMapping` / etc.
-        "spring-route" => (
-            Some(Box::leak(
-                format!(r"@(?i:({verbs}))Mapping").into_boxed_str(),
-            )),
-            HttpMethod::Any,
-        ),
-        // axum — `.route("/path", get(handler))` — verb appears
-        // as the second argument to `.route()`.
-        "axum-route" => (
-            Some(Box::leak(
-                format!(r"\.route\s*\([^,]*,\s*(?i:({verbs}))\s*\(").into_boxed_str(),
-            )),
-            HttpMethod::Any,
-        ),
-        // actix-web — `#[get("/path")]` attribute on a function.
-        "actix-route" => (
-            Some(Box::leak(
-                format!(r"#\[(?i:({verbs}))\s*\(").into_boxed_str(),
-            )),
-            HttpMethod::Any,
-        ),
-        // FastAPI — `@app.get("/path")` decorator.
-        "fastapi-route" => (
-            Some(Box::leak(
-                format!(r"@[\w\.]+\.({verbs})\s*\(").into_boxed_str(),
-            )),
-            HttpMethod::Any,
-        ),
-        // Sinatra — `get '/path' do … end`.
-        "sinatra-route" => (
-            Some(Box::leak(
-                format!(r#"(?i:({verbs}))\s+['"]"#).into_boxed_str(),
-            )),
-            HttpMethod::Any,
-        ),
-        // Gin / Echo — `r.GET("/path", handler)`. The verb is
-        // uppercase at the call site (verbs in the YAML are
-        // already uppercase).
-        "gin-route" => (
-            Some(Box::leak(format!(r"\.({verbs})\s*\(").into_boxed_str())),
-            HttpMethod::Any,
-        ),
-        // Express / Fastify — `router.post("/path", handler)`.
-        "express-route" | "fastify-route" => (
-            Some(Box::leak(format!(r"\.({verbs})\s*\(").into_boxed_str())),
-            HttpMethod::Any,
-        ),
-        // Unknown framework — leave the method regex unset and
-        // rely on `default_method`. Future frameworks opt in by
-        // adding a match arm above.
-        _ => (None, HttpMethod::Any),
-    }
+pub fn get_route_patterns(patterns: &Patterns) -> &BTreeMap<String, RoutePattern> {
+    patterns.route_patterns_map()
 }
 
 /// Scan a file for HTTP routes, after applying same-file router
@@ -526,10 +206,10 @@ pub fn scan_file_for_routes(
         "kt" | "kts" => &["kotlin-"],
         _ => return Vec::new(),
     };
-    let applicable: Vec<(&'static str, &RoutePattern)> = all_patterns
+    let applicable: Vec<(&str, &RoutePattern)> = all_patterns
         .iter()
         .filter(|(k, _)| prefixes.iter().any(|p| k.starts_with(p)))
-        .map(|(k, v)| (*k, v))
+        .map(|(k, v)| (k.as_str(), v))
         .collect();
 
     let mut all_routes = Vec::new();
@@ -567,7 +247,7 @@ pub fn scan_file_for_routes(
     // Per-framework regex extraction — the primary path. The
     // `BTreeMap` keeps iteration deterministic across runs.
     for (key, pattern) in &applicable {
-        let routes = pattern.extract(content, &path.to_string_lossy());
+        let routes = extract_routes(pattern, content, &path.to_string_lossy());
         for mut r in routes {
             if let Some(prefix) = router_prefix_for_receiver(&r, &router_prefixes) {
                 r.path = join_prefix(prefix.as_str(), &r.path);
@@ -961,6 +641,7 @@ pub fn scan_workspace_routes(
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     let patterns = Patterns::with_overrides(root)?;
+    let patterns = &*patterns;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
@@ -1401,11 +1082,14 @@ mod tests {
     /// determinism). Two back-to-back calls must return equal
     /// iterators so the order of route emission is reproducible.
     ///
-    /// The registry is now served from a `OnceLock` cache (Item A
-    /// of the parked-cleanup pass), so two back-to-back calls
-    /// return the *same* `&'static` reference — the test pins both
-    /// pointer-equality (the cache is single-instance) and the
-    /// BTreeMap's sorted iteration order.
+    /// The registry is now served from a `OnceLock` cache on the
+    /// `Patterns` instance (the wire-in lifetime-tightening pass
+    /// moved it from a `thread_local!` keyed on raw pointer to a
+    /// per-instance field), so two back-to-back calls on the
+    /// same `Patterns` return the *same* `&BTreeMap` reference —
+    /// the test pins both pointer-equality (the cache is
+    /// single-instance) and the BTreeMap's sorted iteration
+    /// order.
     #[test]
     fn route_patterns_are_a_btreemap_for_determinism() {
         let first_ptr = get_route_patterns(Patterns::patterns()) as *const _;
@@ -1414,13 +1098,13 @@ mod tests {
             first_ptr, second_ptr,
             "two back-to-back calls must return the same &'_ reference (OnceLock cache)",
         );
-        let first: Vec<&'static str> = get_route_patterns(Patterns::patterns())
+        let first: Vec<String> = get_route_patterns(Patterns::patterns())
             .keys()
-            .copied()
+            .cloned()
             .collect();
-        let second: Vec<&'static str> = get_route_patterns(Patterns::patterns())
+        let second: Vec<String> = get_route_patterns(Patterns::patterns())
             .keys()
-            .copied()
+            .cloned()
             .collect();
         assert_eq!(
             first, second,
