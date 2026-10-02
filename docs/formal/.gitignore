@@ -1,0 +1,4 @@
+# TLC model-checker scratch outputs
+*TTrace*.tla
+*TTrace*.bin
+states/

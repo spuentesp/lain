@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# TLC model-checker wrapper. Forwards all args to java -jar tla2tools.jar.
+# Usage: ./tlc MySpec.tla
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+exec java -jar "$HERE/tla2tools.jar" "$@"
