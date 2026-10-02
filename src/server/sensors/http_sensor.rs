@@ -42,14 +42,14 @@ use crate::server::sensors::patterns::{FrameworkDef, Patterns};
 use crate::server::sensors::util::{parse_for_lang, Lang};
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use tree_sitter::{StreamingIterator, Tree};
 
-/// Test-only instrumentation for the per-call-loop hoist. The
-/// counter is incremented exactly once per `scan_file_for_routes`
-/// call when tree-sitter parsing is invoked on the calling
-/// thread. Each test thread sees its own counter (no global
-/// state), so concurrent sensor tests cannot false-positive the
-/// assertion.
+// Test-only instrumentation for the per-call-loop hoist. The
+// counter is incremented exactly once per `scan_file_for_routes`
+// call when tree-sitter parsing is invoked on the calling thread.
+// Each test thread sees its own counter (no global state), so
+// concurrent sensor tests cannot false-positive the assertion.
 thread_local! {
     pub(crate) static SCAN_PARSE_COUNT: Cell<usize> = const { Cell::new(0) };
 }
@@ -73,7 +73,7 @@ pub struct HttpRoute {
 }
 
 /// HTTP route patterns per language
-struct RoutePattern {
+pub struct RoutePattern {
     /// `None` for APIs that carry no verb at the call site (Go's
     /// `http.HandleFunc`). Per §6.2 these routes are emitted as
     /// `HttpMethod::Any` (was `GET` in 0.8).
@@ -179,7 +179,23 @@ fn method_from_str(s: String) -> HttpMethod {
 /// live in [`route_pattern_for`] — one override per (lang, framework)
 /// — because the YAML schema can't express some framework quirks
 /// (Flask's `methods=["POST"]` shape, Go-std's verbless routes).
-fn get_route_patterns() -> BTreeMap<&'static str, RoutePattern> {
+///
+/// The map is built once via [`OnceLock`] and reused across every
+/// `scan_file_for_routes` call. Pre-parked-cleanup the build ran on
+/// every scan, leaking ~16 `&'static str` per call (one for the
+/// pattern key, one for the handler-regex override, one for the
+/// method-regex override). With caching, the leaks happen exactly
+/// once at first call — every subsequent call returns a `&'static`
+/// reference to the cached map.
+///
+/// `pub` so integration tests can pin the cache contract
+/// (no per-call rebuild → no per-call leak).
+pub fn get_route_patterns() -> &'static BTreeMap<&'static str, RoutePattern> {
+    static CACHE: OnceLock<BTreeMap<&'static str, RoutePattern>> = OnceLock::new();
+    CACHE.get_or_init(|| build_route_patterns())
+}
+
+fn build_route_patterns() -> BTreeMap<&'static str, RoutePattern> {
     let mut patterns = BTreeMap::new();
 
     let registry = Patterns::patterns();
@@ -1292,10 +1308,22 @@ mod tests {
     /// same registry; the registry must be a `BTreeMap` (§6.1
     /// determinism). Two back-to-back calls must return equal
     /// iterators so the order of route emission is reproducible.
+    ///
+    /// The registry is now served from a `OnceLock` cache (Item A
+    /// of the parked-cleanup pass), so two back-to-back calls
+    /// return the *same* `&'static` reference — the test pins both
+    /// pointer-equality (the cache is single-instance) and the
+    /// BTreeMap's sorted iteration order.
     #[test]
     fn route_patterns_are_a_btreemap_for_determinism() {
-        let first: Vec<&'static str> = get_route_patterns().into_keys().collect();
-        let second: Vec<&'static str> = get_route_patterns().into_keys().collect();
+        let first_ptr = get_route_patterns() as *const _;
+        let second_ptr = get_route_patterns() as *const _;
+        assert_eq!(
+            first_ptr, second_ptr,
+            "two back-to-back calls must return the same &'_ reference (OnceLock cache)",
+        );
+        let first: Vec<&'static str> = get_route_patterns().keys().copied().collect();
+        let second: Vec<&'static str> = get_route_patterns().keys().copied().collect();
         assert_eq!(
             first, second,
             "two back-to-back calls must produce the same key order (BTreeMap §6.1 determinism)",

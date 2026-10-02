@@ -17,6 +17,9 @@ mod http_client_sensor_patterns;
 #[path = "sensors/http_sensor_patterns.rs"]
 mod http_sensor_patterns;
 
+#[path = "sensors/http_sensor_no_per_scan_leak.rs"]
+mod http_sensor_no_per_scan_leak;
+
 #[path = "sensors/http_sensor_single_parse.rs"]
 mod http_sensor_single_parse;
 
