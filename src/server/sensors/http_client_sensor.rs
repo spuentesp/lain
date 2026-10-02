@@ -269,11 +269,11 @@ pub fn detect_calls(
     calls
 }
 
-fn compiled_query_body(
-    patterns: &Patterns,
+fn compiled_query_body<'a>(
+    patterns: &'a Patterns,
     lang_yaml: &'static str,
     framework_id: &str,
-) -> Option<&'static str> {
+) -> Option<&'a str> {
     let key = format!("{lang_yaml}/{framework_id}.scm");
     patterns.compiled_queries().ok().and_then(|q| {
         q.iter()

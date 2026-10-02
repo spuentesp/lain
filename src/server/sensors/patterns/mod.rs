@@ -204,6 +204,14 @@ pub struct Patterns {
     /// see the field-level doc-comment for the all-or-nothing
     /// rationale.
     override_scml: Vec<(String, String)>,
+    /// Cache of the merged query map (`bundled + override` bodies,
+    /// with overrides replacing bundled entries on key conflict and
+    /// appending for fresh keys). Populated exactly once per
+    /// `Patterns` instance on the first `compiled_queries()` call
+    /// that finds non-empty overrides. The closure inside
+    /// `compiled_queries()` is where the `Box::leak` calls happen —
+    /// running once instead of per-call closes the per-scan leak.
+    merged_queries: OnceLock<Vec<(&'static str, &'static str, &'static str, &'static str)>>,
 }
 
 impl Clone for Patterns {
@@ -213,10 +221,33 @@ impl Clone for Patterns {
         // the clone mutates only the clone's cache. This matches the
         // `Mutex<Vec<...>>::clone()` semantics the parked-2 cleanup
         // pass replaced — each clone has its own backing store.
+        //
+        // The merged-queries cache is carried over too — if the
+        // source has already populated it, the clone reuses the
+        // same `Vec` (so the `Box::leak` work doesn't repeat). The
+        // returned `&[tuple]` from `compiled_queries()` borrows
+        // from `merged_queries` (an `OnceLock` field), so the leak
+        // is the only `&'static` allocation and stays valid for
+        // the clone's lifetime. When the source's cache is empty,
+        // the clone starts fresh — `compiled_queries()` will
+        // rebuild on its first call.
+        let merged_queries = self
+            .merged_queries
+            .get()
+            .map(|v| {
+                let once = OnceLock::new();
+                // `set` cannot fail here — the OnceLock was just
+                // constructed, no other thread can have populated
+                // it.
+                let _ = once.set(v.clone());
+                once
+            })
+            .unwrap_or_default();
         Self {
             yaml: self.yaml.clone(),
             overrides_applied: self.overrides_applied,
             override_scml: self.override_scml.clone(),
+            merged_queries,
         }
     }
 }
@@ -231,6 +262,7 @@ impl Patterns {
             yaml,
             overrides_applied: false,
             override_scml: Vec::new(),
+            merged_queries: OnceLock::new(),
         })
     }
 
@@ -280,29 +312,39 @@ impl Patterns {
     ///
     /// When no overrides are loaded (the common case), the returned
     /// slice is a `Cow::Borrowed` of the bundled static — zero cost.
-    /// When overrides are present, the method builds an owned slice
-    /// containing the bundled entries plus the override entries
-    /// (overrides **replace** bundled entries with the same key,
-    /// append for keys not present in the bundled set), and returns
-    /// it as `Cow::Owned`. The override bodies are `String` (not
-    /// `&'static str`), so each unique body is `Box::leak`'d once
-    /// per `compiled_queries()` call to fit the
-    /// `(key, lang, framework, body)` tuple type. This is a single
-    /// leak per unique body — much better than the per-scan leaks
-    /// the cleanup pass addressed.
+    /// When overrides are present, the method returns a `Cow::Borrowed`
+    /// slice backed by the per-instance `merged_queries` cache. The
+    /// cache is populated lazily on the first call that finds
+    /// non-empty overrides; subsequent calls hit the cached `Vec`
+    /// without rebuilding or re-leaking.
     ///
-    /// On success returns the merged map (Cow::Borrowed from the
-    /// bundled static when empty, `Cow::Owned(merged)` otherwise).
-    /// The `Result` is kept for API compatibility — bodies are
-    /// validated at `load_overrides` time, so the `Err` arm is
-    /// unreachable; callers continue to match on `Result`.
+    /// The override bodies are `String` (not `&'static str`), so the
+    /// cache build uses `Box::leak` once per unique body to fit the
+    /// `&'static str` field of the `(key, lang, framework, body)`
+    /// tuple. The closure inside `merged_queries.get_or_init` runs
+    /// exactly once per `Patterns` instance — a single leak per
+    /// unique body per `Patterns` instance, not per scan. This
+    /// closes the per-scan leak the previous
+    /// `Box::leak`-on-every-call design re-introduced.
+    ///
+    /// The returned `Cow` borrows from `&self`, so its lifetime is
+    /// tied to the `Patterns` instance (not `'static`). The three
+    /// production callers (`http_sensor`, `http_client_sensor`,
+    /// `entry_point_sensor`) all consume the slice within the
+    /// calling function's scope — no caller stores the returned
+    /// reference in a `'static` slot — so the tightened lifetime is
+    /// invisible at the call site.
+    ///
+    /// On success returns the merged map (`Cow::Borrowed` from the
+    /// bundled static when empty, `Cow::Borrowed` from the cache
+    /// otherwise). The `Result` is kept for API compatibility —
+    /// bodies are validated at `load_overrides` time, so the `Err`
+    /// arm is unreachable; callers continue to match on `Result`.
     #[allow(clippy::type_complexity)]
-    pub fn compiled_queries(
-        &self,
-    ) -> Result<
-        Cow<'static, [(&'static str, &'static str, &'static str, &'static str)]>,
-        PatternsError,
-    > {
+    pub fn compiled_queries<'a>(
+        &'a self,
+    ) -> Result<Cow<'a, [(&'static str, &'static str, &'static str, &'static str)]>, PatternsError>
+    {
         // Fast path — the common case where no overrides are loaded.
         // Return the bundled static directly with no allocation and
         // no leaks.
@@ -310,74 +352,75 @@ impl Patterns {
             return Ok(Cow::Borrowed(generated::QUERIES));
         }
 
-        // Build a merged slice: bundled entries + override entries,
-        // with overrides REPLACING bundled entries on key conflict
-        // and APPENDING for fresh keys. The result is sorted by key
-        // (a property the bundled slice already preserves) so the
-        // binary search lookup (`generated::get`) keeps working.
-        //
-        // The override bodies are leaked once per unique body via
-        // `Box::leak` to fit the `&'static str` field. This is one
-        // leak per unique body per `compiled_queries()` call, not
-        // per scan — much better than the original per-scan leaks.
-        let bundled = generated::QUERIES;
-        let mut merged: Vec<(&'static str, &'static str, &'static str, &'static str)> =
-            Vec::with_capacity(bundled.len() + self.override_scml.len());
+        // Build (once) and reuse the merged slice. The closure runs
+        // exactly once per `Patterns` instance — every later call
+        // returns the cached `Vec` without re-leaking. Cloning a
+        // `Patterns` after the first call snapshots the populated
+        // cache into the clone (the `Clone` impl below), so clones
+        // don't re-leak either.
+        let cached = self.merged_queries.get_or_init(|| {
+            let bundled = generated::QUERIES;
+            let mut merged: Vec<(&'static str, &'static str, &'static str, &'static str)> =
+                Vec::with_capacity(bundled.len() + self.override_scml.len());
 
-        // Iterate the bundled entries; for each, look up an override
-        // with the same key. If present, emit the override body
-        // (which REPLACES the bundled body); if not, emit the
-        // bundled entry verbatim.
-        let mut override_iter = self.override_scml.iter();
-        let mut next_override: Option<&(String, String)> = override_iter.next();
-        for entry in bundled {
-            let (key, lang, framework, body) = *entry;
-            // Advance through any overrides whose key sorts before
-            // the current bundled key (those are appends).
+            // Iterate the bundled entries; for each, look up an
+            // override with the same key. If present, emit the
+            // override body (which REPLACES the bundled body); if
+            // not, emit the bundled entry verbatim.
+            let mut override_iter = self.override_scml.iter();
+            let mut next_override: Option<&(String, String)> = override_iter.next();
+            for entry in bundled {
+                let (key, lang, framework, body) = *entry;
+                // Advance through any overrides whose key sorts
+                // before the current bundled key (those are
+                // appends).
+                while let Some(ov) = next_override {
+                    if ov.0.as_str() < key {
+                        let leaked_key: &'static str = Box::leak(ov.0.clone().into_boxed_str());
+                        let (lang_part, framework_part) =
+                            leaked_key.split_once('/').unwrap_or((leaked_key, ""));
+                        let leaked_lang: &'static str =
+                            Box::leak(lang_part.to_string().into_boxed_str());
+                        let leaked_framework: &'static str =
+                            Box::leak(framework_part.to_string().into_boxed_str());
+                        let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
+                        merged.push((leaked_key, leaked_lang, leaked_framework, leaked_body));
+                        next_override = override_iter.next();
+                    } else {
+                        break;
+                    }
+                }
+                // If the next override matches this bundled key,
+                // emit the override body (REPLACE); otherwise emit
+                // the bundled entry verbatim.
+                if let Some(ov) = next_override {
+                    if ov.0.as_str() == key {
+                        let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
+                        merged.push((key, lang, framework, leaked_body));
+                        next_override = override_iter.next();
+                        continue;
+                    }
+                }
+                merged.push((key, lang, framework, body));
+            }
+            // Append any overrides whose keys sorted past every
+            // bundled entry.
             while let Some(ov) = next_override {
-                if ov.0.as_str() < key {
-                    let leaked_key: &'static str = Box::leak(ov.0.clone().into_boxed_str());
-                    let (lang_part, framework_part) =
-                        leaked_key.split_once('/').unwrap_or((leaked_key, ""));
-                    let leaked_lang: &'static str =
-                        Box::leak(lang_part.to_string().into_boxed_str());
-                    let leaked_framework: &'static str =
-                        Box::leak(framework_part.to_string().into_boxed_str());
-                    let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
-                    merged.push((leaked_key, leaked_lang, leaked_framework, leaked_body));
-                    next_override = override_iter.next();
-                } else {
-                    break;
-                }
+                let leaked_key: &'static str = Box::leak(ov.0.clone().into_boxed_str());
+                let (lang_part, framework_part) =
+                    leaked_key.split_once('/').unwrap_or((leaked_key, ""));
+                let leaked_lang: &'static str = Box::leak(lang_part.to_string().into_boxed_str());
+                let leaked_framework: &'static str =
+                    Box::leak(framework_part.to_string().into_boxed_str());
+                let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
+                merged.push((leaked_key, leaked_lang, leaked_framework, leaked_body));
+                next_override = override_iter.next();
             }
-            // If the next override matches this bundled key, emit
-            // the override body (REPLACE); otherwise emit the bundled
-            // entry verbatim.
-            if let Some(ov) = next_override {
-                if ov.0.as_str() == key {
-                    let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
-                    merged.push((key, lang, framework, leaked_body));
-                    next_override = override_iter.next();
-                    continue;
-                }
-            }
-            merged.push((key, lang, framework, body));
-        }
-        // Append any overrides whose keys sorted past every bundled
-        // entry.
-        while let Some(ov) = next_override {
-            let leaked_key: &'static str = Box::leak(ov.0.clone().into_boxed_str());
-            let (lang_part, framework_part) =
-                leaked_key.split_once('/').unwrap_or((leaked_key, ""));
-            let leaked_lang: &'static str = Box::leak(lang_part.to_string().into_boxed_str());
-            let leaked_framework: &'static str =
-                Box::leak(framework_part.to_string().into_boxed_str());
-            let leaked_body: &'static str = Box::leak(ov.1.clone().into_boxed_str());
-            merged.push((leaked_key, leaked_lang, leaked_framework, leaked_body));
-            next_override = override_iter.next();
-        }
 
-        Ok(Cow::Owned(merged))
+            merged
+        });
+
+        Ok(Cow::Borrowed(cached.as_slice()))
     }
 
     /// Clone the bundled singleton into an owned [`Patterns`] so

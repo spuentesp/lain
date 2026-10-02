@@ -222,7 +222,7 @@ fn detect_http_handler(content: &str, ext: &str, out: &mut FileDetections, patte
 /// are visible to the entry-point walker. The bundled-singleton path
 /// (`Patterns::patterns()`) is preserved as a no-arg compatibility
 /// helper below.
-fn entry_point_query_body(patterns: &Patterns, key: &str) -> Option<&'static str> {
+fn entry_point_query_body<'a>(patterns: &'a Patterns, key: &str) -> Option<&'a str> {
     patterns
         .compiled_queries()
         .ok()?

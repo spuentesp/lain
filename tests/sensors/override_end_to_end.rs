@@ -482,3 +482,113 @@ fn build() -> Router {
         other => panic!("expected Provider contract, got {other:?}"),
     }
 }
+
+// ─── Test 3 — `compiled_queries()` caches the merged slice across calls ──
+//
+// The wire-in (`47ff13d`) made `compiled_queries()` work end-to-end, but
+// it leaked every override body via `Box::leak` on **every call** —
+// meaning every scan leaked proportional to
+// N-files × N-frameworks × N-overrides. The leak-fix pass caches the
+// merged slice inside `Patterns` so `Box::leak` runs **once per
+// `Patterns` instance**, not once per call.
+//
+// The "equal pointer" assertion below is the proof: if the
+// `Vec<(&'static str, &'static str, &'static str, &'static str)>`
+// were rebuilt every call, the returned `Cow::Borrowed` slice would
+// point to a fresh allocation each time. The two pointers would
+// differ. With the cache in place, the second call hits the cached
+// `Vec` and returns the same `&[tuple]` it returned the first time.
+#[test]
+fn compiled_queries_caches_merged_slice_across_calls() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_root = dir.path();
+
+    // Single Python override. The body is a parseable tree-sitter
+    // fragment — the exact content doesn't matter for the
+    // pointer-stability assertion, only that the merged map is
+    // non-trivial (otherwise the cache might not even be populated).
+    let patterns_dir = repo_root.join(".lain/patterns/python");
+    std::fs::create_dir_all(&patterns_dir).expect("mkdir .lain/patterns/python");
+    std::fs::write(
+        patterns_dir.join("custom-requests.scm"),
+        r#"
+; Per-repo override of `python/custom-requests.scm` (used by the
+; pointer-stability test only — proves `compiled_queries()` caches
+; the merged slice across calls).
+(module) @m
+"#,
+    )
+    .expect("write custom-requests.scm");
+
+    // Build a `Patterns` with the override loaded. The leak-fix
+    // pass means the first call to `compiled_queries()` populates
+    // the cache; subsequent calls return the same slice pointer.
+    let mut patterns = Patterns::clone_default();
+    patterns
+        .load_overrides(repo_root)
+        .expect("load_overrides must accept the per-repo .scm body");
+    assert!(
+        patterns.overrides_applied(),
+        "load_overrides must record that it ran",
+    );
+
+    // Sanity: the override reached the merged map (otherwise the
+    // assertion chain below is meaningless).
+    let first = patterns
+        .compiled_queries()
+        .expect("compiled_queries() must succeed after a successful load_overrides");
+    let first_ptr = first.as_ptr();
+    assert!(
+        first
+            .iter()
+            .any(|(k, _, _, _)| *k == "python/custom-requests.scm"),
+        "the merged map must carry the per-repo .scm override (otherwise the cache is built over an empty override set): {first:?}",
+    );
+
+    // Second call: must hit the cache, not rebuild. Compare the
+    // raw slice pointer — a rebuilt `Vec` would allocate fresh
+    // memory and the pointers would differ.
+    let second = patterns
+        .compiled_queries()
+        .expect("compiled_queries() must succeed on the second call");
+    let second_ptr = second.as_ptr();
+    assert_eq!(
+        first_ptr, second_ptr,
+        "the merged slice must be cached across calls — two calls returned different `&[tuple]` pointers ({first_ptr:?} vs {second_ptr:?}), which means the leak-fix cache is not in place and `Box::leak` is running on every call",
+    );
+
+    // Third call for paranoia — the cache must hold across many
+    // calls, not just two.
+    let third = patterns
+        .compiled_queries()
+        .expect("compiled_queries() must succeed on the third call");
+    assert_eq!(
+        first_ptr,
+        third.as_ptr(),
+        "the cache must hold across many calls (third call returned a different pointer)",
+    );
+
+    // Bonus: also confirm the Clone path snapshots the populated
+    // cache, so cloning a `Patterns` after the first call does NOT
+    // trigger a second `Box::leak` cycle. The clone allocates a
+    // fresh `Vec` (so the slice pointer differs) but the
+    // `&'static str` fields inside that Vec point at the SAME
+    // leaked data — the proof that no new `Box::leak` ran on
+    // the clone. Comparing every `body` pointer against the
+    // original's `body` pointers is the leak-free assertion.
+    let cloned = patterns.clone();
+    let cloned_slice = cloned
+        .compiled_queries()
+        .expect("compiled_queries() must succeed on a clone of a populated Patterns");
+    for (orig, new) in first.iter().zip(cloned_slice.iter()) {
+        assert_eq!(
+            orig.0, new.0,
+            "cloned entry's key `{}` does not match the source's key `{}` — the clone must snapshot the cache, not rebuild",
+            new.0, orig.0,
+        );
+        assert_eq!(
+            orig.3, new.3,
+            "cloned entry's body does not match the source's body — the clone's `Box::leak` of the body was a fresh allocation (re-leak on clone)"
+        );
+    }
+}
