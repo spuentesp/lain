@@ -534,10 +534,21 @@ fn synthetic_url_call(
     } else {
         NormalizedUrl { host, ..normalized }
     };
+    // The `.scm` doesn't capture `@lib` for frameworks whose URL lives
+    // upstream of the call (Java `HttpClient.send`, OkHttp `.execute`,
+    // …). When the receiver text is absent the call's `via` falls back
+    // to the framework's effective_id (`display_name` when set, else
+    // `id`) — so a Java OkHttp call surfaces as
+    // `Library { name: "okhttp" }`, not `Library { name: "" }`.
+    let via_lib = if lib_text.is_empty() {
+        framework.effective_id().to_string()
+    } else {
+        lib_text
+    };
     HttpClientCall {
         method: MethodSpec::Unknown,
         url: final_url,
-        via: CallVia::Library { name: lib_text },
+        via: CallVia::Library { name: via_lib },
         url_expr: format!("{}://dynamic", framework.effective_id()),
         reads_complete: true,
         path: path.to_string(),
