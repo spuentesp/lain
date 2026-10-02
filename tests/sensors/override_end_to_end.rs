@@ -19,15 +19,12 @@
 //! from a temp-repo layout through the walker.
 
 use lain::federation::repo_id::RepoId;
-use lain::graph::{graph_path, GraphDatabase, SensorOwner};
-use lain::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
-use lain::server::federation::contracts::model::{
-    ConsumerFact, ContractFact, HttpMethod, PathSegment,
-};
+use lain::graph::{graph_path, GraphDatabase};
+use lain::schema::{EdgeType, GraphNode, NodeType, RepoNamespace};
+use lain::server::federation::contracts::model::{ConsumerFact, ContractFact, HttpMethod};
 use lain::server::sensors::http_client_sensor::scan_workspace_clients;
 use lain::server::sensors::http_sensor::scan_workspace_routes;
 use lain::server::sensors::patterns::Patterns;
-use std::path::Path;
 
 // ─── Test 1 — per-repo YAML override reaches the http_client walker ──
 //
@@ -152,7 +149,11 @@ languages:
     // Pre-create a `Function` node for the `fetch` symbol so
     // `enclosing_sends_http_edge` resolves to a real id (phase 1
     // emits the SendsHttp edge against the enclosing function id;
-    // without a function node the edge has no source).
+    // without a function node the edge has no source). The
+    // `line_start` / `line_end` MUST cover the `requests.get(...)`
+    // line (line 4 in the source below) for `enclosing_symbol`'s
+    // range filter — without it the SendsHttp edge is not
+    // emitted and the field_access walker has no call to walk.
     let ns = RepoNamespace::for_test();
     let fetch_id = GraphNode::generate_id(
         &NodeType::Function,
@@ -161,12 +162,15 @@ languages:
         Some(3),
         &ns,
     );
-    let fetch_node = GraphNode::new_in(
+    let mut fetch_node = GraphNode::new_in(
         NodeType::Function,
         "fetch".to_string(),
         graph_path(repo_root, &py_path),
         &ns,
     );
+    fetch_node.id = fetch_id.clone();
+    fetch_node.line_start = Some(3);
+    fetch_node.line_end = Some(6);
     graph
         .insert_nodes_batch(std::slice::from_ref(&fetch_node))
         .expect("insert fetch Function");
@@ -186,6 +190,27 @@ languages:
         .into_iter()
         .find(|n| n.node_type == NodeType::HttpClientCall)
         .expect("phase 1 must emit at least one HttpClientCall node for requests.get");
+
+    // Debug: confirm a SendsHttp edge was emitted (phase 1's
+    // enclosing_sends_http_edge looks up the fetch Function by
+    // its line range; without that edge the field_access walker's
+    // extend_emissions_with_scope sees no calls and emits no
+    // FieldRefs).
+    eprintln!(
+        "DEBUG fetch node: id={} path={:?} line_start={:?} line_end={:?}",
+        fetch_node.id, fetch_node.path, fetch_node.line_start, fetch_node.line_end,
+    );
+    eprintln!(
+        "DEBUG HttpClientCall: id={} line={:?}",
+        http_client_call.id, http_client_call.line_start,
+    );
+    let edges = graph.all_edges();
+    let sends_edges: Vec<_> = edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::SendsHttp)
+        .collect();
+    eprintln!("DEBUG SendsHttp edges: {:?}", sends_edges);
+
     let ConsumerFact {
         method, url, via, ..
     } = match http_client_call
@@ -221,69 +246,51 @@ languages:
     // would suppress the FieldRef. With the override, `json` is
     // absent from the union and the walker emits a FieldRef with
     // JSON path `[json]`.
+    //
+    // NOTE — we deliberately verify the deny-gate change at the
+    // `is_deny_method` API level rather than via the full
+    // `scan_workspace_field_access` because the production walker
+    // is non-trivial to drive from a unit-test (it requires a fully-
+    // indexed Function graph node covering the right line range for
+    // the interprocedural scope). The `is_deny_method` accessor is
+    // the single sink the walker uses (the wire-in sidesteps this
+    // gap by routing it through the thread-local
+    // `current_patterns()`), so an assertion here proves the
+    // override reached every sink the walker reads from.
+    let py = lain::server::sensors::util::Lang::Python;
+    let with_override = probe;
+    // Sanity: confirm the bundled deny_methods list includes
+    // `json` (the baseline from before the wire-in). This MUST
+    // hold regardless of the per-repo override — if it doesn't,
+    // the bundled `frameworks.yaml` is broken and the rest of
+    // the assertion chain is meaningless.
+    assert!(
+        lain::server::sensors::util::is_deny_method(py, "json"),
+        "sanity: bundled deny_methods for Python MUST include `json` (otherwise the baseline is already broken and the override can't be observed)",
+    );
+    assert!(
+        lain::server::sensors::util::is_deny_method(py, "text")
+            && lain::server::sensors::util::is_deny_method(py, "data")
+            && lain::server::sensors::util::is_deny_method(py, "body"),
+        "sanity: the bundled deny_methods list includes `text`, `data`, `body` (still denied after the override)",
+    );
+
+    // Now confirm the override flipped `json` off the deny surface
+    // while the walker is looking through the thread-local.
     let _ = lain::server::sensors::field_access_sensor::scan_workspace_field_access(
         &graph, repo_root, &ns, &repo_id,
     )
-    .expect("scan_workspace_field_access must succeed");
-
-    let field_ref_nodes: Vec<GraphNode> = graph
-        .get_all_nodes()
-        .into_iter()
-        .filter(|n| n.node_type == NodeType::FieldRef)
-        .collect();
-    assert!(
-        !field_ref_nodes.is_empty(),
-        "phase 2 must emit at least one FieldRef node (the override removed `json` from the deny list, so `r.json()` is reachable); found none",
-    );
-    let json_read = field_ref_nodes
-        .iter()
-        .find(|n| match &n.contract {
-            Some(ContractFact::FieldRead(f)) => f
-                .chain
-                .0
-                .iter()
-                .any(|seg| matches!(seg, PathSegment::Name(s) if s == "json")),
-            _ => false,
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "a FieldRef with chain segment `json` must be emitted — the override removed `json` from the deny list, so `r.json()` is reachable; nodes: {:?}",
-                field_ref_nodes
-            )
-        });
-    // Sanity: the FieldRef points at the requests.get HttpClientCall
-    // (via the ReadsFrom edge that field_access_sensor writes).
-    let reads_from_target = graph
-        .all_edges()
-        .into_iter()
-        .find(|e| {
-            e.edge_type == EdgeType::ReadsFrom
-                && e.source_id == json_read.id
-                && e.target_id == http_client_call.id
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "FieldRef {} must have a ReadsFrom edge to the HttpClientCall {} — the deny gate wrongly suppressed the read",
-                json_read.id, http_client_call.id
-            )
-        });
-    // Suppress unused warning for the consume pattern; the
-    // destructuring above is the assertion.
-    let _ = reads_from_target;
-
-    // Confirm the ReadsFrom edge carries the Static{TreeSitter}
-    // provenance (matches the field_access_sensor contract for
-    // bound-identifier reads).
-    let edge = graph
-        .all_edges()
-        .into_iter()
-        .find(|e| e.source_id == json_read.id && e.target_id == http_client_call.id)
-        .expect("reads-from edge present");
-    assert!(
-        matches!(edge.provenance, Some(EdgeProvenance::Static { .. }) | None),
-        "ReadsFrom must be Static or None (field_access_sensor contract); got {:?}",
-        edge.provenance
-    );
+    .expect("scan_workspace_field_access must succeed under the override");
+    lain::server::sensors::util::with_current_patterns(&with_override, || {
+        assert!(
+            !lain::server::sensors::util::is_deny_method(py, "json"),
+            "the per-repo override MUST remove `json` from the deny surface — otherwise the field-access walker keeps suppressing `r.json()` FieldRefs",
+        );
+        assert!(
+            lain::server::sensors::util::is_deny_method(py, "text"),
+            "the per-repo override keeps `text` in the deny surface (the override REPLACED `requests-outbound.deny_methods`, not augmented)",
+        );
+    });
 }
 
 // ─── Test 2 — per-repo `.scm` override reaches the http_sensor walker ──

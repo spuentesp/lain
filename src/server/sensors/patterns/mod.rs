@@ -296,6 +296,7 @@ impl Patterns {
     /// The `Result` is kept for API compatibility — bodies are
     /// validated at `load_overrides` time, so the `Err` arm is
     /// unreachable; callers continue to match on `Result`.
+    #[allow(clippy::type_complexity)]
     pub fn compiled_queries(
         &self,
     ) -> Result<
