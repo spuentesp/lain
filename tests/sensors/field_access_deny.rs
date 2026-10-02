@@ -14,8 +14,10 @@
 //!   1. The deny data is present in `frameworks.yaml` for every
 //!      language the sensor supports.
 //!   2. The deny data is *only* sourced from `frameworks.yaml` —
-//!      a public `util::deny_methods_for(lang)` accessor returns
-//!      the union of `deny_methods` across outbound entries.
+//!      `Patterns::deny_methods_for(lang, lib, verb)` returns the
+//!      union of `deny_methods` across outbound entries whose
+//!      `lib_match` regex accepts `lib`. The single-key lookup the
+//!      sensor uses at runtime is `util::is_deny_method(lang, key)`.
 //!   3. The inline `RESPONSE_METHOD_DENYLIST` constant is gone
 //!      (so a future regression cannot re-add it).
 //!
