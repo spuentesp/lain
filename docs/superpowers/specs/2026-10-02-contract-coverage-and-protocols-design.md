@@ -190,17 +190,70 @@ same-service bind.
 
 ## 9. Formal verification (TLA+) and property tests
 
-TLA+ (needs `tla2tools.jar`; Java present; download requires approval):
-1. `CoverageClaim.tla` — repos, languages, sensor support, repo states, unresolved candidates.
-   Action space: reindex, snapshot, sensor failure, config change. Invariant: I3. Also checks that the
-   derived `complete` flag is never true when a scoped repo is not analyzed.
-2. `IndexGeneration.tla` — dirty flag, `rejoin_contracts_if_dirty`, `RwLock`, concurrent snapshot
-   build and tool reads. Invariants: I7, plus liveness: dirty eventually rejoined.
-Both small enough for exhaustive TLC with 2–3 repos. Specs live in `docs/formal/`, run in a CI
-job only when they change.
+Setup: needs `tla2tools.jar` (Java present; the download requires approval). Specs live in
+`docs/formal/` with a short action → code-line mapping per spec so they do not drift; CI runs TLC
+only when a spec changes. Scale: 2–3 repos, 2 writers, 2 readers, 2 snapshots (races show up at tiny
+sizes). Order: models 1 and 2 first (they target code that already exists); a counterexample is
+confirmed, then fixed on this branch as its own small commit. Model 3 gates Phase A.
 
-Property tests (proptest): I2 (partition), I4 (shuffle inputs), I5, I6 (monotone precedence),
-no-panic fuzz for each new parser.
+The findings below come from reading the code, not from running it. TLC confirms or kills each.
+
+### 9.1 `RejoinProtocol.tla` (highest value)
+
+Code: `federated_index.rs` `rejoin_contracts_if_dirty`, `rejoin_contracts`, `contracts_dirty`,
+`projection_lock`, `contract_index`.
+
+Suspected problems:
+- **Lost dirty flag.** `rejoin_contracts` reads inputs, joins, writes `Binds`, swaps the index, and
+  only then `contracts_dirty.store(false)`. `projection_lock` is taken at three sites (293, 333, 511);
+  the setters at ~875/959 and the public `mark_contracts_dirty` do not reference it (refresh loop and
+  hot reload not yet traced). A set landing mid-join is overwritten by the clear.
+- **Torn input.** Nodes (`get_node`) and edges (`all_edges`) are read separately; a concurrent
+  projection can land in between.
+- **Two views of one generation.** `Binds` edges are applied before `contract_index` is swapped.
+
+Model: writers (project nodes, project edges, add/remove repo, config reload); rejoin at its real step
+granularity; readers that call `rejoin_if_dirty` then read both index and `Binds` edges.
+Variants checked: (a) current code, (b) clear flag before reading and re-set on error, (c) epoch-stamped
+atomic publish of `(index, binds)`.
+Invariants: convergence (quiescent ⇒ `index == join(inputs)`); no lost update (an input change is
+reflected or the flag is set); reader consistency (no mixed generation, I7).
+Liveness: a dirty flag is eventually rejoined.
+
+### 9.2 `SnapshotResidency.tla`
+
+Code: `snapshots/manager.rs` `from_snapshot_with_wait_ms`, `install_resident`,
+`try_evict_one_lru_unheld`, `HoldGuard`, `residency_notify`.
+
+Suspected problems:
+- `held` is an `AtomicBool`, not a count: two concurrent calls on one resident snapshot share it, the
+  first drop clears it, and the snapshot can leave `resident` while still in use (the `|resident| ≤ cap`
+  bound then stops meaning anything).
+- `install_resident` checks `len() < cap` and inserts under separate lock acquisitions (cap overrun).
+- `try_evict_one_lru_unheld` selects and removes under separate locks (a hold can land in between).
+- No single-flight: two builders for one snapshot id both build; the second overwrites the first.
+- The condvar uses a different mutex from the state it guards; the 50 ms poll may hide a lost wakeup.
+  The model decides whether that is latency only or a hang.
+
+Invariants: a held snapshot is never evicted; `|resident| ≤ cap`; at most one federation per snapshot
+id; cache pins cover every live federation; `busy` is returned only when every slot is held.
+
+### 9.3 `CoverageClaim.tla` (gates Phase A)
+
+State: repos, languages, sensor support, repo states, unresolved candidates, cache entries.
+Actions: reindex, snapshot, sensor failure, config change, analyzer upgrade.
+Invariants: I3 (`NoKnownImpact ⇒` all in-scope repos analyzed and no could-match unresolved) and
+`complete` never true while a scoped repo is unanalyzed.
+Cache validity: `CacheKey` includes `analyzer_version`. If the ledger shape or a new sensor ships
+without a bump, old entries read as "analyzed" when they are not. The model must show a bump is
+required; the resulting rule is enforced in Phase A (ledger presence is part of cache validity).
+
+### 9.4 Not modeled (property tests instead)
+
+Pure functions: `match_route`, `compare_specificity`, URL normalization, `field_join`, resolution
+precedence (I6, total order), determinism (I4), partition (I2), no same-service bind (I5), and
+no-panic fuzz for each new parser. Sensor phase ordering is also left out: `replace_sensor_output`
+is one write-locked swap and phases are sorted, so a model would be trivial.
 
 ## 10. Delivery
 
