@@ -135,7 +135,10 @@ fn no_parse_when_no_route_framework_applies() {
     let routes = scan_file_for_routes(std::path::Path::new("notes.txt"), src);
     let after = scan_parse_count();
 
-    assert!(routes.is_empty(), "non-source files must produce zero routes");
+    assert!(
+        routes.is_empty(),
+        "non-source files must produce zero routes"
+    );
     assert_eq!(
         after - before,
         0,

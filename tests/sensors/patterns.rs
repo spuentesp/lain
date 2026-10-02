@@ -230,8 +230,8 @@ fn generated_queries_cover_all_eight_languages() {
     // silently dropped 10 entries; the present check covers
     // python + tsjs and stays accurate through future framework
     // additions.
-    let patterns_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/server/sensors/patterns");
+    let patterns_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/sensors/patterns");
     let on_disk_count = count_scm_files(&patterns_dir);
     assert_eq!(
         patterns::generated::LEN,
