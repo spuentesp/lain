@@ -493,6 +493,17 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
     // times. The `SCAN_PARSE_COUNT` instrumentation lets tests pin
     // this contract on a per-thread basis (concurrent tests cannot
     // false-positive the count).
+    //
+    // `applicable.first()` is load-bearing here: each entry in the
+    // `prefixes` slice maps to exactly one lang bucket (`rust-` →
+    // `Lang::Rust`, `tsjs-` → `Lang::TsJs`, …), so the first
+    // applicable entry's prefix is the file's lang. A future change
+    // that allows one extension to map to multiple lang buckets
+    // (e.g. `.kt` → `["kotlin-", "kotlin-ng-"]`) would need to
+    // re-think this — the per-file parse would either need to fan
+    // out across grammars (expensive) or pick one canonical lang
+    // (lossy). Today the slice is one-prefix-per-lang, so `.first()`
+    // is correct by construction.
     let parsed_tree: Option<Tree> = applicable
         .first()
         .map(|(key, _)| key)
