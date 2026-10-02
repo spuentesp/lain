@@ -333,7 +333,9 @@ fn process_outbound_match(
     let verb_text = if let Some(n) = verb {
         // Kotlin-style: `@_nav` captures the whole
         // navigation_expression; the verb is its last named child.
-        if framework.id == "ktor-client-outbound" || framework.id == "okhttp-outbound" {
+        if framework.effective_id() == "ktor-client-outbound"
+            || framework.effective_id() == "okhttp-outbound"
+        {
             extract_navigation_verb(n, src)
         } else {
             text_of(n, src).unwrap_or_default().to_ascii_lowercase()
@@ -385,22 +387,24 @@ fn process_outbound_match(
     if is_known_library(&lib_text, framework, lang) {
         // Direct library call. `reqwest::get`, `requests.get`, …
         let method = method_for(framework, &verb_text, call, url, src);
-        // When the framework declares a `display_name`, the walker
-        // uses that as the `via` (the gem-name / public name) —
-        // bypassing the per-framework hardcoded Ruby match below.
-        // A future framework that wants the same behaviour ships a
-        // `display_name:` in `frameworks.yaml`; no walker edit is
-        // required. The hardcoded arms remain for the Ruby
-        // frameworks that haven't picked up `display_name` yet.
-        let via_lib: String = match framework.display_name.as_deref() {
-            Some(name) => name.to_string(),
-            None => match (framework.id.as_str(), via_lib.as_str()) {
-                ("net-http-outbound", "Net::HTTP") => "net/http".to_string(),
-                ("httparty-outbound", "HTTParty") => "httparty".to_string(),
-                ("faraday-outbound", "Faraday") => "faraday".to_string(),
-                ("restclient-outbound", "RestClient") => "restclient".to_string(),
-                _ => via_lib,
-            },
+        // When `effective_id()` differs from `id` (i.e. `display_name`
+        // is set), the walker uses the effective id as the `via` —
+        // the gem-name / public-name surface (e.g. `httparty` for
+        // `httparty-outbound`). A future framework that wants the
+        // same behaviour ships a `display_name:` in `frameworks.yaml`;
+        // no walker edit is required.
+        //
+        // When `display_name` is unset, the inner match disambiguates
+        // within the Ruby family by `framework.id` (the YAML id) and
+        // the captured receiver text. `httparty-outbound`'s
+        // `display_name: httparty` covers the gem-name lookup, so the
+        // inner hardcoded arm for it is no longer reachable.
+        let via_lib: String = match (framework.id.as_str(), framework.effective_id(), via_lib.as_str()) {
+            (id, eff, _) if eff != id => eff.to_string(),
+            ("net-http-outbound", _, "Net::HTTP") => "net/http".to_string(),
+            ("faraday-outbound", _, "Faraday") => "faraday".to_string(),
+            ("restclient-outbound", _, "RestClient") => "restclient".to_string(),
+            _ => via_lib,
         };
         return build_call(
             CallVia::Library { name: via_lib },
@@ -423,7 +427,7 @@ fn process_outbound_match(
     // receiver text. The walker resolves the via to the
     // framework's name in that case.
     if matches!(
-        framework.id.as_str(),
+        framework.effective_id(),
         "ktor-client-outbound" | "okhttp-outbound" | "httpclient-outbound"
     ) {
         let method = method_for(framework, &verb_text, call, url, src);
@@ -432,7 +436,7 @@ fn process_outbound_match(
         // not a client call, even though it walks past the
         // ktor-outbound .scm's `call_expression` matcher.
         if matches!(method, MethodSpec::Unknown)
-            && framework.id == "ktor-client-outbound"
+            && framework.effective_id() == "ktor-client-outbound"
             && !is_valid_http_verb(&verb_text)
             && verb_text != "execute"
         {
@@ -449,7 +453,7 @@ fn process_outbound_match(
                     "httpclient".to_string()
                 }
             }
-            _ => framework.id.clone(),
+            _ => framework.effective_id().to_string(),
         };
         return build_call(
             CallVia::Library { name: via_lib },
@@ -511,7 +515,10 @@ fn synthetic_url_call(
     call: Node,
     path: &str,
 ) -> HttpClientCall {
-    let raw_parts = vec![UrlPart::Literal(format!("{}://dynamic", framework.id))];
+    let raw_parts = vec![UrlPart::Literal(format!(
+        "{}://dynamic",
+        framework.effective_id()
+    ))];
     let host = host_for(&raw_parts);
     let normalized = normalize(&raw_parts);
     let final_url = if matches!(host, HostPart::None) {
@@ -523,7 +530,7 @@ fn synthetic_url_call(
         method: MethodSpec::Unknown,
         url: final_url,
         via: CallVia::Library { name: lib_text },
-        url_expr: format!("{}://dynamic", framework.id),
+        url_expr: format!("{}://dynamic", framework.effective_id()),
         reads_complete: true,
         path: path.to_string(),
         line: (call.start_position().row as u32) + 1,
