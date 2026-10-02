@@ -341,7 +341,6 @@ fn process_outbound_match(
     } else {
         String::new()
     };
-    let _call_line_unused = (call.start_position().row as u32) + 1;
     let enclosing_fn_line = enclosing_function_line(call);
 
     // Library classification. The order matters: a bound client
