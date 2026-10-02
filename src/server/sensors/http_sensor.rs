@@ -220,11 +220,34 @@ fn route_pattern_key(lang: Lang, def: &FrameworkDef) -> &'static str {
 /// schema can't encode (Flask's `methods=["POST"]` kwarg, the
 /// verbless `http.HandleFunc` shape, etc.).
 ///
-/// `None` is returned when the framework is missing the
-/// `path_regex` field — the walker then has nothing to match
-/// against, and the framework is silently skipped. The same was
-/// true of the pre-Task-2 inline table: frameworks without a path
-/// regex just weren't listed.
+/// Contract:
+///   - `Some(_)` is returned when `def.path_regex` is present; the
+///     walker has something to match against and the framework is
+///     emitted as a candidate route pattern.
+///   - `None` is returned when `def.path_regex` is missing — the
+///     walker has nothing to match against, and the framework is
+///     silently skipped (the same was true of the pre-Task-2 inline
+///     table: frameworks without a path regex just weren't listed).
+///
+/// Fields read from [`FrameworkDef`]:
+///   - `def.path_regex` — the route-template regex; panics at
+///     construction if it fails to compile (so a malformed YAML entry
+///     crashes the binary loudly rather than corrupting the walker).
+///   - `def.handler_regex` — captured by [`handler_regex_for`]; for
+///     most frameworks it's used as-is, but Sinatra / Minimal API /
+///     Rails need a framework-specific override (the YAML's regex
+///     lost a capture group during the Task-1 data conversion).
+///   - `def.verbs` — joined into a `(verb|verb|verb)` alternation
+///     inside [`method_capture_for`] to build `method_regex`. The
+///     escape order is the YAML's verbatim order, so framework ids
+///     that put `GET` / `POST` first in `verbs` match `GET` before
+///     `POST`.
+///
+/// The returned `RoutePattern`'s `default_method` is the framework's
+/// verb when the method regex is unambiguous (`HttpMethod::Get` for
+/// "verbed" frameworks) and `HttpMethod::Any` when the framework
+/// admits any HTTP verb or has an empty `verbs:` list (verbless
+/// APIs like Go-std `HandleFunc`).
 fn route_pattern_for(def: &FrameworkDef) -> Option<RoutePattern> {
     let path_re = def.path_regex.as_deref()?;
     let handler_re = handler_regex_for(def);
