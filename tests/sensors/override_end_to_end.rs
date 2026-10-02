@@ -630,7 +630,13 @@ fn repo_a_overrides_do_not_leak_into_repo_b() {
     // ── Repo A: with a per-repo override that REPLACES the bundled
     // axum-route.scm body with a query that fires on a different
     // path shape (".<anything>(/v2/users, get(h))") so we can
-    // observe the override reaching the walker.
+    // observe the override reaching the walker. Repo A's source
+    // uses `/v2_users` (an underscore, not a slash) so the
+    // override's `path_regex` (`/(/?v2_users[^"]*)` — matches
+    // the literal text `/v2_users`) catches the route, and the
+    // bundled `path_regex` does NOT (the bundled axum regex
+    // expects a path that starts with `/`; `/v2_users` doesn't
+    // start with `/` so the bundled regex would miss it).
     let dir_a = tempfile::tempdir().expect("tempdir repo A");
     let repo_a_root = dir_a.path();
     std::fs::write(
@@ -640,7 +646,7 @@ fn repo_a_overrides_do_not_leak_into_repo_b() {
 async fn get_users() {}
 
 fn build() -> Router {
-    Router::new().route("/users", get(get_users))
+    Router::new().route("/v2_users", get(get_users))
 }
 "#,
     )
@@ -674,6 +680,31 @@ fn build() -> Router {
 "#,
     )
     .expect("write repo A axum-route.scm");
+
+    // Also write a YAML override that changes the axum-route
+    // framework's `path_regex` so the route patterns map for
+    // repo A DIFFERS from repo B. This is the surface the
+    // per-pointer thread-local cache bug leaked: a stale
+    // `&BTreeMap<String, RoutePattern>` from repo A's scan
+    // would have been returned for repo B's scan, so repo B's
+    // walker would use repo A's path_regex when matching repo
+    // B's source. The override's path_regex matches a
+    // distinctive token (`/v2_users`) that the bundled
+    // regex's path_regex does NOT match — repo A's route
+    // patterns map matches `/v2_users`, repo B's does not.
+    std::fs::write(
+        patterns_dir.join("axum-route.yaml"),
+        r#"
+languages:
+  rust:
+    - id: axum-route
+      kind: route
+      verbs: [get, post, put, delete, patch]
+      path_regex: '\.route\s*\(\s*"(/?v2_users[^"]*)"'
+      handler_regex: '\.route\s*\([^,]+,\s*(\w+)\s*\)'
+"#,
+    )
+    .expect("write repo A axum-route.yaml");
 
     // ── Repo B: same source file, NO overrides. The expected
     // result is that repo B's scan emits the bundled regex's
@@ -723,9 +754,9 @@ fn build() -> Router {
     );
 
     // Now scan repo A end-to-end via `scan_workspace_routes`.
-    // (The wire-in path; the route emitted must be `/users`
-    // because tree-sitter queries can't synthesise a path that
-    // isn't in the source.)
+    // (The wire-in path; the route emitted must be `/v2_users`
+    // because repo A's source uses that path and the
+    // override's path_regex matches it.)
     let db_path_a = repo_a_root.join("ga.bin");
     let graph_a = GraphDatabase::new(&db_path_a).expect("repo A GraphDatabase::new");
     let ns = RepoNamespace::for_test();
@@ -738,8 +769,8 @@ fn build() -> Router {
         .find(|n| n.node_type == NodeType::HttpRoute)
         .expect("repo A scan_workspace_routes must emit an HttpRoute node");
     assert_eq!(
-        route_a.name, "GET /users",
-        "repo A must emit a `/users` route (the source's verbatim path): got {:?}",
+        route_a.name, "GET /v2_users",
+        "repo A must emit a `/v2_users` route (the source's verbatim path, matched by the override's path_regex): got {:?}",
         route_a.name
     );
 
@@ -778,8 +809,13 @@ fn build() -> Router {
     // Run repo B's scan end-to-end. The route emitted must be
     // `/users` (the bundled regex's path capture matches the
     // source's `"/users"` literal). Critically, the count must
-    // not include a phantom `/v2/users` route that repo A's
-    // override would have produced if its cache had leaked.
+    // not include a phantom `/v2_users` route that repo A's
+    // override would have produced if its route patterns map
+    // had leaked into repo B's scan (the per-pointer
+    // thread-local cache bug: repo A's stale `&BTreeMap<String,
+    // RoutePattern>` would have been returned for repo B's
+    // scan, so repo B's walker would use repo A's override
+    // `path_regex` which matches `/v2_users` and NOT `/users`).
     let db_path_b = repo_b_root.join("gb.bin");
     let graph_b = GraphDatabase::new(&db_path_b).expect("repo B GraphDatabase::new");
     let repo_id_b = RepoId::new("repo_b_no_overrides").unwrap();
@@ -799,12 +835,12 @@ fn build() -> Router {
         "repo B's single route must be `/users` (the bundled regex path capture); got {:?}",
         routes_b[0].name
     );
-    // Specifically assert NO `/v2/users` phantom route leaked
-    // from repo A's override body.
+    // Specifically assert NO `/v2_users` phantom route leaked
+    // from repo A's override.
     assert!(
-        !routes_b.iter().any(|n| n.name.contains("/v2/users")),
-        "repo B must not carry a phantom `/v2/users` route that would only exist if \
-         repo A's override data leaked into repo B's cache: {routes_b:?}"
+        !routes_b.iter().any(|n| n.name.contains("/v2_users")),
+        "repo B must not carry a phantom `/v2_users` route that would only exist if \
+         repo A's override `path_regex` leaked into repo B's route patterns map: {routes_b:?}"
     );
 }
 
