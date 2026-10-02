@@ -193,7 +193,6 @@ impl YamlFile {
 /// Cloning the registry snapshots the current bodies into a fresh
 /// `Vec`; a clone that runs `load_overrides` does not perturb the
 /// original's cache.
-#[derive(Debug)]
 pub struct Patterns {
     yaml: YamlFile,
     overrides_applied: bool,
@@ -231,6 +230,27 @@ pub struct Patterns {
     route_patterns_cache: OnceLock<BTreeMap<String, RoutePattern>>,
 }
 
+impl std::fmt::Debug for Patterns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Patterns")
+            .field(
+                "yaml_languages",
+                &self.yaml.languages.keys().collect::<Vec<_>>(),
+            )
+            .field("overrides_applied", &self.overrides_applied)
+            .field("override_scml_count", &self.override_scml.len())
+            .field(
+                "merged_queries_populated",
+                &self.merged_queries.get().is_some(),
+            )
+            .field(
+                "route_patterns_cache_populated",
+                &self.route_patterns_cache.get().is_some(),
+            )
+            .finish()
+    }
+}
+
 impl Clone for Patterns {
     fn clone(&self) -> Self {
         // Snapshot the current override bodies into a fresh `Vec`.
@@ -247,33 +267,26 @@ impl Clone for Patterns {
         // clone. When the source's cache is empty, the clone starts
         // fresh — `compiled_queries()` will rebuild on its first
         // call.
-        let merged_queries = self
-            .merged_queries
-            .get()
-            .map(|v| {
-                let once = OnceLock::new();
-                // `set` cannot fail here — the OnceLock was just
-                // constructed, no other thread can have populated
-                // it.
-                let _ = once.set(v.clone());
-                once
-            })
-            .unwrap_or_default();
-        // The route-patterns cache is a `OnceLock<BTreeMap<String,
-        // RoutePattern>>` with no lifetime params (keys are owned
-        // `String` and values own their `regex::Regex`); cloning
-        // an already-populated cache snapshot the populated
-        // BTreeMap into the clone so the `route_patterns_map()`
-        // call on the clone doesn't rebuild from scratch.
-        let route_patterns_cache = self
-            .route_patterns_cache
-            .get()
-            .map(|m| {
-                let once = OnceLock::new();
-                let _ = once.set(m.clone());
-                once
-            })
-            .unwrap_or_default();
+        let merged_queries: OnceLock<Vec<(String, String, String, String)>> =
+            match self.merged_queries.get() {
+                Some(v) => {
+                    let once = OnceLock::new();
+                    // `set` cannot fail here — the OnceLock was just
+                    // constructed, no other thread can have populated
+                    // it.
+                    let _ = once.set(v.clone());
+                    once
+                }
+                None => OnceLock::new(),
+            };
+        // `RoutePattern` doesn't implement `Clone` (it owns a
+        // `regex::Regex`), so the route-patterns cache cannot be
+        // carried over to the clone. The clone starts with an
+        // empty `OnceLock` and `route_patterns_map()` rebuilds
+        // via `get_or_init` on first call — one rebuild per clone,
+        // which preserves the wire-in-2 invariant that the cache
+        // lives on the instance, not the process.
+        let route_patterns_cache: OnceLock<BTreeMap<String, RoutePattern>> = OnceLock::new();
         Self {
             yaml: self.yaml.clone(),
             overrides_applied: self.overrides_applied,
