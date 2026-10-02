@@ -333,9 +333,11 @@ fn process_outbound_match(
     let verb_text = if let Some(n) = verb {
         // Kotlin-style: `@_nav` captures the whole
         // navigation_expression; the verb is its last named child.
-        if framework.effective_id() == "ktor-client-outbound"
-            || framework.effective_id() == "okhttp-outbound"
-        {
+        // After Item 2 of the parked-Minor #2 pass, ktor-client-outbound
+        // and okhttp-outbound carry `display_name: ktor` /
+        // `display_name: okhttp`; the public name is what
+        // effective_id() returns, so the guard matches against those.
+        if framework.effective_id() == "ktor" || framework.effective_id() == "okhttp" {
             extract_navigation_verb(n, src)
         } else {
             text_of(n, src).unwrap_or_default().to_ascii_lowercase()
@@ -429,18 +431,18 @@ fn process_outbound_match(
     // okhttp-outbound, .NET's HttpClient) accept any receiver —
     // the framework is identified by the call shape, not the
     // receiver text. The walker resolves the via to the
-    // framework's name in that case.
-    if matches!(
-        framework.effective_id(),
-        "ktor-client-outbound" | "okhttp-outbound" | "httpclient-outbound"
-    ) {
+    // framework's name in that case. After Item 2 of the parked-
+    // Minor #2 pass, the three frameworks each carry `display_name`
+    // (`ktor` / `okhttp` / `httpclient`); the public name is what
+    // effective_id() returns, so the guard matches against those.
+    if matches!(framework.effective_id(), "ktor" | "okhttp" | "httpclient") {
         let method = method_for(framework, &verb_text, call, url, src);
         // Ktor / OkHttp / .NET HttpClient — only emit when the
         // verb is recognised. `Request.Builder().url("/api")` is
         // not a client call, even though it walks past the
         // ktor-outbound .scm's `call_expression` matcher.
         if matches!(method, MethodSpec::Unknown)
-            && framework.effective_id() == "ktor-client-outbound"
+            && framework.effective_id() == "ktor"
             && !is_valid_http_verb(&verb_text)
             && verb_text != "execute"
         {
