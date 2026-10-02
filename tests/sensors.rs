@@ -8,6 +8,9 @@
 #[path = "sensors/entry_point_patterns.rs"]
 mod entry_point_patterns;
 
+#[path = "sensors/field_access_deny.rs"]
+mod field_access_deny;
+
 #[path = "sensors/http_client_sensor_patterns.rs"]
 mod http_client_sensor_patterns;
 

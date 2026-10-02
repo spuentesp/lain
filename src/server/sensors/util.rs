@@ -8,6 +8,11 @@ use crate::schema::GraphNode;
 use std::path::Path;
 use tree_sitter::{Language, Parser, Tree};
 
+// Forward the patterns module into this file's scope so the deny-list
+// accessor below can read from `Patterns::patterns()` without forcing
+// every sensor to re-import `crate::server::sensors::patterns`.
+use crate::server::sensors::patterns::Patterns;
+
 // ─── Language classification ────────────────────────────────────
 
 /// Source-file language for sensors that walk code. PR 14 added Rust +
@@ -85,91 +90,27 @@ fn grammar_for(lang: Lang) -> Language {
 
 // ─── Response-metadata denylist (Workstream 5, §6.5) ─────────────
 
-/// Method / property names whose access on a bound HTTP response is
-/// never a payload-field read. Bug B of the contract-federation bug
-/// fixes; the sensor's attribute walker suppresses `ReadsField`
-/// emission when the attribute on a bound receiver is in this list.
+/// `true` when `key` names a response-metadata accessor (body parser,
+/// status / status-text, …) for any bound HTTP client the language
+/// produces. Bug B of the contract-federation bug fixes; the
+/// `field_access_sensor`'s attribute walker suppresses `ReadsField`
+/// emission when the attribute on a bound receiver matches.
 ///
-/// `field_access_sensor` owns the policy; this list lives in
-/// `sensors/util.rs` because Workstream 5 expanded it with
-/// language-specific entries (Java `getStatusCode()`, C# `StatusCode`,
-/// Ruby `code`, Kotlin `statusCode`, …) and the cross-sensor helper
-/// needs the same surface.
-pub const RESPONSE_METHOD_DENYLIST: &[&str] = &[
-    // body parsing (rule 2 already rebinds to the same path)
-    "json",
-    "text",
-    "data",
-    "body",
-    // HTTP-response / Fetch-API metadata
-    "status_code",
-    "headers",
-    "url",
-    "encoding",
-    "content",
-    "raise_for_status",
-    "is_redirect",
-    "ok",
-    "elapsed",
-    // TS / JS Fetch equivalents
-    "blob",
-    "arrayBuffer",
-    "formData",
-    "status",
-    "redirected",
-    // Go body decoding / metadata — see pre-PR-14 comment.
-    "decode",
-    "Decode",
-    "Close",
-    "Body",
-    "StatusCode",
-    "Status",
-    "Header",
-    "Proto",
-    "Request",
-    "TLS",
-    "Trailer",
-    "ContentLength",
-    // Java HttpResponse / `okhttp3.Response` metadata
-    // (`HttpResponse.statusCode()`, `Response.headers()`, etc.). These
-    // are method-form getters — `getStatusCode()` is the Java-Bean
-    // spelling, `statusCode()` is the record-style. The body of a
-    // Java response is the `body()` method (not in this list — it
-    // already rebinds via rule 2). Headers, status, and code / message
-    // are response metadata, not payload fields.
-    "getStatusCode",
-    "statusCode",
-    "getBody",
-    "getHeaders",
-    "headers",
-    "firstValue",
-    "getMessage",
-    "message",
-    // C# `HttpResponseMessage` / `HttpClient` properties. `StatusCode`
-    // and `IsSuccessStatusCode` are response metadata; `Headers` and
-    // `GetValues` are response-header access. Body decoding is
-    // `ReadAsStringAsync` / `ReadFromJsonAsync` (treated as body
-    // parsers — `Body` is in the list above).
-    "IsSuccessStatusCode",
-    "StatusCode",
-    "Headers",
-    "GetValues",
-    "DownloadString",
-    "DownloadStringTaskAsync",
-    // Ruby `Net::HTTPResponse` / `HTTParty::Response` accessors. The
-    // `code` and `message` methods are status / status-text;
-    // `body` is the response payload — but `body` is already in the
-    // body-parser list above and gets the rule-2 rebind.
-    "code",
-    "message",
-    "read_body",
-    "back",
-    // Kotlin Ktor `HttpResponse` properties.
-    "statusCode",
-    "call",
-    "headers",
-    "body",
-];
+/// Pre-refactor (Workstream 5, PR 13/14/16), the same policy lived in
+/// the inline `RESPONSE_METHOD_DENYLIST` constant in this file. Task 5
+/// of the data-driven sensor-patterns plan relocated the deny list
+/// into `frameworks.yaml` under each language's outbound entry; this
+/// accessor is the single sink the sensor now consults. The deny set
+/// is data-driven and runtime-overridable via `<root>/.lain/patterns/`
+/// — see [`crate::server::sensors::patterns::Patterns::load_overrides`].
+///
+/// The per-language union matches the old list for every language the
+/// sensor supports, so existing walker tests stay green.
+pub fn is_deny_method(lang: Lang, key: &str) -> bool {
+    Patterns::patterns()
+        .outbound_patterns(lang)
+        .any(|def| def.deny_methods.iter().any(|m| m == key))
+}
 
 /// A file found by [`walk_workspace`].
 pub struct WalkedFile(std::path::PathBuf);

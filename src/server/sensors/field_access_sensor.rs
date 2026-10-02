@@ -51,7 +51,7 @@ use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::util::{
-    lang_for_path as lang_for_path_shared, parse_for_lang, Lang, RESPONSE_METHOD_DENYLIST,
+    is_deny_method, lang_for_path as lang_for_path_shared, parse_for_lang, Lang,
 };
 use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1174,8 +1174,25 @@ fn handle_attribute<'a>(
         // handles `json` / `text` / `data` / `body` at the assignment
         // site, so suppressing the FieldRef here doesn't lose any
         // rebind information.
-        if RESPONSE_METHOD_DENYLIST.contains(&key.as_str()) {
-            return;
+        //
+        // The deny set is data-driven: `is_deny_method` reads from
+        // `Patterns::patterns().outbound_patterns(lang)` — the union
+        // of `deny_methods` across every outbound entry in
+        // `frameworks.yaml` for `lang`. The pre-refactor inline
+        // `RESPONSE_METHOD_DENYLIST` constant lived in `util.rs` and
+        // was a hand-maintained flat surface across all languages;
+        // the YAML entries carry the same set per-language.
+        //
+        // The lang comes from the file extension (`file_path`) — the
+        // sensor dispatches per language at the top of `walk`, so
+        // every `handle_attribute` invocation in this scope shares
+        // the same language. The map is a no-op when the extension
+        // doesn't name one of the ten supported languages (the
+        // upstream walker wouldn't have walked the file in that case).
+        if let Some(deny_lang) = lang_for_path(file_path) {
+            if is_deny_method(deny_lang, &key) {
+                return;
+            }
         }
         let mut chain = prefix.0.clone();
         chain.push(PathSegment::Name(key));
@@ -3052,7 +3069,12 @@ fn handle_ruby_call(
             if key_text.is_empty() {
                 return;
             }
-            if RESPONSE_METHOD_DENYLIST.contains(&key_text.as_str()) {
+            // Bug B gate: response-metadata accessors never emit a
+            // payload-field read. Data-driven: see `is_deny_method`
+            // (sourced from `Patterns::outbound_patterns(Lang::Ruby)`
+            // — `code`, `message`, `read_body`, `back`, plus the body
+            // parsers like `body` shared with the other languages).
+            if is_deny_method(Lang::Ruby, &key_text) {
                 return;
             }
             let mut chain = prefix.0.clone();

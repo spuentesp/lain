@@ -169,11 +169,11 @@ languages:
     - id: net-http-outbound
       kind: outbound
       lib_match: '^(Net::HTTP|HTTParty|Faraday|RestClient)$'
-      deny_methods: [code, message, read_body, back]
+      deny_methods: [body, code, message, read_body, back]
     - id: httparty-outbound
       kind: outbound
       lib_match: '^HTTParty$'
-      deny_methods: [code, message, read_body, back]
+      deny_methods: [body, code, message, read_body, back]
     - id: faraday-outbound
       kind: outbound
       lib_match: '^Faraday$'
