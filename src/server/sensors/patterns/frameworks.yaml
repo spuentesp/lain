@@ -46,6 +46,20 @@ languages:
     - id: aiohttp-outbound
       kind: outbound
       lib_match: '^aiohttp$'
+    # Task 8 (data-driven sensor-patterns proof): Django's
+    # `path("foo/", handler)` / `re_path(r"^bar/$", handler)`
+    # constructor — a non-decorator route shape that's
+    # tree-sitter distinct from `fastapi-route` / `flask-route`
+    # (matches a `path` or `re_path` identifier function with a
+    # string literal + positional handler identifier). Pure data
+    # change: this YAML entry + the matching
+    # `python/django-route.scm`. No production code in
+    # `src/server/sensors/*.rs` is touched.
+    - id: django-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '\b(?:path|re_path)\s*\(\s*r?["'']([^"'']+)["'']'
+      handler_regex: '\b(?:path|re_path)\s*\(\s*r?["''][^"'']+["'']\s*,\s*(\w+)'
 
   # ── TypeScript / JavaScript ─────────────────────────────────────
   tsjs:

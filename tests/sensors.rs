@@ -25,3 +25,6 @@ mod patterns_build;
 
 #[path = "sensors/patterns_override.rs"]
 mod patterns_override;
+
+#[path = "sensors/patterns_new_framework.rs"]
+mod patterns_new_framework;
