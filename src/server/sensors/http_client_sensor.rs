@@ -399,7 +399,11 @@ fn process_outbound_match(
         // the captured receiver text. `httparty-outbound`'s
         // `display_name: httparty` covers the gem-name lookup, so the
         // inner hardcoded arm for it is no longer reachable.
-        let via_lib: String = match (framework.id.as_str(), framework.effective_id(), via_lib.as_str()) {
+        let via_lib: String = match (
+            framework.id.as_str(),
+            framework.effective_id(),
+            via_lib.as_str(),
+        ) {
             (id, eff, _) if eff != id => eff.to_string(),
             ("net-http-outbound", _, "Net::HTTP") => "net/http".to_string(),
             ("faraday-outbound", _, "Faraday") => "faraday".to_string(),
