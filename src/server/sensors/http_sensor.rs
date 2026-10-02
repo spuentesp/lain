@@ -203,7 +203,7 @@ fn route_pattern_key(lang: Lang, def: &FrameworkDef) -> &'static str {
     let prefix = match lang {
         Lang::Rust => "rust",
         Lang::Python => "python",
-        Lang::TsJs | Lang::Ts | Lang::Tsx => "ts",
+        Lang::TsJs | Lang::Ts | Lang::Tsx => "tsjs",
         Lang::Go => "go",
         Lang::Java => "java",
         Lang::CSharp => "csharp",
@@ -412,7 +412,7 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
     let prefixes: &[&str] = match extension {
         "rs" => &["rust-"],
         "py" => &["python-"],
-        "ts" | "tsx" | "js" | "jsx" => &["ts-"],
+        "ts" | "tsx" | "js" | "jsx" => &["tsjs-"],
         "go" => &["go-"],
         "java" => &["java-"],
         "cs" => &["csharp-"],
@@ -555,14 +555,14 @@ fn try_treesitter_extract(
 }
 
 /// Map the http_sensor pattern key's lang prefix to the
-/// tree-sitter [`Lang`] variant. `ts` covers `.ts`, `.tsx`, `.js`,
+/// tree-sitter [`Lang`] variant. `tsjs` covers `.ts`, `.tsx`, `.js`,
 /// `.jsx` via `lang_for_path`, but the walker only knows the
 /// abstract [`Lang`].
 fn lang_for_yaml_key(key: &str) -> Option<Lang> {
     match key {
         "rust" => Some(Lang::Rust),
         "python" => Some(Lang::Python),
-        "ts" => Some(Lang::TsJs),
+        "tsjs" => Some(Lang::TsJs),
         "go" => Some(Lang::Go),
         "java" => Some(Lang::Java),
         "csharp" => Some(Lang::CSharp),
