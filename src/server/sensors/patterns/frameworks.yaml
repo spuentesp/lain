@@ -186,6 +186,7 @@ languages:
       deny_methods: [body, code, message, read_body, back]
     - id: httparty-outbound
       kind: outbound
+      display_name: httparty
       lib_match: '^HTTParty$'
       deny_methods: [body, code, message, read_body, back]
     - id: faraday-outbound

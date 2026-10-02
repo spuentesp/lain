@@ -40,6 +40,24 @@ pub struct FrameworkDef {
     /// Stable, file-unique identifier (`fastapi-route`,
     /// `reqwest-outbound`, …). Overrides match by `id`.
     pub id: String,
+    /// Optional "what the walker calls this framework" — for
+    /// frameworks whose YAML identifier is a different spelling
+    /// than the lib's actual import (`Net::HTTP` for
+    /// `net-http-outbound`, `HttpClient` for `httpclient-outbound`,
+    /// …). When `Some(_)`, the walker uses `display_name` instead
+    /// of `id` for `is_known_library`, `via_lib`, and verb
+    /// normalisation lookups so the per-framework hardcoded match
+    /// arms disappear from `http_client_sensor.rs`. `None` (the
+    /// default) means "use `id`" — no change to existing entries.
+    ///
+    /// The intent is to let a future framework declare its
+    /// `display_name` in YAML and remove the corresponding
+    /// hardcoded match arm in the walker. Adding
+    /// `display_name` to entries that don't currently have a
+    /// hardcoded mapping is **not** what this field is for —
+    /// keep the YAML minimal.
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub kind: FrameworkKind,
     /// Verbs the framework's call shape can take. Lower-case strings
     /// (`get`, `post`, …). Empty for outbound definitions where the
@@ -71,6 +89,18 @@ pub struct FrameworkDef {
     /// ASP.NET `[HttpGet]`).
     #[serde(default)]
     pub annotation: Option<String>,
+}
+
+impl FrameworkDef {
+    /// The identifier the walker should use for "is this framework
+    /// the X?" lookups. Defaults to [`Self::id`]; returns
+    /// [`Self::display_name`] when set. A regression that drops
+    /// this helper (and inlines `framework.id` back into the walker)
+    /// re-introduces the per-framework hardcoded match arms — keep
+    /// this single funnel the canonical source.
+    pub fn effective_id(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(self.id.as_str())
+    }
 }
 
 /// What role this framework plays in the federation graph.

@@ -385,15 +385,22 @@ fn process_outbound_match(
     if is_known_library(&lib_text, framework, lang) {
         // Direct library call. `reqwest::get`, `requests.get`, …
         let method = method_for(framework, &verb_text, call, url, src);
-        // Ruby frameworks normalise the constant to the conventional
-        // gem name (e.g. `Net::HTTP` → `net/http`,
-        // `HTTParty` → `httparty`).
-        let via_lib = match (framework.id.as_str(), via_lib.as_str()) {
-            ("net-http-outbound", "Net::HTTP") => "net/http".to_string(),
-            ("httparty-outbound", "HTTParty") => "httparty".to_string(),
-            ("faraday-outbound", "Faraday") => "faraday".to_string(),
-            ("restclient-outbound", "RestClient") => "restclient".to_string(),
-            _ => via_lib,
+        // When the framework declares a `display_name`, the walker
+        // uses that as the `via` (the gem-name / public name) —
+        // bypassing the per-framework hardcoded Ruby match below.
+        // A future framework that wants the same behaviour ships a
+        // `display_name:` in `frameworks.yaml`; no walker edit is
+        // required. The hardcoded arms remain for the Ruby
+        // frameworks that haven't picked up `display_name` yet.
+        let via_lib: String = match framework.display_name.as_deref() {
+            Some(name) => name.to_string(),
+            None => match (framework.id.as_str(), via_lib.as_str()) {
+                ("net-http-outbound", "Net::HTTP") => "net/http".to_string(),
+                ("httparty-outbound", "HTTParty") => "httparty".to_string(),
+                ("faraday-outbound", "Faraday") => "faraday".to_string(),
+                ("restclient-outbound", "RestClient") => "restclient".to_string(),
+                _ => via_lib,
+            },
         };
         return build_call(
             CallVia::Library { name: via_lib },
