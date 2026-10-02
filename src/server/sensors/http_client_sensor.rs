@@ -49,9 +49,11 @@ use crate::federation::contracts::normalize::{normalize, UrlPart};
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::patterns::{FrameworkDef, Patterns};
+use crate::server::sensors::util::{language_for, parse_for_lang, Lang};
 use std::collections::BTreeMap;
 use std::path::Path;
-use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 // ─── Public sensor shape ───────────────────────────────────────────────
 
@@ -160,73 +162,710 @@ pub fn scan_workspace_clients(
 
 // ─── Per-language detection ───────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lang {
-    Python,
-    TsJs,
-    Rust,
-    Go,
-    /// Workstream 5 — added in PR #5 of the contract-federation
-    /// tracker. Same shape as the other variants: `detect_calls`
-    /// dispatches by extension (`src/server/sensors/util.rs::Lang`)
-    /// and the per-language helper emits one `HttpClientCall` per
-    /// outbound site.
-    Java,
-    CSharp,
-    Ruby,
-    Kotlin,
-}
-
 /// Detect every HTTP consumer call site in `content` for `lang`.
+///
+/// Task 3 of the data-driven sensor-patterns plan replaced the eight
+/// per-language `detect_*_call` functions (which each encoded ~80
+/// LoC of `if`-chains on tree-sitter node kinds) with a single
+/// walker that drives detection from
+/// [`Patterns::outbound_patterns`] + each framework's compiled `.scm`
+/// query.
+///
+/// The walker:
+///   1. Parses the file with the lang's tree-sitter grammar
+///      (via `parse_for_lang`).
+///   2. Collects client-instance bindings
+///      (`client = httpx.Client(...)`) into a [`FileContext`].
+///   3. For every outbound framework in `Patterns::outbound_patterns(lang)`,
+///      loads the matching `<lang>/<framework>-outbound.scm` body
+///      and runs it against the parsed tree.
+///   4. For every match, the walker reads `(call, lib, verb, url)`
+///      captures, classifies the library, and emits an
+///      [`HttpClientCall`] via the existing language-agnostic
+///      URL-parts extractor + host resolver.
 pub fn detect_calls(path: &Path, content: &str, lang: Lang) -> Vec<HttpClientCall> {
-    let Some(tree) = parse(lang, content) else {
+    let Some(tree) = parse_for_lang(lang, content) else {
         return Vec::new();
     };
     let src = content.as_bytes();
     let path_str = path.to_string_lossy().to_string();
     let ctx = FileContext::collect(tree.root_node(), src, lang);
 
-    let mut calls = Vec::new();
-    walk(tree.root_node(), &mut |node| {
-        let call = match lang {
-            Lang::Python => detect_python_call(node, src, &path_str, &ctx),
-            Lang::TsJs => detect_tsjs_call(node, src, &path_str, &ctx),
-            Lang::Rust => detect_rust_call(node, src, &path_str),
-            Lang::Go => detect_go_call(node, src, &path_str),
-            Lang::Java => detect_java_call(node, src, &path_str),
-            Lang::CSharp => detect_csharp_call(node, src, &path_str),
-            Lang::Ruby => detect_ruby_call(node, src, &path_str),
-            Lang::Kotlin => detect_kotlin_call(node, src, &path_str),
+    let mut calls: Vec<HttpClientCall> = Vec::new();
+    let grammar = language_for(lang);
+    let patterns = Patterns::patterns();
+    let lang_yaml = lang_yaml_key(lang);
+
+    // Track calls we've already emitted by (path, line) so the
+    // same call site doesn't fire from every framework's `.scm`.
+    // Each framework's wrapper pattern shares the same exclusion
+    // predicates, so a `<recv>.<verb>(url)` with URL `/foo` matches
+    // every outbound `.scm`. We pick the first one and ignore the
+    // rest.
+    let mut seen: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
+
+    for framework in patterns.outbound_patterns(lang) {
+        let Some(body) = compiled_query_body(patterns, lang_yaml, framework.id.as_str()) else {
+            continue;
         };
-        if let Some(c) = call {
-            calls.push(c);
+        if !has_query_content(body) {
+            continue;
         }
-    });
+        let Ok(query) = Query::new(&grammar, body) else {
+            continue;
+        };
+
+        let call_idx = query.capture_index_for_name("call");
+        let lib_idx = query.capture_index_for_name("lib");
+        let verb_idx = query.capture_index_for_name("verb");
+        let nav_idx = query.capture_index_for_name("_nav");
+        let url_idx = query.capture_index_for_name("url");
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), src);
+
+        while let Some(m) = matches.next() {
+            let call_node = call_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+            let lib_node = lib_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+            let verb_node = verb_idx
+                .and_then(|i| m.nodes_for_capture_index(i).last())
+                .or_else(|| nav_idx.and_then(|i| m.nodes_for_capture_index(i).last()));
+            let url_node = url_idx.and_then(|i| m.nodes_for_capture_index(i).next());
+
+            let Some(call_node) = call_node else {
+                continue;
+            };
+
+            if let Some(call) = process_outbound_match(
+                framework, call_node, lib_node, verb_node, url_node, src, &ctx, &path_str, lang,
+            ) {
+                // Multiple frameworks' `.scm` files can match the
+                // same call site (e.g. `ureq::post` matches both
+                // `reqwest-outbound` and `ureq-outbound`). Dedup by
+                // (path, line) so each call site emits exactly once
+                // across all frameworks.
+                let key = (call.path.clone(), call.line);
+                if seen.contains(&key) {
+                    continue;
+                }
+                seen.insert(key);
+                calls.push(call);
+            }
+        }
+    }
     calls
 }
 
-fn parse(lang: Lang, src: &str) -> Option<Tree> {
-    let mut parser = Parser::new();
-    let grammar = match lang {
-        Lang::Python => tree_sitter_python::LANGUAGE.into(),
-        Lang::TsJs => tree_sitter_javascript::LANGUAGE.into(),
-        Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
-        Lang::Go => tree_sitter_go::LANGUAGE.into(),
-        Lang::Java => tree_sitter_java::LANGUAGE.into(),
-        Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
-        Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
-        Lang::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
-    };
-    parser.set_language(&grammar).ok()?;
-    parser.parse(src, None)
+fn compiled_query_body(
+    patterns: &Patterns,
+    lang_yaml: &'static str,
+    framework_id: &str,
+) -> Option<&'static str> {
+    let key = format!("{lang_yaml}/{framework_id}.scm");
+    patterns
+        .compiled_queries()
+        .iter()
+        .find(|(k, _, _, _)| *k == key)
+        .map(|(_, _, _, body)| *body)
 }
 
+fn has_query_content(body: &str) -> bool {
+    body.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.is_empty() && !trimmed.starts_with(';')
+    })
+}
+
+fn lang_yaml_key(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Python => "python",
+        Lang::TsJs | Lang::Ts | Lang::Tsx => "tsjs",
+        Lang::Rust => "rust",
+        Lang::Go => "go",
+        Lang::Java => "java",
+        Lang::CSharp => "csharp",
+        Lang::Ruby => "ruby",
+        Lang::Kotlin => "kotlin",
+    }
+}
+
+/// Recursive AST walk used by the file-context pre-pass (Python
+/// `httpx.Client(base_url=…)` bindings + TS/JS module-level
+/// assignments). The post-context outbound walker uses tree-sitter
+/// queries, not this.
 fn walk<F: FnMut(Node)>(root: Node, f: &mut F) {
     f(root);
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
         walk(child, f);
     }
+}
+
+// ─── Per-match dispatch ───────────────────────────────────────────────
+
+/// Process a single outbound `.scm` match. The captures
+/// `(lib?, verb?, url)` come from the framework's `<framework>.scm`
+/// query (see the per-language `.scm` files). Returns
+/// `Some(HttpClientCall)` when the match is a recognised outbound
+/// site, `None` when the walker should skip it (unknown receiver
+/// whose URL does not start with `/`, for example).
+#[allow(clippy::too_many_arguments)]
+fn process_outbound_match(
+    framework: &FrameworkDef,
+    call: Node,
+    lib: Option<Node>,
+    verb: Option<Node>,
+    url: Option<Node>,
+    src: &[u8],
+    ctx: &FileContext,
+    path: &str,
+    lang: Lang,
+) -> Option<HttpClientCall> {
+    let lib_text = lib.and_then(|n| text_of(n, src)).unwrap_or_default();
+    // The verb capture is taken from the LAST node bound to `@verb`
+    // (via `.last()` in the match loop). When the `.scm` captures
+    // a wrapper like Kotlin's `client.get` (whose verb is the
+    // rightmost `identifier` child of `navigation_expression`),
+    // the walker extracts the verb from the wrapper's last named
+    // child instead. This keeps the generic `.scm` shape
+    // `(call_subtree, library_name, verb_method, url_subtree)`
+    // the brief requires.
+    let verb_text = if let Some(n) = verb {
+        // Kotlin-style: `@_nav` captures the whole
+        // navigation_expression; the verb is its last named child.
+        if framework.id == "ktor-client-outbound" || framework.id == "okhttp-outbound" {
+            extract_navigation_verb(n, src)
+        } else {
+            text_of(n, src).unwrap_or_default().to_ascii_lowercase()
+        }
+    } else {
+        String::new()
+    };
+    let _call_line_unused = (call.start_position().row as u32) + 1;
+    let enclosing_fn_line = enclosing_function_line(call);
+
+    // Library classification. The order matters: a bound client
+    // wins over a known-library match (so `client = httpx.Client(...)`
+    // resolves `client.get(url)` to via=`httpx`, not via=`client`).
+    //
+    // When the .scm match is a client-instance call (receiver is
+    // not one of the libraries the framework owns), we still want
+    // to emit the call — but only when the framework's `lib_match`
+    // would also accept the bound library. This keeps one call
+    // per outbound site even though every framework's `.scm` may
+    // match the same `<recv>.<verb>(url)` shape.
+    let (via_lib, base_url_opt) = if let Some(binding) = ctx.client_base_urls.get(&lib_text) {
+        (binding.library.clone(), Some(binding.base_url.as_str()))
+    } else {
+        (lib_text.clone(), None)
+    };
+
+    if ctx.client_base_urls.contains_key(&lib_text) {
+        // Client-instance call. Emit only when the framework owns
+        // the bound library (so the same call doesn't fire from
+        // every framework's .scm).
+        if !is_known_library(&via_lib, framework, lang) {
+            return None;
+        }
+        let method = method_for(framework, &verb_text, call, url, src);
+        return build_call(
+            CallVia::Library { name: via_lib },
+            method,
+            url,
+            call,
+            src,
+            ctx,
+            base_url_opt,
+            enclosing_fn_line,
+            path,
+            framework,
+            &verb_text,
+        );
+    }
+
+    if is_known_library(&lib_text, framework, lang) {
+        // Direct library call. `reqwest::get`, `requests.get`, …
+        let method = method_for(framework, &verb_text, call, url, src);
+        // Ruby frameworks normalise the constant to the conventional
+        // gem name (e.g. `Net::HTTP` → `net/http`,
+        // `HTTParty` → `httparty`).
+        let via_lib = match (framework.id.as_str(), via_lib.as_str()) {
+            ("net-http-outbound", "Net::HTTP") => "net/http".to_string(),
+            ("httparty-outbound", "HTTParty") => "httparty".to_string(),
+            ("faraday-outbound", "Faraday") => "faraday".to_string(),
+            ("restclient-outbound", "RestClient") => "restclient".to_string(),
+            _ => via_lib,
+        };
+        return build_call(
+            CallVia::Library { name: via_lib },
+            method,
+            url,
+            call,
+            src,
+            ctx,
+            base_url_opt,
+            enclosing_fn_line,
+            path,
+            framework,
+            &verb_text,
+        );
+    }
+
+    // Some frameworks (Ktor's ktor-client-outbound, Kotlin's
+    // okhttp-outbound, .NET's HttpClient) accept any receiver —
+    // the framework is identified by the call shape, not the
+    // receiver text. The walker resolves the via to the
+    // framework's name in that case.
+    if matches!(
+        framework.id.as_str(),
+        "ktor-client-outbound" | "okhttp-outbound" | "httpclient-outbound"
+    ) {
+        let method = method_for(framework, &verb_text, call, url, src);
+        // Ktor / OkHttp / .NET HttpClient — only emit when the
+        // verb is recognised. `Request.Builder().url("/api")` is
+        // not a client call, even though it walks past the
+        // ktor-outbound .scm's `call_expression` matcher.
+        if matches!(method, MethodSpec::Unknown)
+            && framework.id == "ktor-client-outbound"
+            && !is_valid_http_verb(&verb_text)
+            && verb_text != "execute"
+        {
+            return None;
+        }
+        let via_lib = match (framework.id.as_str(), lang) {
+            ("okhttp-outbound", _) => "okhttp".to_string(),
+            ("ktor-client-outbound", _) => "ktor".to_string(),
+            ("httpclient-outbound", Lang::Java) => "http".to_string(),
+            ("httpclient-outbound", Lang::CSharp) => {
+                if verb_text == "downloadstring" || verb_text == "downloadstringtaskasync" {
+                    "webclient".to_string()
+                } else {
+                    "httpclient".to_string()
+                }
+            }
+            _ => framework.id.clone(),
+        };
+        return build_call(
+            CallVia::Library { name: via_lib },
+            method,
+            url,
+            call,
+            src,
+            ctx,
+            base_url_opt,
+            enclosing_fn_line,
+            path,
+            framework,
+            &verb_text,
+        );
+    }
+
+    // For frameworks where the URL lives elsewhere in the call
+    // chain (Java's HttpClient.send, OkHttp.execute), the `.scm`
+    // doesn't bind `@url`. We emit a synthetic URL keyed on the
+    // framework's prefix so the joiner still matches against the
+    // verb+method axis.
+    let Some(url) = url else {
+        return Some(synthetic_url_call(framework, lib_text, call, path));
+    };
+
+    if starts_with_slash_node(url, src) {
+        // Wrapper candidate: receiver is not a known library but
+        // the URL starts with `/`. Emit `CallVia::Receiver`.
+        let method = method_for(framework, &verb_text, call, Some(url), src);
+        return build_call(
+            CallVia::Receiver {
+                expr: lib_text.clone(),
+                fn_name: verb_text.clone(),
+            },
+            method,
+            Some(url),
+            call,
+            src,
+            ctx,
+            base_url_opt,
+            enclosing_fn_line,
+            path,
+            framework,
+            &verb_text,
+        );
+    }
+
+    None
+}
+
+/// Build a [`HttpClientCall`] for a `.scm` match where the URL
+/// lives upstream of the call (e.g. Java `HttpClient.send` and
+/// Kotlin `OkHttpClient.execute`). The emitted URL is synthetic
+/// (`<framework-id>://dynamic`); the joiner still matches it
+/// against the verb+method axis.
+fn synthetic_url_call(
+    framework: &FrameworkDef,
+    lib_text: String,
+    call: Node,
+    path: &str,
+) -> HttpClientCall {
+    let raw_parts = vec![UrlPart::Literal(format!("{}://dynamic", framework.id))];
+    let host = host_for(&raw_parts);
+    let normalized = normalize(&raw_parts);
+    let final_url = if matches!(host, HostPart::None) {
+        normalized
+    } else {
+        NormalizedUrl { host, ..normalized }
+    };
+    HttpClientCall {
+        method: MethodSpec::Unknown,
+        url: final_url,
+        via: CallVia::Library { name: lib_text },
+        url_expr: format!("{}://dynamic", framework.id),
+        reads_complete: true,
+        path: path.to_string(),
+        line: (call.start_position().row as u32) + 1,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_call(
+    via: CallVia,
+    method: MethodSpec,
+    url: Option<Node>,
+    call: Node,
+    src: &[u8],
+    ctx: &FileContext,
+    base_url_opt: Option<&str>,
+    enclosing_fn_line: Option<u32>,
+    path: &str,
+    _framework: &FrameworkDef,
+    _verb_text: &str,
+) -> Option<HttpClientCall> {
+    let call_line = (call.start_position().row as u32) + 1;
+    let raw_parts = match url {
+        Some(u) => parts_from_node(u, src, ctx, enclosing_fn_line, base_url_opt),
+        None => Vec::new(),
+    };
+    let host = host_for(&raw_parts);
+    let normalized = normalize(&raw_parts);
+    let final_url = if matches!(host, HostPart::None) {
+        normalized
+    } else {
+        NormalizedUrl { host, ..normalized }
+    };
+    let url_source = match url {
+        Some(u) => text_of(u, src).unwrap_or_default(),
+        None => String::new(),
+    };
+    let url_expr = truncate_url_expr(&url_source);
+    Some(HttpClientCall {
+        method,
+        url: final_url,
+        via,
+        url_expr,
+        reads_complete: true,
+        path: path.to_string(),
+        line: call_line,
+    })
+}
+
+/// Does the receiver text match the framework's `lib_match` regex?
+fn is_known_library(lib_text: &str, framework: &FrameworkDef, _lang: Lang) -> bool {
+    if let Some(re) = framework.lib_match.as_deref() {
+        regex_match_lib(re, lib_text)
+    } else {
+        // No regex — accept any receiver (e.g. catch-all wrapper).
+        !lib_text.is_empty()
+    }
+}
+
+fn regex_match_lib(pattern: &str, lib_text: &str) -> bool {
+    match regex::Regex::new(pattern) {
+        Ok(re) => re.is_match(lib_text),
+        Err(_) => false,
+    }
+}
+
+fn starts_with_slash_node(node: Node, src: &[u8]) -> bool {
+    let raw = text_of(node, src).unwrap_or_default();
+    let s = raw.trim_start();
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    if matches!(bytes[0], b'"' | b'\'') && bytes.len() >= 2 {
+        return bytes[1] == b'/';
+    }
+    if bytes[0] == b'/' {
+        return true;
+    }
+    if bytes.len() >= 3
+        && (bytes[0] == b'f' || bytes[0] == b'F')
+        && matches!(bytes[1], b'"' | b'\'')
+    {
+        return bytes[2] == b'/';
+    }
+    if bytes[0] == b'`' {
+        return s.trim_start_matches('`').starts_with('/');
+    }
+    false
+}
+
+/// Extract the HTTP method from a match. Most repos pass the verb
+/// text directly through [`method_from_verb`]; a few need to read
+/// an init object or a positional argument for the method (TS/JS
+/// `fetch`, `axios`, Python/Go `request` / `NewRequest`). The
+/// .NET HttpClient verbs are spelled `GetAsync`, `PostAsync`, …
+/// and need the trailing `async` stripped before mapping.
+fn method_for(
+    framework: &FrameworkDef,
+    verb_text: &str,
+    call: Node,
+    url: Option<Node>,
+    src: &[u8],
+) -> MethodSpec {
+    if is_valid_http_verb(verb_text) {
+        return method_from_verb(verb_text);
+    }
+    let id = framework.id.as_str();
+    match id {
+        "httpclient-outbound" => method_from_csharp_verb(verb_text),
+        "requests-outbound" | "httpx-outbound" => {
+            // Verb == "request" → method from first positional arg
+            // (string literal) or from the `method=` kwarg.
+            method_from_request_shape(call, src)
+        }
+        "fetch-outbound" => {
+            // `fetch(url, init)` → method from init's `method` key.
+            method_from_init_object(call, src)
+        }
+        "axios-outbound" | "got-outbound" => {
+            // `axios(url)` → Unknown. `axios({method, url})` →
+            // method from object.method. `axios.<verb>(url)` →
+            // Unknown (verb captured separately; not a valid HTTP
+            // verb at this point).
+            method_from_axios_shape(call, url, src)
+        }
+        "stdlib-http-outbound" => {
+            // `http.NewRequest(method, url, body)` /
+            // `http.NewRequestWithContext(ctx, method, url, body)`.
+            // Verb = "newrequest" / "newrequestwithcontext"; the
+            // walker reads the appropriate positional argument.
+            method_from_newrequest_shape(call, src)
+        }
+        "okhttp-outbound" => {
+            // Java: `execute` / `send` — verb itself is not an HTTP
+            // verb, so the method is Unknown. (The URL is buried in
+            // the receiver chain; the walker emits a synthetic URL.)
+            MethodSpec::Unknown
+        }
+        "net-http-outbound" | "httparty-outbound" | "faraday-outbound" | "restclient-outbound" => {
+            // The .scm already captures the verb on the receiver
+            // — if it isn't a known HTTP verb here, return Unknown.
+            MethodSpec::Unknown
+        }
+        "ktor-client-outbound" => {
+            // `client.get(url)` etc. — verb is `get` / `post` / …;
+            // `client.execute()` is the OkHttp shape, which the
+            // okhttp-outbound .scm owns.
+            MethodSpec::Unknown
+        }
+        "awc-outbound" | "ureq-outbound" | "reqwest-outbound" => {
+            // Rust: scoped_identifier binds @verb to the rightmost
+            // identifier. If it isn't a valid HTTP verb here, return
+            // Unknown rather than emitting a junk call.
+            MethodSpec::Unknown
+        }
+        _ => MethodSpec::Unknown,
+    }
+}
+
+/// Map C# `HttpClient.<verb>(url)` / `WebClient.<verb>(url)` verb
+/// spellings to the canonical HTTP method.
+fn method_from_csharp_verb(verb_text: &str) -> MethodSpec {
+    let normalized = verb_text.to_ascii_lowercase();
+    let canonical = match normalized.as_str() {
+        "getasync" | "getstringasync" => "get",
+        "postasync" => "post",
+        "putasync" => "put",
+        "patchasync" => "patch",
+        "deleteasync" => "delete",
+        "sendasync" => "send",
+        "downloadstring" | "downloadstringtaskasync" => "get",
+        other => other,
+    };
+    method_from_verb(canonical)
+}
+
+/// Extract the verb (rightmost named child) from a Kotlin
+/// `navigation_expression` node. The Kotlin grammar exposes
+/// the receiver and the verb as named siblings under one
+/// navigation_expression — the rightmost is the verb.
+fn extract_navigation_verb(nav: Node, src: &[u8]) -> String {
+    let mut cursor = nav.walk();
+    let mut last_id: Option<Node> = None;
+    for child in nav.named_children(&mut cursor) {
+        if matches!(child.kind(), "identifier" | "simple_identifier") {
+            last_id = Some(child);
+        }
+    }
+    last_id
+        .and_then(|n| text_of(n, src))
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+/// Read the `method` from a `requests.request(method, url)` /
+/// `requests.request(method=…, url=…)` call shape.
+fn method_from_request_shape(call: Node, src: &[u8]) -> MethodSpec {
+    let args = args_of_tsjs(call);
+    // Positional: method is arg 0.
+    if let Some(first) = args.first() {
+        if first.kind() == "string" {
+            if let Some(text) = text_of(*first, src) {
+                let cleaned = strip_python_string_quotes(&text).to_ascii_lowercase();
+                return method_from_verb(&cleaned);
+            }
+        }
+    }
+    // Kwarg: method=…
+    for arg in &args {
+        if arg.kind() == "keyword_argument" {
+            let name = arg
+                .child_by_field_name("name")
+                .and_then(|n| text_of(n, src));
+            if name.as_deref() == Some("method") {
+                if let Some(value) = arg.child_by_field_name("value") {
+                    if value.kind() == "string" {
+                        if let Some(text) = text_of(value, src) {
+                            let cleaned = strip_python_string_quotes(&text).to_ascii_lowercase();
+                            return method_from_verb(&cleaned);
+                        }
+                    }
+                }
+                return MethodSpec::Unknown;
+            }
+        }
+    }
+    MethodSpec::Unknown
+}
+
+/// Read the method from a `fetch(url, init)` call's init object —
+/// the `method` key on the object. Defaults to GET when init is
+/// absent or has no `method` key.
+fn method_from_init_object(call: Node, src: &[u8]) -> MethodSpec {
+    let args = args_of_tsjs(call);
+    let init = match args.get(1) {
+        Some(n) => n,
+        None => return MethodSpec::Known(HttpMethod::Get),
+    };
+    if init.kind() != "object" {
+        return MethodSpec::Known(HttpMethod::Get);
+    }
+    let mut cursor = init.walk();
+    for child in init.children(&mut cursor) {
+        if child.kind() != "pair" {
+            continue;
+        }
+        let key = match child.child_by_field_name("key") {
+            Some(k) => k,
+            None => continue,
+        };
+        let key_text = text_of(key, src).unwrap_or_default();
+        if key_text != "method" {
+            continue;
+        }
+        let value = match child.child_by_field_name("value") {
+            Some(v) => v,
+            None => return MethodSpec::Known(HttpMethod::Get),
+        };
+        if value.kind() == "string" {
+            if let Some(text) = text_of(value, src) {
+                let cleaned = strip_js_string_quotes(&text).to_ascii_lowercase();
+                return method_from_verb(&cleaned);
+            }
+        }
+        return MethodSpec::Unknown;
+    }
+    MethodSpec::Known(HttpMethod::Get)
+}
+
+/// Read the method from an `axios(url)` / `axios({method, url})` /
+/// `axios(url, {method})` shape. Looks at:
+///   1. The init object (arg 1) for `axios(url, {method: …})`.
+///   2. The URL node itself when `=== object` (for
+///      `axios({method: …, url: …})`).
+///   3. Returns Unknown otherwise.
+fn method_from_axios_shape(call: Node, url: Option<Node>, src: &[u8]) -> MethodSpec {
+    // Try the init-object path first (arg 1 = object).
+    if let Some(args) = call.child_by_field_name("arguments") {
+        let mut cursor = args.walk();
+        let named: Vec<_> = args.named_children(&mut cursor).collect();
+        if let Some(init) = named.get(1) {
+            if init.kind() == "object" {
+                if let Some(spec) = method_from_object(init, src) {
+                    return spec;
+                }
+            }
+        }
+    }
+    // Fall back to looking at the URL node itself when it's an object.
+    if let Some(url) = url {
+        if url.kind() == "object" {
+            if let Some(spec) = method_from_object(&url, src) {
+                return spec;
+            }
+        }
+    }
+    MethodSpec::Unknown
+}
+
+fn method_from_object(obj: &Node, src: &[u8]) -> Option<MethodSpec> {
+    let mut cursor = obj.walk();
+    for child in obj.children(&mut cursor) {
+        if child.kind() != "pair" {
+            continue;
+        }
+        let key = child.child_by_field_name("key");
+        let key_text = key.and_then(|k| text_of(k, src)).unwrap_or_default();
+        if key_text == "method" {
+            let value = child.child_by_field_name("value")?;
+            if value.kind() == "string" {
+                if let Some(text) = text_of(value, src) {
+                    let cleaned = strip_js_string_quotes(&text).to_ascii_lowercase();
+                    return Some(method_from_verb(&cleaned));
+                }
+            }
+            return Some(MethodSpec::Unknown);
+        }
+    }
+    None
+}
+
+/// Read the method from `http.NewRequest(method, url, body)` /
+/// `http.NewRequestWithContext(ctx, method, url, body)`. The
+/// .scm pattern restricts @verb so we just look at the right
+/// positional argument.
+fn method_from_newrequest_shape(call: Node, src: &[u8]) -> MethodSpec {
+    let args = args_of_tsjs(call);
+    // The .scm captures @verb in two forms: "NewRequest" and
+    // "NewRequestWithContext". Determine the method arg index
+    // from the call's text.
+    let call_text = text_of(call, src).unwrap_or_default();
+    let method_idx = if call_text.contains("NewRequestWithContext") {
+        1
+    } else {
+        0
+    };
+    let Some(method_arg) = args.get(method_idx) else {
+        return MethodSpec::Unknown;
+    };
+    if method_arg.kind() != "interpreted_string_literal"
+        && method_arg.kind() != "string_literal"
+        && method_arg.kind() != "string"
+    {
+        return MethodSpec::Unknown;
+    }
+    let raw = text_of(*method_arg, src).unwrap_or_default();
+    let cleaned = strip_js_string_quotes(&raw).to_ascii_lowercase();
+    method_from_verb(&cleaned)
 }
 
 // ─── File context: identifiers and client bindings ────────────────────
@@ -274,6 +913,15 @@ impl FileContext {
             // ctor-base_url resolution either; the receiver-side
             // detection fires at the call site.
             Lang::Java | Lang::CSharp | Lang::Ruby | Lang::Kotlin => {}
+            // `Ts` / `Tsx` share the `tsjs` bucket — the
+            // existing parser uses `tree_sitter_javascript` for both,
+            // and `lang_for_path` routes .ts/.tsx to `Lang::Ts` /
+            // `Lang::Tsx` before they reach the sensors. The
+            // `scan_workspace_clients` extension matcher routes them
+            // all to `Lang::TsJs`. If `Lang::Ts` ever shows up
+            // here it's a wiring bug worth surfacing — currently
+            // the match arm is a no-op.
+            Lang::Ts | Lang::Tsx => {}
         }
         ctx
     }
@@ -616,22 +1264,6 @@ fn find_kwarg(call: Node, name: &str, src: &[u8]) -> Option<String> {
     None
 }
 
-fn collect_kwargs_py<'a>(args: &[Node<'a>], src: &[u8]) -> BTreeMap<String, Node<'a>> {
-    let mut out = BTreeMap::new();
-    for arg in args {
-        if arg.kind() == "keyword_argument" {
-            let n = match arg.child_by_field_name("name") {
-                Some(n) => n,
-                None => continue,
-            };
-            if let Some(name) = text_of(n, src) {
-                out.insert(name, *arg);
-            }
-        }
-    }
-    out
-}
-
 fn args_of<'a>(call: Node<'a>) -> Vec<Node<'a>> {
     let Some(args) = call.child_by_field_name("arguments") else {
         return Vec::new();
@@ -668,37 +1300,6 @@ fn method_from_verb(verb: &str) -> MethodSpec {
         _ => return MethodSpec::Unknown,
     };
     MethodSpec::Known(m)
-}
-
-fn method_from_request_args(args: &[Node], src: &[u8]) -> MethodSpec {
-    // `requests.request("GET", url)` / `requests.request(method="GET", url=…)`.
-    // First positional arg wins; else kwarg `method=`.
-    for (i, arg) in args.iter().enumerate() {
-        if i == 0 && arg.kind() == "string" {
-            if let Some(text) = text_of(*arg, src) {
-                let cleaned = strip_python_string_quotes(&text).to_ascii_lowercase();
-                if is_valid_http_verb(&cleaned) {
-                    return method_from_verb(&cleaned);
-                }
-            }
-        }
-    }
-    if let Some(kw) = args.iter().find(|a| a.kind() == "keyword_argument") {
-        let name = kw.child_by_field_name("name").and_then(|n| text_of(n, src));
-        if name.as_deref() == Some("method") {
-            let value = kw.child_by_field_name("value");
-            if let Some(v) = value {
-                if v.kind() == "string" {
-                    if let Some(text) = text_of(v, src) {
-                        let cleaned = strip_python_string_quotes(&text).to_ascii_lowercase();
-                        return method_from_verb(&cleaned);
-                    }
-                }
-            }
-            return MethodSpec::Unknown;
-        }
-    }
-    MethodSpec::Unknown
 }
 
 fn strip_python_string_quotes(s: &str) -> &str {
@@ -794,8 +1395,24 @@ fn parts_from_node_inner(
             vec![UrlPart::Literal(content.to_string())]
         }
         "string_literal" => {
+            // Rust, C#, Java, Kotlin: `string_literal` carries its
+            // own delimiters. Strip them so the §4.5 normalizer
+            // doesn't see the trailing `"` as part of the URL.
             let text = text_of(node, src).unwrap_or_default();
-            vec![UrlPart::Literal(text.clone())]
+            let cleaned = strip_js_string_quotes(&text);
+            vec![UrlPart::Literal(cleaned.to_string())]
+        }
+        // Go's `interpreted_string_literal` (e.g. `"foo"` in
+        // `http.Get("foo")`) — same shape as Rust's
+        // `string_literal`: strip the quotes and emit a single
+        // Literal. The grammar nests the actual content in
+        // `interpreted_string_literal_content`, but we accept either
+        // shape (a stripped Literal from the wrapper is equivalent
+        // to a Literal from the inner content).
+        "interpreted_string_literal" => {
+            let text = text_of(node, src).unwrap_or_default();
+            let cleaned = strip_js_string_quotes(&text);
+            vec![UrlPart::Literal(cleaned.to_string())]
         }
         // Python string concatenation: `"a" "b"` — multiple `string`
         // siblings inside `concatenated_string`, OR a sequence of
@@ -850,10 +1467,22 @@ fn parts_from_node_inner(
             Vec::new()
         }
         "argument" | "keyword_argument" => {
-            // Bare argument node from the Python grammar (the grammar
-            // wraps positional args in `argument`); recurse on the value.
-            let value = node.child_by_field_name("value").unwrap_or(node);
-            parts_from_node_inner(value, src, ctx, enclosing_fn_line)
+            // Bare argument node — recurse on the wrapped expression.
+            // Python's `argument` exposes the value as a `value`
+            // field; C# / Java / Kotlin / Ruby expose it as a single
+            // unnamed child. Walk both candidates, taking whichever
+            // exists, and never fall back to `node` itself (which
+            // would recurse on the same kind → stack overflow).
+            if let Some(value) = node.child_by_field_name("value") {
+                parts_from_node_inner(value, src, ctx, enclosing_fn_line)
+            } else {
+                let mut cursor = node.walk();
+                let next = node.named_children(&mut cursor).next();
+                match next {
+                    Some(child) => parts_from_node_inner(child, src, ctx, enclosing_fn_line),
+                    None => Vec::new(),
+                }
+            }
         }
         // `urljoin(base, "/p")` / `new URL("/p", base)` give parts of
         // base then "/p". Both Python stdlib `urljoin` and TS `URL`
@@ -867,6 +1496,31 @@ fn parts_from_node_inner(
         // its full source text.
         "attribute" | "member_expression" | "subscript" | "subscript_expression" => {
             vec![UrlPart::Hole(text_of(node, src).unwrap_or_default())]
+        }
+        // TS/JS object literal: drill into pairs and pick up a
+        // `url: <string>` member if present. `axios({ method, url })`
+        // and `fetch(url, { method })` both rely on this.
+        "object" => {
+            let mut out = Vec::new();
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() != "pair" {
+                    continue;
+                }
+                let key = child.child_by_field_name("key");
+                let key_text = key.and_then(|k| text_of(k, src)).unwrap_or_default();
+                if key_text == "url" {
+                    let value = child.child_by_field_name("value");
+                    if let Some(v) = value {
+                        out.extend(parts_from_node_inner(v, src, ctx, enclosing_fn_line));
+                    }
+                }
+            }
+            if out.is_empty() {
+                vec![UrlPart::Hole(text_of(node, src).unwrap_or_default())]
+            } else {
+                out
+            }
         }
         // Catch-all: drop the node, emit no parts.
         _ => Vec::new(),
@@ -1177,1315 +1831,6 @@ fn inner_paren(s: &str) -> &str {
     } else {
         t
     }
-}
-
-// ─── Python call detection ────────────────────────────────────────────
-
-fn detect_python_call(
-    node: Node,
-    src: &[u8],
-    path: &str,
-    ctx: &FileContext,
-) -> Option<HttpClientCall> {
-    if node.kind() != "call" {
-        return None;
-    }
-    let function = node.child_by_field_name("function")?;
-    let line = (node.start_position().row as u32) + 1;
-    let args = args_of(node);
-    let kwargs = collect_kwargs_py(&args, src);
-
-    let enclosing_fn_line = enclosing_function_line(node);
-
-    match function.kind() {
-        // `identifier` — bare call; not a wrapper candidate per §6.3
-        // (wrappers are receiver-shape `<recv>.<verb>(arg)`).
-        "identifier" => None,
-        "attribute" => {
-            let recv = function.child_by_field_name("object")?;
-            let recv_text = text_of(recv, src)?;
-            let attr = function.child_by_field_name("attribute")?;
-            let verb_text = text_of(attr, src)?.to_ascii_lowercase();
-
-            // Library/module-level calls: `requests.<verb>` /
-            // `httpx.<verb>` / `requests.request` / `httpx.request`.
-            let module_match = match (recv_text.as_str(), verb_text.as_str()) {
-                ("requests", v) if is_valid_http_verb(v) => Some(("requests", verb_text.clone())),
-                ("httpx", v) if is_valid_http_verb(v) => Some(("httpx", verb_text.clone())),
-                ("requests", "request") => Some(("requests", "request".to_string())),
-                ("httpx", "request") => Some(("httpx", "request".to_string())),
-                _ => None,
-            };
-            // For `requests.request(method, url)` / `httpx.request(method, url)`,
-            // the URL is positional arg 1, not arg 0.
-            let url_pos = if matches!(verb_text.as_str(), "request")
-                && (recv_text == "requests" || recv_text == "httpx")
-            {
-                1
-            } else {
-                0
-            };
-            let url_arg = kwargs
-                .get("url")
-                .map(|kw| kw.child_by_field_name("value").unwrap_or(*kw))
-                .or_else(|| args.get(url_pos).copied())?;
-            let url_source = text_of(url_arg, src)?;
-            let url_expr = truncate_url_expr(&url_source);
-
-            if let Some((lib, verb)) = module_match {
-                let method = if verb == "request" {
-                    method_from_request_args(&args, src)
-                } else {
-                    method_from_verb(&verb)
-                };
-                let via = CallVia::Library {
-                    name: lib.to_string(),
-                };
-                let url = url_for(url_arg, src, ctx, enclosing_fn_line, None);
-                return Some(HttpClientCall {
-                    method,
-                    url,
-                    via,
-                    url_expr,
-                    reads_complete: true,
-                    path: path.to_string(),
-                    line,
-                });
-            }
-
-            // Client-instance call: `client.<verb>(...)` where client
-            // was bound from a Client/AsyncClient/Session/ClientSession.
-            if let Some(binding) = ctx.client_base_urls.get(&recv_text) {
-                if !is_valid_http_verb(&verb_text) {
-                    return None;
-                }
-                let method = method_from_verb(&verb_text);
-                let via = CallVia::Library {
-                    name: binding.library.clone(),
-                };
-                let url = url_for(
-                    url_arg,
-                    src,
-                    ctx,
-                    enclosing_fn_line,
-                    Some(&binding.base_url),
-                );
-                return Some(HttpClientCall {
-                    method,
-                    url,
-                    via,
-                    url_expr,
-                    reads_complete: true,
-                    path: path.to_string(),
-                    line,
-                });
-            }
-
-            // Wrapper candidate: any `<recv>.<verb>(<arg>)` with arg
-            // starting with `/`.
-            if !starts_with_slash_expr(url_arg, src) {
-                return None;
-            }
-            if !is_valid_http_verb(&verb_text) {
-                // Spec says verb must be a known HTTP verb for the
-                // method; otherwise `MethodSpec::Unknown`. A wrapper
-                // candidate with an unknown verb is still recorded
-                // but the method is `Unknown`.
-                let via = CallVia::Receiver {
-                    expr: recv_text.clone(),
-                    fn_name: verb_text.clone(),
-                };
-                let url = url_for(url_arg, src, ctx, enclosing_fn_line, None);
-                return Some(HttpClientCall {
-                    method: MethodSpec::Unknown,
-                    url,
-                    via,
-                    url_expr,
-                    reads_complete: true,
-                    path: path.to_string(),
-                    line,
-                });
-            }
-            let method = method_from_verb(&verb_text);
-            let via = CallVia::Receiver {
-                expr: recv_text.clone(),
-                fn_name: verb_text.clone(),
-            };
-            let url = url_for(url_arg, src, ctx, enclosing_fn_line, None);
-            Some(HttpClientCall {
-                method,
-                url,
-                via,
-                url_expr,
-                reads_complete: true,
-                path: path.to_string(),
-                line,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn starts_with_slash_expr(node: Node, src: &[u8]) -> bool {
-    let raw = text_of(node, src).unwrap_or_default();
-    let s = raw.trim_start();
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return false;
-    }
-    // Skip past string quotes.
-    let mut idx = 0;
-    if matches!(bytes[0], b'"' | b'\'') {
-        idx = 1;
-    }
-    if idx < bytes.len() && bytes[idx] == b'/' {
-        return true;
-    }
-    // f-string literal text: in Python the f"" prefix has `f` then
-    // `"`, then the literal starts. We've already advanced past `"`;
-    // check for `f` prefix in the original.
-    let prefix_bytes = raw.as_bytes();
-    if prefix_bytes.len() >= 2
-        && prefix_bytes[0] == b'f'
-        && matches!(prefix_bytes[1], b'"' | b'\'')
-        && prefix_bytes.len() >= 3
-        && prefix_bytes[2] == b'/'
-    {
-        return true;
-    }
-    false
-}
-
-fn url_for(
-    url_arg: Node,
-    src: &[u8],
-    ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
-    base_url: Option<&str>,
-) -> NormalizedUrl {
-    let raw_parts = parts_from_node(url_arg, src, ctx, enclosing_fn_line, base_url);
-    let host = host_for(&raw_parts);
-    // The normalizer re-derives the host from the parts, but we keep
-    // the §6.3-config-free host (Env/Expr) when the normalizer would
-    // classify the same leading-hole as a path-only HostPart::None.
-    // To avoid losing the env info, we run normalize with a synthetic
-    // scheme-less host-prefix so the host step sees a hole, and then
-    // substitute our resolved host in.
-    //
-    // Simpler: if `host` is `Expr`/`Env` (the §6.3 outcome), we
-    // trust it. If it's `None` (no leading hole) we let the
-    // normalizer's host step run normally. `Literal` is unreachable
-    // here because a host literal would have been `Literal(...)` in
-    // `raw_parts`, which makes `host_for` see a leading literal and
-    // return `None` (no leading hole).
-    let normalized = normalize(&raw_parts);
-    if matches!(host, HostPart::None) {
-        normalized
-    } else {
-        NormalizedUrl {
-            host: host.clone(),
-            ..normalized
-        }
-    }
-}
-
-// ─── TS/JS call detection ────────────────────────────────────────────
-
-fn detect_tsjs_call(
-    node: Node,
-    src: &[u8],
-    path: &str,
-    ctx: &FileContext,
-) -> Option<HttpClientCall> {
-    if node.kind() != "call_expression" {
-        return None;
-    }
-    let function = node.child_by_field_name("function")?;
-    let line = (node.start_position().row as u32) + 1;
-    let args = args_of_tsjs(node);
-    let enclosing_fn_line = enclosing_function_line(node);
-
-    match function.kind() {
-        // `fetch(url, init?)`.
-        "identifier" => {
-            let name = text_of(function, src)?;
-            if name == "fetch" {
-                let url_arg = args.first().copied()?;
-                let url_source = text_of(url_arg, src)?;
-                let url_expr = truncate_url_expr(&url_source);
-                let method = init_method(args.get(1).copied(), src);
-                let url = url_for(url_arg, src, ctx, enclosing_fn_line, None);
-                let via = CallVia::Library {
-                    name: "fetch".to_string(),
-                };
-                return Some(HttpClientCall {
-                    method,
-                    url,
-                    via,
-                    url_expr,
-                    reads_complete: true,
-                    path: path.to_string(),
-                    line,
-                });
-            }
-            if name == "axios" {
-                // `axios(url)` or `axios({method, url})`.
-                let first = args.first().copied()?;
-                let url_source = text_of(first, src)?;
-                let url_expr = truncate_url_expr(&url_source);
-                if first.kind() == "object" {
-                    let (object_method, object_url) =
-                        object_method_and_url(first, src).unwrap_or((MethodSpec::Unknown, first));
-                    let url_arg = object_url;
-                    let url_source = text_of(url_arg, src).unwrap_or_else(|| url_expr.clone());
-                    let url_expr = truncate_url_expr(&url_source);
-                    let url = url_for(url_arg, src, ctx, enclosing_fn_line, None);
-                    let via = CallVia::Library {
-                        name: "axios".to_string(),
-                    };
-                    return Some(HttpClientCall {
-                        method: object_method,
-                        url,
-                        via,
-                        url_expr,
-                        reads_complete: true,
-                        path: path.to_string(),
-                        line,
-                    });
-                }
-                // `axios(url)` — method is unknown.
-                let url = url_for(first, src, ctx, enclosing_fn_line, None);
-                let via = CallVia::Library {
-                    name: "axios".to_string(),
-                };
-                return Some(HttpClientCall {
-                    method: MethodSpec::Unknown,
-                    url,
-                    via,
-                    url_expr,
-                    reads_complete: true,
-                    path: path.to_string(),
-                    line,
-                });
-            }
-            if name == "got" {
-                // `got(url)` or `got(url, {method})`.
-                let url_arg = args.first().copied()?;
-                let url_source = text_of(url_arg, src)?;
-                let url_expr = truncate_url_expr(&url_source);
-                let opts = args.get(1).copied();
-                let method = if let Some(opts) = opts {
-                    if opts.kind() == "object" {
-                        method_from_object(opts, src)
-                    } else {
-                        MethodSpec::Unknown
-                    }
-                } else {
-                    MethodSpec::Unknown
-                };
-                let url = url_for(url_arg, src, ctx, enclosing_fn_line, None);
-                let via = CallVia::Library {
-                    name: "got".to_string(),
-                };
-                return Some(HttpClientCall {
-                    method,
-                    url,
-                    via,
-                    url_expr,
-                    reads_complete: true,
-                    path: path.to_string(),
-                    line,
-                });
-            }
-            None
-        }
-        "member_expression" => {
-            let recv = function.child_by_field_name("object")?;
-            let recv_text = text_of(recv, src)?;
-            let attr = function.child_by_field_name("property")?;
-            let verb_text = text_of(attr, src)?.to_ascii_lowercase();
-
-            // Library/module calls: `axios.<verb>`, `got.<verb>`, `ky.<verb>`.
-            let lib = match recv_text.as_str() {
-                "axios" | "got" | "ky" => Some(recv_text.as_str()),
-                _ => None,
-            };
-            if let Some(lib) = lib {
-                if !is_valid_http_verb(&verb_text) {
-                    return None;
-                }
-                let method = method_from_verb(&verb_text);
-                let url_arg = args.first().copied()?;
-                let url_source = text_of(url_arg, src)?;
-                let url_expr = truncate_url_expr(&url_source);
-                let url = url_for(url_arg, src, ctx, enclosing_fn_line, None);
-                let via = CallVia::Library {
-                    name: lib.to_string(),
-                };
-                return Some(HttpClientCall {
-                    method,
-                    url,
-                    via,
-                    url_expr,
-                    reads_complete: true,
-                    path: path.to_string(),
-                    line,
-                });
-            }
-
-            // Wrapper candidate: `<recv>.<verb>(<arg>)` with arg
-            // starting with `/`.
-            if !starts_with_slash_expr_tsjs(args.first().copied(), src) {
-                return None;
-            }
-            let url_arg = args.first().copied()?;
-            let url_source = text_of(url_arg, src)?;
-            let url_expr = truncate_url_expr(&url_source);
-            let method = method_from_verb(&verb_text);
-            let via = CallVia::Receiver {
-                expr: recv_text.clone(),
-                fn_name: verb_text.clone(),
-            };
-            let url = url_for(url_arg, src, ctx, enclosing_fn_line, None);
-            Some(HttpClientCall {
-                method,
-                url,
-                via,
-                url_expr,
-                reads_complete: true,
-                path: path.to_string(),
-                line,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn starts_with_slash_expr_tsjs(node: Option<Node>, src: &[u8]) -> bool {
-    let Some(node) = node else { return false };
-    let raw = text_of(node, src).unwrap_or_default();
-    let s = raw.trim_start();
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return false;
-    }
-    // TS string: `"…"`, `'…'`, or `` `…` ``. Template literal can
-    // begin with `${…}` (interpolation first). We treat that as not
-    // starting with `/` since it's a hole.
-    if bytes[0] == b'`' {
-        // If the template literal's first non-` text is `/`, treat
-        // it as starting with `/`. The grammar emits the literal
-        // text inside the template_string as a child. For our text
-        // heuristic, the inner first non-` character decides.
-        let inner = raw.trim_start_matches('`');
-        return inner.starts_with('/');
-    }
-    if matches!(bytes[0], b'"' | b'\'') {
-        return bytes.len() >= 2 && bytes[1] == b'/';
-    }
-    bytes[0] == b'/'
-}
-
-fn init_method(init: Option<Node>, src: &[u8]) -> MethodSpec {
-    let Some(init) = init else {
-        return MethodSpec::Known(HttpMethod::Get);
-    };
-    if init.kind() != "object" {
-        return MethodSpec::Known(HttpMethod::Get);
-    }
-    let mut cursor = init.walk();
-    for child in init.children(&mut cursor) {
-        if child.kind() != "pair" {
-            continue;
-        }
-        let key = match child.child_by_field_name("key") {
-            Some(k) => k,
-            None => continue,
-        };
-        let key_text = text_of(key, src).unwrap_or_default();
-        if key_text != "method" {
-            continue;
-        }
-        let value = match child.child_by_field_name("value") {
-            Some(v) => v,
-            None => return MethodSpec::Known(HttpMethod::Get),
-        };
-        if value.kind() == "string" {
-            if let Some(text) = text_of(value, src) {
-                let cleaned = strip_js_string_quotes(&text).to_ascii_lowercase();
-                return method_from_verb(&cleaned);
-            }
-        }
-        return MethodSpec::Unknown;
-    }
-    MethodSpec::Known(HttpMethod::Get)
-}
-
-fn object_method_and_url<'a>(obj: Node<'a>, src: &[u8]) -> Option<(MethodSpec, Node<'a>)> {
-    let mut method = MethodSpec::Unknown;
-    let mut url_arg: Option<Node> = None;
-    let mut cursor = obj.walk();
-    for child in obj.children(&mut cursor) {
-        if child.kind() != "pair" {
-            continue;
-        }
-        let key = child.child_by_field_name("key")?;
-        let key_text = text_of(key, src).unwrap_or_default();
-        let value = child.child_by_field_name("value")?;
-        match key_text.as_str() {
-            "method" => {
-                if value.kind() == "string" {
-                    if let Some(text) = text_of(value, src) {
-                        let cleaned = strip_js_string_quotes(&text).to_ascii_lowercase();
-                        method = method_from_verb(&cleaned);
-                    }
-                } else {
-                    method = MethodSpec::Unknown;
-                }
-            }
-            "url" => url_arg = Some(value),
-            _ => {}
-        }
-    }
-    url_arg.map(|u| (method, u))
-}
-
-/// Extract just the `method` key from an options object. Independent
-/// of whether `url` is present — used by `got(url, {method: ...})`
-/// where the URL is positional, not in the object.
-fn method_from_object(obj: Node, src: &[u8]) -> MethodSpec {
-    let mut cursor = obj.walk();
-    for child in obj.children(&mut cursor) {
-        if child.kind() != "pair" {
-            continue;
-        }
-        let key = match child.child_by_field_name("key") {
-            Some(k) => k,
-            None => continue,
-        };
-        let key_text = text_of(key, src).unwrap_or_default();
-        if key_text != "method" {
-            continue;
-        }
-        let value = match child.child_by_field_name("value") {
-            Some(v) => v,
-            None => return MethodSpec::Unknown,
-        };
-        if value.kind() == "string" {
-            if let Some(text) = text_of(value, src) {
-                let cleaned = strip_js_string_quotes(&text).to_ascii_lowercase();
-                return method_from_verb(&cleaned);
-            }
-        }
-        return MethodSpec::Unknown;
-    }
-    MethodSpec::Unknown
-}
-
-// ─── Rust call detection ───────────────────────────────────────────
-//
-// Recognized outbound HTTP shapes:
-//   - `reqwest::get(url)`, `reqwest::Client::new().get(url)`,
-//     `reqwest::Client::builder().build().unwrap().get(url)`,
-//     `reqwest::blocking::get(url)` — verb is `get` (default) or any
-//     valid HTTP verb.
-//   - `ureq::get(url)`, `ureq::AgentBuilder::new().build().get(url)`.
-//   - `awc::Client::new().get(url)` — actix-web HTTP client.
-//
-// The verb is the method name on the call; the URL is the first arg.
-
-fn detect_rust_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
-    if node.kind() != "call_expression" {
-        return None;
-    }
-    let function = node.child_by_field_name("function")?;
-    let line = (node.start_position().row as u32) + 1;
-    let args = args_of_tsjs(node); // same arg-walk strategy as TS/JS
-
-    // Library-recognition: walk down chained method calls to find the
-    // outermost receiver of `reqwest` / `ureq` / `awc`. We look at the
-    // current call's function — if it's a `field_expression`, the
-    // receiver may itself be a chain ending at the library.
-    let (lib, verb_attr) = match function.kind() {
-        "field_expression" => {
-            let recv = function
-                .child_by_field_name("value")
-                .or_else(|| function.child_by_field_name("object"))?;
-            let attr = function
-                .child_by_field_name("field")
-                .or_else(|| function.child_by_field_name("attribute"))
-                .or_else(|| function.child_by_field_name("property"))?;
-            let recv_text = recv.utf8_text(src).ok()?;
-            let attr_text = attr.utf8_text(src).ok()?.to_string();
-            let verb = attr_text.to_lowercase();
-            // Library candidates: `reqwest.get`, `reqwest.post`, etc.
-            // Or `reqwest::get(...)` (scoped_identifier function with no
-            // separate `.get` field).
-            let lib = if recv_text == "reqwest" {
-                "reqwest"
-            } else if recv_text == "ureq" {
-                "ureq"
-            } else if recv_text == "awc" {
-                "awc"
-            } else {
-                return None;
-            };
-            if !is_valid_http_verb(&verb) {
-                return None;
-            }
-            (lib.to_string(), verb)
-        }
-        "scoped_identifier" => {
-            // `reqwest::get(...)`, `reqwest::blocking::get(...)`,
-            // `ureq::get(...)`.
-            let text = function.utf8_text(src).ok()?;
-            let lib_verb: Option<(&str, &str)> = if text == "reqwest::get" {
-                Some(("reqwest", "get"))
-            } else if text == "reqwest::post" {
-                Some(("reqwest", "post"))
-            } else if text == "reqwest::put" {
-                Some(("reqwest", "put"))
-            } else if text == "reqwest::delete" {
-                Some(("reqwest", "delete"))
-            } else if text == "reqwest::patch" {
-                Some(("reqwest", "patch"))
-            } else if text == "reqwest::head" {
-                Some(("reqwest", "head"))
-            } else if text == "reqwest::blocking::get" {
-                Some(("reqwest", "get"))
-            } else if text == "reqwest::blocking::post" {
-                Some(("reqwest", "post"))
-            } else if text == "ureq::get" {
-                Some(("ureq", "get"))
-            } else if text == "ureq::post" {
-                Some(("ureq", "post"))
-            } else {
-                None
-            };
-            let (lib, verb) = lib_verb?;
-            (lib.to_string(), verb.to_string())
-        }
-        "identifier" => {
-            // Bare-call: `get(url)` / `post(url)` are unlikely as
-            // library calls in Rust. Skipped to keep conservative.
-            let _ = path;
-            return None;
-        }
-        _ => return None,
-    };
-
-    let url_arg = args.first().copied()?;
-    let url_source = text_of(url_arg, src)?;
-    let url_expr = truncate_url_expr(&url_source);
-    let method = method_from_verb(&verb_attr);
-    let url = url_for_tsjs_like(url_arg, src);
-    let via = CallVia::Library { name: lib };
-    Some(HttpClientCall {
-        method,
-        url,
-        via,
-        url_expr,
-        reads_complete: true,
-        path: path.to_string(),
-        line,
-    })
-}
-
-/// URL extraction for Rust/Go. Reuses the language-agnostic parts
-/// extractor (string literal / identifier / Hole) — no f-strings,
-/// template literals, or urljoin. The first arg is usually a string
-/// literal in idiomatic Rust/Go HTTP client calls.
-fn url_for_tsjs_like(url_arg: Node, src: &[u8]) -> NormalizedUrl {
-    // Use the existing `parts_from_node_inner` via the
-    // language-agnostic helpers, but skip the language-specific
-    // string-stripping that depends on Python's `string` vs TS's
-    // `string_literal` kind names. For Rust, a literal `"/a"` is a
-    // `string_literal` containing `string_content`. For Go, it's an
-    // `interpreted_string_literal` containing
-    // `interpreted_string_literal_content`. The host-resolution and
-    // normalizer handle all three shapes identically.
-    let raw_parts = parts_from_node_rust_or_go(url_arg, src);
-    let host = host_for(&raw_parts);
-    let normalized = normalize(&raw_parts);
-    if matches!(host, HostPart::None) {
-        normalized
-    } else {
-        NormalizedUrl {
-            host: host.clone(),
-            ..normalized
-        }
-    }
-}
-
-fn parts_from_node_rust_or_go(node: Node, src: &[u8]) -> Vec<UrlPart> {
-    match node.kind() {
-        "string_literal" | "interpreted_string_literal" | "string" => {
-            let text = node.utf8_text(src).unwrap_or_default();
-            vec![UrlPart::Literal(strip_rust_or_go_string(text))]
-        }
-        "identifier" => vec![UrlPart::Hole(
-            node.utf8_text(src).unwrap_or_default().to_string(),
-        )],
-        _ => vec![UrlPart::Hole(
-            node.utf8_text(src).unwrap_or_default().to_string(),
-        )],
-    }
-}
-
-fn strip_rust_or_go_string(s: &str) -> String {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2 {
-        let first = bytes[0];
-        let last = bytes[bytes.len() - 1];
-        if (first == b'"' || first == b'\'') && first == last {
-            return s[1..s.len() - 1].to_string();
-        }
-    }
-    s.to_string()
-}
-
-// ─── Go call detection ────────────────────────────────────────────
-//
-// Recognized outbound HTTP shapes (Go stdlib net/http + stdlib
-// common idioms):
-//   - `http.Get(url)` / `http.Post(url, ct, body)` / `http.PostForm(url, data)` /
-//     `http.Head(url)` etc. — function is `selector_expression`
-//     `http.<Verb>`, attribute is the verb, first arg is the URL.
-//   - `http.NewRequest(method, url, body)` — first arg is a method
-//     string literal, second arg is the URL. The receiver-of-method
-//     is `http.NewRequest` and the verb is the first arg (string).
-//   - `http.NewRequestWithContext(ctx, method, url, body)` — second
-//     arg is the method string, third arg is the URL.
-//   - `http.DefaultClient.Do(req)` — `Do` requires a pre-built
-//     request; treat as Unknown method, URL is whatever the request
-//     was built for (already detected upstream).
-//
-// For v1 we focus on `http.Get`, `http.Post`, `http.NewRequest`,
-// `http.NewRequestWithContext`. Methods like `http.Head`,
-// `http.Put` are also covered by the same vocabulary match.
-
-fn detect_go_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
-    if node.kind() != "call_expression" {
-        return None;
-    }
-    let function = node.child_by_field_name("function")?;
-    let line = (node.start_position().row as u32) + 1;
-    let args = args_of_tsjs(node);
-
-    // `http.Get(url)`, `http.Post(url, ct, body)`, etc. — function is
-    // `http.<Verb>` (a selector_expression with operand=identifier
-    // `http` and field=Verb).
-    let (host_recv, verb_attr) = match function.kind() {
-        "selector_expression" => {
-            let recv = function.child_by_field_name("operand")?;
-            let attr = function
-                .child_by_field_name("field")
-                .or_else(|| function.child_by_field_name("attribute"))?;
-            let recv_text = recv.utf8_text(src).ok()?;
-            let attr_text = attr.utf8_text(src).ok()?.to_string();
-            (recv_text, attr_text)
-        }
-        _ => return None,
-    };
-
-    // Library names: `http`, `net/http`. The text `http.` covers both
-    // (`net/http.Get` would be `http.Get` for short — Go uses the
-    // package name in calls).
-    if host_recv != "http" {
-        return None;
-    }
-
-    let verb_lower = verb_attr.to_ascii_lowercase();
-
-    // `http.NewRequest(method, url, body)` — method-bearing call.
-    if verb_lower == "newrequest" {
-        let method_arg = args.first().copied()?;
-        let url_arg = args.get(1).copied()?;
-        let method = method_from_first_string_arg(method_arg, src);
-        let url_source = text_of(url_arg, src)?;
-        let url_expr = truncate_url_expr(&url_source);
-        let url = url_for_tsjs_like(url_arg, src);
-        return Some(HttpClientCall {
-            method,
-            url,
-            via: CallVia::Library {
-                name: "http".to_string(),
-            },
-            url_expr,
-            reads_complete: true,
-            path: path.to_string(),
-            line,
-        });
-    }
-    if verb_lower == "newrequestwithcontext" {
-        // First arg is a context; method is the second, url is the third.
-        let method_arg = args.get(1).copied()?;
-        let url_arg = args.get(2).copied()?;
-        let method = method_from_first_string_arg(method_arg, src);
-        let url_source = text_of(url_arg, src)?;
-        let url_expr = truncate_url_expr(&url_source);
-        let url = url_for_tsjs_like(url_arg, src);
-        return Some(HttpClientCall {
-            method,
-            url,
-            via: CallVia::Library {
-                name: "http".to_string(),
-            },
-            url_expr,
-            reads_complete: true,
-            path: path.to_string(),
-            line,
-        });
-    }
-
-    // Generic verb-shaped call (`http.Get`, `http.Post`, `http.Head`,
-    // etc.). URL is the first arg.
-    if is_valid_http_verb(&verb_lower) {
-        let url_arg = args.first().copied()?;
-        let url_source = text_of(url_arg, src)?;
-        let url_expr = truncate_url_expr(&url_source);
-        let url = url_for_tsjs_like(url_arg, src);
-        return Some(HttpClientCall {
-            method: method_from_verb(&verb_lower),
-            url,
-            via: CallVia::Library {
-                name: "http".to_string(),
-            },
-            url_expr,
-            reads_complete: true,
-            path: path.to_string(),
-            line,
-        });
-    }
-
-    None
-}
-
-/// Read a string-literal node and return the method it names. Falls
-/// back to `MethodSpec::Unknown` for non-literals. Recognizes Go's
-/// `http.MethodGet`/`http.MethodPost` constants as their string
-/// values.
-fn method_from_first_string_arg(arg: Node, src: &[u8]) -> MethodSpec {
-    if arg.kind() != "interpreted_string_literal"
-        && arg.kind() != "string_literal"
-        && arg.kind() != "string"
-    {
-        return MethodSpec::Unknown;
-    }
-    let raw = arg.utf8_text(src).unwrap_or_default();
-    let cleaned = strip_rust_or_go_string(raw).to_ascii_lowercase();
-    method_from_verb(&cleaned)
-}
-
-// ─── Java call detection ─────────────────────────────────────────
-//
-// Recognized outbound HTTP shapes (Workstream 5):
-//   - `java.net.http.HttpClient.newHttpClient().send(req, BodyHandlers.ofString())`
-//   - `java.net.http.HttpClient.newHttpClient().sendAsync(req, BodyHandlers.ofString())`
-//   - `RestTemplate rt = new RestTemplate(); rt.getForObject(url, …)`
-//   - `okhttp3.OkHttpClient client = new OkHttpClient.Builder().url(url).build();
-//     client.newCall(request).execute()` (URL on the Request.Builder)
-//   - `okhttp3.Request.Builder builder = new Request.Builder().url(url); …`
-//
-// v1 focuses on `HttpClient.send` / `HttpClient.sendAsync` and the
-// legacy `URL.openConnection().getInputStream()` shape; `RestTemplate`
-// is a single-method detection; `OkHttp` adds the URL from
-// `Request.Builder().url(...)` so we record a call at that site.
-
-fn detect_java_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
-    if node.kind() != "method_invocation" {
-        return None;
-    }
-    let line = (node.start_position().row as u32) + 1;
-
-    // `HttpClient.send(request, BodyHandlers.ofString())` /
-    // `HttpClient.sendAsync(...)`. The method_invocation's `object`
-    // is the receiver (a `method_invocation` chain ending at
-    // `HttpClient.newHttpClient()`), `name` is `send` /
-    // `sendAsync`, `arguments` wraps the URL-relevant args.
-    let _recv_text = node
-        .child_by_field_name("object")
-        .and_then(|o| o.utf8_text(src).ok());
-    let verb = node
-        .child_by_field_name("name")
-        .and_then(|n| n.utf8_text(src).ok());
-    let verb = verb?;
-    let verb_lower = verb.to_ascii_lowercase();
-    let args = args_of(node);
-
-    // HttpClient / OkHttp chain detection. We accept any receiver
-    // whose text contains one of these substrings as a conservative
-    // shorthand — the chain unwraps through `object` to find the
-    // library.
-    let is_http_client_send = verb_lower == "send" || verb_lower == "sendasync";
-    let is_okhttp_execute = verb_lower == "execute";
-    if !is_http_client_send && !is_okhttp_execute {
-        return None;
-    }
-    // The HttpClient / OkHttp receiver is the chain. We don't try to
-    // pull a URL out of the HttpClient builder — the URL lives on
-    // the `HttpRequest` argument. Emit Unknown method for
-    // `sendAsync` (the verb isn't HTTP), but accept the call site so
-    // the URL extraction can still happen.
-    let method = if verb_lower == "send" {
-        // `send(request, BodyHandlers.ofString())` — method lives on
-        // the request. Probe the first argument for a string
-        // literal that's a method name; otherwise Unknown.
-        MethodSpec::Unknown
-    } else {
-        MethodSpec::Unknown
-    };
-
-    // For OkHttp, the URL lives on the `Request.Builder().url(url)`
-    // call. We can't easily reach that from the `execute()` site; we
-    // instead emit a synthetic template `okhttp://…` so the joiner
-    // sees the call. The exact URL is out of scope for v1.
-
-    // URL extraction: take the first argument's text. For HttpClient
-    // it's a `HttpRequest` (not a string); for OkHttp it's a
-    // `Request` (not a string). Either way we capture the source
-    // text of the call's argument list for `url_expr`.
-    let url_source = if let Some(first) = args.first() {
-        text_of(*first, src).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let url_expr = truncate_url_expr(&url_source);
-
-    // URL parts — there's no literal URL in this shape. Emit a
-    // synthetic template `okhttp://dynamic` or
-    // `http://dynamic` for the joiner to match against method+verb.
-    let raw_parts = vec![UrlPart::Literal(format!(
-        "{}://dynamic",
-        if is_okhttp_execute { "okhttp" } else { "http" }
-    ))];
-    let host = host_for(&raw_parts);
-    let normalized = normalize(&raw_parts);
-    let url = if matches!(host, HostPart::None) {
-        normalized
-    } else {
-        NormalizedUrl { host, ..normalized }
-    };
-
-    let library = if is_okhttp_execute { "okhttp" } else { "http" };
-    Some(HttpClientCall {
-        method,
-        url,
-        via: CallVia::Library {
-            name: library.to_string(),
-        },
-        url_expr,
-        reads_complete: true,
-        path: path.to_string(),
-        line,
-    })
-}
-
-// ─── C# call detection ───────────────────────────────────────────
-//
-// Recognized outbound HTTP shapes (Workstream 5):
-//   - `HttpClient client = new HttpClient(); client.GetAsync(url)` /
-//     `.PostAsync(url, content)`.
-//   - `HttpClient.SendAsync(new HttpRequestMessage(HttpMethod.Get, url))`
-//   - `WebClient client = new WebClient(); client.DownloadString(url)`
-//     / `.DownloadStringTaskAsync(url)`.
-
-fn detect_csharp_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
-    if node.kind() != "invocation_expression" {
-        return None;
-    }
-    let line = (node.start_position().row as u32) + 1;
-
-    let function = node.child_by_field_name("function")?;
-    if function.kind() != "member_access_expression" {
-        return None;
-    }
-    // C#'s `member_access_expression` carries `name` (the property
-    // / method) as a field; for newer grammar revisions the verb
-    // is the LAST `identifier` child (the receiver can be an
-    // arbitrary expression). Probe both.
-    let attr_text = function
-        .child_by_field_name("name")
-        .and_then(|n| n.utf8_text(src).ok())
-        .or_else(|| {
-            // Fallback: last `identifier` child.
-            let mut cursor = function.walk();
-            let mut last_id: Option<Node> = None;
-            for child in function.named_children(&mut cursor) {
-                if child.kind() == "identifier" {
-                    last_id = Some(child);
-                }
-            }
-            last_id.and_then(|n| n.utf8_text(src).ok())
-        })?;
-    let attr_lower = attr_text.to_ascii_lowercase();
-
-    let args = args_of_tsjs(node);
-    // C#'s `argument` may have the literal as a direct child or
-    // behind a `value` field. Drill through the wrapper to find
-    // the actual literal node for URL extraction.
-    let url_arg = args.first().copied().and_then(|a| {
-        if a.kind() == "argument" {
-            a.child_by_field_name("value")
-                .or_else(|| {
-                    let mut c = a.walk();
-                    let first = a.named_children(&mut c).next();
-                    drop(c);
-                    first
-                })
-                .or(Some(a))
-        } else {
-            Some(a)
-        }
-    })?;
-
-    // HttpClient verb-shaped: `client.GetAsync(url)` etc.
-    let verb_normalized: Option<&str> = match attr_lower.as_str() {
-        "getasync" => Some("get"),
-        "getstringasync" => Some("get"),
-        "postasync" => Some("post"),
-        "putasync" => Some("put"),
-        "patchasync" => Some("patch"),
-        "deleteasync" => Some("delete"),
-        "sendasync" => Some("send"),
-        // WebClient async
-        "downloadstring" => Some("get"),
-        "downloadstringtaskasync" => Some("get"),
-        _ => None,
-    };
-    let verb_normalized = verb_normalized?;
-
-    let url_source = text_of(url_arg, src)?;
-    let url_expr = truncate_url_expr(&url_source);
-    let url = url_for_tsjs_like(url_arg, src);
-
-    // Library name: prefer to detect `WebClient` vs `HttpClient` by
-    // looking at the receiver — but `member_access_expression` here
-    // doesn't expose the receiver name cleanly via fields. Use the
-    // verb family as a proxy.
-    let library = if attr_lower == "downloadstring" || attr_lower == "downloadstringtaskasync" {
-        "webclient"
-    } else {
-        "httpclient"
-    };
-
-    let method = method_from_verb(verb_normalized);
-
-    Some(HttpClientCall {
-        method,
-        url,
-        via: CallVia::Library {
-            name: library.to_string(),
-        },
-        url_expr,
-        reads_complete: true,
-        path: path.to_string(),
-        line,
-    })
-}
-
-// ─── Ruby call detection ──────────────────────────────────────────
-//
-// Recognized outbound HTTP shapes (Workstream 5):
-//   - `Net::HTTP.get(URI(url))` / `Net::HTTP.get_response(URI(url))`.
-//   - `Net::HTTP::Get.new(uri).then { |res| … }` (Net::HTTP::Get is
-//     the request object — not the call site).
-//   - `HTTParty.get(url)` / `Faraday.get(url)` / `RestClient.get(url)`
-//     (gems — single-method detection).
-//   - `URI.parse(url).open.read` (URI.open for read; the call site
-//     is `URI.parse` and we record it).
-//
-// For v1 we focus on the bare receiver-form calls: `Net::HTTP.get`,
-// `Net::HTTP.get_response`, `HTTParty.<verb>`, `Faraday.<verb>`,
-// `RestClient.<verb>`.
-
-fn detect_ruby_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
-    if node.kind() != "call" {
-        return None;
-    }
-    let line = (node.start_position().row as u32) + 1;
-    let recv_node = node.child_by_field_name("receiver");
-    let method_node = node.child_by_field_name("method");
-    let recv_node = recv_node?;
-    let method_node = method_node?;
-
-    let recv_text = recv_node.utf8_text(src).ok()?;
-    let method_text = method_node.utf8_text(src).ok()?;
-    let method_lower = method_text.to_ascii_lowercase();
-
-    let (library, verb): (&str, Option<&str>) = match recv_text {
-        "Net::HTTP" => match method_lower.as_str() {
-            "get" => ("net/http", Some("get")),
-            "get_response" => ("net/http", Some("get")),
-            "post" => ("net/http", Some("post")),
-            "post_form" => ("net/http", Some("post")),
-            "head" => ("net/http", Some("head")),
-            _ => return None,
-        },
-        "HTTParty" => match method_lower.as_str() {
-            "get" => ("httparty", Some("get")),
-            "post" => ("httparty", Some("post")),
-            "put" => ("httparty", Some("put")),
-            "patch" => ("httparty", Some("patch")),
-            "delete" => ("httparty", Some("delete")),
-            "head" => ("httparty", Some("head")),
-            _ => return None,
-        },
-        "Faraday" => match method_lower.as_str() {
-            "get" => ("faraday", Some("get")),
-            "post" => ("faraday", Some("post")),
-            "put" => ("faraday", Some("put")),
-            "patch" => ("faraday", Some("patch")),
-            "delete" => ("faraday", Some("delete")),
-            _ => return None,
-        },
-        "RestClient" => match method_lower.as_str() {
-            "get" => ("restclient", Some("get")),
-            "post" => ("restclient", Some("post")),
-            "put" => ("restclient", Some("put")),
-            "patch" => ("restclient", Some("patch")),
-            "delete" => ("restclient", Some("delete")),
-            "head" => ("restclient", Some("head")),
-            _ => return None,
-        },
-        _ => return None,
-    };
-    let verb = verb?;
-
-    // URL extraction: first argument. Ruby's `Net::HTTP.get(URI(url))`
-    // wraps the URL in `URI(...)`; for v1 we extract the source text
-    // and normalize through the existing parts extractor (which
-    // handles identifier resolution).
-    let args = args_of_tsjs(node);
-    let url_arg = args.first().copied();
-    let url_source = url_arg.and_then(|n| text_of(n, src)).unwrap_or_default();
-    let url_expr = truncate_url_expr(&url_source);
-    let url = url_arg
-        .map(|n| url_for_tsjs_like(n, src))
-        .unwrap_or_else(|| {
-            // No URL arg → synthetic.
-            let parts = vec![UrlPart::Literal(format!("{}://dynamic", library))];
-
-            normalize(&parts)
-        });
-
-    let method = method_from_verb(verb);
-    Some(HttpClientCall {
-        method,
-        url,
-        via: CallVia::Library {
-            name: library.to_string(),
-        },
-        url_expr,
-        reads_complete: true,
-        path: path.to_string(),
-        line,
-    })
-}
-
-// ─── Kotlin call detection ────────────────────────────────────────
-//
-// Recognized outbound HTTP shapes (Workstream 5):
-//   - Ktor HttpClient: `client.get<String>("/api/x")` / `client.post(...)`
-//     — `client` is a bound `HttpClient`, the extension function
-//     `get` / `post` carries the verb; the URL is the first type-
-//     parameterized argument.
-//   - OkHttp: `OkHttpClient.newCall(Request.Builder().url(url).build()).execute()`
-//   - `URL(url).openConnection().getInputStream()` (java.net style).
-
-fn detect_kotlin_call(node: Node, src: &[u8], path: &str) -> Option<HttpClientCall> {
-    // Kotlin's Ktor extension calls come in two shapes:
-    //   - `client.get(url)` — `call_expression` whose `function`
-    //     is a `navigation_expression`.
-    //   - `client.get<String>(url)` — `binary_expression` whose
-    //     right side is the parenthesized arg list and whose left
-    //     side wraps a `navigation_expression` and a `simple_identifier`
-    //     (the type argument).
-    //
-    // We dispatch on both: walk the AST and look for either a
-    // `call_expression` with a verb-shaped `navigation_expression`
-    // function, OR a `binary_expression` whose right side is a
-    // `parenthesized_expression` wrapping a `navigation_expression`
-    // left side (the generic-arg call shape).
-    let line = (node.start_position().row as u32) + 1;
-    let (function, paren_arg) = match node.kind() {
-        "call_expression" => {
-            // Kotlin's `call_expression` carries the verb as the
-            // first positional named child (a `navigation_expression`)
-            // and the args as the second (`value_arguments`). No
-            // field names — fall back to positional children.
-            let mut c = node.walk();
-            let mut first: Option<tree_sitter::Node<'_>> = None;
-            let mut second: Option<tree_sitter::Node<'_>> = None;
-            for child in node.named_children(&mut c) {
-                if first.is_none() {
-                    first = Some(child);
-                } else if second.is_none() {
-                    second = Some(child);
-                }
-            }
-            (first, None)
-        }
-        "binary_expression" => {
-            let right = node.child_by_field_name("right");
-            let left = node.child_by_field_name("left");
-            let _ = left;
-            let right_node = right.or_else(|| {
-                let mut c = node.walk();
-                let mut first: Option<tree_sitter::Node> = None;
-                for child in node.named_children(&mut c) {
-                    if first.is_none() {
-                        first = Some(child);
-                    }
-                }
-                first
-            });
-            {
-                let r = right_node?;
-                if r.kind() == "parenthesized_expression" {
-                    let verb_node = find_navigation_expression(node);
-                    (verb_node, Some(r))
-                } else {
-                    return None;
-                }
-            }
-        }
-        _ => return None,
-    };
-    let function = function?;
-    if function.kind() != "navigation_expression" {
-        return None;
-    }
-    let target = kotlin_attr_node(function);
-    let verb = target.and_then(|t| t.utf8_text(src).ok())?;
-    let verb_lower = verb.to_ascii_lowercase();
-
-    // Map the verb to a HTTP method.
-    let method = match verb_lower.as_str() {
-        "get" => MethodSpec::Known(HttpMethod::Get),
-        "post" => MethodSpec::Known(HttpMethod::Post),
-        "put" => MethodSpec::Known(HttpMethod::Put),
-        "patch" => MethodSpec::Known(HttpMethod::Patch),
-        "delete" => MethodSpec::Known(HttpMethod::Delete),
-        "head" => MethodSpec::Known(HttpMethod::Head),
-        "options" => MethodSpec::Known(HttpMethod::Options),
-        "execute" => MethodSpec::Unknown,
-        _ => return None,
-    };
-
-    // URL extraction: the first thing inside the parenthesized
-    // expression (or the call_expression's args[0]).
-    let url_arg: Option<Node<'static>> = None;
-    let _ = url_arg; // borrow lifetime workaround: re-extract below.
-    let (url_expr, url) = match paren_arg {
-        Some(paren) => {
-            let mut c = paren.walk();
-            let first = paren.named_children(&mut c).next();
-            match first {
-                Some(arg) => {
-                    let url_source = text_of(arg, src).unwrap_or_default();
-                    let url_expr = truncate_url_expr(&url_source);
-                    let url = url_for_tsjs_like(arg, src);
-                    (url_expr, url)
-                }
-                None => {
-                    let parts = vec![UrlPart::Literal("ktor://dynamic".to_string())];
-                    let url = normalize(&parts);
-                    (String::new(), url)
-                }
-            }
-        }
-        None => {
-            // `call_expression` shape: take args[0]. Kotlin uses
-            // `value_arguments` (not `arguments`) for the field
-            // name; the grammar places it as the second positional
-            // named child.
-            let mut c = node.walk();
-            let mut first: Option<tree_sitter::Node<'_>> = None;
-            let mut second: Option<tree_sitter::Node<'_>> = None;
-            for child in node.named_children(&mut c) {
-                if first.is_none() {
-                    first = Some(child);
-                } else if second.is_none() {
-                    second = Some(child);
-                }
-            }
-            let args_node = second.or(first);
-            let args: Vec<tree_sitter::Node<'_>> = if let Some(a) = args_node {
-                let mut c = a.walk();
-                let named: Vec<_> = a.named_children(&mut c).collect();
-                drop(c);
-                named
-            } else {
-                args_of_tsjs(node)
-            };
-            match args.first().copied() {
-                Some(arg) => {
-                    let url_source = text_of(arg, src).unwrap_or_default();
-                    let url_expr = truncate_url_expr(&url_source);
-                    let url = url_for_tsjs_like(arg, src);
-                    (url_expr, url)
-                }
-                None => {
-                    let parts = vec![UrlPart::Literal("ktor://dynamic".to_string())];
-                    let url = normalize(&parts);
-                    (String::new(), url)
-                }
-            }
-        }
-    };
-
-    let library = if verb_lower == "execute" {
-        "okhttp"
-    } else {
-        "ktor"
-    };
-
-    Some(HttpClientCall {
-        method,
-        url,
-        via: CallVia::Library {
-            name: library.to_string(),
-        },
-        url_expr,
-        reads_complete: true,
-        path: path.to_string(),
-        line,
-    })
-}
-
-/// Recursively walk `node` looking for the deepest
-/// `navigation_expression` (a member-access like `a.b.c`). Kotlin's
-/// generic-argument call shape nests a `binary_expression` around
-/// the navigation expression.
-fn find_navigation_expression(node: Node) -> Option<Node> {
-    if node.kind() == "navigation_expression" {
-        return Some(node);
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if let Some(n) = find_navigation_expression(child) {
-            return Some(n);
-        }
-    }
-    None
-}
-
-/// Extract the verb (last identifier) of a Kotlin
-/// `navigation_expression` (`client.get` → "get"). The grammar
-/// carries the receiver and the member as bare `identifier` /
-/// `simple_identifier` siblings — no field names. The verb is
-/// the LAST identifier (the receiver may be a complex expression
-/// with its own identifiers, so first-vs-second is unreliable).
-fn kotlin_attr_node(node: Node) -> Option<Node> {
-    let mut cursor = node.walk();
-    let mut last_id: Option<Node> = None;
-    for child in node.named_children(&mut cursor) {
-        if matches!(child.kind(), "identifier" | "simple_identifier") {
-            last_id = Some(child);
-        }
-    }
-    last_id
 }
 
 // ─── Graph emission ───────────────────────────────────────────────────
@@ -3432,6 +2777,7 @@ func f() {
     fn csharp_calls(src: &str) -> Vec<HttpClientCall> {
         detect_calls(std::path::Path::new("Foo.cs"), src, Lang::CSharp)
     }
+
     fn ruby_calls(src: &str) -> Vec<HttpClientCall> {
         detect_calls(std::path::Path::new("Foo.rb"), src, Lang::Ruby)
     }

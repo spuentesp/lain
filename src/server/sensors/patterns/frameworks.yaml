@@ -69,7 +69,7 @@ languages:
       deny_methods: [json, text, data, body, status, statusText, headers, config]
     - id: got-outbound
       kind: outbound
-      lib_match: '^got$'
+      lib_match: '^(got|ky)$'
 
   # ── Rust ─────────────────────────────────────────────────────────
   rust:
