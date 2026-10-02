@@ -127,14 +127,13 @@ fn empty_or_absent_override_directory_does_not_augment_patterns() {
     // found nothing to load). This matches the existing
     // `overrides_applied_flips_even_when_dir_is_absent` test
     // for the absent-dir case.
-    match &result_empty {
-        Cow::Owned(p) => {
-            assert!(
-                p.overrides_applied(),
-                "empty override dir: load_overrides must record that it ran, even when the dir carried nothing"
-            );
-        }
-        Cow::Borrowed(_) => {} // unreachable — present dir always goes Owned in the current impl
+    if let Cow::Owned(p) = &result_empty {
+        assert!(
+            p.overrides_applied(),
+            "empty override dir: load_overrides must record that it ran, even when the dir carried nothing"
+        );
+    } else {
+        // unreachable — present dir always goes Owned in the current impl
     }
 }
 

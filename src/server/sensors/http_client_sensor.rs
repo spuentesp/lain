@@ -131,7 +131,7 @@ pub fn scan_workspace_clients(
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     let patterns = Patterns::with_overrides(root)?;
-    let patterns = &*patterns;
+    let patterns: &Patterns = &patterns;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
@@ -153,7 +153,7 @@ pub fn scan_workspace_clients(
             Ok(c) => c,
             Err(_) => continue,
         };
-        let calls = detect_calls(path, &content, lang, &patterns);
+        let calls = detect_calls(path, &content, lang, patterns);
         for mut call in calls {
             call.path = graph_path(root, Path::new(&call.path));
             let (nodes, edges) = build_graph(graph, &call, namespace);

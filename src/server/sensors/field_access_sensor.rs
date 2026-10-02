@@ -181,7 +181,7 @@ pub fn scan_workspace_field_access(
         return Ok(0);
     }
     let patterns = Patterns::with_overrides(root)?;
-    let patterns = &*patterns;
+    let patterns: &Patterns = &patterns;
 
     // Phase 2 needs the joiner to have run. The graph has the
     // `Binds` edges by the time the field-access sensor sees it —
@@ -195,7 +195,7 @@ pub fn scan_workspace_field_access(
     // augmented deny set. Without this wrapper, the deny set
     // would be the bundled singleton and per-repo YAML overrides
     // would have no effect on field-access suppression.
-    let (emissions, _) = super::util::with_current_patterns(&patterns, || {
+    let (emissions, _) = super::util::with_current_patterns(patterns, || {
         let mut emissions: Vec<FieldAccessEmission> = Vec::new();
         for entry in crate::server::sensors::util::walk_workspace(root) {
             let path = entry.path();

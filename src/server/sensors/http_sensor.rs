@@ -641,7 +641,7 @@ pub fn scan_workspace_routes(
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     let patterns = Patterns::with_overrides(root)?;
-    let patterns = &*patterns;
+    let patterns: &Patterns = &patterns;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
@@ -659,7 +659,7 @@ pub fn scan_workspace_routes(
             Ok(c) => c,
             Err(_) => continue, // a vanished file between walk and read is fine
         };
-        let mut routes = scan_file_for_routes(path, &content, &patterns);
+        let mut routes = scan_file_for_routes(path, &content, patterns);
         for r in &mut routes {
             r.handler_path = crate::graph::graph_path(root, std::path::Path::new(&r.handler_path));
         }

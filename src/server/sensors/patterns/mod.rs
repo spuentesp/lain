@@ -363,9 +363,9 @@ impl Patterns {
     /// `&self.override_scml` (overrides) and `generated::QUERIES`
     /// (bundled). No `Box::leak` is involved: the cache stores
     /// owned `String`s and the slice borrows from them, with its
-    /// lifetime tied to `&self`. A small per-call `Vec::with_capacity`
-    /// + borrow-copy is the only allocation the override path
-    /// performs.
+    /// lifetime tied to `&self`. A small per-call
+    /// `Vec::with_capacity` plus a borrow-copy is the only
+    /// allocation the override path performs.
     ///
     /// The cached merged data (`merged_queries: OnceLock<Vec<(String, String, String, String)>>`)
     /// is invalidated on every successful `load_overrides` (a fresh

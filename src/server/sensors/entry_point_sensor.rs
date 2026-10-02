@@ -77,7 +77,7 @@ pub fn scan_workspace_entry_points(
 
     let mut by_id: BTreeMap<String, (String, EntryKind)> = BTreeMap::new();
     let patterns = Patterns::with_overrides(root)?;
-    let patterns = &*patterns;
+    let patterns: &Patterns = &patterns;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
@@ -94,7 +94,7 @@ pub fn scan_workspace_entry_points(
             Err(_) => continue,
         };
         let graph_path = crate::graph::graph_path(root, path);
-        let detections = detect_in_file(&content, &graph_path, ext, &patterns);
+        let detections = detect_in_file(&content, &graph_path, ext, patterns);
         for ((name, _line), kind) in detections {
             // Resolve the name to a graph node id. The scanner may
             // have produced multiple `Function` nodes for the same
