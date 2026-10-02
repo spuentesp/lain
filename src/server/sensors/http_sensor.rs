@@ -1225,12 +1225,27 @@ mod tests {
 
     /// `scan_file_for_routes` and the unit-test code call into the
     /// same registry; the registry must be a `BTreeMap` (§6.1
-    /// determinism).
+    /// determinism). Two back-to-back calls must return equal
+    /// iterators so the order of route emission is reproducible.
     #[test]
     fn route_patterns_are_a_btreemap_for_determinism() {
-        let _ = get_route_patterns();
-        // Static check: get_route_patterns's return type is
-        // BTreeMap; the test just exercises it.
+        let first: Vec<&'static str> = get_route_patterns().into_keys().collect();
+        let second: Vec<&'static str> = get_route_patterns().into_keys().collect();
+        assert_eq!(
+            first, second,
+            "two back-to-back calls must produce the same key order (BTreeMap §6.1 determinism)",
+        );
+        // A `BTreeMap` iterates in sorted order, so the keys must be
+        // monotonically increasing. A future regression that swaps
+        // the map type for `HashMap` (and reorders iteration) would
+        // fail here even if `first == second` happened to hold by
+        // coincidence in the same process.
+        let mut sorted = first.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            first, sorted,
+            "BTreeMap iteration must be in sorted order; got {first:?}",
+        );
     }
 
     #[test]
