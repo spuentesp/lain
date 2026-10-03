@@ -34,12 +34,12 @@ use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, HostPart, HttpMethod, MethodSpec,
     NormalizedUrl, ProviderFact, ProviderOrigin, ServiceName, TopicConsumerFact,
 };
-use crate::server::sensors::env_sensor::EnvBindingIndex;
 use crate::federation::contracts::route_match::{
     compare_specificity, match_route, MatchDetail, MatchOutcome,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{EdgeProvenance, GraphEdge, GraphNode, RouteMatch};
+use crate::server::sensors::env_sensor::EnvBindingIndex;
 
 /// Spec §5.3 — I6 total-order resolution precedence, condensed as a
 /// Rust enum for the joiner to surface at the per-call layer.
@@ -92,7 +92,7 @@ pub enum Resolution {
 /// `binds` set against the current `Binds` edges in the graph backend
 /// and applies adds/removes through `upsert_edges_batch` +
 /// `remove_edges`. The `index` is stored on a `RwLock<...>` for tools.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct JoinOutput {
     pub binds: Vec<BindsEdge>,
     pub index: ContractIndex,
@@ -110,17 +110,6 @@ pub struct JoinOutput {
     /// `Binds` edge is emitted. The list of distinct hosts is kept
     /// here so the operator can disambiguate.
     pub ambiguous_env_vars: BTreeMap<String, Vec<String>>,
-}
-
-impl Default for JoinOutput {
-    fn default() -> Self {
-        Self {
-            binds: Vec::new(),
-            index: ContractIndex::default(),
-            unresolved_env_vars: BTreeMap::new(),
-            ambiguous_env_vars: BTreeMap::new(),
-        }
-    }
 }
 
 /// One desired `Binds` edge, with the join details carried on it so
@@ -496,10 +485,12 @@ impl ContractJoiner {
                     MethodSpec::Unknown => HttpMethod::Any,
                 },
                 ContractKey::Topic { .. } => HttpMethod::Any,
+                ContractKey::Rpc { .. } => HttpMethod::Any,
             };
             let template = match &key {
                 ContractKey::Http { template, .. } => template.clone(),
                 ContractKey::Topic { name, .. } => name.clone(),
+                ContractKey::Rpc { method, .. } => method.clone(),
             };
             let provider_records: Vec<EndpointProvider> = providers
                 .into_iter()

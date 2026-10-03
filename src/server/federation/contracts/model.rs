@@ -333,9 +333,11 @@ pub struct SymbolKey {
 // ─── Derived keys ─────────────────────────────────────────────────────
 
 /// Federation-level identifier of an endpoint. `Http` keys are the
-/// `(method, template)` pair; `Topic` keys are `(broker, name)`. The
-/// `Display` / `FromStr` grammar is in §4.4 — implementations land
-/// with the joiner (task 7) since they need the encoding machinery.
+/// `(method, template)` pair; `Topic` keys are `(broker, name)`;
+/// `Rpc` keys are `(system, package.service, method)` per spec §8.1.
+/// The `Display` / `FromStr` grammar is in §4.4 — implementations
+/// land with the joiner (task 7) since they need the encoding
+/// machinery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ContractKey {
     /// HTTP endpoint. `MethodSpec::Unknown` only appears in
@@ -348,6 +350,37 @@ pub enum ContractKey {
         broker: String,
         name: String,
     },
+    /// Phase E (spec §8.1, §8.2): one RPC method on a (possibly
+    /// package-qualified) service. `service` is the proto package
+    /// plus service name joined by `.` — `com.acme.orders.Orders`
+    /// for `package com.acme.orders; service Orders { … }`. The
+    /// method is the rpc's bare name (no input/output type). The
+    /// wire-form `display` projects `service.method` so the
+    /// joiner and the contract-federation tools can render it
+    /// without the `system` prefix.
+    Rpc {
+        system: RpcSystem,
+        service: String,
+        method: String,
+    },
+}
+
+/// Phase E (spec §8.1): the RPC family. Only `Grpc` exists today
+/// (spec §8.3 is GraphQL which uses a separate `ContractKey`
+/// variant). The enum is open so future systems (Thrift,
+/// Connect-RPC) extend without a wire-shape change beyond the
+/// discriminator.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RpcSystem {
+    Grpc,
+}
+
+impl std::fmt::Display for RpcSystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RpcSystem::Grpc => f.write_str("grpc"),
+        }
+    }
 }
 
 impl std::fmt::Display for ContractKey {
@@ -358,6 +391,9 @@ impl std::fmt::Display for ContractKey {
             }
             ContractKey::Topic { broker, name } => {
                 write!(f, "topic:{}/{}", broker, name)
+            }
+            ContractKey::Rpc { service, method, .. } => {
+                write!(f, "rpc:{}/{}", service, method)
             }
         }
     }
@@ -386,6 +422,17 @@ impl std::str::FromStr for ContractKey {
             return Ok(ContractKey::Topic {
                 broker: broker.to_string(),
                 name: name.to_string(),
+            });
+        }
+        if let Some(rest) = s.strip_prefix("rpc:") {
+            // "<service>/<method>" (service is package-qualified).
+            let (service, method) = rest
+                .split_once('/')
+                .ok_or_else(|| format!("malformed rpc key: {s:?}"))?;
+            return Ok(ContractKey::Rpc {
+                system: RpcSystem::Grpc,
+                service: service.to_string(),
+                method: method.to_string(),
             });
         }
         Err(format!("unknown contract key kind: {s:?}"))

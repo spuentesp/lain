@@ -204,6 +204,7 @@ async fn run_list_contracts(
             let key_kind = match &endpoint_id.1 {
                 ContractKey::Http { .. } => "http",
                 ContractKey::Topic { .. } => "topic",
+                ContractKey::Rpc { .. } => "rpc",
             };
             if k != key_kind {
                 continue;

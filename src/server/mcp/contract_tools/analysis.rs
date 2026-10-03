@@ -1057,6 +1057,7 @@ fn endpoint_from_change(
                                     (method.clone(), template.clone())
                                 }
                                 ContractKey::Topic { .. } => continue,
+                                ContractKey::Rpc { .. } => continue,
                             };
                             if !method_compatible(&m, &id_method) {
                                 continue;
