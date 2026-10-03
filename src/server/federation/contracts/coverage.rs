@@ -402,6 +402,68 @@ pub fn consumer_capable_langs() -> Vec<Lang> {
     ]
 }
 
+// ─── Cache-validity helper (Task 5) ────────────────────────────────
+
+/// TLA+ `CacheValid(r)` predicate as a single function. The
+/// `analyzer_version` on the cache manifest is the right-hand side;
+/// the runtime argument is the `current_analyzer_version` produced
+/// by `crate::federation::contracts::analyzer_version()`.
+///
+/// The cache manifest itself already encodes the version (spec §8.3:
+/// `<sha>-<analyzer_version>`). The helper exists so callers can
+/// gate ledger reads on a version match without going through the
+/// bytes-on-disk check that [`manifest_matches_on_disk`] does.
+pub fn manifest_matches_analyzer_version(
+    manifest: &crate::federation::contracts::index_cache::CacheManifest,
+    current_analyzer_version: &str,
+) -> bool {
+    manifest.analyzer_version == current_analyzer_version
+}
+
+// ─── On-disk ledger persistence (Task 5) ─────────────────────────────
+
+/// Filename for the per-repo coverage ledger, written next to
+/// `manifest.json` in the per-commit cache entry. The ledger is
+/// versioned via the manifest's `analyzer_version`, so two cache
+/// entries with different analyzer versions live in different
+/// directories and never share a ledger file.
+pub const LEDGER_FILE: &str = "coverage_ledger.json";
+
+/// Write a [`CoverageLedger`] next to the cache manifest at `path`.
+/// The bytes are written atomically via temp + rename. The function
+/// is best-effort: a serialization or I/O failure is returned to the
+/// caller, which can choose to drop the ledger (the analyzer still
+/// ran; the cache is still usable) or fail closed.
+pub fn write_ledger(
+    path: &Path,
+    ledger: &CoverageLedger,
+) -> Result<(), crate::error::LainError> {
+    let bytes = serde_json::to_vec_pretty(ledger)
+        .map_err(|e| crate::error::LainError::Serialization(e.to_string()))?;
+    let staging = path.with_extension("json.staging");
+    std::fs::write(&staging, &bytes).map_err(|e| crate::error::LainError::Io(e.to_string()))?;
+    std::fs::rename(&staging, path).map_err(|e| crate::error::LainError::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// Read a [`CoverageLedger`] from disk. `None` is returned when the
+/// file does not exist (the cache was written before Phase A
+/// shipped). A corrupt ledger is an error — the cache entry is
+/// invalidated and the caller reindexes.
+pub fn read_ledger(path: &Path) -> Result<Option<CoverageLedger>, crate::error::LainError> {
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<CoverageLedger>(&bytes) {
+            Ok(l) => Ok(Some(l)),
+            Err(e) => Err(crate::error::LainError::Serialization(format!(
+                "ledger {} corrupt: {e}",
+                path.display()
+            ))),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(crate::error::LainError::Io(e.to_string())),
+    }
+}
+
 // ─── run_all_with_coverage (Task 4 — coverage-aware scan) ───────────
 
 use crate::federation::contracts::index_cache::CacheKey as IcCacheKey;
@@ -822,5 +884,47 @@ mod tests {
 
     fn repo_id_for_test() -> RepoId {
         RepoId::new("orders").unwrap()
+    }
+
+    /// `write_ledger` + `read_ledger` round-trip a `CoverageLedger`
+    /// to disk; the cache key survives the round-trip.
+    #[test]
+    fn ledger_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coverage_ledger.json");
+        let mut ledger = CoverageLedger::default();
+        let key = crate::federation::contracts::index_cache::CacheKey::new(
+            "orders",
+            "abc",
+            "0.9.0+c3",
+        );
+        ledger.insert(
+            "orders".into(),
+            RepoCoverage {
+                cache_key: key.clone(),
+                ..empty_cover("orders", "abc", "0.9.0+c3")
+            },
+        );
+        write_ledger(&path, &ledger).expect("write");
+        let loaded = read_ledger(&path).expect("read").expect("ledger present");
+        assert_eq!(loaded.by_repo.get("orders").map(|c| c.cache_key.clone()), Some(key));
+    }
+
+    /// `manifest_matches_analyzer_version` returns true on a matching
+    /// version, false on a mismatch.
+    #[test]
+    fn manifest_matches_analyzer_version_helper() {
+        let m = crate::federation::contracts::index_cache::CacheManifest {
+            repo: "r".into(),
+            commit: "s".into(),
+            analyzer_version: "0.9.0+c3".into(),
+            files: Vec::new(),
+            sensor_counts: BTreeMap::new(),
+            bytes: 0,
+            created_unix: 0,
+            last_used_unix: 0,
+        };
+        assert!(manifest_matches_analyzer_version(&m, "0.9.0+c3"));
+        assert!(!manifest_matches_analyzer_version(&m, "0.9.0+c2"));
     }
 }
