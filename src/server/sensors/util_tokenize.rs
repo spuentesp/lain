@@ -380,7 +380,7 @@ fn find_receiver_method_shapes(line: &str) -> Vec<(usize, usize, usize, usize)> 
         }
         // Receiver identifier: walk back from `.` to the previous
         // non-identifier char.
-        let mut rcv_end = i;
+        let rcv_end = i;
         if rcv_end == 0 {
             i += 1;
             continue;

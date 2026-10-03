@@ -112,7 +112,9 @@ fn repo_key(root: &Path) -> String {
 /// without holding the index lock.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EnvBindingIndex {
-    by_var: BTreeMap<String, Vec<EnvBinding>>,
+    /// `var -> [EnvBinding]` (one entry per source — the joiner
+    /// dedupes into a single host or flags an `Ambiguous`).
+    pub by_var: BTreeMap<String, Vec<EnvBinding>>,
 }
 
 impl EnvBindingIndex {
@@ -212,46 +214,183 @@ pub fn scan(root: &Path) -> Vec<EnvBinding> {
     for (rel, source) in env_file_candidates(root) {
         if let Ok(content) = std::fs::read_to_string(&rel) {
             for line in content.lines() {
-                if let Some((var, value)) = parse_dotenv_line(line) {
-                    if let Some(host) = url_host_from(&value) {
-                        bindings.push(EnvBinding {
-                            var,
-                            host,
-                            source,
-                        });
-                    }
+                if let Some(b) = parse_env_value(line, source) {
+                    bindings.push(b);
                 }
             }
         }
     }
     for (rel, source) in compose_file_candidates(root) {
         if let Ok(content) = std::fs::read_to_string(&rel) {
-            for (var, value) in parse_compose_environment(&content) {
-                if let Some(host) = url_host_from(&value) {
-                    bindings.push(EnvBinding { var, host, source });
-                }
+            if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                bindings.extend(walk_yaml_env_block(&value, source));
             }
         }
     }
     for (rel, source) in helm_file_candidates(root) {
         if let Ok(content) = std::fs::read_to_string(&rel) {
-            for (var, value) in parse_helm_env(&content) {
-                if let Some(host) = url_host_from(&value) {
-                    bindings.push(EnvBinding { var, host, source });
-                }
+            if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                bindings.extend(walk_yaml_env_block(&value, source));
             }
         }
     }
     for (rel, source) in k8s_file_candidates(root) {
         if let Ok(content) = std::fs::read_to_string(&rel) {
-            for (var, value) in parse_k8s_env(&content) {
-                if let Some(host) = url_host_from(&value) {
-                    bindings.push(EnvBinding { var, host, source });
-                }
+            if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                bindings.extend(walk_yaml_env_block(&value, source));
             }
         }
     }
     bindings
+}
+
+/// Build one [`EnvBinding`] from a single dotenv-style `KEY=value`
+/// line, or `None` when the line is blank, a comment, or its value
+/// is not a URL-shaped host. Replaces the four
+/// `parse_dotenv_line → url_host_from → EnvBinding` blocks the
+/// pre-refactor scan function carried in each source branch (D9).
+fn parse_env_value(raw: &str, source: EnvSource) -> Option<EnvBinding> {
+    let (var, value) = parse_dotenv_line(raw)?;
+    let host = url_host_from(&value)?;
+    Some(EnvBinding { var, host, source })
+}
+
+/// Walk a `serde_yaml::Value` recursively, collecting every
+/// env-bearing block as [`EnvBinding`]s. Replaces the four
+/// per-format YAML walkers (D10):
+///
+/// - **Helm / values.yaml**: any `env:` mapping is treated as
+///   `KEY: value` pairs.
+/// - **docker-compose**: a service's `environment:` may be a
+///   mapping (`KEY: value`) or a sequence of `KEY=value` strings
+///   (or a sequence of `{KEY: value}` maps).
+/// - **k8s**: a `containers:` / `initContainers:` entry's `env:`
+///   is a sequence of `{name, value}` maps; the walker descends
+///   into each container and recognises this shape by the
+///   `name` + `value` keys.
+///
+/// The walker also computes the host from each value via
+/// [`url_host_from`] so non-URL env vars (`LOG_LEVEL=info`)
+/// silently drop out — matching the previous `scan` behaviour.
+fn walk_yaml_env_block(value: &serde_yaml::Value, source: EnvSource) -> Vec<EnvBinding> {
+    let mut out: Vec<EnvBinding> = Vec::new();
+    walk_yaml_env_recursive(value, source, &mut out);
+    out
+}
+
+fn walk_yaml_env_recursive(
+    value: &serde_yaml::Value,
+    source: EnvSource,
+    out: &mut Vec<EnvBinding>,
+) {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            for (k, v) in map {
+                if let Some(key) = k.as_str() {
+                    if key == "env" || key == "environment" {
+                        collect_env_block(v, source, out);
+                    }
+                }
+                // Recurse so k8s' `containers[*].env:` is reached
+                // and Helm's nested `env:` blocks are picked up.
+                walk_yaml_env_recursive(v, source, out);
+            }
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq {
+                walk_yaml_env_recursive(item, source, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Process a single env block value (the contents of an `env:` or
+/// `environment:` key). Three sub-shapes are accepted:
+///
+/// - **Mapping** (`{KEY: value, ...}`): each entry is a candidate
+///   env var; non-URL values are dropped via [`url_host_from`].
+/// - **Sequence of strings** (`[KEY=value, ...]`): each string is
+///   parsed via [`parse_dotenv_line`] and dropped on URL failure.
+/// - **Sequence of mappings** (`[{KEY: value}, ...]` or
+///   `[{name: K, value: V}, ...]`): the k8s `{name, value}` shape
+///   is recognised by the two keys; the compose `{KEY: value}`
+///   shape falls through to a nested mapping walk.
+fn collect_env_block(value: &serde_yaml::Value, source: EnvSource, out: &mut Vec<EnvBinding>) {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            for (k, v) in map {
+                if let Some(key) = k.as_str() {
+                    if is_valid_env_name(key) {
+                        if let Some(s) = v.as_str() {
+                            if !s.is_empty() {
+                                if let Some(host) = url_host_from(s) {
+                                    out.push(EnvBinding {
+                                        var: key.to_string(),
+                                        host,
+                                        source,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for entry in seq {
+                if let Some(s) = entry.as_str() {
+                    // compose `- KEY=value` form.
+                    if let Some((k, v)) = parse_dotenv_line(s) {
+                        if let Some(host) = url_host_from(&v) {
+                            out.push(EnvBinding {
+                                var: k,
+                                host,
+                                source,
+                            });
+                        }
+                    }
+                } else if let Some(map) = entry.as_mapping() {
+                    // Detect k8s `{name, value}` by the two keys.
+                    let name = map
+                        .get(serde_yaml::Value::String("name".into()))
+                        .and_then(|v| v.as_str());
+                    let val = map
+                        .get(serde_yaml::Value::String("value".into()))
+                        .and_then(|v| v.as_str());
+                    if let (Some(name), Some(val)) = (name, val) {
+                        if is_valid_env_name(name) && !val.is_empty() {
+                            if let Some(host) = url_host_from(val) {
+                                out.push(EnvBinding {
+                                    var: name.to_string(),
+                                    host,
+                                    source,
+                                });
+                            }
+                        }
+                    } else {
+                        // compose `[{KEY: value}]` shape.
+                        for (k, v) in map {
+                            if let Some(key) = k.as_str() {
+                                if let Some(s) = v.as_str() {
+                                    if is_valid_env_name(key) && !s.is_empty() {
+                                        if let Some(host) = url_host_from(s) {
+                                            out.push(EnvBinding {
+                                                var: key.to_string(),
+                                                host,
+                                                source,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The sensor's `scan` entry point. Reads the workspace, updates
@@ -291,57 +430,41 @@ pub fn scan_workspace_env(
 /// resolves the var via the env_sensor's index).
 pub struct EnvSensor;
 
-crate::server::sensors::register_sensor!(
-    EnvSensor,
-    "env",
-    EntryPoints,
-    0,
-    scan_workspace_env
-);
+crate::server::sensors::register_sensor!(EnvSensor, "env", EntryPoints, 0, scan_workspace_env);
 
 // ─── File discovery ──────────────────────────────────────────────────
 
-fn env_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> {
+/// Walk `root` and yield every path that exists in `names`, tagging
+/// each hit with the given `source`. Replaces the four near-identical
+/// `env_file_candidates` / `compose_file_candidates` /
+/// `helm_file_candidates` / `k8s_file_candidates` functions the
+/// pre-refactor sensor carried (D9).
+fn find_config_files(
+    root: &Path,
+    names: &[&str],
+    source: EnvSource,
+) -> Vec<(std::path::PathBuf, EnvSource)> {
     let mut out: Vec<(std::path::PathBuf, EnvSource)> = Vec::new();
-    for name in [".env", ".env.local", ".env.development", ".env.production"] {
+    for name in names {
         let p = root.join(name);
         if p.is_file() {
-            out.push((p, EnvSource::DotEnv));
+            out.push((p, source));
         }
     }
     out
 }
 
-fn compose_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> {
+/// Walk every subdirectory in `dirs` and yield every `.yaml` /
+/// `.yml` file found, tagged with the given `source`. Used for
+/// the k8s source where the env-bearing manifests live one level
+/// below `k8s/` / `manifests/` / `deploy/`.
+fn find_yaml_files_in_dirs(
+    root: &Path,
+    dirs: &[&str],
+    source: EnvSource,
+) -> Vec<(std::path::PathBuf, EnvSource)> {
     let mut out: Vec<(std::path::PathBuf, EnvSource)> = Vec::new();
-    for name in [
-        "docker-compose.yml",
-        "docker-compose.yaml",
-        "compose.yml",
-        "compose.yaml",
-    ] {
-        let p = root.join(name);
-        if p.is_file() {
-            out.push((p, EnvSource::DockerCompose));
-        }
-    }
-    out
-}
-
-fn helm_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> {
-    let mut out: Vec<(std::path::PathBuf, EnvSource)> = Vec::new();
-    for name in ["helm/values.yaml", "values.yaml"] {
-        let p = root.join(name);
-        if p.is_file() {
-            out.push((p, EnvSource::HelmValues));
-        }
-    }
-    out
-}
-
-fn k8s_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> {
-    let mut out: Vec<(std::path::PathBuf, EnvSource)> = Vec::new();
-    for dir in ["k8s", "manifests", "deploy"] {
+    for dir in dirs {
         let d = root.join(dir);
         if !d.is_dir() {
             continue;
@@ -357,11 +480,44 @@ fn k8s_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> {
             }
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext == "yaml" || ext == "yml" {
-                out.push((path, EnvSource::K8sEnv));
+                out.push((path, source));
             }
         }
     }
     out
+}
+
+fn env_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> {
+    find_config_files(
+        root,
+        &[".env", ".env.local", ".env.development", ".env.production"],
+        EnvSource::DotEnv,
+    )
+}
+
+fn compose_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> {
+    find_config_files(
+        root,
+        &[
+            "docker-compose.yml",
+            "docker-compose.yaml",
+            "compose.yml",
+            "compose.yaml",
+        ],
+        EnvSource::DockerCompose,
+    )
+}
+
+fn helm_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> {
+    find_config_files(
+        root,
+        &["helm/values.yaml", "values.yaml"],
+        EnvSource::HelmValues,
+    )
+}
+
+fn k8s_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> {
+    find_yaml_files_in_dirs(root, &["k8s", "manifests", "deploy"], EnvSource::K8sEnv)
 }
 
 // ─── Parsers ────────────────────────────────────────────────────────
@@ -376,10 +532,7 @@ pub fn parse_dotenv_line(line: &str) -> Option<(String, String)> {
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return None;
     }
-    let stripped = trimmed
-        .strip_prefix("export ")
-        .unwrap_or(trimmed)
-        .trim();
+    let stripped = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
     let (key, raw_value) = stripped.split_once('=')?;
     let key = key.trim().to_string();
     if key.is_empty() || !is_valid_env_name(&key) {
@@ -426,12 +579,11 @@ fn find_unquoted_hash(s: &str) -> Option<usize> {
 
 fn unquote(s: &str) -> &str {
     let bytes = s.as_bytes();
-    if bytes.len() >= 2 {
-        if (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'')
-        {
-            return &s[1..s.len() - 1];
-        }
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        return &s[1..s.len() - 1];
     }
     s
 }
@@ -454,7 +606,7 @@ pub fn url_host_from(value: &str) -> Option<String> {
     // The host ends at the first `/`, `:`, `?`, or `#` after the
     // scheme strip.
     let end = after_scheme
-        .find(|c: char| c == '/' || c == ':' || c == '?' || c == '#')
+        .find(['/', ':', '?', '#'])
         .unwrap_or(after_scheme.len());
     let host = &after_scheme[..end];
     if host.is_empty() {
@@ -708,10 +860,7 @@ mod tests {
 
     #[test]
     fn url_host_from_strips_scheme_path_and_port() {
-        assert_eq!(
-            url_host_from("http://orders:8080"),
-            Some("orders".into())
-        );
+        assert_eq!(url_host_from("http://orders:8080"), Some("orders".into()));
         assert_eq!(
             url_host_from("https://api.billing/v1"),
             Some("api.billing".into())
@@ -736,8 +885,12 @@ services:
       - DEBUG
 "#;
         let pairs = parse_compose_environment(content);
-        assert!(pairs.iter().any(|(k, v)| k == "ORDERS_API_URL" && v == "http://orders:8080"));
-        assert!(pairs.iter().any(|(k, v)| k == "BILLING_URL" && v == "http://billing:9000"));
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "ORDERS_API_URL" && v == "http://orders:8080"));
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "BILLING_URL" && v == "http://billing:9000"));
         // Non-URL value (LOG_LEVEL=info) survives parse but is
         // filtered out by the host extraction in `scan`.
         assert!(pairs.iter().any(|(k, v)| k == "LOG_LEVEL" && v == "info"));
@@ -755,7 +908,9 @@ env:
   LOG_LEVEL: warn
 "#;
         let pairs = parse_helm_env(content);
-        assert!(pairs.iter().any(|(k, v)| k == "ORDERS_API_URL" && v == "http://orders:8080"));
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "ORDERS_API_URL" && v == "http://orders:8080"));
         assert!(pairs.iter().any(|(k, v)| k == "LOG_LEVEL" && v == "warn"));
     }
 
@@ -778,7 +933,9 @@ spec:
               value: info
 "#;
         let pairs = parse_k8s_env(content);
-        assert!(pairs.iter().any(|(k, v)| k == "ORDERS_API_URL" && v == "http://orders:8080"));
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "ORDERS_API_URL" && v == "http://orders:8080"));
         assert!(pairs.iter().any(|(k, v)| k == "LOG_LEVEL" && v == "info"));
     }
 
@@ -816,8 +973,7 @@ spec:
         .unwrap();
 
         let bindings = scan(&root);
-        let vars: std::collections::BTreeSet<_> =
-            bindings.iter().map(|b| b.var.clone()).collect();
+        let vars: std::collections::BTreeSet<_> = bindings.iter().map(|b| b.var.clone()).collect();
         assert!(vars.contains("ORDERS_API_URL"));
         assert!(vars.contains("BILLING_URL"));
         assert!(vars.contains("REPORTS_URL"));
