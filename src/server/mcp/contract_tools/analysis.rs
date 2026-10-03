@@ -1058,6 +1058,7 @@ fn endpoint_from_change(
                                 }
                                 ContractKey::Topic { .. } => continue,
                                 ContractKey::Rpc { .. } => continue,
+                                ContractKey::Graphql { .. } => continue,
                             };
                             if !method_compatible(&m, &id_method) {
                                 continue;

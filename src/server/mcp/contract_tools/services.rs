@@ -600,6 +600,7 @@ fn build_unresolved_candidates(idx: &ContractIndex, _info: &ServiceInfo) -> Vec<
                     UnresolvedReason::EnvUnmapped => "env_unmapped",
                     UnresolvedReason::EnvAmbiguous => "env_ambiguous",
                     UnresolvedReason::RpcStubUnknown => "rpc_stub_unknown",
+                    UnresolvedReason::GraphqlNoOp => "graphql_no_op",
                 },
                 "target_service": r.service.0,
             }));

@@ -719,7 +719,7 @@ fn method_of(id: &EndpointId) -> Option<crate::federation::contracts::model::Htt
             MethodSpec::Known(m) => Some(*m),
             MethodSpec::Unknown => None,
         },
-        ContractKey::Topic { .. } | ContractKey::Rpc { .. } => None,
+        ContractKey::Topic { .. } | ContractKey::Rpc { .. } | ContractKey::Graphql { .. } => None,
     }
 }
 
@@ -1970,12 +1970,14 @@ pub fn could_match(
         }
         ConsumerTargetKey::Contract(ContractKey::Topic { .. }) => return false,
         ConsumerTargetKey::Contract(ContractKey::Rpc { .. }) => return false,
+        ConsumerTargetKey::Contract(ContractKey::Graphql { .. }) => return false,
         ConsumerTargetKey::UrlExpr(_) => (MethodSpec::Unknown, None),
     };
     let endpoint_method = match &endpoint.1 {
         ContractKey::Http { method, .. } => method.clone(),
         ContractKey::Topic { .. } => return false,
         ContractKey::Rpc { .. } => return false,
+        ContractKey::Graphql { .. } => return false,
     };
     match (consumer_method, endpoint_method) {
         (MethodSpec::Known(cm), MethodSpec::Known(em)) => {

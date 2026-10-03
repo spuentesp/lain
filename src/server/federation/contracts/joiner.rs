@@ -511,11 +511,13 @@ impl ContractJoiner {
                 },
                 ContractKey::Topic { .. } => HttpMethod::Any,
                 ContractKey::Rpc { .. } => HttpMethod::Any,
+                ContractKey::Graphql { .. } => HttpMethod::Any,
             };
             let template = match &key {
                 ContractKey::Http { template, .. } => template.clone(),
                 ContractKey::Topic { name, .. } => name.clone(),
                 ContractKey::Rpc { method, .. } => method.clone(),
+                ContractKey::Graphql { field, .. } => field.clone(),
             };
             let provider_records: Vec<EndpointProvider> = providers
                 .into_iter()

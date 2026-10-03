@@ -205,6 +205,7 @@ async fn run_list_contracts(
                 ContractKey::Http { .. } => "http",
                 ContractKey::Topic { .. } => "topic",
                 ContractKey::Rpc { .. } => "rpc",
+                ContractKey::Graphql { .. } => "graphql",
             };
             if k != key_kind {
                 continue;
@@ -1050,6 +1051,7 @@ fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         UnresolvedReason::EnvUnmapped => "env_unmapped",
         UnresolvedReason::EnvAmbiguous => "env_ambiguous",
         UnresolvedReason::RpcStubUnknown => "rpc_stub_unknown",
+        UnresolvedReason::GraphqlNoOp => "graphql_no_op",
     }
 }
 

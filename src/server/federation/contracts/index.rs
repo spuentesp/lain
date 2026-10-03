@@ -167,6 +167,14 @@ pub enum UnresolvedReason {
     /// the coverage ledger's `unresolved` bucket; the operator
     /// wires the host via `repos.yaml#services[]`.
     RpcStubUnknown,
+    /// Phase E (spec §8.3): a GraphQL consumer whose
+    /// `(op, field)` did not match any provider scoped to
+    /// the service that owns the `/graphql` HTTP route. The
+    /// consumer lands in the coverage ledger's `unresolved`
+    /// bucket with this reason so the operator can wire a
+    /// missing schema field or expand the route's
+    /// service-scoped provider set.
+    GraphqlNoOp,
 }
 
 /// Field read resolution (§7.5). `bound_fields` carries the joined
@@ -259,6 +267,17 @@ pub fn node_type_of(fact: &ContractFact) -> NodeType {
         // the enclosing function). Function is the primary
         // shape.
         ContractFact::RpcConsumer(_) => NodeType::Function,
+        // Phase E (spec §8.3): `GraphqlProvider` rides on a
+        // Module node (the SDL file's path-keyed module). The
+        // `GraphqlHandler` link is keyed off the handler
+        // function. Both surface as `Module` so the existing
+        // typed traversal works.
+        ContractFact::GraphqlProvider(_) | ContractFact::GraphqlHandler(_) => NodeType::Module,
+        // Phase E (spec §8.3): `GraphqlConsumer` rides on a
+        // function / method (mirrors how `SendsHttp` attaches
+        // to the enclosing function). Function is the primary
+        // shape.
+        ContractFact::GraphqlConsumer(_) => NodeType::Function,
     }
 }
 

@@ -97,6 +97,13 @@ pub enum SensorOwner {
     /// retracts all three groups together (the older `proto_sensor`
     /// did not manage these; the new sensors replace it).
     ProtoSensor,
+    /// Phase E (spec §8.3): the GraphQL provider, handler-link,
+    /// and consumer sensors all own `Module` / `Function` nodes
+    /// that carry `GraphqlProvider` / `GraphqlHandler` /
+    /// `GraphqlConsumer` contract facts. They share a single
+    /// `SensorOwner` so a rescan retracts all three groups
+    /// together.
+    GraphqlSensor,
 }
 
 /// Map a node to its sensor owner (§6.1 derivation rules). Returns
@@ -129,6 +136,13 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         (_, Some(ContractFact::RpcProvider(_)))
         | (_, Some(ContractFact::RpcHandler(_)))
         | (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::ProtoSensor),
+        // Phase E (spec §8.3): `GraphqlProvider` / `GraphqlHandler` /
+        // `GraphqlConsumer` ride on Module / Function nodes. All
+        // three are owned by the GraphQL sensor family so a rescan
+        // retracts them together.
+        (_, Some(ContractFact::GraphqlProvider(_)))
+        | (_, Some(ContractFact::GraphqlHandler(_)))
+        | (_, Some(ContractFact::GraphqlConsumer(_))) => Some(SensorOwner::GraphqlSensor),
         _ => None,
     }
 }

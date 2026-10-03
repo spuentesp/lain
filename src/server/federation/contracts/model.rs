@@ -88,6 +88,30 @@ pub enum ContractFact {
     /// records the link on the corresponding `RpcProvider` so
     /// typed traversal `handler → function → rpc` is reachable.
     RpcHandler(RpcHandlerFact),
+    /// Phase E (spec §8.3): one GraphQL root field on the SDL
+    /// provider side. `op` is the operation kind (Query /
+    /// Mutation / Subscription), `field` is the root field name
+    /// (`orders`), and `return_type` is the raw return-type
+    /// expression the sensor extracted (e.g. `[Order!]`). The
+    /// joiner matches providers on the `(op, field)` pair; the
+    /// return type is informational (the spec does not model
+    /// GraphQL type semantics in v1).
+    GraphqlProvider(GraphqlProviderFact),
+    /// Phase E (spec §8.3): one GraphQL consumer. The consumer
+    /// sensor emits one of these per top-level selection field
+    /// of an operation document (`gql\`query { orders { id } }\``
+    /// → one consumer for the `orders` root field). Fragment-only
+    /// or interpolated documents land in the coverage ledger
+    /// as `Unresolved { reason: DynamicOperation }` and never
+    /// produce a `GraphqlConsumer` fact.
+    GraphqlConsumer(GraphqlConsumerFact),
+    /// Phase E (spec §8.3): one resolver-link from a GraphQL root
+    /// field to its implementing handler. The payload carries the
+    /// `ContractKey::Graphql { op, field }` and the handler
+    /// function's `SymbolKey` plus the framework marker the
+    /// sensor detected (Apollo resolver map / graphql-java
+    /// `DataFetcher` / gqlgen / Strawberry).
+    GraphqlHandler(GraphqlHandlerFact),
 }
 
 // ─── HTTP provider ────────────────────────────────────────────────────
@@ -178,6 +202,62 @@ pub enum RpcHandlerOrigin {
     JavaGrpcService,
     GoRegister,
     PythonServicer,
+}
+
+// ─── GraphQL provider / consumer / handler (Phase E, spec §8.3) ─────
+
+/// Phase E (spec §8.3): one GraphQL root field on the SDL
+/// provider side. The sensor emits one per detected `field: Ret`
+/// declaration inside a `type Query { ... }` / `Mutation` /
+/// `Subscription` block. `return_type` is the raw textual return
+/// type the SDL declared (`[Order!]`, `Order`, …) — informational
+/// only; the joiner matches on `(op, field)`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphqlProviderFact {
+    pub op: GraphqlOp,
+    pub field: String,
+    pub return_type: String,
+}
+
+/// Phase E (spec §8.3): one GraphQL consumer — the top-level
+/// selection field of an operation document. The sensor emits one
+/// per detected top-level field of a `query { … }` /
+/// `mutation { … }` / `subscription { … }` operation in a
+/// tagged template / `.graphql` document / persisted operation.
+/// Fragment-only or interpolated documents do not produce a
+/// `GraphqlConsumer`; they land in the coverage ledger as
+/// `Unresolved { reason: DynamicOperation }`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphqlConsumerFact {
+    pub op: GraphqlOp,
+    pub field: String,
+}
+
+/// Phase E (spec §8.3): one resolver-link from a GraphQL root
+/// field to its implementing handler. The sensor emits one per
+/// detected naming-convention match (Apollo resolver maps /
+/// graphql-java `DataFetcher` / gqlgen / Strawberry). The
+/// joiner records the link on the corresponding
+/// `GraphqlProvider` so typed traversal `handler → function →
+/// graphql` is reachable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphqlHandlerFact {
+    pub graphql_field: ContractKey,
+    pub handler_function: SymbolKey,
+    pub origin: GraphqlHandlerOrigin,
+}
+
+/// Phase E (spec §8.3): the framework-specific marker the
+/// resolver-link sensor used to claim a function is the
+/// handler for a GraphQL root field. Recorded on the
+/// `GraphqlHandler` fact so the operator can see *why* a
+/// function was linked to a root field.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GraphqlHandlerOrigin {
+    Apollo,
+    GraphqlJava,
+    Gqlgen,
+    Strawberry,
 }
 
 // ─── HTTP consumer ────────────────────────────────────────────────────
@@ -428,10 +508,10 @@ pub struct SymbolKey {
 
 /// Federation-level identifier of an endpoint. `Http` keys are the
 /// `(method, template)` pair; `Topic` keys are `(broker, name)`;
-/// `Rpc` keys are `(system, package.service, method)` per spec §8.1.
-/// The `Display` / `FromStr` grammar is in §4.4 — implementations
-/// land with the joiner (task 7) since they need the encoding
-/// machinery.
+/// `Rpc` keys are `(system, package.service, method)` per spec §8.1;
+/// `Graphql` keys are `(op, field)` per spec §8.3. The `Display` /
+/// `FromStr` grammar is in §4.4 — implementations land with the
+/// joiner (task 7) since they need the encoding machinery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ContractKey {
     /// HTTP endpoint. `MethodSpec::Unknown` only appears in
@@ -457,6 +537,39 @@ pub enum ContractKey {
         service: String,
         method: String,
     },
+    /// Phase E (spec §8.3): one GraphQL root field on a Query,
+    /// Mutation, or Subscription. The `(op, field)` pair is the
+    /// join key; a federation with two services exposing the same
+    /// `(op, field)` is ambiguous and never single-bound (per
+    /// spec §8.3 "federation/gateway"). The wire form renders
+    /// `graphql:<op>:<field>` so it round-trips through
+    /// `Display` / `FromStr` like the other variants.
+    Graphql {
+        op: GraphqlOp,
+        field: String,
+    },
+}
+
+/// Phase E (spec §8.3): the GraphQL operation kind for a
+/// `ContractKey::Graphql` or `GraphqlProvider` / `GraphqlConsumer`.
+/// The enum is open so future shapes (a single
+/// `Subscription`-only federation, a custom transport) extend
+/// without a wire-shape change beyond the discriminator.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GraphqlOp {
+    Query,
+    Mutation,
+    Subscription,
+}
+
+impl std::fmt::Display for GraphqlOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GraphqlOp::Query => f.write_str("query"),
+            GraphqlOp::Mutation => f.write_str("mutation"),
+            GraphqlOp::Subscription => f.write_str("subscription"),
+        }
+    }
 }
 
 /// Phase E (spec §8.1): the RPC family. Only `Grpc` exists today
@@ -486,8 +599,13 @@ impl std::fmt::Display for ContractKey {
             ContractKey::Topic { broker, name } => {
                 write!(f, "topic:{}/{}", broker, name)
             }
-            ContractKey::Rpc { service, method, .. } => {
+            ContractKey::Rpc {
+                service, method, ..
+            } => {
                 write!(f, "rpc:{}/{}", service, method)
+            }
+            ContractKey::Graphql { op, field } => {
+                write!(f, "graphql:{}:{}", op, field)
             }
         }
     }
@@ -527,6 +645,22 @@ impl std::str::FromStr for ContractKey {
                 system: RpcSystem::Grpc,
                 service: service.to_string(),
                 method: method.to_string(),
+            });
+        }
+        if let Some(rest) = s.strip_prefix("graphql:") {
+            // "<op>:<field>" — op is `query` | `mutation` | `subscription`.
+            let (op_str, field) = rest
+                .split_once(':')
+                .ok_or_else(|| format!("malformed graphql key: {s:?}"))?;
+            let op = match op_str {
+                "query" => GraphqlOp::Query,
+                "mutation" => GraphqlOp::Mutation,
+                "subscription" => GraphqlOp::Subscription,
+                _ => return Err(format!("unknown graphql op in key: {op_str:?}")),
+            };
+            return Ok(ContractKey::Graphql {
+                op,
+                field: field.to_string(),
             });
         }
         Err(format!("unknown contract key kind: {s:?}"))
