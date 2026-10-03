@@ -221,8 +221,11 @@ fn detect_go_stub_calls(
     channel: &Option<String>,
     out: &mut Vec<GrpcStubCall>,
 ) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = (idx as u32) + 1;
+    for (line_no, line) in
+        crate::server::sensors::util_tokenize::lines_matching_pattern(content, |l| {
+            l.contains("Client.")
+        })
+    {
         let trimmed = line.trim();
         // `client.Get(ctx, req)` — look for `<ident>Client.<Method>(`
         // anywhere in the line. The receiver is whatever identifier
@@ -261,7 +264,7 @@ fn detect_go_stub_calls(
                 channel_host_part: host_part,
                 site: SourceSite {
                     path: graph_path.to_string(),
-                    line: line_no,
+                    line: line_no as u32,
                 },
             });
             break; // one call site per line is enough
@@ -275,8 +278,11 @@ fn detect_python_stub_calls(
     channel: &Option<String>,
     out: &mut Vec<GrpcStubCall>,
 ) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = (idx as u32) + 1;
+    for (line_no, line) in
+        crate::server::sensors::util_tokenize::lines_matching_pattern(content, |l| {
+            l.contains("Stub.")
+        })
+    {
         let trimmed = line.trim();
         for (start, end) in find_stub_receivers_suffix(trimmed, "Stub.") {
             let receiver = &trimmed[start..end];
@@ -306,7 +312,7 @@ fn detect_python_stub_calls(
                 channel_host_part: host_part,
                 site: SourceSite {
                     path: graph_path.to_string(),
-                    line: line_no,
+                    line: line_no as u32,
                 },
             });
             break;
@@ -320,8 +326,11 @@ fn detect_java_stub_calls(
     channel: &Option<String>,
     out: &mut Vec<GrpcStubCall>,
 ) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = (idx as u32) + 1;
+    for (line_no, line) in
+        crate::server::sensors::util_tokenize::lines_matching_pattern(content, |l| {
+            l.contains("Client.") || l.contains("Stub.")
+        })
+    {
         let trimmed = line.trim();
         // `ordersClient.getOrder(request)` — receiver ends in
         // `Client` (blocking stub) or `Stub` (async stub). Try
@@ -357,7 +366,7 @@ fn detect_java_stub_calls(
                 channel_host_part: host_part,
                 site: SourceSite {
                     path: graph_path.to_string(),
-                    line: line_no,
+                    line: line_no as u32,
                 },
             });
             break;
@@ -401,8 +410,9 @@ fn detect_cpp_stub_calls(
     channel: &Option<String>,
     out: &mut Vec<GrpcStubCall>,
 ) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = (idx as u32) + 1;
+    for (line_no, line) in
+        crate::server::sensors::util_tokenize::lines_matching_pattern(content, |l| l.contains("->"))
+    {
         let trimmed = line.trim();
         // `stub->Get(&context, &request, &response)` — receiver
         // is `stub`, the type is `<Service>::Stub`.
@@ -440,7 +450,7 @@ fn detect_cpp_stub_calls(
             channel_host_part: host_part,
             site: SourceSite {
                 path: graph_path.to_string(),
-                line: line_no,
+                line: line_no as u32,
             },
         });
     }

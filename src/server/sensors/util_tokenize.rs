@@ -265,6 +265,35 @@ fn is_word_boundary(b: u8) -> bool {
     !((b as char).is_ascii_alphanumeric() || b == b'_')
 }
 
+// ─── Line iteration ───────────────────────────────────────────────────
+
+/// Yield `(line_no, line)` for every line in `src` matching
+/// `predicate`. `line_no` is 1-based to match the `SourceSite::line`
+/// convention every sensor uses for error reporting.
+///
+/// This is the per-extension list-of-needles + line-by-line walk the
+/// SQL, gRPC, GraphQL, and event sensors all need. Each call site
+/// still owns the per-line extraction logic — the helper only
+/// handles the boilerplate of enumerating lines, applying the
+/// predicate, and computing the 1-based line number.
+pub fn lines_matching_pattern<'a, F>(
+    src: &'a str,
+    predicate: F,
+) -> impl Iterator<Item = (usize, &'a str)> + 'a
+where
+    F: Fn(&str) -> bool + 'a,
+{
+    src.lines()
+        .enumerate()
+        .filter_map(move |(idx, line)| {
+            if predicate(line) {
+                Some((idx + 1, line))
+            } else {
+                None
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +374,19 @@ mod tests {
         assert!(!starts_with_keyword("services Foo", 0, "service"));
         assert!(!starts_with_keyword("aservice Foo", 0, "service"));
         assert!(starts_with_keyword("type Query {", 0, "type"));
+    }
+
+    #[test]
+    fn lines_matching_pattern_yields_one_based_line_numbers() {
+        let src = "alpha\nbeta gamma\nalpha again\n";
+        let hits: Vec<(usize, &str)> = lines_matching_pattern(src, |l| l.contains("alpha")).collect();
+        assert_eq!(hits, vec![(1, "alpha"), (3, "alpha again")]);
+    }
+
+    #[test]
+    fn lines_matching_pattern_returns_empty_when_no_match() {
+        let src = "foo\nbar\n";
+        let hits: Vec<(usize, &str)> = lines_matching_pattern(src, |l| l.contains("zzz")).collect();
+        assert!(hits.is_empty());
     }
 }
