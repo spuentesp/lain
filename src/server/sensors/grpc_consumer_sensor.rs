@@ -109,11 +109,8 @@ pub fn scan_workspace_grpc_consumer(
                 Some(call.site.line),
                 namespace,
             );
-            let mut node = GraphNode::new(
-                NodeType::Function,
-                id_name.clone(),
-                call.site.path.clone(),
-            );
+            let mut node =
+                GraphNode::new(NodeType::Function, id_name.clone(), call.site.path.clone());
             node.id = id;
             node.line_start = Some(call.site.line);
             node.line_end = Some(call.site.line);
@@ -130,11 +127,8 @@ pub fn scan_workspace_grpc_consumer(
         }
     }
     if !all_nodes.is_empty() {
-        let _ = graph.replace_sensor_output(
-            SensorOwner::ProtoSensor,
-            &all_nodes,
-            &[] as &[GraphEdge],
-        );
+        let _ =
+            graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &[] as &[GraphEdge]);
     }
     Ok(total)
 }
@@ -151,7 +145,9 @@ pub fn detect_stub_calls(content: &str, ext: &str, graph_path: &str) -> Vec<Grpc
         "go" => detect_go_stub_calls(content, graph_path, &channel, &mut out),
         "py" => detect_python_stub_calls(content, graph_path, &channel, &mut out),
         "java" => detect_java_stub_calls(content, graph_path, &channel, &mut out),
-        "cc" | "cpp" | "h" | "hpp" => detect_cpp_stub_calls(content, graph_path, &channel, &mut out),
+        "cc" | "cpp" | "h" | "hpp" => {
+            detect_cpp_stub_calls(content, graph_path, &channel, &mut out)
+        }
         _ => {}
     }
     out
@@ -220,10 +216,7 @@ fn extract_string_arg(rest: &str) -> Option<String> {
     // Stop at the matching quote OR at any of the common
     // call-argument terminators (`,`, `)`, `+`) — defensive against
     // multiline / concatenated string shapes.
-    let end = body
-        .find(|c: char| {
-            c == quote as char || c == ',' || c == ')' || c == '+'
-        })?;
+    let end = body.find([quote as char, ',', ')', '+'])?;
     Some(body[..end].to_string())
 }
 
@@ -353,9 +346,7 @@ fn detect_java_stub_calls(
         // `ordersClient.getOrder(request)` — receiver ends in
         // `Client` (blocking stub) or `Stub` (async stub). Try
         // both suffixes.
-        for (start, end, suffix_kind) in
-            find_java_stub_receivers(trimmed)
-        {
+        for (start, end, suffix_kind) in find_java_stub_receivers(trimmed) {
             let receiver = &trimmed[start..end];
             let after_dot_full = &trimmed[end + 1..];
             let paren_pos = after_dot_full.find('(').unwrap_or(after_dot_full.len());

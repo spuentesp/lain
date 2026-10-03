@@ -29,9 +29,7 @@
 //! not get emitted as a method.
 
 use crate::error::LainError;
-use crate::federation::contracts::model::{
-    ContractFact, RpcProviderFact, RpcSystem, SourceSite,
-};
+use crate::federation::contracts::model::{ContractFact, RpcProviderFact, RpcSystem, SourceSite};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
 use std::path::Path;
@@ -126,7 +124,8 @@ pub fn scan_workspace_grpc(
         // (which also writes Module nodes keyed off the proto
         // path) — the E1 acceptance test confirms the two
         // sensors coexist without overwriting each other.
-        let _ = graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &[] as &[GraphEdge]);
+        let _ =
+            graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &[] as &[GraphEdge]);
     }
     Ok(total)
 }
@@ -257,11 +256,7 @@ fn join_continued_lines(input: &str) -> String {
             prev_ended_with_continuation = false;
             continue;
         }
-        if ch == '\\' {
-            prev_ended_with_continuation = true;
-        } else {
-            prev_ended_with_continuation = false;
-        }
+        prev_ended_with_continuation = ch == '\\';
         out.push(ch);
     }
     out
@@ -393,13 +388,11 @@ fn starts_with_keyword(bytes: &[u8], at: usize, kw: &str) -> bool {
         return false;
     }
     // Word boundary on both sides.
-    let before_ok = at == 0
-        || !(bytes[at - 1] as char).is_ascii_alphanumeric()
-            && bytes[at - 1] != b'_';
+    let before_ok =
+        at == 0 || !(bytes[at - 1] as char).is_ascii_alphanumeric() && bytes[at - 1] != b'_';
     let after_idx = at + kw.len();
     let after_ok = after_idx >= bytes.len()
-        || !(bytes[after_idx] as char).is_ascii_alphanumeric()
-            && bytes[after_idx] != b'_';
+        || !(bytes[after_idx] as char).is_ascii_alphanumeric() && bytes[after_idx] != b'_';
     before_ok && after_ok
 }
 
