@@ -145,6 +145,15 @@ pub(crate) fn resolve_env_consumer(
             return Some(EnvResolution::Service(ServiceName(s.name.clone())));
         }
     }
+    // The `no_service:` key prefix is the joiner's bookkeeping
+    // for "the env var resolved to a host, but no
+    // services[].hosts pattern claimed that host". The
+    // orchestrator reads [`JoinOutput::unresolved_env_vars`]
+    // and treats both the bare-var form and the `no_service:`
+    // form as `EnvUnmapped` (pass #4 R23, review §D20). The
+    // prefix is intentionally not a typed enum key — the
+    // coverage ledger's per-(sensor, lang) bucket reason
+    // `EnvUnmapped` already collapses both forms.
     *unresolved_env_vars
         .entry(format!("no_service:{}", host))
         .or_insert(0) += 1;

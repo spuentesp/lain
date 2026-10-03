@@ -148,6 +148,23 @@ pub struct JoinOutput {
     /// that referenced the var. The orchestrator folds these
     /// into the coverage ledger as `unresolved` records with
     /// `reason: EnvUnmapped`.
+    ///
+    /// Key shape (pass #4 R23, review §D20): the map carries
+    /// two key forms, both `String`:
+    /// - `<var_name>` — the consumer's var had no env_sensor
+    ///   binding at all (the env_sensor returned zero hosts).
+    /// - `no_service:<host>` — every var resolved to the same
+    ///   host, but no `services[].hosts` pattern matched. The
+    ///   `<host>` is the resolved host (not the var name). This
+    ///   key is set by
+    ///   [`resolve_env_consumer`](crate::federation::contracts::url_resolution::resolve_env_consumer)
+    ///   when the env path exhausts the service list.
+    ///
+    /// Consumers should treat both forms as `EnvUnmapped` —
+    /// the difference is bookkeeping, not semantics. The
+    /// `no_service:` prefix is the joiner's only way to
+    /// disambiguate "the var had no binding" from "the var's
+    /// binding resolved to a host no service claims".
     pub unresolved_env_vars: BTreeMap<String, u32>,
     /// Phase C (spec §6): env vars the joiner found to resolve
     /// to multiple distinct hosts in the env_sensor's bindings
