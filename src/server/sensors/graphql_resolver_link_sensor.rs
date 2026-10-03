@@ -169,7 +169,10 @@ fn default_resolver_detectors(root: &Path, repo_id: &RepoId) -> Vec<Box<dyn Reso
         Box::new(ApolloDetector::new(root.to_path_buf(), repo_id.clone())),
         Box::new(GqlgenDetector::new(root.to_path_buf(), repo_id.clone())),
         Box::new(StrawberryDetector::new(root.to_path_buf(), repo_id.clone())),
-        Box::new(GraphqlJavaDetector::new(root.to_path_buf(), repo_id.clone())),
+        Box::new(GraphqlJavaDetector::new(
+            root.to_path_buf(),
+            repo_id.clone(),
+        )),
     ]
 }
 
@@ -185,10 +188,9 @@ pub fn detect_resolver_links(
 ) -> Vec<GraphqlHandlerLink> {
     let workspace = PathBuf::from(".");
     let detectors: Vec<Box<dyn ResolverLinkDetector>> = match ext {
-        "ts" | "tsx" | "js" | "jsx" => vec![Box::new(ApolloDetector::new(
-            workspace,
-            repo_id.clone(),
-        ))],
+        "ts" | "tsx" | "js" | "jsx" => {
+            vec![Box::new(ApolloDetector::new(workspace, repo_id.clone()))]
+        }
         "go" => vec![Box::new(GqlgenDetector::new(workspace, repo_id.clone()))],
         "py" => vec![Box::new(StrawberryDetector::new(
             workspace,
@@ -359,6 +361,39 @@ fn extract_apollo_handler_name(expr: &str) -> String {
     head
 }
 
+// Apollo arrow-body minitokenizer. Pass #4 R25 (review §D22)
+// — this is a third minitokenizer in the sensor layer after
+// the SQL / proto / GraphQL ones that the D1 `util_tokenize`
+// helper serves, but it intentionally does NOT reuse the
+// helper:
+//
+// - The helper exists for protocol-source-token streams that
+//   need comment stripping, brace balancing, and string-
+//   literal awareness before walking identifiers. The Apollo
+//   detector feeds it arrow-body content extracted from a
+//   resolver map value (e.g. `async (parent, args) => {
+//   return Order.findById(args.id) }`). The arrow body is
+//   already past the parser surface — comments and strings
+//   have been stripped by the line-level walk that produced
+//   the resolver map. Walking it as identifiers-only is the
+//   exact shape we want.
+// - The helper returns `Vec<Token>` (an owned struct) for
+//   parser-walk use. The Apollo detector wants a borrowed
+//   iterator (`impl Iterator<Item = &str>`) over a single
+//   arrow body so it can stop on the first alphabetic
+//   identifier. Wrapping the helper in an iterator adapter
+//   would be more code than the 3-line split below.
+// - The split-non-alphanumeric is a 1-line operation on
+//   already-bounded input. The 30+ lines of
+//   `util_tokenize::strip_comments` + balance + extract
+//   scaffolding would be unused surface.
+//
+// Keeping the per-sensor minitokenizer is the right call for
+// the D1 helper's contract. If a future detector needs the
+// same arrow-body shape (e.g. a "kysely arrow resolver" for
+// GraphQL), the helper should grow a `ident_split(&str)`
+// entry point and both detectors should switch — but for
+// now, the duplication is two lines, not three.
 fn tokenize(s: &str) -> impl Iterator<Item = &str> {
     s.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|tok| !tok.is_empty())
