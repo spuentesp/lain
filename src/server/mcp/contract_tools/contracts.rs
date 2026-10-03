@@ -201,13 +201,7 @@ async fn run_list_contracts(
             }
         }
         if let Some(ref k) = kind_filter {
-            let key_kind = match &endpoint_id.1 {
-                ContractKey::Http { .. } => "http",
-                ContractKey::Topic { .. } => "topic",
-                ContractKey::Rpc { .. } => "rpc",
-                ContractKey::Graphql { .. } => "graphql",
-            };
-            if k != key_kind {
+            if k != endpoint_id.1.kind() {
                 continue;
             }
         }

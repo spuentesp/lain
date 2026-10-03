@@ -611,6 +611,68 @@ impl std::fmt::Display for ContractKey {
     }
 }
 
+impl ContractKey {
+    /// Wire-form of the key (the `Display` round-trip). One per
+    /// variant: `http:<METHOD> <template>`, `topic:<broker>/<name>`,
+    /// `rpc:<service>/<method>`, `graphql:<op>:<field>`. The §4.4
+    /// `Display` / `FromStr` grammar is shared with this method —
+    /// any change to one must propagate to the other.
+    pub fn wire_form(&self) -> String {
+        self.to_string()
+    }
+
+    /// Per-variant leaf identifier:
+    /// * `Http` — the route template (e.g. `/api/orders/{id}`);
+    /// * `Topic` — the topic name;
+    /// * `Rpc` — the method name;
+    /// * `Graphql` — the field name.
+    ///
+    /// Used by the joiner's `Endpoint { method, template }`
+    /// projection (§7.3 step 2) and by §9.4 specificity scoring;
+    /// consolidated here so the Phase E follow-up (Thrift /
+    /// Connect-RPC per spec §8.1) only adds the new variant's
+    /// arm, not four call-site matches.
+    pub fn leaf(&self) -> &str {
+        match self {
+            ContractKey::Http { template, .. } => template,
+            ContractKey::Topic { name, .. } => name,
+            ContractKey::Rpc { method, .. } => method,
+            ContractKey::Graphql { field, .. } => field,
+        }
+    }
+
+    /// Short variant tag (`"http"` / `"topic"` / `"rpc"` /
+    /// `"graphql"`). Used by tool envelopes that filter by
+    /// protocol kind — `mcp::contracts::list_contracts`'s
+    /// `kind_filter` parameter, for one.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ContractKey::Http { .. } => "http",
+            ContractKey::Topic { .. } => "topic",
+            ContractKey::Rpc { .. } => "rpc",
+            ContractKey::Graphql { .. } => "graphql",
+        }
+    }
+
+    /// True iff this key carries an embedded service name equal
+    /// to `caller_service`. Only `Rpc` keys embed a service in the
+    /// key shape (per spec §8.2 — package-qualified
+    /// `package.Service`); the other variants are protocol-scoped
+    /// and rely on the joiner's `(service, key)` pair for I5
+    /// same-service filtering, so this method returns `false`
+    /// for them. Used by I5 ("no same-service Binds") checks
+    /// inside `resolve_rpc_consumer` and the topic / GraphQL
+    /// resolvers' candidate filtering.
+    pub fn is_self_service(&self, caller_service: &str) -> bool {
+        match self {
+            ContractKey::Rpc { service, .. } => service == caller_service,
+            ContractKey::Http { .. } | ContractKey::Topic { .. } | ContractKey::Graphql { .. } => {
+                false
+            }
+        }
+    }
+}
+
 impl std::str::FromStr for ContractKey {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
