@@ -221,54 +221,27 @@ fn detect_go_stub_calls(
     channel: &Option<String>,
     out: &mut Vec<GrpcStubCall>,
 ) {
-    for (line_no, line) in
-        crate::server::sensors::util_tokenize::lines_matching_pattern(content, |l| {
-            l.contains("Client.")
-        })
-    {
-        let trimmed = line.trim();
-        // `client.Get(ctx, req)` — look for `<ident>Client.<Method>(`
-        // anywhere in the line. The receiver is whatever identifier
-        // precedes the `.` and ends in `Client`. We scan the line
-        // for a `Client.` (or `Stub.`) literal so multi-assignment
-        // (`resp, err := ordersClient.Get(...)`) still matches.
-        for (start, end) in find_stub_receivers(trimmed) {
-            let receiver = &trimmed[start..end];
-            if !receiver.ends_with("Client") {
-                continue;
-            }
-            // Method name is the leading identifier after the dot.
-            let after_dot_full = &trimmed[end + 1..];
-            let paren_pos = after_dot_full.find('(').unwrap_or(after_dot_full.len());
-            let head = &after_dot_full[..paren_pos];
-            if head.contains('.') {
-                continue;
-            }
-            let method_end = head
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
-                .unwrap_or(head.len());
-            let method = &head[..method_end];
-            if method.is_empty() {
-                continue;
-            }
-            let service = strip_client_suffix(receiver);
-            if service.is_empty() {
-                continue;
-            }
-            let (channel_target, host_part) = host_parts_from_channel(channel);
-            out.push(GrpcStubCall {
-                service,
-                package: String::new(),
-                method: method.to_string(),
-                channel_target,
-                channel_host_part: host_part,
-                site: SourceSite {
-                    path: graph_path.to_string(),
-                    line: line_no as u32,
-                },
-            });
-            break; // one call site per line is enough
+    for det in crate::server::sensors::util_tokenize::detect_method_calls(
+        content,
+        |rcv| rcv.ends_with("Client"),
+        |meth| !meth.is_empty(),
+    ) {
+        let service = strip_client_suffix(det.receiver);
+        if service.is_empty() {
+            continue;
         }
+        let (channel_target, host_part) = host_parts_from_channel(channel);
+        out.push(GrpcStubCall {
+            service,
+            package: String::new(),
+            method: det.method.to_string(),
+            channel_target,
+            channel_host_part: host_part,
+            site: SourceSite {
+                path: graph_path.to_string(),
+                line: det.line_no,
+            },
+        });
     }
 }
 
@@ -278,45 +251,27 @@ fn detect_python_stub_calls(
     channel: &Option<String>,
     out: &mut Vec<GrpcStubCall>,
 ) {
-    for (line_no, line) in
-        crate::server::sensors::util_tokenize::lines_matching_pattern(content, |l| {
-            l.contains("Stub.")
-        })
-    {
-        let trimmed = line.trim();
-        for (start, end) in find_stub_receivers_suffix(trimmed, "Stub.") {
-            let receiver = &trimmed[start..end];
-            let after_dot_full = &trimmed[end + 1..];
-            let paren_pos = after_dot_full.find('(').unwrap_or(after_dot_full.len());
-            let head = &after_dot_full[..paren_pos];
-            if head.contains('.') {
-                continue;
-            }
-            let method_end = head
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
-                .unwrap_or(head.len());
-            let method = &head[..method_end];
-            if method.is_empty() {
-                continue;
-            }
-            let service = strip_stub_suffix(receiver);
-            if service.is_empty() {
-                continue;
-            }
-            let (channel_target, host_part) = host_parts_from_channel(channel);
-            out.push(GrpcStubCall {
-                service,
-                package: String::new(),
-                method: method.to_string(),
-                channel_target,
-                channel_host_part: host_part,
-                site: SourceSite {
-                    path: graph_path.to_string(),
-                    line: line_no as u32,
-                },
-            });
-            break;
+    for det in crate::server::sensors::util_tokenize::detect_method_calls(
+        content,
+        |rcv| rcv.ends_with("Stub"),
+        |meth| !meth.is_empty(),
+    ) {
+        let service = strip_stub_suffix(det.receiver);
+        if service.is_empty() {
+            continue;
         }
+        let (channel_target, host_part) = host_parts_from_channel(channel);
+        out.push(GrpcStubCall {
+            service,
+            package: String::new(),
+            method: det.method.to_string(),
+            channel_target,
+            channel_host_part: host_part,
+            site: SourceSite {
+                path: graph_path.to_string(),
+                line: det.line_no,
+            },
+        });
     }
 }
 
@@ -326,82 +281,32 @@ fn detect_java_stub_calls(
     channel: &Option<String>,
     out: &mut Vec<GrpcStubCall>,
 ) {
-    for (line_no, line) in
-        crate::server::sensors::util_tokenize::lines_matching_pattern(content, |l| {
-            l.contains("Client.") || l.contains("Stub.")
-        })
-    {
-        let trimmed = line.trim();
-        // `ordersClient.getOrder(request)` — receiver ends in
-        // `Client` (blocking stub) or `Stub` (async stub). Try
-        // both suffixes.
-        for (start, end, suffix_kind) in find_java_stub_receivers(trimmed) {
-            let receiver = &trimmed[start..end];
-            let after_dot_full = &trimmed[end + 1..];
-            let paren_pos = after_dot_full.find('(').unwrap_or(after_dot_full.len());
-            let head = &after_dot_full[..paren_pos];
-            if head.contains('.') {
-                continue;
-            }
-            let method_end = head
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
-                .unwrap_or(head.len());
-            let method = &head[..method_end];
-            if method.is_empty() {
-                continue;
-            }
-            let service = match suffix_kind {
-                StubSuffix::Client => strip_client_suffix(receiver),
-                StubSuffix::Stub => strip_stub_suffix(receiver),
-            };
-            if service.is_empty() {
-                continue;
-            }
-            let (channel_target, host_part) = host_parts_from_channel(channel);
-            out.push(GrpcStubCall {
-                service,
-                package: String::new(),
-                method: method.to_string(),
-                channel_target,
-                channel_host_part: host_part,
-                site: SourceSite {
-                    path: graph_path.to_string(),
-                    line: line_no as u32,
-                },
-            });
-            break;
+    for det in crate::server::sensors::util_tokenize::detect_method_calls(
+        content,
+        |rcv| rcv.ends_with("Client") || rcv.ends_with("Stub"),
+        |meth| !meth.is_empty(),
+    ) {
+        let service = if det.receiver.ends_with("Client") {
+            strip_client_suffix(det.receiver)
+        } else {
+            strip_stub_suffix(det.receiver)
+        };
+        if service.is_empty() {
+            continue;
         }
+        let (channel_target, host_part) = host_parts_from_channel(channel);
+        out.push(GrpcStubCall {
+            service,
+            package: String::new(),
+            method: det.method.to_string(),
+            channel_target,
+            channel_host_part: host_part,
+            site: SourceSite {
+                path: graph_path.to_string(),
+                line: det.line_no,
+            },
+        });
     }
-}
-
-#[derive(Clone, Copy)]
-enum StubSuffix {
-    Client,
-    Stub,
-}
-
-fn find_java_stub_receivers(line: &str) -> Vec<(usize, usize, StubSuffix)> {
-    let mut out: Vec<(usize, usize, StubSuffix)> = Vec::new();
-    for (needle, kind) in [("Client.", StubSuffix::Client), ("Stub.", StubSuffix::Stub)] {
-        let mut pos = 0usize;
-        while let Some(rel) = line[pos..].find(needle) {
-            let dot_pos = pos + rel + needle.len() - 1;
-            let mut begin = dot_pos;
-            while begin > 0 {
-                let prev = line.as_bytes()[begin - 1] as char;
-                if prev.is_alphanumeric() || prev == '_' {
-                    begin -= 1;
-                } else {
-                    break;
-                }
-            }
-            if begin < dot_pos {
-                out.push((begin, dot_pos, kind));
-            }
-            pos = dot_pos + 1;
-        }
-    }
-    out
 }
 
 fn detect_cpp_stub_calls(
@@ -466,60 +371,6 @@ fn is_identifier(s: &str) -> bool {
 /// `needle` (e.g. `"Stub."`). Returns `(start, end)` byte
 /// offsets into `line`. `end` is the position of the dot
 /// (one past the last identifier character).
-fn find_stub_receivers_suffix(line: &str, needle: &str) -> Vec<(usize, usize)> {
-    let mut out: Vec<(usize, usize)> = Vec::new();
-    let mut pos = 0usize;
-    while let Some(rel) = line[pos..].find(needle) {
-        let dot_pos = pos + rel + needle.len() - 1;
-        let mut begin = dot_pos;
-        while begin > 0 {
-            let prev = line.as_bytes()[begin - 1] as char;
-            if prev.is_alphanumeric() || prev == '_' {
-                begin -= 1;
-            } else {
-                break;
-            }
-        }
-        if begin < dot_pos {
-            out.push((begin, dot_pos));
-        }
-        pos = dot_pos + 1;
-    }
-    out
-}
-
-/// Find every identifier in `line` that ends in `Client` and is
-/// followed by `.`. Returns `(start, end)` byte offsets into
-/// `line`. The receiver may appear mid-line so multi-assignment
-/// (`resp, err := ordersClient.Get(...)`) still matches. `end`
-/// is the position of the dot (i.e. one past the last identifier
-/// character) so callers can read `line[end + 1..]` as the
-/// `.<Method>(...)` after the dot.
-fn find_stub_receivers(line: &str) -> Vec<(usize, usize)> {
-    let mut out: Vec<(usize, usize)> = Vec::new();
-    let mut pos = 0usize;
-    while let Some(rel) = line[pos..].find("Client.") {
-        let dot_pos = pos + rel + "Client".len();
-        // Walk backwards from one position BEFORE the dot (the
-        // last `t` of `Client`) to find the start of the
-        // identifier. The receiver includes the `Client` suffix.
-        let mut begin = dot_pos;
-        while begin > 0 {
-            let prev = line.as_bytes()[begin - 1] as char;
-            if prev.is_alphanumeric() || prev == '_' {
-                begin -= 1;
-            } else {
-                break;
-            }
-        }
-        if begin < dot_pos {
-            out.push((begin, dot_pos));
-        }
-        pos = pos + rel + "Client.".len();
-    }
-    out
-}
-
 fn strip_client_suffix(name: &str) -> String {
     name.strip_suffix("Client")
         .map(|s| s.to_string())

@@ -294,6 +294,119 @@ where
         })
 }
 
+// ─── Call-site detection ──────────────────────────────────────────────
+
+/// One call-site match found by [`detect_method_calls`]. The
+/// `receiver` and `method` are borrows into the source string
+/// (callers can `.to_string()` to take ownership when emitting a
+/// record).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedCall<'a> {
+    pub receiver: &'a str,
+    pub method: &'a str,
+    pub line_no: u32,
+}
+
+/// Walk `src` line-by-line and emit one [`DetectedCall`] for every
+/// `<receiver>.<method>(` shape where `receiver_predicate(receiver)`
+/// and `method_predicate(method)` both hold. The receiver is
+/// required to be a single identifier (no dots); the method is the
+/// bare identifier between the dot and the `(`.
+///
+/// This is the per-language line-walk + receiver.method() pattern
+/// the gRPC consumer sensor's four `detect_*_stub_calls` functions
+/// all need. Each caller still owns the post-processing (suffix
+/// stripping, channel-host projection, package inference) — the
+/// helper handles the line scan, the per-line shape, and the
+/// predicate filter.
+pub fn detect_method_calls<F, G>(
+    src: &str,
+    receiver_predicate: F,
+    method_predicate: G,
+) -> Vec<DetectedCall<'_>>
+where
+    F: Fn(&str) -> bool,
+    G: Fn(&str) -> bool,
+{
+    let mut out: Vec<DetectedCall> = Vec::new();
+    for (idx, line) in src.lines().enumerate() {
+        let line_no = (idx as u32) + 1;
+        for (rcv_start, rcv_end, meth_start, meth_end) in find_receiver_method_shapes(line) {
+            let receiver = &line[rcv_start..rcv_end];
+            let method = &line[meth_start..meth_end];
+            if !receiver_predicate(receiver) || !method_predicate(method) {
+                continue;
+            }
+            out.push(DetectedCall {
+                receiver,
+                method,
+                line_no,
+            });
+        }
+    }
+    out
+}
+
+/// Find every `<receiver>.<method>(` shape on `line`. Returns
+/// `(rcv_start, rcv_end, meth_start, meth_end)` byte offsets into
+/// `line`. The receiver is the run of identifier characters
+/// immediately before `.`; the method is the run of identifier
+/// characters between `.` and `(`. Chained calls (`.method(` after
+/// the dot) are skipped.
+fn find_receiver_method_shapes(line: &str) -> Vec<(usize, usize, usize, usize)> {
+    let mut out: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Look for `.` followed by an identifier followed by `(`.
+        if bytes[i] != b'.' || i + 1 >= bytes.len() {
+            i += 1;
+            continue;
+        }
+        // Method identifier: starts at i+1, ends before `(` or any
+        // non-identifier char.
+        let meth_start = i + 1;
+        if !is_ident_start(bytes[meth_start]) {
+            i += 1;
+            continue;
+        }
+        let mut meth_end = meth_start;
+        while meth_end < bytes.len() && is_ident_continue(bytes[meth_end]) {
+            meth_end += 1;
+        }
+        if meth_end >= bytes.len() || bytes[meth_end] != b'(' {
+            i += 1;
+            continue;
+        }
+        // Receiver identifier: walk back from `.` to the previous
+        // non-identifier char.
+        let mut rcv_end = i;
+        if rcv_end == 0 {
+            i += 1;
+            continue;
+        }
+        let mut rcv_start = rcv_end;
+        while rcv_start > 0 && is_ident_continue(bytes[rcv_start - 1]) {
+            rcv_start -= 1;
+        }
+        if rcv_start == rcv_end {
+            i += 1;
+            continue;
+        }
+        out.push((rcv_start, rcv_end, meth_start, meth_end));
+        i = meth_end;
+    }
+    out
+}
+
+fn is_ident_start(b: u8) -> bool {
+    (b as char).is_ascii_alphabetic() || b == b'_'
+}
+
+fn is_ident_continue(b: u8) -> bool {
+    (b as char).is_ascii_alphanumeric() || b == b'_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +501,47 @@ mod tests {
         let src = "foo\nbar\n";
         let hits: Vec<(usize, &str)> = lines_matching_pattern(src, |l| l.contains("zzz")).collect();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn detect_method_calls_finds_receiver_method_pairs() {
+        let src = "\
+ordersClient.Get(ctx, req)
+ordersStub.GetOrder(request)
+not a call
+";
+        let calls: Vec<String> = detect_method_calls(
+            src,
+            |rcv| rcv.ends_with("Client") || rcv.ends_with("Stub"),
+            |meth| !meth.is_empty(),
+        )
+        .iter()
+        .map(|c| format!("{}.{}", c.receiver, c.method))
+        .collect();
+        assert_eq!(calls, vec!["ordersClient.Get", "ordersStub.GetOrder"]);
+    }
+
+    #[test]
+    fn detect_method_calls_reports_line_numbers() {
+        let src = "\nfirst\nordersClient.GetOrder(req)\n";
+        let calls = detect_method_calls(src, |_| true, |_| true);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].line_no, 3);
+        assert_eq!(calls[0].receiver, "ordersClient");
+        assert_eq!(calls[0].method, "GetOrder");
+    }
+
+    #[test]
+    fn detect_method_calls_skips_chained_calls() {
+        // `obj.a.b()` should NOT emit `a.b` (the receiver `a` is
+        // itself a method call chain).
+        let src = "obj.a.b()\n";
+        let calls = detect_method_calls(src, |_| true, |_| true);
+        // The outer `.b(` is the only receiver.method( match —
+        // receiver is `a`, method is `b`. The inner `.a(` is
+        // ignored because `obj` isn't followed by `(`.
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].receiver, "a");
+        assert_eq!(calls[0].method, "b");
     }
 }
