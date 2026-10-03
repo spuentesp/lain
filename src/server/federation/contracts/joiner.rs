@@ -865,6 +865,28 @@ fn build_endpoints(
                         method: HttpMethod::Any,
                     });
             }
+            // Phase E (spec §8.3): a `GraphqlProvider` node
+            // carries the `(op, field)` pair the
+            // `ContractKey::Graphql` form needs. The endpoint
+            // table indexes the provider by that key so the
+            // `resolve_graphql_consumer` join (Task 5) can do
+            // an exact-match lookup within the service that
+            // owns the `/graphql` HTTP route.
+            Some(ContractFact::GraphqlProvider(graphql_provider)) => {
+                let key = ContractKey::Graphql {
+                    op: graphql_provider.op,
+                    field: graphql_provider.field.clone(),
+                };
+                table
+                    .entry((svc.clone(), key))
+                    .or_default()
+                    .push(EndpointProviderRecord {
+                        id: gid,
+                        fact: Some(ContractFact::GraphqlProvider(graphql_provider.clone())),
+                        template: graphql_provider.field.clone(),
+                        method: HttpMethod::Any,
+                    });
+            }
             _ => continue,
         }
     }
@@ -1095,16 +1117,23 @@ fn resolve_topic_consumer(
 }
 
 /// Phase E (spec §8.3): resolve a `GraphqlConsumer` to a
-/// `GraphqlProvider` by exact `(op, field)` match within the
-/// service that owns the `/graphql` HTTP route. The HTTP
-/// route ownership is determined by walking the endpoint
-/// table for any `ContractKey::Http { method, template }` with
-/// `template == "/graphql"`; the (unique) service that hosts
-/// it is the join's scope. A federation with two services
-/// exposing the same root field is **ambiguous** and never
-/// single-bound (per spec §8.3: "if several services expose
-/// the same root field (federation/gateway) ⇒ ambiguous,
-/// never single-bound").
+/// `GraphqlProvider` by exact `(op, field)` match. Per spec
+/// §8.3, "if several services expose the same root field
+/// (federation/gateway) ⇒ ambiguous, never single-bound" —
+/// when more than one provider matches, the join returns
+/// `Unresolved { reason: GraphqlNoOp }` instead of binding.
+///
+/// The `/graphql` HTTP route is the carrier the spec pins
+/// the endpoint on (§8.3: "Endpoint target: `/graphql` HTTP
+/// route resolution via Phase B/C selects the service; join
+/// on `(op, field)` there"). When a `/graphql` route owner
+/// is known, it surfaces as `target_service` on the
+/// unresolved record so the operator can see the join's
+/// expected target. The route owner is **not** used to
+/// restrict the candidate set — a backend that implements
+/// the schema while the gateway owns the route is a common
+/// GraphQL federation shape (F2_NEG pins this), and the
+/// `(op, field)` match is the actual contract per the spec.
 ///
 /// Returns a `ConsumerResolution` mirroring the RPC / topic
 /// paths and pushes any `Binds` edges onto `binds`.
@@ -1115,12 +1144,11 @@ fn resolve_graphql_consumer(
     endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
     binds: &mut Vec<BindsEdge>,
 ) -> ConsumerResolution {
-    // Find the service that owns `/graphql`. Phase B's HTTP
-    // join has already resolved the HTTP route to a service;
-    // the endpoint table carries the resulting `Http`
-    // key. We pick the unique service hosting it; if two
-    // services expose `/graphql` (an unusual federation
-    // shape), the join is also ambiguous.
+    // Determine the `/graphql` route owner for the
+    // `target_service` field on the unresolved record. This
+    // is purely informational — the candidate set is keyed
+    // on `(op, field)` and may include providers in
+    // services other than the route owner.
     let mut graphql_route_owners: Vec<ServiceName> = Vec::new();
     for (svc, key) in endpoints.keys() {
         if let ContractKey::Http { method, template } = key {
@@ -1150,18 +1178,6 @@ fn resolve_graphql_consumer(
         // I5: skip own-service providers (same-service binds
         // are not a contract between services).
         if svc == own_service {
-            continue;
-        }
-        if let Some(route_owner) = &graphql_route_owner {
-            if svc != route_owner {
-                continue;
-            }
-        } else if graphql_route_owners.len() > 1 {
-            // No unique `/graphql` route owner — when two
-            // services share the route, every match is
-            // ambiguous regardless of the `(op, field)`
-            // collision. We skip and let the per-field
-            // ambiguity check below classify the case.
             continue;
         }
         for provider in providers {
