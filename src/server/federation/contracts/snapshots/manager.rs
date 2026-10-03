@@ -1183,17 +1183,32 @@ impl SnapshotManager {
         let started = std::time::Instant::now();
         let deadline = started + std::time::Duration::from_millis(wait_ms);
         loop {
-            // Try to evict one unheld LRU entry, then install. If
-            // the cap is not full, install directly.
+            // Combined lock for the check + insert (TLA+
+            // SnapshotResidency variant for `CapBound`): three
+            // `InstallCheck` actions could each pass
+            // `len() < cap` under separate `self.resident.lock()`
+            // acquisitions before any `InstallInsert` lands,
+            // leaving `|resident| > cap`. Pre-fix the cap-check
+            // and the insert were under two `self.resident.lock()`
+            // acquisitions; the parking_lot guard from the check
+            // was dropped at the end of the `if` expression, then
+            // re-acquired for the insert. Three concurrent
+            // installs could each see `len() < cap` and then
+            // insert in sequence.
+            //
+            // The fix: hold the resident lock across the
+            // `len() < cap` check and the `insert` call so a
+            // concurrent installer's `insert` lands inside the
+            // same critical section.
             let evicted = self.try_evict_one_lru_unheld();
-            if self.resident.lock().len() < cap || evicted {
-                self.resident
-                    .lock()
-                    .insert(fed.snapshot_id.clone(), fed.clone());
+            let mut resident = self.resident.lock();
+            if resident.len() < cap || evicted {
+                resident.insert(fed.snapshot_id.clone(), fed.clone());
                 return Ok(());
             }
             // Cap is full and every entry is held. Wait for a
             // release or for `wait_ms` to elapse.
+            drop(resident);
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Err(InstallBusy {
@@ -2213,6 +2228,107 @@ repos:
             1,
             "exactly one slot registered"
         );
+    }
+
+    /// Regression for the TLA+ SnapshotResidency.tla 7-state
+    /// trace that violates `CapBound`: three `InstallCheck(sN)`
+    /// actions each pass `Cardinality(resident) < Cap` before
+    /// any `InstallInsert`, leaving `|resident| = 3 > cap = 2`.
+    ///
+    /// The TLA+ trace models `install_resident`'s two
+    /// operations — `InstallCheck` (a cap check) and
+    /// `InstallInsert` — as distinct actions. Pre-fix the
+    /// Rust code did the check + insert under two
+    /// `self.resident.lock()` acquisitions, with the parking_lot
+    /// guard dropped in between. A concurrent installer could
+    /// see `len() < cap` from its check before the first
+    /// installer's insert lands, then proceed to insert
+    /// itself — ending with `|resident| > cap`. Post-fix
+    /// (Fix 5) the check + insert are under one lock
+    /// acquisition, so the second installer observes the
+    /// first's insert.
+    ///
+    /// The test isolates the cap-check / insert race by
+    /// populating resident with `cap - 1` HELD entries (so no
+    /// installer can evict anything during the test) and
+    /// racing N > cap installers. Pre-fix all four see
+    /// `len() = cap - 1 < cap` from their checks before any
+    /// insert lands, and the cap is overrun. Post-fix the
+    /// `len() < cap` check and the `insert` are atomic, so
+    /// at most `cap` inserts land.
+    #[test]
+    fn install_resident_caps_under_concurrent_installs() {
+        use std::path::PathBuf;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = IndexCache::new(dir.path());
+        // cap = 2; we pre-populate cap - 1 = 1 HELD entry.
+        // Nothing is evictable during the test.
+        let mgr = Arc::new(SnapshotManager::with_cap(dir.path(), cache, 2));
+        let notify = Arc::new((
+            std::sync::Mutex::new(()),
+            std::sync::Condvar::new(),
+        ));
+
+        let pinned = Arc::new(SnapshotFederation {
+            snapshot_id: "snap_pinned".into(),
+            backend: Arc::new(PetgraphBackend::ephemeral(dir.path())),
+            holds: Mutex::new(Vec::new()),
+            residency: Arc::new(ResidencyTracker::new()),
+            contract_index: parking_lot::RwLock::new(None),
+            last_used_unix: Mutex::new(0),
+            held: AtomicUsize::new(0),
+            data_dir: PathBuf::from("."),
+        });
+        let pinned_hold = HoldGuard::new(Arc::clone(&pinned), Arc::clone(&notify));
+        mgr.resident.lock().insert("snap_pinned".into(), pinned);
+
+        // Three concurrent installers. Each carries its own
+        // HoldGuard so its fed is held=1 (not evictable).
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = (0..3)
+            .map(|i| {
+                let mgr = Arc::clone(&mgr);
+                let barrier = Arc::clone(&barrier);
+                let notify = Arc::clone(&notify);
+                let dir: PathBuf = dir.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let fed = Arc::new(SnapshotFederation {
+                        snapshot_id: format!("snap_race_{i}"),
+                        backend: Arc::new(PetgraphBackend::ephemeral(&dir)),
+                        holds: Mutex::new(Vec::new()),
+                        residency: Arc::new(ResidencyTracker::new()),
+                        contract_index: parking_lot::RwLock::new(None),
+                        last_used_unix: Mutex::new(0),
+                        held: AtomicUsize::new(0),
+                        data_dir: dir,
+                    });
+                    let _hold = HoldGuard::new(Arc::clone(&fed), Arc::clone(&notify));
+                    barrier.wait();
+                    mgr.install_resident(fed, 5_000)
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("install thread"))
+            .collect();
+        drop(pinned_hold);
+
+        // The TLA+ invariant: |resident| <= cap = 2 at every
+        // instant. Pre-fix the racing installs could see
+        // `len() = 1 < cap = 2` from their checks before any
+        // insert lands, then all three insert — |resident| = 4.
+        assert!(
+            mgr.resident.lock().len() <= 2,
+            "cap is honored at every instant; resident={}",
+            mgr.resident.lock().len()
+        );
+        // The number of Ok results depends on thread
+        // scheduling (which installer's `_hold` is alive at
+        // each installer's check); the invariant the TLA+
+        // trace covers is `|resident| <= cap`.
+        let _ = results;
     }
 
     #[test]
