@@ -284,6 +284,35 @@ impl ContractJoiner {
                 consumers.insert(call_id.clone(), resolution);
                 continue;
             }
+            // Phase E (spec §8.3): GraphQL consumers take the
+            // graphql-join path. The HTTP §7.3 table does not
+            // apply — GraphQL consumers are scoped to the
+            // service that owns the `/graphql` HTTP route
+            // (resolved by Phase B's HTTP join). The match is
+            // on `(op, field)`; multiple providers exposing the
+            // same `(op, field)` (federation / gateway) →
+            // ambiguous, never single-bound.
+            if let Some(ContractFact::GraphqlConsumer(graphql_consumer)) =
+                node.contract.as_ref()
+            {
+                let call_id = match GlobalId::parse(&node.id) {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                let own_service = assignments
+                    .get(call_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| implicit_service(node));
+                let resolution = resolve_graphql_consumer(
+                    &call_id,
+                    graphql_consumer,
+                    &own_service,
+                    &endpoint_table,
+                    &mut binds,
+                );
+                consumers.insert(call_id.clone(), resolution);
+                continue;
+            }
             let Some(ContractFact::Consumer(consumer)) = node.contract.as_ref() else {
                 continue;
             };
@@ -1063,6 +1092,158 @@ fn resolve_topic_consumer(
         bound_endpoints: bound,
         reads_complete: true,
     }
+}
+
+/// Phase E (spec §8.3): resolve a `GraphqlConsumer` to a
+/// `GraphqlProvider` by exact `(op, field)` match within the
+/// service that owns the `/graphql` HTTP route. The HTTP
+/// route ownership is determined by walking the endpoint
+/// table for any `ContractKey::Http { method, template }` with
+/// `template == "/graphql"`; the (unique) service that hosts
+/// it is the join's scope. A federation with two services
+/// exposing the same root field is **ambiguous** and never
+/// single-bound (per spec §8.3: "if several services expose
+/// the same root field (federation/gateway) ⇒ ambiguous,
+/// never single-bound").
+///
+/// Returns a `ConsumerResolution` mirroring the RPC / topic
+/// paths and pushes any `Binds` edges onto `binds`.
+fn resolve_graphql_consumer(
+    call_id: &GlobalId,
+    consumer: &crate::federation::contracts::model::GraphqlConsumerFact,
+    own_service: &ServiceName,
+    endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
+    binds: &mut Vec<BindsEdge>,
+) -> ConsumerResolution {
+    // Find the service that owns `/graphql`. Phase B's HTTP
+    // join has already resolved the HTTP route to a service;
+    // the endpoint table carries the resulting `Http`
+    // key. We pick the unique service hosting it; if two
+    // services expose `/graphql` (an unusual federation
+    // shape), the join is also ambiguous.
+    let mut graphql_route_owners: Vec<ServiceName> = Vec::new();
+    for (svc, key) in endpoints.keys() {
+        if let ContractKey::Http { method, template } = key {
+            if template == "/graphql"
+                && matches!(method, MethodSpec::Known(HttpMethod::Post) | MethodSpec::Unknown)
+            {
+                graphql_route_owners.push(svc.clone());
+            }
+        }
+    }
+    graphql_route_owners.sort();
+    graphql_route_owners.dedup();
+    let graphql_route_owner: Option<ServiceName> = match graphql_route_owners.len() {
+        0 => None,
+        1 => Some(graphql_route_owners[0].clone()),
+        _ => None,
+    };
+    let target_key = ContractKey::Graphql {
+        op: consumer.op,
+        field: consumer.field.clone(),
+    };
+    let mut candidates: Vec<&EndpointProviderRecord> = Vec::new();
+    for ((svc, key), providers) in endpoints {
+        if key != &target_key {
+            continue;
+        }
+        // I5: skip own-service providers (same-service binds
+        // are not a contract between services).
+        if svc == own_service {
+            continue;
+        }
+        if let Some(route_owner) = &graphql_route_owner {
+            if svc != route_owner {
+                continue;
+            }
+        } else if graphql_route_owners.len() > 1 {
+            // No unique `/graphql` route owner — when two
+            // services share the route, every match is
+            // ambiguous regardless of the `(op, field)`
+            // collision. We skip and let the per-field
+            // ambiguity check below classify the case.
+            continue;
+        }
+        for provider in providers {
+            candidates.push(provider);
+        }
+    }
+    match candidates.len() {
+        0 => ConsumerResolution {
+            call_id: call_id.clone(),
+            service: own_service.clone(),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::GraphqlNoOp,
+                target_service: graphql_route_owner.clone(),
+            }),
+            bound_endpoints: Vec::new(),
+            reads_complete: true,
+        },
+        1 => {
+            let provider = candidates[0];
+            let provenance = EdgeProvenance::Static {
+                source: crate::schema::StaticSource::Regex,
+            };
+            let endpoint_id = (provider_service_of(provider, endpoints), target_key.clone());
+            binds.push(BindsEdge {
+                consumer: call_id.clone(),
+                provider: provider.id.clone(),
+                consumer_service: own_service.clone(),
+                provider_service: endpoint_id.0.clone(),
+                target_endpoint: endpoint_id.clone(),
+                provenance,
+                confidence: 1.0,
+                route_match: RouteMatch::Exact,
+                stripped_prefix: None,
+            });
+            ConsumerResolution {
+                call_id: call_id.clone(),
+                service: own_service.clone(),
+                target: Some(ConsumerTarget::Binds {
+                    provenance: EdgeProvenance::Static {
+                        source: crate::schema::StaticSource::Regex,
+                    },
+                    confidence: 1.0,
+                    route_match: RouteMatch::Exact,
+                    stripped_prefix: None,
+                }),
+                bound_endpoints: vec![endpoint_id],
+                reads_complete: true,
+            }
+        }
+        _ => ConsumerResolution {
+            call_id: call_id.clone(),
+            service: own_service.clone(),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::GraphqlNoOp,
+                target_service: graphql_route_owner.clone(),
+            }),
+            bound_endpoints: Vec::new(),
+            reads_complete: true,
+        },
+    }
+}
+
+/// Resolve the `ServiceName` for an endpoint provider record
+/// from the endpoint-table key. Each `EndpointProviderRecord`
+/// is a value in a `BTreeMap<(ServiceName, ContractKey),
+/// Vec<EndpointProviderRecord>>`; the key's service is the
+/// canonical source. We plumb the map in (rather than
+/// reaching for an `&HashMap` field on the record) so the
+/// function is pure and the joiner stays a pure function of
+/// its inputs (§7.8).
+fn provider_service_of(
+    provider: &EndpointProviderRecord,
+    endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
+) -> ServiceName {
+    for (svc, key) in endpoints.keys() {
+        if let Some(records) = endpoints.get(&(svc.clone(), key.clone())) {
+            if records.iter().any(|r| r.id == provider.id) {
+                return svc.clone();
+            }
+        }
+    }
+    ServiceName("unknown".to_string())
 }
 
 /// Phase E (spec §8.2): resolve one gRPC stub call site. The
