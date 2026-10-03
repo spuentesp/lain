@@ -462,7 +462,7 @@ pub fn read_ledger(path: &Path) -> Result<Option<CoverageLedger>, crate::error::
 
 use crate::federation::contracts::index_cache::CacheKey as IcCacheKey;
 use crate::federation::repo_id::RepoId;
-use crate::server::sensors::{SensorCounts, SensorEntry};
+use crate::server::sensors::{run_all_with_reports, SensorCounts};
 
 /// TLA+ `Reindex(repo)` analog: walk the workspace, run every
 /// registered sensor, and produce both the legacy `SensorCounts` and
@@ -488,7 +488,7 @@ pub fn run_all_with_coverage(
     repo_id: &RepoId,
     cache_key: &IcCacheKey,
 ) -> (SensorCounts, RepoCoverage) {
-    let mut counts = SensorCounts::default();
+    let (counts, reports) = run_all_with_reports(graph, root, namespace);
     let mut ledger = RepoCoverage {
         cache_key: cache_key.clone(),
         ..Default::default()
@@ -503,44 +503,24 @@ pub fn run_all_with_coverage(
     ledger.languages_present = languages_present;
     // TLA+: for each sensor, `sensors_ran[r] += {s}` and (on error)
     // `sensors_failed[r] += {s}`. The sensor report's `error`
-    // reflects the legacy `scan()`'s `Result` (a `tracing::warn!`
-    // in `run_all`).
-    let mut entries: Vec<&SensorEntry> = inventory::iter::<SensorEntry>().collect();
-    entries.sort_by(|a, b| {
-        let pa = a.0.phase();
-        let pb = b.0.phase();
-        pa.cmp(&pb).then_with(|| a.0.name().cmp(b.0.name()))
-    });
-    for entry in entries {
-        let sensor = entry.0;
-        let outcome = sensor.scan(graph, root, namespace);
-        let count = match &outcome {
-            Ok(n) => *n,
-            Err(_) => 0,
-        };
-        let error = outcome.err().map(|e| e.to_string());
-        // `SensorCounts::add` is `pub(crate)` so the coverage ledger
-        // can drive it without re-implementing the 14-arm match
-        // (Phase A review §D13). The previous inlined copy here was
-        // the same match as in `sensors::mod::run_all` — Phase D
-        // wanted a single source of truth.
-        counts.add(sensor.count_field(), count);
+    // reflects the sensor's `Result` (a `tracing::warn!` is logged
+    // by `run_all_with_reports`).
+    let python_label = lang_label(crate::server::sensors::util::Lang::Python).to_string();
+    let py_files_seen = records
+        .iter()
+        .filter(|r| r.lang == Some(crate::server::sensors::util::Lang::Python))
+        .count();
+    for (sensor_name, report) in reports {
         let bucket: &mut BTreeMap<String, SensorLedger> =
-            ledger.ledger.entry(sensor.name().to_string()).or_default();
-        // The sensor's per-lang ledger is unknown in Phase A (the
-        // trait does not yet ship `scan_with_report`). The single
-        // legacy integer is recorded as the sensor's emitted count
-        // against `Lang::Unknown` ("we ran the sensor; per-lang is
-        // not yet available"). When sensors implement
-        // `scan_with_report`, the bucket is filled per lang.
-        let key = lang_label(crate::server::sensors::util::Lang::Python).to_string();
-        let entry = bucket.entry(key).or_default();
-        entry.files_seen += records
-            .iter()
-            .filter(|r| r.lang == Some(crate::server::sensors::util::Lang::Python))
-            .count();
-        entry.emitted += count;
-        if let Some(err) = &error {
+            ledger.ledger.entry(sensor_name.to_string()).or_default();
+        // The sensor's per-lang ledger is unknown until the sensor
+        // migrates to a richer `scan_with_report`. The legacy
+        // integer is recorded as the sensor's emitted count against
+        // the Python bucket (Phase A's single-bucket approximation).
+        let entry = bucket.entry(python_label.clone()).or_default();
+        entry.files_seen += py_files_seen;
+        entry.emitted += report.emitted;
+        if let Some(err) = &report.error {
             entry.error = Some(err.clone());
         }
     }

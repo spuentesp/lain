@@ -123,6 +123,33 @@ pub enum SensorCountField {
     SqlTables,
 }
 
+/// Default-delegating per-sensor report returned by
+/// [`Sensor::scan_with_report`]. The shape is intentionally minimal:
+/// `emitted` is the legacy `scan()` count, `error` is the sensor's
+/// error message if it failed. Sensors that opt into richer
+/// per-(sensor, lang) reporting override `scan_with_report` and
+/// return a richer report (TLA+: `files_analyzed[s][lang]`,
+/// `unresolved[r][s]`, etc.).
+///
+/// The `unknown()` constructor is the marker that a sensor has not
+/// yet migrated to per-file reporting; the coverage ledger treats
+/// that as a coverage gap per spec §4.2 ("unmigrated sensors are
+/// reported as `unknown`, never as `clean`").
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScanReport {
+    pub emitted: usize,
+    pub error: Option<String>,
+}
+
+impl ScanReport {
+    /// The sensor did not opt into per-file reporting. Equivalent
+    /// to `Default::default()`; the dedicated constructor exists so
+    /// the call sites read clearly.
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+}
+
 /// A registered protocol sensor. Each impl contributes its `scan`
 /// results to one bucket of [`SensorCounts`] and is discovered by
 /// `run_all` via the `inventory` collection.
@@ -148,6 +175,23 @@ pub trait Sensor: Send + Sync {
     /// phase, sensors run in lexicographic name order.
     fn phase(&self) -> u8 {
         0
+    }
+    /// Default-delegating per-sensor report used by the coverage
+    /// ledger (`run_all_with_reports`). The default calls
+    /// [`Self::scan`] and packs the legacy count into `emitted`;
+    /// sensors that opt into richer per-(sensor, lang) reporting
+    /// override this method.
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<ScanReport, LainError> {
+        let n = self.scan(graph, root, namespace)?;
+        Ok(ScanReport {
+            emitted: n,
+            error: None,
+        })
     }
 }
 
@@ -210,7 +254,28 @@ pub(crate) use register_sensor;
 /// route entries (e.g. `GET /health`) mint distinct ids and don't
 /// silently overwrite each other on merge.
 pub fn run_all(graph: &GraphDatabase, root: &Path, namespace: &RepoNamespace) -> SensorCounts {
+    let (counts, _reports) = run_all_with_reports(graph, root, namespace);
+    counts
+}
+
+/// Shared inventory iteration behind [`run_all`] and the coverage
+/// ledger's `run_all_with_coverage`. Walks every registered
+/// [`Sensor`], sorts by `(phase, name)`, and asks each one for a
+/// [`ScanReport`] via [`Sensor::scan_with_report`]. Returns the
+/// aggregated [`SensorCounts`] and one `(name, report)` pair per
+/// sensor (the coverage ledger consumes the latter).
+///
+/// A failing sensor contributes a `ScanReport { error: Some(...) }`
+/// with `emitted = 0` — the inventory iteration never aborts on a
+/// single sensor failure (a malformed `.proto` in a corner of the
+/// tree must not cost the caller their call graph).
+pub(crate) fn run_all_with_reports(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+) -> (SensorCounts, Vec<(&'static str, ScanReport)>) {
     let mut counts = SensorCounts::default();
+    let mut reports = Vec::new();
     let mut entries: Vec<&SensorEntry> = inventory::iter::<SensorEntry>().collect();
     entries.sort_by(|a, b| {
         let pa = a.0.phase();
@@ -219,12 +284,20 @@ pub fn run_all(graph: &GraphDatabase, root: &Path, namespace: &RepoNamespace) ->
     });
     for entry in entries {
         let sensor = entry.0;
-        match sensor.scan(graph, root, namespace) {
-            Ok(n) => counts.add(sensor.count_field(), n),
-            Err(e) => tracing::warn!("{} sensor failed for {:?}: {e}", sensor.name(), root),
-        }
+        let report = match sensor.scan_with_report(graph, root, namespace) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("{} sensor failed for {:?}: {e}", sensor.name(), root);
+                ScanReport {
+                    emitted: 0,
+                    error: Some(e.to_string()),
+                }
+            }
+        };
+        counts.add(sensor.count_field(), report.emitted);
+        reports.push((sensor.name(), report));
     }
-    counts
+    (counts, reports)
 }
 
 #[cfg(test)]
