@@ -24,11 +24,92 @@
 //! [`lang_label`] is the single source of truth for the wire form.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::federation::contracts::index_cache::CacheKey;
-use crate::server::sensors::util::Lang;
+use crate::server::sensors::util::{lang_for_path, Lang, SOURCE_EXTS};
+
+// ─── Central file classification (§4.2) ──────────────────────────────
+
+/// Threshold above which a source file is recorded as `size_capped`
+/// (the spec §4.1 `SizeCap` skip reason). Mirrors the existing
+/// per-sensor caps; LAIN does not analyze multi-megabyte files
+/// because tree-sitter parsers blow up on them.
+pub const SIZE_CAP_BYTES: u64 = 4 * 1024 * 1024;
+
+/// One file the walker saw, classified once (TLA+: every file is
+/// classified once by extension before any sensor decides whether to
+/// analyze it).
+///
+/// `ignored` is true when the extension is not in `SOURCE_EXTS` —
+/// `lang` is `None` in that case. `size_capped` is true when the
+/// file is over [`SIZE_CAP_BYTES`]; sensors decide whether to analyze
+/// or skip it. The record is the single source of truth for "what
+/// did the walker see?" — sensors consume the stream and decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRecord {
+    pub path: PathBuf,
+    pub lang: Option<Lang>,
+    pub ignored: bool,
+    pub size_capped: bool,
+}
+
+/// TLA+ `Reindex(repo)` step 1: walk the workspace and classify every
+/// file. This is a parallel API to `crate::server::sensors::util::
+/// walk_workspace` (which the existing five protocol sensors still
+/// use); it adds the language / size / ignored classification that
+/// the coverage ledger requires. The Phase A `run_all` path switches
+/// to this function so the ledger sees every file the walker saw,
+/// not just the ones each sensor decided to scan.
+///
+/// `git`-tracked files that `.gitignore` matches are included (the
+/// existing walker's behaviour). Hidden directory entries stay out.
+pub fn classify_workspace(root: &Path) -> Vec<FileRecord> {
+    let mut out: Vec<FileRecord> = Vec::new();
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    for path in crate::server::sensors::util::walk_workspace(root) {
+        let path = path.into_path();
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string();
+        let lang = lang_for_path(&ext);
+        let ignored = lang.is_none() || !SOURCE_EXTS.contains(&ext.as_str());
+        let size_capped = std::fs::metadata(&path)
+            .map(|m| m.len() > SIZE_CAP_BYTES)
+            .unwrap_or(false);
+        out.push(FileRecord {
+            path,
+            lang,
+            ignored,
+            size_capped,
+        });
+    }
+    out
+}
+
+// ─── helpers to convert WalkedFile into PathBuf ─────────────────────
+
+trait WalkedFileExt {
+    fn into_path(self) -> PathBuf;
+}
+
+impl WalkedFileExt for crate::server::sensors::util::WalkedFile {
+    fn into_path(self) -> PathBuf {
+        let p: &Path = self.path();
+        p.to_path_buf()
+    }
+}
+
+// (WalkedFile lives in `sensors/util.rs`; the trait above wraps its
+// accessor so `classify_workspace` can build `PathBuf` values without
+// forcing a change to `util.rs`.)
 
 /// Canonical wire name for a [`Lang`]. Stable across builds; used as
 /// the BTreeMap key in [`RepoCoverage::ledger`] and as the on-disk
@@ -471,5 +552,68 @@ mod tests {
             empty_cover("orders", "abc", "0.9.0+c3"),
         );
         assert!(!ledger.scope_is_complete(&["orders".into(), "billing".into()], "0.9.0+c3"));
+    }
+
+    /// `classify_workspace` returns one `FileRecord` per walker
+    /// entry, classified once by language. A `.py` extension is
+    /// mapped to `Lang::Python`, an unknown extension is `ignored`.
+    #[test]
+    fn classify_workspace_marks_lang_and_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("b.cob"), "*>\n").unwrap();
+        std::fs::write(dir.path().join("c.rs"), "fn main(){}\n").unwrap();
+        let records = classify_workspace(dir.path());
+        let names: Vec<String> = records
+            .iter()
+            .map(|r| {
+                r.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(names.contains(&"a.py".to_string()), "{names:?}");
+        assert!(names.contains(&"b.cob".to_string()), "{names:?}");
+        assert!(names.contains(&"c.rs".to_string()), "{names:?}");
+        let py = records
+            .iter()
+            .find(|r| r.path.file_name().map(|n| n == "a.py").unwrap_or(false))
+            .expect("py record");
+        assert_eq!(py.lang, Some(Lang::Python));
+        assert!(!py.ignored);
+        let cob = records
+            .iter()
+            .find(|r| r.path.file_name().map(|n| n == "b.cob").unwrap_or(false))
+            .expect("cob record");
+        assert_eq!(cob.lang, None);
+        assert!(cob.ignored);
+        let rs = records
+            .iter()
+            .find(|r| r.path.file_name().map(|n| n == "c.rs").unwrap_or(false))
+            .expect("rs record");
+        assert_eq!(rs.lang, Some(Lang::Rust));
+        assert!(!rs.ignored);
+    }
+
+    /// `lang_label` ↔ `lang_for_label` round-trips every supported
+    /// `Lang` variant.
+    #[test]
+    fn lang_label_round_trips_every_variant() {
+        for l in [
+            Lang::Python,
+            Lang::TsJs,
+            Lang::Ts,
+            Lang::Tsx,
+            Lang::Rust,
+            Lang::Go,
+            Lang::Java,
+            Lang::CSharp,
+            Lang::Ruby,
+            Lang::Kotlin,
+        ] {
+            let label = lang_label(l);
+            assert_eq!(lang_for_label(label), Some(l), "round-trip {l:?}");
+        }
     }
 }
