@@ -80,13 +80,7 @@ pub struct SqlSensor;
 // `http_client_sensor`. The sql sensor reads the indexed Function /
 // Method nodes via `enclosing_symbol`, so any phase that resolves
 // symbols first is fine.
-crate::server::sensors::register_sensor!(
-    SqlSensor,
-    "sql",
-    SqlTables,
-    1,
-    scan_workspace_sql
-);
+crate::server::sensors::register_sensor!(SqlSensor, "sql", SqlTables, 1, scan_workspace_sql);
 
 // ─── Workspace scan ───────────────────────────────────────────────────
 
@@ -139,9 +133,7 @@ pub fn scan_workspace_sql(
 
     let removed = graph.replace_sensor_output(SensorOwner::SqlSensor, &all_nodes, &all_edges)?;
     if removed > 0 {
-        tracing::debug!(
-            "sql_sensor: replaced {removed} stale table edge(s) for {root:?}"
-        );
+        tracing::debug!("sql_sensor: replaced {removed} stale table edge(s) for {root:?}");
     }
     // The ledger bucket for `unresolved` lives in the per-sensor
     // coverage report; here we just count the deduped `Table` nodes
@@ -158,17 +150,18 @@ pub fn scan_workspace_sql(
 fn detect_in_file(content: &str, ext: &str) -> Vec<SqlSite> {
     let mut sites: Vec<SqlSite> = Vec::new();
     let shapes = shapes_for_ext(ext);
+    let lines: Vec<&str> = content.lines().collect();
     // When two patterns match on the same line (e.g. `cursor.execute("...")`
     // matches both `cursor.execute(` and `.execute(`), we keep only
     // the most specific one — the needle with the longest prefix.
     // Tracking per-line prevents double-emission for nested matches.
-    for (idx, line) in content.lines().enumerate() {
-        let line_num = idx as u32 + 1;
-        let line = strip_line_comment(line);
+    for idx in 0..lines.len() {
+        let line = strip_line_comment(lines[idx]);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+        let line_num = (idx as u32) + 1;
         let mut best: Option<(usize, &SqlShape)> = None;
         for shape in &shapes {
             if !shape.matches(trimmed) {
@@ -181,19 +174,36 @@ fn detect_in_file(content: &str, ext: &str) -> Vec<SqlSite> {
                 _ => {}
             }
         }
-        if let Some((_, shape)) = best {
-            if let Some(literal) = shape.first_string_arg(trimmed) {
-                match parse_sql(&literal) {
-                    Some(stmt) => sites.push(SqlSite { stmt, line: line_num }),
-                    None => sites.push(SqlSite {
-                        stmt: SqlStatement {
-                            access: SqlAccess::Reads,
-                            tables: Vec::new(),
-                        },
-                        line: line_num,
-                    }),
-                }
-            } else {
+        let Some((_, shape)) = best else {
+            continue;
+        };
+        // Look at the matched line and up to 4 lines ahead for
+        // the literal — multi-line calls like
+        //
+        //     conn.execute(
+        //         "UPDATE …",
+        //         params,
+        //     )
+        //
+        // have the literal on a different line. We stop after the
+        // first non-blank, non-comment line OR after the closing
+        // paren of the call.
+        let literal = first_string_arg_across_lines(&lines, idx, shape);
+        match literal {
+            Some(literal_text) => match parse_sql(&literal_text) {
+                Some(stmt) => sites.push(SqlSite {
+                    stmt,
+                    line: line_num,
+                }),
+                None => sites.push(SqlSite {
+                    stmt: SqlStatement {
+                        access: SqlAccess::Reads,
+                        tables: Vec::new(),
+                    },
+                    line: line_num,
+                }),
+            },
+            None => {
                 // Non-literal first arg → dynamic SQL.
                 sites.push(SqlSite {
                     stmt: SqlStatement {
@@ -206,6 +216,39 @@ fn detect_in_file(content: &str, ext: &str) -> Vec<SqlSite> {
         }
     }
     sites
+}
+
+/// Look up to 4 lines ahead for the call's first string literal
+/// argument. Returns `None` when no literal is found in the
+/// lookahead window (the call's first arg is a non-literal
+/// expression — e.g. `format!(...)` or a variable).
+fn first_string_arg_across_lines(lines: &[&str], start: usize, shape: &SqlShape) -> Option<String> {
+    let start_line = lines[start];
+    let after_on_same = start_line
+        .find(shape.needle)
+        .map(|i| &start_line[i + shape.needle.len()..]);
+    if let Some(text) = after_on_same {
+        if let Some(lit) = extract_string_literal(text) {
+            return Some(lit);
+        }
+    }
+    for j in 1..=4 {
+        let Some(lookahead_line) = lines.get(start + j) else {
+            break;
+        };
+        let trimmed = strip_line_comment(lookahead_line).trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with(')') || trimmed == ");" || trimmed.starts_with("],") {
+            // Closing of the call — stop scanning.
+            break;
+        }
+        if let Some(lit) = extract_string_literal(trimmed) {
+            return Some(lit);
+        }
+    }
+    None
 }
 
 /// One recognized call shape. Each language has a small list of
@@ -225,17 +268,6 @@ impl SqlShape {
     }
     fn matches(&self, trimmed: &str) -> bool {
         trimmed.contains(self.needle)
-    }
-    /// Extract the first string-literal argument from the call. We
-    /// only handle the simple `func("...")` shape — chained calls
-    /// like `sqlx::query("SELECT ...").execute(&pool)` are matched
-    /// when the needle is `sqlx::query(` and the literal is the
-    /// first arg of the inner call. `cursor.execute("SELECT ...")`
-    /// matches when the needle is `cursor.execute(`.
-    fn first_string_arg(&self, trimmed: &str) -> Option<String> {
-        let idx = trimmed.find(self.needle)?;
-        let after = &trimmed[idx + self.needle.len()..];
-        extract_string_literal(after)
     }
 }
 
@@ -601,10 +633,7 @@ fn next_table_token(tokens: &[Token], from_or_join_idx: usize) -> Option<String>
         // (or `LEFT OUTER JOIN`); the very next token is the
         // table.
         if from_or_join_idx > 0
-            && tokens[from_or_join_idx]
-                .text
-                .to_ascii_uppercase()
-                == "JOIN"
+            && tokens[from_or_join_idx].text.eq_ignore_ascii_case("JOIN")
             && i == from_or_join_idx + 1
         {
             // fall through and consume the table name
@@ -796,17 +825,26 @@ fn collect_target_table_after(sql: &str, head: &str, between: &str) -> Vec<Strin
 /// Extract the first quoted-string literal from `s`. Recognises
 /// both single and double quotes. Escapes (`\"`, `\'`, `\\`) are
 /// honoured so a literal containing an escaped quote is not split.
+/// Leading whitespace before the literal is skipped (the form
+/// `func( "literal" )` is common in real code).
 fn extract_string_literal(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     if bytes.is_empty() {
         return None;
     }
-    let quote = bytes[0];
+    let mut start = 0;
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    if start >= bytes.len() {
+        return None;
+    }
+    let quote = bytes[start];
     if quote != b'"' && quote != b'\'' && quote != b'`' {
         return None;
     }
     let mut end: Option<usize> = None;
-    let mut i = 1;
+    let mut i = start + 1;
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
             i += 2;
@@ -819,7 +857,7 @@ fn extract_string_literal(s: &str) -> Option<String> {
         i += 1;
     }
     let end = end?;
-    let mut literal = String::from_utf8_lossy(&bytes[1..end]).to_string();
+    let mut literal = String::from_utf8_lossy(&bytes[start + 1..end]).to_string();
     // Strip SQL escaping (`""` → `"` in SQL standard; `''` → `'`
     // in some dialects).
     if quote == b'"' {
@@ -872,14 +910,10 @@ fn strip_line_comment(line: &str) -> &str {
 /// level SQL; returns `None` when neither exists (the sensor
 /// then skips the edge).
 fn enclosing_or_file(graph: &GraphDatabase, graph_path_str: &str, line: u32) -> Option<String> {
-    if let Some(sym) =
-        crate::server::sensors::util::enclosing_symbol(graph, graph_path_str, line)
-    {
+    if let Some(sym) = crate::server::sensors::util::enclosing_symbol(graph, graph_path_str, line) {
         return Some(sym.id.clone());
     }
-    graph
-        .find_node_by_path(graph_path_str)
-        .map(|f| f.id)
+    graph.find_node_by_path(graph_path_str).map(|f| f.id)
 }
 
 /// Build the `Table` nodes and `ReadsTable` / `WritesTable` edges
@@ -1015,10 +1049,9 @@ mod tests {
 
     #[test]
     fn parse_select_with_join() {
-        let s = parse_sql(
-            "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id",
-        )
-        .unwrap();
+        let s =
+            parse_sql("SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id")
+                .unwrap();
         let tables: std::collections::BTreeSet<_> = s.tables.iter().collect();
         assert!(tables.contains(&"orders".to_string()));
         assert!(tables.contains(&"customers".to_string()));
@@ -1147,7 +1180,10 @@ mod tests {
         let src = r#"sqlx::query(&format!("SELECT * FROM {}", table)).execute(&pool).await"#;
         let sites = detect_in_file(src, "rs");
         assert_eq!(sites.len(), 1);
-        assert!(sites[0].stmt.tables.is_empty(), "non-literal SQL has no parsed tables");
+        assert!(
+            sites[0].stmt.tables.is_empty(),
+            "non-literal SQL has no parsed tables"
+        );
     }
 
     #[test]
@@ -1192,8 +1228,7 @@ mod tests {
             },
             line: 5,
         };
-        let (nodes, edges, unresolved) =
-            build_graph(&graph, &[site], "src/orders.py", &ns);
+        let (nodes, edges, unresolved) = build_graph(&graph, &[site], "src/orders.py", &ns);
         assert!(unresolved.is_empty());
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].node_type, NodeType::Table);

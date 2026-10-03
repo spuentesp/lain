@@ -21,7 +21,7 @@
 //! hermetic: no network, no `lain reindex`, no federation boot.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lain::federation::contracts::coverage::{
     CoverageLedger, SensorLedger, SkipReason, UnresolvedReason, UnresolvedRecord,
@@ -41,7 +41,7 @@ fn fixed_workspace(tag: &str) -> PathBuf {
     dir
 }
 
-fn write_file(root: &PathBuf, rel: &str, content: &str) -> PathBuf {
+fn write_file(root: &Path, rel: &str, content: &str) -> PathBuf {
     let path = root.join(rel);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
@@ -291,13 +291,8 @@ def report(cursor):
     );
     fn_node.line_start = Some(2);
     fn_node.line_end = Some(8);
-    fn_node.id = GraphNode::generate_id(
-        &NodeType::Function,
-        "src/report.py",
-        "report",
-        Some(2),
-        &ns,
-    );
+    fn_node.id =
+        GraphNode::generate_id(&NodeType::Function, "src/report.py", "report", Some(2), &ns);
     graph.upsert_node(fn_node).unwrap();
 
     let count = scan_workspace_sql(&graph, &root, &ns).unwrap();
@@ -313,14 +308,23 @@ def report(cursor):
     names.sort();
     assert_eq!(
         names,
-        vec!["active".to_string(), "customers".to_string(), "orders".to_string(), "users".to_string()]
+        vec![
+            "active".to_string(),
+            "customers".to_string(),
+            "orders".to_string(),
+            "users".to_string()
+        ]
     );
 
     let edges = collect_sql_edges(&graph);
     // Four `ReadsTable` edges — one per distinct table the function
     // reads from. Multiple statements referencing the same table
     // collapse via the graph's `(source, target, type)` dedup.
-    assert_eq!(edges.len(), 4, "one ReadsTable per distinct (function, table)");
+    assert_eq!(
+        edges.len(),
+        4,
+        "one ReadsTable per distinct (function, table)"
+    );
     for (_, _, kind) in &edges {
         assert!(matches!(kind, EdgeType::ReadsTable));
     }
@@ -471,27 +475,18 @@ fn d4_parser_re_exercised() {
     names.sort();
     assert_eq!(names, vec!["customers".to_string(), "orders".to_string()]);
 
-    let stmt = parse_sql(
-        "WITH active AS (SELECT * FROM users WHERE active = true) SELECT * FROM active",
-    )
-    .expect("WITH parses");
+    let stmt =
+        parse_sql("WITH active AS (SELECT * FROM users WHERE active = true) SELECT * FROM active")
+            .expect("WITH parses");
     let mut names = stmt.tables.clone();
     names.sort();
-    assert_eq!(
-        names,
-        vec!["active".to_string(), "users".to_string()]
-    );
+    assert_eq!(names, vec!["active".to_string(), "users".to_string()]);
 
-    let stmt = parse_sql(
-        "SELECT id FROM orders WHERE customer_id IN (SELECT id FROM customers)",
-    )
-    .expect("subselect parses");
+    let stmt = parse_sql("SELECT id FROM orders WHERE customer_id IN (SELECT id FROM customers)")
+        .expect("subselect parses");
     let mut names = stmt.tables.clone();
     names.sort();
-    assert_eq!(
-        names,
-        vec!["customers".to_string(), "orders".to_string()]
-    );
+    assert_eq!(names, vec!["customers".to_string(), "orders".to_string()]);
 }
 
 // ─── Test serialisation ─────────────────────────────────────────────
