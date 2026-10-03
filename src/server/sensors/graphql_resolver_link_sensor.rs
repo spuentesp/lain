@@ -260,8 +260,7 @@ fn op_label(op: GraphqlOp) -> &'static str {
 fn is_valid_field_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && s
-            .chars()
+        && s.chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
