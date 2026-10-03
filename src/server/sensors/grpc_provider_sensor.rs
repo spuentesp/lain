@@ -189,60 +189,14 @@ struct MethodDecl {
 
 /// Strip `//` line comments and `/* … */` block comments. Block
 /// comments spanning multiple lines preserve newlines so the
-/// subsequent line-number math stays correct.
+/// subsequent line-number math stays correct. Thin wrapper around
+/// `crate::server::sensors::util_tokenize::strip_comments` so the
+/// per-sensor API stays unchanged for callers.
 fn strip_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            // line comment — copy nothing, swallow until newline.
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-        } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            // block comment — preserve newlines for line tracking.
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                if bytes[i] == b'\n' {
-                    out.push('\n');
-                }
-                i += 1;
-            }
-            if i + 1 < bytes.len() {
-                i += 2;
-            } else {
-                i = bytes.len();
-            }
-        } else if bytes[i] == b'"' {
-            // string literal — copy verbatim (preserve newlines so
-            // line tracking stays correct).
-            out.push('"');
-            i += 1;
-            while i < bytes.len() && bytes[i] != b'"' {
-                if bytes[i] == b'\n' {
-                    out.push('\n');
-                }
-                out.push(bytes[i] as char);
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 1;
-                    if bytes[i] == b'\n' {
-                        out.push('\n');
-                    }
-                    out.push(bytes[i] as char);
-                }
-                i += 1;
-            }
-            if i < bytes.len() {
-                out.push('"');
-                i += 1;
-            }
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
+    crate::server::sensors::util_tokenize::strip_comments(
+        input,
+        crate::server::sensors::util_tokenize::CommentSyntax::CStyle,
+    )
 }
 
 /// Join continued lines: a single `\` at end of line is a proto
@@ -381,19 +335,11 @@ fn find_byte_offset(content: &str, line: u32) -> usize {
 }
 
 fn starts_with_keyword(bytes: &[u8], at: usize, kw: &str) -> bool {
-    if at + kw.len() > bytes.len() {
-        return false;
-    }
-    if &bytes[at..at + kw.len()] != kw.as_bytes() {
-        return false;
-    }
-    // Word boundary on both sides.
-    let before_ok =
-        at == 0 || !(bytes[at - 1] as char).is_ascii_alphanumeric() && bytes[at - 1] != b'_';
-    let after_idx = at + kw.len();
-    let after_ok = after_idx >= bytes.len()
-        || !(bytes[after_idx] as char).is_ascii_alphanumeric() && bytes[after_idx] != b'_';
-    before_ok && after_ok
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    crate::server::sensors::util_tokenize::starts_with_keyword(s, at, kw)
 }
 
 fn is_ident_continue(b: u8) -> bool {

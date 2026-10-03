@@ -828,44 +828,7 @@ fn collect_target_table_after(sql: &str, head: &str, between: &str) -> Vec<Strin
 /// Leading whitespace before the literal is skipped (the form
 /// `func( "literal" )` is common in real code).
 fn extract_string_literal(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-    let mut start = 0;
-    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
-        start += 1;
-    }
-    if start >= bytes.len() {
-        return None;
-    }
-    let quote = bytes[start];
-    if quote != b'"' && quote != b'\'' && quote != b'`' {
-        return None;
-    }
-    let mut end: Option<usize> = None;
-    let mut i = start + 1;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            i += 2;
-            continue;
-        }
-        if bytes[i] == quote {
-            end = Some(i);
-            break;
-        }
-        i += 1;
-    }
-    let end = end?;
-    let mut literal = String::from_utf8_lossy(&bytes[start + 1..end]).to_string();
-    // Strip SQL escaping (`""` → `"` in SQL standard; `''` → `'`
-    // in some dialects).
-    if quote == b'"' {
-        literal = literal.replace("\"\"", "\"");
-    } else if quote == b'\'' {
-        literal = literal.replace("''", "'");
-    }
-    Some(literal)
+    crate::server::sensors::util_tokenize::extract_string_literal(s, 0).map(|(_, lit)| lit)
 }
 
 /// Strip line comments from the line (same shape as

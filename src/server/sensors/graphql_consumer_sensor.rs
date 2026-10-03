@@ -312,46 +312,14 @@ pub fn parse_document(content: &str, graph_path: &str) -> Vec<GraphqlConsumerFie
 
 /// Strip `#` line comments and `""" ... """` block comments
 /// (mirrors the provider-sensor helper so the same source
-/// shape parses identically).
+/// shape parses identically). Thin wrapper around
+/// `crate::server::sensors::util_tokenize::strip_comments` so
+/// the per-sensor API stays unchanged for callers.
 fn strip_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'#' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if i + 2 < bytes.len() && bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
-            out.push('"');
-            out.push('"');
-            out.push('"');
-            i += 3;
-            while i + 2 < bytes.len()
-                && !(bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"')
-            {
-                if bytes[i] == b'\n' {
-                    out.push('\n');
-                }
-                out.push(bytes[i] as char);
-                i += 1;
-            }
-            if i + 2 < bytes.len() {
-                out.push('"');
-                out.push('"');
-                out.push('"');
-                i += 3;
-            } else {
-                i = bytes.len();
-            }
-            continue;
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
+    crate::server::sensors::util_tokenize::strip_comments(
+        input,
+        crate::server::sensors::util_tokenize::CommentSyntax::HashBlockString,
+    )
 }
 
 /// Detect template-literal interpolation placeholders

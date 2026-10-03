@@ -177,47 +177,14 @@ struct FieldDecl {
 
 /// Strip `#` line comments and `""" ... """` block comments.
 /// Block comments spanning multiple lines preserve newlines so
-/// the subsequent line-number math stays correct.
+/// the subsequent line-number math stays correct. Thin wrapper
+/// around `crate::server::sensors::util_tokenize::strip_comments`
+/// so the per-sensor API stays unchanged for callers.
 fn strip_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'#' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if i + 2 < bytes.len() && bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
-            // Block string — preserve newlines for line tracking.
-            out.push('"');
-            out.push('"');
-            out.push('"');
-            i += 3;
-            while i + 2 < bytes.len()
-                && !(bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"')
-            {
-                if bytes[i] == b'\n' {
-                    out.push('\n');
-                }
-                out.push(bytes[i] as char);
-                i += 1;
-            }
-            if i + 2 < bytes.len() {
-                out.push('"');
-                out.push('"');
-                out.push('"');
-                i += 3;
-            } else {
-                i = bytes.len();
-            }
-            continue;
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
+    crate::server::sensors::util_tokenize::strip_comments(
+        input,
+        crate::server::sensors::util_tokenize::CommentSyntax::HashBlockString,
+    )
 }
 
 /// Join continued lines: a trailing comma or opening bracket
@@ -350,19 +317,15 @@ fn extract_root_type_blocks(content: &str) -> Vec<RootTypeBlock> {
 /// `starts_with_keyword(bytes, 0, "type")` must not match
 /// `types` or `atype` — without the boundary check those would
 /// land in the field-parser's identifier path and yield junk.
+/// Thin wrapper around
+/// `crate::server::sensors::util_tokenize::starts_with_keyword` so
+/// the per-sensor API stays unchanged.
 fn starts_with_keyword(bytes: &[u8], at: usize, kw: &str) -> bool {
-    if at + kw.len() > bytes.len() {
-        return false;
-    }
-    if &bytes[at..at + kw.len()] != kw.as_bytes() {
-        return false;
-    }
-    let before_ok =
-        at == 0 || !(bytes[at - 1] as char).is_ascii_alphanumeric() && bytes[at - 1] != b'_';
-    let after_idx = at + kw.len();
-    let after_ok = after_idx >= bytes.len()
-        || !(bytes[after_idx] as char).is_ascii_alphanumeric() && bytes[after_idx] != b'_';
-    before_ok && after_ok
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    crate::server::sensors::util_tokenize::starts_with_keyword(s, at, kw)
 }
 
 fn is_ident_continue(b: u8) -> bool {

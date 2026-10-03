@@ -32,6 +32,7 @@ pub mod patterns;
 pub mod proto_sensor;
 pub mod sql_sensor;
 pub mod util;
+pub mod util_tokenize;
 pub mod websocket_sensor;
 
 use crate::error::LainError;
