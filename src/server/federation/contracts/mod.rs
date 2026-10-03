@@ -45,6 +45,7 @@
 
 pub mod changed_files;
 pub mod config;
+pub mod coverage;
 pub mod diff;
 pub mod digest;
 pub mod field_join;
