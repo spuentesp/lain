@@ -150,25 +150,38 @@ impl ContractJoiner {
             // them and `evaluate()` can downgrade `NoKnownImpact` on
             // a `CouldMatch` verdict (§9.5, §9.7). Rule 2
             // (confirmed bindings) is applied in step 6 below.
-            if is_wrapper_candidate(consumer) && !http_clients.matches(&consumer.via) {
-                let own_service_for_unresolved = assignments
-                    .get(call_id.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| implicit_service(node));
-                consumers.insert(
-                    call_id.clone(),
-                    ConsumerResolution {
-                        call_id: call_id.clone(),
-                        service: own_service_for_unresolved,
-                        target: Some(ConsumerTarget::Unresolved {
-                            reason: UnresolvedReason::WrapperUnconfigured,
-                            target_service: None,
-                        }),
-                        bound_endpoints: Vec::new(),
-                        reads_complete: consumer.reads_complete,
-                    },
-                );
-                continue;
+            //
+            // When `http_clients` is empty (no operator config), the
+            // pre-Phase-A `continue` is preserved: an operator with
+            // no wrapper config has no expectation that wrappers
+            // resolve, and dropping them keeps the diff goldens
+            // stable. Once the operator adds even one entry, the
+            // contract is "the rest of the wrappers should
+            // resolve", and the emission fires.
+            if is_wrapper_candidate(consumer) {
+                if http_clients.is_empty() {
+                    continue;
+                }
+                if !http_clients.matches(&consumer.via) {
+                    let own_service_for_unresolved = assignments
+                        .get(call_id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| implicit_service(node));
+                    consumers.insert(
+                        call_id.clone(),
+                        ConsumerResolution {
+                            call_id: call_id.clone(),
+                            service: own_service_for_unresolved,
+                            target: Some(ConsumerTarget::Unresolved {
+                                reason: UnresolvedReason::WrapperUnconfigured,
+                                target_service: None,
+                            }),
+                            bound_endpoints: Vec::new(),
+                            reads_complete: consumer.reads_complete,
+                        },
+                    );
+                    continue;
+                }
             }
             // The remaining rows (3, 4, 5, 6) are checked in
             // `resolve_consumer` below, in §7.3 table order. The
@@ -679,6 +692,10 @@ impl CompiledHttpClients {
         self.entries
             .iter()
             .any(|e| pattern_matches(&e.pattern, &combined))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 

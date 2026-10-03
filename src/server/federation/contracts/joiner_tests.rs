@@ -268,6 +268,11 @@ fn rule_1_records_unresolved_wrapper_candidate_with_no_http_client_match() {
     // silently dropped. The consumer still has no `binds` edge (no
     // route matches), but the consumer is in the index so the
     // coverage ledger and `evaluate()` can see it.
+    //
+    // The test uses a non-empty `http_clients` config (with a
+    // pattern that does NOT match the receiver) so the emission
+    // fires. When `http_clients` is empty, the pre-Phase-A `continue`
+    // is preserved — see the empty-config companion test below.
     let p = provider_node(
         "orders",
         "src/orders.py",
@@ -291,7 +296,15 @@ fn rule_1_records_unresolved_wrapper_candidate_with_no_http_client_match() {
             fn_name: "get".into(),
         },
     );
-    let cfg = default_config(); // empty http_clients
+    let mut cfg = default_config();
+    // http_clients is non-empty but its pattern does not match
+    // the call's receiver.
+    cfg.http_clients.push(crate::federation::contracts::config::HttpClientDecl {
+        call: "differentClient.{method}".into(),
+        service: "orders".into(),
+        method: None,
+        path_arg: None,
+    });
     let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
     assert!(
         out.binds.is_empty(),
@@ -319,6 +332,45 @@ fn rule_1_records_unresolved_wrapper_candidate_with_no_http_client_match() {
         ),
         other => panic!("expected Unresolved, got {other:?}"),
     }
+}
+
+/// Companion test: when `http_clients` is empty, the wrapper
+/// candidate is silently dropped (the pre-Phase-A behaviour).
+/// The emission only fires when the operator has at least one
+/// `http_clients` entry but no match — a real "wrapper
+/// unconfigured" state.
+#[test]
+fn rule_1_with_empty_http_clients_silently_drops() {
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "get_order",
+        10,
+        HttpMethod::Get,
+        "/api/orders/{}",
+    );
+    let c = consumer_node(
+        "billing",
+        "src/billing.py",
+        "fetch_order",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(
+            HostPart::Literal("orders.svc".into()),
+            Some("/api/orders/42"),
+        ),
+        CallVia::Receiver {
+            expr: "ordersClient".into(),
+            fn_name: "get".into(),
+        },
+    );
+    let cfg = default_config(); // empty http_clients
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
+    assert!(out.binds.is_empty());
+    assert!(
+        out.index.consumers.is_empty(),
+        "rule 1 with empty http_clients: the consumer is dropped"
+    );
 }
 
 #[test]
