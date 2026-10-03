@@ -416,23 +416,33 @@ fn canonical_module(path: &str) -> String {
     stripped.to_string()
 }
 
+/// The JS / TS assignment prefixes `extract_assigned_name`
+/// strips. Ordered longest-first so the two-pass loop below
+/// catches `export const` before falling through to `const`.
+/// The trailing space matters: `strip_prefix("const ")` does
+/// not match `constants` (no space), so a real keyword + space
+/// is the boundary we need.
+const ASSIGN_PREFIXES: &[&str] = &[
+    "export var ", "export let ", "export const ", "var ", "let ", "const ",
+];
+
 fn extract_assigned_name(line: &str) -> Option<String> {
     // `const ordersClient = ...` / `let client = ...` /
     // `var foo = ...` / `export const ordersClient = ...`.
-    let lower = line.trim_start();
-    let trimmed = lower
-        .strip_prefix("const ")
-        .or_else(|| lower.strip_prefix("let "))
-        .or_else(|| lower.strip_prefix("var "))
-        .or_else(|| lower.strip_prefix("export const "))
-        .or_else(|| lower.strip_prefix("export let "))
-        .or_else(|| lower.strip_prefix("export var "))
-        .unwrap_or(lower);
-    let trimmed = trimmed
-        .strip_prefix("const ")
-        .or_else(|| trimmed.strip_prefix("let "))
-        .or_else(|| trimmed.strip_prefix("var "))
-        .unwrap_or(trimmed);
+    let mut trimmed = line.trim_start();
+    for _ in 0..2 {
+        let mut next = trimmed;
+        for prefix in ASSIGN_PREFIXES {
+            if let Some(rest) = next.strip_prefix(prefix) {
+                next = rest;
+                break;
+            }
+        }
+        if next == trimmed {
+            break;
+        }
+        trimmed = next;
+    }
     let name: String = trimmed
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
