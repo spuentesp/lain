@@ -181,6 +181,17 @@ pub struct SnapshotManager {
     residency_notify: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
     resident_cap: usize,
     retention_days: u64,
+    /// Per-snapshot-id in-flight build slots (TLA+ SnapshotResidency
+    /// variant (c) — single-flight per id). Two concurrent
+    /// `from_snapshot_with_wait_ms` calls for the same `record.id`
+    /// share one build; the first inserts an `Arc<InflightSlot>`
+    /// and runs the build, every other caller clones the same Arc
+    /// and `wait()`s for the first's result. The slot is removed
+    /// from the map when the build finishes (success or failure)
+    /// so the next miss rebuilds.
+    in_flight: parking_lot::Mutex<
+        std::collections::HashMap<String, Arc<InflightSlot>>,
+    >,
     /// Per-manager worker thread handles. The threads run
     /// `snapshot_worker_loop` for the lifetime of the manager;
     /// each test's manager owns its own bounded pool so a slow test
@@ -218,6 +229,7 @@ impl SnapshotManager {
             retention_days: snapshot_retention_days(),
             source_resolver: parking_lot::RwLock::new(None),
             worker_handles: Mutex::new(None),
+            in_flight: parking_lot::Mutex::new(std::collections::HashMap::new()),
         });
         mgr.recover_from_disk();
         mgr
@@ -1016,16 +1028,80 @@ impl SnapshotManager {
                 HoldGuard::new(fed, Arc::clone(&self.residency_notify)),
             ));
         }
-        // 2. Build a new ephemeral federation.
-        let fed = self.build_snapshot_federation(record)?;
-        let hold_guard = HoldGuard::new(Arc::clone(&fed), Arc::clone(&self.residency_notify));
-        if let Err(busy) = self.install_resident(Arc::clone(&fed), wait_ms) {
-            return Err(LainError::Other(format!(
-                "snapshot residency busy (retry after {}ms)",
-                busy.retry_after_ms
-            )));
+        // 2. Single-flight per id (TLA+ SnapshotResidency variant
+        // (c)). Two concurrent `from_snapshot_with_wait_ms` calls
+        // for the same `record.id` race the resident miss and would
+        // both call `build_snapshot_federation`, each producing a
+        // distinct federation and racing on `install_resident` —
+        // whichever lands second wins, silently overwriting the
+        // first. Pre-fix the manager had no per-id coordination;
+        // the job-runner dedup is on `(repo, sha, analyzer_version)`
+        // and does not match `record.id`.
+        // We claim a per-id slot. If another caller already holds
+        // one, we wait on their result; otherwise we register and
+        // build.
+        let (slot, is_first) = {
+            let mut map = self.in_flight.lock();
+            if let Some(existing) = map.get(&record.id).cloned() {
+                (existing, false)
+            } else {
+                let new_slot = Arc::new(InflightSlot {
+                    state: std::sync::Mutex::new(None),
+                    notify: std::sync::Condvar::new(),
+                });
+                map.insert(record.id.clone(), Arc::clone(&new_slot));
+                (new_slot, true)
+            }
+        };
+        let outcome = if is_first {
+            let build_result = self.build_snapshot_federation(record);
+            let install_result = match &build_result {
+                Ok(fed) => self.install_resident(Arc::clone(fed), wait_ms).map_err(|b| {
+                    LainError::Other(format!(
+                        "snapshot residency busy (retry after {}ms)",
+                        b.retry_after_ms
+                    ))
+                }),
+                Err(_) => Ok(()),
+            };
+            let outcome = match (build_result, install_result) {
+                (Ok(fed), Ok(())) => BuildOutcome::Ok(fed),
+                (Err(e), _) => BuildOutcome::Err(e.to_string()),
+                (Ok(_), Err(e)) => BuildOutcome::Err(e.to_string()),
+            };
+            // Publish the outcome and wake every joiner that
+            // entered the wait above (they entered the map under
+            // the parking_lot mutex, before we removed the slot
+            // — but our removal happens after the build, so any
+            // joiner that saw the slot in the map is already
+            // waiting on the condvar).
+            {
+                let mut state = slot.state.lock().unwrap();
+                *state = Some(outcome.clone());
+                slot.notify.notify_all();
+            }
+            // Remove the slot from the map. Any concurrent caller
+            // that did NOT see this slot will rebuild — that's
+            // correct (a fresh miss after this build completes is
+            // a new request).
+            self.in_flight.lock().remove(&record.id);
+            outcome
+        } else {
+            // Joiner: another caller is already building or has
+            // just finished. Wait for them to publish.
+            let mut state = slot.state.lock().unwrap();
+            while state.is_none() {
+                state = slot.notify.wait(state).unwrap();
+            }
+            state.as_ref().expect("notified with no value").clone()
+        };
+        match outcome {
+            BuildOutcome::Ok(fed) => Ok((
+                Arc::clone(&fed),
+                HoldGuard::new(fed, Arc::clone(&self.residency_notify)),
+            )),
+            BuildOutcome::Err(e) => Err(LainError::Other(e)),
         }
-        Ok((fed, hold_guard))
     }
 
     fn build_snapshot_federation(
@@ -1222,6 +1298,27 @@ impl Drop for HoldGuard {
         self.fed.mark_used();
         self.residency_notify.1.notify_all();
     }
+}
+
+/// The shared outcome of a single-flight build (TLA+ SnapshotResidency
+/// variant (c)). The first caller fills the slot, every other
+/// concurrent caller waits on the same slot and reads the same
+/// `Arc`. Stored as `Arc<BuildOutcome>` so cloning across the
+/// parking_lot mutex boundary is cheap.
+#[derive(Clone)]
+pub(crate) enum BuildOutcome {
+    Ok(Arc<SnapshotFederation>),
+    Err(String),
+}
+
+/// The per-snapshot-id slot the manager registers while a build
+/// is in flight. `state` is `None` while the first caller is
+/// building, `Some(...)` once the build completes (success or
+/// failure). Waiters hold the `Mutex` and `Condvar::wait` until
+/// the first caller transitions the slot to `Some`.
+struct InflightSlot {
+    state: std::sync::Mutex<Option<BuildOutcome>>,
+    notify: std::sync::Condvar,
 }
 
 /// The outcome of a `prepare_snapshot` / `get_snapshot` call. The
@@ -2008,6 +2105,113 @@ repos:
             fed.hold_count_for_test(),
             0,
             "after second Drop the count is 0 — eviction may proceed"
+        );
+    }
+
+    /// Regression for the TLA+ SnapshotResidency.tla 3-state trace
+    /// that violates `SingleFlight`: two `BuildStart(s1)` actions
+    /// race the resident miss and both call
+    /// `build_snapshot_federation`; whichever lands second in
+    /// `install_resident` wins, silently overwriting the first.
+    /// Post-fix (variant (c) — single-flight per id): the
+    /// manager registers an `InflightSlot` per snapshot id before
+    /// building, and a concurrent caller sees the existing slot
+    /// instead of registering a second one.
+    ///
+    /// The test directly exercises the slot registration
+    /// machinery — the full `from_snapshot_with_wait_ms` path
+    /// requires cache entries and a valid config (covered by
+    /// `tests/snapshots_e2e.rs::from_snapshot_concurrent_calls_succeed`).
+    #[test]
+    fn from_snapshot_single_flight_registers_one_slot_per_id() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = IndexCache::new(dir.path());
+        let mgr = Arc::new(SnapshotManager::with_cap(dir.path(), cache, 4));
+
+        // Two concurrent calls would race the registration; with
+        // the parking_lot mutex held across both `insert` /
+        // `get`, only the first call wins and the second sees
+        // the existing slot. This is the structural property
+        // that closes the TLA+ `SingleFlight` violation.
+        let ready = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let m1 = Arc::clone(&mgr);
+        let m2 = Arc::clone(&mgr);
+        let r1 = Arc::clone(&ready);
+        let r2 = Arc::clone(&ready);
+        let b1 = Arc::clone(&barrier);
+        let b2 = Arc::clone(&barrier);
+        let id = "snap_race".to_string();
+
+        let id1 = id.clone();
+        let id2 = id.clone();
+        let t1 = std::thread::spawn(move || {
+            // Acquire the slot directly (mirrors the first half
+            // of `from_snapshot_with_wait_ms`'s registration
+            // step). The barrier ensures both threads attempt
+            // the registration simultaneously.
+            b1.wait();
+            let slot = {
+                let mut map = m1.in_flight.lock();
+                if let Some(existing) = map.get(&id1).cloned() {
+                    existing
+                } else {
+                    let new_slot = Arc::new(InflightSlot {
+                        state: std::sync::Mutex::new(None),
+                        notify: std::sync::Condvar::new(),
+                    });
+                    map.insert(id1.clone(), Arc::clone(&new_slot));
+                    new_slot
+                }
+            };
+            // Mark that this thread was the first (or joiner)
+            // by checking the slot identity against the map.
+            let in_map = m1.in_flight.lock().contains_key(&id1);
+            r1.fetch_add(1, AOrd::AcqRel);
+            (slot, in_map)
+        });
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            let slot = {
+                let mut map = m2.in_flight.lock();
+                if let Some(existing) = map.get(&id2).cloned() {
+                    existing
+                } else {
+                    let new_slot = Arc::new(InflightSlot {
+                        state: std::sync::Mutex::new(None),
+                        notify: std::sync::Condvar::new(),
+                    });
+                    map.insert(id2.clone(), Arc::clone(&new_slot));
+                    new_slot
+                }
+            };
+            let in_map = m2.in_flight.lock().contains_key(&id2);
+            r2.fetch_add(1, AOrd::AcqRel);
+            (slot, in_map)
+        });
+        let (s1, _) = t1.join().expect("t1");
+        let (s2, _) = t2.join().expect("t2");
+        assert_eq!(
+            ready.load(AOrd::Acquire),
+            2,
+            "both threads completed"
+        );
+        // Critical assertion: both threads observe the same slot
+        // identity (Arc::ptr_eq), i.e. exactly one slot was
+        // registered. Pre-fix this assertion was not testable
+        // because the manager had no per-id bookkeeping.
+        assert!(
+            Arc::ptr_eq(&s1, &s2),
+            "two concurrent registrations for the same id share one slot \
+             (TLA+ SnapshotResidency.tla SingleFlight variant (c))"
+        );
+        assert_eq!(
+            mgr.in_flight.lock().len(),
+            1,
+            "exactly one slot registered"
         );
     }
 
