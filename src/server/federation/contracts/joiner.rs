@@ -1583,9 +1583,7 @@ fn resolve_consumer(
     //   to the existing `services[].env` match" — the new
     //   path is additive, not a replacement.
     if let HostPart::Env(names) = &consumer.url.host {
-        if let Some(resolved) =
-            resolve_env_consumer(consumer, env, config, unresolved_env_vars)
-        {
+        if let Some(resolved) = resolve_env_consumer(consumer, env, config, unresolved_env_vars) {
             match resolved {
                 EnvResolution::Service(svc) => {
                     let resolution = match_one_service(

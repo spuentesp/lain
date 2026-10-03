@@ -21,11 +21,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::federation::contracts::clients::{compose_and_normalize, ClientDef, UrlPart as RegistryUrlPart};
-use crate::federation::contracts::config::ContractFederationConfig;
-use crate::federation::contracts::model::{
-    ConsumerFact, HostPart, NormalizedUrl, ServiceName,
+use crate::federation::contracts::clients::{
+    compose_and_normalize, ClientDef, UrlPart as RegistryUrlPart,
 };
+use crate::federation::contracts::config::ContractFederationConfig;
+use crate::federation::contracts::model::{ConsumerFact, HostPart, NormalizedUrl, ServiceName};
 use crate::server::sensors::env_sensor::EnvBindingIndex;
 
 /// Compose `def.base ++ call.url` into a single [`NormalizedUrl`].
@@ -50,7 +50,10 @@ pub(crate) fn compose_for_registry(consumer: &ConsumerFact, def: &ClientDef) -> 
 /// `target_service_from_env` (env-name match) and
 /// `target_service_from_hosts` (host-pattern match) into a single
 /// helper so tier 2 can call either without duplicating it.
-pub(crate) fn service_from_host(host: &HostPart, config: &ContractFederationConfig) -> Option<ServiceName> {
+pub(crate) fn service_from_host(
+    host: &HostPart,
+    config: &ContractFederationConfig,
+) -> Option<ServiceName> {
     match host {
         HostPart::Env(names) => {
             for env in names {

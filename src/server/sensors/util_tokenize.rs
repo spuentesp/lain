@@ -283,15 +283,13 @@ pub fn lines_matching_pattern<'a, F>(
 where
     F: Fn(&str) -> bool + 'a,
 {
-    src.lines()
-        .enumerate()
-        .filter_map(move |(idx, line)| {
-            if predicate(line) {
-                Some((idx + 1, line))
-            } else {
-                None
-            }
-        })
+    src.lines().enumerate().filter_map(move |(idx, line)| {
+        if predicate(line) {
+            Some((idx + 1, line))
+        } else {
+            None
+        }
+    })
 }
 
 // ─── Call-site detection ──────────────────────────────────────────────
@@ -492,7 +490,8 @@ mod tests {
     #[test]
     fn lines_matching_pattern_yields_one_based_line_numbers() {
         let src = "alpha\nbeta gamma\nalpha again\n";
-        let hits: Vec<(usize, &str)> = lines_matching_pattern(src, |l| l.contains("alpha")).collect();
+        let hits: Vec<(usize, &str)> =
+            lines_matching_pattern(src, |l| l.contains("alpha")).collect();
         assert_eq!(hits, vec![(1, "alpha"), (3, "alpha again")]);
     }
 

@@ -25,7 +25,9 @@ use std::collections::BTreeMap;
 
 use crate::federation::contracts::config::ContractFederationConfig;
 use crate::federation::contracts::index::ConsumerResolution;
-use crate::federation::contracts::joiner::{resolve_graphql_consumer, resolve_rpc_consumer, resolve_topic_consumer, EndpointProviderRecord};
+use crate::federation::contracts::joiner::{
+    resolve_graphql_consumer, resolve_rpc_consumer, resolve_topic_consumer, EndpointProviderRecord,
+};
 use crate::federation::contracts::model::{ContractFact, ServiceName};
 use crate::federation::repo_id::GlobalId;
 
@@ -54,7 +56,13 @@ pub trait ProtocolDispatch: sealed::Sealed {
         call_id: &GlobalId,
         own_service: &ServiceName,
         fact: &ContractFact,
-        endpoints: &BTreeMap<(ServiceName, crate::federation::contracts::model::ContractKey), Vec<EndpointProviderRecord>>,
+        endpoints: &BTreeMap<
+            (
+                ServiceName,
+                crate::federation::contracts::model::ContractKey,
+            ),
+            Vec<EndpointProviderRecord>,
+        >,
         config: &ContractFederationConfig,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution;
@@ -79,7 +87,13 @@ impl ProtocolDispatch for TopicDispatch {
         call_id: &GlobalId,
         own_service: &ServiceName,
         fact: &ContractFact,
-        endpoints: &BTreeMap<(ServiceName, crate::federation::contracts::model::ContractKey), Vec<EndpointProviderRecord>>,
+        endpoints: &BTreeMap<
+            (
+                ServiceName,
+                crate::federation::contracts::model::ContractKey,
+            ),
+            Vec<EndpointProviderRecord>,
+        >,
         _config: &ContractFederationConfig,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution {
@@ -111,7 +125,13 @@ impl ProtocolDispatch for RpcDispatch {
         call_id: &GlobalId,
         own_service: &ServiceName,
         fact: &ContractFact,
-        endpoints: &BTreeMap<(ServiceName, crate::federation::contracts::model::ContractKey), Vec<EndpointProviderRecord>>,
+        endpoints: &BTreeMap<
+            (
+                ServiceName,
+                crate::federation::contracts::model::ContractKey,
+            ),
+            Vec<EndpointProviderRecord>,
+        >,
         config: &ContractFederationConfig,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution {
@@ -142,7 +162,13 @@ impl ProtocolDispatch for GraphqlDispatch {
         call_id: &GlobalId,
         own_service: &ServiceName,
         fact: &ContractFact,
-        endpoints: &BTreeMap<(ServiceName, crate::federation::contracts::model::ContractKey), Vec<EndpointProviderRecord>>,
+        endpoints: &BTreeMap<
+            (
+                ServiceName,
+                crate::federation::contracts::model::ContractKey,
+            ),
+            Vec<EndpointProviderRecord>,
+        >,
         _config: &ContractFederationConfig,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution {
