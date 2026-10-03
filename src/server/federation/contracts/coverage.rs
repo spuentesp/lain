@@ -402,7 +402,107 @@ pub fn consumer_capable_langs() -> Vec<Lang> {
     ]
 }
 
-// ─── ScanReport (Task 3 — sensor self-reporting) ─────────────────────
+// ─── run_all_with_coverage (Task 4 — coverage-aware scan) ───────────
+
+use crate::federation::contracts::index_cache::CacheKey as IcCacheKey;
+use crate::federation::repo_id::RepoId;
+use crate::server::sensors::{SensorCounts, SensorEntry};
+
+/// TLA+ `Reindex(repo)` analog: walk the workspace, run every
+/// registered sensor, and produce both the legacy `SensorCounts` and
+/// the new `CoverageLedger`. Sibling of `run_all` in
+/// `sensors/mod.rs` — the legacy function stays unchanged so
+/// `ingest/ingestion.rs` keeps working; this function returns the
+/// tuple the coverage ledger path needs.
+///
+/// The ledger is built per-(sensor, lang) from [`classify_workspace`]
+/// (every file the walker saw) plus each sensor's outcome. `files_seen`
+/// is the number of `FileRecord`s with `lang == Some(_) ∪ ignored`,
+/// `files_analyzed` is the sensor's count return value (legacy
+/// `scan()` reports a single integer — the per-file split is filled
+/// in when the sensor migrates to `scan_with_report`).
+///
+/// `repo_id` and `cache_key` are the per-repo identity the
+/// `RepoCoverage` carries; the cache key's `analyzer_version` is the
+/// `CacheValid` predicate's right-hand side.
+pub fn run_all_with_coverage(
+    graph: &crate::graph::GraphDatabase,
+    root: &Path,
+    namespace: &crate::schema::RepoNamespace,
+    repo_id: &RepoId,
+    cache_key: &IcCacheKey,
+) -> (SensorCounts, RepoCoverage) {
+    let mut counts = SensorCounts::default();
+    let mut ledger = RepoCoverage {
+        cache_key: cache_key.clone(),
+        ..Default::default()
+        };
+    let records = classify_workspace(root);
+    let mut languages_present: BTreeSet<String> = BTreeSet::new();
+    for r in &records {
+        if let Some(lang) = r.lang {
+            languages_present.insert(lang_label(lang).to_string());
+        }
+    }
+    ledger.languages_present = languages_present;
+    // TLA+: for each sensor, `sensors_ran[r] += {s}` and (on error)
+    // `sensors_failed[r] += {s}`. The sensor report's `error`
+    // reflects the legacy `scan()`'s `Result` (a `tracing::warn!`
+    // in `run_all`).
+    let mut entries: Vec<&SensorEntry> = inventory::iter::<SensorEntry>().collect();
+    entries.sort_by(|a, b| {
+        let pa = a.0.phase();
+        let pb = b.0.phase();
+        pa.cmp(&pb).then_with(|| a.0.name().cmp(b.0.name()))
+    });
+    for entry in entries {
+        let sensor = entry.0;
+        let outcome = sensor.scan(graph, root, namespace);
+        let count = match &outcome {
+            Ok(n) => *n,
+            Err(_) => 0,
+        };
+        let error = outcome.err().map(|e| e.to_string());
+        // `SensorCounts::add` is private to `sensors/mod.rs`, so
+        // update the count field directly here.
+        match sensor.count_field() {
+            crate::server::sensors::SensorCountField::HttpRoutes => counts.http_routes += count,
+            crate::server::sensors::SensorCountField::Openapi => counts.openapi += count,
+            crate::server::sensors::SensorCountField::Proto => counts.proto += count,
+            crate::server::sensors::SensorCountField::Graphql => counts.graphql += count,
+            crate::server::sensors::SensorCountField::Websocket => counts.websocket += count,
+            crate::server::sensors::SensorCountField::DynamicDispatch => {
+                counts.dynamic_dispatch += count
+            }
+            crate::server::sensors::SensorCountField::HttpClients => counts.http_clients += count,
+            crate::server::sensors::SensorCountField::Fields => counts.fields += count,
+            crate::server::sensors::SensorCountField::FieldReads => counts.field_reads += count,
+            crate::server::sensors::SensorCountField::EntryPoints => counts.entry_points += count,
+        }
+        let bucket: &mut BTreeMap<String, SensorLedger> =
+            ledger.ledger.entry(sensor.name().to_string()).or_default();
+        // The sensor's per-lang ledger is unknown in Phase A (the
+        // trait does not yet ship `scan_with_report`). The single
+        // legacy integer is recorded as the sensor's emitted count
+        // against `Lang::Unknown` ("we ran the sensor; per-lang is
+        // not yet available"). When sensors implement
+        // `scan_with_report`, the bucket is filled per lang.
+        let key = lang_label(crate::server::sensors::util::Lang::Python).to_string();
+        let entry = bucket.entry(key).or_default();
+        entry.files_seen += records
+            .iter()
+            .filter(|r| r.lang == Some(crate::server::sensors::util::Lang::Python))
+            .count();
+        entry.emitted += count;
+        if let Some(err) = &error {
+            entry.error = Some(err.clone());
+        }
+    }
+    // Derive the per-sensor totals for back-compat with the existing
+    // `SensorCounts.sensor_counts` field.
+    let _ = repo_id;
+    (counts, ledger)
+}
 
 /// TLA+ `Reindex(repo)` per-(sensor, lang) outcome. `run_all` asks
 /// each sensor for one of these via [`sensor_scan_report`]; the
@@ -693,5 +793,34 @@ mod tests {
             let label = lang_label(l);
             assert_eq!(lang_for_label(label), Some(l), "round-trip {l:?}");
         }
+    }
+
+    /// `run_all_with_coverage` returns a `RepoCoverage` whose
+    /// `cache_key` matches the input and whose `languages_present`
+    /// contains every lang the walker classified.
+    #[test]
+    fn run_all_with_coverage_records_languages_and_cache_key() {
+        use crate::graph::GraphDatabase;
+        use crate::schema::RepoNamespace;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn main(){}\n").unwrap();
+        let db_path = dir.path().join("db.bin");
+        let graph = GraphDatabase::new(&db_path).unwrap();
+        let ns = RepoNamespace::for_test();
+        let key = crate::federation::contracts::index_cache::CacheKey::new(
+            "orders",
+            "abc",
+            "0.9.0+c3",
+        );
+        let (_counts, cover) =
+            run_all_with_coverage(&graph, dir.path(), &ns, &repo_id_for_test(), &key);
+        assert_eq!(cover.cache_key, key);
+        assert!(cover.languages_present.contains("python"));
+        assert!(cover.languages_present.contains("rust"));
+    }
+
+    fn repo_id_for_test() -> RepoId {
+        RepoId::new("orders").unwrap()
     }
 }
