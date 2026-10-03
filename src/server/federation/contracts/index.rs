@@ -160,6 +160,13 @@ pub enum UnresolvedReason {
     /// (`.env` says one thing, compose says another). No bind
     /// emitted; the consumer is ambiguous.
     EnvAmbiguous,
+    /// Phase E (spec §8.2): the consumer's gRPC stub call
+    /// resolved to a known service but the channel address
+    /// (host:port) the consumer constructed has no matching
+    /// service in `services[].hosts`. The consumer lands in
+    /// the coverage ledger's `unresolved` bucket; the operator
+    /// wires the host via `repos.yaml#services[]`.
+    RpcStubUnknown,
 }
 
 /// Field read resolution (§7.5). `bound_fields` carries the joined
@@ -239,6 +246,19 @@ pub fn node_type_of(fact: &ContractFact) -> NodeType {
         // joiner fills `service` later, so an empty `service` at
         // scan time is fine — the node is still keyed on `name`.
         ContractFact::Table(_) => NodeType::Table,
+        // Phase E (spec §8.2): `RpcProvider` rides on a Module
+        // node (the proto file's path-keyed module); the
+        // `RpcHandler` link is keyed off the handler function.
+        // Both surface as `Module` today so the existing typed
+        // traversal still works; a future PR can introduce a
+        // dedicated `RpcService` node type if a tool needs to
+        // filter for them.
+        ContractFact::RpcProvider(_) | ContractFact::RpcHandler(_) => NodeType::Module,
+        // Phase E (spec §8.2): `RpcConsumer` rides on a function
+        // / method / file (mirrors how `SendsHttp` attaches to
+        // the enclosing function). Function is the primary
+        // shape.
+        ContractFact::RpcConsumer(_) => NodeType::Function,
     }
 }
 

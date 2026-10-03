@@ -58,6 +58,36 @@ pub enum ContractFact {
     /// table by name only. The sensor emits one `Table` node per
     /// distinct `(name, path)` pair so duplicate joins collapse.
     Table(Table),
+    /// Phase E (spec §8.1, §8.2): one RPC method declared by a
+    /// proto file (`service Foo { rpc Bar(...) returns (...); }`).
+    /// The payload carries the same `(system, service, method)`
+    /// triple the `ContractKey::Rpc` key is built from, plus the
+    /// request/response type names the sensor extracted. `handler`
+    /// is filled in by `grpc_provider_sensor`'s server-registration
+    /// linkage (Task 3) when a `RegisterFooServer(...)` /
+    /// `@GrpcService(impl = FooImpl.class)` /
+    /// `add_FooServicer_to_server(...)` /
+    /// `pb.RegisterFooServer(s, &fooImpl{})` call site resolves to
+    /// a function node in the same repo.
+    RpcProvider(RpcProviderFact),
+    /// Phase E (spec §8.1, §8.2): one generated-stub call site
+    /// (Go `client.Get(...)`, Java `ordersClient.getOrder(...)`,
+    /// Python `stub.Get(...)`, C++ `stub->Get(...)`). The
+    /// joiner (Task 5) resolves the receiver type + channel
+    /// address to a `ContractKey::Rpc` provider via Phase B's
+    /// wrapper resolution + Phase C's env aliases. Unresolvable
+    /// stubs land in the coverage ledger as
+    /// `Unresolved { reason: RpcStubUnknown }`.
+    RpcConsumer(RpcConsumerFact),
+    /// Phase E (spec §8.2): one server-registration link from a
+    /// generated proto service to the user-supplied handler
+    /// function. The payload carries the proto service key
+    /// (`ContractKey::Rpc { system, service, method }`) and the
+    /// handler function's `SymbolKey`. The sensor (Task 3) emits
+    /// one per recognised registration pattern; the joiner
+    /// records the link on the corresponding `RpcProvider` so
+    /// typed traversal `handler → function → rpc` is reachable.
+    RpcHandler(RpcHandlerFact),
 }
 
 // ─── HTTP provider ────────────────────────────────────────────────────
@@ -84,6 +114,70 @@ pub struct ProviderFact {
 pub enum ProviderOrigin {
     Code,
     OpenApi,
+}
+
+// ─── RPC provider / consumer / handler (Phase E, spec §8) ─────────────
+
+/// Phase E (spec §8.2): one RPC method declared in a proto file.
+/// `service` is the proto package plus the service name joined by
+/// `.` — `com.acme.orders.Orders` for
+/// `package com.acme.orders; service Orders { … }`. `request_type`
+/// and `response_type` are the proto type names the sensor
+/// extracted; they are informational (the joiner matches on
+/// `(service, method)` only). `handler` is filled by the
+/// server-registration sensor (Task 3) once a registration call
+/// resolves to a function node; `None` at scan time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RpcProviderFact {
+    pub system: RpcSystem,
+    pub service: String,
+    pub method: String,
+    pub request_type: String,
+    pub response_type: String,
+    pub handler: Option<SymbolKey>,
+}
+
+/// Phase E (spec §8.2): one generated-stub call site. `receiver` is
+/// the typed stub (`ordersClient` / `stub` / `ordersStub`); `method`
+/// is the bare rpc name. `channel_target` is the host:port literal
+/// the sensor extracted from the channel construction
+/// (`grpc.NewClient("orders:50051")`,
+/// `ManagedChannelBuilder.forAddress("orders", 50051)`,
+/// `grpc.insecure_channel("orders:50051")`). `channel_host_part`
+/// is the same expression projected into the joiner's
+/// `HostPart` shape so the existing tier-2 / tier-3 resolution
+/// can run unchanged. A `None` channel means the call cannot be
+/// resolved and the joiner must emit
+/// `Unresolved { reason: RpcStubUnknown }`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RpcConsumerFact {
+    pub system: RpcSystem,
+    pub service: String,
+    pub method: String,
+    pub channel_target: Option<String>,
+    pub channel_host_part: HostPart,
+}
+
+/// Phase E (spec §8.2): server-registration link. The sensor
+/// emits one per detected registration call site. The joiner
+/// records the link on the `RpcProvider` so typed traversal
+/// `handler → function → rpc` is reachable. The `origin` is the
+/// detected language-specific pattern (gRPC C++ `RegisterFooServer`
+/// / gRPC Java Spring `@GrpcService` / gRPC Go `pb.RegisterFooServer`
+/// / gRPC Python `add_FooServicer_to_server`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RpcHandlerFact {
+    pub rpc_service: ContractKey,
+    pub handler_function: SymbolKey,
+    pub origin: RpcHandlerOrigin,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RpcHandlerOrigin {
+    CppRegister,
+    JavaGrpcService,
+    GoRegister,
+    PythonServicer,
 }
 
 // ─── HTTP consumer ────────────────────────────────────────────────────

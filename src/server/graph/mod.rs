@@ -90,6 +90,13 @@ pub enum SensorOwner {
     /// `ReadsTable` / `WritesTable` edges. A rescan replaces only
     /// its own previous output.
     SqlSensor,
+    /// Phase E (spec §8.2): the gRPC provider, handler-link, and
+    /// consumer sensors all own `Module` / `Function` nodes that
+    /// carry `RpcProvider` / `RpcHandler` / `RpcConsumer` contract
+    /// facts. They share a single `SensorOwner` so a rescan
+    /// retracts all three groups together (the older `proto_sensor`
+    /// did not manage these; the new sensors replace it).
+    ProtoSensor,
 }
 
 /// Map a node to its sensor owner (§6.1 derivation rules). Returns
@@ -112,9 +119,16 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         // `TopicConsumer` contract fact; the event sensor owns it.
         (_, Some(ContractFact::TopicConsumer(_))) => Some(SensorOwner::EventSensor),
         // Phase D (spec §7): a `Table` node carries a `Table`
-        // contract fact (or no contract fact if the joiner has
-        // not yet populated `service`). The sql sensor owns it.
+        // contract fact (or at scan time a `name`-only payload).
+        // The sql sensor owns it.
         (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
+        // Phase E (spec §8.2): `RpcProvider` / `RpcHandler` /
+        // `RpcConsumer` ride on Module / Function nodes. All three
+        // are owned by the gRPC sensor family so a rescan
+        // retracts them together.
+        (_, Some(ContractFact::RpcProvider(_)))
+        | (_, Some(ContractFact::RpcHandler(_)))
+        | (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::ProtoSensor),
         _ => None,
     }
 }

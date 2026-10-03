@@ -707,7 +707,9 @@ fn implicit_service(node: &GraphNode) -> ServiceName {
 /// OpenAPI operation with the same `(service, method, template)`
 /// merge into one endpoint with two providers. Topic providers (§6.7)
 /// are keyed by `(service, ContractKey::Topic { broker, name })` so
-/// the topic-join path can match them later.
+/// the topic-join path can match them later. RPC providers (§8.2)
+/// are keyed by `(service, ContractKey::Rpc { system, service,
+/// method })` so the rpc-join path can match them later.
 fn build_endpoints(
     nodes: &[GraphNode],
     assignments: &BTreeMap<String, ServiceName>,
@@ -782,6 +784,29 @@ fn build_endpoints(
                         fact: Some(ContractFact::Provider(provider.clone())),
                         template: full_template,
                         method,
+                    });
+            }
+            // Phase E (spec §8.2): an `RpcProvider` node carries the
+            // exact `(system, service, method)` triple the
+            // `ContractKey::Rpc` form needs. The endpoint table
+            // indexes the provider by that key so the
+            // `resolve_rpc_consumer` join (Task 5) can do an
+            // exact-match lookup without the URL-prefix tolerance
+            // the HTTP path uses.
+            Some(ContractFact::RpcProvider(rpc)) => {
+                let key = ContractKey::Rpc {
+                    system: rpc.system,
+                    service: rpc.service.clone(),
+                    method: rpc.method.clone(),
+                };
+                table
+                    .entry((svc.clone(), key))
+                    .or_default()
+                    .push(EndpointProviderRecord {
+                        id: gid,
+                        fact: Some(ContractFact::RpcProvider(rpc.clone())),
+                        template: rpc.method.clone(),
+                        method: HttpMethod::Any,
                     });
             }
             _ => continue,

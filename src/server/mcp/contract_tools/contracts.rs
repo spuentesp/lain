@@ -1049,6 +1049,7 @@ fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         UnresolvedReason::WrapperUnconfigured => "wrapper_unconfigured",
         UnresolvedReason::EnvUnmapped => "env_unmapped",
         UnresolvedReason::EnvAmbiguous => "env_ambiguous",
+        UnresolvedReason::RpcStubUnknown => "rpc_stub_unknown",
     }
 }
 
