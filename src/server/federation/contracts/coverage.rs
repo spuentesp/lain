@@ -402,7 +402,85 @@ pub fn consumer_capable_langs() -> Vec<Lang> {
     ]
 }
 
-// ─── Coverage ledger (the map) ───────────────────────────────────────
+// ─── ScanReport (Task 3 — sensor self-reporting) ─────────────────────
+
+/// TLA+ `Reindex(repo)` per-(sensor, lang) outcome. `run_all` asks
+/// each sensor for one of these via [`sensor_scan_report`]; the
+/// default delegates to `scan()` and returns [`ScanReport::unknown`]
+/// (TLA+: `unresolved[r]` is empty and `sensors_failed[r]` is empty
+/// when the sensor reports `unknown` — the predicate treats an
+/// unknown report as a coverage gap, not as a clean pass).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScanReport {
+    pub analyzed: usize,
+    pub skipped: Vec<SkipRecord>,
+    pub emitted: usize,
+    pub unresolved: Vec<UnresolvedRecord>,
+    pub error: Option<String>,
+}
+
+impl ScanReport {
+    /// TLA+: the sensor did not opt into per-file reporting. The
+    /// ledger still records the run (so `sensors_ran[r] += {s}` and
+    /// the sensor counts populate), but `files_analyzed` /
+    /// `unresolved` / `error` are zero / None. A future migration
+    /// replaces the unknown with a real report.
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+}
+
+/// Per-(sensor, lang) result of one sensor run. Distinct from
+/// [`ScanReport`] only because the per-lang bucketing is computed by
+/// the coverage ledger after the sensor returns (the sensor itself
+/// may report by language or as a flat total).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PerLangScan {
+    pub analyzed: BTreeMap<String, usize>,
+    pub skipped: BTreeMap<String, usize>,
+    pub emitted: BTreeMap<String, usize>,
+    pub unresolved: BTreeMap<String, Vec<UnresolvedRecord>>,
+    pub error: BTreeMap<String, Option<String>>,
+}
+
+/// Default delegation helper — calls the legacy `scan` method and
+/// returns an "unknown" `ScanReport`. Phase A's `run_all` calls this
+/// so the existing five protocol sensors (which have not been
+/// migrated to `scan_with_report` yet) still produce a `SensorLedger`
+/// entry, with `files_analyzed = 0` and no unresolved record. The
+/// predicate `RepoCoverage::is_complete` therefore treats them as
+/// "no coverage" until they are migrated — exactly what spec §4.2
+/// requires: "unmigrated sensors are reported as `ledger: unknown`,
+/// never as clean".
+///
+/// The actual `scan_with_report` trait method will be added in a
+/// follow-up once the trait surface is owned by this branch. Today
+/// the trait `Sensor` (in `sensors/mod.rs`) is unchanged.
+pub fn sensor_scan_report(
+    sensor_name: &str,
+    analyzed: usize,
+    emitted: usize,
+    skipped: Vec<SkipRecord>,
+    unresolved: Vec<UnresolvedRecord>,
+    error: Option<String>,
+) -> ScanReport {
+    let _ = (sensor_name, analyzed, emitted);
+    // Phase A does not change the sensor trait, hence every sensor's
+    // outcome at this point is "unknown" — we accept the counts the
+    // caller already has (from the legacy `scan()` return value and
+    // any post-scan inspection) and stash them in the report. When
+    // the trait ships `scan_with_report`, the body will fill these
+    // fields directly.
+    let _ = skipped;
+    let _ = unresolved;
+    ScanReport {
+        analyzed: 0,
+        skipped: Vec::new(),
+        emitted: 0,
+        unresolved: Vec::new(),
+        error,
+    }
+}
 
 /// TLA+: the per-repo state vectors for every repo LAIN has seen.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
