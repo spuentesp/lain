@@ -292,9 +292,7 @@ impl ContractJoiner {
             // on `(op, field)`; multiple providers exposing the
             // same `(op, field)` (federation / gateway) →
             // ambiguous, never single-bound.
-            if let Some(ContractFact::GraphqlConsumer(graphql_consumer)) =
-                node.contract.as_ref()
-            {
+            if let Some(ContractFact::GraphqlConsumer(graphql_consumer)) = node.contract.as_ref() {
                 let call_id = match GlobalId::parse(&node.id) {
                     Ok(g) => g,
                     Err(_) => continue,
@@ -1153,7 +1151,10 @@ fn resolve_graphql_consumer(
     for (svc, key) in endpoints.keys() {
         if let ContractKey::Http { method, template } = key {
             if template == "/graphql"
-                && matches!(method, MethodSpec::Known(HttpMethod::Post) | MethodSpec::Unknown)
+                && matches!(
+                    method,
+                    MethodSpec::Known(HttpMethod::Post) | MethodSpec::Unknown
+                )
             {
                 graphql_route_owners.push(svc.clone());
             }

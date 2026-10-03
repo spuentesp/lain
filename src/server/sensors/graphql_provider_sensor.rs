@@ -539,7 +539,11 @@ type Subscription {
         let ops: Vec<GraphqlOp> = providers.iter().map(|p| p.op).collect();
         assert_eq!(
             ops,
-            vec![GraphqlOp::Query, GraphqlOp::Mutation, GraphqlOp::Subscription]
+            vec![
+                GraphqlOp::Query,
+                GraphqlOp::Mutation,
+                GraphqlOp::Subscription
+            ]
         );
         assert_eq!(providers[1].field, "createOrder");
         assert_eq!(providers[2].field, "onOrderUpdate");

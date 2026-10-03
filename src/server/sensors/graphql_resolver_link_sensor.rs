@@ -104,11 +104,8 @@ pub fn scan_workspace_resolver_link(
                 Some(link.site_line),
                 namespace,
             );
-            let mut node = GraphNode::new(
-                NodeType::Module,
-                id_name.clone(),
-                graph_path_str.clone(),
-            );
+            let mut node =
+                GraphNode::new(NodeType::Module, id_name.clone(), graph_path_str.clone());
             node.id = id;
             node.line_start = Some(link.site_line);
             node.line_end = Some(link.site_line);
@@ -173,7 +170,11 @@ fn detect_apollo(
     for (idx, line) in lines.iter().enumerate() {
         let _line_no = (idx as u32) + 1;
         let trimmed = line.trim();
-        for op in [GraphqlOp::Query, GraphqlOp::Mutation, GraphqlOp::Subscription] {
+        for op in [
+            GraphqlOp::Query,
+            GraphqlOp::Mutation,
+            GraphqlOp::Subscription,
+        ] {
             let marker = format!("{}:", op_label(op));
             // We need a `:` right after the op name, optionally
             // followed by a space and `{`. The simplest
@@ -200,9 +201,7 @@ fn detect_apollo(
                 // Closing brace of the resolver block — at the
                 // same or shallower indent than the op marker.
                 if inner_indent <= op_indent
-                    && (inner_trim == "}"
-                        || inner_trim == "},"
-                        || inner_trim == "};")
+                    && (inner_trim == "}" || inner_trim == "}," || inner_trim == "};")
                 {
                     break;
                 }
@@ -260,9 +259,11 @@ fn op_label(op: GraphqlOp) -> &'static str {
 
 fn is_valid_field_name(s: &str) -> bool {
     !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && s.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && s
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
 /// Extract a handler identifier from an Apollo resolver map
@@ -289,7 +290,7 @@ fn extract_apollo_handler_name(expr: &str) -> String {
                 if token
                     .chars()
                     .next()
-                    .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                 {
                     return token.to_string();
                 }
@@ -569,14 +570,9 @@ const resolvers = {
         assert_eq!(orders.len(), 1);
         assert_eq!(orders[0].op, GraphqlOp::Query);
         assert_eq!(orders[0].handler_function.name, "ordersResolver");
-        assert!(matches!(
-            orders[0].origin,
-            GraphqlHandlerOrigin::Apollo
-        ));
-        let create: Vec<&GraphqlHandlerLink> = links
-            .iter()
-            .filter(|l| l.field == "createOrder")
-            .collect();
+        assert!(matches!(orders[0].origin, GraphqlHandlerOrigin::Apollo));
+        let create: Vec<&GraphqlHandlerLink> =
+            links.iter().filter(|l| l.field == "createOrder").collect();
         assert_eq!(create[0].op, GraphqlOp::Mutation);
         assert_eq!(create[0].handler_function.name, "createOrderResolver");
     }
@@ -605,10 +601,8 @@ func (r *mutationResolver) CreateOrder(ctx context.Context, input CreateOrderInp
             Some("queryResolver")
         );
         assert!(matches!(orders[0].origin, GraphqlHandlerOrigin::Gqlgen));
-        let create: Vec<&GraphqlHandlerLink> = links
-            .iter()
-            .filter(|l| l.field == "CreateOrder")
-            .collect();
+        let create: Vec<&GraphqlHandlerLink> =
+            links.iter().filter(|l| l.field == "CreateOrder").collect();
         assert_eq!(create[0].op, GraphqlOp::Mutation);
         assert_eq!(
             create[0].handler_function.container.as_deref(),
@@ -631,10 +625,7 @@ class Query:
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].field, "orders");
         assert_eq!(links[0].op, GraphqlOp::Query);
-        assert!(matches!(
-            links[0].origin,
-            GraphqlHandlerOrigin::Strawberry
-        ));
+        assert!(matches!(links[0].origin, GraphqlHandlerOrigin::Strawberry));
     }
 
     #[test]
@@ -656,10 +647,7 @@ public class OrdersDataFetcher implements DataFetcher<List<Order>> {
         assert_eq!(links[0].field, "orders");
         assert_eq!(links[0].op, GraphqlOp::Query);
         assert_eq!(links[0].handler_function.name, "OrdersDataFetcher");
-        assert!(matches!(
-            links[0].origin,
-            GraphqlHandlerOrigin::GraphqlJava
-        ));
+        assert!(matches!(links[0].origin, GraphqlHandlerOrigin::GraphqlJava));
     }
 
     #[test]

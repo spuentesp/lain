@@ -434,7 +434,10 @@ fn find_top_level_operations(content: &str) -> Vec<OpDecl> {
             }
             i += 1;
         }
-        out.push(OpDecl { op, line: start_line });
+        out.push(OpDecl {
+            op,
+            line: start_line,
+        });
     }
     out
 }
@@ -444,11 +447,10 @@ fn operation_keyword(bytes: &[u8], at: usize) -> Option<GraphqlOp> {
     let starts = |kw: &[u8]| rest.starts_with(kw);
     let after_ok = |kw: &[u8]| {
         let idx = at + kw.len();
-        idx >= bytes.len()
-            || !(bytes[idx] as char).is_ascii_alphanumeric() && bytes[idx] != b'_'
+        idx >= bytes.len() || !(bytes[idx] as char).is_ascii_alphanumeric() && bytes[idx] != b'_'
     };
-    let before_ok = at == 0
-        || !(bytes[at - 1] as char).is_ascii_alphanumeric() && bytes[at - 1] != b'_';
+    let before_ok =
+        at == 0 || !(bytes[at - 1] as char).is_ascii_alphanumeric() && bytes[at - 1] != b'_';
     if !before_ok {
         return None;
     }
@@ -603,11 +605,7 @@ fn is_ident_continue(b: u8) -> bool {
     (b as char).is_ascii_alphanumeric() || b == b'_'
 }
 
-fn parse_operation_body(
-    body: &str,
-    graph_path: &str,
-    line_no: u32,
-) -> Vec<GraphqlConsumerField> {
+fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<GraphqlConsumerField> {
     // The body has the operation type implicit when the
     // shorthand `{ orders { id } }` is used. We treat it
     // as a Query for the common case (and the

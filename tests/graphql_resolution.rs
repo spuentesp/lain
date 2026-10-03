@@ -88,12 +88,7 @@ fn graphql_provider_node(
 ) -> GraphNode {
     let id_name = format!("{}:{}", op, field);
     let id = make_id(repo, NodeType::Module, path, &id_name, line);
-    let mut n = GraphNode::new_in(
-        NodeType::Module,
-        id_name.clone(),
-        path.to_string(),
-        &ns(),
-    );
+    let mut n = GraphNode::new_in(NodeType::Module, id_name.clone(), path.to_string(), &ns());
     n.repo_id = Some(repo.to_string());
     n.id = id;
     n.line_start = Some(line);
@@ -131,7 +126,12 @@ fn http_route_node(repo: &str, path: &str, template: &str, line: u32) -> GraphNo
     use lain::federation::contracts::model::{ProviderFact, ProviderOrigin};
     let id_name = format!("http:POST {}", template);
     let id = make_id(repo, NodeType::HttpRoute, path, &id_name, line);
-    let mut n = GraphNode::new_in(NodeType::HttpRoute, id_name.clone(), path.to_string(), &ns());
+    let mut n = GraphNode::new_in(
+        NodeType::HttpRoute,
+        id_name.clone(),
+        path.to_string(),
+        &ns(),
+    );
     n.repo_id = Some(repo.to_string());
     n.id = id;
     n.line_start = Some(line);
@@ -266,18 +266,9 @@ fn f2_gql_tagged_template_binds_via_graphql_route() {
         3,
         "[Order!]!",
     );
-    let consumer = graphql_consumer_node(
-        "billing",
-        "src/orders.ts",
-        GraphqlOp::Query,
-        "orders",
-        7,
-    );
+    let consumer = graphql_consumer_node("billing", "src/orders.ts", GraphqlOp::Query, "orders", 7);
     let route = http_route_node("api", "src/server.ts", "/graphql", 12);
-    let out = run(
-        vec![provider, consumer, route],
-        config_with_service("api"),
-    );
+    let out = run(vec![provider, consumer, route], config_with_service("api"));
     let consumer_id = gid(
         "billing",
         NodeType::Function,
@@ -302,13 +293,7 @@ fn f2_gql_tagged_template_binds_via_graphql_route() {
         panic!("target must be Binds, got {:?}", resolution.target);
     };
     assert!((confidence - 1.0).abs() < f32::EPSILON);
-    let provider_id = gid(
-        "api",
-        NodeType::Module,
-        "schema.graphql",
-        "query:orders",
-        3,
-    );
+    let provider_id = gid("api", NodeType::Module, "schema.graphql", "query:orders", 3);
     let Some(bind) = out.binds.iter().find(|b| b.consumer == consumer_id) else {
         panic!("a Binds edge must exist for the consumer");
     };
@@ -396,10 +381,8 @@ const ORDERS = gql`query { ${userId} { id } }`;
     let root = fixed_workspace("f4");
     let ts = write_file(&root, "src/orders.ts", src);
     let content = std::fs::read_to_string(&ts).unwrap();
-    let detected = lain::server::sensors::graphql_consumer_sensor::detect_in_code(
-        &content,
-        "src/orders.ts",
-    );
+    let detected =
+        lain::server::sensors::graphql_consumer_sensor::detect_in_code(&content, "src/orders.ts");
     assert_eq!(detected.len(), 1);
     assert!(
         detected[0].dynamic,
@@ -444,13 +427,7 @@ fn f5_federation_ambiguous_no_single_bind() {
         5,
         "[Order!]!",
     );
-    let consumer = graphql_consumer_node(
-        "billing",
-        "src/orders.ts",
-        GraphqlOp::Query,
-        "orders",
-        7,
-    );
+    let consumer = graphql_consumer_node("billing", "src/orders.ts", GraphqlOp::Query, "orders", 7);
     let route = http_route_node("api", "src/server.ts", "/graphql", 12);
     let out = run(
         vec![gateway_provider, backend_provider, consumer, route],
@@ -542,13 +519,7 @@ fn f2_neg_route_owner_and_provider_can_differ() {
         3,
         "[Order!]!",
     );
-    let consumer = graphql_consumer_node(
-        "billing",
-        "src/orders.ts",
-        GraphqlOp::Query,
-        "orders",
-        7,
-    );
+    let consumer = graphql_consumer_node("billing", "src/orders.ts", GraphqlOp::Query, "orders", 7);
     let route = http_route_node("api", "src/server.ts", "/graphql", 12);
     let out = run(
         vec![provider, consumer, route],
@@ -607,18 +578,9 @@ fn graphql_same_service_does_not_bind() {
         3,
         "[Order!]!",
     );
-    let consumer = graphql_consumer_node(
-        "api",
-        "src/orders.ts",
-        GraphqlOp::Query,
-        "orders",
-        7,
-    );
+    let consumer = graphql_consumer_node("api", "src/orders.ts", GraphqlOp::Query, "orders", 7);
     let route = http_route_node("api", "src/server.ts", "/graphql", 12);
-    let out = run(
-        vec![provider, consumer, route],
-        config_with_service("api"),
-    );
+    let out = run(vec![provider, consumer, route], config_with_service("api"));
     let consumer_id = gid(
         "api",
         NodeType::Function,
@@ -634,7 +596,10 @@ fn graphql_same_service_does_not_bind() {
         "same-service consumer must NOT bind (I5)"
     );
     let Some(ConsumerTarget::Unresolved { reason, .. }) = resolution.target.as_ref() else {
-        panic!("same-service must be Unresolved, got {:?}", resolution.target);
+        panic!(
+            "same-service must be Unresolved, got {:?}",
+            resolution.target
+        );
     };
     assert!(matches!(reason, UnresolvedReason::GraphqlNoOp));
     assert!(out.binds.is_empty());
