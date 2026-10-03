@@ -175,12 +175,18 @@ pub fn find_matching_close(src: &str, start: usize) -> Option<usize> {
 /// Extract the first quoted-string literal starting at `src[start]`.
 /// Recognises `"`, `'`, and backtick quotes; respects backslash
 /// escapes so a literal containing an escaped quote is not split.
-/// Leading whitespace before the literal is skipped (the form
-/// `func( "literal" )` is common in real code).
+/// Triple-quoted forms (`"""..."""` / `'''...'''`) are also
+/// recognised — common in proto / GraphQL SDL / Python docstrings
+/// and the SQL string-literal fixture. Leading whitespace before
+/// the literal is skipped (the form `func( "literal" )` is common
+/// in real code).
 ///
-/// Returns `(end, literal)` where `end` is the index of the closing
-/// quote (or `src.len()` on unterminated input — callers that need
-/// a strict check should compare `end` against the byte length).
+/// Returns `(end, literal)` where `end` is the index one past the
+/// closing quote (or `src.len()` on unterminated input — callers
+/// that need a strict check should compare `end` against the byte
+/// length). For triple-quoted forms `end` is one past the closing
+/// triple-quote and the literal preserves internal newlines
+/// verbatim.
 pub fn extract_string_literal(src: &str, start: usize) -> Option<(usize, String)> {
     let bytes = src.as_bytes();
     let mut i = start;
@@ -192,6 +198,20 @@ pub fn extract_string_literal(src: &str, start: usize) -> Option<(usize, String)
     }
     let quote = bytes[i];
     if quote != b'"' && quote != b'\'' && quote != b'`' {
+        return None;
+    }
+    // Triple-quoted form: `"""..."""` / `'''...'''`. The body
+    // extends to the matching triple-quote, allowing embedded
+    // newlines and unescaped single quotes of the same kind.
+    if i + 2 < bytes.len() && bytes[i + 1] == quote && bytes[i + 2] == quote {
+        let mut j = i + 3;
+        while j + 2 < bytes.len() {
+            if bytes[j] == quote && bytes[j + 1] == quote && bytes[j + 2] == quote {
+                let literal = String::from_utf8_lossy(&bytes[i + 3..j]).to_string();
+                return Some((j + 3, literal));
+            }
+            j += 1;
+        }
         return None;
     }
     let mut end: Option<usize> = None;
@@ -295,6 +315,28 @@ mod tests {
             extract_string_literal("`SELECT 1`", 0),
             Some(("`SELECT 1`".len(), "SELECT 1".to_string()))
         );
+    }
+
+    #[test]
+    fn extract_string_literal_handles_triple_double_block() {
+        // Triple-double-quoted form preserves newlines.
+        let src = "\"\"\"\nSELECT *\nFROM orders\n\"\"\"";
+        let (end, literal) = extract_string_literal(src, 0).expect("triple-quoted");
+        assert_eq!(end, src.len());
+        assert_eq!(literal, "\nSELECT *\nFROM orders\n");
+    }
+
+    #[test]
+    fn extract_string_literal_handles_triple_single_block() {
+        let src = "'''SELECT 1'''";
+        let (end, literal) = extract_string_literal(src, 0).expect("triple-single");
+        assert_eq!(end, src.len());
+        assert_eq!(literal, "SELECT 1");
+    }
+
+    #[test]
+    fn extract_string_literal_unterminated_triple_returns_none() {
+        assert!(extract_string_literal("\"\"\"unterminated", 0).is_none());
     }
 
     #[test]

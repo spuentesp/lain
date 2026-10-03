@@ -523,12 +523,10 @@ fn extract_base_value(rest: &str, key: &str) -> Option<BaseValue> {
         return None;
     }
     // Literal string path: "..." / '...' / `...`.
-    let bytes = after.as_bytes();
-    let quote = bytes[0];
-    if quote == b'"' || quote == b'\'' || quote == b'`' {
-        let body = &after[1..];
-        let end = body.find(quote as char)?;
-        return Some(BaseValue::Literal(body[..end].to_string()));
+    if let Some((_, literal)) =
+        crate::server::sensors::util_tokenize::extract_string_literal(after, 0)
+    {
+        return Some(BaseValue::Literal(literal));
     }
     // Env path: `process.env.X` / `process.env["X"]`.
     if let Some(name) = extract_process_env_name(after) {

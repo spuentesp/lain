@@ -197,20 +197,7 @@ fn detect_channel_host(content: &str, ext: &str) -> Option<String> {
 }
 
 fn extract_string_arg(rest: &str) -> Option<String> {
-    let bytes = rest.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-    let quote = bytes[0];
-    if quote != b'"' && quote != b'\'' {
-        return None;
-    }
-    let body = &rest[1..];
-    // Stop at the matching quote OR at any of the common
-    // call-argument terminators (`,`, `)`, `+`) — defensive against
-    // multiline / concatenated string shapes.
-    let end = body.find([quote as char, ',', ')', '+'])?;
-    Some(body[..end].to_string())
+    crate::server::sensors::util_tokenize::extract_string_literal(rest, 0).map(|(_, lit)| lit)
 }
 
 fn extract_host(target: &str) -> String {

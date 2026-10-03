@@ -209,37 +209,7 @@ fn collect_same_file_constants(content: &str, ext: &str) -> BTreeMap<String, Str
 }
 
 fn extract_string_literal(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.len() < 2 {
-        return None;
-    }
-    let quote = bytes[0];
-    if quote != b'"' && quote != b'\'' && quote != b'`' {
-        return None;
-    }
-    // Find the closing quote. Skip escaped quotes (preceded by an odd
-    // number of backslashes). The opening quote is at index 0, so we
-    // start scanning at 1.
-    let mut end: Option<usize> = None;
-    let mut i = 1;
-    while i < bytes.len() {
-        if bytes[i] == quote {
-            // Count preceding backslashes.
-            let mut backslashes = 0;
-            let mut j = i as i32 - 1;
-            while j >= 0 && bytes[j as usize] == b'\\' {
-                backslashes += 1;
-                j -= 1;
-            }
-            if backslashes % 2 == 0 {
-                end = Some(i);
-                break;
-            }
-        }
-        i += 1;
-    }
-    let end = end?;
-    Some(s[1..end].to_string())
+    crate::server::sensors::util_tokenize::extract_string_literal(s, 0).map(|(_, lit)| lit)
 }
 
 fn is_ident(s: &str) -> bool {
