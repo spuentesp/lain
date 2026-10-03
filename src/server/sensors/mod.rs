@@ -5,13 +5,14 @@
 //!
 //! Sensors are registered via [`inventory::submit!`] at static-init
 //! time and iterated by [`run_all`]. Adding a new sensor means
-//! `impl Sensor for XxxSensor` + one `inventory::submit!` line in the
-//! sensor's module — no central registry to edit, no
+//! one `register_sensor!` line (the `Sensor` impl plus its
+//! `inventory::submit!`) in the sensor's module — no central registry to edit, no
 //! `dispatch_tool_call`-style match ladder to grow. See
 //! [`docs/CONTRIBUTING_AGENTS.md`](../../../docs/CONTRIBUTING_AGENTS.md#sensor-pattern-one-concern-per-file-one-trait-shared).
 
 pub mod codeowners_sensor;
 pub mod dynamic_dispatch_sensor;
+pub mod env_sensor;
 pub mod entry_point_sensor;
 pub mod event_sensor;
 pub mod field_access_sensor;
@@ -135,6 +136,43 @@ pub trait Sensor: Send + Sync {
 /// Inventory wrapper so each sensor can `inventory::submit!(SensorEntry(&…))`.
 pub struct SensorEntry(pub &'static (dyn Sensor + 'static));
 inventory::collect!(SensorEntry);
+
+/// Declare a sensor: the `Sensor` impl plus its `inventory` registration.
+/// `$scan` is any `Fn(&GraphDatabase, &Path, &RepoNamespace) ->
+/// Result<usize, LainError>`; `$phase` defaults to 0.
+macro_rules! register_sensor {
+    ($ty:ident, $name:literal, $count:ident, $scan:expr) => {
+        $crate::server::sensors::register_sensor!($ty, $name, $count, 0, $scan);
+    };
+    ($ty:ident, $name:literal, $count:ident, $phase:literal, $scan:expr) => {
+        impl $crate::server::sensors::Sensor for $ty {
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn count_field(&self) -> $crate::server::sensors::SensorCountField {
+                $crate::server::sensors::SensorCountField::$count
+            }
+            fn phase(&self) -> u8 {
+                $phase
+            }
+            fn scan(
+                &self,
+                graph: &$crate::graph::GraphDatabase,
+                root: &::std::path::Path,
+                namespace: &$crate::schema::RepoNamespace,
+            ) -> ::std::result::Result<usize, $crate::error::LainError> {
+                let scan: fn(
+                    &$crate::graph::GraphDatabase,
+                    &::std::path::Path,
+                    &$crate::schema::RepoNamespace,
+                ) -> ::std::result::Result<usize, $crate::error::LainError> = $scan;
+                scan(graph, root, namespace)
+            }
+        }
+        inventory::submit!($crate::server::sensors::SensorEntry(&$ty));
+    };
+}
+pub(crate) use register_sensor;
 
 /// Run every registered protocol sensor over `root`, returning how
 /// many nodes/edges each contributed.
