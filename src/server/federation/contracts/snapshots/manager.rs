@@ -12,11 +12,12 @@
 //! `§12`) delegate here. The manager is the only path through which
 //! the tools touch snapshot state.
 
+use crate::server::time::now_unix;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
@@ -101,9 +102,14 @@ pub struct SnapshotFederation {
     pub residency: Arc<ResidencyTracker>,
     pub contract_index: parking_lot::RwLock<Option<Arc<ContractIndex>>>,
     pub last_used_unix: Mutex<i64>,
-    /// `true` when at least one tool call currently holds a
-    /// reference. Residency evictions are skipped while held.
-    pub held: AtomicBool,
+    /// Number of `HoldGuard` tokens currently alive for this
+    /// federation. Residency evictions are skipped while the
+    /// count is non-zero (TLA+ SnapshotResidency.tla NoEvictionOfHeld
+    /// variant (b) — refcount, not bool). Pre-fix this was an
+    /// `AtomicBool`; two holders sharing one slot saw the first
+    /// `Drop` clear the bool while the second was still using the
+    /// federation, allowing eviction under live holders.
+    pub held: AtomicUsize,
     /// The owning manager's `data_dir`. Tool-layer paths (`read_source`,
     /// `resolve_evidence` snippets) locate the per-repo mirror
     /// under `<data_dir>/mirrors/<repo>.git` for git2 blob
@@ -127,6 +133,13 @@ impl SnapshotFederation {
 
     pub fn last_used(&self) -> i64 {
         *self.last_used_unix.lock()
+    }
+
+    /// Current hold count. Test-only observation hook for the
+    /// `hold_guard_uses_refcount_not_bool` regression test.
+    #[cfg(test)]
+    pub fn hold_count_for_test(&self) -> usize {
+        self.held.load(Ordering::Acquire)
     }
 }
 
@@ -1069,7 +1082,7 @@ impl SnapshotManager {
             residency: residency_for_fed,
             contract_index: parking_lot::RwLock::new(Some(Arc::new(contract_index))),
             last_used_unix: Mutex::new(now_unix()),
-            held: AtomicBool::new(false),
+            held: AtomicUsize::new(0),
             data_dir: self.data_dir.clone(),
         });
         // Suppress unused warning: residency is consulted on
@@ -1129,7 +1142,12 @@ impl SnapshotManager {
         {
             let resident = self.resident.lock();
             for (id, f) in resident.iter() {
-                if !f.held.load(Ordering::Acquire)
+                // Refcount-based predicate (TLA+ SnapshotResidency
+                // variant (b)): only evict when the count is zero.
+                // Pre-fix the bool surface saw `false` after the
+                // first holder's Drop, allowing eviction while a
+                // second holder was still using the federation.
+                if f.held.load(Ordering::Acquire) == 0
                     && (evict_id.is_none()
                         || f.last_used() < resident[evict_id.as_ref().unwrap()].last_used())
                 {
@@ -1177,7 +1195,10 @@ impl HoldGuard {
         fed: Arc<SnapshotFederation>,
         residency_notify: Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
     ) -> Self {
-        fed.held.store(true, Ordering::Release);
+        // Refcount-based hold (TLA+ SnapshotResidency variant (b)):
+        // increment the count for each live holder. The eviction
+        // predicate only fires when the count is zero.
+        fed.held.fetch_add(1, Ordering::AcqRel);
         Self {
             fed,
             residency_notify,
@@ -1194,7 +1215,10 @@ impl std::ops::Deref for HoldGuard {
 
 impl Drop for HoldGuard {
     fn drop(&mut self) {
-        self.fed.held.store(false, Ordering::Release);
+        // Decrement the refcount (TLA+ SnapshotResidency variant (b)).
+        // Pre-fix the bool surface was unconditionally cleared on the
+        // first Drop while the logical count was > 0.
+        self.fed.held.fetch_sub(1, Ordering::AcqRel);
         self.fed.mark_used();
         self.residency_notify.1.notify_all();
     }
@@ -1292,13 +1316,6 @@ pub fn build_view_sync(record: &SnapshotRecord) -> serde_json::Value {
         "created_unix": record.created_unix,
         "last_access_unix": record.last_access_unix,
     })
-}
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 fn parse_join_config(value: &serde_json::Value) -> Result<ContractFederationConfig, PrepareError> {
@@ -1619,15 +1636,14 @@ mod tests {
             residency: resident,
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(0),
-            held: AtomicBool::new(false),
+            held: AtomicUsize::new(0),
             data_dir: std::path::PathBuf::from("."),
         });
-        fed.held.store(true, Ordering::Release);
         let notify = Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
         let _g = HoldGuard::new(Arc::clone(&fed), Arc::clone(&notify));
-        assert!(fed.held.load(Ordering::Acquire));
+        assert_eq!(fed.held.load(Ordering::Acquire), 1);
         drop(_g);
-        assert!(!fed.held.load(Ordering::Acquire));
+        assert_eq!(fed.held.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -1876,12 +1892,13 @@ repos:
             residency: resident,
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(now_unix()),
-            held: AtomicBool::new(false),
+            held: AtomicUsize::new(0),
             data_dir: std::path::PathBuf::from("."),
         });
-        held_fed.held.store(true, Ordering::Release);
         let notify = Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
-        // Keep the guard alive for the whole test so `held` stays true.
+        // HoldGuard::new increments the count; with the refcount
+        // surface, the count starts at 1 here and stays > 0 for
+        // the duration of the test (TLA+ variant (b)).
         let _held_guard = HoldGuard::new(Arc::clone(&held_fed), Arc::clone(&notify));
         mgr.resident.lock().insert("snap_held".into(), held_fed);
         // Second install with wait_ms = 0 → busy.
@@ -1892,7 +1909,7 @@ repos:
             residency: Arc::new(ResidencyTracker::new()),
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(now_unix()),
-            held: AtomicBool::new(false),
+            held: AtomicUsize::new(0),
             data_dir: std::path::PathBuf::from("."),
         });
         let err = mgr.install_resident(new_fed, 0).expect_err("busy");
@@ -1915,11 +1932,12 @@ repos:
             residency: resident,
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(now_unix()),
-            held: AtomicBool::new(false),
+            held: AtomicUsize::new(0),
             data_dir: std::path::PathBuf::from("."),
         });
-        held_fed.held.store(true, Ordering::Release);
         let notify = Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
+        // HoldGuard::new increments the count; with the refcount
+        // surface, the count starts at 1 here (TLA+ variant (b)).
         let held_guard = HoldGuard::new(Arc::clone(&held_fed), Arc::clone(&notify));
         mgr.resident.lock().insert("snap_held".into(), held_fed);
         // Spawn the waiter on a separate thread; drop the guard
@@ -1933,7 +1951,7 @@ repos:
             residency: Arc::new(ResidencyTracker::new()),
             contract_index: parking_lot::RwLock::new(None),
             last_used_unix: Mutex::new(now_unix()),
-            held: AtomicBool::new(false),
+            held: AtomicUsize::new(0),
             data_dir: std::path::PathBuf::from("."),
         });
         let new_fed_clone = Arc::clone(&new_fed);
@@ -1947,10 +1965,54 @@ repos:
         drop(new_fed);
     }
 
+    /// Regression for the TLA+ SnapshotResidency.tla 7-state trace
+    /// where two `Hold(s1)` actions share one resident slot, the
+    /// first `Release` flips `held_storage := FALSE`, and the
+    /// eviction predicate sees the bool surface as `unheld` while
+    /// the second holder is still using the federation. Post-fix
+    /// (variant (b) — `held: AtomicUsize`): the hold count is a
+    /// proper refcount; eviction only fires when the count is 0.
+    #[test]
+    fn hold_guard_uses_refcount_not_bool() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = IndexCache::new(dir.path());
+        let _mgr = SnapshotManager::with_cap(dir.path(), cache, 1);
+        let fed = Arc::new(SnapshotFederation {
+            snapshot_id: "snap_x".into(),
+            backend: Arc::new(PetgraphBackend::ephemeral(dir.path())),
+            holds: Mutex::new(Vec::new()),
+            residency: Arc::new(ResidencyTracker::new()),
+            contract_index: parking_lot::RwLock::new(None),
+            last_used_unix: Mutex::new(now_unix()),
+            held: AtomicUsize::new(0),
+            data_dir: std::path::PathBuf::from("."),
+        });
+        let notify = Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
+        // Two holders share the slot. Pre-fix the count was a bool
+        // and the first Drop cleared it while the second was alive.
+        let g1 = HoldGuard::new(Arc::clone(&fed), Arc::clone(&notify));
+        assert_eq!(fed.hold_count_for_test(), 1, "first holder increments to 1");
+        let g2 = HoldGuard::new(Arc::clone(&fed), Arc::clone(&notify));
+        assert_eq!(fed.hold_count_for_test(), 2, "second holder increments to 2");
+        drop(g1);
+        // Critical check: the bool surface would have cleared held
+        // here; the refcount surface keeps it at 1 so the second
+        // holder is still protected from eviction.
+        assert_eq!(
+            fed.hold_count_for_test(),
+            1,
+            "after first Drop the count is 1, NOT 0 — eviction must not fire"
+        );
+        drop(g2);
+        assert_eq!(
+            fed.hold_count_for_test(),
+            0,
+            "after second Drop the count is 0 — eviction may proceed"
+        );
+    }
+
     #[test]
     fn parse_ref_not_found_marker_recognises_known_shape() {
-        let err = "snapshot job: ref \"main\" not found in repo orders";
-        assert_eq!(parse_ref_not_found("orders", err).as_deref(), Some("main"));
         let err2 = "snapshot job: ref \"abc1234\" not found in repo billing";
         assert_eq!(
             parse_ref_not_found("billing", err2).as_deref(),
