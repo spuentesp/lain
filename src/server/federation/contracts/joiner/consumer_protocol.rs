@@ -219,25 +219,28 @@ pub fn resolve_graphql_consumer(
     endpoints: &EndpointTable,
     binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
 ) -> ConsumerResolution {
-    let mut graphql_route_owners: Vec<ServiceName> = Vec::new();
-    for (svc, key) in endpoints.keys() {
-        if let ContractKey::Http { method, template } = key {
+    // Pass #4 R22 (review §D19) — use the `route_owner` helper
+    // for the "find the first /graphql route owner" iteration.
+    // The cardinality check (exactly one owner) stays inline
+    // because `route_owner` returns the first match, not
+    // "exactly one". Two + owners → `None` per spec §8.3
+    // ("several services expose the same root field ⇒
+    // ambiguous, never single-bound").
+    let is_graphql_route = |(_, key): &(_, ContractKey)| {
+        matches!(key, ContractKey::Http { method, template }
             if template == "/graphql"
                 && matches!(
                     method,
                     MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Post)
                         | MethodSpec::Unknown
-                )
-            {
-                graphql_route_owners.push(svc.clone());
-            }
-        }
-    }
-    graphql_route_owners.sort();
-    graphql_route_owners.dedup();
-    let route_owner: Option<ServiceName> = match graphql_route_owners.len() {
-        1 => Some(graphql_route_owners[0].clone()),
-        _ => None,
+                ))
+    };
+    let first_owner = super::endpoints::route_owner(endpoints, is_graphql_route);
+    let total_owners = endpoints.keys().filter(|k| is_graphql_route(k)).count();
+    let route_owner: Option<ServiceName> = if total_owners == 1 {
+        first_owner
+    } else {
+        None
     };
     let target_key = ContractKey::Graphql {
         op: consumer.op,

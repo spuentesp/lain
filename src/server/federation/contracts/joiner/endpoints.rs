@@ -182,3 +182,30 @@ fn default_broker_for(node: &GraphNode) -> String {
 pub(crate) fn endpoint_id_string(id: &EndpointId) -> String {
     id.0.to_string() + "|" + &id.1.to_string()
 }
+
+/// First/only route owner whose `(service, ContractKey)` passes
+/// `filter`. Pass #4 R22 (review §D19) collapses the three
+/// "enumerate endpoints matching a filter, return the
+/// first/only route owner" sites that lived in the pre-refactor
+/// `joiner.rs`:
+/// - the `/graphql` route resolution in
+///   [`resolve_graphql_consumer`](super::consumer_protocol::resolve_graphql_consumer);
+/// - the env-host resolution in
+///   [`target_service_from_hosts`](crate::federation::contracts::url_resolution::target_service_from_hosts);
+/// - the rule-4 host-pattern resolution that lived at
+///   `joiner.rs:300-312` (pre-split) and now flows through the
+///   same helper.
+///
+/// Returns the first match's `ServiceName`. Callers that need
+/// "exactly one" semantics (the `/graphql` route owner case)
+/// should compare the count themselves — the helper exists to
+/// dedupe the iteration, not to decide the cardinality.
+pub(crate) fn route_owner<F>(endpoints: &EndpointTable, filter: F) -> Option<ServiceName>
+where
+    F: Fn(&(ServiceName, ContractKey)) -> bool,
+{
+    endpoints
+        .keys()
+        .find(|k| filter(k))
+        .map(|(svc, _)| svc.clone())
+}
