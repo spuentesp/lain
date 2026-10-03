@@ -16,6 +16,7 @@ pub mod entry_point_sensor;
 pub mod env_sensor;
 pub mod event_sensor;
 pub mod field_access_sensor;
+pub mod graphql_consumer_sensor;
 pub mod graphql_provider_sensor;
 pub mod graphql_resolver_link_sensor;
 pub mod graphql_sensor;
