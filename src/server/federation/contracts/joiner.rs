@@ -16,9 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::federation::contracts::clients::{
-    compose_and_normalize, ClientDef, ClientRegistry, UrlPart as RegistryUrlPart,
-};
+use crate::federation::contracts::clients::{ClientDef, ClientRegistry};
 use crate::federation::contracts::config::{
     ConfirmedBinding, ContractFederationConfig, RoutePrefix as CfgRoutePrefix, ServiceDecl,
 };
@@ -32,7 +30,7 @@ use crate::federation::contracts::index::{
 };
 use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, HostPart, HttpMethod, MethodSpec,
-    NormalizedUrl, ProviderFact, ProviderOrigin, RpcConsumerFact, ServiceName, TopicConsumerFact,
+    ProviderFact, ProviderOrigin, RpcConsumerFact, ServiceName, TopicConsumerFact,
 };
 use crate::federation::contracts::protocol_dispatch::{default_dispatch_chain, ProtocolDispatch};
 use crate::federation::contracts::route_match::{
@@ -1586,7 +1584,7 @@ fn resolve_consumer(
     //   path is additive, not a replacement.
     if let HostPart::Env(names) = &consumer.url.host {
         if let Some(resolved) =
-            target_service_from_env_resolved(consumer, env, config, unresolved_env_vars)
+            resolve_env_consumer(consumer, env, config, unresolved_env_vars)
         {
             match resolved {
                 EnvResolution::Service(svc) => {
@@ -1922,195 +1920,15 @@ fn target_service_via_registry(
     None
 }
 
-/// Compose `def.base ++ call.url` into a single `NormalizedUrl`.
-/// Helper for `target_service_via_registry` (spec §5.3 tier 2 +
-/// §5.2 "Final URL = `normalize(base_parts ++ call_path_parts)`").
-/// The call_path is the URL the consumer was emitted with; we
-/// render its template as a single `Literal` part and prepend
-/// `def.base`. The result feeds the existing `host_for` /
-/// `target_service_from_env` / `target_service_from_hosts`
-/// dispatch.
-fn compose_for_registry(
-    consumer: &crate::federation::contracts::model::ConsumerFact,
-    def: &ClientDef,
-) -> NormalizedUrl {
-    let template = consumer.url.template.clone().unwrap_or_default();
-    let path_part = if template.is_empty() {
-        RegistryUrlPart::Literal("/".into())
-    } else {
-        RegistryUrlPart::Literal(template)
-    };
-    compose_and_normalize(&[path_part], &def.base)
-}
-
-/// Spec §5.3 / I6 — service-from-host dispatch. Combines
-/// `target_service_from_env` (env-name match) and
-/// `target_service_from_hosts` (host-pattern match) into a single
-/// helper so tier 2 can call either without duplicating it.
-fn service_from_host(host: &HostPart, config: &ContractFederationConfig) -> Option<ServiceName> {
-    match host {
-        HostPart::Env(names) => {
-            for env in names {
-                for s in &config.services {
-                    if s.env.iter().any(|e| e == env) {
-                        return Some(ServiceName(s.name.clone()));
-                    }
-                }
-            }
-            None
-        }
-        HostPart::Literal(h) => {
-            for s in &config.services {
-                if s.hosts.iter().any(|pat| host_matches_pattern(pat, h)) {
-                    return Some(ServiceName(s.name.clone()));
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn target_service_from_env(
-    consumer: &crate::federation::contracts::model::ConsumerFact,
-    config: &ContractFederationConfig,
-) -> Option<ServiceName> {
-    if let HostPart::Env(envs) = &consumer.url.host {
-        for env in envs {
-            for s in &config.services {
-                if s.env.iter().any(|e| e == env) {
-                    return Some(ServiceName(s.name.clone()));
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Phase C (spec §6): result of resolving a `HostPart::Env([var])`
-/// consumer against the env_sensor's bindings. Three terminals per
-/// the spec:
-///
-/// - `Service(s)`: every var resolves to the same host AND the
-///   host matches a service's `hosts` list. The joiner binds to
-///   `s` (the existing `match_one_service` path).
-/// - `Ambiguous(hosts)`: the vars resolve to different hosts in
-///   the env_sensor's bindings (`.env` says one thing, compose
-///   says another). The joiner records the conflict on
-///   `JoinOutput::ambiguous_env_vars` and emits
-///   `Unresolved { EnvAmbiguous }` — no `Binds` edge.
-/// - `Unmapped`: at least one var has no binding in the
-///   env_sensor. The joiner records the var on
-///   `JoinOutput::unresolved_env_vars` (the orchestrator folds
-///   it into the coverage ledger as
-///   `unresolved { reason: EnvUnmapped }`) and emits
-///   `Unresolved { EnvUnmapped }`.
-///
-/// Only consumers whose `url.host` is `HostPart::Env` reach this
-/// function. When the call has no env part (e.g. `Literal` /
-/// `Expr` / `None`) the joiner falls through to the existing
-/// `target_service_from_env` / `target_service_from_hosts` /
-/// rule-4 / rule-5 / rule-6 ladder unchanged.
-enum EnvResolution {
-    Service(ServiceName),
-    Ambiguous(Vec<String>),
-    Unmapped,
-}
-
-/// Phase C (spec §6): resolve `HostPart::Env([var])` through the
-/// env_sensor's per-repo bindings. Each var is resolved to a host
-/// (distinct-hosts deduped). Three outcomes:
-///
-/// - All vars resolve to the same single host AND the host
-///   matches a service's `hosts` list → `Service(s)`.
-/// - Vars resolve to multiple distinct hosts → `Ambiguous(hosts)`.
-/// - Any var has no binding → the var counters in
-///   `unresolved_env_vars` are bumped and `Unmapped` is returned
-///   (the caller emits `Unresolved { EnvUnmapped }`).
-///
-/// The pre-existing `target_service_from_env` (which matches
-/// `HostPart::Env` directly against `services[].env`) is
-/// untouched — Phase C adds this new path *in addition to* the
-/// env-name match (spec §6: "in addition to the existing
-/// `services[].env` match").
-fn target_service_from_env_resolved(
-    consumer: &crate::federation::contracts::model::ConsumerFact,
-    env: &EnvBindingIndex,
-    config: &ContractFederationConfig,
-    unresolved_env_vars: &mut BTreeMap<String, u32>,
-) -> Option<EnvResolution> {
-    let HostPart::Env(vars) = &consumer.url.host else {
-        return None;
-    };
-    if vars.is_empty() {
-        return None;
-    }
-    // Resolve every var. If any var is missing, the consumer is
-    // unmapped (we still record each missing var so the ledger
-    // bucket is correct).
-    let mut distinct_hosts: Vec<String> = Vec::new();
-    let mut any_unmapped = false;
-    for var in vars {
-        let hosts = env.distinct_hosts(var);
-        if hosts.is_empty() {
-            any_unmapped = true;
-            *unresolved_env_vars.entry(var.clone()).or_insert(0) += 1;
-        } else {
-            for h in hosts {
-                if !distinct_hosts.contains(&h) {
-                    distinct_hosts.push(h);
-                }
-            }
-        }
-    }
-    if any_unmapped {
-        return Some(EnvResolution::Unmapped);
-    }
-    if distinct_hosts.len() > 1 {
-        return Some(EnvResolution::Ambiguous(distinct_hosts));
-    }
-    // Exactly one host — try to map it to a service via
-    // `services[].hosts`.
-    let host = &distinct_hosts[0];
-    for s in &config.services {
-        if s.hosts.iter().any(|h| host_matches_pattern(h, host)) {
-            return Some(EnvResolution::Service(ServiceName(s.name.clone())));
-        }
-    }
-    // Single host, no service match — fall through to the
-    // existing `services[].env` / `services[].hosts` / rule
-    // ladder (the operator may have wired a `services[].env`
-    // declaration that names the var). The unresolved_env_vars
-    // counter is bumped so the operator can see the
-    // env_sensor did not know about the var.
-    *unresolved_env_vars
-        .entry(format!("no_service:{}", host))
-        .or_insert(0) += 1;
-    Some(EnvResolution::Unmapped)
-}
-
-fn target_service_from_hosts(
-    consumer: &crate::federation::contracts::model::ConsumerFact,
-    config: &ContractFederationConfig,
-) -> Option<ServiceName> {
-    let HostPart::Literal(host) = &consumer.url.host else {
-        return None;
-    };
-    for s in &config.services {
-        if s.hosts.iter().any(|h| host_matches_pattern(h, host)) {
-            return Some(ServiceName(s.name.clone()));
-        }
-    }
-    None
-}
-
-fn host_matches_pattern(pattern: &str, host: &str) -> bool {
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        host == suffix || host.ends_with(&format!(".{suffix}"))
-    } else {
-        pattern == host
-    }
-}
+// The URL / service-resolution helpers (compose_for_registry,
+// service_from_host, target_service_from_env, target_service_from_hosts,
+// host_matches_pattern, target_service_from_env_resolved, EnvResolution)
+// live in `url_resolution.rs` (R11 partial S3 fix). The joiner
+// re-exports them here for the in-file call sites.
+use crate::federation::contracts::url_resolution::{
+    compose_for_registry, host_matches_pattern, resolve_env_consumer, service_from_host,
+    target_service_from_env, target_service_from_hosts, EnvResolution,
+};
 
 /// PR 18 — operationId fallback for generated SDK clients. Find the
 /// first `(service, key)` in `endpoints` whose providers carry an

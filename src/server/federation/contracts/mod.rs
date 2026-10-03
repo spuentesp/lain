@@ -59,6 +59,7 @@ pub mod normalize;
 pub mod protocol_dispatch;
 pub mod route_match;
 pub mod snapshots;
+pub mod url_resolution;
 
 /// Per-module revision counter for the contract analyzer (§8.3).
 ///
