@@ -42,9 +42,9 @@ use crate::federation::contracts::model::{
     ContractFact, ContractKey, GraphqlHandlerFact, GraphqlHandlerOrigin, GraphqlOp, SymbolKey,
 };
 use crate::federation::repo_id::RepoId;
-use crate::graph::{GraphDatabase, SensorOwner};
+use crate::graph::{graph_path as compute_graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ─── Public sensor shape ───────────────────────────────────────────────
 
@@ -92,34 +92,40 @@ pub fn scan_workspace_resolver_link(
     };
     let mut total = 0usize;
     let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let detectors = default_resolver_detectors(root, &repo_id);
     for (path, content, ext) in crate::server::sensors::util::scan_files(root, code_ext) {
-        let graph_path_str = crate::graph::graph_path(root, &path);
-        let links = detect_resolver_links(&content, &ext, &graph_path_str, &repo_id);
-        for link in links {
-            let id_name = format!("graphql-handler:{}:{}", link.op, link.field);
-            let id = GraphNode::generate_id(
-                &NodeType::Module,
-                &graph_path_str,
-                &id_name,
-                Some(link.site_line),
-                namespace,
-            );
-            let mut node =
-                GraphNode::new(NodeType::Module, id_name.clone(), graph_path_str.clone());
-            node.id = id;
-            node.line_start = Some(link.site_line);
-            node.line_end = Some(link.site_line);
-            let key = ContractKey::Graphql {
-                op: link.op,
-                field: link.field.clone(),
-            };
-            node.contract = Some(ContractFact::GraphqlHandler(GraphqlHandlerFact {
-                graphql_field: key,
-                handler_function: link.handler_function.clone(),
-                origin: link.origin,
-            }));
-            all_nodes.push(node);
-            total += 1;
+        for detector in &detectors {
+            if !detector.handles_ext(&ext) {
+                continue;
+            }
+            let links = detector.detect(&content, &path);
+            for link in links {
+                let id_name = format!("graphql-handler:{}:{}", link.op, link.field);
+                let graph_path_str = detector.graph_path_for(&path);
+                let id = GraphNode::generate_id(
+                    &NodeType::Module,
+                    &graph_path_str,
+                    &id_name,
+                    Some(link.site_line),
+                    namespace,
+                );
+                let mut node =
+                    GraphNode::new(NodeType::Module, id_name.clone(), graph_path_str.clone());
+                node.id = id;
+                node.line_start = Some(link.site_line);
+                node.line_end = Some(link.site_line);
+                let key = ContractKey::Graphql {
+                    op: link.op,
+                    field: link.field.clone(),
+                };
+                node.contract = Some(ContractFact::GraphqlHandler(GraphqlHandlerFact {
+                    graphql_field: key,
+                    handler_function: link.handler_function.clone(),
+                    origin: link.origin,
+                }));
+                all_nodes.push(node);
+                total += 1;
+            }
         }
     }
     if !all_nodes.is_empty() {
@@ -134,118 +140,171 @@ pub fn scan_workspace_resolver_link(
 
 // ─── Detection ─────────────────────────────────────────────────────────
 
+/// Per-framework resolver-link detector. One impl per framework
+/// (Apollo, Gqlgen, Strawberry, GraphQL-Java). Phase B-D review
+/// §S9 / §D8 second-half-hive: the trait is the open/closed hook
+/// — adding a fifth framework is one new struct + impl + line in
+/// [`default_resolver_detectors`], not an edit to
+/// [`detect_resolver_links`].
+pub trait ResolverLinkDetector: Send + Sync {
+    /// Stable name for telemetry / diff reports.
+    fn framework_name(&self) -> &'static str;
+    /// Whether this detector claims the given source-file extension.
+    fn handles_ext(&self, ext: &str) -> bool;
+    /// Detect every resolver-link pattern in `content` whose
+    /// source file is `src_path`. The detector owns its
+    /// `workspace` + `repo_id` so the call site does not need
+    /// to thread them through.
+    fn detect(&self, content: &str, src_path: &Path) -> Vec<GraphqlHandlerLink>;
+    /// Root-relative `graph_path` for `src_path` (the
+    /// `SymbolKey.path` the emitted link carries).
+    fn graph_path_for(&self, src_path: &Path) -> String;
+}
+
+/// Build the default chain (Apollo → Gqlgen → Strawberry →
+/// GraphQL-Java) for the workspace rooted at `root`. A new
+/// framework means one new `Arc<dyn ResolverLinkDetector>` here.
+fn default_resolver_detectors(root: &Path, repo_id: &RepoId) -> Vec<Box<dyn ResolverLinkDetector>> {
+    vec![
+        Box::new(ApolloDetector::new(root.to_path_buf(), repo_id.clone())),
+        Box::new(GqlgenDetector::new(root.to_path_buf(), repo_id.clone())),
+        Box::new(StrawberryDetector::new(root.to_path_buf(), repo_id.clone())),
+        Box::new(GraphqlJavaDetector::new(root.to_path_buf(), repo_id.clone())),
+    ]
+}
+
 /// Detect every recognised resolver-link pattern in `content`.
 /// Public so the acceptance tests can exercise the detector
-/// without going through the graph emission path.
+/// without going through the graph emission path. The `repo_id`
+/// defaults to `"test"`; pass the real repo id in production.
 pub fn detect_resolver_links(
     content: &str,
     ext: &str,
     graph_path: &str,
     repo_id: &RepoId,
 ) -> Vec<GraphqlHandlerLink> {
+    let workspace = PathBuf::from(".");
+    let detectors: Vec<Box<dyn ResolverLinkDetector>> = match ext {
+        "ts" | "tsx" | "js" | "jsx" => vec![Box::new(ApolloDetector::new(
+            workspace,
+            repo_id.clone(),
+        ))],
+        "go" => vec![Box::new(GqlgenDetector::new(workspace, repo_id.clone()))],
+        "py" => vec![Box::new(StrawberryDetector::new(
+            workspace,
+            repo_id.clone(),
+        ))],
+        "java" => vec![Box::new(GraphqlJavaDetector::new(
+            workspace,
+            repo_id.clone(),
+        ))],
+        _ => Vec::new(),
+    };
     let mut out: Vec<GraphqlHandlerLink> = Vec::new();
-    match ext {
-        "ts" | "tsx" | "js" | "jsx" => detect_apollo(content, graph_path, repo_id, &mut out),
-        "go" => detect_gqlgen(content, graph_path, repo_id, &mut out),
-        "py" => detect_strawberry(content, graph_path, repo_id, &mut out),
-        "java" => detect_graphql_java(content, graph_path, repo_id, &mut out),
-        _ => {}
+    for detector in &detectors {
+        // The acceptance tests pass a precomputed `graph_path`
+        // (the canonical wire form); the detector derives its
+        // own from `src_path`/workspace, so we substitute the
+        // test's value by constructing a fake path whose
+        // `compute_graph_path` would yield it.
+        let src_path = std::path::PathBuf::from(graph_path);
+        let mut links = detector.detect(content, &src_path);
+        for link in &mut links {
+            link.handler_function.path = graph_path.to_string();
+        }
+        out.extend(links);
     }
     out
 }
 
-fn detect_apollo(
-    content: &str,
-    graph_path: &str,
-    repo_id: &crate::federation::repo_id::RepoId,
-    out: &mut Vec<GraphqlHandlerLink>,
-) {
-    // Apollo resolver map pattern: `Query: { orders: ... }`,
-    // `Mutation: { createOrder: ... }`,
-    // `Subscription: { ... }`. We look for any line containing
-    // `<Op>: {` where Op is Query / Mutation / Subscription and
-    // then walk the subsequent indented block for the field
-    // assignments.
-    let lines: Vec<&str> = content.lines().collect();
-    for (idx, line) in lines.iter().enumerate() {
-        let _line_no = (idx as u32) + 1;
-        let trimmed = line.trim();
-        for op in [
-            GraphqlOp::Query,
-            GraphqlOp::Mutation,
-            GraphqlOp::Subscription,
-        ] {
-            let marker = format!("{}:", op_label(op));
-            // We need a `:` right after the op name, optionally
-            // followed by a space and `{`. The simplest
-            // discriminating pattern is `<op>:` on a line whose
-            // value starts with that token.
-            if !trimmed.starts_with(&marker) {
-                continue;
-            }
-            // Capture the subsequent block of field assignments.
-            // Walk forward until we hit a line that is `}` (or
-            // `},` / `};`) at the same (or shallower) indent as
-            // the `<op>:` line — that closes the resolver block.
-            // We also stop at a sibling op marker
-            // (`Mutation:` / `Subscription:`) so an inline map
-            // (`{ Query: {...}, Mutation: {...} }`) doesn't
-            // cross-pollute fields.
-            let op_indent = line.len() - line.trim_start().len();
-            for (inner_idx, inner) in lines.iter().enumerate().skip(idx + 1) {
-                let inner_trim = inner.trim();
-                if inner_trim.is_empty() {
+// ─── Per-framework detectors ──────────────────────────────────────────
+
+/// Apollo resolver-map detector (TS/JS / `*.ts` / `*.tsx` /
+/// `*.js` / `*.jsx`).
+struct ApolloDetector {
+    workspace: PathBuf,
+    repo_id: RepoId,
+}
+
+impl ApolloDetector {
+    fn new(workspace: PathBuf, repo_id: RepoId) -> Self {
+        Self { workspace, repo_id }
+    }
+}
+
+impl ResolverLinkDetector for ApolloDetector {
+    fn framework_name(&self) -> &'static str {
+        "apollo"
+    }
+    fn handles_ext(&self, ext: &str) -> bool {
+        matches!(ext, "ts" | "tsx" | "js" | "jsx")
+    }
+    fn detect(&self, content: &str, src_path: &Path) -> Vec<GraphqlHandlerLink> {
+        let graph_path = compute_graph_path(&self.workspace, src_path);
+        let repo_id = &self.repo_id;
+        let mut out: Vec<GraphqlHandlerLink> = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            let _line_no = (idx as u32) + 1;
+            let trimmed = line.trim();
+            for op in [
+                GraphqlOp::Query,
+                GraphqlOp::Mutation,
+                GraphqlOp::Subscription,
+            ] {
+                let marker = format!("{}:", op_label(op));
+                if !trimmed.starts_with(&marker) {
                     continue;
                 }
-                let inner_indent = inner.len() - inner.trim_start().len();
-                // Closing brace of the resolver block — at the
-                // same or shallower indent than the op marker.
-                if inner_indent <= op_indent
-                    && (inner_trim == "}" || inner_trim == "}," || inner_trim == "};")
-                {
-                    break;
-                }
-                // Sibling op marker — Query / Mutation /
-                // Subscription at the same indent as the
-                // current op. Treat as the end of this op's
-                // field block.
-                if inner_indent <= op_indent
-                    && (inner_trim.starts_with("Query:")
-                        || inner_trim.starts_with("Mutation:")
-                        || inner_trim.starts_with("Subscription:"))
-                {
-                    break;
-                }
-                // Field assignment: `<field>: <handler>`.
-                // The handler is a function expression, an
-                // identifier, or `async (...) => ...`. We only
-                // need the field name and the handler identifier
-                // (when present).
-                if let Some(colon) = inner_trim.find(':') {
-                    let field = inner_trim[..colon].trim().to_string();
-                    let handler_expr = inner_trim[colon + 1..].trim();
-                    if field.is_empty() || !is_valid_field_name(&field) {
+                let op_indent = line.len() - line.trim_start().len();
+                for (inner_idx, inner) in lines.iter().enumerate().skip(idx + 1) {
+                    let inner_trim = inner.trim();
+                    if inner_trim.is_empty() {
                         continue;
                     }
-                    let handler_name = extract_apollo_handler_name(handler_expr);
-                    if handler_name.is_empty() {
-                        continue;
+                    let inner_indent = inner.len() - inner.trim_start().len();
+                    if inner_indent <= op_indent
+                        && (inner_trim == "}" || inner_trim == "}," || inner_trim == "};")
+                    {
+                        break;
                     }
-                    out.push(GraphqlHandlerLink {
-                        op,
-                        field,
-                        handler_function: SymbolKey {
-                            repo: repo_id.clone(),
-                            path: graph_path.to_string(),
-                            container: None,
-                            name: handler_name,
-                        },
-                        origin: GraphqlHandlerOrigin::Apollo,
-                        site_line: (inner_idx as u32) + 1,
-                    });
+                    if inner_indent <= op_indent
+                        && (inner_trim.starts_with("Query:")
+                            || inner_trim.starts_with("Mutation:")
+                            || inner_trim.starts_with("Subscription:"))
+                    {
+                        break;
+                    }
+                    if let Some(colon) = inner_trim.find(':') {
+                        let field = inner_trim[..colon].trim().to_string();
+                        let handler_expr = inner_trim[colon + 1..].trim();
+                        if field.is_empty() || !is_valid_field_name(&field) {
+                            continue;
+                        }
+                        let handler_name = extract_apollo_handler_name(handler_expr);
+                        if handler_name.is_empty() {
+                            continue;
+                        }
+                        out.push(GraphqlHandlerLink {
+                            op,
+                            field,
+                            handler_function: SymbolKey {
+                                repo: repo_id.clone(),
+                                path: graph_path.clone(),
+                                container: None,
+                                name: handler_name,
+                            },
+                            origin: GraphqlHandlerOrigin::Apollo,
+                            site_line: (inner_idx as u32) + 1,
+                        });
+                    }
                 }
             }
         }
+        out
+    }
+    fn graph_path_for(&self, src_path: &Path) -> String {
+        compute_graph_path(&self.workspace, src_path)
     }
 }
 
@@ -279,12 +338,8 @@ fn extract_apollo_handler_name(expr: &str) -> String {
         return String::new();
     }
     if expr.starts_with("async") || expr.starts_with("(") || expr.starts_with("function") {
-        // Walk to the arrow (`=>`) and return the first
-        // identifier in the body. The body may be a function
-        // call (`ordersResolver(...)`) or a block.
         if let Some(arrow_pos) = expr.find("=>") {
             let body = expr[arrow_pos + 2..].trim();
-            // First identifier in the body.
             for token in tokenize(body) {
                 if token
                     .chars()
@@ -297,7 +352,6 @@ fn extract_apollo_handler_name(expr: &str) -> String {
         }
         return String::new();
     }
-    // Bare identifier (possibly with trailing call parens).
     let head: String = expr
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -310,218 +364,233 @@ fn tokenize(s: &str) -> impl Iterator<Item = &str> {
         .filter(|tok| !tok.is_empty())
 }
 
-fn detect_gqlgen(
-    content: &str,
-    graph_path: &str,
-    repo_id: &crate::federation::repo_id::RepoId,
-    out: &mut Vec<GraphqlHandlerLink>,
-) {
-    // gqlgen resolver pattern:
-    //   func (r *queryResolver) Orders(ctx context.Context) ([]*Order, error) { ... }
-    //   func (r *mutationResolver) CreateOrder(ctx context.Context, input CreateOrderInput) (*Order, error) { ... }
-    // The receiver type ends in `Resolver`; the convention is
-    // `queryResolver` / `mutationResolver` /
-    // `subscriptionResolver` so we map it to the operation.
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = (idx as u32) + 1;
-        let trimmed = line.trim();
-        let Some(after_func) = trimmed.strip_prefix("func ") else {
-            continue;
-        };
-        // Look for `(<receiver> <type>) <Method>(`.
-        let Some(paren_start) = after_func.find('(') else {
-            continue;
-        };
-        let Some(paren_end) = after_func[paren_start..].find(')') else {
-            continue;
-        };
-        let receiver = &after_func[paren_start + 1..paren_start + paren_end];
-        // The receiver should be `<name> *<type>Resolver`.
-        // Split on whitespace, then on `*`.
-        let mut parts = receiver.split_whitespace();
-        let _var = parts.next();
-        let Some(type_str) = parts.next() else {
-            continue;
-        };
-        let type_name = type_str.trim_start_matches('*');
-        let op = if type_name == "queryResolver" {
-            Some(GraphqlOp::Query)
-        } else if type_name == "mutationResolver" {
-            Some(GraphqlOp::Mutation)
-        } else if type_name == "subscriptionResolver" {
-            Some(GraphqlOp::Subscription)
-        } else {
-            None
-        };
-        let Some(op) = op else {
-            continue;
-        };
-        // Method name: the identifier between the receiver's
-        // `)` and the parameter list `(`.
-        let after_receiver = &after_func[paren_start + paren_end + 1..].trim();
-        let Some(method_end) = after_receiver.find('(') else {
-            continue;
-        };
-        let method = after_receiver[..method_end].trim();
-        if method.is_empty() || !is_valid_field_name(method) {
-            continue;
-        }
-        out.push(GraphqlHandlerLink {
-            op,
-            field: method.to_string(),
-            handler_function: SymbolKey {
-                repo: repo_id.clone(),
-                path: graph_path.to_string(),
-                container: Some(type_name.to_string()),
-                name: method.to_string(),
-            },
-            origin: GraphqlHandlerOrigin::Gqlgen,
-            site_line: line_no,
-        });
+/// gqlgen resolver detector (Go).
+struct GqlgenDetector {
+    workspace: PathBuf,
+    repo_id: RepoId,
+}
+
+impl GqlgenDetector {
+    fn new(workspace: PathBuf, repo_id: RepoId) -> Self {
+        Self { workspace, repo_id }
     }
 }
 
-fn detect_strawberry(
-    content: &str,
-    graph_path: &str,
-    repo_id: &crate::federation::repo_id::RepoId,
-    out: &mut Vec<GraphqlHandlerLink>,
-) {
-    // Strawberry resolver pattern:
-    //   @strawberry.field
-    //   def orders(self) -> list[Order]:
-    // The decorator may also include resolver= or
-    // description= kwargs; we ignore them.
-    let lines: Vec<&str> = content.lines().collect();
-    for (idx, line) in lines.iter().enumerate() {
-        let _line_no = (idx as u32) + 1;
-        let trimmed = line.trim();
-        if !trimmed.starts_with("@strawberry.field") {
-            continue;
-        }
-        // Look forward for the `def` line. We accept any of the
-        // three ops — the class the function lives in
-        // (`Query` / `Mutation` / `Subscription`) determines it.
-        // Without AST access we default to `Query` (the most
-        // common Strawberry shape). The acceptance scenario
-        // (F3) exercises the Query case.
-        for (def_idx, def_line) in lines.iter().enumerate().skip(idx + 1).take(3) {
-            let def_trim = def_line.trim();
-            if def_trim.is_empty() || def_trim.starts_with('#') {
+impl ResolverLinkDetector for GqlgenDetector {
+    fn framework_name(&self) -> &'static str {
+        "gqlgen"
+    }
+    fn handles_ext(&self, ext: &str) -> bool {
+        ext == "go"
+    }
+    fn detect(&self, content: &str, src_path: &Path) -> Vec<GraphqlHandlerLink> {
+        let graph_path = compute_graph_path(&self.workspace, src_path);
+        let repo_id = &self.repo_id;
+        let mut out: Vec<GraphqlHandlerLink> = Vec::new();
+        for (idx, line) in content.lines().enumerate() {
+            let line_no = (idx as u32) + 1;
+            let trimmed = line.trim();
+            let Some(after_func) = trimmed.strip_prefix("func ") else {
+                continue;
+            };
+            let Some(paren_start) = after_func.find('(') else {
+                continue;
+            };
+            let Some(paren_end) = after_func[paren_start..].find(')') else {
+                continue;
+            };
+            let receiver = &after_func[paren_start + 1..paren_start + paren_end];
+            let mut parts = receiver.split_whitespace();
+            let _var = parts.next();
+            let Some(type_str) = parts.next() else {
+                continue;
+            };
+            let type_name = type_str.trim_start_matches('*');
+            let op = if type_name == "queryResolver" {
+                Some(GraphqlOp::Query)
+            } else if type_name == "mutationResolver" {
+                Some(GraphqlOp::Mutation)
+            } else if type_name == "subscriptionResolver" {
+                Some(GraphqlOp::Subscription)
+            } else {
+                None
+            };
+            let Some(op) = op else {
+                continue;
+            };
+            let after_receiver = &after_func[paren_start + paren_end + 1..].trim();
+            let Some(method_end) = after_receiver.find('(') else {
+                continue;
+            };
+            let method = after_receiver[..method_end].trim();
+            if method.is_empty() || !is_valid_field_name(method) {
                 continue;
             }
-            let Some(after_def) = def_trim.strip_prefix("def ") else {
+            out.push(GraphqlHandlerLink {
+                op,
+                field: method.to_string(),
+                handler_function: SymbolKey {
+                    repo: repo_id.clone(),
+                    path: graph_path.clone(),
+                    container: Some(type_name.to_string()),
+                    name: method.to_string(),
+                },
+                origin: GraphqlHandlerOrigin::Gqlgen,
+                site_line: line_no,
+            });
+        }
+        out
+    }
+    fn graph_path_for(&self, src_path: &Path) -> String {
+        compute_graph_path(&self.workspace, src_path)
+    }
+}
+
+/// Strawberry resolver detector (Python).
+struct StrawberryDetector {
+    workspace: PathBuf,
+    repo_id: RepoId,
+}
+
+impl StrawberryDetector {
+    fn new(workspace: PathBuf, repo_id: RepoId) -> Self {
+        Self { workspace, repo_id }
+    }
+}
+
+impl ResolverLinkDetector for StrawberryDetector {
+    fn framework_name(&self) -> &'static str {
+        "strawberry"
+    }
+    fn handles_ext(&self, ext: &str) -> bool {
+        ext == "py"
+    }
+    fn detect(&self, content: &str, src_path: &Path) -> Vec<GraphqlHandlerLink> {
+        let graph_path = compute_graph_path(&self.workspace, src_path);
+        let repo_id = &self.repo_id;
+        let mut out: Vec<GraphqlHandlerLink> = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            let _line_no = (idx as u32) + 1;
+            let trimmed = line.trim();
+            if !trimmed.starts_with("@strawberry.field") {
+                continue;
+            }
+            for (def_idx, def_line) in lines.iter().enumerate().skip(idx + 1).take(3) {
+                let def_trim = def_line.trim();
+                if def_trim.is_empty() || def_trim.starts_with('#') {
+                    continue;
+                }
+                let Some(after_def) = def_trim.strip_prefix("def ") else {
+                    break;
+                };
+                let head: String = after_def
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if head.is_empty() || !is_valid_field_name(&head) {
+                    break;
+                }
+                out.push(GraphqlHandlerLink {
+                    op: GraphqlOp::Query,
+                    field: head.clone(),
+                    handler_function: SymbolKey {
+                        repo: repo_id.clone(),
+                        path: graph_path.clone(),
+                        container: None,
+                        name: head,
+                    },
+                    origin: GraphqlHandlerOrigin::Strawberry,
+                    site_line: (def_idx as u32) + 1,
+                });
                 break;
+            }
+        }
+        out
+    }
+    fn graph_path_for(&self, src_path: &Path) -> String {
+        compute_graph_path(&self.workspace, src_path)
+    }
+}
+
+/// graphql-java `DataFetcher` detector.
+struct GraphqlJavaDetector {
+    workspace: PathBuf,
+    repo_id: RepoId,
+}
+
+impl GraphqlJavaDetector {
+    fn new(workspace: PathBuf, repo_id: RepoId) -> Self {
+        Self { workspace, repo_id }
+    }
+}
+
+impl ResolverLinkDetector for GraphqlJavaDetector {
+    fn framework_name(&self) -> &'static str {
+        "graphql-java"
+    }
+    fn handles_ext(&self, ext: &str) -> bool {
+        ext == "java"
+    }
+    fn detect(&self, content: &str, src_path: &Path) -> Vec<GraphqlHandlerLink> {
+        let graph_path = compute_graph_path(&self.workspace, src_path);
+        let repo_id = &self.repo_id;
+        let mut out: Vec<GraphqlHandlerLink> = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            let line_no = (idx as u32) + 1;
+            let trimmed = line.trim();
+            if !trimmed.contains("DataFetcher") {
+                continue;
+            }
+            let Some(class_pos) = trimmed.find("class ") else {
+                continue;
             };
-            let head: String = after_def
+            let after_class = &trimmed[class_pos + "class ".len()..];
+            let class_name: String = after_class
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                 .collect();
-            if head.is_empty() || !is_valid_field_name(&head) {
-                break;
-            }
-            // The class context (Query / Mutation / Subscription)
-            // would normally come from the surrounding class.
-            // Without a full AST we default to Query (per the
-            // acceptance scenario) and let the F3 test pin the
-            // behaviour.
-            out.push(GraphqlHandlerLink {
-                op: GraphqlOp::Query,
-                field: head.clone(),
-                handler_function: SymbolKey {
-                    repo: repo_id.clone(),
-                    path: graph_path.to_string(),
-                    container: None,
-                    name: head,
-                },
-                origin: GraphqlHandlerOrigin::Strawberry,
-                site_line: (def_idx as u32) + 1,
-            });
-            break;
-        }
-    }
-}
-
-fn detect_graphql_java(
-    content: &str,
-    graph_path: &str,
-    repo_id: &crate::federation::repo_id::RepoId,
-    out: &mut Vec<GraphqlHandlerLink>,
-) {
-    // graphql-java DataFetcher pattern:
-    //   @Component
-    //   public class OrdersDataFetcher implements DataFetcher<Order> { ... }
-    // registered via
-    //   RuntimeWiring.newRuntimeDataFetcher().register("orders", new OrdersDataFetcher())
-    // or the equivalent `SchemaParser` builder. The
-    // convention is that the class name is `<Field>DataFetcher`
-    // (e.g. `OrdersDataFetcher` for the `orders` field).
-    let lines: Vec<&str> = content.lines().collect();
-    for (idx, line) in lines.iter().enumerate() {
-        let line_no = (idx as u32) + 1;
-        let trimmed = line.trim();
-        // Look for `<name>DataFetcher` declaration preceded by
-        // `@Component` (within the previous 4 non-comment
-        // lines).
-        if !trimmed.contains("DataFetcher") {
-            continue;
-        }
-        let Some(class_pos) = trimmed.find("class ") else {
-            continue;
-        };
-        let after_class = &trimmed[class_pos + "class ".len()..];
-        let class_name: String = after_class
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        let Some(field) = class_name.strip_suffix("DataFetcher") else {
-            continue;
-        };
-        if field.is_empty() {
-            continue;
-        }
-        // Walk back over up to 4 non-comment, non-empty lines
-        // looking for `@Component`. graphql-java's Spring
-        // starter emits the annotation on the line immediately
-        // before the class, but the gap can be wider (e.g. a
-        // license header) so we allow 4 lines of slack.
-        let mut has_component = false;
-        for (n, back) in lines.iter().take(idx).rev().enumerate() {
-            if n >= 4 {
-                break;
-            }
-            let back_trim = back.trim();
-            if back_trim.starts_with("//") || back_trim.is_empty() {
+            let Some(field) = class_name.strip_suffix("DataFetcher") else {
+                continue;
+            };
+            if field.is_empty() {
                 continue;
             }
-            if back_trim.contains("@Component") {
-                has_component = true;
+            let mut has_component = false;
+            for (n, back) in lines.iter().take(idx).rev().enumerate() {
+                if n >= 4 {
+                    break;
+                }
+                let back_trim = back.trim();
+                if back_trim.starts_with("//") || back_trim.is_empty() {
+                    continue;
+                }
+                if back_trim.contains("@Component") {
+                    has_component = true;
+                }
+                break;
             }
-            break;
+            if !has_component {
+                continue;
+            }
+            out.push(GraphqlHandlerLink {
+                op: GraphqlOp::Query,
+                field: lower_first(field),
+                handler_function: SymbolKey {
+                    repo: repo_id.clone(),
+                    path: graph_path.clone(),
+                    container: None,
+                    name: class_name,
+                },
+                origin: GraphqlHandlerOrigin::GraphqlJava,
+                site_line: line_no,
+            });
         }
-        if !has_component {
-            continue;
-        }
-        out.push(GraphqlHandlerLink {
-            op: GraphqlOp::Query,
-            // SDL field names are conventionally camelCase /
-            // snake_case. Java class names are PascalCase; the
-            // canonical `OrdersDataFetcher` => `orders` mapping
-            // requires lowercasing the first char so the SDL
-            // join key matches the consumer side. The
-            // handler-function `name` keeps the original
-            // PascalCase (`OrdersDataFetcher`) so a
-            // `handler → function` lookup finds the class.
-            field: lower_first(field),
-            handler_function: SymbolKey {
-                repo: repo_id.clone(),
-                path: graph_path.to_string(),
-                container: None,
-                name: class_name,
-            },
-            origin: GraphqlHandlerOrigin::GraphqlJava,
-            site_line: line_no,
-        });
+        out
+    }
+    fn graph_path_for(&self, src_path: &Path) -> String {
+        compute_graph_path(&self.workspace, src_path)
     }
 }
 
