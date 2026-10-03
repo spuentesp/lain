@@ -234,6 +234,11 @@ pub fn node_type_of(fact: &ContractFact) -> NodeType {
         // parsing edges. The schema carries `NodeType::Topic` for
         // the producer-side; consumers are still function-shaped.
         ContractFact::TopicConsumer(_) => NodeType::Function,
+        // Phase D (spec §7): a `Table` contract payload maps to a
+        // `Table` node. The payload carries `(service, name)`; the
+        // joiner fills `service` later, so an empty `service` at
+        // scan time is fine — the node is still keyed on `name`.
+        ContractFact::Table(_) => NodeType::Table,
     }
 }
 

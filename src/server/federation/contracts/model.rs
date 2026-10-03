@@ -50,6 +50,14 @@ pub enum ContractFact {
     /// these against producer-side `Provider` facts whose underlying
     /// `Topic` node carries the same `(broker, name)`.
     TopicConsumer(TopicConsumerFact),
+    /// Phase D (spec §7): one database table surfaced by
+    /// `sql_sensor`. `service` is filled in by the joiner when it
+    /// links the table to its owning service via `repos.yaml` (the
+    /// same mapping Phase B uses for HTTP clients); at scan time
+    /// `service` is the empty string and the sensor records the
+    /// table by name only. The sensor emits one `Table` node per
+    /// distinct `(name, path)` pair so duplicate joins collapse.
+    Table(Table),
 }
 
 // ─── HTTP provider ────────────────────────────────────────────────────
@@ -207,6 +215,30 @@ pub enum HostPart {
 pub struct FieldReadFact {
     pub chain: JsonPath,
     pub exact: bool,
+}
+
+// ─── SQL tables (Phase D, spec §7) ────────────────────────────────────
+
+/// Phase D (spec §7): one database table surfaced by `sql_sensor`.
+///
+/// `name` is the literal SQL identifier the sensor extracted from
+/// a SQL statement — `orders` from `SELECT id FROM orders`. It is
+/// stored verbatim (case preserved) so the joiner can apply the
+/// repo's case-folding rules if any.
+///
+/// `service` names the repo / service that owns the table. At
+/// scan time the sensor has no service context — `sql_sensor`
+/// sees the literal SQL and the source file, not `repos.yaml`.
+/// The joiner fills `service` from `repos.yaml#services[]` the
+/// same way Phase B links an HTTP-client wrapper to its owning
+/// service. Before the joiner runs, `service` is the empty
+/// string, and downstream tools render the table as `orders`
+/// (by name only). The joiner's `rejoin_contracts` step is what
+/// promotes the empty string into the service name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Table {
+    pub service: String,
+    pub name: String,
 }
 
 // ─── Schema fields ────────────────────────────────────────────────────
