@@ -34,6 +34,7 @@ use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, HostPart, HttpMethod, MethodSpec,
     NormalizedUrl, ProviderFact, ProviderOrigin, RpcConsumerFact, ServiceName, TopicConsumerFact,
 };
+use crate::federation::contracts::protocol_dispatch::{default_dispatch_chain, ProtocolDispatch};
 use crate::federation::contracts::route_match::{
     compare_specificity, match_route, MatchDetail, MatchOutcome,
 };
@@ -236,87 +237,48 @@ impl ContractJoiner {
         let mut external: BTreeMap<String, u32> = BTreeMap::new();
         let mut unnormalized: Vec<GlobalId> = Vec::new();
         let mut binds: Vec<BindsEdge> = Vec::new();
+        // Protocol dispatch chain. Each protocol (Topic, RPC, GraphQL)
+        // contributes one entry; the for-loop below iterates the chain
+        // instead of the prior `if let Some(ContractFact::XxxConsumer)`
+        // cascade. Adding a new protocol is one Vec entry plus the
+        // matching `ProtocolDispatch` impl — no edits to this for-loop.
+        let dispatch_chain: Vec<Box<dyn ProtocolDispatch>> = default_dispatch_chain();
         for node in nodes {
-            // §7.7 (stretch): topic consumers take the topic-join
-            // path. The HTTP §7.3 table does not apply — topics have
-            // no `HostPart` / template, only `(broker, name)`.
-            if let Some(ContractFact::TopicConsumer(topic_consumer)) = node.contract.as_ref() {
-                let call_id = match GlobalId::parse(&node.id) {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
-                let own_service = assignments
-                    .get(call_id.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| implicit_service(node));
-                let resolution = resolve_topic_consumer(
-                    &call_id,
-                    topic_consumer,
-                    &own_service,
-                    &endpoint_table,
-                    &mut binds,
-                );
-                consumers.insert(call_id.clone(), resolution);
-                continue;
-            }
-            // Phase E (spec §8.2): RPC stub calls take the
-            // grpc-join path. The HTTP §7.3 table does not apply —
-            // RPC consumers have no `HostPart` / template; the
-            // joiner resolves the channel address to a service
-            // and matches by exact `(package.Service, method)`.
-            if let Some(ContractFact::RpcConsumer(rpc_consumer)) = node.contract.as_ref() {
-                let call_id = match GlobalId::parse(&node.id) {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
-                let own_service = assignments
-                    .get(call_id.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| implicit_service(node));
-                let resolution = resolve_rpc_consumer(
-                    &call_id,
-                    rpc_consumer,
-                    &own_service,
-                    &endpoint_table,
-                    config,
-                    &mut binds,
-                );
-                consumers.insert(call_id.clone(), resolution);
-                continue;
-            }
-            // Phase E (spec §8.3): GraphQL consumers take the
-            // graphql-join path. The HTTP §7.3 table does not
-            // apply — GraphQL consumers are scoped to the
-            // service that owns the `/graphql` HTTP route
-            // (resolved by Phase B's HTTP join). The match is
-            // on `(op, field)`; multiple providers exposing the
-            // same `(op, field)` (federation / gateway) →
-            // ambiguous, never single-bound.
-            if let Some(ContractFact::GraphqlConsumer(graphql_consumer)) = node.contract.as_ref() {
-                let call_id = match GlobalId::parse(&node.id) {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
-                let own_service = assignments
-                    .get(call_id.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| implicit_service(node));
-                let resolution = resolve_graphql_consumer(
-                    &call_id,
-                    graphql_consumer,
-                    &own_service,
-                    &endpoint_table,
-                    &mut binds,
-                );
-                consumers.insert(call_id.clone(), resolution);
-                continue;
-            }
-            let Some(ContractFact::Consumer(consumer)) = node.contract.as_ref() else {
+            let Some(fact) = node.contract.as_ref() else {
                 continue;
             };
             let call_id = match GlobalId::parse(&node.id) {
                 Ok(g) => g,
                 Err(_) => continue,
+            };
+            let own_service = assignments
+                .get(call_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| implicit_service(node));
+            // First match wins; the chain is ordered so the more
+            // specific consumer shapes (Topic/Rpc/Graphql) are
+            // tried before the HTTP fallback below.
+            let mut dispatched = false;
+            for dispatcher in &dispatch_chain {
+                if dispatcher.matches(fact) {
+                    let resolution = dispatcher.dispatch(
+                        &call_id,
+                        &own_service,
+                        fact,
+                        &endpoint_table,
+                        config,
+                        &mut binds,
+                    );
+                    consumers.insert(call_id.clone(), resolution);
+                    dispatched = true;
+                    break;
+                }
+            }
+            if dispatched {
+                continue;
+            }
+            let ContractFact::Consumer(consumer) = fact else {
+                continue;
             };
             // Rule 1 — Phase A rule-1 fix. Wrapper candidates with
             // no matching `http_clients` entry are NOT silently
@@ -1041,7 +1003,7 @@ fn host_is_external_exempt(host: &str) -> bool {
 /// services. An in-service topic consumer must NOT bind to its own
 /// service's producer endpoint — same rule §7.3 rule 6 enforces
 /// for HTTP consumers.
-fn resolve_topic_consumer(
+pub(crate) fn resolve_topic_consumer(
     call_id: &GlobalId,
     consumer: &TopicConsumerFact,
     own_service: &ServiceName,
@@ -1130,7 +1092,7 @@ fn resolve_topic_consumer(
 ///
 /// Returns a `ConsumerResolution` mirroring the RPC / topic
 /// paths and pushes any `Binds` edges onto `binds`.
-fn resolve_graphql_consumer(
+pub(crate) fn resolve_graphql_consumer(
     call_id: &GlobalId,
     consumer: &crate::federation::contracts::model::GraphqlConsumerFact,
     own_service: &ServiceName,
@@ -1280,7 +1242,7 @@ fn provider_service_of(
 ///
 /// Returns a `ConsumerResolution` (mirroring `resolve_topic_consumer`)
 /// and pushes any `Binds` edges onto `binds`.
-fn resolve_rpc_consumer(
+pub(crate) fn resolve_rpc_consumer(
     call_id: &GlobalId,
     consumer: &RpcConsumerFact,
     own_service: &ServiceName,

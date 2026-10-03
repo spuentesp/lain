@@ -56,6 +56,7 @@ pub mod joiner;
 pub mod mirrors;
 pub mod model;
 pub mod normalize;
+pub mod protocol_dispatch;
 pub mod route_match;
 pub mod snapshots;
 
