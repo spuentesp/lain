@@ -183,7 +183,7 @@ fn a3_wrapper_call_emits_unresolved_reason() {
     );
     // The reasons_for helper surfaces the WrapperUnconfigured reason
     // so the LookupResult::NotAnalyzed branch can render it.
-    let reasons = lain::federation::contracts::coverage::reasons_for(&cover, ANALYZER_VERSION);
+    let reasons = lain::federation::contracts::coverage::reasons_for(&cover);
     assert!(reasons.contains(&UnresolvedReason::WrapperUnconfigured));
 }
 

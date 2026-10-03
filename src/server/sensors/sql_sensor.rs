@@ -35,8 +35,8 @@
 //! Spec: docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md §7
 
 use crate::error::LainError;
-use crate::federation::contracts::coverage::{UnresolvedReason, UnresolvedRecord};
-use crate::federation::contracts::model::{ContractFact, SourceSite, Table};
+use crate::federation::contracts::coverage::UnresolvedRecord;
+use crate::federation::contracts::model::{ContractFact, SourceSite, Table, UnresolvedReason};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use std::collections::{BTreeMap, BTreeSet};

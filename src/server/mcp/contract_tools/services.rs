@@ -20,6 +20,7 @@
 //! - `cursor`: opaque base64url; `cursor_mismatch` on reuse with
 //!   different arguments.
 
+use super::contracts::unresolved_reason_label;
 use super::envelope::{cap_2000, check_api_version, error_outcome, outcome, success_envelope};
 use super::paging::{apply_limit, decode_cursor, fingerprint};
 use super::scope::{live_scope, provider_is_reviewed};
@@ -592,16 +593,7 @@ fn build_unresolved_candidates(idx: &ContractIndex, _info: &ServiceInfo) -> Vec<
                 "consumer": {"id": r.call_id.as_str(), "repo": "", "commit": "", "path": "", "line": 0, "text": ""},
                 "url_expr": "",
                 "method": "",
-                "reason": match reason {
-                    UnresolvedReason::NoRouteInService => "no_route_in_service",
-                    UnresolvedReason::NoMatch => "no_match",
-                    UnresolvedReason::Unnormalized => "no_route_in_service",
-                    UnresolvedReason::WrapperUnconfigured => "wrapper_unconfigured",
-                    UnresolvedReason::EnvUnmapped => "env_unmapped",
-                    UnresolvedReason::EnvAmbiguous => "env_ambiguous",
-                    UnresolvedReason::RpcStubUnknown => "rpc_stub_unknown",
-                    UnresolvedReason::GraphqlNoOp => "graphql_no_op",
-                },
+                "reason": unresolved_reason_label(*reason),
                 "target_service": r.service.0,
             }));
         }

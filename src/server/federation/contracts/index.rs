@@ -136,46 +136,11 @@ pub enum ConsumerTarget {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnresolvedReason {
-    /// Rule 3: target service known but no route in it.
-    NoRouteInService,
-    /// Rule 6: target unknown, no service matches.
-    NoMatch,
-    /// Rule 5: template was dynamic.
-    Unnormalized,
-    /// Phase A rule-1 fix: a `CallVia::Receiver` with no matching
-    /// `http_clients` entry. Pre-Phase-A, these were silently dropped
-    /// (a soundness bug — the consumer was neither bound nor
-    /// recorded). Phase A records them as Unresolved so the
-    /// coverage ledger and the verdict downgrade see them.
-    WrapperUnconfigured,
-    /// Phase C: the consumer's `HostPart::Env([var])` referenced a
-    /// var the env_sensor has no binding for. The var is also
-    /// recorded in the coverage ledger (`unresolved` bucket with
-    /// `reason: EnvUnmapped`) so the operator can wire a value.
-    EnvUnmapped,
-    /// Phase C: the consumer's `HostPart::Env([var])` resolved to
-    /// multiple distinct hosts in the env_sensor's bindings
-    /// (`.env` says one thing, compose says another). No bind
-    /// emitted; the consumer is ambiguous.
-    EnvAmbiguous,
-    /// Phase E (spec §8.2): the consumer's gRPC stub call
-    /// resolved to a known service but the channel address
-    /// (host:port) the consumer constructed has no matching
-    /// service in `services[].hosts`. The consumer lands in
-    /// the coverage ledger's `unresolved` bucket; the operator
-    /// wires the host via `repos.yaml#services[]`.
-    RpcStubUnknown,
-    /// Phase E (spec §8.3): a GraphQL consumer whose
-    /// `(op, field)` did not match any provider scoped to
-    /// the service that owns the `/graphql` HTTP route. The
-    /// consumer lands in the coverage ledger's `unresolved`
-    /// bucket with this reason so the operator can wire a
-    /// missing schema field or expand the route's
-    /// service-scoped provider set.
-    GraphqlNoOp,
-}
+/// Joiner / coverage ledger reason. Re-exported from the unified
+/// `model::UnresolvedReason` so the historical `index::UnresolvedReason`
+/// import path keeps compiling while the canonical enum lives in
+/// `model.rs`. See `model::UnresolvedReason` for the variant set.
+pub use crate::federation::contracts::model::UnresolvedReason;
 
 /// Field read resolution (§7.5). `bound_fields` carries the joined
 /// `Binds(FieldRef → Field)` product; `call` is the id of the

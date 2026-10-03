@@ -191,7 +191,7 @@ pub fn take_unmapped_records(root: &Path) -> Vec<UnresolvedRecord> {
     let mut out: Vec<UnresolvedRecord> = Vec::new();
     for (var, count) in repo.unmapped.iter() {
         out.push(UnresolvedRecord {
-            reason: crate::federation::contracts::coverage::UnresolvedReason::EnvUnmapped,
+            reason: crate::federation::contracts::model::UnresolvedReason::EnvUnmapped,
             count: *count as usize,
             sample_ids: vec![var.clone()],
         });

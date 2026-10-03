@@ -698,6 +698,97 @@ fn parse_method_label(s: &str) -> Option<MethodSpec> {
     })
 }
 
+// ─── UnresolvedReason (unified; replaces the two-parallel-enums design) ──
+
+/// Why a consumer / call site could not be bound, or why a sensor
+/// could not classify its input. Phase A introduced one
+/// `UnresolvedReason` per joiner verdict (`index::UnresolvedReason`);
+/// Phase D added a parallel per-(sensor, lang) ledger-bucket reason
+/// (`coverage::UnresolvedReason`) that shared two variant names
+/// (`WrapperUnconfigured`, `EnvUnmapped`) with subtly different
+/// semantics. The SOLID+DRY review
+/// (`.superpowers/sdd/2026-10-02-coverage-and-protocols/review-solid-dry.md`
+/// §S1) flagged the parallel enums as Critical. This type is the
+/// single canonical enum; both the joiner verdict and the
+/// coverage-ledger bucket carry it verbatim, and the previous
+/// `reasons_for` translation layer is gone.
+///
+/// The variants partition into two axes:
+///
+/// * **Joiner verdict** (`NoRouteInService`, `NoMatch`,
+///   `Unnormalized`, `WrapperUnconfigured`, `EnvUnmapped`,
+///   `EnvAmbiguous`, `RpcStubUnknown`, `GraphqlNoOp`) — the joiner
+///   decided a particular call could not bind.
+/// * **Sensor ledger bucket** (`DynamicUrl`, `BaseUnknown`,
+///   `DynamicTopic`, `ExternalRef`, `DynamicSql`) — a sensor
+///   classified a site but could not mint a graph edge for it.
+///
+/// `WrapperUnconfigured` and `EnvUnmapped` carry the joiner's
+/// semantic ("Phase A rule-1 unmatched `CallVia::Receiver`" and
+/// "Phase C unresolved env var"). Sensors that previously emitted
+/// them as ledger-bucket reasons are compatible — the same
+/// condition is recorded under the same variant.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum UnresolvedReason {
+    // ── Joiner verdict ────────────────────────────────────────────
+    /// Rule 3: target service known but no route in it.
+    NoRouteInService,
+    /// Rule 6: target unknown, no service matches.
+    NoMatch,
+    /// Rule 5: template was dynamic.
+    Unnormalized,
+    /// Phase A rule-1 fix: a `CallVia::Receiver` with no matching
+    /// `http_clients` entry. Pre-Phase-A, these were silently dropped
+    /// (a soundness bug — the consumer was neither bound nor
+    /// recorded). Phase A records them as Unresolved so the
+    /// coverage ledger and the verdict downgrade see them.
+    WrapperUnconfigured,
+    /// Phase C: the consumer's `HostPart::Env([var])` referenced a
+    /// var the env_sensor has no binding for. The var is also
+    /// recorded in the coverage ledger (`unresolved` bucket with
+    /// `reason: EnvUnmapped`) so the operator can wire a value.
+    EnvUnmapped,
+    /// Phase C: the consumer's `HostPart::Env([var])` resolved to
+    /// multiple distinct hosts in the env_sensor's bindings
+    /// (`.env` says one thing, compose says another). No bind
+    /// emitted; the consumer is ambiguous.
+    EnvAmbiguous,
+    /// Phase E (spec §8.2): the consumer's gRPC stub call
+    /// resolved to a known service but the channel address
+    /// (host:port) the consumer constructed has no matching
+    /// service in `services[].hosts`.
+    RpcStubUnknown,
+    /// Phase E (spec §8.3): a GraphQL consumer whose
+    /// `(op, field)` did not match any provider scoped to
+    /// the service that owns the `/graphql` HTTP route.
+    GraphqlNoOp,
+
+    // ── Sensor ledger bucket ──────────────────────────────────────
+    /// Phase B (spec §5.1): the consumer's URL template includes a
+    /// non-literal part (parameter, string concat, `format!`, …) so
+    /// no host can be resolved and no `HttpClient` node can be
+    /// emitted.
+    DynamicUrl,
+    /// Phase B (spec §5.1): a host part was detected but its
+    /// base URL could not be classified — the extractor did not
+    /// recognise the form.
+    BaseUnknown,
+    /// Phase C (spec §6.7): the consumer's topic name is non-literal
+    /// (parameter, `f"…"` interpolation, …) so no `Topic` edge can
+    /// be emitted.
+    DynamicTopic,
+    /// The consumer's URL points to a service outside the
+    /// federation (rule 4: `External`); the ledger records the
+    /// reference so an operator can decide whether to onboard it.
+    ExternalRef,
+    /// Phase D (spec §7): the SQL call shape was recognised but
+    /// the literal argument was non-literal (parameter, `format!`,
+    /// f-string, …) or the parser could not classify the
+    /// statement (DDL, PRAGMA, …). Either way, no `Table` edge
+    /// can be emitted.
+    DynamicSql,
+}
+
 /// A JSON pointer (or, here, JSON path) into a payload. Segments are
 /// name, array-element suffix, or map-values suffix. The `Display` /
 /// `FromStr` grammar is in §4.4 — implementations land with the

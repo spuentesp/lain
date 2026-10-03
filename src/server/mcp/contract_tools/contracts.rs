@@ -1042,16 +1042,31 @@ fn host_label_for(_call_id: &GlobalId) -> Option<String> {
     None
 }
 
-fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
+/// Render the wire-form label for a `model::UnresolvedReason`.
+/// `pub(crate)` so `services.rs` (the per-service `list_unresolved`
+/// envelope) can render the same labels — Phase A review §S1
+/// collapsed the two parallel enums, and the wire-form table moves
+/// to a single function.
+pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
+    use crate::federation::contracts::model::UnresolvedReason::*;
     match r {
-        UnresolvedReason::NoRouteInService => "no_route_in_service",
-        UnresolvedReason::NoMatch => "no_match",
-        UnresolvedReason::Unnormalized => "no_route_in_service",
-        UnresolvedReason::WrapperUnconfigured => "wrapper_unconfigured",
-        UnresolvedReason::EnvUnmapped => "env_unmapped",
-        UnresolvedReason::EnvAmbiguous => "env_ambiguous",
-        UnresolvedReason::RpcStubUnknown => "rpc_stub_unknown",
-        UnresolvedReason::GraphqlNoOp => "graphql_no_op",
+        // Joinder verdict (Phase A review §S1 — unified model).
+        NoRouteInService => "no_route_in_service",
+        NoMatch => "no_match",
+        Unnormalized => "no_route_in_service",
+        WrapperUnconfigured => "wrapper_unconfigured",
+        EnvUnmapped => "env_unmapped",
+        EnvAmbiguous => "env_ambiguous",
+        RpcStubUnknown => "rpc_stub_unknown",
+        GraphqlNoOp => "graphql_no_op",
+        // Sensor ledger bucket — collapsed into the same enum per
+        // the Phase A review §S1 unification. The labels below
+        // were the legacy `coverage::UnresolvedReason` strings.
+        DynamicUrl => "dynamic_url",
+        BaseUnknown => "base_unknown",
+        DynamicTopic => "dynamic_topic",
+        ExternalRef => "external_ref",
+        DynamicSql => "dynamic_sql",
     }
 }
 

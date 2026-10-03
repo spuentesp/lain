@@ -193,32 +193,22 @@ pub enum SkipReason {
 
 /// TLA+ `unresolved[r]` — one unresolved-bucket record. `count` + up
 /// to 5 sample ids so the ledger stays bounded even when the repo
-/// has many could-match calls.
+/// has many could-match calls. The `reason` carries the unified
+/// `model::UnresolvedReason` (Phase A review §S1): the ledger
+/// bucket is no longer a parallel enum that needs translation in
+/// `reasons_for`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnresolvedRecord {
-    pub reason: UnresolvedReason,
+    pub reason: crate::federation::contracts::model::UnresolvedReason,
     pub count: usize,
     pub sample_ids: Vec<String>,
 }
 
-/// Why a consumer could not be bound. Spec §4.1 plus the spec's
-/// `wrapper_unconfigured` (Phase A rule-1 fix, `joiner.rs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UnresolvedReason {
-    DynamicUrl,
-    WrapperUnconfigured,
-    BaseUnknown,
-    EnvUnmapped,
-    DynamicTopic,
-    ExternalRef,
-    /// Phase D (spec §7): the SQL call shape was recognised but
-    /// the literal argument was non-literal (parameter, `format!`,
-    /// f-string, …) or the parser could not classify the
-    /// statement (DDL, PRAGMA, …). Either way, no `Table` edge
-    /// can be emitted; the operator sees the call site exists but
-    /// its SQL is dynamic.
-    DynamicSql,
-}
+/// Why a consumer / call site could not be bound, or why a sensor
+/// could not classify its input. Re-exported so historical
+/// `coverage::UnresolvedReason` import paths keep compiling while
+/// the canonical enum lives in `model::UnresolvedReason`.
+pub use crate::federation::contracts::model::UnresolvedReason;
 
 // ─── Per-repo ledger ──────────────────────────────────────────────────
 
@@ -704,26 +694,19 @@ impl<T> From<Option<T>> for LookupResult<T> {
     }
 }
 
-/// `LookupResult::NotAnalyzed { reasons }` carries the per-repo
-/// coverage reasons so the operator can see why a verdict could not
-/// be reached. `reasons_for(coverage, repo)` collects the
-/// `CoverageLedger`-side reasons for `repo` (sensor error,
-/// unresolved could-match, cache version mismatch, language with no
-/// sensor that analyzed anything). The function is the bridge the
-/// tool layer uses to populate the `reasons` list.
-pub fn reasons_for(cover: &RepoCoverage, current_analyzer_version: &str) -> Vec<UnresolvedReason> {
+/// Collect every `UnresolvedReason` recorded in `cover`'s
+/// per-(sensor, lang) ledger buckets. Phase A review §S1 unified
+/// the ledger-bucket enum and the joiner-verdict enum, so this
+/// pass-through no longer needs to translate error / cache-version
+/// conditions into reason labels — those conditions carry their
+/// own semantics and the operator can read them directly from
+/// `cover.error` and `cover.cache_key` if needed. The `reasons`
+/// field on `LookupResult::NotAnalyzed` lists exactly what was
+/// written into the ledger.
+pub fn reasons_for(cover: &RepoCoverage) -> Vec<UnresolvedReason> {
     let mut reasons: Vec<UnresolvedReason> = Vec::new();
-    if cover.error.is_some() {
-        reasons.push(UnresolvedReason::WrapperUnconfigured);
-    }
-    if cover.cache_key.analyzer_version != current_analyzer_version {
-        reasons.push(UnresolvedReason::EnvUnmapped);
-    }
     for sensor_ledger in cover.ledger.values() {
         for entry in sensor_ledger.values() {
-            if entry.error.is_some() {
-                reasons.push(UnresolvedReason::BaseUnknown);
-            }
             for r in &entry.unresolved {
                 reasons.push(r.reason);
             }
@@ -1038,9 +1021,12 @@ mod tests {
         assert!(matches!(r, LookupResult::NotFoundAnalyzed));
     }
 
-    /// `reasons_for` collects `WrapperUnconfigured` on `error`,
-    /// `EnvUnmapped` on cache-version mismatch, and any per-ledger
-    /// `BaseUnknown` / unresolved reason.
+    /// `reasons_for` collects every per-ledger `UnresolvedReason`
+    /// from the `unresolved` buckets. The Phase A review (§S1)
+    /// removed the previous error / cache-mismatch translations —
+    /// those conditions now live directly on `cover.error` and
+    /// `cover.cache_key` and are surfaced through the
+    /// `RepoCoverage` readers, not via `reasons_for`.
     #[test]
     fn reasons_for_collects_each_branch() {
         let mut cover = empty_cover("orders", "abc", "0.9.0+c3");
@@ -1054,7 +1040,7 @@ mod tests {
         let mut sl = BTreeMap::new();
         sl.insert(lang_label(Lang::Python).to_string(), py);
         cover.ledger.insert("http_sensor".to_string(), sl);
-        let reasons = reasons_for(&cover, "0.9.0+c3");
+        let reasons = reasons_for(&cover);
         assert!(reasons.contains(&UnresolvedReason::WrapperUnconfigured));
     }
 }
