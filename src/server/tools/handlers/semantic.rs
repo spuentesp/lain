@@ -597,6 +597,9 @@ fn node_type_label(nt: &NodeType) -> &'static str {
         NodeType::HttpClientCall => "http-client-call",
         NodeType::Field => "field",
         NodeType::FieldRef => "field-ref",
+        // Phase D (spec §7): a database table. Same kebab-case
+        // shape as the existing contract-federation labels.
+        NodeType::Table => "table",
     }
 }
 

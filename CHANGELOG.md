@@ -168,6 +168,18 @@ that touches the joiner, sensors, or fixture must keep
   not make bincode files backward compatible — the version bumps
   are the only path to forward compatibility).
 
+### SQL tables — schema folded into v3 (Phase D, spec §7)
+
+- New `NodeType::Table` and `EdgeType::{ReadsTable, WritesTable}`.
+  Folded into v3 — `FEDERATION_GRAPH_VERSION`, `PATH_FORMAT_VERSION`,
+  and `CONTRACT_ANALYZER_REV` are unchanged. `lain reindex` covers
+  the rollout.
+- `describe_schema` reports `Table`, `ReadsTable`, `WritesTable`
+  alongside the existing contract-federation types. Existing graphs
+  decode cleanly; an operator running 0.9 without reindexing sees
+  no new edges until `lain reindex` runs (the new sensor only
+  emits on the new build).
+
 ## [0.8.0] — 2026-09-28
 
 ### Migration required — read first

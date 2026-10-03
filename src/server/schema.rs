@@ -45,6 +45,14 @@ pub enum NodeType {
     // receiver the static graph cannot resolve. Tag any query that
     // pulls these in with a confidence filter, or skip them entirely.
     Synthetic,
+    // Phase D (spec §7): a database table surfaced by the
+    // `sql_sensor`. Identified by `(service, name)` carried on the
+    // `Table` contract payload; the joiner fills `service` from
+    // `repos.yaml` the same way it binds `HttpClientCall` to a
+    // service. The variant folds into v3 — `FEDERATION_GRAPH_VERSION`
+    // stays at 3 — so existing graphs continue to load (per spec §2
+    // "v3 is unreleased: new node/edge types fold into v3").
+    Table,
 }
 
 impl NodeType {
@@ -80,6 +88,7 @@ impl NodeType {
             NodeType::Field,
             NodeType::FieldRef,
             NodeType::Synthetic,
+            NodeType::Table,
         ]
     }
 
@@ -144,6 +153,16 @@ impl NodeType {
             // from "lain has no notion of HTTP client calls".
             NodeType::HttpClientCall | NodeType::Field | NodeType::FieldRef => false,
             NodeType::Topic | NodeType::Resource | NodeType::Schema => false,
+            // Phase D (spec §7): `sql_sensor` emits `Table` nodes for
+            // every literal SQL statement it can parse. The sensor
+            // ships in this phase and is wired into `sensors::run_all`,
+            // so `Table` is real indexed data on every supported
+            // language. Until an operator reindexes with the new
+            // build, an existing graph has zero `Table` nodes — the
+            // "no KnownImpact sound with respect to what was
+            // analyzed" predicate is unaffected because `Table` is a
+            // producer, not a coverage gap.
+            NodeType::Table => true,
         }
     }
 
@@ -195,6 +214,13 @@ impl NodeType {
                  stands in for a receiver the static graph cannot resolve. \
                  Filter to confidence-bearing edges only — see \
                  `EdgeProvenance::Heuristic`."
+            }
+            NodeType::Table => {
+                "A database table surfaced by `sql_sensor` from a literal \
+                 SQL statement. Identified by `(service, name)` on the \
+                 `Table` contract payload; the joiner fills `service` from \
+                 `repos.yaml`. Reach handler → function → table through \
+                 `ReadsTable` / `WritesTable` edges."
             }
         }
     }
@@ -277,6 +303,13 @@ pub enum EdgeType {
     ReadsField,
     ReadsFrom,
     Binds,
+    // Phase D (spec §7): edges from a function / method / file to a
+    // `Table` node, emitted by `sql_sensor`. `ReadsTable` covers
+    // SELECT (including CTE bodies, subselects, and joins);
+    // `WritesTable` covers INSERT / UPDATE / DELETE / MERGE. Folded
+    // into v3 — `FEDERATION_GRAPH_VERSION` stays at 3.
+    ReadsTable,
+    WritesTable,
 }
 
 impl EdgeType {
@@ -316,6 +349,8 @@ impl EdgeType {
             EdgeType::ReadsField,
             EdgeType::ReadsFrom,
             EdgeType::Binds,
+            EdgeType::ReadsTable,
+            EdgeType::WritesTable,
         ]
     }
 
@@ -377,6 +412,12 @@ impl EdgeType {
             // cross-service edge (§5.3). All three are real
             // indexed data on every contract-tool surface (`§10.1`).
             EdgeType::ReadsField | EdgeType::ReadsFrom | EdgeType::Binds => true,
+            // Phase D (spec §7): `sql_sensor` emits `ReadsTable` and
+            // `WritesTable` from a function / method / file to the
+            // `Table` nodes it just minted. The sensor is wired in
+            // this phase so both edges are real indexed data on
+            // every supported language.
+            EdgeType::ReadsTable | EdgeType::WritesTable => true,
             // No producer anywhere in the codebase. `Imports` in
             // particular reads like a core relationship and has never
             // been emitted by any indexer.
@@ -456,6 +497,16 @@ impl EdgeType {
                  `EdgeProvenance::Confirmed` with the `repos.yaml#bindings[<i>]` \
                  reference."
             }
+            EdgeType::ReadsTable => {
+                "Enclosing function/method/file → Table. Emitted by \
+                 `sql_sensor` for SELECT (including CTE bodies, \
+                 subselects, and joins). Spec §7."
+            }
+            EdgeType::WritesTable => {
+                "Enclosing function/method/file → Table. Emitted by \
+                 `sql_sensor` for INSERT / UPDATE / DELETE / MERGE. \
+                 Spec §7."
+            }
         }
     }
 
@@ -514,6 +565,17 @@ impl EdgeType {
                 NodeType::FieldRef,
                 NodeType::Topic,
             ],
+            // Phase D (spec §7): the SQL-shaped edges mirror
+            // `SendsHttp`'s source rules — the enclosing
+            // function/method when resolvable, otherwise the file or
+            // module. Module-level SQL is rare but possible (an init
+            // script).
+            EdgeType::ReadsTable | EdgeType::WritesTable => &[
+                NodeType::Function,
+                NodeType::Method,
+                NodeType::File,
+                NodeType::Module,
+            ],
         }
     }
 
@@ -562,6 +624,9 @@ impl EdgeType {
             // HttpRoute, FieldRef → Field, consumer Topic → producer
             // Topic.
             EdgeType::Binds => &[NodeType::HttpRoute, NodeType::Field, NodeType::Topic],
+            // Phase D (spec §7): the SQL edges always target a
+            // `Table` node (the destination of a read or a write).
+            EdgeType::ReadsTable | EdgeType::WritesTable => &[NodeType::Table],
         }
     }
 }

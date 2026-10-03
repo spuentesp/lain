@@ -630,7 +630,16 @@ pub fn impact_propagation(e: &EdgeType) -> Propagation {
         | EdgeType::RequestSchema
         | EdgeType::ResponseSchema
         | EdgeType::HasField
-        | EdgeType::ReadsField => Propagation::Incoming,
+        | EdgeType::ReadsField
+        // Phase D (spec §7): from the table, both reads and writes
+        // walk back to the function that touches it — the same
+        // direction as `SendsHttp` / `Calls`. An operator asking
+        // "what depends on the orders table?" gets the answering
+        // function; an operator asking "what does this function
+        // touch?" gets the table when they start at the function
+        // and follow forward (a separate traversal pass).
+        | EdgeType::ReadsTable
+        | EdgeType::WritesTable => Propagation::Incoming,
         EdgeType::Consumes
         | EdgeType::PayloadSchema
         | EdgeType::Produces

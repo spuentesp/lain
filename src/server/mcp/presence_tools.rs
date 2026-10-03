@@ -1284,7 +1284,12 @@ fn symbol_weight(kind: &NodeType) -> u32 {
         // weight 1 is the same bucket as the cross-runtime markers.
         | NodeType::HttpClientCall
         | NodeType::Field
-        | NodeType::FieldRef => 1,
+        | NodeType::FieldRef
+        // Phase D (spec §7): a `Table` is a leaf from a
+        // symbol-overlap perspective too — a single table reference
+        // is rarely co-edited by two agents, so weight 1 is the
+        // same bucket as the other contract-federation leaves.
+        | NodeType::Table => 1,
     }
 }
 
