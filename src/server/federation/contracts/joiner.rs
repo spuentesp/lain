@@ -1721,6 +1721,7 @@ fn resolve_consumer(
     }
     // One hit: Binds. Several: one Binds per service. Several are
     // ambiguous and carry `Heuristic{ambiguous}` 0.3.
+    let (detector, confidence) = heuristic_provenance_for(hits.len());
     let mut bound: Vec<EndpointId> = Vec::new();
     for svc in &hits {
         let best = best_provider_for(svc, &target_method, target_template.as_deref(), endpoints);
@@ -1732,14 +1733,10 @@ fn resolve_consumer(
                 provider_service: svc.clone(),
                 target_endpoint: (svc.clone(), key.clone()),
                 provenance: EdgeProvenance::Heuristic {
-                    detector: if hits.len() > 1 {
-                        "ambiguous".into()
-                    } else {
-                        "unbound_host".into()
-                    },
-                    confidence: if hits.len() > 1 { 0.3 } else { 0.6 },
+                    detector: detector.into(),
+                    confidence,
                 },
-                confidence: if hits.len() > 1 { 0.3 } else { 0.6 },
+                confidence,
                 route_match: detail.kind,
                 stripped_prefix: detail.stripped_prefix,
             });
@@ -1751,14 +1748,10 @@ fn resolve_consumer(
     } else {
         Some(ConsumerTarget::Binds {
             provenance: EdgeProvenance::Heuristic {
-                detector: if hits.len() > 1 {
-                    "ambiguous".into()
-                } else {
-                    "unbound_host".into()
-                },
-                confidence: if hits.len() > 1 { 0.3 } else { 0.6 },
+                detector: detector.into(),
+                confidence,
             },
-            confidence: if hits.len() > 1 { 0.3 } else { 0.6 },
+            confidence,
             route_match: if hits.len() == 1 {
                 RouteMatch::Exact
             } else {
@@ -2151,6 +2144,22 @@ fn provider_node_id(
         .get(&(service.clone(), key.clone()))
         .and_then(|v| v.first().map(|p| p.id.clone()))
         .unwrap_or_else(|| GlobalId::from_string("unknown"))
+}
+
+/// Provenance for the §7.3 rule-6 heuristic Binds. One hit means the
+/// joiner selected a single service via the unbound-host path
+/// (`"unbound_host"`, 0.6); several hits means the same path
+/// returned multiple services and the joiner bound them all as
+/// ambiguous (`"ambiguous"`, 0.3). Single source of truth so the
+/// per-edge `EdgeProvenance::Heuristic` and the
+/// `ConsumerTarget::Binds` provenance can't drift apart (Phase B-D
+/// review §S7, §D17).
+fn heuristic_provenance_for(hit_count: usize) -> (&'static str, f32) {
+    if hit_count > 1 {
+        ("ambiguous", 0.3)
+    } else {
+        ("unbound_host", 0.6)
+    }
 }
 
 fn provenance_for_detail(
