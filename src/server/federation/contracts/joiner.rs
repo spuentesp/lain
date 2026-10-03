@@ -34,6 +34,7 @@ use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, HostPart, HttpMethod, MethodSpec,
     NormalizedUrl, ProviderFact, ProviderOrigin, ServiceName, TopicConsumerFact,
 };
+use crate::server::sensors::env_sensor::EnvBindingIndex;
 use crate::federation::contracts::route_match::{
     compare_specificity, match_route, MatchDetail, MatchOutcome,
 };
@@ -95,6 +96,31 @@ pub enum Resolution {
 pub struct JoinOutput {
     pub binds: Vec<BindsEdge>,
     pub index: ContractIndex,
+    /// Phase C (spec §6): env vars the joiner tried to resolve via
+    /// the env_sensor's bindings but had no mapping for. Keyed by
+    /// var name; the count is the number of consumers that
+    /// referenced the var. The orchestrator folds these into the
+    /// coverage ledger as `unresolved` records with
+    /// `reason: EnvUnmapped`.
+    pub unresolved_env_vars: BTreeMap<String, u32>,
+    /// Phase C (spec §6): env vars the joiner found to resolve to
+    /// multiple distinct hosts in the env_sensor's bindings
+    /// (`.env` says one thing, compose says another). The consumer
+    /// is recorded as `Unresolved { reason: EnvAmbiguous }` and no
+    /// `Binds` edge is emitted. The list of distinct hosts is kept
+    /// here so the operator can disambiguate.
+    pub ambiguous_env_vars: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for JoinOutput {
+    fn default() -> Self {
+        Self {
+            binds: Vec::new(),
+            index: ContractIndex::default(),
+            unresolved_env_vars: BTreeMap::new(),
+            ambiguous_env_vars: BTreeMap::new(),
+        }
+    }
 }
 
 /// One desired `Binds` edge, with the join details carried on it so
@@ -161,6 +187,29 @@ impl ContractJoiner {
         config: &ContractFederationConfig,
         registry: &ClientRegistry,
     ) -> JoinOutput {
+        Self::run_with_registry_and_env(nodes, edges, config, registry, &EnvBindingIndex::default())
+    }
+
+    /// Phase C (spec §6): same as [`run_with_registry`] but the
+    /// caller passes the per-repo env-var bindings the
+    /// `env_sensor` produced. The joiner resolves every
+    /// `HostPart::Env([var])` against this index before falling
+    /// through to the existing `services[].env` match — the
+    /// env_sensor-resolved host is then matched against
+    /// `services[].hosts`. Unmapped vars are recorded in
+    /// [`JoinOutput::unresolved_env_vars`] (folded into the
+    /// coverage ledger as `unresolved` records with
+    /// `reason: EnvUnmapped`); conflicting multi-source hosts
+    /// for the same var are recorded in
+    /// [`JoinOutput::ambiguous_env_vars`] and the consumer is
+    /// `Unresolved { reason: EnvAmbiguous }` (no `Binds` edge).
+    pub fn run_with_registry_and_env(
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+        config: &ContractFederationConfig,
+        registry: &ClientRegistry,
+        env: &EnvBindingIndex,
+    ) -> JoinOutput {
         // Step 1 — assign services to every node (§4.1). Longest
         // matching prefix wins; implicit service = repo id.
         let assignments = assign_services(nodes, config);
@@ -179,6 +228,19 @@ impl ContractJoiner {
         // back-compat (every pre-Phase B test still passes an empty
         // registry, which preserves the §7.3 row order).
         let client_registry = registry;
+
+        // Phase C (spec §6): the per-repo env-var bindings the
+        // `env_sensor` produced. The joiner threads the index
+        // through `resolve_consumer` so every
+        // `HostPart::Env([var])` is checked against the
+        // env_sensor before the existing `services[].env` match.
+        let env_index = env;
+
+        // Phase C accumulators — collected by `resolve_consumer`
+        // and exposed on the `JoinOutput` for the orchestrator to
+        // fold into the coverage ledger.
+        let mut unresolved_env_vars: BTreeMap<String, u32> = BTreeMap::new();
+        let mut ambiguous_env_vars: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         // Step 4 — resolve consumers (§7.3 table).
         let mut consumers: BTreeMap<GlobalId, ConsumerResolution> = BTreeMap::new();
@@ -283,6 +345,9 @@ impl ContractJoiner {
                 &mut binds,
                 &mut external,
                 client_registry,
+                env_index,
+                &mut unresolved_env_vars,
+                &mut ambiguous_env_vars,
             );
             // Rule 5 records the consumer in the
             // `unnormalized` index. The verdict lives on the
@@ -535,7 +600,12 @@ impl ContractJoiner {
             external,
             unnormalized,
         };
-        JoinOutput { binds, index }
+        JoinOutput {
+            binds,
+            index,
+            unresolved_env_vars,
+            ambiguous_env_vars,
+        }
     }
 }
 
@@ -1000,6 +1070,8 @@ pub fn resolve_consumer_to_service(
         "synthetic:HttpClientCall:synthetic:{}",
         consumer.url_expr
     ));
+    let mut unresolved_env = BTreeMap::new();
+    let mut ambiguous_env: BTreeMap<String, Vec<String>> = BTreeMap::new();
     resolve_consumer(
         &synthetic,
         consumer,
@@ -1010,12 +1082,20 @@ pub fn resolve_consumer_to_service(
         binds,
         external,
         client_registry,
+        &EnvBindingIndex::default(),
+        &mut unresolved_env,
+        &mut ambiguous_env,
     )
 }
 ///
 /// `client_registry` is the Phase B wrapper-base registry. An
 /// empty registry skips tier 2 entirely (every existing pre-Phase B
 /// test passes an empty registry, preserving the §7.3 row order).
+///
+/// `env` is the Phase C env_sensor's per-repo index; the
+/// `unresolved_env_vars` / `ambiguous_env_vars` accumulators are
+/// filled in when a `HostPart::Env([var])` consumer has no binding
+/// or binds to conflicting hosts.
 #[allow(clippy::too_many_arguments)]
 fn resolve_consumer(
     call_id: &GlobalId,
@@ -1027,6 +1107,9 @@ fn resolve_consumer(
     binds: &mut Vec<BindsEdge>,
     external: &mut BTreeMap<String, u32>,
     client_registry: &ClientRegistry,
+    env: &EnvBindingIndex,
+    unresolved_env_vars: &mut BTreeMap<String, u32>,
+    ambiguous_env_vars: &mut BTreeMap<String, Vec<String>>,
 ) -> ConsumerResolution {
     let target_template = consumer.url.template.clone();
     let target_method = consumer.method.clone();
@@ -1070,6 +1153,74 @@ fn resolve_consumer(
             binds,
         );
         return resolution;
+    }
+    // Phase C (spec §6): `HostPart::Env([var])` → env_sensor → host
+    // → `services[].hosts`. Resolves the env var via the sensor's
+    // bindings and matches the resulting host against a service's
+    // `hosts` list. Three outcomes:
+    //
+    // - All vars resolve to the same host → match the host
+    //   against `services[].hosts`; on hit, return the
+    //   `match_one_service` resolution.
+    // - Vars resolve to different hosts → `EnvAmbiguous`, no bind.
+    // - Any var has no binding → `EnvUnmapped`, the var is
+    //   recorded in `unresolved_env_vars` for the ledger.
+    if let HostPart::Env(names) = &consumer.url.host {
+        if let Some(resolved) =
+            target_service_from_env_resolved(consumer, env, config, unresolved_env_vars)
+        {
+            match resolved {
+                EnvResolution::Service(svc) => {
+                    let resolution = match_one_service(
+                        call_id,
+                        consumer,
+                        own_service,
+                        svc,
+                        &target_method,
+                        target_template.as_deref(),
+                        true,
+                        endpoints,
+                        binds,
+                    );
+                    return resolution;
+                }
+                EnvResolution::Ambiguous(hosts) => {
+                    for h in &hosts {
+                        ambiguous_env_vars
+                            .entry(format!("ambiguous:{}", h))
+                            .or_default()
+                            .extend(names.iter().cloned());
+                    }
+                    return ConsumerResolution {
+                        call_id: call_id.clone(),
+                        service: own_service.clone(),
+                        target: Some(ConsumerTarget::Unresolved {
+                            reason: UnresolvedReason::EnvAmbiguous,
+                            target_service: None,
+                        }),
+                        bound_endpoints: Vec::new(),
+                        reads_complete: consumer.reads_complete,
+                    };
+                }
+                EnvResolution::Unmapped => {
+                    // The var counters are already updated by
+                    // `target_service_from_env_resolved`; return
+                    // `Unresolved { EnvUnmapped }` so the consumer
+                    // appears in the per-call list with the right
+                    // reason.
+                    return ConsumerResolution {
+                        call_id: call_id.clone(),
+                        service: own_service.clone(),
+                        target: Some(ConsumerTarget::Unresolved {
+                            reason: UnresolvedReason::EnvUnmapped,
+                            target_service: None,
+                        }),
+                        bound_endpoints: Vec::new(),
+                        reads_complete: consumer.reads_complete,
+                    };
+                }
+            }
+        }
     }
     if let Some(svc) = target_service_from_env(consumer, config) {
         let resolution = match_one_service(
@@ -1407,6 +1558,105 @@ fn target_service_from_env(
         }
     }
     None
+}
+
+/// Phase C (spec §6): result of resolving a `HostPart::Env([var])`
+/// consumer against the env_sensor's bindings. Three terminals per
+/// the spec:
+///
+/// - `Service(s)`: every var resolves to the same host AND the
+///   host matches a service's `hosts` list. The joiner binds to
+///   `s` (the existing `match_one_service` path).
+/// - `Ambiguous(hosts)`: the vars resolve to different hosts in
+///   the env_sensor's bindings (`.env` says one thing, compose
+///   says another). The joiner records the conflict on
+///   `JoinOutput::ambiguous_env_vars` and emits
+///   `Unresolved { EnvAmbiguous }` — no `Binds` edge.
+/// - `Unmapped`: at least one var has no binding in the
+///   env_sensor. The joiner records the var on
+///   `JoinOutput::unresolved_env_vars` (the orchestrator folds
+///   it into the coverage ledger as
+///   `unresolved { reason: EnvUnmapped }`) and emits
+///   `Unresolved { EnvUnmapped }`.
+///
+/// Only consumers whose `url.host` is `HostPart::Env` reach this
+/// function. When the call has no env part (e.g. `Literal` /
+/// `Expr` / `None`) the joiner falls through to the existing
+/// `target_service_from_env` / `target_service_from_hosts` /
+/// rule-4 / rule-5 / rule-6 ladder unchanged.
+enum EnvResolution {
+    Service(ServiceName),
+    Ambiguous(Vec<String>),
+    Unmapped,
+}
+
+/// Phase C (spec §6): resolve `HostPart::Env([var])` through the
+/// env_sensor's per-repo bindings. Each var is resolved to a host
+/// (distinct-hosts deduped). Three outcomes:
+///
+/// - All vars resolve to the same single host AND the host
+///   matches a service's `hosts` list → `Service(s)`.
+/// - Vars resolve to multiple distinct hosts → `Ambiguous(hosts)`.
+/// - Any var has no binding → the var counters in
+///   `unresolved_env_vars` are bumped and `Unmapped` is returned
+///   (the caller emits `Unresolved { EnvUnmapped }`).
+///
+/// The pre-existing `target_service_from_env` (which matches
+/// `HostPart::Env` directly against `services[].env`) is
+/// untouched — Phase C adds this new path *in addition to* the
+/// env-name match (spec §6: "in addition to the existing
+/// `services[].env` match").
+fn target_service_from_env_resolved(
+    consumer: &crate::federation::contracts::model::ConsumerFact,
+    env: &EnvBindingIndex,
+    config: &ContractFederationConfig,
+    unresolved_env_vars: &mut BTreeMap<String, u32>,
+) -> Option<EnvResolution> {
+    let HostPart::Env(vars) = &consumer.url.host else {
+        return None;
+    };
+    if vars.is_empty() {
+        return None;
+    }
+    // Resolve every var. If any var is missing, the consumer is
+    // unmapped (we still record each missing var so the ledger
+    // bucket is correct).
+    let mut distinct_hosts: Vec<String> = Vec::new();
+    let mut any_unmapped = false;
+    for var in vars {
+        let hosts = env.distinct_hosts(var);
+        if hosts.is_empty() {
+            any_unmapped = true;
+            *unresolved_env_vars.entry(var.clone()).or_insert(0) += 1;
+        } else {
+            for h in hosts {
+                if !distinct_hosts.contains(&h) {
+                    distinct_hosts.push(h);
+                }
+            }
+        }
+    }
+    if any_unmapped {
+        return Some(EnvResolution::Unmapped);
+    }
+    if distinct_hosts.len() > 1 {
+        return Some(EnvResolution::Ambiguous(distinct_hosts));
+    }
+    // Exactly one host — try to map it to a service via
+    // `services[].hosts`.
+    let host = &distinct_hosts[0];
+    for s in &config.services {
+        if s.hosts.iter().any(|h| host_matches_pattern(h, host)) {
+            return Some(EnvResolution::Service(ServiceName(s.name.clone())));
+        }
+    }
+    // Single host, no service match — treat as unmapped so the
+    // operator can wire a `services[].hosts` entry. Record the
+    // host under a synthetic key so the ledger surfaces it.
+    *unresolved_env_vars
+        .entry(format!("no_service:{}", host))
+        .or_insert(0) += 1;
+    Some(EnvResolution::Unmapped)
 }
 
 fn target_service_from_hosts(

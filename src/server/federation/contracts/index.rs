@@ -150,6 +150,16 @@ pub enum UnresolvedReason {
     /// recorded). Phase A records them as Unresolved so the
     /// coverage ledger and the verdict downgrade see them.
     WrapperUnconfigured,
+    /// Phase C: the consumer's `HostPart::Env([var])` referenced a
+    /// var the env_sensor has no binding for. The var is also
+    /// recorded in the coverage ledger (`unresolved` bucket with
+    /// `reason: EnvUnmapped`) so the operator can wire a value.
+    EnvUnmapped,
+    /// Phase C: the consumer's `HostPart::Env([var])` resolved to
+    /// multiple distinct hosts in the env_sensor's bindings
+    /// (`.env` says one thing, compose says another). No bind
+    /// emitted; the consumer is ambiguous.
+    EnvAmbiguous,
 }
 
 /// Field read resolution (§7.5). `bound_fields` carries the joined

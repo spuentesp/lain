@@ -1046,6 +1046,8 @@ fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         UnresolvedReason::NoMatch => "no_match",
         UnresolvedReason::Unnormalized => "no_route_in_service",
         UnresolvedReason::WrapperUnconfigured => "wrapper_unconfigured",
+        UnresolvedReason::EnvUnmapped => "env_unmapped",
+        UnresolvedReason::EnvAmbiguous => "env_ambiguous",
     }
 }
 
