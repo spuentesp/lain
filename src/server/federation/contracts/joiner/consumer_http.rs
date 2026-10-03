@@ -10,7 +10,8 @@
 //!
 //! 1. Confirmed binding — `apply_confirmed_binding` (§7.6).
 //! 2. Code-derived base + host/env (Phase B [`ClientRegistry`] —
-//!    composes `base ++ call_path` via [`compose_for_registry`]).
+//!    composes `base ++ call_path` via
+//!    [`crate::federation::contracts::clients::compose_and_normalize`]).
 //! 3. `http_clients` config pattern (rule 3 first branch in §7.3).
 //! 4. operationId match (Heuristic 0.9, PR 18 — runs inside
 //!    `match_one_service` after a URL match attempt fails).
@@ -390,7 +391,7 @@ fn target_service_via_registry(
     client_registry: &ClientRegistry,
     config: &ContractFederationConfig,
 ) -> Option<ServiceName> {
-    use crate::federation::contracts::url_resolution::compose_for_registry;
+    use crate::federation::contracts::clients::{compose_and_normalize, UrlPart};
     if client_registry.is_empty() {
         return None;
     }
@@ -405,7 +406,19 @@ fn target_service_via_registry(
         if def.base.is_empty() {
             continue;
         }
-        let composed = compose_for_registry(consumer, def);
+        // Inlined from `url_resolution::compose_for_registry`
+        // (pass #4 R20, review §D15): render the consumer's
+        // template as a single Literal part and prepend
+        // `def.base`, then normalize. The path_part is `/` when
+        // the template is empty so the composed URL is
+        // well-formed (no trailing template + an empty path).
+        let template = consumer.url.template.clone().unwrap_or_default();
+        let path_part = if template.is_empty() {
+            UrlPart::Literal("/".into())
+        } else {
+            UrlPart::Literal(template)
+        };
+        let composed = compose_and_normalize(&[path_part], &def.base);
         let host = composed.host.clone();
         if let Some(svc) = service_from_host(&host, config) {
             return Some(svc);

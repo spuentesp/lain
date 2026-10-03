@@ -7,44 +7,25 @@
 //! `target_service_via_registry`, `target_service_from_env`,
 //! `target_service_from_hosts`, and the merged `service_from_host`
 //! helper — share a 60-line body of `HostPart` matching,
-//! env-var resolution, and host-pattern globbing, and `host_matches_pattern`
-//! / `compose_for_registry` are siblings.
+//! env-var resolution, and host-pattern globbing. `host_matches_pattern`
+//! is a sibling.
 //!
-//! This module hoists those six helpers out of `joiner.rs` so the
-//! orchestrator module is leaner (R11, partial S3 fix). The full
-//! joiner split into `consumer_http` / `consumer_protocol` /
-//! `endpoints` is deferred (the R11 spec is explicit: "A full
-//! split is risky; instead, identify one or two large helper
-//! functions"). The helpers remain the joiner's internals; only
-//! the *location* changed. The signatures and bodies are
-//! unchanged so every existing test stays green.
+//! This module hoists those helpers out of `joiner.rs` so the
+//! orchestrator module is leaner (R11, partial S3 fix). Pass #4
+//! refactored the joiner into `consumer_http` / `consumer_protocol` /
+//! `endpoints` / `confirmed`; the helpers remain the joiner's
+//! internals; only the *location* changed. The signatures and
+//! bodies are unchanged so every existing test stays green.
+//!
+//! Pass #4 R20 (review §D15) inlined the single-use
+//! `compose_for_registry` helper at its only call site
+//! (`consumer_http::target_service_via_registry`).
 
 use std::collections::BTreeMap;
 
-use crate::federation::contracts::clients::{
-    compose_and_normalize, ClientDef, UrlPart as RegistryUrlPart,
-};
 use crate::federation::contracts::config::ContractFederationConfig;
-use crate::federation::contracts::model::{ConsumerFact, HostPart, NormalizedUrl, ServiceName};
+use crate::federation::contracts::model::{ConsumerFact, HostPart, ServiceName};
 use crate::server::sensors::env_sensor::EnvBindingIndex;
-
-/// Compose `def.base ++ call.url` into a single [`NormalizedUrl`].
-/// Used by `target_service_via_registry` (spec §5.3 tier 2 +
-/// §5.2 "Final URL = `normalize(base_parts ++ call_path_parts)`").
-/// The call_path is the URL the consumer was emitted with; we
-/// render its template as a single `Literal` part and prepend
-/// `def.base`. The result feeds the existing `host_for` /
-/// `target_service_from_env` / `target_service_from_hosts`
-/// dispatch.
-pub(crate) fn compose_for_registry(consumer: &ConsumerFact, def: &ClientDef) -> NormalizedUrl {
-    let template = consumer.url.template.clone().unwrap_or_default();
-    let path_part = if template.is_empty() {
-        RegistryUrlPart::Literal("/".into())
-    } else {
-        RegistryUrlPart::Literal(template)
-    };
-    compose_and_normalize(&[path_part], &def.base)
-}
 
 /// Spec §5.3 / I6 — service-from-host dispatch. Combines
 /// `target_service_from_env` (env-name match) and
