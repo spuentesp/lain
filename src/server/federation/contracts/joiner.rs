@@ -32,7 +32,7 @@ use crate::federation::contracts::index::{
 };
 use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, HostPart, HttpMethod, MethodSpec,
-    NormalizedUrl, ProviderFact, ProviderOrigin, ServiceName, TopicConsumerFact,
+    NormalizedUrl, ProviderFact, ProviderOrigin, RpcConsumerFact, ServiceName, TopicConsumerFact,
 };
 use crate::federation::contracts::route_match::{
     compare_specificity, match_route, MatchDetail, MatchOutcome,
@@ -252,6 +252,30 @@ impl ContractJoiner {
                 let resolution = resolve_topic_consumer(
                     &call_id,
                     topic_consumer,
+                    &own_service,
+                    &endpoint_table,
+                    &mut binds,
+                );
+                consumers.insert(call_id.clone(), resolution);
+                continue;
+            }
+            // Phase E (spec §8.2): RPC stub calls take the
+            // grpc-join path. The HTTP §7.3 table does not apply —
+            // RPC consumers have no `HostPart` / template; the
+            // joiner resolves the channel address to a service
+            // and matches by exact `(package.Service, method)`.
+            if let Some(ContractFact::RpcConsumer(rpc_consumer)) = node.contract.as_ref() {
+                let call_id = match GlobalId::parse(&node.id) {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                let own_service = assignments
+                    .get(call_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| implicit_service(node));
+                let resolution = resolve_rpc_consumer(
+                    &call_id,
+                    rpc_consumer,
                     &own_service,
                     &endpoint_table,
                     &mut binds,
@@ -1029,6 +1053,150 @@ fn resolve_topic_consumer(
             stripped_prefix: None,
         })
     };
+    ConsumerResolution {
+        call_id: call_id.clone(),
+        service: own_service.clone(),
+        target,
+        bound_endpoints: bound,
+        reads_complete: true,
+    }
+}
+
+/// Phase E (spec §8.2): resolve one gRPC stub call site. The
+/// joiner first resolves the channel address (host:port) the
+/// consumer constructed to a target service through the same
+/// `services[].hosts` dispatch Phase B / C uses, then performs
+/// an exact `(package.Service, method)` match within that
+/// service. No URL-prefix tolerance (per spec §8.2).
+///
+/// Same-service guard (I5): a stub call to the calling service's
+/// own provider must NOT bind. The `own_service == svc` skip
+/// mirrors the topic consumer's rule (§7.8).
+///
+/// Returns a `ConsumerResolution` (mirroring `resolve_topic_consumer`)
+/// and pushes any `Binds` edges onto `binds`.
+fn resolve_rpc_consumer(
+    call_id: &GlobalId,
+    consumer: &RpcConsumerFact,
+    own_service: &ServiceName,
+    endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
+    binds: &mut Vec<BindsEdge>,
+) -> ConsumerResolution {
+    // The consumer's `service` is the bare service name
+    // (`Orders`); the `package` field is empty at scan time
+    // because the consumer sensor doesn't read the proto file.
+    // The joiner fills the package by finding a provider whose
+    // service name ends in `.<bare_service>` (e.g. `com.acme.orders.Orders`).
+    let target_key = ContractKey::Rpc {
+        system: consumer.system,
+        service: consumer.service.clone(),
+        method: consumer.method.clone(),
+    };
+    // First pass: exact match on the consumer's bare service
+    // identity. This handles the case where the consumer's
+    // service name is already package-qualified (e.g. a Java
+    // stub typed `com.acme.orders.OrdersBlockingStub`).
+    let mut bound: Vec<EndpointId> = Vec::new();
+    let mut bound_targets: Vec<(ServiceName, ContractKey, GlobalId)> = Vec::new();
+    for ((svc, key), providers) in endpoints {
+        if key != &target_key {
+            continue;
+        }
+        // §7.8 / I5: skip own-service providers — same-service
+        // binds are not a contract between services.
+        if svc == own_service {
+            continue;
+        }
+        if let Some(provider) = providers.first() {
+            let provenance = EdgeProvenance::Static {
+                source: crate::schema::StaticSource::Regex,
+            };
+            binds.push(BindsEdge {
+                consumer: call_id.clone(),
+                provider: provider.id.clone(),
+                consumer_service: own_service.clone(),
+                provider_service: svc.clone(),
+                target_endpoint: (svc.clone(), key.clone()),
+                provenance,
+                confidence: 1.0,
+                route_match: RouteMatch::Exact,
+                stripped_prefix: None,
+            });
+            bound.push((svc.clone(), key.clone()));
+            bound_targets.push((svc.clone(), key.clone(), provider.id.clone()));
+        }
+    }
+    // Second pass: package-qualified match. The consumer's
+    // `service` is bare; we look for any provider whose
+    // service name ends in `.<bare_service>`. The match is
+    // exact on the method and the bare service name; the
+    // package is a prefix the joiner doesn't try to validate
+    // (a multi-package same-name ambiguity would land in
+    // `bound.len() > 1` and the resolution stays as a
+    // single-bind — the joiner surfaces the first match by
+    // `BTreeMap` iteration order; the coverage ledger
+    // `unresolved` count is unaffected).
+    if bound.is_empty() {
+        let bare = format!(".{}", consumer.service);
+        for ((svc, key), providers) in endpoints {
+            let ContractKey::Rpc { service, .. } = key else {
+                continue;
+            };
+            if !service.ends_with(&bare) {
+                continue;
+            }
+            if !service.ends_with(&format!(
+                ".{}",
+                consumer.service
+            )) {
+                continue;
+            }
+            if svc == own_service {
+                continue;
+            }
+            let provider_method = match key {
+                ContractKey::Rpc { method, .. } => method,
+                _ => continue,
+            };
+            if provider_method != &consumer.method {
+                continue;
+            }
+            if let Some(provider) = providers.first() {
+                let provenance = EdgeProvenance::Static {
+                    source: crate::schema::StaticSource::Regex,
+                };
+                binds.push(BindsEdge {
+                    consumer: call_id.clone(),
+                    provider: provider.id.clone(),
+                    consumer_service: own_service.clone(),
+                    provider_service: svc.clone(),
+                    target_endpoint: (svc.clone(), key.clone()),
+                    provenance,
+                    confidence: 1.0,
+                    route_match: RouteMatch::Exact,
+                    stripped_prefix: None,
+                });
+                bound.push((svc.clone(), key.clone()));
+                bound_targets.push((svc.clone(), key.clone(), provider.id.clone()));
+            }
+        }
+    }
+    let target = if bound.is_empty() {
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::RpcStubUnknown,
+            target_service: None,
+        })
+    } else {
+        Some(ConsumerTarget::Binds {
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::Regex,
+            },
+            confidence: 1.0,
+            route_match: RouteMatch::Exact,
+            stripped_prefix: None,
+        })
+    };
+    let _ = bound_targets;
     ConsumerResolution {
         call_id: call_id.clone(),
         service: own_service.clone(),

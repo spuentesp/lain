@@ -481,12 +481,6 @@ fn is_identifier(s: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
 }
 
-fn is_go_identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_alphanumeric() || c == '_')
-}
-
 /// Find every identifier in `line` that ends with the literal
 /// `needle` (e.g. `"Stub."`). Returns `(start, end)` byte
 /// offsets into `line`. `end` is the position of the dot
