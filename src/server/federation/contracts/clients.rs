@@ -353,11 +353,11 @@ pub fn detect_clients(path: &str, content: &str) -> Vec<DetectedClient> {
             (ClientLibrary::Got, "got.extend", "prefixUrl"),
         ] {
             if let Some(rest) = line_after_create(line, key) {
-                if let Some(base) = extract_string_key(rest, target_key) {
+                if let Some(base) = extract_base_value(rest, target_key) {
                     out.push(DetectedClient {
                         name: extract_assigned_name(line).unwrap_or_else(|| "default".into()),
                         module: module.clone(),
-                        base: vec![UrlPart::Literal(base)],
+                        base: vec![base.into_url_part()],
                         library: lib,
                         site: ClientSite {
                             path: path.to_string(),
@@ -369,12 +369,12 @@ pub fn detect_clients(path: &str, content: &str) -> Vec<DetectedClient> {
         }
         // `const NAME = new Foo({baseUrl: …})` — local thin wrapper.
         if let Some(rest) = line_after_new(line) {
-            if let Some(base) = extract_string_key(rest, "baseUrl") {
+            if let Some(base) = extract_base_value(rest, "baseUrl") {
                 if let Some(name) = extract_assigned_name(line) {
                     out.push(DetectedClient {
                         name,
                         module: module.clone(),
-                        base: vec![UrlPart::Literal(base)],
+                        base: vec![base.into_url_part()],
                         library: ClientLibrary::Custom,
                         site: ClientSite {
                             path: path.to_string(),
@@ -488,25 +488,97 @@ fn line_after_new(line: &str) -> Option<&str> {
     Some(trimmed)
 }
 
-fn extract_string_key(rest: &str, key: &str) -> Option<String> {
-    // Match `<key>: "..."` or `<key>: '...'` (no `=` for plain
-    // object property shape; spec §5.1 keeps it simple). Strip
-    // trailing `,` / `}` / `)`.
+/// One URL base value extracted from a TS/JS client declaration
+/// (Phase C, spec §6). Spec §5.1 accepts only literal strings;
+/// Phase C also accepts `process.env.X` and `process.env["X"]`
+/// shapes so the joiner can resolve the var through the
+/// env_sensor's per-repo index and the host through
+/// `services[].hosts`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BaseValue {
+    Literal(String),
+    Env(String),
+}
+
+impl BaseValue {
+    fn into_url_part(self) -> UrlPart {
+        match self {
+            BaseValue::Literal(s) => UrlPart::Literal(s),
+            BaseValue::Env(name) => UrlPart::Env(vec![name]),
+        }
+    }
+}
+
+/// Extract a base value, accepting both literal strings and
+/// `process.env.X` / `process.env["X"]` (Phase C). The literal
+/// path mirrors [`extract_string_key`]; the env path recognizes
+/// the same patterns the http_client_sensor's `host_env_name`
+/// already knows about so the two scanners stay in sync.
+fn extract_base_value(rest: &str, key: &str) -> Option<BaseValue> {
     let pos = rest.find(key)?;
     let after = &rest[pos + key.len()..];
     let after = after.trim_start().strip_prefix(':')?;
     let after = after.trim_start();
+    if after.is_empty() {
+        return None;
+    }
+    // Literal string path: "..." / '...' / `...`.
     let bytes = after.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
     let quote = bytes[0];
-    if quote != b'"' && quote != b'\'' && quote != b'`' {
-        return None;
+    if quote == b'"' || quote == b'\'' || quote == b'`' {
+        let body = &after[1..];
+        let end = body.find(quote as char)?;
+        return Some(BaseValue::Literal(body[..end].to_string()));
     }
-    let body = &after[1..];
-    let end = body.find(quote as char)?;
-    Some(body[..end].to_string())
+    // Env path: `process.env.X` / `process.env["X"]`.
+    if let Some(name) = extract_process_env_name(after) {
+        return Some(BaseValue::Env(name.to_string()));
+    }
+    None
+}
+
+/// Extract the env-var name from a `process.env.X` /
+/// `process.env["X"]` expression at the start of `s` (i.e. the
+/// `<key>:` is stripped and we look at the value). Returns
+/// `Some(name)` when the value matches one of those two shapes,
+/// `None` otherwise. The grammar matches
+/// `host_env_name` in the http_client_sensor.
+fn extract_process_env_name(s: &str) -> Option<&str> {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix("process.env[") {
+        // The bracket form ends with `]` (possibly followed by
+        // trailing punctuation the object literal carries: `,`,
+        // `}`, `)`, `;`). Find the matching `]` and stop there.
+        let end = rest.find(']')?;
+        let inside = &rest[..end];
+        return Some(inner_bracket(inside));
+    }
+    if let Some(rest) = t.strip_prefix("process.env.") {
+        // Allow trailing punctuation (`,` / `}` / `)` / `;` /
+        // whitespace) that the next character may carry.
+        let end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+        let name = &rest[..end];
+        if name.is_empty() {
+            return None;
+        }
+        return Some(name);
+    }
+    None
+}
+
+fn inner_bracket(s: &str) -> &str {
+    let t = s.trim();
+    let bytes = t.as_bytes();
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[0] == bytes[bytes.len() - 1]
+    {
+        &t[1..t.len() - 1]
+    } else {
+        t
+    }
 }
 
 // ─── Python ctor clients (spec §5.1) ─────────────────────────────────
@@ -617,6 +689,47 @@ mod tests {
         assert_eq!(
             dets[0].base,
             vec![UrlPart::Literal("https://g.test".into())]
+        );
+    }
+
+    /// Phase C (spec §6): `baseURL: process.env.X` and
+    /// `prefixUrl: process.env["X"]` are recognized as env-var
+    /// bases. The scanner emits `UrlPart::Env([X])` so the joiner
+    /// resolves the var through the env_sensor's per-repo
+    /// bindings.
+    #[test]
+    fn detect_clients_recognizes_process_env_base_url() {
+        let src = "const ordersClient = axios.create({baseURL: process.env.ORDERS_API_URL});\n";
+        let dets = detect_clients("src/clients.ts", src);
+        assert_eq!(dets.len(), 1);
+        assert_eq!(dets[0].library, ClientLibrary::Axios);
+        assert_eq!(
+            dets[0].base,
+            vec![UrlPart::Env(vec!["ORDERS_API_URL".to_string()])]
+        );
+
+        let src2 =
+            "const billing = ky.create({prefixUrl: process.env[\"BILLING_URL\"]});\n";
+        let dets2 = detect_clients("c.ts", src2);
+        assert_eq!(dets2.len(), 1);
+        assert_eq!(dets2[0].library, ClientLibrary::Ky);
+        assert_eq!(
+            dets2[0].base,
+            vec![UrlPart::Env(vec!["BILLING_URL".to_string()])]
+        );
+    }
+
+    /// `process.env.X` on a `new Foo({baseUrl: …})` wrapper
+    /// detection also flows through.
+    #[test]
+    fn detect_clients_recognizes_process_env_on_local_wrapper() {
+        let src = "const ordersClient = new OrdersClient({baseUrl: process.env.ORDERS_API_URL});\n";
+        let dets = detect_clients("src/orders_client.ts", src);
+        assert_eq!(dets.len(), 1);
+        assert_eq!(dets[0].library, ClientLibrary::Custom);
+        assert_eq!(
+            dets[0].base,
+            vec![UrlPart::Env(vec!["ORDERS_API_URL".to_string()])]
         );
     }
 
