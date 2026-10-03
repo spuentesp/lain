@@ -211,6 +211,13 @@ pub enum UnresolvedReason {
     EnvUnmapped,
     DynamicTopic,
     ExternalRef,
+    /// Phase D (spec §7): the SQL call shape was recognised but
+    /// the literal argument was non-literal (parameter, `format!`,
+    /// f-string, …) or the parser could not classify the
+    /// statement (DDL, PRAGMA, …). Either way, no `Table` edge
+    /// can be emitted; the operator sees the call site exists but
+    /// its SQL is dynamic.
+    DynamicSql,
 }
 
 // ─── Per-repo ledger ──────────────────────────────────────────────────
@@ -537,6 +544,7 @@ pub fn run_all_with_coverage(
             crate::server::sensors::SensorCountField::Fields => counts.fields += count,
             crate::server::sensors::SensorCountField::FieldReads => counts.field_reads += count,
             crate::server::sensors::SensorCountField::EntryPoints => counts.entry_points += count,
+            crate::server::sensors::SensorCountField::SqlTables => counts.sql_tables += count,
         }
         let bucket: &mut BTreeMap<String, SensorLedger> =
             ledger.ledger.entry(sensor.name().to_string()).or_default();

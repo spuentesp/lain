@@ -86,6 +86,10 @@ pub enum SensorOwner {
     /// plus `Produces` / `Consumes` edges. Its `replace_sensor_output`
     /// call retracts only those.
     EventSensor,
+    /// Phase D (spec §7): the sql sensor owns `Table` nodes plus
+    /// `ReadsTable` / `WritesTable` edges. A rescan replaces only
+    /// its own previous output.
+    SqlSensor,
 }
 
 /// Map a node to its sensor owner (§6.1 derivation rules). Returns
@@ -107,6 +111,10 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         // §6.7 (stretch): the consumer-side function node carries a
         // `TopicConsumer` contract fact; the event sensor owns it.
         (_, Some(ContractFact::TopicConsumer(_))) => Some(SensorOwner::EventSensor),
+        // Phase D (spec §7): a `Table` node carries a `Table`
+        // contract fact (or no contract fact if the joiner has
+        // not yet populated `service`). The sql sensor owns it.
+        (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
         _ => None,
     }
 }
@@ -880,10 +888,7 @@ impl GraphDatabase {
             // pass; until then say nothing rather than guess.
             return Freshness::Fresh;
         };
-        let mtime_secs = mtime
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let mtime_secs = crate::server::time::unix_secs(mtime);
 
         if mtime_secs > last_scan {
             Freshness::Dirty {

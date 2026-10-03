@@ -12,8 +12,8 @@
 
 pub mod codeowners_sensor;
 pub mod dynamic_dispatch_sensor;
-pub mod env_sensor;
 pub mod entry_point_sensor;
+pub mod env_sensor;
 pub mod event_sensor;
 pub mod field_access_sensor;
 pub mod graphql_sensor;
@@ -24,6 +24,7 @@ pub mod openapi_schema;
 pub mod openapi_sensor;
 pub mod patterns;
 pub mod proto_sensor;
+pub mod sql_sensor;
 pub mod util;
 pub mod websocket_sensor;
 
@@ -53,6 +54,11 @@ pub struct SensorCounts {
     pub fields: usize,
     pub field_reads: usize,
     pub entry_points: usize,
+    // Phase D (spec §7): the SQL-tables sensor writes one count
+    // per `Table` node it mints. The bucket lives next to
+    // `entry_points` because both are "consumers of contract
+    // surfaces" that ride the same per-repo scan.
+    pub sql_tables: usize,
 }
 
 impl SensorCounts {
@@ -67,6 +73,7 @@ impl SensorCounts {
             + self.fields
             + self.field_reads
             + self.entry_points
+            + self.sql_tables
     }
 
     fn add(&mut self, field: SensorCountField, n: usize) {
@@ -81,6 +88,7 @@ impl SensorCounts {
             SensorCountField::Fields => self.fields += n,
             SensorCountField::FieldReads => self.field_reads += n,
             SensorCountField::EntryPoints => self.entry_points += n,
+            SensorCountField::SqlTables => self.sql_tables += n,
         }
     }
 }
@@ -103,6 +111,8 @@ pub enum SensorCountField {
     Fields,
     FieldReads,
     EntryPoints,
+    // Phase D (spec §7): the SQL-tables sensor bucket.
+    SqlTables,
 }
 
 /// A registered protocol sensor. Each impl contributes its `scan`
