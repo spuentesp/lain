@@ -229,6 +229,66 @@ async fn remove_repo_clears_its_contract_nodes_and_dirties() {
     let _ = b.local_path();
 }
 
+/// Regression for the TLA+ RejoinProtocol.tla 10-state trace that
+/// violates `NoLostUpdate`: `WriterSetConfig(c1)` lands between the
+/// rejoin's `RejoinReadConfig(c0)` and its `RejoinClear`. The pre-fix
+/// code cleared dirty at the END of `rejoin_contracts`, overwriting
+/// the writer's mark. The post-fix code clears dirty at the START
+/// (variant (b) — clear-before-read), so any writer that lands
+/// after the clear re-arms dirty and the next call redoes the work.
+#[tokio::test]
+async fn rejoin_does_not_lose_mid_join_mark() {
+    let (_dir, fed, _o, _b) = build_two_repo_federation().await;
+    project_both(&fed).await;
+
+    // Baseline: project + initial rejoin establishes the starting
+    // state (dirty=FALSE).
+    fed.rejoin_contracts_if_dirty()
+        .expect("baseline rejoin");
+    assert!(!fed.contracts_dirty(), "baseline: dirty is clear");
+
+    // Mark dirty and run the rejoin on a worker thread. Poll the
+    // dirty flag from the main thread: post-fix the rejoin clears
+    // dirty BEFORE the read/apply phase, so dirty briefly drops to
+    // FALSE; pre-fix dirty stays TRUE until the trailing clear.
+    fed.mark_contracts_dirty();
+    assert!(fed.contracts_dirty(), "post-mark: dirty is set");
+    let fed_for_rejoin = std::sync::Arc::clone(&fed);
+    let rejoin_handle = std::thread::spawn(move || {
+        fed_for_rejoin
+            .rejoin_contracts_if_dirty()
+            .expect("rejoin");
+    });
+
+    // Wait until the clear-before-read fires. Bounded by a deadline
+    // so a regression that broke the fix (dirty never clears during
+    // the rejoin) reports a clear failure rather than hanging.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while fed.contracts_dirty() {
+        if std::time::Instant::now() > deadline {
+            panic!(
+                "rejoin never cleared dirty mid-flight — clear-before-read \
+                 did not fire (TLA+ RejoinProtocol.tla NoLostUpdate fix is \
+                 missing)"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+
+    // The rejoin is now in the read/apply/swap phase. Inject a
+    // mark: post-fix this survives the rejoin's trailing clear
+    // (which is now a no-op because dirty was already false); pre-fix
+    // it would be overwritten by the trailing clear.
+    fed.mark_contracts_dirty();
+    rejoin_handle.join().expect("rejoin thread");
+
+    assert!(
+        fed.contracts_dirty(),
+        "mid-rejoin mark_contracts_dirty survives the rejoin \
+         (TLA+ RejoinProtocol.tla NoLostUpdate / Convergence variant (b))"
+    );
+}
+
 #[tokio::test]
 async fn contract_config_round_trip() {
     // Setting the same config twice must produce the same hash and

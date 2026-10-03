@@ -989,7 +989,27 @@ impl FederatedIndex {
         if !self.contracts_dirty.load(Ordering::Acquire) {
             return Ok(());
         }
-        self.rejoin_contracts()
+        // Clear-before-read (§9.1 RejoinProtocol variant (b)): the
+        // TLA+ model found a 10-state counterexample where a
+        // `set_contract_config` lands between the rejoin's read of
+        // `contract_config` and its trailing clear, the trailing
+        // clear overwrites the writer's `dirty := TRUE`, and the
+        // system settles into `~dirty ∧ binds ≠ ComputeBinds(config)`.
+        // We hold `projection_lock` for the whole sequence, so the
+        // only writers that can interleave are the lockless paths
+        // (`set_contract_config`, `mark_contracts_dirty`,
+        // `register_contract_node_for_test`); clearing dirty BEFORE
+        // reading inputs means any mark those writers set after the
+        // clear re-arms the dirty flag, and the next call will redo.
+        self.contracts_dirty.store(false, Ordering::Release);
+        if let Err(e) = self.rejoin_contracts() {
+            // Restore dirty so the next call retries — losing the
+            // mark here would silently swallow the change that
+            // triggered this rejoin.
+            self.contracts_dirty.store(true, Ordering::Release);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Mark the contract join as dirty so the next
@@ -1001,6 +1021,14 @@ impl FederatedIndex {
     /// rejoin on the next read.
     pub fn mark_contracts_dirty(&self) {
         self.contracts_dirty.store(true, Ordering::Release);
+    }
+
+    /// Read the current dirty flag. Public observation hook used
+    /// by the `rejoin_does_not_lose_mid_join_mark` regression test
+    /// (TLA+ RejoinProtocol.tla 10-state counterexample for
+    /// `NoLostUpdate`) — also useful for diagnostics.
+    pub fn contracts_dirty(&self) -> bool {
+        self.contracts_dirty.load(Ordering::Acquire)
     }
 
     /// Register a synthetic contract node id (and the host repo) so
@@ -1024,13 +1052,12 @@ impl FederatedIndex {
     pub fn rejoin_contracts(&self) -> Result<(), LainError> {
         let config = match self.contract_config.read().clone() {
             Some(c) => c,
-            // No config: nothing to join. Still clear the flag so
-            // the next contract config install produces a single
-            // join.
-            None => {
-                self.contracts_dirty.store(false, Ordering::Release);
-                return Ok(());
-            }
+            // No config: nothing to join. The dirty flag is
+            // managed by `rejoin_contracts_if_dirty` (it clears
+            // at the start, restores on error); a direct
+            // `rejoin_contracts()` call leaves the flag as-is so
+            // the caller can choose to retry.
+            None => return Ok(()),
         };
         // Collect every contract-bearing node by reading only the
         // ids recorded by `project_nodes` (§5.3 Cost).
@@ -1157,7 +1184,11 @@ impl FederatedIndex {
         }
 
         *self.contract_index.write() = Some(Arc::new(out.index));
-        self.contracts_dirty.store(false, Ordering::Release);
+        // Dirty is managed by `rejoin_contracts_if_dirty` (it
+        // clears at the start, restores on error); a mid-rejoin
+        // `set_contract_config` / `mark_contracts_dirty` that lands
+        // after the start-clear would be overwritten by a trailing
+        // clear, so we deliberately do NOT clear here.
         Ok(())
     }
 
