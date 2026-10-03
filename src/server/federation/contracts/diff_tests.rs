@@ -565,17 +565,26 @@ fn phase_a_no_known_impact_downgraded_on_incomplete_repo() {
     use crate::federation::contracts::coverage::RepoCoverage as PhaseARepo;
     use crate::federation::contracts::index_cache::CacheKey;
     let mut coverage = minimal_coverage();
-    let mut ledger_entry = PhaseARepo::default();
-    ledger_entry.error = Some("walk failed".into());
-    ledger_entry.cache_key = CacheKey::new("billing", "abc", "0.9.0+c3");
-    coverage.repo_coverages.insert("billing".into(), ledger_entry);
+    let ledger_entry = PhaseARepo {
+        error: Some("walk failed".into()),
+        cache_key: CacheKey::new("billing", "abc", "0.9.0+c3"),
+        ..Default::default()
+    };
+    coverage
+        .repo_coverages
+        .insert("billing".into(), ledger_entry);
     let change = Change {
-        service: svc("billing").into(),
+        service: svc("billing"),
         kind: ChangeKind::EndpointAdded {
             key: http_key(HttpMethod::Get, "/api/x"),
         },
     };
-    let impact = evaluate(&change, &ContractSurface::default(), &ContractSurface::default(), &coverage);
+    let impact = evaluate(
+        &change,
+        &ContractSurface::default(),
+        &ContractSurface::default(),
+        &coverage,
+    );
     assert_eq!(impact.class, Class::NeedsInvestigation);
     assert_eq!(impact.reason, Some(Reason::UnresolvedCandidates));
 }
@@ -585,7 +594,7 @@ fn phase_a_no_known_impact_downgraded_on_incomplete_repo() {
 #[test]
 fn phase_a_no_known_impact_unchanged_without_ledger() {
     let change = Change {
-        service: svc("billing").into(),
+        service: svc("billing"),
         kind: ChangeKind::EndpointAdded {
             key: http_key(HttpMethod::Get, "/api/x"),
         },

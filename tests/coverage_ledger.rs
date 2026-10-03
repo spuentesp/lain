@@ -17,28 +17,27 @@
 //!
 //! These tests run the production code paths directly: `classify_workspace`
 //! + `RepoCoverage::is_complete` for the language/skip cases, the
-//! joiner's rule-1 path for the wrapper case, and `write_ledger` /
-//! `read_ledger` for the round-trip. They are acceptance, not
-//! integration: they pin each branch of the spec's gate.
+//!   joiner's rule-1 path for the wrapper case, and `write_ledger` /
+//!   `read_ledger` for the round-trip. They are acceptance, not
+//!   integration: they pin each branch of the spec's gate.
 
 use lain::federation::contracts::coverage::{
-    classify_workspace, consumer_capable_langs, lang_label, write_ledger, read_ledger,
-    CoverageLedger, RepoCoverage, SensorLedger, SkipReason, UnresolvedReason,
-    UnresolvedRecord, LookupResult,
+    classify_workspace, consumer_capable_langs, lang_label, read_ledger, write_ledger,
+    CoverageLedger, LookupResult, RepoCoverage, SensorLedger, SkipReason, UnresolvedReason,
+    UnresolvedRecord,
 };
+use lain::federation::contracts::diff::{evaluate, Change, ChangeKind, Class, Reason, Scope};
 use lain::federation::contracts::index_cache::CacheKey;
 use lain::federation::contracts::model::{HttpMethod, MethodSpec};
-use lain::federation::contracts::diff::{
-    evaluate, Change, ChangeKind, Class, Reason, Scope,
-};
 use std::collections::BTreeMap;
 
 const ANALYZER_VERSION: &str = "0.9.0+c3";
 
 fn repo_cover_empty(repo: &str, sha: &str) -> RepoCoverage {
-    let mut c = RepoCoverage::default();
-    c.cache_key = CacheKey::new(repo, sha, ANALYZER_VERSION);
-    c
+    RepoCoverage {
+        cache_key: CacheKey::new(repo, sha, ANALYZER_VERSION),
+        ..Default::default()
+    }
 }
 
 // ─── A1 — language with no sensor ⇒ NotAnalyzed, NeedsInvestigation ─
@@ -111,7 +110,10 @@ fn a2_size_capped_file_lands_in_files_skipped() {
         .iter()
         .find(|r| r.path.file_name().map(|n| n == "big.py").unwrap_or(false))
         .expect("big record");
-    assert!(big_rec.size_capped, "files over SIZE_CAP_BYTES are size_capped");
+    assert!(
+        big_rec.size_capped,
+        "files over SIZE_CAP_BYTES are size_capped"
+    );
     let small_rec = records
         .iter()
         .find(|r| r.path.file_name().map(|n| n == "small.py").unwrap_or(false))
@@ -121,14 +123,16 @@ fn a2_size_capped_file_lands_in_files_skipped() {
     // The corresponding SensorLedger captures the skip.
     let mut cover = repo_cover_empty("orders", "abc");
     let py_lang = lang_label(lain::server::sensors::util::Lang::Python).to_string();
-    let mut sensor_ledger = SensorLedger::default();
-    sensor_ledger.files_seen = 2;
-    sensor_ledger.files_analyzed = 1;
-    sensor_ledger.files_skipped.push(lain::federation::contracts::coverage::SkipRecord {
-        reason: SkipReason::SizeCap,
-        count: 1,
-        sample_paths: vec!["big.py".into()],
-    });
+    let sensor_ledger = SensorLedger {
+        files_seen: 2,
+        files_analyzed: 1,
+        files_skipped: vec![lain::federation::contracts::coverage::SkipRecord {
+            reason: SkipReason::SizeCap,
+            count: 1,
+            sample_paths: vec!["big.py".into()],
+        }],
+        ..Default::default()
+    };
     let mut bucket = BTreeMap::new();
     bucket.insert(py_lang, sensor_ledger);
     cover.ledger.insert("http_sensor".to_string(), bucket);
@@ -159,13 +163,15 @@ fn a2_size_capped_file_lands_in_files_skipped() {
 fn a3_wrapper_call_emits_unresolved_reason() {
     let mut cover = repo_cover_empty("billing", "abc");
     let py_lang = lang_label(lain::server::sensors::util::Lang::Python).to_string();
-    let mut sensor_ledger = SensorLedger::default();
-    sensor_ledger.files_analyzed = 3;
-    sensor_ledger.unresolved.push(UnresolvedRecord {
-        reason: UnresolvedReason::WrapperUnconfigured,
-        count: 1,
-        sample_ids: vec!["billing:HttpClientCall:src/billing.py:fetch_order:10".into()],
-    });
+    let sensor_ledger = SensorLedger {
+        files_analyzed: 3,
+        unresolved: vec![UnresolvedRecord {
+            reason: UnresolvedReason::WrapperUnconfigured,
+            count: 1,
+            sample_ids: vec!["billing:HttpClientCall:src/billing.py:fetch_order:10".into()],
+        }],
+        ..Default::default()
+    };
     let mut bucket = BTreeMap::new();
     bucket.insert(py_lang, sensor_ledger);
     cover.ledger.insert("http_sensor".to_string(), bucket);
@@ -202,10 +208,7 @@ fn a4_snapshot_round_trip_preserves_ledger_and_cache_key() {
     let restored = loaded.by_repo.get("orders").expect("orders restored");
     assert_eq!(restored.cache_key, key, "cache_key survives the round-trip");
     assert!(restored.languages_present.contains("python"));
-    assert_eq!(
-        restored.sensor_counts.get("http_routes").copied(),
-        Some(4)
-    );
+    assert_eq!(restored.sensor_counts.get("http_routes").copied(), Some(4));
 }
 
 // ─── A5 — tri-state LookupResult over a known query shape ────────────
@@ -235,9 +238,7 @@ fn a5_lookup_result_tri_state_for_known_query() {
 /// `NeedsInvestigation` rather than `NoKnownImpact`.
 #[test]
 fn a7_incomplete_in_scope_repo_downgrades_verdict() {
-    use lain::federation::contracts::diff::{
-        build_coverage, ContractSurface, ReviewedRepo,
-    };
+    use lain::federation::contracts::diff::{build_coverage, ContractSurface, ReviewedRepo};
     use lain::federation::contracts::index::ContractIndex;
     use lain::federation::contracts::model::{ContractKey as MKey, ServiceName};
     let mut coverage_ledger = CoverageLedger::default();

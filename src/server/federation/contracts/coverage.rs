@@ -434,10 +434,7 @@ pub const LEDGER_FILE: &str = "coverage_ledger.json";
 /// is best-effort: a serialization or I/O failure is returned to the
 /// caller, which can choose to drop the ledger (the analyzer still
 /// ran; the cache is still usable) or fail closed.
-pub fn write_ledger(
-    path: &Path,
-    ledger: &CoverageLedger,
-) -> Result<(), crate::error::LainError> {
+pub fn write_ledger(path: &Path, ledger: &CoverageLedger) -> Result<(), crate::error::LainError> {
     let bytes = serde_json::to_vec_pretty(ledger)
         .map_err(|e| crate::error::LainError::Serialization(e.to_string()))?;
     let staging = path.with_extension("json.staging");
@@ -498,7 +495,7 @@ pub fn run_all_with_coverage(
     let mut ledger = RepoCoverage {
         cache_key: cache_key.clone(),
         ..Default::default()
-        };
+    };
     let records = classify_workspace(root);
     let mut languages_present: BTreeSet<String> = BTreeSet::new();
     for r in &records {
@@ -751,11 +748,7 @@ impl CoverageLedger {
     /// set of repo ids whose lens the verifier is checking; the live
     /// `analyzer_version` is what `CacheKey.analyzer_version` must
     /// match.
-    pub fn scope_is_complete(
-        &self,
-        in_scope: &[String],
-        current_analyzer_version: &str,
-    ) -> bool {
+    pub fn scope_is_complete(&self, in_scope: &[String], current_analyzer_version: &str) -> bool {
         let capable = consumer_capable_langs();
         for repo in in_scope {
             let Some(cover) = self.by_repo.get(repo) else {
@@ -814,12 +807,18 @@ mod tests {
     #[test]
     fn is_complete_covered_lang_is_complete() {
         let mut cover = empty_cover("orders", "abc", "0.9.0+c3");
-        cover.languages_present.insert(lang_label(Lang::Python).to_string());
-        let mut python_ledger = SensorLedger::default();
-        python_ledger.files_analyzed = 3;
+        cover
+            .languages_present
+            .insert(lang_label(Lang::Python).to_string());
+        let python_ledger = SensorLedger {
+            files_analyzed: 3,
+            ..Default::default()
+        };
         let mut sensor_ledger = BTreeMap::new();
         sensor_ledger.insert(lang_label(Lang::Python).to_string(), python_ledger);
-        cover.ledger.insert("http_sensor".to_string(), sensor_ledger);
+        cover
+            .ledger
+            .insert("http_sensor".to_string(), sensor_ledger);
         assert!(cover.is_complete(&consumer_capable_langs(), "0.9.0+c3"));
     }
 
@@ -828,10 +827,17 @@ mod tests {
     #[test]
     fn is_complete_uncovored_lang_is_incomplete() {
         let mut cover = empty_cover("orders", "abc", "0.9.0+c3");
-        cover.languages_present.insert(lang_label(Lang::Python).to_string());
+        cover
+            .languages_present
+            .insert(lang_label(Lang::Python).to_string());
         let mut sensor_ledger = BTreeMap::new();
-        sensor_ledger.insert(lang_label(Lang::Python).to_string(), SensorLedger::default());
-        cover.ledger.insert("http_sensor".to_string(), sensor_ledger);
+        sensor_ledger.insert(
+            lang_label(Lang::Python).to_string(),
+            SensorLedger::default(),
+        );
+        cover
+            .ledger
+            .insert("http_sensor".to_string(), sensor_ledger);
         assert!(!cover.is_complete(&consumer_capable_langs(), "0.9.0+c3"));
     }
 
@@ -840,13 +846,17 @@ mod tests {
     #[test]
     fn is_complete_sensor_error_blocks_complete() {
         let mut cover = empty_cover("orders", "abc", "0.9.0+c3");
-        let mut py = SensorLedger::default();
-        py.files_analyzed = 2;
-        py.error = Some("boom".into());
+        let py = SensorLedger {
+            files_analyzed: 2,
+            error: Some("boom".into()),
+            ..Default::default()
+        };
         let mut sl = BTreeMap::new();
         sl.insert(lang_label(Lang::Python).to_string(), py);
         cover.ledger.insert("http_sensor".to_string(), sl);
-        cover.languages_present.insert(lang_label(Lang::Python).to_string());
+        cover
+            .languages_present
+            .insert(lang_label(Lang::Python).to_string());
         assert!(!cover.is_complete(&consumer_capable_langs(), "0.9.0+c3"));
     }
 
@@ -863,7 +873,9 @@ mod tests {
         let mut sl = BTreeMap::new();
         sl.insert(lang_label(Lang::Python).to_string(), py);
         cover.ledger.insert("http_sensor".to_string(), sl);
-        cover.languages_present.insert(lang_label(Lang::Python).to_string());
+        cover
+            .languages_present
+            .insert(lang_label(Lang::Python).to_string());
         assert!(!cover.is_complete(&consumer_capable_langs(), "0.9.0+c3"));
     }
 
@@ -872,10 +884,7 @@ mod tests {
     #[test]
     fn scope_is_complete_missing_repo_is_incomplete() {
         let mut ledger = CoverageLedger::default();
-        ledger.insert(
-            "orders".into(),
-            empty_cover("orders", "abc", "0.9.0+c3"),
-        );
+        ledger.insert("orders".into(), empty_cover("orders", "abc", "0.9.0+c3"));
         assert!(!ledger.scope_is_complete(&["orders".into(), "billing".into()], "0.9.0+c3"));
     }
 
@@ -955,11 +964,8 @@ mod tests {
         let db_path = dir.path().join("db.bin");
         let graph = GraphDatabase::new(&db_path).unwrap();
         let ns = RepoNamespace::for_test();
-        let key = crate::federation::contracts::index_cache::CacheKey::new(
-            "orders",
-            "abc",
-            "0.9.0+c3",
-        );
+        let key =
+            crate::federation::contracts::index_cache::CacheKey::new("orders", "abc", "0.9.0+c3");
         let (_counts, cover) =
             run_all_with_coverage(&graph, dir.path(), &ns, &repo_id_for_test(), &key);
         assert_eq!(cover.cache_key, key);
@@ -978,11 +984,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("coverage_ledger.json");
         let mut ledger = CoverageLedger::default();
-        let key = crate::federation::contracts::index_cache::CacheKey::new(
-            "orders",
-            "abc",
-            "0.9.0+c3",
-        );
+        let key =
+            crate::federation::contracts::index_cache::CacheKey::new("orders", "abc", "0.9.0+c3");
         ledger.insert(
             "orders".into(),
             RepoCoverage {
@@ -992,7 +995,10 @@ mod tests {
         );
         write_ledger(&path, &ledger).expect("write");
         let loaded = read_ledger(&path).expect("read").expect("ledger present");
-        assert_eq!(loaded.by_repo.get("orders").map(|c| c.cache_key.clone()), Some(key));
+        assert_eq!(
+            loaded.by_repo.get("orders").map(|c| c.cache_key.clone()),
+            Some(key)
+        );
     }
 
     /// `manifest_matches_analyzer_version` returns true on a matching
