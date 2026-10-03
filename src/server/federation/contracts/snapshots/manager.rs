@@ -1200,15 +1200,43 @@ impl SnapshotManager {
             // `len() < cap` check and the `insert` call so a
             // concurrent installer's `insert` lands inside the
             // same critical section.
-            let evicted = self.try_evict_one_lru_unheld();
-            let mut resident = self.resident.lock();
-            if resident.len() < cap || evicted {
-                resident.insert(fed.snapshot_id.clone(), fed.clone());
-                return Ok(());
+            //
+            // S1 fix (TLA+ InstallResidentEviction.tla): the
+            // lock must be acquired FIRST and the cap check run
+            // BEFORE the eviction attempt. The pre-S1 ordering
+            // (`try_evict_one_lru_unheld` then cap check) lost
+            // a cache hit per install when the resident had
+            // space — an LRU entry was evicted unnecessarily,
+            // bringing `len()` down by one, only for the
+            // subsequent `insert` to bring it back up. The
+            // TLA+ trace shows
+            // `evictions_during_install = 1 ∧ resident_before = 0 < Cap = 3`.
+            //
+            // Post-S1: only enter the eviction path when
+            // `len() == cap`. When `len() < cap`, the new fed
+            // is inserted immediately with no eviction.
+            {
+                let mut resident = self.resident.lock();
+                if resident.len() < cap {
+                    resident.insert(fed.snapshot_id.clone(), fed.clone());
+                    return Ok(());
+                }
+            }
+            // Resident is full (`len() == cap`). Try to evict
+            // an unheld LRU entry; re-check `len()` after the
+            // eviction under the same lock so a concurrent
+            // install / release cannot push us into a torn
+            // state. The combined-lock invariant from
+            // SnapshotResidency.tla variant (c) is preserved.
+            if self.try_evict_one_lru_unheld() {
+                let mut resident = self.resident.lock();
+                if resident.len() < cap {
+                    resident.insert(fed.snapshot_id.clone(), fed.clone());
+                    return Ok(());
+                }
             }
             // Cap is full and every entry is held. Wait for a
             // release or for `wait_ms` to elapse.
-            drop(resident);
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Err(InstallBusy {
@@ -2459,6 +2487,67 @@ repos:
             mgr.resident.lock().len(),
             2,
             "|resident| == cap after the install"
+        );
+    }
+
+    /// Regression for TLA+ InstallResidentEviction.tla (variant
+    /// (a) → (b)). Pre-fix, `install_resident` called
+    /// `try_evict_one_lru_unheld()` BEFORE the cap check; when
+    /// the resident had space (e.g. `len() = 1 < cap = 3`), an
+    /// unheld LRU entry was evicted, `len()` dropped to 0, the
+    /// subsequent `insert` brought it back to 1. Net effect: a
+    /// cache hit was destroyed per install. The TLA+ trace
+    /// shows `evictions_during_install = 1 ∧ resident_before = 0 < Cap = 3`.
+    ///
+    /// Post-fix (variant (b)): the resident lock is acquired
+    /// first, the cap check runs, and eviction only fires when
+    /// `len() == cap`. With `len() < cap` the new fed is
+    /// inserted immediately, no eviction occurs, and the
+    /// existing LRU entry survives the install.
+    #[test]
+    fn install_resident_does_not_evict_when_cap_has_space() {
+        use std::path::PathBuf;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = IndexCache::new(dir.path());
+        let mgr = Arc::new(SnapshotManager::with_cap(dir.path(), cache, 3));
+        let lru = Arc::new(SnapshotFederation {
+            snapshot_id: "snap_lru".into(),
+            backend: Arc::new(PetgraphBackend::ephemeral(dir.path())),
+            holds: Mutex::new(Vec::new()),
+            residency: Arc::new(ResidencyTracker::new()),
+            contract_index: parking_lot::RwLock::new(None),
+            last_used_unix: Mutex::new(0),
+            held: AtomicUsize::new(0),
+            data_dir: PathBuf::from("."),
+        });
+        mgr.resident.lock().insert("snap_lru".into(), lru.clone());
+        let new_fed = Arc::new(SnapshotFederation {
+            snapshot_id: "snap_new".into(),
+            backend: Arc::new(PetgraphBackend::ephemeral(dir.path())),
+            holds: Mutex::new(Vec::new()),
+            residency: Arc::new(ResidencyTracker::new()),
+            contract_index: parking_lot::RwLock::new(None),
+            last_used_unix: Mutex::new(now_unix()),
+            held: AtomicUsize::new(0),
+            data_dir: PathBuf::from("."),
+        });
+        mgr.install_resident(new_fed, 1_000)
+            .expect("install succeeds (cap has space)");
+        let resident = mgr.resident.lock();
+        assert!(
+            resident.contains_key("snap_lru"),
+            "unheld LRU entry survives the install when cap has space \
+             (TLA+ InstallResidentEviction.tla variant (b) — Fix S1)"
+        );
+        assert!(
+            resident.contains_key("snap_new"),
+            "new entry installs in the free slot"
+        );
+        assert_eq!(
+            resident.len(),
+            2,
+            "len() == 2 after the install (1 pre-existing + 1 new), \
+             not 1 (which would mean the LRU was evicted unnecessarily)"
         );
     }
 
