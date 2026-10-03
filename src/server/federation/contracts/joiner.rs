@@ -142,11 +142,32 @@ impl ContractJoiner {
                 Ok(g) => g,
                 Err(_) => continue,
             };
-            // Rule 1 — wrapper candidates with no matching
-            // http_clients entry are discarded (rule 1 of the
-            // §7.3 table). Rule 2 (confirmed bindings) is
-            // applied in step 6 below.
+            // Rule 1 — Phase A rule-1 fix. Wrapper candidates with
+            // no matching `http_clients` entry are NOT silently
+            // discarded (the pre-Phase-A bug). Instead, they are
+            // recorded as `Unresolved { reason: WrapperUnconfigured }`
+            // so the coverage ledger's `unresolved` bucket counts
+            // them and `evaluate()` can downgrade `NoKnownImpact` on
+            // a `CouldMatch` verdict (§9.5, §9.7). Rule 2
+            // (confirmed bindings) is applied in step 6 below.
             if is_wrapper_candidate(consumer) && !http_clients.matches(&consumer.via) {
+                let own_service_for_unresolved = assignments
+                    .get(call_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| implicit_service(node));
+                consumers.insert(
+                    call_id.clone(),
+                    ConsumerResolution {
+                        call_id: call_id.clone(),
+                        service: own_service_for_unresolved,
+                        target: Some(ConsumerTarget::Unresolved {
+                            reason: UnresolvedReason::WrapperUnconfigured,
+                            target_service: None,
+                        }),
+                        bound_endpoints: Vec::new(),
+                        reads_complete: consumer.reads_complete,
+                    },
+                );
                 continue;
             }
             // The remaining rows (3, 4, 5, 6) are checked in

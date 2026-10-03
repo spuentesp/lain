@@ -596,6 +596,7 @@ fn build_unresolved_candidates(idx: &ContractIndex, _info: &ServiceInfo) -> Vec<
                     UnresolvedReason::NoRouteInService => "no_route_in_service",
                     UnresolvedReason::NoMatch => "no_match",
                     UnresolvedReason::Unnormalized => "no_route_in_service",
+                    UnresolvedReason::WrapperUnconfigured => "wrapper_unconfigured",
                 },
                 "target_service": r.service.0,
             }));

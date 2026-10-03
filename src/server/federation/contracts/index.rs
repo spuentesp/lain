@@ -144,6 +144,12 @@ pub enum UnresolvedReason {
     NoMatch,
     /// Rule 5: template was dynamic.
     Unnormalized,
+    /// Phase A rule-1 fix: a `CallVia::Receiver` with no matching
+    /// `http_clients` entry. Pre-Phase-A, these were silently dropped
+    /// (a soundness bug — the consumer was neither bound nor
+    /// recorded). Phase A records them as Unresolved so the
+    /// coverage ledger and the verdict downgrade see them.
+    WrapperUnconfigured,
 }
 
 /// Field read resolution (§7.5). `bound_fields` carries the joined

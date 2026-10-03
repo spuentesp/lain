@@ -261,7 +261,13 @@ fn order_independence_two_projection_orders_match() {
 // ─── §7.3 resolution table ─────────────────────────────────────────
 
 #[test]
-fn rule_1_discards_wrapper_candidate_with_no_http_client_match() {
+fn rule_1_records_unresolved_wrapper_candidate_with_no_http_client_match() {
+    // Phase A rule-1 fix: a wrapper candidate (`CallVia::Receiver`)
+    // with no matching `http_clients` entry is recorded as
+    // `Unresolved { reason: WrapperUnconfigured }` instead of being
+    // silently dropped. The consumer still has no `binds` edge (no
+    // route matches), but the consumer is in the index so the
+    // coverage ledger and `evaluate()` can see it.
     let p = provider_node(
         "orders",
         "src/orders.py",
@@ -286,15 +292,33 @@ fn rule_1_discards_wrapper_candidate_with_no_http_client_match() {
         },
     );
     let cfg = default_config(); // empty http_clients
-    let out = ContractJoiner::run(&[p, c], &[], &cfg);
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
     assert!(
         out.binds.is_empty(),
-        "rule 1: Receiver with no matching http_clients call is discarded"
+        "rule 1: Receiver with no matching http_clients call still has no bind"
     );
-    assert!(
-        out.index.consumers.is_empty(),
-        "rule 1: discarded calls do not appear in consumers"
+    assert_eq!(
+        out.index.consumers.len(),
+        1,
+        "rule 1 fix: the consumer is recorded as Unresolved"
     );
+    let call_id = GlobalId::parse(&c.id).unwrap();
+    let resolution = out
+        .index
+        .consumers
+        .get(&call_id)
+        .expect("consumer present");
+    match &resolution.target {
+        Some(crate::federation::contracts::index::ConsumerTarget::Unresolved {
+            reason,
+            ..
+        }) => assert_eq!(
+            *reason,
+            UnresolvedReason::WrapperUnconfigured,
+            "rule 1 fix: the unresolved reason is WrapperUnconfigured"
+        ),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
 }
 
 #[test]

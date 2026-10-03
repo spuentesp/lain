@@ -1045,6 +1045,7 @@ fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         UnresolvedReason::NoRouteInService => "no_route_in_service",
         UnresolvedReason::NoMatch => "no_match",
         UnresolvedReason::Unnormalized => "no_route_in_service",
+        UnresolvedReason::WrapperUnconfigured => "wrapper_unconfigured",
     }
 }
 
@@ -1404,6 +1405,10 @@ mod tests {
         assert_eq!(
             unresolved_reason_label(UnresolvedReason::Unnormalized),
             "no_route_in_service"
+        );
+        assert_eq!(
+            unresolved_reason_label(UnresolvedReason::WrapperUnconfigured),
+            "wrapper_unconfigured"
         );
     }
 
