@@ -292,6 +292,7 @@ fn rule_1_records_unresolved_wrapper_candidate_with_no_http_client_match() {
             Some("/api/orders/42"),
         ),
         CallVia::Receiver {
+            base: None,
             expr: "ordersClient".into(),
             fn_name: "get".into(),
         },
@@ -299,12 +300,13 @@ fn rule_1_records_unresolved_wrapper_candidate_with_no_http_client_match() {
     let mut cfg = default_config();
     // http_clients is non-empty but its pattern does not match
     // the call's receiver.
-    cfg.http_clients.push(crate::federation::contracts::config::HttpClientDecl {
-        call: "differentClient.{method}".into(),
-        service: "orders".into(),
-        method: None,
-        path_arg: None,
-    });
+    cfg.http_clients
+        .push(crate::federation::contracts::config::HttpClientDecl {
+            call: "differentClient.{method}".into(),
+            service: "orders".into(),
+            method: None,
+            path_arg: None,
+        });
     let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
     assert!(
         out.binds.is_empty(),
@@ -316,15 +318,10 @@ fn rule_1_records_unresolved_wrapper_candidate_with_no_http_client_match() {
         "rule 1 fix: the consumer is recorded as Unresolved"
     );
     let call_id = GlobalId::parse(&c.id).unwrap();
-    let resolution = out
-        .index
-        .consumers
-        .get(&call_id)
-        .expect("consumer present");
+    let resolution = out.index.consumers.get(&call_id).expect("consumer present");
     match &resolution.target {
         Some(crate::federation::contracts::index::ConsumerTarget::Unresolved {
-            reason,
-            ..
+            reason, ..
         }) => assert_eq!(
             *reason,
             UnresolvedReason::WrapperUnconfigured,
@@ -360,6 +357,7 @@ fn rule_1_with_empty_http_clients_silently_drops() {
             Some("/api/orders/42"),
         ),
         CallVia::Receiver {
+            base: None,
             expr: "ordersClient".into(),
             fn_name: "get".into(),
         },
@@ -394,6 +392,7 @@ fn rule_3_target_service_via_http_clients_binds_with_static_confidence() {
             Some("/api/orders/42"),
         ),
         CallVia::Receiver {
+            base: None,
             expr: "ordersClient".into(),
             fn_name: "get".into(),
         },
@@ -1292,6 +1291,7 @@ fn rule_3_operation_id_fallback_binds_when_url_no_match() {
             Some("/api/v1/orders/42"),
         ),
         CallVia::Receiver {
+            base: None,
             expr: "client.orders".into(),
             fn_name: "getOrderById".into(),
         },
@@ -1406,6 +1406,7 @@ fn rule_3_operation_id_fallback_no_match_stays_unresolved() {
             Some("/api/v1/orders/42"),
         ),
         CallVia::Receiver {
+            base: None,
             expr: "client.orders".into(),
             fn_name: "someUnknown".into(),
         },
@@ -1458,6 +1459,7 @@ fn rule_3_url_match_still_wins_over_operation_id_fallback() {
             Some("/api/orders/42"),
         ),
         CallVia::Receiver {
+            base: None,
             expr: "client.orders".into(),
             fn_name: "getOrderById".into(),
         },
@@ -1500,6 +1502,7 @@ fn rule_3_operation_id_fallback_overrides_prefix_stripped_url_match() {
             Some("/api/orders/42"),
         ),
         CallVia::Receiver {
+            base: None,
             expr: "client.orders".into(),
             fn_name: "getOrderById".into(),
         },

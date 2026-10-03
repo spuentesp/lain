@@ -191,6 +191,7 @@ fn call_via_variants_roundtrip() {
     let recv = CallVia::Receiver {
         expr: "ordersClient".to_string(),
         fn_name: "get".to_string(),
+        base: None,
     };
     let bytes = bincode::serde::encode_to_vec(&recv, bincode::config::legacy()).unwrap();
     let (decoded, _): (CallVia, usize) =

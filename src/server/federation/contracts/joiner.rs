@@ -16,6 +16,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::federation::contracts::clients::{
+    compose_and_normalize, ClientDef, ClientRegistry, UrlPart as RegistryUrlPart,
+};
 use crate::federation::contracts::config::{
     ConfirmedBinding, ContractFederationConfig, RoutePrefix as CfgRoutePrefix, ServiceDecl,
 };
@@ -28,14 +31,60 @@ use crate::federation::contracts::index::{
     UnresolvedReason,
 };
 use crate::federation::contracts::model::{
-    CallVia, ContractFact, ContractKey, Direction, HostPart, HttpMethod, MethodSpec, ProviderFact,
-    ProviderOrigin, ServiceName, TopicConsumerFact,
+    CallVia, ConsumerFact, ContractFact, ContractKey, Direction, HostPart, HttpMethod, MethodSpec,
+    NormalizedUrl, ProviderFact, ProviderOrigin, ServiceName, TopicConsumerFact,
 };
 use crate::federation::contracts::route_match::{
     compare_specificity, match_route, MatchDetail, MatchOutcome,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{EdgeProvenance, GraphEdge, GraphNode, RouteMatch};
+
+/// Spec §5.3 — I6 total-order resolution precedence, condensed as a
+/// Rust enum for the joiner to surface at the per-call layer.
+///
+/// The full order (highest first):
+///
+/// 1. Confirmed binding (apply_confirmed_binding, §7.6).
+/// 2. Code-derived base + host/env (Phase B [`ClientRegistry`] —
+///    composes `base ++ call_path`).
+/// 3. `http_clients` config pattern (§7.3 rule 3 first branch).
+/// 4. operationId match (Heuristic 0.9) — falls back when URL
+///    doesn't match a known target service.
+/// 5. Unbound-host heuristic (0.6) / ambiguous (0.3) (§7.3 rule 6).
+/// 6. Unresolved candidate (reason recorded).
+///
+/// **Total-order property (I6):** once a tier binds, no lower tier
+/// can override the bind. This is the joiner's central invariant —
+/// see `resolve_consumer_to_service` below for the function that
+/// walks the tiers in spec order and returns at the first hit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Resolution {
+    /// Tier 1 (Confirmed) or tier 2/3 with a known target service +
+    /// a route that matches. Carries the originating `ServiceName`
+    /// and the matching `EndpointId` (None for Confirmed bindings
+    /// that don't go through the route table).
+    Endpoint {
+        service: ServiceName,
+        endpoint: EndpointId,
+        provenance: EdgeProvenance,
+        confidence: f32,
+        route_match: RouteMatch,
+        stripped_prefix: Option<String>,
+    },
+    /// Tier 4 (rule 4 in §7.3): a `HostPart::Literal` that matches
+    /// no service and isn't on the exempt list. Recorded in
+    /// `external`; no `Binds` edge emitted.
+    External { host: String },
+    /// Tier 5/6: no bindable target — `Unresolved` with a reason.
+    /// `target_service` carries the known service when rule 3 found
+    /// one but rule 4 couldn't match a route (§7.3 row 3's
+    /// `NoRouteInService`).
+    Unresolved {
+        reason: UnresolvedReason,
+        target_service: Option<ServiceName>,
+    },
+}
 
 /// The output of a `ContractJoiner::run` call. The federation-level
 /// orchestrator (`FederatedIndex::rejoin_contracts`) diffs the
@@ -95,6 +144,23 @@ impl ContractJoiner {
         edges: &[GraphEdge],
         config: &ContractFederationConfig,
     ) -> JoinOutput {
+        Self::run_with_registry(nodes, edges, config, &ClientRegistry::new())
+    }
+
+    /// Phase B (spec §5.1 / §5.3 tier 2): same as [`run`] but the
+    /// caller passes the per-repo client registry the cross-file
+    /// pre-pass built. An empty registry is equivalent to [`run`]
+    /// (no tier-2 resolution). The orchestrator
+    /// (`FederatedIndex::rejoin_contracts`) is the primary caller;
+    /// the property tests in `tests/property_join_pipeline.rs` and
+    /// the acceptance tests in `tests/wrapper_resolution.rs` use
+    /// this surface directly.
+    pub fn run_with_registry(
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+        config: &ContractFederationConfig,
+        registry: &ClientRegistry,
+    ) -> JoinOutput {
         // Step 1 — assign services to every node (§4.1). Longest
         // matching prefix wins; implicit service = repo id.
         let assignments = assign_services(nodes, config);
@@ -106,6 +172,13 @@ impl ContractJoiner {
 
         // Step 3 — filter wrapper candidates (§7.3 rule 1).
         let http_clients = compile_http_clients(config);
+
+        // Phase B (spec §5.3 tier 2): the cross-file client registry
+        // the per-repo pre-pass built. The orchestrator passes it
+        // through `run_with_registry`; `run` defaults to empty for
+        // back-compat (every pre-Phase B test still passes an empty
+        // registry, which preserves the §7.3 row order).
+        let client_registry = registry;
 
         // Step 4 — resolve consumers (§7.3 table).
         let mut consumers: BTreeMap<GlobalId, ConsumerResolution> = BTreeMap::new();
@@ -152,17 +225,23 @@ impl ContractJoiner {
             // (confirmed bindings) is applied in step 6 below.
             //
             // When `http_clients` is empty (no operator config), the
-            // pre-Phase-A `continue` is preserved: an operator with
-            // no wrapper config has no expectation that wrappers
-            // resolve, and dropping them keeps the diff goldens
-            // stable. Once the operator adds even one entry, the
-            // contract is "the rest of the wrappers should
-            // resolve", and the emission fires.
+            // pre-Phase-A `continue` is preserved UNLESS the per-repo
+            // client registry (`client_registry`, Phase B §5.1) has
+            // a `ClientDef` for this receiver — in that case the
+            // joiner's tier-2 path (spec §5.3) has a known base and
+            // the operator's expectation is that the receiver
+            // resolves. The registry is the cross-file client
+            // pre-pass output; the joiner consults it before
+            // dropping.
             if is_wrapper_candidate(consumer) {
-                if http_clients.is_empty() {
+                let registry_has_def = matches!(
+                    consumer.via,
+                    CallVia::Receiver { ref expr, .. } if registry_lookup_name(client_registry, expr).is_some()
+                );
+                if http_clients.is_empty() && !registry_has_def {
                     continue;
                 }
-                if !http_clients.matches(&consumer.via) {
+                if !http_clients.matches(&consumer.via) && !registry_has_def {
                     let own_service_for_unresolved = assignments
                         .get(call_id.as_str())
                         .cloned()
@@ -203,6 +282,7 @@ impl ContractJoiner {
                 &endpoint_table,
                 &mut binds,
                 &mut external,
+                client_registry,
             );
             // Rule 5 records the consumer in the
             // `unnormalized` index. The verdict lives on the
@@ -491,11 +571,11 @@ fn endpoint_template_for(
 }
 
 #[derive(Debug, Clone)]
-struct EndpointProviderRecord {
-    id: GlobalId,
-    fact: Option<ContractFact>,
-    template: String,
-    method: HttpMethod,
+pub struct EndpointProviderRecord {
+    pub id: GlobalId,
+    pub fact: Option<ContractFact>,
+    pub template: String,
+    pub method: HttpMethod,
 }
 
 /// Step 1: assign a service to every node. The longest matching
@@ -664,9 +744,52 @@ fn is_wrapper_candidate(consumer: &crate::federation::contracts::model::Consumer
     matches!(consumer.via, CallVia::Receiver { .. })
 }
 
+/// Phase B (spec §5.1 + §5.3 tier 2): does the registry carry any
+/// `ClientDef` whose `name == query_name`? A hit means the joiner
+/// can compose `base ++ call_path` for this receiver — the
+/// rule-1 gate must NOT drop the call. Cross-file resolution lives
+/// on `ClientDef::resolve_cross_file`; this helper is the bare-name
+/// check the gate needs.
+fn registry_lookup_name<'a>(
+    registry: &'a ClientRegistry,
+    query_name: &str,
+) -> Option<&'a ClientDef> {
+    registry
+        .iter()
+        .find(|(_, name, _)| *name == query_name)
+        .map(|(_, _, def)| def)
+}
+
 #[derive(Debug, Clone, Default)]
-struct CompiledHttpClients {
+pub struct CompiledHttpClients {
     entries: Vec<CompiledHttpClient>,
+}
+
+impl CompiledHttpClients {
+    /// Public constructor for tests / property-test harnesses.
+    /// Builds a `CompiledHttpClients` from a slice of
+    /// [`HttpClientDecl`] without going through the full
+    /// `ContractFederationConfig`. Production callers use
+    /// [`compile_http_clients`] instead.
+    ///
+    /// This is the only path that builds a `CompiledHttpClients`
+    /// without a `ContractFederationConfig`; the property tests in
+    /// `tests/property_join_pipeline.rs` exercise the joiner's I2 /
+    /// I5 / I6 total-order invariants without an orchestrator.
+    pub fn compile_for_tests(
+        decls: &[crate::federation::contracts::config::HttpClientDecl],
+    ) -> Self {
+        let entries = decls
+            .iter()
+            .map(|e| CompiledHttpClient {
+                pattern: e.call.clone(),
+                service: ServiceName(e.service.clone()),
+                method: e.method.as_ref().and_then(|m| parse_method(m)),
+                path_arg: e.path_arg,
+            })
+            .collect();
+        Self { entries }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -680,7 +803,7 @@ struct CompiledHttpClient {
 
 impl CompiledHttpClients {
     fn matches(&self, via: &CallVia) -> bool {
-        let CallVia::Receiver { expr, fn_name } = via else {
+        let CallVia::Receiver { expr, fn_name, .. } = via else {
             return false;
         };
         // The §7.3 / §7.1 grammar is "the call's `expr.fn_name`
@@ -832,6 +955,67 @@ fn resolve_topic_consumer(
 /// Resolve one consumer. Returns a `ConsumerResolution` and appends
 /// any `Binds` edges it produced. The 6-row §7.3 table runs in
 /// order; the first match wins.
+///
+/// Spec §5.3 / I6 total-order precedence. The 6 tiers run in this
+/// order; once a tier binds, no lower tier can override:
+///
+/// 1. Confirmed binding — handled separately by
+///    `apply_confirmed_binding` (§7.6) before this function is
+///    called.
+/// 2. Code-derived base + host/env (Phase B [`ClientRegistry`] —
+///    composes `base ++ call_path` via [`compose_and_normalize`]).
+/// 3. `http_clients` config pattern (rule 3 first branch in §7.3).
+/// 4. operationId match (Heuristic 0.9, PR 18 — runs inside
+///    `match_one_service` after a URL match attempt fails).
+/// 5. Unbound-host heuristic (0.6) / ambiguous (0.3) (rule 6 in
+///    §7.3).
+/// 6. Unresolved candidate (rule 5 in §7.3 when template is
+///    `None`; otherwise the reason recorded on the verdict).
+///
+/// `client_registry` is the Phase B wrapper-base registry. An
+/// empty registry skips tier 2 entirely (every existing pre-Phase B
+/// test passes an empty registry, preserving the §7.3 row order).
+///
+/// Public alias: [`resolve_consumer_to_service`] (same call shape + same I6
+/// total order, exposed at the joiner module's surface so the property tests
+/// in `tests/property/join_pipeline.rs` can pin I2 / I5 / I6 without
+/// round-tripping through the full `ContractJoiner::run` orchestrator).
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_consumer_to_service(
+    consumer: &ConsumerFact,
+    own_service: &ServiceName,
+    config: &ContractFederationConfig,
+    endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
+    http_clients: &CompiledHttpClients,
+    external: &mut BTreeMap<String, u32>,
+    binds: &mut Vec<BindsEdge>,
+    client_registry: &ClientRegistry,
+) -> ConsumerResolution {
+    // The orchestrator's `GlobalId` isn't observable from a
+    // single-call surface — the property tests construct synthetic
+    // ids. We mint a deterministic one from the consumer's
+    // `url_expr` (already canonicalized by the sensor) so the
+    // resolution surfaces the same `call_id` on every run (I4).
+    let synthetic = GlobalId::from_string(&format!(
+        "synthetic:HttpClientCall:synthetic:{}",
+        consumer.url_expr
+    ));
+    resolve_consumer(
+        &synthetic,
+        consumer,
+        own_service,
+        config,
+        http_clients,
+        endpoints,
+        binds,
+        external,
+        client_registry,
+    )
+}
+///
+/// `client_registry` is the Phase B wrapper-base registry. An
+/// empty registry skips tier 2 entirely (every existing pre-Phase B
+/// test passes an empty registry, preserving the §7.3 row order).
 #[allow(clippy::too_many_arguments)]
 fn resolve_consumer(
     call_id: &GlobalId,
@@ -842,17 +1026,37 @@ fn resolve_consumer(
     endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
     binds: &mut Vec<BindsEdge>,
     external: &mut BTreeMap<String, u32>,
+    client_registry: &ClientRegistry,
 ) -> ConsumerResolution {
     let target_template = consumer.url.template.clone();
     let target_method = consumer.method.clone();
 
-    // Rule 3 — target service known. Check http_clients first,
-    // then env, then hosts. Fires even when `template = None`:
-    // a known target with a dynamic path becomes
-    // `unresolved no_route_in_service` (rule 3's verdict),
-    // not `unnormalized` (rule 5). Per §7.3 the first matching
-    // row decides; rule 5 only fires when rule 3 found no
-    // target service.
+    // Tier 2 — code-derived base + host/env (Phase B). When the
+    // call's `via` resolves to a `ClientDef` in the registry,
+    // compose the base with the call's URL parts and use the
+    // composed target's host as the resolution axis. Tier 2 beats
+    // tiers 3–6 because the operator has declared the wrapper's
+    // base explicitly (the spec §5.3 acceptance: "with a known
+    // base → binds to the Orders service with provenance naming
+    // the client").
+    if let Some(svc) = target_service_via_registry(consumer, client_registry, config) {
+        let resolution = match_one_service(
+            call_id,
+            consumer,
+            own_service,
+            svc,
+            &target_method,
+            target_template.as_deref(),
+            true,
+            endpoints,
+            binds,
+        );
+        return resolution;
+    }
+
+    // Tier 3 — http_clients config pattern (rule 3 first branch in
+    // §7.3). Fires before env/hosts because a wrapper pattern is
+    // more specific than a host or env-name match.
     if let Some(svc) = target_service_from_http_client(consumer, http_clients) {
         let resolution = match_one_service(
             call_id,
@@ -1056,7 +1260,7 @@ fn target_service_from_http_client(
     consumer: &crate::federation::contracts::model::ConsumerFact,
     http_clients: &CompiledHttpClients,
 ) -> Option<ServiceName> {
-    let CallVia::Receiver { expr, fn_name } = &consumer.via else {
+    let CallVia::Receiver { expr, fn_name, .. } = &consumer.via else {
         return None;
     };
     let combined = format!("{expr}.{fn_name}");
@@ -1069,6 +1273,124 @@ fn target_service_from_http_client(
         }
     }
     None
+}
+
+/// Spec §5.3 tier 2 — code-derived base + host/env (Phase B).
+/// When the call's `via` resolves to a `ClientDef` in the
+/// registry, compose `base ++ call_path` and resolve the
+/// composed target's host through the same `env` / `hosts`
+/// matching tier 3 uses. Returns the matching `ServiceName` or
+/// `None`.
+///
+/// The composed URL's `host` is what `target_service_from_env` and
+/// `target_service_from_hosts` already know how to read — by
+/// reusing them we keep the I6 total-order guarantee: tier 2 is
+/// "we know the wrapper's base" plus "the base resolves to a
+/// known service", not a separate heap of logic.
+///
+/// A consumer whose `via` is `Library { … }` (a known library
+/// without registry plumbing) doesn't reach this function: tier 2
+/// is a `Receiver`-only tier. Library calls fall through to
+/// tier 3+ unchanged.
+fn target_service_via_registry(
+    consumer: &crate::federation::contracts::model::ConsumerFact,
+    client_registry: &ClientRegistry,
+    config: &ContractFederationConfig,
+) -> Option<ServiceName> {
+    if client_registry.is_empty() {
+        return None;
+    }
+    let CallVia::Receiver { expr, fn_name, .. } = &consumer.via else {
+        return None;
+    };
+    // Look up the receiver in the registry by `(module, name)`. The
+    // module the joiner keys on is the consumer's enclosing file
+    // (the `path` on the underlying `GraphNode`); the spec's
+    // cross-file lookup walks one hop via `ClientDef::resolve_cross_file`.
+    // The caller passes the registry the per-repo pre-pass built;
+    // the joiner does not know which module owns the receiver
+    // without the caller telling it. We attempt the bare-name
+    // lookup first (the common case where `expr` is a module-level
+    // name), and otherwise return `None` so the precedence list
+    // continues at tier 3. A future orchestrator-side wiring can
+    // thread the call's `module` through; spec §5.3 acceptance
+    // pins the bare-name + cross-file case as the primary.
+    let _ = (expr, fn_name);
+    // Walk the registry for any `ClientDef` whose `name == expr`
+    // and that yields a non-empty `base`. This is the joiner's
+    // single-axis search: the registry keys on `(module, name)`
+    // but only `name` is observable from the call's `via.expr`.
+    // The orchestrator (FederatedIndex::rejoin_contracts) hands
+    // the joiner a per-call filter in a future PR; for now, the
+    // joiner iterates every `(module, name)` and returns the
+    // first `ServiceName` the composed URL's host resolves to.
+    for (_module, name, def) in client_registry.iter() {
+        if name != expr {
+            continue;
+        }
+        if def.base.is_empty() {
+            continue;
+        }
+        // Compose base ++ call_path. The call_path comes from the
+        // existing `consumer.url`; we re-derive its parts as a
+        // single-Literal (the template side) plus the host part.
+        let composed = compose_for_registry(consumer, def);
+        let host = composed.host.clone();
+        // Run the env-match helper on the composed host.
+        if let Some(svc) = service_from_host(&host, config) {
+            return Some(svc);
+        }
+    }
+    None
+}
+
+/// Compose `def.base ++ call.url` into a single `NormalizedUrl`.
+/// Helper for `target_service_via_registry` (spec §5.3 tier 2 +
+/// §5.2 "Final URL = `normalize(base_parts ++ call_path_parts)`").
+/// The call_path is the URL the consumer was emitted with; we
+/// render its template as a single `Literal` part and prepend
+/// `def.base`. The result feeds the existing `host_for` /
+/// `target_service_from_env` / `target_service_from_hosts`
+/// dispatch.
+fn compose_for_registry(
+    consumer: &crate::federation::contracts::model::ConsumerFact,
+    def: &ClientDef,
+) -> NormalizedUrl {
+    let template = consumer.url.template.clone().unwrap_or_default();
+    let path_part = if template.is_empty() {
+        RegistryUrlPart::Literal("/".into())
+    } else {
+        RegistryUrlPart::Literal(template)
+    };
+    compose_and_normalize(&[path_part], &def.base)
+}
+
+/// Spec §5.3 / I6 — service-from-host dispatch. Combines
+/// `target_service_from_env` (env-name match) and
+/// `target_service_from_hosts` (host-pattern match) into a single
+/// helper so tier 2 can call either without duplicating it.
+fn service_from_host(host: &HostPart, config: &ContractFederationConfig) -> Option<ServiceName> {
+    match host {
+        HostPart::Env(names) => {
+            for env in names {
+                for s in &config.services {
+                    if s.env.iter().any(|e| e == env) {
+                        return Some(ServiceName(s.name.clone()));
+                    }
+                }
+            }
+            None
+        }
+        HostPart::Literal(h) => {
+            for s in &config.services {
+                if s.hosts.iter().any(|pat| host_matches_pattern(pat, h)) {
+                    return Some(ServiceName(s.name.clone()));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn target_service_from_env(

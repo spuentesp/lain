@@ -44,6 +44,7 @@
 //!   sensor / normalizer / joiner output shape.
 
 pub mod changed_files;
+pub mod clients;
 pub mod config;
 pub mod coverage;
 pub mod diff;

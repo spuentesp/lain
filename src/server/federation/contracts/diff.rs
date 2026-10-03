@@ -1368,7 +1368,8 @@ pub struct Coverage {
     /// pre-Phase-A behaviour (no coverage downgrade). When the
     /// federation hydrates from the per-commit cache, every in-scope
     /// repo carries an entry.
-    pub repo_coverages: std::collections::BTreeMap<String, crate::federation::contracts::coverage::RepoCoverage>,
+    pub repo_coverages:
+        std::collections::BTreeMap<String, crate::federation::contracts::coverage::RepoCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1623,9 +1624,9 @@ pub fn evaluate(
                 service: change.service.clone(),
                 consumer: ConsumerKey {
                     caller: crate::federation::contracts::model::SymbolKey {
-                        repo: crate::federation::repo_id::RepoId::new("coverage").unwrap_or_else(|_| {
-                            crate::federation::repo_id::RepoId::new("unknown").unwrap()
-                        }),
+                        repo: crate::federation::repo_id::RepoId::new("coverage").unwrap_or_else(
+                            |_| crate::federation::repo_id::RepoId::new("unknown").unwrap(),
+                        ),
                         path: "<coverage>".into(),
                         container: None,
                         name: "<incomplete_repo>".into(),

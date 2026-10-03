@@ -99,10 +99,53 @@ pub struct ConsumerFact {
 /// How the call was made. `Library` is a known client
 /// (`requests`, `axios`, `httpx`, …). `Receiver` is a wrapper
 /// candidate that the joiner keeps only if `http_clients` matches.
+///
+/// Phase B (spec §5.2) extends `Receiver` with `base: Option<BaseOrigin>`
+/// so the joiner can carry the originating `ClientDef` as evidence
+/// on the resolved `Binds` edge. The field is `None` when the
+/// sensor could not identify a `ClientDef` (the no-cross-file
+/// resolution case, or the Python/TS case where `httpx.Client(...)`
+/// exists but is not in the registry).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CallVia {
-    Library { name: String },
-    Receiver { expr: String, fn_name: String },
+    Library {
+        name: String,
+    },
+    Receiver {
+        expr: String,
+        fn_name: String,
+        /// Phase B (spec §5.2): the originating `ClientDef` for the
+        /// wrapper, when the joiner resolved one. `Some(origin)` →
+        /// the joiner's evidence is a `Heuristic { detector: base_origin, ... }`
+        /// bind; `None` → the call stays a candidate or unresolves
+        /// the same way it would have pre-Phase-B.
+        #[serde(default)]
+        base: Option<BaseOrigin>,
+    },
+}
+
+/// Phase B (spec §5.2) — the wrapper client a `CallVia::Receiver`
+/// call originated from. Carried on the resolve so the user-facing
+/// `EdgeProvenance::Heuristic { detector }` names the `ClientDef`
+/// the joiner used. The `(client, module, site)` triple is enough
+/// for the operator to jump back to the source file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseOrigin {
+    pub client: String,
+    pub module: String,
+    pub site: ClientSite,
+}
+
+/// Source site a `ClientDef` was detected at (spec §5.1). The
+/// joiner carries this on `CallVia::Receiver::base` so the
+/// user-visible `EdgeProvenance::Heuristic { detector }` names the
+/// originating definition (spec §5.2 "evidence"). Lives in `model.rs`
+/// (not `clients.rs`) so `CallVia::Receiver.base` can reference it
+/// without a circular module dependency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientSite {
+    pub path: String,
+    pub line: u32,
 }
 
 /// The HTTP verb, optionally unknown. `Known` is used for literal

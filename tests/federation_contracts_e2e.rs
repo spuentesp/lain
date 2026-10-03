@@ -2617,6 +2617,7 @@ mod pr18_operation_id {
             via: CallVia::Receiver {
                 expr: "client.orders".into(),
                 fn_name: fn_name.into(),
+                base: None,
             },
             url_expr: "client.orders.getOrderById({id: 42})".to_string(),
             reads_complete: true,
