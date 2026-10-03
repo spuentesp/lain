@@ -539,44 +539,24 @@ fn extract_base_value(rest: &str, key: &str) -> Option<BaseValue> {
 /// `process.env["X"]` expression at the start of `s` (i.e. the
 /// `<key>:` is stripped and we look at the value). Returns
 /// `Some(name)` when the value matches one of those two shapes,
-/// `None` otherwise. The grammar matches
-/// `host_env_name` in the http_client_sensor.
+/// `None` otherwise. The grammar is delegated to the canonical
+/// [`crate::server::sensors::util::host_env_name`] (Phase B-D
+/// review §S10); the only deviation is the trailing-punctuation
+/// strip — `host_env_name` requires a clean shape but the value
+/// here often carries `,` / `}` / `)` / `;` from the enclosing
+/// object literal.
+#[allow(clippy::manual_pattern_char_comparison)]
 fn extract_process_env_name(s: &str) -> Option<&str> {
-    let t = s.trim();
-    if let Some(rest) = t.strip_prefix("process.env[") {
-        // The bracket form ends with `]` (possibly followed by
-        // trailing punctuation the object literal carries: `,`,
-        // `}`, `)`, `;`). Find the matching `]` and stop there.
-        let end = rest.find(']')?;
-        let inside = &rest[..end];
-        return Some(inner_bracket(inside));
+    // `host_env_name` requires a clean shape; the value here often
+    // carries `,` / `}` / `)` / `;` from the enclosing object
+    // literal. Strip those before delegating.
+    let t = s
+        .trim()
+        .trim_end_matches(|c: char| matches!(c, ',' | ')' | '}' | ';' | ' ' | '\t' | '\n' | ']'));
+    if !t.starts_with("process.env") {
+        return None;
     }
-    if let Some(rest) = t.strip_prefix("process.env.") {
-        // Allow trailing punctuation (`,` / `}` / `)` / `;` /
-        // whitespace) that the next character may carry.
-        let end = rest
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .unwrap_or(rest.len());
-        let name = &rest[..end];
-        if name.is_empty() {
-            return None;
-        }
-        return Some(name);
-    }
-    None
-}
-
-fn inner_bracket(s: &str) -> &str {
-    let t = s.trim();
-    let bytes = t.as_bytes();
-    if bytes.len() >= 2
-        && (bytes[0] == b'"' || bytes[0] == b'\'')
-        && bytes[0] == bytes[bytes.len() - 1]
-    {
-        &t[1..t.len() - 1]
-    } else {
-        t
-    }
+    crate::server::sensors::util::host_env_name(t)
 }
 
 // ─── Python ctor clients (spec §5.1) ─────────────────────────────────
@@ -706,8 +686,7 @@ mod tests {
             vec![UrlPart::Env(vec!["ORDERS_API_URL".to_string()])]
         );
 
-        let src2 =
-            "const billing = ky.create({prefixUrl: process.env[\"BILLING_URL\"]});\n";
+        let src2 = "const billing = ky.create({prefixUrl: process.env[\"BILLING_URL\"]});\n";
         let dets2 = detect_clients("c.ts", src2);
         assert_eq!(dets2.len(), 1);
         assert_eq!(dets2[0].library, ClientLibrary::Ky);

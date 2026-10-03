@@ -184,6 +184,34 @@ impl WalkedFile {
     }
 }
 
+/// Extensions the route-shaped sensors (http, entry points) scan.
+pub const SOURCE_EXTS: &[&str] = &[
+    "rs", "py", "ts", "js", "go", "java", "cs", "rb", "kt", "kts",
+];
+
+/// `path`'s extension when it is one of `exts` (as spelled in `exts`).
+pub fn ext_in(path: &Path, exts: &'static [&'static str]) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?;
+    exts.iter().copied().find(|e| *e == ext)
+}
+
+/// [`walk_workspace`] plus the per-file boilerplate every sensor repeats:
+/// `select` picks the files to scan (and a per-file tag such as the
+/// extension or language), then the file is read. Files `select` skips
+/// are never read; one that vanished or is not UTF-8 between the walk
+/// and the read is skipped silently. Yields `(path, content, tag)`.
+pub fn scan_files<'a, T: 'a>(
+    root: &'a Path,
+    select: impl Fn(&Path) -> Option<T> + 'a,
+) -> impl Iterator<Item = (std::path::PathBuf, String, T)> + 'a {
+    walk_workspace(root).filter_map(move |entry| {
+        let path = entry.path();
+        let tag = select(path)?;
+        let content = std::fs::read_to_string(path).ok()?;
+        Some((path.to_path_buf(), content, tag))
+    })
+}
+
 /// Walk every file under `root`: what the main scan indexes, so a sensor
 /// sees the same code the graph has. That is every path the walker yields
 /// honouring `.gitignore` and hidden-file rules, plus every file git
@@ -279,6 +307,102 @@ pub fn compose_service_name(package: &str, service: &str) -> String {
     } else {
         format!("{}.{}", package, service)
     }
+}
+
+/// Extract the env-var name from a host-shaped expression.
+/// Recognises the patterns the http_client_sensor's `host_env_name`
+/// already knew about plus the same patterns the contract-federation
+/// `clients.rs::extract_process_env_name` did (Phase C). Single
+/// source of truth so the two scanners stay in sync (Phase B-D
+/// review §S10).
+///
+/// Returns `None` for expressions that don't match any of the
+/// known shapes — callers are expected to fall back to
+/// `HostPart::Expr` when this returns `None`.
+///
+/// The grammar:
+/// - `os.environ["X"]` / `os.environ.get("X", …)` / `os.getenv("X", …)`
+/// - `process.env.X` / `process.env["X"]`
+/// - `settings.X` / `config.X`
+///
+/// The function does not strip trailing punctuation — callers
+/// that pass through the raw value of an object-literal field
+/// (e.g. `process.env.X,` after the `baseURL:` prefix) must
+/// `trim_end_matches` the trailing `,` / `)` / `}` / `;`
+/// themselves before calling.
+pub fn host_env_name(text: &str) -> Option<&str> {
+    let t = text.trim();
+    // `os.environ["X"]` / `os.environ.get("X", …)` / `os.getenv("X", …)`.
+    if t.starts_with("os.environ[") && t.ends_with(']') {
+        return Some(inner_bracket(&t["os.environ[".len()..t.len() - 1]));
+    }
+    if let Some(rest) = t.strip_prefix("os.environ.get(") {
+        if let Some(end) = rest.find(',') {
+            return Some(inner_paren(&rest[..end]));
+        }
+        if let Some(stripped) = rest.strip_suffix(')') {
+            return Some(inner_paren(stripped));
+        }
+    }
+    if let Some(rest) = t.strip_prefix("os.getenv(") {
+        if let Some(end) = rest.find(',') {
+            return Some(inner_paren(&rest[..end]));
+        }
+        if let Some(stripped) = rest.strip_suffix(')') {
+            return Some(inner_paren(stripped));
+        }
+    }
+    // `process.env.X` / `process.env["X"]`.
+    if let Some(rest) = t.strip_prefix("process.env[") {
+        if let Some(stripped) = rest.strip_suffix(']') {
+            return Some(inner_bracket(stripped));
+        }
+    }
+    if let Some(rest) = t.strip_prefix("process.env.") {
+        // `process.env.X` — X is an identifier.
+        if rest.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Some(rest);
+        }
+    }
+    // `settings.X` / `config.X`.
+    for prefix in ["settings.", "config."] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            if rest.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Some(rest);
+            }
+        }
+    }
+    None
+}
+
+/// Strip the surrounding `[ … ]` brackets and any quotes / spaces
+/// around the inner literal. Returns the substring between the
+/// outermost brackets.
+fn inner_bracket(s: &str) -> &str {
+    let t = s.trim();
+    let bytes = t.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        return &t[1..t.len() - 1];
+    }
+    t
+}
+
+/// Strip the surrounding `( … )` parens and any quotes / spaces
+/// around the inner literal. Returns the substring between the
+/// outermost parens.
+fn inner_paren(s: &str) -> &str {
+    let t = s.trim();
+    let bytes = t.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        return &t[1..t.len() - 1];
+    }
+    t
 }
 
 /// Look up a handler node by `name`, trying exact, then `snake_case`,

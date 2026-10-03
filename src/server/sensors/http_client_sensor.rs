@@ -80,32 +80,19 @@ const URL_EXPR_CAP: usize = 200;
 /// central registry to edit.
 pub struct HttpClientSensor;
 
-impl crate::server::sensors::Sensor for HttpClientSensor {
-    fn name(&self) -> &'static str {
-        "http_client"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        crate::server::sensors::SensorCountField::HttpClients
-    }
-    fn phase(&self) -> u8 {
-        // §6.1: phase 1, runs after providers (phase 0) so the joiner
-        // can resolve `HttpClientCall`'s enclosing symbol against
-        // routes that the providers just minted.
-        1
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &Path,
-        namespace: &RepoNamespace,
-    ) -> Result<usize, LainError> {
+// §6.1: phase 1, after providers (phase 0) so the joiner can resolve a
+// `HttpClientCall`'s enclosing symbol against the routes they minted.
+crate::server::sensors::register_sensor!(
+    HttpClientSensor,
+    "http_client",
+    HttpClients,
+    1,
+    |graph, root, namespace| {
         let repo_id = RepoId::new(root.to_string_lossy().as_ref())
             .unwrap_or_else(|_| RepoId::new("http-client-sensor").unwrap());
         scan_workspace_clients(graph, root, namespace, &repo_id)
     }
-}
-
-inventory::submit!(crate::server::sensors::SensorEntry(&HttpClientSensor));
+);
 
 // ─── Workspace scan ───────────────────────────────────────────────────
 
@@ -133,27 +120,19 @@ pub fn scan_workspace_clients(
     let patterns = Patterns::with_overrides(root)?;
     let patterns: &Patterns = &patterns;
 
-    for entry in crate::server::sensors::util::walk_workspace(root) {
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let lang = match ext {
-            "py" => Some(Lang::Python),
-            "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
-            "rs" => Some(Lang::Rust),
-            "go" => Some(Lang::Go),
-            "java" => Some(Lang::Java),
-            "cs" => Some(Lang::CSharp),
-            "rb" => Some(Lang::Ruby),
-            "kt" | "kts" => Some(Lang::Kotlin),
-            _ => None,
-        };
-        let Some(lang) = lang else { continue };
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let calls = detect_calls(path, &content, lang, patterns);
+    let by_lang = |p: &Path| match p.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "py" => Some(Lang::Python),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
+        "rs" => Some(Lang::Rust),
+        "go" => Some(Lang::Go),
+        "java" => Some(Lang::Java),
+        "cs" => Some(Lang::CSharp),
+        "rb" => Some(Lang::Ruby),
+        "kt" | "kts" => Some(Lang::Kotlin),
+        _ => None,
+    };
+    for (path, content, lang) in crate::server::sensors::util::scan_files(root, by_lang) {
+        let calls = detect_calls(&path, &content, lang, patterns);
         for mut call in calls {
             call.path = graph_path(root, Path::new(&call.path));
             let (nodes, edges) = build_graph(graph, &call, namespace);
@@ -510,11 +489,16 @@ fn process_outbound_match(
     if starts_with_slash_node(url, src) {
         // Wrapper candidate: receiver is not a known library but
         // the URL starts with `/`. Emit `CallVia::Receiver`.
+        // Phase B (spec §5.2): `base` is `None` here — the
+        // cross-file client registry is a joiner-side input, not a
+        // sensor-side one. The joiner populates `base` when it
+        // resolves the receiver to a `ClientDef`.
         let method = method_for(framework, &verb_text, call, Some(url), src);
         return build_call(
             CallVia::Receiver {
                 expr: lib_text.clone(),
                 fn_name: verb_text.clone(),
+                base: None,
             },
             method,
             Some(url),
@@ -1808,81 +1792,10 @@ fn host_for(parts: &[UrlPart]) -> HostPart {
     }
     // Pattern-match the resolved expression.
     let t = hole_text.trim();
-    if let Some(name) = host_env_name(t) {
+    if let Some(name) = crate::server::sensors::util::host_env_name(t) {
         return HostPart::Env(vec![name.to_string()]);
     }
     HostPart::Expr(hole_text)
-}
-
-fn host_env_name(text: &str) -> Option<&str> {
-    let t = text.trim();
-    // `os.environ["X"]` / `os.environ.get("X", …)` / `os.getenv("X", …)`.
-    if t.starts_with("os.environ[") && t.ends_with(']') {
-        return Some(inner_bracket(&t["os.environ[".len()..t.len() - 1]));
-    }
-    if let Some(rest) = t.strip_prefix("os.environ.get(") {
-        if let Some(end) = rest.find(',') {
-            return Some(inner_paren(&rest[..end]));
-        }
-        if let Some(stripped) = rest.strip_suffix(')') {
-            return Some(inner_paren(stripped));
-        }
-    }
-    if let Some(rest) = t.strip_prefix("os.getenv(") {
-        if let Some(end) = rest.find(',') {
-            return Some(inner_paren(&rest[..end]));
-        }
-        if let Some(stripped) = rest.strip_suffix(')') {
-            return Some(inner_paren(stripped));
-        }
-    }
-    // `process.env.X` / `process.env["X"]`.
-    if let Some(rest) = t.strip_prefix("process.env[") {
-        if let Some(stripped) = rest.strip_suffix(']') {
-            return Some(inner_bracket(stripped));
-        }
-    }
-    if let Some(rest) = t.strip_prefix("process.env.") {
-        // `process.env.X` — X is an identifier.
-        if rest.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Some(rest);
-        }
-    }
-    // `settings.X` / `config.X`.
-    for prefix in ["settings.", "config."] {
-        if let Some(rest) = t.strip_prefix(prefix) {
-            if rest.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                return Some(rest);
-            }
-        }
-    }
-    None
-}
-
-fn inner_bracket(s: &str) -> &str {
-    let t = s.trim();
-    let bytes = t.as_bytes();
-    if bytes.len() >= 2
-        && (bytes[0] == b'"' || bytes[0] == b'\'')
-        && bytes[0] == bytes[bytes.len() - 1]
-    {
-        &t[1..t.len() - 1]
-    } else {
-        t
-    }
-}
-
-fn inner_paren(s: &str) -> &str {
-    let t = s.trim();
-    let bytes = t.as_bytes();
-    if bytes.len() >= 2
-        && (bytes[0] == b'"' || bytes[0] == b'\'')
-        && bytes[0] == bytes[bytes.len() - 1]
-    {
-        &t[1..t.len() - 1]
-    } else {
-        t
-    }
 }
 
 // ─── Graph emission ───────────────────────────────────────────────────
@@ -1992,23 +1905,32 @@ mod tests {
 
     #[test]
     fn host_env_name_matches_os_environ_subscript() {
-        assert_eq!(host_env_name("os.environ[\"BASE_URL\"]"), Some("BASE_URL"));
-        assert_eq!(host_env_name("os.environ['BASE_URL']"), Some("BASE_URL"));
+        assert_eq!(
+            crate::server::sensors::util::host_env_name("os.environ[\"BASE_URL\"]"),
+            Some("BASE_URL")
+        );
+        assert_eq!(
+            crate::server::sensors::util::host_env_name("os.environ['BASE_URL']"),
+            Some("BASE_URL")
+        );
     }
 
     #[test]
     fn host_env_name_matches_os_environ_get() {
         assert_eq!(
-            host_env_name("os.environ.get(\"BASE_URL\", \"\")"),
+            crate::server::sensors::util::host_env_name("os.environ.get(\"BASE_URL\", \"\")"),
             Some("BASE_URL")
         );
     }
 
     #[test]
     fn host_env_name_matches_os_getenv() {
-        assert_eq!(host_env_name("os.getenv(\"BASE_URL\")"), Some("BASE_URL"));
         assert_eq!(
-            host_env_name("os.getenv(\"BASE_URL\", \"\")"),
+            crate::server::sensors::util::host_env_name("os.getenv(\"BASE_URL\")"),
+            Some("BASE_URL")
+        );
+        assert_eq!(
+            crate::server::sensors::util::host_env_name("os.getenv(\"BASE_URL\", \"\")"),
             Some("BASE_URL")
         );
     }
@@ -2016,24 +1938,33 @@ mod tests {
     #[test]
     fn host_env_name_matches_process_env() {
         assert_eq!(
-            host_env_name("process.env.BILLING_URL"),
+            crate::server::sensors::util::host_env_name("process.env.BILLING_URL"),
             Some("BILLING_URL")
         );
         assert_eq!(
-            host_env_name("process.env[\"BILLING_URL\"]"),
+            crate::server::sensors::util::host_env_name("process.env[\"BILLING_URL\"]"),
             Some("BILLING_URL")
         );
     }
 
     #[test]
     fn host_env_name_matches_settings_and_config() {
-        assert_eq!(host_env_name("settings.base_url"), Some("base_url"));
-        assert_eq!(host_env_name("config.api_url"), Some("api_url"));
+        assert_eq!(
+            crate::server::sensors::util::host_env_name("settings.base_url"),
+            Some("base_url")
+        );
+        assert_eq!(
+            crate::server::sensors::util::host_env_name("config.api_url"),
+            Some("api_url")
+        );
     }
 
     #[test]
     fn host_env_name_falls_back_to_none_for_unknown() {
-        assert_eq!(host_env_name("not_a_known_pattern"), None);
+        assert_eq!(
+            crate::server::sensors::util::host_env_name("not_a_known_pattern"),
+            None
+        );
     }
 
     #[test]
@@ -2251,7 +2182,7 @@ session = aiohttp.ClientSession()
         assert_eq!(c.method, MethodSpec::Known(HttpMethod::Post));
         assert!(matches!(
             c.via,
-            CallVia::Receiver { ref expr, ref fn_name } if expr == "my_lib" && fn_name == "post"
+            CallVia::Receiver { ref expr, ref fn_name, .. } if expr == "my_lib" && fn_name == "post"
         ));
     }
 
@@ -2416,7 +2347,7 @@ got(\"/api/y\", { method: \"PUT\" });
         let c = &calls[0];
         assert!(matches!(
             c.via,
-            CallVia::Receiver { ref expr, ref fn_name } if expr == "myHttp" && fn_name == "post"
+            CallVia::Receiver { ref expr, ref fn_name, .. } if expr == "myHttp" && fn_name == "post"
         ));
     }
 
