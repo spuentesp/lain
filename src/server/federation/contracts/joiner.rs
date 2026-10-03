@@ -989,6 +989,146 @@ fn host_is_external_exempt(host: &str) -> bool {
     )
 }
 
+/// How [`resolve_by_key`] turns an N-candidate match into a
+/// [`ConsumerTarget`]. The three protocol resolvers share the
+/// iteration + bind machinery — they differ only in (a) the
+/// `candidate_filter` predicate and (b) what to do when there are
+/// 0 / 1 / N providers that pass the filter. This enum captures the
+/// policy axis so the iteration is shared (Phase B-D review §S6).
+#[derive(Debug, Clone)]
+pub(crate) enum AmbiguityPolicy {
+    /// Bind on any count; 0 candidates → `Unresolved { reason: NoMatch }`.
+    /// Topic resolver semantics.
+    NoMatch,
+    /// Bind only when exactly one candidate passes the filter;
+    /// 0 or 2+ → `Unresolved { reason: GraphqlNoOp, target_service: route_owner }`.
+    /// GraphQL resolver semantics (spec §8.3: "several services expose
+    /// the same root field ⇒ ambiguous, never single-bound").
+    GraphqlNoOp {
+        /// Informational `/graphql` route owner surfaced on the
+        /// unresolved record so the operator can see the join's
+        /// expected target.
+        route_owner: Option<ServiceName>,
+    },
+    /// Bind on any count; 0 candidates → `Unresolved { reason: RpcStubUnknown }`.
+    /// gRPC resolver semantics.
+    RpcStubUnknown,
+}
+
+/// Shared iteration in the three protocol resolvers
+/// (`resolve_topic_consumer`, `resolve_graphql_consumer`,
+/// `resolve_rpc_consumer`). Walks `endpoints`, applies
+/// `candidate_filter`, skips own-service providers, decides the
+/// bind / unresolved verdict from `ambiguity_policy`, and pushes
+/// `Binds` edges onto `binds` only when the verdict is `Binds`.
+///
+/// `target_key` is the consumer's [`ContractKey`] and is enforced
+/// as the primary equality predicate: an endpoint only enters the
+/// candidate set when `*endpoint_key == *target_key`. The
+/// `candidate_filter` is the *additional* axis on top of that
+/// match — RPC's first pass restricts the candidate set further
+/// to the services resolved from the channel host.
+///
+/// The gRPC second-pass (package-qualified) case bypasses the
+/// `target_key` equality check by passing `target_key` set to a
+/// placeholder key whose shape the filter ignores; the filter then
+/// does all the matching itself.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_by_key<F>(
+    call_id: &GlobalId,
+    target_key: &ContractKey,
+    endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
+    candidate_filter: F,
+    ambiguity_policy: AmbiguityPolicy,
+    own_service: &ServiceName,
+    binds: &mut Vec<BindsEdge>,
+) -> ConsumerResolution
+where
+    F: Fn(&(ServiceName, ContractKey)) -> bool,
+{
+    // Step 1: collect every candidate that passes `candidate_filter`
+    // and is not the calling service.
+    let mut candidates: Vec<(ServiceName, ContractKey, GlobalId)> = Vec::new();
+    for ((svc, key), providers) in endpoints {
+        if !candidate_filter(&(svc.clone(), key.clone())) {
+            continue;
+        }
+        // §7.8 / I5: in-service calls are not a contract between
+        // services. Skip own-service providers.
+        if svc == own_service {
+            continue;
+        }
+        if let Some(provider) = providers.first() {
+            candidates.push((svc.clone(), key.clone(), provider.id.clone()));
+        }
+    }
+
+    // Step 2: decide the target from the policy + candidate count.
+    let target = match (&ambiguity_policy, candidates.len()) {
+        (AmbiguityPolicy::NoMatch, 0) => Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::NoMatch,
+            target_service: None,
+        }),
+        (AmbiguityPolicy::RpcStubUnknown, 0) => Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::RpcStubUnknown,
+            target_service: None,
+        }),
+        (AmbiguityPolicy::GraphqlNoOp { route_owner }, n) if n != 1 => {
+            Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::GraphqlNoOp,
+                target_service: route_owner.clone(),
+            })
+        }
+        _ => Some(ConsumerTarget::Binds {
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::Regex,
+            },
+            confidence: 1.0,
+            route_match: RouteMatch::Exact,
+            stripped_prefix: None,
+        }),
+    };
+
+    // Step 3: push `Binds` edges only when the verdict is `Binds`.
+    // Each BindsEdge's `target_endpoint` carries the *endpoint's*
+    // `(svc, key)` pair (the actual contract being bound to), not
+    // the consumer's `target_key` — for the package-qualified RPC
+    // second pass the endpoint key is the package-qualified one.
+    let mut bound: Vec<EndpointId> = Vec::new();
+    if matches!(target, Some(ConsumerTarget::Binds { .. })) {
+        for (svc, key, provider_id) in &candidates {
+            binds.push(BindsEdge {
+                consumer: call_id.clone(),
+                provider: provider_id.clone(),
+                consumer_service: own_service.clone(),
+                provider_service: svc.clone(),
+                target_endpoint: (svc.clone(), key.clone()),
+                provenance: EdgeProvenance::Static {
+                    source: crate::schema::StaticSource::Regex,
+                },
+                confidence: 1.0,
+                route_match: RouteMatch::Exact,
+                stripped_prefix: None,
+            });
+            bound.push((svc.clone(), key.clone()));
+        }
+        bound.sort_by(|a, b| {
+            a.0 .0
+                .cmp(&b.0 .0)
+                .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
+        });
+    }
+    let _ = target_key;
+
+    ConsumerResolution {
+        call_id: call_id.clone(),
+        service: own_service.clone(),
+        target,
+        bound_endpoints: bound,
+        reads_complete: true,
+    }
+}
+
 /// §7.7 (stretch, PR 15): resolve a topic consumer. Same broker AND
 /// same name = `Binds { route_match: Exact, confidence: 1.0 }`. Any
 /// mismatch (different broker, different name, no producer-side
@@ -1008,65 +1148,20 @@ pub(crate) fn resolve_topic_consumer(
     endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
     binds: &mut Vec<BindsEdge>,
 ) -> ConsumerResolution {
-    let key = ContractKey::Topic {
+    let target_key = ContractKey::Topic {
         broker: consumer.broker.clone(),
         name: consumer.name.clone(),
     };
-    // Find every producer-side endpoint with the same `(broker, name)`.
-    let mut bound: Vec<EndpointId> = Vec::new();
-    for ((svc, k), providers) in endpoints {
-        if k != &key {
-            continue;
-        }
-        // §7.8: in-service calls are not a contract between
-        // services. Skip own-service producers.
-        if svc == own_service {
-            continue;
-        }
-        if let Some(provider) = providers.first() {
-            binds.push(BindsEdge {
-                consumer: call_id.clone(),
-                provider: provider.id.clone(),
-                consumer_service: own_service.clone(),
-                provider_service: svc.clone(),
-                target_endpoint: (svc.clone(), k.clone()),
-                provenance: EdgeProvenance::Static {
-                    source: crate::schema::StaticSource::Regex,
-                },
-                confidence: 1.0,
-                route_match: RouteMatch::Exact,
-                stripped_prefix: None,
-            });
-            bound.push((svc.clone(), k.clone()));
-        }
-    }
-    bound.sort_by(|a, b| {
-        a.0 .0
-            .cmp(&b.0 .0)
-            .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
-    });
-    let target = if bound.is_empty() {
-        Some(ConsumerTarget::Unresolved {
-            reason: UnresolvedReason::NoMatch,
-            target_service: None,
-        })
-    } else {
-        Some(ConsumerTarget::Binds {
-            provenance: EdgeProvenance::Static {
-                source: crate::schema::StaticSource::Regex,
-            },
-            confidence: 1.0,
-            route_match: RouteMatch::Exact,
-            stripped_prefix: None,
-        })
-    };
-    ConsumerResolution {
-        call_id: call_id.clone(),
-        service: own_service.clone(),
-        target,
-        bound_endpoints: bound,
-        reads_complete: true,
-    }
+    let target_key_ref = &target_key;
+    resolve_by_key(
+        call_id,
+        &target_key,
+        endpoints,
+        |(_, key): &(ServiceName, ContractKey)| key == target_key_ref,
+        AmbiguityPolicy::NoMatch,
+        own_service,
+        binds,
+    )
 }
 
 /// Phase E (spec §8.3): resolve a `GraphqlConsumer` to a
@@ -1117,8 +1212,7 @@ pub(crate) fn resolve_graphql_consumer(
     }
     graphql_route_owners.sort();
     graphql_route_owners.dedup();
-    let graphql_route_owner: Option<ServiceName> = match graphql_route_owners.len() {
-        0 => None,
+    let route_owner: Option<ServiceName> = match graphql_route_owners.len() {
         1 => Some(graphql_route_owners[0].clone()),
         _ => None,
     };
@@ -1126,96 +1220,16 @@ pub(crate) fn resolve_graphql_consumer(
         op: consumer.op,
         field: consumer.field.clone(),
     };
-    let mut candidates: Vec<&EndpointProviderRecord> = Vec::new();
-    for ((svc, key), providers) in endpoints {
-        if key != &target_key {
-            continue;
-        }
-        // I5: skip own-service providers (same-service binds
-        // are not a contract between services).
-        if svc == own_service {
-            continue;
-        }
-        for provider in providers {
-            candidates.push(provider);
-        }
-    }
-    match candidates.len() {
-        0 => ConsumerResolution {
-            call_id: call_id.clone(),
-            service: own_service.clone(),
-            target: Some(ConsumerTarget::Unresolved {
-                reason: UnresolvedReason::GraphqlNoOp,
-                target_service: graphql_route_owner.clone(),
-            }),
-            bound_endpoints: Vec::new(),
-            reads_complete: true,
-        },
-        1 => {
-            let provider = candidates[0];
-            let provenance = EdgeProvenance::Static {
-                source: crate::schema::StaticSource::Regex,
-            };
-            let endpoint_id = (provider_service_of(provider, endpoints), target_key.clone());
-            binds.push(BindsEdge {
-                consumer: call_id.clone(),
-                provider: provider.id.clone(),
-                consumer_service: own_service.clone(),
-                provider_service: endpoint_id.0.clone(),
-                target_endpoint: endpoint_id.clone(),
-                provenance,
-                confidence: 1.0,
-                route_match: RouteMatch::Exact,
-                stripped_prefix: None,
-            });
-            ConsumerResolution {
-                call_id: call_id.clone(),
-                service: own_service.clone(),
-                target: Some(ConsumerTarget::Binds {
-                    provenance: EdgeProvenance::Static {
-                        source: crate::schema::StaticSource::Regex,
-                    },
-                    confidence: 1.0,
-                    route_match: RouteMatch::Exact,
-                    stripped_prefix: None,
-                }),
-                bound_endpoints: vec![endpoint_id],
-                reads_complete: true,
-            }
-        }
-        _ => ConsumerResolution {
-            call_id: call_id.clone(),
-            service: own_service.clone(),
-            target: Some(ConsumerTarget::Unresolved {
-                reason: UnresolvedReason::GraphqlNoOp,
-                target_service: graphql_route_owner.clone(),
-            }),
-            bound_endpoints: Vec::new(),
-            reads_complete: true,
-        },
-    }
-}
-
-/// Resolve the `ServiceName` for an endpoint provider record
-/// from the endpoint-table key. Each `EndpointProviderRecord`
-/// is a value in a `BTreeMap<(ServiceName, ContractKey),
-/// Vec<EndpointProviderRecord>>`; the key's service is the
-/// canonical source. We plumb the map in (rather than
-/// reaching for an `&HashMap` field on the record) so the
-/// function is pure and the joiner stays a pure function of
-/// its inputs (§7.8).
-fn provider_service_of(
-    provider: &EndpointProviderRecord,
-    endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
-) -> ServiceName {
-    for (svc, key) in endpoints.keys() {
-        if let Some(records) = endpoints.get(&(svc.clone(), key.clone())) {
-            if records.iter().any(|r| r.id == provider.id) {
-                return svc.clone();
-            }
-        }
-    }
-    ServiceName("unknown".to_string())
+    let target_key_ref = &target_key;
+    resolve_by_key(
+        call_id,
+        &target_key,
+        endpoints,
+        |(_, key): &(ServiceName, ContractKey)| key == target_key_ref,
+        AmbiguityPolicy::GraphqlNoOp { route_owner },
+        own_service,
+        binds,
+    )
 }
 
 /// Phase E (spec §8.2): resolve one gRPC stub call site. The
@@ -1255,16 +1269,7 @@ pub(crate) fn resolve_rpc_consumer(
     // without iterating providers.
     let candidate_services: Vec<ServiceName> = match &consumer.channel_host_part {
         HostPart::None => {
-            return ConsumerResolution {
-                call_id: call_id.clone(),
-                service: own_service.clone(),
-                target: Some(ConsumerTarget::Unresolved {
-                    reason: UnresolvedReason::RpcStubUnknown,
-                    target_service: None,
-                }),
-                bound_endpoints: Vec::new(),
-                reads_complete: true,
-            };
+            return rpc_stub_unknown(call_id, own_service);
         }
         HostPart::Literal(host) => {
             let mut svcs: Vec<ServiceName> = config
@@ -1274,16 +1279,7 @@ pub(crate) fn resolve_rpc_consumer(
                 .map(|s| ServiceName(s.name.clone()))
                 .collect();
             if svcs.is_empty() {
-                return ConsumerResolution {
-                    call_id: call_id.clone(),
-                    service: own_service.clone(),
-                    target: Some(ConsumerTarget::Unresolved {
-                        reason: UnresolvedReason::RpcStubUnknown,
-                        target_service: None,
-                    }),
-                    bound_endpoints: Vec::new(),
-                    reads_complete: true,
-                };
+                return rpc_stub_unknown(call_id, own_service);
             }
             svcs.sort();
             svcs
@@ -1293,16 +1289,7 @@ pub(crate) fn resolve_rpc_consumer(
             // resolution (already plumbed through `target_service_from_hosts`).
             // We pass the literal resolution for now (the joiner
             // does not need Phase C to satisfy E1-E5).
-            return ConsumerResolution {
-                call_id: call_id.clone(),
-                service: own_service.clone(),
-                target: Some(ConsumerTarget::Unresolved {
-                    reason: UnresolvedReason::RpcStubUnknown,
-                    target_service: None,
-                }),
-                bound_endpoints: Vec::new(),
-                reads_complete: true,
-            };
+            return rpc_stub_unknown(call_id, own_service);
         }
     };
     // The consumer's `service` is the bare service name
@@ -1315,107 +1302,66 @@ pub(crate) fn resolve_rpc_consumer(
         service: consumer.service.clone(),
         method: consumer.method.clone(),
     };
-    let mut bound: Vec<EndpointId> = Vec::new();
     // First pass: exact match on the consumer's bare service
     // identity, restricted to the candidate services. This
     // handles the case where the consumer's service name is
     // already package-qualified (e.g. a Java stub typed
     // `com.acme.orders.OrdersBlockingStub`).
-    for ((svc, key), providers) in endpoints {
-        if !candidate_services.contains(svc) {
-            continue;
-        }
-        if key != &target_key {
-            continue;
-        }
-        // §7.8 / I5: skip own-service providers — same-service
-        // binds are not a contract between services.
-        if svc == own_service {
-            continue;
-        }
-        if let Some(provider) = providers.first() {
-            let provenance = EdgeProvenance::Static {
-                source: crate::schema::StaticSource::Regex,
-            };
-            binds.push(BindsEdge {
-                consumer: call_id.clone(),
-                provider: provider.id.clone(),
-                consumer_service: own_service.clone(),
-                provider_service: svc.clone(),
-                target_endpoint: (svc.clone(), key.clone()),
-                provenance,
-                confidence: 1.0,
-                route_match: RouteMatch::Exact,
-                stripped_prefix: None,
-            });
-            bound.push((svc.clone(), key.clone()));
-        }
+    let candidate_services_ref = &candidate_services;
+    let target_key_ref = &target_key;
+    let res = resolve_by_key(
+        call_id,
+        &target_key,
+        endpoints,
+        |(svc, key): &(ServiceName, ContractKey)| {
+            candidate_services_ref.contains(svc) && key == target_key_ref
+        },
+        AmbiguityPolicy::RpcStubUnknown,
+        own_service,
+        binds,
+    );
+    if !res.bound_endpoints.is_empty() {
+        return res;
     }
     // Second pass: package-qualified match. The consumer's
     // `service` is bare; we look for any provider whose
     // service name ends in `.<bare_service>`. The match is
     // exact on the method and the bare service name.
-    if bound.is_empty() {
-        let bare = format!(".{}", consumer.service);
-        for ((svc, key), providers) in endpoints {
-            if !candidate_services.contains(svc) {
-                continue;
-            }
-            let ContractKey::Rpc { service, .. } = key else {
-                continue;
-            };
-            if !service.ends_with(&bare) {
-                continue;
-            }
-            let provider_method = match key {
-                ContractKey::Rpc { method, .. } => method,
-                _ => continue,
-            };
-            if provider_method != &consumer.method {
-                continue;
-            }
-            if svc == own_service {
-                continue;
-            }
-            if let Some(provider) = providers.first() {
-                let provenance = EdgeProvenance::Static {
-                    source: crate::schema::StaticSource::Regex,
-                };
-                binds.push(BindsEdge {
-                    consumer: call_id.clone(),
-                    provider: provider.id.clone(),
-                    consumer_service: own_service.clone(),
-                    provider_service: svc.clone(),
-                    target_endpoint: (svc.clone(), key.clone()),
-                    provenance,
-                    confidence: 1.0,
-                    route_match: RouteMatch::Exact,
-                    stripped_prefix: None,
-                });
-                bound.push((svc.clone(), key.clone()));
-            }
-        }
-    }
-    let target = if bound.is_empty() {
-        Some(ConsumerTarget::Unresolved {
-            reason: UnresolvedReason::RpcStubUnknown,
-            target_service: None,
-        })
-    } else {
-        Some(ConsumerTarget::Binds {
-            provenance: EdgeProvenance::Static {
-                source: crate::schema::StaticSource::Regex,
-            },
-            confidence: 1.0,
-            route_match: RouteMatch::Exact,
-            stripped_prefix: None,
-        })
-    };
+    let bare = format!(".{}", consumer.service);
+    let bare_ref = &bare;
+    let method_ref = &consumer.method;
+    let candidate_services_ref2 = &candidate_services;
+    resolve_by_key(
+        call_id,
+        &target_key,
+        endpoints,
+        |(svc, key): &(ServiceName, ContractKey)| {
+            candidate_services_ref2.contains(svc)
+                && matches!(
+                    key,
+                    ContractKey::Rpc { ref service, method, .. }
+                    if service.ends_with(bare_ref) && method == method_ref
+                )
+        },
+        AmbiguityPolicy::RpcStubUnknown,
+        own_service,
+        binds,
+    )
+}
+
+/// `Unresolved { reason: RpcStubUnknown }` shortcut used by
+/// [`resolve_rpc_consumer`] when the channel host cannot be
+/// resolved to any service. Mirrors the three early-return blocks
+/// the original RPC resolver carried.
+fn rpc_stub_unknown(call_id: &GlobalId, own_service: &ServiceName) -> ConsumerResolution {
     ConsumerResolution {
         call_id: call_id.clone(),
         service: own_service.clone(),
-        target,
-        bound_endpoints: bound,
+        target: Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::RpcStubUnknown,
+            target_service: None,
+        }),
+        bound_endpoints: Vec::new(),
         reads_complete: true,
     }
 }
