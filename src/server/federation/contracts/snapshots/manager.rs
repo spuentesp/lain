@@ -1069,22 +1069,46 @@ impl SnapshotManager {
                 (Err(e), _) => BuildOutcome::Err(e.to_string()),
                 (Ok(_), Err(e)) => BuildOutcome::Err(e.to_string()),
             };
-            // Publish the outcome and wake every joiner that
-            // entered the wait above (they entered the map under
-            // the parking_lot mutex, before we removed the slot
-            // — but our removal happens after the build, so any
-            // joiner that saw the slot in the map is already
-            // waiting on the condvar).
+            // Publish the outcome AND remove the slot from the
+            // map under one critical section (S2 fix —
+            // TLA+ SnapshotInFlightSlot.tla). Pre-fix, the
+            // publish and the remove were two separate
+            // `in_flight.lock()` acquisitions: a concurrent
+            // caller arriving between the publish and the
+            // remove could observe the slot in the map (with
+            // `has_first_result = TRUE` from the joiner side
+            // observable) but a SECOND concurrent caller
+            // arriving AFTER the remove would see no slot and
+            // start a duplicate build. The TLA+ trace shows
+            // `has_first_result[s1] = TRUE ∧ second_build_count[s1] = 1`.
+            //
+            // The fix: hold the `in_flight` map lock across
+            // the publish + remove so the two operations are
+            // atomic. The joiner is waiting on the slot's
+            // own condvar (`slot.notify` + `slot.state`); the
+            // map lock is not part of the joiner's wait, so
+            // holding it does not block the joiner from
+            // reading the published result. The notify
+            // happens while the map lock is held; the joiner
+            // wakes up, reads `slot.state` (no contention with
+            // the map lock), and returns.
+            //
+            // A third caller arriving after we drop the map
+            // lock sees no slot in the map; but the install
+            // succeeded (this branch only runs when the build
+            // is the first for this id), so the resident
+            // cache at the top of `from_snapshot_with_wait_ms`
+            // already has the fed — the cache check returns
+            // before the map lookup, so no duplicate build.
             {
-                let mut state = slot.state.lock().unwrap();
-                *state = Some(outcome.clone());
-                slot.notify.notify_all();
+                let mut map = self.in_flight.lock();
+                {
+                    let mut state = slot.state.lock().unwrap();
+                    *state = Some(outcome.clone());
+                    slot.notify.notify_all();
+                }
+                map.remove(&record.id);
             }
-            // Remove the slot from the map. Any concurrent caller
-            // that did NOT see this slot will rebuild — that's
-            // correct (a fresh miss after this build completes is
-            // a new request).
-            self.in_flight.lock().remove(&record.id);
             outcome
         } else {
             // Joiner: another caller is already building or has
@@ -2548,6 +2572,98 @@ repos:
             2,
             "len() == 2 after the install (1 pre-existing + 1 new), \
              not 1 (which would mean the LRU was evicted unnecessarily)"
+        );
+    }
+
+    /// Regression for TLA+ SnapshotInFlightSlot.tla (variant
+    /// (a) → (b)). Pre-fix, the builder's publish and slot
+    /// removal were two separate `in_flight.lock()` acquisitions:
+    /// a third caller arriving between the publish and the
+    /// remove could observe the slot removed (no `in_flight`
+    /// entry) and start a duplicate build while the first
+    /// federation was still in resident. The TLA+ trace shows
+    /// `has_first_result[s1] = TRUE ∧ second_build_count[s1] = 1`.
+    ///
+    /// Post-fix (variant (b)): the publish and the remove are
+    /// one atomic operation under a single `in_flight.lock()`
+    /// acquisition. A third caller arriving during the atomic
+    /// window blocks on the map mutex; once the builder drops
+    /// the lock, the caller's resident-cache check hits (the
+    /// install succeeded) and the call returns the cached fed
+    /// without starting a duplicate build.
+    ///
+    /// The test directly exercises the structural property by
+    /// pre-registering an `InflightSlot` whose `state` is
+    /// already `Some(BuildOutcome::Ok(fed))` — i.e. the
+    /// publish has happened, the slot is still in the map
+    /// (simulating the post-publish pre-remove state). A
+    /// joiner-side `from_snapshot_with_wait_ms` for the same
+    /// id must (a) see the slot, (b) join it and return the
+    /// pre-set fed, and (c) NOT remove the slot (joiner
+    /// removal is the builder's job, and the builder is
+    /// holding the map lock during the atomic publish+remove).
+    /// Pre-fix the test still passes (the joiner path is
+    /// unchanged); what the test pins is the joiner-side
+    /// invariant the atomic operation depends on.
+    #[test]
+    fn from_snapshot_joiner_path_does_not_remove_in_flight_slot() {
+        use crate::server::federation::contracts::snapshots::record::SnapshotState;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = IndexCache::new(dir.path());
+        let mgr = Arc::new(SnapshotManager::with_cap(dir.path(), cache, 4));
+
+        let id = "snap_inflight_atomic".to_string();
+        let pre_fed = Arc::new(SnapshotFederation {
+            snapshot_id: id.clone(),
+            backend: Arc::new(PetgraphBackend::ephemeral(dir.path())),
+            holds: Mutex::new(Vec::new()),
+            residency: Arc::new(ResidencyTracker::new()),
+            contract_index: parking_lot::RwLock::new(None),
+            last_used_unix: Mutex::new(now_unix()),
+            held: AtomicUsize::new(0),
+            data_dir: PathBuf::from("."),
+        });
+        let slot = Arc::new(InflightSlot {
+            state: std::sync::Mutex::new(Some(BuildOutcome::Ok(Arc::clone(&pre_fed)))),
+            notify: std::sync::Condvar::new(),
+        });
+        mgr.in_flight.lock().insert(id.clone(), Arc::clone(&slot));
+
+        let record = SnapshotRecord {
+            id: id.clone(),
+            repos: BTreeMap::new(),
+            excluded: Vec::new(),
+            refs_: BTreeMap::new(),
+            join_config: serde_json::Value::Null,
+            config_hash: String::new(),
+            analyzer_version: String::new(),
+            state: SnapshotState::Ready,
+            repo_states: BTreeMap::new(),
+            created_unix: now_unix(),
+            last_access_unix: now_unix(),
+        };
+
+        let result = mgr
+            .from_snapshot_with_wait_ms(&record, 1_000)
+            .expect("joiner returns the pre-published outcome");
+        let (returned_fed, _hold) = result;
+
+        assert!(
+            Arc::ptr_eq(&returned_fed, &pre_fed),
+            "joiner returns the pre-published fed \
+             (TLA+ SnapshotInFlightSlot.tla variant (b) — Fix S2). \
+             Pre-fix a third caller could observe the slot \
+             removed and start a duplicate build; post-fix the \
+             joiner still sees the slot in the map (the builder's \
+             remove is held under the same map lock as the \
+             publish)."
+        );
+        assert!(
+            mgr.in_flight.lock().contains_key(&id),
+            "joiner does not remove the in_flight slot; \
+             only the builder's atomic publish+remove does"
         );
     }
 
