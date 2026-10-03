@@ -1113,6 +1113,17 @@ fn resolve_consumer(
 ) -> ConsumerResolution {
     let target_template = consumer.url.template.clone();
     let target_method = consumer.method.clone();
+    // Phase C (spec §6): when the env_sensor reports a var as
+    // unmapped AND no other rule resolves the consumer, the
+    // final verdict is `Unresolved { reason: EnvUnmapped }` —
+    // not the legacy `NoMatch`. The env_sensor's Unmapped is
+    // authoritative for `HostPart::Env` consumers (spec §6
+    // acceptance: "with no mapping, appears in `env_unmapped`").
+    // The flag is set when the env_sensor path returns
+    // `Unmapped`; lower tiers may still resolve the call (env-
+    // name match, host match, rule 4, rule 6), so the flag is
+    // only consulted at the very end when no tier bound.
+    let mut env_unmapped_pending = false;
 
     // Tier 2 — code-derived base + host/env (Phase B). When the
     // call's `via` resolves to a `ClientDef` in the registry,
@@ -1159,12 +1170,20 @@ fn resolve_consumer(
     // bindings and matches the resulting host against a service's
     // `hosts` list. Three outcomes:
     //
-    // - All vars resolve to the same host → match the host
-    //   against `services[].hosts`; on hit, return the
-    //   `match_one_service` resolution.
-    // - Vars resolve to different hosts → `EnvAmbiguous`, no bind.
-    // - Any var has no binding → `EnvUnmapped`, the var is
-    //   recorded in `unresolved_env_vars` for the ledger.
+    // - All vars resolve to the same host AND the host matches
+    //   a service's `hosts` list → `match_one_service` returns
+    //   the resolution.
+    // - Vars resolve to different hosts → `EnvAmbiguous`, no
+    //   bind, the consumer is recorded as
+    //   `Unresolved { reason: EnvAmbiguous }`. Per I6 the
+    //   ambiguous case preempts every other tier — once vars
+    //   disagree, no lower tier can override.
+    // - Any var has no binding → the var counter is bumped
+    //   in `unresolved_env_vars` for the ledger, but the
+    //   joiner falls through to the existing `target_service_from_env`
+    //   (`services[].env` name match). Spec §6: "in addition
+    //   to the existing `services[].env` match" — the new
+    //   path is additive, not a replacement.
     if let HostPart::Env(names) = &consumer.url.host {
         if let Some(resolved) =
             target_service_from_env_resolved(consumer, env, config, unresolved_env_vars)
@@ -1203,21 +1222,19 @@ fn resolve_consumer(
                     };
                 }
                 EnvResolution::Unmapped => {
-                    // The var counters are already updated by
-                    // `target_service_from_env_resolved`; return
-                    // `Unresolved { EnvUnmapped }` so the consumer
-                    // appears in the per-call list with the right
-                    // reason.
-                    return ConsumerResolution {
-                        call_id: call_id.clone(),
-                        service: own_service.clone(),
-                        target: Some(ConsumerTarget::Unresolved {
-                            reason: UnresolvedReason::EnvUnmapped,
-                            target_service: None,
-                        }),
-                        bound_endpoints: Vec::new(),
-                        reads_complete: consumer.reads_complete,
-                    };
+                    // The var counter is already updated; fall
+                    // through to the existing
+                    // `target_service_from_env` /
+                    // `target_service_from_hosts` / rule-4 /
+                    // rule-5 / rule-6 ladder so the operator's
+                    // `services[].env` declaration still resolves
+                    // the call when present. If no lower tier
+                    // matches, the `env_unmapped_pending` check
+                    // at the end of the function returns
+                    // `Unresolved { EnvUnmapped }` (the env_sensor
+                    // verdict is authoritative for
+                    // `HostPart::Env` consumers).
+                    env_unmapped_pending = true;
                 }
             }
         }
@@ -1339,11 +1356,21 @@ fn resolve_consumer(
     hits.sort();
     hits.dedup();
     if hits.is_empty() {
+        // Phase C: when the env_sensor path returned Unmapped
+        // AND no lower tier found a route, the env verdict is
+        // the authoritative `EnvUnmapped` (not the legacy
+        // `NoMatch`). The var is already in
+        // `unresolved_env_vars` for the ledger.
+        let reason = if env_unmapped_pending {
+            UnresolvedReason::EnvUnmapped
+        } else {
+            UnresolvedReason::NoMatch
+        };
         return ConsumerResolution {
             call_id: call_id.clone(),
             service: own_service.clone(),
             target: Some(ConsumerTarget::Unresolved {
-                reason: UnresolvedReason::NoMatch,
+                reason,
                 target_service: None,
             }),
             bound_endpoints: Vec::new(),
@@ -1650,9 +1677,12 @@ fn target_service_from_env_resolved(
             return Some(EnvResolution::Service(ServiceName(s.name.clone())));
         }
     }
-    // Single host, no service match — treat as unmapped so the
-    // operator can wire a `services[].hosts` entry. Record the
-    // host under a synthetic key so the ledger surfaces it.
+    // Single host, no service match — fall through to the
+    // existing `services[].env` / `services[].hosts` / rule
+    // ladder (the operator may have wired a `services[].env`
+    // declaration that names the var). The unresolved_env_vars
+    // counter is bumped so the operator can see the
+    // env_sensor did not know about the var.
     *unresolved_env_vars
         .entry(format!("no_service:{}", host))
         .or_insert(0) += 1;
