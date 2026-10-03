@@ -644,6 +644,91 @@ pub fn sensor_scan_report(
     }
 }
 
+// ─── LookupResult (Task 6 — tri-state query result) ─────────────────
+
+/// TLA+ `AddScopeUnindexed(repo)` is forbidden, so every query has
+/// exactly three terminals:
+///
+/// - `Found(T)`: the resource was found in an indexed repo;
+/// - `NotFoundAnalyzed`: the repo(s) carrying the resource were
+///   fully indexed but no such resource exists (e.g. the service
+///   name is unknown to the federation);
+/// - `NotAnalyzed { reasons }`: at least one in-scope repo was not
+///   fully analyzed. The caller can render the reason list so the
+///   operator knows whether the missing answer is "definitely
+///   absent" or "we cannot say".
+///
+/// Phase A's tools continue to return `Option<T>` for back-compat
+/// with the existing JSON envelopes; the lookup-side migration to
+/// `LookupResult<T>` is staged in via the `TryFrom` impls below.
+/// `tri_state_lookup` is a small helper that bridges the two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LookupResult<T> {
+    Found(T),
+    NotFoundAnalyzed,
+    NotAnalyzed { reasons: Vec<UnresolvedReason> },
+}
+
+impl<T> LookupResult<T> {
+    pub fn found(self) -> Option<T> {
+        match self {
+            LookupResult::Found(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn is_found(&self) -> bool {
+        matches!(self, LookupResult::Found(_))
+    }
+
+    pub fn is_not_analyzed(&self) -> bool {
+        matches!(self, LookupResult::NotAnalyzed { .. })
+    }
+}
+
+impl<T> From<Option<T>> for LookupResult<T> {
+    /// Bridges legacy `Option<T>` callers — `None` is treated as
+    /// `NotFoundAnalyzed` because the existing tools cannot tell
+    /// "not found" from "not analyzed". The new code that wants the
+    /// tri-state semantics reads `LookupResult<T>` directly.
+    fn from(opt: Option<T>) -> Self {
+        match opt {
+            Some(v) => LookupResult::Found(v),
+            None => LookupResult::NotFoundAnalyzed,
+        }
+    }
+}
+
+/// `LookupResult::NotAnalyzed { reasons }` carries the per-repo
+/// coverage reasons so the operator can see why a verdict could not
+/// be reached. `reasons_for(coverage, repo)` collects the
+/// `CoverageLedger`-side reasons for `repo` (sensor error,
+/// unresolved could-match, cache version mismatch, language with no
+/// sensor that analyzed anything). The function is the bridge the
+/// tool layer uses to populate the `reasons` list.
+pub fn reasons_for(cover: &RepoCoverage, current_analyzer_version: &str) -> Vec<UnresolvedReason> {
+    let mut reasons: Vec<UnresolvedReason> = Vec::new();
+    if cover.error.is_some() {
+        reasons.push(UnresolvedReason::WrapperUnconfigured);
+    }
+    if cover.cache_key.analyzer_version != current_analyzer_version {
+        reasons.push(UnresolvedReason::EnvUnmapped);
+    }
+    for sensor_ledger in cover.ledger.values() {
+        for entry in sensor_ledger.values() {
+            if entry.error.is_some() {
+                reasons.push(UnresolvedReason::BaseUnknown);
+            }
+            for r in &entry.unresolved {
+                reasons.push(r.reason);
+            }
+        }
+    }
+    reasons
+}
+
+// ─── Coverage ledger (the map) ───────────────────────────────────────
+
 /// TLA+: the per-repo state vectors for every repo LAIN has seen.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CoverageLedger {
@@ -926,5 +1011,36 @@ mod tests {
         };
         assert!(manifest_matches_analyzer_version(&m, "0.9.0+c3"));
         assert!(!manifest_matches_analyzer_version(&m, "0.9.0+c2"));
+    }
+
+    /// `LookupResult::From<Option<T>>` maps `Some` to `Found` and
+    /// `None` to `NotFoundAnalyzed`.
+    #[test]
+    fn lookup_result_from_option() {
+        let r: LookupResult<u32> = Some(7).into();
+        assert!(r.is_found());
+        assert_eq!(r.found(), Some(7));
+        let r: LookupResult<u32> = None.into();
+        assert!(matches!(r, LookupResult::NotFoundAnalyzed));
+    }
+
+    /// `reasons_for` collects `WrapperUnconfigured` on `error`,
+    /// `EnvUnmapped` on cache-version mismatch, and any per-ledger
+    /// `BaseUnknown` / unresolved reason.
+    #[test]
+    fn reasons_for_collects_each_branch() {
+        let mut cover = empty_cover("orders", "abc", "0.9.0+c3");
+        cover.error = Some("walk failed".into());
+        let mut py = SensorLedger::default();
+        py.unresolved.push(UnresolvedRecord {
+            reason: UnresolvedReason::WrapperUnconfigured,
+            count: 1,
+            sample_ids: vec!["call:1".into()],
+        });
+        let mut sl = BTreeMap::new();
+        sl.insert(lang_label(Lang::Python).to_string(), py);
+        cover.ledger.insert("http_sensor".to_string(), sl);
+        let reasons = reasons_for(&cover, "0.9.0+c3");
+        assert!(reasons.contains(&UnresolvedReason::WrapperUnconfigured));
     }
 }
