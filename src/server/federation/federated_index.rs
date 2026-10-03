@@ -12,6 +12,7 @@
 //! plan flags this as acceptable for the MVP and notes a separate name index
 //! would be the production implementation.
 use crate::error::LainError;
+use crate::federation::contracts::clients::{build_client_def, detect_clients, ClientRegistry};
 use crate::federation::contracts::config::ContractFederationConfig;
 use crate::federation::contracts::index::ContractIndex;
 use crate::federation::contracts::joiner::ContractJoiner;
@@ -23,6 +24,7 @@ use crate::federation::repo_index::RepoIndex;
 use crate::federation::repo_source::RepoSource;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use crate::server::overlay::VolatileOverlay;
+use crate::server::sensors::env_sensor::{env_bindings_for, EnvBindingIndex};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -1000,6 +1002,69 @@ impl FederatedIndex {
             .map(|s| s.index.clone())
     }
 
+    /// Build the per-repo Phase B + Phase C inputs the joiner
+    /// consumes during a live rejoin.
+    ///
+    /// **S3 fix (TLA+ `JoiningTier2NotPlumbed.tla`).** Pre-fix,
+    /// `rejoin_contracts` called `ContractJoiner::run` with the
+    /// default empty `ClientRegistry` and `EnvBindingIndex`. The
+    /// per-repo pre-pass outputs (`detect_clients` for Phase B,
+    /// `env_bindings_for` for Phase C) were reachable only
+    /// from tests; in production the joiner fell through the
+    /// §7.3 rule-1 opt-in clause (`if http_clients.is_empty()
+    /// && !registry_has_def { continue; }`) and silently
+    /// dropped every wrapper call, violating I2
+    /// (`every discovered call lands in exactly one terminal
+    /// state`). The TLA+ trace shows
+    /// `calls_seen = {c1} ∧ call_terminal[c1] = "None"`.
+    ///
+    /// Post-fix, this helper walks every registered repo
+    /// root, runs `detect_clients` on the TS/JS sources to
+    /// populate the `ClientRegistry`, and snapshots the
+    /// per-repo `EnvBindingIndex` from the `env_sensor`.
+    /// `rejoin_contracts` then passes the result to
+    /// `ContractJoiner::run_with_registry_and_env` so the
+    /// tier-2 and env resolution paths are reachable in
+    /// production.
+    fn build_phase_b_c_inputs(&self) -> (ClientRegistry, EnvBindingIndex) {
+        use crate::server::sensors::util::walk_workspace;
+        let mut registry = ClientRegistry::new();
+        let mut env = EnvBindingIndex::default();
+        for repo_root in self.repo_paths() {
+            // Phase B — walk the repo and feed every TS/JS source
+            // to `detect_clients`. We restrict to the extensions
+            // `detect_clients` actually parses; other languages
+            // would only feed the `Custom` (new-Foo) branch
+            // with garbage, so the filter is a soundness
+            // optimisation, not a correctness gate.
+            for entry in walk_workspace(&repo_root) {
+                let path = entry.path();
+                let ext = path.extension().and_then(|e| e.to_str());
+                if !matches!(ext, Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")) {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                let rel = path.strip_prefix(&repo_root).unwrap_or(path);
+                let rel_str = rel.to_string_lossy();
+                for detected in detect_clients(&rel_str, &content) {
+                    let def = build_client_def(&detected);
+                    registry.insert(def);
+                }
+            }
+            // Phase C — snapshot the per-repo env bindings the
+            // `env_sensor` already populated. The helper reads
+            // the sensor's global cache (keyed by `repo_key`)
+            // and returns the per-var host map.
+            let env_index = env_bindings_for(&repo_root);
+            for (var, bindings) in env_index.by_var {
+                env.by_var.entry(var).or_default().extend(bindings);
+            }
+        }
+        (registry, env)
+    }
+
     /// The atomic `(contract_index, binds)` pair (TLA+ RejoinProtocol
     /// variant (c)). Tools that need both halves — e.g. to verify a
     /// consumer resolution's `Binds` target is among the published
@@ -1155,7 +1220,26 @@ impl FederatedIndex {
             })
             .collect();
 
-        let out = ContractJoiner::run(&contract_nodes, &contract_edges, &config);
+        let out = {
+            // S3 fix: build the per-repo Phase B + Phase C
+            // inputs (ClientRegistry + EnvBindingIndex) and
+            // route the joiner through
+            // `run_with_registry_and_env` so the tier-2
+            // (ClientRegistry) and env-binding resolution
+            // paths are reachable in production. Pre-fix the
+            // empty defaults silently dropped every wrapper
+            // call via the rule-1 opt-in clause; the TLA+
+            // `JoiningTier2NotPlumbed.tla` counterexample
+            // violates I2 in that case.
+            let (registry, env_bindings) = self.build_phase_b_c_inputs();
+            ContractJoiner::run_with_registry_and_env(
+                &contract_nodes,
+                &contract_edges,
+                &config,
+                &registry,
+                &env_bindings,
+            )
+        };
 
         // Diff against current backend `Binds`. Build the desired
         // set keyed by `(consumer_id, provider_id)`; build the
@@ -1231,11 +1315,7 @@ impl FederatedIndex {
             // been updated at line ~1215, leaving a torn-view
             // window where a reader could observe the old index
             // but the new binds.
-            binds: Arc::new(
-                desired
-                    .into_iter()
-                    .collect::<Vec<(String, String)>>(),
-            ),
+            binds: Arc::new(desired.into_iter().collect::<Vec<(String, String)>>()),
         }));
         // Dirty is managed by `rejoin_contracts_if_dirty` (it
         // clears at the start, restores on error); a mid-rejoin
@@ -1540,6 +1620,114 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod phase_b_c_tests {
+    use super::*;
+    use crate::federation::contracts::clients::{build_client_def, detect_clients, ClientLibrary};
+    use crate::federation::graph_backend::PetgraphBackend;
+    use crate::federation::repo_id::RepoId;
+    use crate::federation::repo_source::{RepoSource, WorkspaceDirSource};
+    use std::sync::Arc;
+
+    /// Regression for TLA+ JoiningTier2NotPlumbed.tla (variant
+    /// (a) → (b)). Pre-fix, `rejoin_contracts` called
+    /// `ContractJoiner::run` with the default empty
+    /// `ClientRegistry` and `EnvBindingIndex`. The per-repo
+    /// pre-pass outputs (`detect_clients` for Phase B,
+    /// `env_bindings_for` for Phase C) were reachable only
+    /// from tests; in production the joiner fell through the
+    /// §7.3 rule-1 opt-in clause
+    /// (`if http_clients.is_empty() && !registry_has_def { continue; }`)
+    /// and silently dropped every wrapper call, violating
+    /// I2 (`every discovered call lands in exactly one
+    /// terminal state`). The TLA+ trace shows
+    /// `calls_seen = {c1} ∧ call_terminal[c1] = "None"`.
+    ///
+    /// Post-fix, `build_phase_b_c_inputs` walks every
+    /// registered repo root, feeds the TS/JS sources to
+    /// `detect_clients`, and snapshots the per-repo
+    /// `EnvBindingIndex` from the `env_sensor`. The helper
+    /// is the live-rejoin counterpart of the test-only
+    /// `run_with_registry_and_env` surface; this test pins
+    /// its structural property (the registry is non-empty
+    /// when a repo has a client def in TS source).
+    #[tokio::test]
+    async fn build_phase_b_c_inputs_populates_registry_from_ts_source() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        // Repo `billing` with a TS file declaring an
+        // axios client. The client def's name (`ordersClient`)
+        // is what the wrapper consumer calls in the S3
+        // production trace; the registry entry is what
+        // closes the I2 violation.
+        let billing_dir = root.join("billing");
+        std::fs::create_dir_all(billing_dir.join("src")).unwrap();
+        std::fs::write(
+            billing_dir.join("src/clients.ts"),
+            "const ordersClient = axios.create({baseURL: 'https://orders.svc'});\n",
+        )
+        .unwrap();
+        // The git sensor needs an initial commit.
+        git2::Repository::init(&billing_dir).unwrap();
+        {
+            let repo = git2::Repository::open(&billing_dir).unwrap();
+            let mut index = repo.index().unwrap();
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let sig = git2::Signature::now("test", "test@example.com").unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let backend: Arc<dyn crate::federation::graph_backend::GraphBackend> =
+            Arc::new(PetgraphBackend::new(&data_dir).expect("backend"));
+        let fed = Arc::new(FederatedIndex::new(backend));
+        let billing_source: Box<dyn RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new("billing").unwrap(), billing_dir.clone()).unwrap(),
+        );
+        billing_source.fetch().await.unwrap();
+        fed.add_repo(billing_source, &data_dir).await.unwrap();
+
+        // Sanity check: the TS file is recognised by the
+        // detector (the helper is the wrapper around it).
+        let src = std::fs::read_to_string(billing_dir.join("src/clients.ts")).unwrap();
+        let dets = detect_clients("src/clients.ts", &src);
+        assert_eq!(dets.len(), 1, "detect_clients finds ordersClient");
+        assert_eq!(dets[0].name, "ordersClient");
+        assert!(matches!(dets[0].library, ClientLibrary::Axios));
+
+        // The fix: `build_phase_b_c_inputs` walks the repo
+        // root, runs `detect_clients` on the TS source, and
+        // inserts the resulting `ClientDef` into the registry.
+        // Pre-fix, the production rejoin called
+        // `ContractJoiner::run` with an empty registry; the
+        // wrapper consumer was silently dropped (I2 violation).
+        let (registry, _env) = fed.build_phase_b_c_inputs();
+        assert!(
+            !registry.is_empty(),
+            "S3 fix: the live rejoin's per-repo pre-pass populates \
+             the ClientRegistry from TS sources. Pre-fix the registry \
+             was empty and every wrapper call landed in no terminal \
+             state (TLA+ JoiningTier2NotPlumbed.tla)."
+        );
+        let _ = build_client_def(&dets[0]);
+        // The registry is keyed by `(module, name)`; look it
+        // up by the canonical module the detector produces.
+        assert!(
+            registry.iter().any(|(_m, n, _d)| n == "ordersClient"),
+            "registry contains the ordersClient def (module, name) pair; \
+             pre-fix this def was never registered, so the wrapper \
+             consumer fell through the rule-1 opt-in clause and was \
+             silently dropped"
+        );
     }
 }
 
