@@ -15,7 +15,7 @@
 use crate::server::time::now_unix;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -189,9 +189,7 @@ pub struct SnapshotManager {
     /// and `wait()`s for the first's result. The slot is removed
     /// from the map when the build finishes (success or failure)
     /// so the next miss rebuilds.
-    in_flight: parking_lot::Mutex<
-        std::collections::HashMap<String, Arc<InflightSlot>>,
-    >,
+    in_flight: parking_lot::Mutex<std::collections::HashMap<String, Arc<InflightSlot>>>,
     /// Per-manager worker thread handles. The threads run
     /// `snapshot_worker_loop` for the lifetime of the manager;
     /// each test's manager owns its own bounded pool so a slow test
@@ -1056,12 +1054,14 @@ impl SnapshotManager {
         let outcome = if is_first {
             let build_result = self.build_snapshot_federation(record);
             let install_result = match &build_result {
-                Ok(fed) => self.install_resident(Arc::clone(fed), wait_ms).map_err(|b| {
-                    LainError::Other(format!(
-                        "snapshot residency busy (retry after {}ms)",
-                        b.retry_after_ms
-                    ))
-                }),
+                Ok(fed) => self
+                    .install_resident(Arc::clone(fed), wait_ms)
+                    .map_err(|b| {
+                        LainError::Other(format!(
+                            "snapshot residency busy (retry after {}ms)",
+                            b.retry_after_ms
+                        ))
+                    }),
                 Err(_) => Ok(()),
             };
             let outcome = match (build_result, install_result) {
@@ -2192,7 +2192,11 @@ repos:
         let g1 = HoldGuard::new(Arc::clone(&fed), Arc::clone(&notify));
         assert_eq!(fed.hold_count_for_test(), 1, "first holder increments to 1");
         let g2 = HoldGuard::new(Arc::clone(&fed), Arc::clone(&notify));
-        assert_eq!(fed.hold_count_for_test(), 2, "second holder increments to 2");
+        assert_eq!(
+            fed.hold_count_for_test(),
+            2,
+            "second holder increments to 2"
+        );
         drop(g1);
         // Critical check: the bool surface would have cleared held
         // here; the refcount surface keeps it at 1 so the second
@@ -2296,11 +2300,7 @@ repos:
         });
         let (s1, _) = t1.join().expect("t1");
         let (s2, _) = t2.join().expect("t2");
-        assert_eq!(
-            ready.load(AOrd::Acquire),
-            2,
-            "both threads completed"
-        );
+        assert_eq!(ready.load(AOrd::Acquire), 2, "both threads completed");
         // Critical assertion: both threads observe the same slot
         // identity (Arc::ptr_eq), i.e. exactly one slot was
         // registered. Pre-fix this assertion was not testable
@@ -2310,11 +2310,7 @@ repos:
             "two concurrent registrations for the same id share one slot \
              (TLA+ SnapshotResidency.tla SingleFlight variant (c))"
         );
-        assert_eq!(
-            mgr.in_flight.lock().len(),
-            1,
-            "exactly one slot registered"
-        );
+        assert_eq!(mgr.in_flight.lock().len(), 1, "exactly one slot registered");
     }
 
     /// Regression for the TLA+ SnapshotResidency.tla 7-state
@@ -2351,10 +2347,7 @@ repos:
         // cap = 2; we pre-populate cap - 1 = 1 HELD entry.
         // Nothing is evictable during the test.
         let mgr = Arc::new(SnapshotManager::with_cap(dir.path(), cache, 2));
-        let notify = Arc::new((
-            std::sync::Mutex::new(()),
-            std::sync::Condvar::new(),
-        ));
+        let notify = Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
 
         let pinned = Arc::new(SnapshotFederation {
             snapshot_id: "snap_pinned".into(),
@@ -2499,10 +2492,10 @@ repos:
         // because `try_evict_one_lru_unheld` returned true on
         // a stale held=0 read.
         assert!(
-                mgr.resident.lock().contains_key("snap_lru"),
-                "held LRU entry survives the install \
+            mgr.resident.lock().contains_key("snap_lru"),
+            "held LRU entry survives the install \
                  (TLA+ SnapshotResidency.tla NoEvictionOfHeld variant — Fix 6)"
-            );
+        );
         assert!(
             mgr.resident.lock().contains_key("snap_new"),
             "new entry installs in the free slot"
