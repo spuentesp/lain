@@ -129,6 +129,7 @@ fn minimal_coverage() -> Coverage {
             unreviewed: Vec::new(),
             configured_only: true,
         },
+        repo_coverages: std::collections::BTreeMap::new(),
     }
 }
 
@@ -548,7 +549,54 @@ fn coverage_with_reviewed(reviewed: Vec<&str>) -> Coverage {
             unreviewed: Vec::new(),
             configured_only: true,
         },
+        repo_coverages: std::collections::BTreeMap::new(),
     }
+}
+
+// ─── Phase A coverage downgrade ─────────────────────────────────────
+
+/// TLA+ `NoKnownImpactSound`: when a `NoKnownImpact` verdict fires
+/// for a change, every in-scope repo must be `RepoComplete(r)`. The
+/// evaluator checks the coverage ledger on every `NoKnownImpact`
+/// path; an incomplete in-scope repo downgrades to
+/// `NeedsInvestigation`.
+#[test]
+fn phase_a_no_known_impact_downgraded_on_incomplete_repo() {
+    use crate::federation::contracts::coverage::RepoCoverage as PhaseARepo;
+    use crate::federation::contracts::index_cache::CacheKey;
+    let mut coverage = minimal_coverage();
+    let mut ledger_entry = PhaseARepo::default();
+    ledger_entry.error = Some("walk failed".into());
+    ledger_entry.cache_key = CacheKey::new("billing", "abc", "0.9.0+c3");
+    coverage.repo_coverages.insert("billing".into(), ledger_entry);
+    let change = Change {
+        service: svc("billing").into(),
+        kind: ChangeKind::EndpointAdded {
+            key: http_key(HttpMethod::Get, "/api/x"),
+        },
+    };
+    let impact = evaluate(&change, &ContractSurface::default(), &ContractSurface::default(), &coverage);
+    assert_eq!(impact.class, Class::NeedsInvestigation);
+    assert_eq!(impact.reason, Some(Reason::UnresolvedCandidates));
+}
+
+/// TLA+ `NoKnownImpactSound`: a `NoKnownImpact` verdict with no
+/// ledger attached (the pre-Phase-A shape) is unchanged.
+#[test]
+fn phase_a_no_known_impact_unchanged_without_ledger() {
+    let change = Change {
+        service: svc("billing").into(),
+        kind: ChangeKind::EndpointAdded {
+            key: http_key(HttpMethod::Get, "/api/x"),
+        },
+    };
+    let impact = evaluate(
+        &change,
+        &ContractSurface::default(),
+        &ContractSurface::default(),
+        &minimal_coverage(),
+    );
+    assert_eq!(impact.class, Class::NoKnownImpact);
 }
 
 #[allow(clippy::too_many_arguments)]

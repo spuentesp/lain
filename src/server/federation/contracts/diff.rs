@@ -1361,6 +1361,14 @@ pub struct Coverage {
     pub schemaless_endpoints: Vec<EndpointId>,
     pub scope: Scope,
     pub complete: bool,
+    /// TLA+ CoverageClaim.tla: the per-repo `RepoCoverage` state
+    /// vectors. Phase A wires the coverage ledger into the
+    /// evaluator's `is_complete` check (Task 7) — empty here means
+    /// "no ledger attached", which the evaluator treats as
+    /// pre-Phase-A behaviour (no coverage downgrade). When the
+    /// federation hydrates from the per-commit cache, every in-scope
+    /// repo carries an entry.
+    pub repo_coverages: std::collections::BTreeMap<String, crate::federation::contracts::coverage::RepoCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1585,6 +1593,54 @@ pub fn evaluate(
         }
     }
 
+    // TLA+ CoverageClaim.tla `NoKnownImpactSound`: when `claim_fired`
+    // (here, `NoKnownImpact`), every in-scope repo must be `RepoComplete(r)`.
+    // Phase A enforces this in `evaluate()`: if the coverage ledger is
+    // attached AND any in-scope repo's `RepoCoverage::is_complete` is false
+    // (missing ledger entry, sensor error, unresolved could-match,
+    // cache-version mismatch), downgrade `NoKnownImpact` →
+    // `NeedsInvestigation` with `Reason::UnresolvedCandidates`. The
+    // downgrade is opt-in via `coverage.repo_coverages` being non-empty
+    // so existing tests that do not wire a ledger preserve the
+    // pre-Phase-A verdicts.
+    if matches!(class_overall, Class::NoKnownImpact) && !coverage.repo_coverages.is_empty() {
+        let current_analyzer_version = crate::federation::contracts::analyzer_version();
+        let capable = crate::federation::contracts::coverage::consumer_capable_langs();
+        let mut incomplete_repos: Vec<String> = Vec::new();
+        for repo in scope_repo_names(coverage) {
+            let Some(cover) = coverage.repo_coverages.get(&repo) else {
+                incomplete_repos.push(repo);
+                continue;
+            };
+            if !cover.is_complete(&capable, &current_analyzer_version) {
+                incomplete_repos.push(repo);
+            }
+        }
+        if !incomplete_repos.is_empty() {
+            class_overall = Class::NeedsInvestigation;
+            reason_overall = Some(Reason::UnresolvedCandidates);
+            affected.push(Affected {
+                service: change.service.clone(),
+                consumer: ConsumerKey {
+                    caller: crate::federation::contracts::model::SymbolKey {
+                        repo: crate::federation::repo_id::RepoId::new("coverage").unwrap_or_else(|_| {
+                            crate::federation::repo_id::RepoId::new("unknown").unwrap()
+                        }),
+                        path: "<coverage>".into(),
+                        container: None,
+                        name: "<incomplete_repo>".into(),
+                    },
+                    target: ConsumerTargetKey::UrlExpr(format!(
+                        "incomplete:{}",
+                        incomplete_repos.join(",")
+                    )),
+                },
+                class: Class::NeedsInvestigation,
+                reason: Reason::UnresolvedCandidates,
+            });
+        }
+    }
+
     finalize_impact(
         change,
         class_overall,
@@ -1593,6 +1649,26 @@ pub fn evaluate(
         coverage,
         compatible_changes,
     )
+}
+
+/// TLA+: every repo in scope is `(reviewed ∪ unreviewed)`. The
+/// `scope_is_complete` check iterates this set against the ledger.
+/// Phase A pins the names from the existing `Scope` struct so the
+/// legacy builders that pass an empty ledger still pass
+/// `repo_coverages.is_empty()` and skip the downgrade.
+fn scope_repo_names(coverage: &Coverage) -> Vec<String> {
+    let mut names: Vec<String> = coverage
+        .scope
+        .reviewed
+        .iter()
+        .map(|r| r.repo.clone())
+        .collect();
+    for r in &coverage.scope.unreviewed {
+        names.push(r.repo.clone());
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn finalize_impact(
@@ -2042,6 +2118,7 @@ pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Sc
         schemaless_endpoints,
         complete: scope.unreviewed.is_empty(),
         scope,
+        repo_coverages: std::collections::BTreeMap::new(),
     }
 }
 
