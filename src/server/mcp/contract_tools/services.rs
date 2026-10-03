@@ -30,7 +30,7 @@ use crate::federation::contracts::config::RoutePrefix;
 use crate::federation::contracts::index::{
     BoundField, ConsumerTarget, ContractIndex, Endpoint, ServiceInfo, UnresolvedReason,
 };
-use crate::federation::contracts::model::{ContractKey, EntryKind, ProviderOrigin};
+use crate::federation::contracts::model::{EntryKind, ProviderOrigin};
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::health::RepoHealth;
 use crate::federation::repo_id::{GlobalId, RepoId};
@@ -305,7 +305,7 @@ fn count_distinct_consumer_services(idx: &ContractIndex, info: &ServiceInfo) -> 
     let provider_endpoints: std::collections::BTreeSet<String> = info
         .endpoint_ids
         .iter()
-        .map(|(_, k)| key_label(k))
+        .map(|(_, k)| k.to_string())
         .collect();
     let mut consumers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for resolution in idx.consumers.values() {
@@ -316,17 +316,13 @@ fn count_distinct_consumer_services(idx: &ContractIndex, info: &ServiceInfo) -> 
             let bound = resolution
                 .bound_endpoints
                 .iter()
-                .any(|(_, k)| provider_endpoints.contains(&key_label(k)));
+                .any(|(_, k)| provider_endpoints.contains(&k.to_string()));
             if bound {
                 consumers.insert(resolution.service.0.clone());
             }
         }
     }
     consumers.len()
-}
-
-fn key_label(k: &ContractKey) -> String {
-    k.to_string()
 }
 
 fn count_unresolved_inbound(idx: &ContractIndex, info: &ServiceInfo) -> usize {
@@ -410,7 +406,7 @@ async fn run_get_service(
     let endpoints: Vec<String> = info
         .endpoint_ids
         .iter()
-        .map(|(_, k)| key_label(k))
+        .map(|(_, k)| k.to_string())
         .collect();
     let consumers = build_consumer_rows(fed, &idx, info.clone(), depth);
 
@@ -486,7 +482,7 @@ fn build_consumer_rows(
     let provider_endpoints: std::collections::BTreeSet<String> = info
         .endpoint_ids
         .iter()
-        .map(|(_, k)| key_label(k))
+        .map(|(_, k)| k.to_string())
         .collect();
     let mut by_consumer: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
     let mut by_consumer_repo: BTreeMap<String, String> = BTreeMap::new();
@@ -503,7 +499,7 @@ fn build_consumer_rows(
         let Some(endpoint) = idx
             .endpoints
             .values()
-            .find(|e| provider_endpoints.contains(&key_label(&e.id.1)))
+            .find(|e| provider_endpoints.contains(&e.id.1.to_string()))
         else {
             continue;
         };
@@ -538,7 +534,7 @@ fn build_consumer_rows(
         };
 
         let use_value = json!({
-            "endpoint": {"service": endpoint.id.0.0.as_str(), "key": key_label(&endpoint.id.1)},
+            "endpoint": {"service": endpoint.id.0.0.as_str(), "key": &endpoint.id.1.to_string()},
             "site": site,
             "caller": caller_node_evidence(&caller_node),
             "binding": provenance_to_json(provenance),
