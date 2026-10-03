@@ -266,6 +266,21 @@ pub fn to_camel_case(name: &str) -> String {
     result
 }
 
+/// Compose a proto package-qualified service name from its parts.
+/// Returns the bare `service` when `package` is empty (matches
+/// the proto convention `service Foo { … }` for `package;`-less
+/// files); otherwise `package.service`. Shared by the proto
+/// provider sensor and the gRPC consumer sensor (Phase A review
+/// §D2) — previously each sensor carried an identical 3-line
+/// copy that could drift if the convention ever changes.
+pub fn compose_service_name(package: &str, service: &str) -> String {
+    if package.is_empty() {
+        service.to_string()
+    } else {
+        format!("{}.{}", package, service)
+    }
+}
+
 /// Look up a handler node by `name`, trying exact, then `snake_case`,
 /// then `camelCase`. Empty `name` returns `None`.
 ///

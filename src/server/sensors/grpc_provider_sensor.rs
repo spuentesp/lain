@@ -161,16 +161,11 @@ pub fn parse_proto_providers(content: &str, proto_path: &str) -> Vec<GrpcProvide
     out
 }
 
-/// Compose the full service identity. Empty `package` reduces to
-/// just the service name (no leading dot), matching how the joiner
-/// normalises the `(package, service)` pair.
-pub fn compose_service_name(package: &str, service: &str) -> String {
-    if package.is_empty() {
-        service.to_string()
-    } else {
-        format!("{}.{}", package, service)
-    }
-}
+/// Re-export of the canonical `crate::server::sensors::util::compose_service_name`
+/// so existing callers keep working. Phase A review §D2 collapsed
+/// the two identical 3-line bodies (one here, one in
+/// `grpc_consumer_sensor`) into the shared util implementation.
+pub use crate::server::sensors::util::compose_service_name;
 
 // ─── Tokenizer helpers ────────────────────────────────────────────────
 

@@ -41,6 +41,7 @@ use crate::federation::contracts::model::{
 };
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::util::compose_service_name;
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -151,14 +152,6 @@ pub fn detect_stub_calls(content: &str, ext: &str, graph_path: &str) -> Vec<Grpc
         _ => {}
     }
     out
-}
-
-fn compose_service_name(package: &str, service: &str) -> String {
-    if package.is_empty() {
-        service.to_string()
-    } else {
-        format!("{}.{}", package, service)
-    }
 }
 
 fn detect_channel_host(content: &str, ext: &str) -> Option<String> {
