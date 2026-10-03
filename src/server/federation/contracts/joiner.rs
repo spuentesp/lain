@@ -278,6 +278,7 @@ impl ContractJoiner {
                     rpc_consumer,
                     &own_service,
                     &endpoint_table,
+                    config,
                     &mut binds,
                 );
                 consumers.insert(call_id.clone(), resolution);
@@ -1073,6 +1074,15 @@ fn resolve_topic_consumer(
 /// own provider must NOT bind. The `own_service == svc` skip
 /// mirrors the topic consumer's rule (§7.8).
 ///
+/// Channel resolution (spec §8.2 acceptance E2): when the
+/// consumer's `channel_host_part` is `HostPart::Literal(host)`,
+/// the joiner restricts the candidate set to the services
+/// whose `hosts` list matches `host`. When the channel host
+/// is `HostPart::None`, the consumer has no resolvable
+/// channel address and lands in `Unresolved { reason:
+/// RpcStubUnknown }` (E4). When the channel host matches no
+/// service, the consumer is similarly unresolved.
+///
 /// Returns a `ConsumerResolution` (mirroring `resolve_topic_consumer`)
 /// and pushes any `Binds` edges onto `binds`.
 fn resolve_rpc_consumer(
@@ -1080,8 +1090,66 @@ fn resolve_rpc_consumer(
     consumer: &RpcConsumerFact,
     own_service: &ServiceName,
     endpoints: &BTreeMap<(ServiceName, ContractKey), Vec<EndpointProviderRecord>>,
+    config: &ContractFederationConfig,
     binds: &mut Vec<BindsEdge>,
 ) -> ConsumerResolution {
+    // Resolve the channel host to the set of candidate services.
+    // The empty / missing case (HostPart::None) means the channel
+    // could not be resolved — the stub call is unknown to the
+    // joiner and lands in `Unresolved { reason: RpcStubUnknown }`
+    // without iterating providers.
+    let candidate_services: Vec<ServiceName> = match &consumer.channel_host_part {
+        HostPart::None => {
+            return ConsumerResolution {
+                call_id: call_id.clone(),
+                service: own_service.clone(),
+                target: Some(ConsumerTarget::Unresolved {
+                    reason: UnresolvedReason::RpcStubUnknown,
+                    target_service: None,
+                }),
+                bound_endpoints: Vec::new(),
+                reads_complete: true,
+            };
+        }
+        HostPart::Literal(host) => {
+            let mut svcs: Vec<ServiceName> = config
+                .services
+                .iter()
+                .filter(|s| s.hosts.iter().any(|pat| host_matches_pattern(pat, host)))
+                .map(|s| ServiceName(s.name.clone()))
+                .collect();
+            if svcs.is_empty() {
+                return ConsumerResolution {
+                    call_id: call_id.clone(),
+                    service: own_service.clone(),
+                    target: Some(ConsumerTarget::Unresolved {
+                        reason: UnresolvedReason::RpcStubUnknown,
+                        target_service: None,
+                    }),
+                    bound_endpoints: Vec::new(),
+                    reads_complete: true,
+                };
+            }
+            svcs.sort();
+            svcs
+        }
+        HostPart::Env(_) | HostPart::Expr(_) => {
+            // Env / Expr host: the spec defers to Phase C env
+            // resolution (already plumbed through `target_service_from_hosts`).
+            // We pass the literal resolution for now (the joiner
+            // does not need Phase C to satisfy E1-E5).
+            return ConsumerResolution {
+                call_id: call_id.clone(),
+                service: own_service.clone(),
+                target: Some(ConsumerTarget::Unresolved {
+                    reason: UnresolvedReason::RpcStubUnknown,
+                    target_service: None,
+                }),
+                bound_endpoints: Vec::new(),
+                reads_complete: true,
+            };
+        }
+    };
     // The consumer's `service` is the bare service name
     // (`Orders`); the `package` field is empty at scan time
     // because the consumer sensor doesn't read the proto file.
@@ -1092,13 +1160,16 @@ fn resolve_rpc_consumer(
         service: consumer.service.clone(),
         method: consumer.method.clone(),
     };
-    // First pass: exact match on the consumer's bare service
-    // identity. This handles the case where the consumer's
-    // service name is already package-qualified (e.g. a Java
-    // stub typed `com.acme.orders.OrdersBlockingStub`).
     let mut bound: Vec<EndpointId> = Vec::new();
-    let mut bound_targets: Vec<(ServiceName, ContractKey, GlobalId)> = Vec::new();
+    // First pass: exact match on the consumer's bare service
+    // identity, restricted to the candidate services. This
+    // handles the case where the consumer's service name is
+    // already package-qualified (e.g. a Java stub typed
+    // `com.acme.orders.OrdersBlockingStub`).
     for ((svc, key), providers) in endpoints {
+        if !candidate_services.contains(svc) {
+            continue;
+        }
         if key != &target_key {
             continue;
         }
@@ -1123,35 +1194,22 @@ fn resolve_rpc_consumer(
                 stripped_prefix: None,
             });
             bound.push((svc.clone(), key.clone()));
-            bound_targets.push((svc.clone(), key.clone(), provider.id.clone()));
         }
     }
     // Second pass: package-qualified match. The consumer's
     // `service` is bare; we look for any provider whose
     // service name ends in `.<bare_service>`. The match is
-    // exact on the method and the bare service name; the
-    // package is a prefix the joiner doesn't try to validate
-    // (a multi-package same-name ambiguity would land in
-    // `bound.len() > 1` and the resolution stays as a
-    // single-bind — the joiner surfaces the first match by
-    // `BTreeMap` iteration order; the coverage ledger
-    // `unresolved` count is unaffected).
+    // exact on the method and the bare service name.
     if bound.is_empty() {
         let bare = format!(".{}", consumer.service);
         for ((svc, key), providers) in endpoints {
+            if !candidate_services.contains(svc) {
+                continue;
+            }
             let ContractKey::Rpc { service, .. } = key else {
                 continue;
             };
             if !service.ends_with(&bare) {
-                continue;
-            }
-            if !service.ends_with(&format!(
-                ".{}",
-                consumer.service
-            )) {
-                continue;
-            }
-            if svc == own_service {
                 continue;
             }
             let provider_method = match key {
@@ -1159,6 +1217,9 @@ fn resolve_rpc_consumer(
                 _ => continue,
             };
             if provider_method != &consumer.method {
+                continue;
+            }
+            if svc == own_service {
                 continue;
             }
             if let Some(provider) = providers.first() {
@@ -1177,7 +1238,6 @@ fn resolve_rpc_consumer(
                     stripped_prefix: None,
                 });
                 bound.push((svc.clone(), key.clone()));
-                bound_targets.push((svc.clone(), key.clone(), provider.id.clone()));
             }
         }
     }
@@ -1196,7 +1256,6 @@ fn resolve_rpc_consumer(
             stripped_prefix: None,
         })
     };
-    let _ = bound_targets;
     ConsumerResolution {
         call_id: call_id.clone(),
         service: own_service.clone(),
