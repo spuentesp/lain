@@ -84,7 +84,7 @@ impl SensorCounts {
             + self.sql_tables
     }
 
-    fn add(&mut self, field: SensorCountField, n: usize) {
+    pub(crate) fn add(&mut self, field: SensorCountField, n: usize) {
         match field {
             SensorCountField::HttpRoutes => self.http_routes += n,
             SensorCountField::Openapi => self.openapi += n,

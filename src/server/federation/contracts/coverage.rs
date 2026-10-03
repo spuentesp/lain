@@ -519,23 +519,12 @@ pub fn run_all_with_coverage(
             Err(_) => 0,
         };
         let error = outcome.err().map(|e| e.to_string());
-        // `SensorCounts::add` is private to `sensors/mod.rs`, so
-        // update the count field directly here.
-        match sensor.count_field() {
-            crate::server::sensors::SensorCountField::HttpRoutes => counts.http_routes += count,
-            crate::server::sensors::SensorCountField::Openapi => counts.openapi += count,
-            crate::server::sensors::SensorCountField::Proto => counts.proto += count,
-            crate::server::sensors::SensorCountField::Graphql => counts.graphql += count,
-            crate::server::sensors::SensorCountField::Websocket => counts.websocket += count,
-            crate::server::sensors::SensorCountField::DynamicDispatch => {
-                counts.dynamic_dispatch += count
-            }
-            crate::server::sensors::SensorCountField::HttpClients => counts.http_clients += count,
-            crate::server::sensors::SensorCountField::Fields => counts.fields += count,
-            crate::server::sensors::SensorCountField::FieldReads => counts.field_reads += count,
-            crate::server::sensors::SensorCountField::EntryPoints => counts.entry_points += count,
-            crate::server::sensors::SensorCountField::SqlTables => counts.sql_tables += count,
-        }
+        // `SensorCounts::add` is `pub(crate)` so the coverage ledger
+        // can drive it without re-implementing the 14-arm match
+        // (Phase A review §D13). The previous inlined copy here was
+        // the same match as in `sensors::mod::run_all` — Phase D
+        // wanted a single source of truth.
+        counts.add(sensor.count_field(), count);
         let bucket: &mut BTreeMap<String, SensorLedger> =
             ledger.ledger.entry(sensor.name().to_string()).or_default();
         // The sensor's per-lang ledger is unknown in Phase A (the
