@@ -108,9 +108,31 @@ pub struct FederatedIndex {
     /// The active contract config. Set via `set_contract_config`;
     /// the joiner reads it inside `rejoin_contracts_if_dirty`.
     contract_config: RwLock<Option<Arc<ContractFederationConfig>>>,
-    /// The most recent `ContractIndex`. Tools (PR 13/16) read this
-    /// after calling `rejoin_contracts_if_dirty`.
-    contract_index: RwLock<Option<Arc<ContractIndex>>>,
+    /// Atomic `(contract_index, binds)` pair (TLA+ RejoinProtocol
+    /// variant (c) — epoch-stamped atomic publish). The rejoin
+    /// produces both halves in one write-lock acquisition; readers
+    /// always see them as a coherent pair from the same
+    /// generation, even when the backend's `Binds` edges are being
+    /// updated. `Binds` mirrors the `(consumer, provider)` key set
+    /// the rejoin applied so a tool that needs both index + bind
+    /// keys can take them atomically. Pre-fix the rejoin wrote
+    /// `Binds` to the backend (line ~1180) before swapping
+    /// `contract_index`, leaving a torn-view window where a
+    /// reader could observe the old index but the new binds.
+    contract_snapshot: RwLock<Option<Arc<ContractSnapshot>>>,
+}
+
+/// The atomic payload of `FederatedIndex::contract_snapshot`.
+/// `index` is the join output; `binds` mirrors the `(consumer,
+/// provider)` key set the rejoin just wrote to the backend so
+/// readers can verify the two halves match.
+#[derive(Debug, Default)]
+pub struct ContractSnapshot {
+    pub index: Arc<ContractIndex>,
+    /// The `(consumer.as_str(), provider.as_str())` pairs the
+    /// rejoin's BTreeSet diff produced. Mirrors the Binds edges
+    /// the rejoin wrote to the backend.
+    pub binds: Arc<Vec<(String, String)>>,
 }
 
 /// Collapse a per-definition repo list to the distinct repos in it,
@@ -149,7 +171,7 @@ impl FederatedIndex {
             contracts_dirty: AtomicBool::new(false),
             contract_node_ids: DashMap::new(),
             contract_config: RwLock::new(None),
-            contract_index: RwLock::new(None),
+            contract_snapshot: RwLock::new(None),
         }
     }
 
@@ -972,7 +994,21 @@ impl FederatedIndex {
     /// `rejoin_contracts_if_dirty`. Tools (PR 13/16) call
     /// `rejoin_contracts_if_dirty` first, then read this snapshot.
     pub fn contract_index(&self) -> Option<Arc<ContractIndex>> {
-        self.contract_index.read().clone()
+        self.contract_snapshot
+            .read()
+            .as_ref()
+            .map(|s| s.index.clone())
+    }
+
+    /// The atomic `(contract_index, binds)` pair (TLA+ RejoinProtocol
+    /// variant (c)). Tools that need both halves — e.g. to verify a
+    /// consumer resolution's `Binds` target is among the published
+    /// `Binds` edges — should call this instead of `contract_index`
+    /// and a separate backend query; the two halves are guaranteed
+    /// to be from the same generation. Returns `None` before the
+    /// first rejoin.
+    pub fn contract_snapshot(&self) -> Option<Arc<ContractSnapshot>> {
+        self.contract_snapshot.read().clone()
     }
 
     /// Recompute the desired `Binds` set and `ContractIndex` when
@@ -1183,7 +1219,24 @@ impl FederatedIndex {
             self.backend.remove_edges(&to_remove)?;
         }
 
-        *self.contract_index.write() = Some(Arc::new(out.index));
+        *self.contract_snapshot.write() = Some(Arc::new(ContractSnapshot {
+            index: Arc::new(out.index),
+            // The `desired` set is the join's intended output and
+            // exactly what was just written to the backend. A
+            // reader that takes `contract_snapshot` sees this
+            // set together with `index` from the same generation
+            // (TLA+ RejoinProtocol.tla I7 variant (c) — atomic
+            // epoch-stamped publish). Pre-fix, the index was
+            // written here while the backend's Binds had already
+            // been updated at line ~1215, leaving a torn-view
+            // window where a reader could observe the old index
+            // but the new binds.
+            binds: Arc::new(
+                desired
+                    .into_iter()
+                    .collect::<Vec<(String, String)>>(),
+            ),
+        }));
         // Dirty is managed by `rejoin_contracts_if_dirty` (it
         // clears at the start, restores on error); a mid-rejoin
         // `set_contract_config` / `mark_contracts_dirty` that lands

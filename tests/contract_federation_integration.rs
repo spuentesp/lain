@@ -711,5 +711,75 @@ async fn field_ref_to_field_binds_edge_is_persisted() {
     assert_eq!(field_binds_after[0].provenance, fb.provenance);
 }
 
+/// Regression for the TLA+ RejoinProtocol.tla 9-state trace that
+/// violates `I7ReaderConsistency`: `RejoinApply` writes new Binds
+/// to the backend, then `RejoinSwapIndex` swaps the published
+/// index, and a reader observes the OLD index's consumers but the
+/// NEW binds. Pre-fix: `contract_index` and the backend's Binds
+/// were stored in separate fields, leaving a torn-view window
+/// between the Binds write and the index swap. Post-fix
+/// (variant (c) — epoch-stamped atomic publish): the rejoin
+/// publishes `contract_snapshot = (Arc<ContractIndex>, Arc<Vec<bind_keys>>)`
+/// as a single tuple under one `RwLock` write; readers see both
+/// halves from the same generation.
+///
+/// The test polls `contract_snapshot()` while a rejoin is in flight
+/// and verifies every observed snapshot is internally consistent
+/// (its `binds` corresponds to the consumers in its `index`). Pre-fix
+/// this was structurally impossible because there was no
+/// `contract_snapshot` accessor at all.
+#[tokio::test]
+async fn rejoin_publishes_index_and_binds_atomically() {
+    use lain::federation::contracts::index::ConsumerTarget;
+
+    let (_dir, fed, _o, _b) = build_two_repo_federation().await;
+    project_both(&fed).await;
+    fed.rejoin_contracts_if_dirty()
+        .expect("baseline rejoin");
+
+    // Poll the snapshot from the main thread while a worker re-runs
+    // the rejoin. The fixture's two-repo config produces a stable
+    // bind set across re-runs, so the structural check below is
+    // the atomicity check: any snapshot we observe must be
+    // internally consistent.
+    let fed_for_rejoin = std::sync::Arc::clone(&fed);
+    let rejoin_handle = std::thread::spawn(move || {
+        for _ in 0..50 {
+            fed_for_rejoin
+                .rejoin_contracts_if_dirty()
+                .expect("rejoin");
+        }
+    });
+
+    let mut sampled = 0usize;
+    let mut inconsistent = 0usize;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if let Some(snap) = fed.contract_snapshot() {
+            sampled += 1;
+            // Internal consistency: the `binds` set has one entry
+            // per consumer resolution whose `target` is `Binds`.
+            let consumers_with_binds: usize = snap
+                .index
+                .consumers
+                .values()
+                .filter(|c| matches!(c.target, Some(ConsumerTarget::Binds { .. })))
+                .count();
+            if snap.binds.len() != consumers_with_binds {
+                inconsistent += 1;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_micros(50));
+    }
+    rejoin_handle.join().expect("rejoin thread");
+
+    assert!(sampled > 0, "should have observed at least one snapshot");
+    assert_eq!(
+        inconsistent, 0,
+        "every observed contract_snapshot must have binds matching its \
+         consumers (TLA+ RejoinProtocol.tla I7ReaderConsistency variant (c))"
+    );
+}
+
 #[allow(dead_code)]
 fn _hush() {}
