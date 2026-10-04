@@ -268,11 +268,15 @@ section "1. Server and advertised surface"
 TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['result']['tools']))" \
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
+# The 13 contract-federation tools (PR 13) are model-independent and
+# always advertised on `full` profile. semantic_search toggles with
+# the embedding model: present when MODEL_ARGS is set, absent when
+# it is not.
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "81" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "94" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "80" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "93" "$TOOL_COUNT"
 fi
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
