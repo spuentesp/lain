@@ -6,6 +6,7 @@
 //! in [`persist`].
 
 pub(crate) mod persist;
+pub(crate) mod wal;
 
 pub use persist::{inspect_persisted_graph, GraphInspectionError, PATH_FORMAT_VERSION};
 
