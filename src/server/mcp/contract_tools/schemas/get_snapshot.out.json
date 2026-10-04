@@ -3,60 +3,30 @@
   "title": "get_snapshot output",
   "description": "Output for `get_snapshot`. Same shape as `prepare_snapshot`.",
   "type": "object",
-  "required": [
-    "snapshot",
-    "state",
-    "repos"
-  ],
+  "required": ["snapshot", "state", "repos"],
   "properties": {
-    "snapshot": {
-      "type": "string"
-    },
+    "snapshot": { "type": "string" },
     "state": {
       "type": "string",
-      "enum": [
-        "pending",
-        "indexing",
-        "ready",
-        "failed"
-      ]
+      "enum": ["pending", "indexing", "ready", "failed"]
     },
     "repos": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "repo",
-          "state"
-        ],
+        "required": ["repo", "state"],
         "properties": {
-          "repo": {
-            "type": "string"
-          },
+          "repo": { "type": "string" },
           "state": {
             "type": "string",
-            "enum": [
-              "cached",
-              "queued",
-              "indexing",
-              "failed",
-              "excluded"
-            ]
+            "enum": ["cached", "queued", "indexing", "failed", "excluded"]
           },
-          "commit": {
-            "type": "string"
-          },
-          "error": {
-            "type": "string"
-          }
+          "commit": { "type": "string" },
+          "error": { "type": "string" }
         }
       }
     },
-    "created_unix": {
-      "type": "integer"
-    },
-    "last_access_unix": {
-      "type": "integer"
-    }
+    "created_unix": { "type": "integer" },
+    "last_access_unix": { "type": "integer" }
   }
 }

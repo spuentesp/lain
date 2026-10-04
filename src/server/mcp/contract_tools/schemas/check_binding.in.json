@@ -1,13 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "check_binding input",
-  "description": "Input for `check_binding`. Validates a proposed consumer\u2192endpoint link and emits its `bindings_entry` YAML for `repos.yaml`.",
+  "description": "Input for `check_binding`. Validates a proposed consumer→endpoint link and emits its `bindings_entry` YAML for `repos.yaml`.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "snapshot": {
-      "type": "string"
-    },
+    "snapshot": { "type": "string" },
     "consumer": {
       "type": "string",
       "description": "Consumer GlobalId."
@@ -15,22 +13,11 @@
     "endpoint": {
       "type": "object",
       "properties": {
-        "service": {
-          "type": "string"
-        },
-        "key": {
-          "type": "string"
-        }
+        "service": { "type": "string" },
+        "key": { "type": "string" }
       },
-      "required": [
-        "service",
-        "key"
-      ]
+      "required": ["service", "key"]
     }
   },
-  "required": [
-    "snapshot",
-    "consumer",
-    "endpoint"
-  ]
+  "required": ["snapshot", "consumer", "endpoint"]
 }
