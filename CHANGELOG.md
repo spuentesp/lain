@@ -18,6 +18,17 @@ All notable changes to LAIN are documented here. Versions follow
   dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
   finding B6).
 
+- **`get_coupling_radar` doc clarified** — the section heading
+  "Files that co-change with this one" suggested an arg named
+  `path`; the input schema actually requires `symbol`. The doc now
+  states the arg name explicitly and notes that the value is a file
+  path. New lint
+  `scripts/check-tool-doc-args.py` validates every JSON example in
+  `docs/quickstart-tools.md` against its tool's input schema, so
+  this class of drift can't recur without failing the build. Found
+  by dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B9).
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call

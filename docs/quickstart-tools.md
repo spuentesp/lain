@@ -182,7 +182,10 @@ Everything a symbol depends on (recursive).
 ```
 
 ### get_coupling_radar
-Files that co-change with this one.
+Files that co-change with the given file path. The argument is named
+`symbol` for consistency with the other "name a node" tools (e.g.
+`get_blast_radius`, `explain_symbol`); pass a file path here, not a
+function or method name.
 ```json
 { "name": "get_coupling_radar", "arguments": { "symbol": "my_file.rs" } }
 ```
