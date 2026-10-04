@@ -1,0 +1,32 @@
+# cfg-basename | module | expect | meaning
+#
+# expect=pass : TLC must finish with no error (exit 0).
+# expect=fail : TLC must report an INVARIANT/property violation (exit 12).
+#               These are counterexample specs: each models a pre-fix or
+#               rejected design and is kept so the bug stays reproducible.
+# Any other TLC outcome (parse error, deadlock, crash) fails the check.
+CoverageClaim                     | CoverageClaim                     | pass | I3 verdict soundness
+CoverageClaimCache                | CoverageClaimCache                | pass | claim cache
+IndexGeneration                   | IndexGeneration                   | pass | I7 generation consistency
+RejoinProtocol                    | RejoinProtocol                    | fail | pre-fix rejoin (clear-after-read)
+RejoinProtocol_VariantB           | RejoinProtocol_VariantB           | pass | fixed rejoin: Convergence
+RejoinProtocolMidRejoinInvariant  | RejoinProtocolMidRejoinInvariant  | fail | NoLostUpdate is transiently false mid-rejoin
+SnapshotResidency                 | SnapshotResidency                 | fail | pre-fix residency
+SnapshotResidency_VariantBC       | SnapshotResidency_VariantBC       | pass | fixed residency
+InstallResidentEviction           | InstallResidentEviction           | fail | pre-fix needless eviction
+InstallResidentEviction_VariantB  | InstallResidentEviction_VariantB  | pass | fixed
+SnapshotInFlightSlot              | SnapshotInFlightSlot              | fail | pre-fix duplicate build
+SnapshotInFlightSlot_VariantB     | SnapshotInFlightSlot_VariantB     | pass | fixed
+JoiningTier2NotPlumbed            | JoiningTier2NotPlumbed            | fail | known unplumbed tier-2 joining
+ReadinessLifecycle                | ReadinessLifecycle                | fail | pre-fix: late ready() opens the gate over a mutating pass
+ReadinessLifecycle_Fixed          | ReadinessLifecycle                | pass | fixed: PassGuard + terminal cancel
+ReloadBus                         | ReloadBus                         | fail | pre-fix: subscribe inside spawn loses a reload
+ReloadBus_Fixed                   | ReloadBus                         | pass | fixed: subscribe before spawn
+SnapshotInstallHold               | SnapshotInstallHold               | fail | pre-fix: hold taken after the insert lock drops
+SnapshotInstallHold_Fixed         | SnapshotInstallHold               | pass | fixed: install_resident_held
+FsLeaseGuard_Unguarded            | FsLeaseGuard                      | fail | pre-fix: scan-then-create, all acquirers win
+FsLeaseGuard                      | FsLeaseGuard                      | pass | fixed: O_EXCL acquire guard
+FsLeaseGuard_Stall                | FsLeaseGuard                      | fail | residual: guard holder frozen > GUARD_TTL
+FsLease                           | FsLease                           | fail | scan-then-create (same bug, fine-grained)
+FsLease_Excl                      | FsLease                           | pass | fixed-path O_EXCL lease, no expiry
+FsLease_ExclExpiry                | FsLease                           | fail | residual: expiry + steal needs fencing tokens

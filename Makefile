@@ -24,3 +24,36 @@ demo-video:
 
 demo-video-real:
 	./scripts/make-demo-video.sh --fixture real
+
+# ---- Formal verification & deterministic checking (docs/formal/README.md) ----
+# None of these run in CI yet; run them locally before touching concurrency code.
+.PHONY: formal loom kani miri mutants proptest verify
+
+# TLA+: every spec in docs/formal/MANIFEST must match its expected outcome.
+formal:
+	./scripts/check-formal.sh
+
+# loom: exhaustive thread-interleaving tests on the real code. Own target dir
+# (separate cfg) so it does not invalidate the normal build.
+loom:
+	RUSTFLAGS="--cfg lain_loom" CARGO_TARGET_DIR=target/loom cargo test --lib loom_
+
+# Kani bounded model checking (needs `cargo install kani-verifier && cargo kani setup`).
+kani:
+	cargo kani --lib
+
+# Miri on the unsafe-adjacent tests (needs nightly + miri component).
+miri:
+	MIRIFLAGS="-Zmiri-disable-isolation" CARGO_TARGET_DIR=target/miri \
+	  cargo +nightly miri test --lib sensors::util::verification
+
+# Mutation testing of the verified modules (slow; needs cargo-mutants).
+mutants:
+	cargo mutants -f src/server/readiness.rs -f src/server/reload.rs \
+	  -f src/server/presence_lock.rs --timeout 300 -- --lib
+
+# proptest state machines and property tests.
+proptest:
+	cargo test --lib verification
+
+verify: formal proptest loom
