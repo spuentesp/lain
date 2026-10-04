@@ -235,6 +235,61 @@ test('nodeRadius: 5/6/7 by role', () => {
   assert.equal(app.nodeRadius(undefined),   5);
 });
 
+test('nodeKind: prefers node_type, falls back to kind, else empty string', () => {
+  // normalizeGraphPayload emits `node_type` — the wire field from
+  // schema::GraphNode. drawGraphSvg used to read `d.kind`, which is
+  // undefined on every normalized node, stamping
+  // `graph-node--kind-undefined` and collapsing every shape to a circle.
+  assert.equal(app.nodeKind({ node_type: 'Class' }), 'Class');
+  assert.equal(app.nodeKind({ node_type: 'Function' }), 'Function');
+  assert.equal(app.nodeKind({ kind: 'Method' }), 'Method');
+  assert.equal(app.nodeKind({ node_type: '', kind: 'Method' }), 'Method');
+  assert.equal(app.nodeKind({}), '');
+  assert.equal(app.nodeKind(null), '');
+  assert.equal(app.nodeKind(undefined), '');
+});
+
+test('nodeKind: round-trips through nodeShape for every kind', () => {
+  for (const [node, expected] of [
+    [{ node_type: 'Function' }, 'symbolCircle'],
+    [{ node_type: 'Method' },   'symbolDiamond'],
+    [{ node_type: 'Class' },    'symbolSquare'],
+    [{ kind: 'Class' },         'symbolSquare'],
+  ]) {
+    assert.equal(app.nodeShape(app.nodeKind(node)), expected);
+  }
+});
+
+test('computeMinimapTransform: maps graph bounds into minimap space', () => {
+  const t = app.computeMinimapTransform([{ x: 0, y: 0 }, { x: 100, y: 50 }], 150, 100);
+  assert.ok(t, 'expected a transform for numeric coords');
+  assert.ok(Number.isFinite(t.s) && t.s > 0, `scale must be finite and positive, got ${t.s}`);
+  assert.ok(Number.isFinite(t.tx), `tx must be finite, got ${t.tx}`);
+  assert.ok(Number.isFinite(t.ty), `ty must be finite, got ${t.ty}`);
+});
+
+test('computeMinimapTransform: null when no node has numeric coords', () => {
+  // Regression: paintMinimap reduced over `n.x ?? acc.xmin` with every x
+  // undefined, leaving bounds at ±Infinity. dx went non-finite and the
+  // minimap frame rect was written with x="NaN" y="NaN".
+  assert.equal(app.computeMinimapTransform([], 150, 100), null);
+  assert.equal(app.computeMinimapTransform([{ }, { x: null, y: undefined }], 150, 100), null);
+  assert.equal(app.computeMinimapTransform(null, 150, 100), null);
+});
+
+test('computeMinimapTransform: tolerates nodes missing coordinates', () => {
+  const t = app.computeMinimapTransform([{ x: 0, y: 0 }, { }, { x: 10, y: 10 }], 150, 100);
+  assert.ok(t, 'expected a transform when at least one node is placed');
+  assert.ok(Number.isFinite(t.s) && Number.isFinite(t.tx) && Number.isFinite(t.ty));
+});
+
+test('computeMinimapTransform: degenerate bounds still yield a finite transform', () => {
+  const t = app.computeMinimapTransform([{ x: 5, y: 5 }], 150, 100);
+  assert.ok(t, 'single node must still produce a transform');
+  assert.ok(Number.isFinite(t.s) && t.s > 0, `got s=${t.s}`);
+  assert.ok(Number.isFinite(t.tx) && Number.isFinite(t.ty));
+});
+
 test('applyFilters: drops node when repo unselected', () => {
   const graph = {
     nodes: [
@@ -317,6 +372,26 @@ test('applyFilters: edge drops when either endpoint hidden', () => {
   const out = app.applyFilters(graph, state);
   assert.equal(out.visibleEdges.length, 0);
   assert.equal(out.visibleNodes.length, 1);
+});
+
+test('applyFilters: keeps a node whose kind is only in the legacy `kind` field', () => {
+  // applyFilters used to read `n.node_type` alone while its comment
+  // claimed to accept either field, so a raw payload that never went
+  // through normalizeGraphPayload had every node filtered out.
+  const graph = {
+    nodes: [
+      { id: 'a', repo_id: 'r1', kind: 'Function' },
+      { id: 'b', repo_id: 'r1', node_type: 'Function' },
+    ],
+    edges: [],
+  };
+  const state = {
+    repos: new Set(['r1']),
+    kinds: new Set(['Function', 'Method', 'Class']),
+    crossRepoOnly: false,
+  };
+  const out = app.applyFilters(graph, state);
+  assert.deepStrictEqual(out.visibleNodes.map(n => n.id).sort(), ['a', 'b']);
 });
 
 // ── computeAnchorVisibleSet / applyDepth (v2, 2026-08-31) ──────────────────

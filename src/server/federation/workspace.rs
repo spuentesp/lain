@@ -67,7 +67,10 @@ impl WorkspacesFile {
     }
 
     /// Validate structural invariants: unique workspace names, ≥1 member per
-    /// workspace, valid repo id characters, default workspace exists if set.
+    /// workspace (a workspace with a `source` may start empty — `lain
+    /// workspaces init` registers it and `lain workspaces add` fills in the
+    /// members; nothing merges members in from the source), valid repo id
+    /// characters, default workspace exists if set.
     pub fn validate(&self) -> Result<(), LainError> {
         let mut seen_names = std::collections::HashSet::new();
         for ws in &self.workspaces {
@@ -77,7 +80,7 @@ impl WorkspacesFile {
                     name = ws.name
                 )));
             }
-            if ws.members.is_empty() {
+            if ws.members.is_empty() && ws.source.is_none() {
                 return Err(LainError::Config(format!(
                     "workspace '{name}' must contain >= 1 repos; got 0",
                     name = ws.name,
@@ -412,6 +415,24 @@ workspaces:
 "#;
         let file: WorkspacesFile = serde_yaml::from_str(yaml).unwrap();
         assert!(file.validate().is_err());
+    }
+
+    #[test]
+    fn sourced_workspace_with_zero_members_is_allowed() {
+        // `lain workspaces init` registers a workspace_clone source first
+        // and fills members in via `lain workspaces add` afterwards, so the
+        // saved file must validate (and load) in that transient state.
+        let yaml = r#"
+workspaces:
+  - name: pending
+    members: []
+    source:
+      type: workspace_clone
+      url: https://example.com/ws.git
+"#;
+        let file: WorkspacesFile = serde_yaml::from_str(yaml).unwrap();
+        file.validate()
+            .expect("sourced workspace may start with 0 members");
     }
 
     #[test]

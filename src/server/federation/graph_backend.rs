@@ -7,13 +7,14 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-/// On-disk envelope for `federated_graph.bin`: the `LNF2` magic followed
-/// by a little-endian `u32` schema version. Anything else — headerless
-/// bytes, an unknown magic, a version mismatch, or a corrupt body under a
-/// valid header — is rejected with `LainError::FederationSchemaMismatch`
-/// rather than loaded.
+/// On-disk envelope for `federated_graph.bin`: the `LNF2` magic, then a
+/// little-endian `u32` schema version, then the payload. There is no
+/// headerless legacy path — a file without the magic is rejected as a
+/// schema mismatch (`LainError::FederationSchemaMismatch`) rather than
+/// loaded as v1, a version mismatch is the same error, and a corrupt
+/// body under a valid header is `LainError::FederationPayloadCorrupt`.
 ///
-/// Schema v3 (PR 3) adds contract-federation node/edge variants and
+/// Schema v3 adds contract-federation node/edge variants and
 /// `GraphNode.contract` / `GraphNode.entry` / `GraphEdge.site` /
 /// `GraphEdge.detail` fields. Per the repo's federation-schema policy
 /// (`AGENTS.md`), the version bump ships in the same commit as the

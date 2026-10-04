@@ -241,15 +241,31 @@ fn lain_doctor_reports_live_mcp_surface_against_real_server() {
         listener.local_addr().unwrap().port()
     };
 
-    // Minimal `repos.yaml` so the server has something to read. The
-    // federation is empty — we only need the server's MCP surface to
-    // be alive, not to have real repos.
+    // Minimal `repos.yaml` with one tiny repo. `load_federation` refuses
+    // a config that declares no repos — a server with zero repositories
+    // can only mislead — and this test only needs the server's MCP
+    // surface alive, so the fixture repo is a single committed file.
     let project = tempfile::tempdir().unwrap();
     let data_dir = project.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
+    let fixture_repo = project.path().join("fixture-repo");
+    std::fs::create_dir_all(&fixture_repo).unwrap();
+    let git = git2::Repository::init(&fixture_repo).unwrap();
+    std::fs::write(fixture_repo.join("lib.rs"), "pub fn fixture() {}\n").unwrap();
+    let mut index = git.index().unwrap();
+    index.add_path(std::path::Path::new("lib.rs")).unwrap();
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    git.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+        .unwrap();
     std::fs::write(
         project.path().join("repos.yaml"),
-        format!("data_dir: {}\nrepos: []\n", data_dir.display()),
+        format!(
+            "data_dir: {}\nrepos:\n  - id: fixture\n    source:\n      type: workspace_dir\n      path: {}\n",
+            data_dir.display(),
+            fixture_repo.display()
+        ),
     )
     .unwrap();
 

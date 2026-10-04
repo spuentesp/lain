@@ -381,6 +381,14 @@ impl LainServer {
         self.federation.workspaces_handle()
     }
 
+    pub fn set_workspace_scope(&self, scope: Option<String>) {
+        self.federation.set_workspace_scope(scope);
+    }
+
+    pub fn workspace_scope(&self) -> Option<String> {
+        self.federation.workspace_scope()
+    }
+
     pub async fn shutdown(&self) {
         info!("Shutting down Lain server...");
         // Cancel in-flight work so an HTTP client mid-request sees a

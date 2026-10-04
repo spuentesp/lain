@@ -39,12 +39,13 @@ every state mutation is a tool call.
 
 A walkthrough that matches what you see in the demo above:
 
-1. **Server boot** — the terminal at the top of the clip runs `lain repos add …`, `lain workspaces create tokio-stack --members bytes,tokio`, then `lain server --config ./repos.yaml --transport http --port 9931`. Watch the federation reach `ready`.
+1. **Bootstrap** — chapter 1 of `docs/video/lain-demo.mp4` is a terminal chapter (not an overlay on the dashboard) that runs `lain repos add auth-svc …`, `lain repos add billing-svc …`, then `lain workspaces create biller-core --members auth-svc,billing-svc`; the pre-seeded synthetic fixture answers `already exists` to each. The server is started off-camera, so the federation is already `ready` when the dashboard chapter opens.
 2. **Overview tab** — `get_health` + `get_federation_health` in one view. Federation totals: `total_repos`, `ready`, `indexing`, `degraded`, `total_nodes`, `total_edges`.
 3. **Repos tab** — the per-repo table (id, path, health, node count, edge count). Both `bytes` and `tokio` show `ready`.
-4. **Query tab** — `find` op against `bytes`, type `Function`, limit 50. The JSON result dumps below the form.
-5. **Tools tab** — `find_anchors` against the `bytes` repo, take the top result, then `get_cross_repo_blast_radius` on that symbol with depth `1..3`. The result pane shows real cross-repo call chains into `tokio` (e.g. `bytes::Buf` callers across tokio's I/O codec and runtime).
-6. **Graph tab** — D3 force-directed layout settles on the same workspace-graph nodes the Tools tab just returned. Hover a node to see its name, repo, kind, and path. (Cross-repo edges don't render yet — the federation's per-repo projection drops them; see `tests/federation_e2e.rs::get_cross_repo_blast_radius_traverses_boundaries` for the gap.)
+4. **Changes tab** — staged/unstaged file diff with a per-change risk verdict. (Not toured in the clip.)
+5. **Query tab** — `find` op against `bytes`, type `Function`, limit 50. The JSON result dumps below the form.
+6. **Tools tab** — `find_anchors` against the `bytes` repo, take the top result, then `get_cross_repo_blast_radius` on that symbol with depth `1..3`. The result pane shows real cross-repo call chains into `tokio` (e.g. `bytes::Buf` callers across tokio's I/O codec and runtime).
+7. **Graph tab** — D3 force-directed layout settles on the same workspace-graph nodes the Tools tab just returned. Hover a node to see its name, repo, kind, and path. (Cross-repo edges don't render yet — the federation's per-repo projection drops them; see `tests/federation_e2e.rs::get_cross_repo_blast_radius_traverses_boundaries` for the gap.)
 
 The sections below describe the same surface in prose.
 
@@ -100,6 +101,7 @@ flowchart TB
         GRAPH["Graph<br/>D3 force-directed"]
         REPOSTAB["Repos<br/>id, path, health, counts"]
         SERVICES["Services (PR 16/13)<br/>list_services + get_service"]
+        CH2["Changes<br/>diff + risk verdict"]
         Q["Query<br/>query_graph form"]
         TOOLS["Tools<br/>auto-generated form per tool<br/>(from inputSchema)"]
     end
@@ -128,7 +130,7 @@ flowchart TB
 - **Overview** — *(see [Tour step 2](#tour) for what this looks like)* `get_health` + `get_federation_health` in one view.
 - **Overview tab** — server health (`get_health`) and federation health
   (`get_federation_health`) in a single view.
-- **Graph** — *(see [Tour step 6](#tour) for what this looks like)* D3 force-directed graph of the active workspace.
+- **Graph** — *(see [Tour step 7](#tour) for what this looks like)* D3 force-directed graph of the active workspace.
 - **Graph tab** — D3 force-directed graph of the active workspace, drawn from
   `get_workspace_graph` (Function/Method/Class nodes, Calls/Imports edges,
   capped at 5000 nodes / 10000 edges server-side). Cross-repo edges are drawn
@@ -163,11 +165,14 @@ flowchart TB
   consumer→provider pair, weighted by call-site count, and
   surfaces the §9.6 scope sentence under the graph. Requires
   `LAIN_TOOL_PROFILE=contracts` (or `load_package("contracts")`).
-- **Query** — *(see [Tour step 4](#tour) for what this looks like)* runs `query_graph` against the federation.
+- **Changes** — staged/unstaged file diff with a per-change risk verdict.
+- **Changes tab** — surface working-tree changes, inspect file diffs, and
+  assess symbol impact and risk before editing.
+- **Query** — runs `query_graph` against the federation. (See [Tour step 4 or 5](#tour) for what this looks like; the step number depends on whether Services or Changes comes first in the tour order at the time of reading.)
 - **Query tab** — runs a `query_graph` call against the federation. Pick a
   repo, an op (currently `find`), a node type, and a limit. The JSON result
   is dumped below the form.
-- **Tools** — *(see [Tour step 5](#tour) for what this looks like)* auto-generated MCP tool tester.
+- **Tools** — *(see [Tour step 6](#tour) for what this looks like)* auto-generated MCP tool tester.
 - **Tools tab** — auto-generated MCP tool tester. Calls `tools/list` on load,
   then renders a form for the selected tool by introspecting its
   `inputSchema`. Buttons: *Call* (executes the tool) and *Copy as cURL* (copies
