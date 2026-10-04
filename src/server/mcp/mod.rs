@@ -12,6 +12,7 @@ pub mod hook;
 pub mod intent_tools;
 pub mod overlay_sse;
 pub mod presence_tools;
+pub mod socket_server;
 
 #[cfg(test)]
 mod command_center_assets_tests;

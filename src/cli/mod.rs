@@ -213,6 +213,15 @@ pub enum Commands {
         /// because no command exposed it. This flag is that entry point.
         #[arg(long, value_name = "URL")]
         owner_url: Option<String>,
+        /// Bind a per-workspace Unix socket in addition to stdio.
+        /// `lain oneshot` consults this socket first; if the previous
+        /// process is alive, the new call connects (no reindex), and
+        /// the warm in-memory graph is shared. The default path is
+        /// `config::oneshot_socket_path(workspace)`; pass an explicit
+        /// path to override. B1 (2026-10-04); spec at
+        /// `docs/formal/OneshotSharedServer.tla`.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
     },
     /// Scaffold a `repos.yaml` for the current directory. Walks up for
     /// `.git` (same as `lain mcp`), then writes a minimal
