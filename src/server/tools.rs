@@ -965,6 +965,35 @@ impl ToolExecutor {
                      not.\n",
                 );
             }
+
+            // B4: per-file call-graph coverage. The 2026-10-04
+            // dogfooding found 198 of 224 files in `scripts/` and
+            // `tests/` had no call edges at all — the same number
+            // was already in `find_dead_code`'s ⚠ line, but only
+            // visible to users who ran that tool. `get_health` is
+            // the first place an operator looks; surface the
+            // coverage there too. A covered/total of (N, N) means
+            // the indexer did its job; anything less means some
+            // files had no `Calls`/`Uses` edge.
+            let (covered, total) = ctx.graph.call_graph_file_coverage();
+            if total > 0 {
+                let uncovered = total.saturating_sub(covered);
+                let pct = (covered as f64 / total as f64) * 100.0;
+                output.push_str(&format!(
+                    "\n- **Call-graph file coverage:** {covered} / {total} \
+                     files ({pct:.0}%) have at least one `Calls` or \
+                     `Uses` edge.",
+                ));
+                if uncovered > 0 {
+                    output.push_str(&format!(
+                        " ⚠ **{uncovered} file(s) have no call edges** \
+                         — the indexer did not extract their call graph. \
+                         This usually means a language server is missing; \
+                         see `find_dead_code` for the file list."
+                    ));
+                }
+                output.push('\n');
+            }
         }
 
         // Only the languages this repository contains. Listing every server

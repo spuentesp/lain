@@ -1997,6 +1997,66 @@ impl GraphDatabase {
         counts
     }
 
+    /// How many files in the graph have at least one `Calls` or
+    /// `Uses` edge out of any symbol in them. Returns
+    /// `(covered, total)` where `total` is the number of `File`
+    /// nodes in the graph.
+    ///
+    /// This is the B4 metric for `get_health`: a repo with a
+    /// populated `Contains` tree but few files covered by calls
+    /// means the indexer's call-extraction phase didn't run on
+    /// those files (LSP missing, file is a script, etc.). The 198
+    /// of 224 files in the 2026-10-04 Lain-on-Lain dogfood were
+    /// uncovered — surfaced in `find_dead_code` as the "⚠ N files
+    /// have no call edges" warning. Surfacing the same number in
+    /// `get_health` makes the gap visible to anyone running
+    /// `lain doctor` or wiring a CI check.
+    pub fn call_graph_file_coverage(&self) -> (usize, usize) {
+        use petgraph::stable_graph::NodeIndex;
+        use petgraph::visit::EdgeRef;
+        use std::collections::HashSet;
+        let graph = self.graph.read();
+        let mut total_files = 0usize;
+        let mut file_ids: HashSet<NodeIndex> = HashSet::new();
+        for idx in graph.node_indices() {
+            if matches!(graph[idx].node_type, crate::schema::NodeType::File) {
+                total_files += 1;
+                file_ids.insert(idx);
+            }
+        }
+        let mut covered_files: HashSet<NodeIndex> = HashSet::new();
+        for edge in graph.edge_references() {
+            let kind = &edge.weight().edge_type;
+            if kind != &crate::schema::EdgeType::Calls
+                && kind != &crate::schema::EdgeType::Uses
+            {
+                continue;
+            }
+            // Map the source symbol back to the file it lives in via
+            // incoming `Contains` edges. The simplest pass is "does
+            // either endpoint have a File ancestor"; the cheaper one
+            // is to walk each endpoint's `Contains` predecessors
+            // once. The endpoint symbols have a `.path` already,
+            // so we go via that — no graph walk needed.
+            for &endpoint in &[edge.source(), edge.target()] {
+                let path_key = graph[endpoint].path.clone();
+                let mut file_idx: Option<NodeIndex> = None;
+                if let Some(indices) = self.path_index.get(&path_key) {
+                    for i in indices.iter() {
+                        if graph[*i].node_type == crate::schema::NodeType::File {
+                            file_idx = Some(*i);
+                            break;
+                        }
+                    }
+                }
+                if let Some(idx) = file_idx {
+                    covered_files.insert(idx);
+                }
+            }
+        }
+        (covered_files.len(), total_files)
+    }
+
     pub fn get_node_at_location(&self, path: &str, line: u32) -> Option<GraphNode> {
         let graph = self.graph.read();
 

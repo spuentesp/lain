@@ -184,6 +184,68 @@ fn test_get_stats() {
 }
 
 #[test]
+fn test_call_graph_file_coverage() {
+    // B4 regression: a graph with a populated Contains tree but
+    // only some files reached by Calls/Uses should report
+    // `covered < total`, not 100%. This is the number operators
+    // need in get_health to know whether the indexer's
+    // call-extraction phase actually ran on each file.
+    let tmp = std::env::temp_dir().join("test_call_graph_file_coverage");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    // File A: has a Calls edge.
+    let file_a = GraphNode::new(NodeType::File, "a.rs".to_string(), "src/a.rs".to_string());
+    let fn_a = GraphNode::new(
+        NodeType::Function,
+        "a_fn".to_string(),
+        "src/a.rs".to_string(),
+    );
+    graph.upsert_node(file_a.clone()).unwrap();
+    graph.upsert_node(fn_a.clone()).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Contains,
+            file_a.id.clone(),
+            fn_a.id.clone(),
+        ))
+        .unwrap();
+
+    // File B: same shape but no Calls/Uses edges.
+    let file_b = GraphNode::new(NodeType::File, "b.rs".to_string(), "src/b.rs".to_string());
+    let fn_b = GraphNode::new(
+        NodeType::Function,
+        "b_fn".to_string(),
+        "src/b.rs".to_string(),
+    );
+    graph.upsert_node(file_b.clone()).unwrap();
+    graph.upsert_node(fn_b.clone()).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Contains,
+            file_b.id.clone(),
+            fn_b.id.clone(),
+        ))
+        .unwrap();
+
+    // A self-call: a_fn -> a_fn, so file A is covered.
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            fn_a.id.clone(),
+            fn_a.id.clone(),
+        ))
+        .unwrap();
+
+    let (covered, total) = graph.call_graph_file_coverage();
+    assert_eq!(total, 2, "should count 2 file nodes");
+    assert_eq!(
+        covered, 1,
+        "only file A has a symbol with a Calls edge; file B is uncovered"
+    );
+}
+
+#[test]
 fn test_edge_counts_by_type_seeds_zero_for_unused_variants() {
     // Regression: a graph with no `Calls` edges used to make
     // `get_health` skip the entry entirely, so an operator on a

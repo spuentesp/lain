@@ -50,6 +50,17 @@ All notable changes to LAIN are documented here. Versions follow
   dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
   finding B10).
 
+- **`get_health` now reports per-file call-graph coverage.** A new
+  line shows "X / Y files (Z%) have at least one `Calls` or
+  `Uses` edge", with a warning when uncovered > 0. The same
+  number was already in `find_dead_code`'s "⚠ N files have no
+  call edges" line, but only visible to users who ran that tool
+  (B4 in 2026-10-04 dogfooding: 198 of 224 files in `scripts/`
+  and `tests/` were uncovered). `get_health` is the first place
+  an operator looks, so the number lives there now too. The
+  underlying metric is `GraphDatabase::call_graph_file_coverage`
+  and has its own regression test.
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call
