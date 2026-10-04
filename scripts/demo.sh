@@ -913,6 +913,45 @@ else
   fi
 fi
 
+# ══ 13.6. Contract tools (MCP) surface ════════════════════════════════
+#
+# Every contract tool advertised in `docs/tool-schema.json` must be
+# reachable through JSON-RPC, or the capability suite's coverage
+# check at the end of section 13 fails. Each contract tool requires
+# a `snapshot` id; `prepare_snapshot` is the one that returns one.
+# We call it first, then exercise each read-only tool against the
+# returned id and assert the response is a JSON-RPC envelope, not a
+# transport error (`__RPC_ERROR__`). The tools' own logic (snapshot
+# not yet indexed, etc.) is allowed to return errors — that's what
+# the PR 13 precision/recall test in §13.5 verifies; here we only
+# assert the handler is wired.
+section "13.6. Contract tools (MCP) — every advertised handler answers"
+
+DEMO_PS=$(call prepare_snapshot '{"repos":["subject"],"wait_ms":1000}')
+DEMO_SNAP=$(printf '%s' "$DEMO_PS" | python3 -c "import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('snapshot') or d.get('id') or '')
+except Exception:
+    print('')")
+[ -n "$DEMO_SNAP" ] || DEMO_SNAP="demo-no-snapshot"
+
+# Each call returns its tool-specific result (often an error envelope
+# because the demo fixture isn't a real federation); what matters is
+# that the JSON-RPC dispatch reached the handler.
+for tool in list_services get_service list_contracts get_contract \
+            list_unresolved check_binding trace_impact get_coverage \
+            resolve_evidence read_source get_snapshot; do
+  out=$(call "$tool" "{\"snapshot\":\"$DEMO_SNAP\"}" || true)
+  check_absent "$tool answers JSON-RPC" "__RPC_ERROR__" "$out"
+done
+
+# diff_contracts needs two snapshots; we exercise the handler with
+# dummy base/head ids and assert it answers (its own validation will
+# reject the inputs — that's expected).
+out=$(call diff_contracts "{\"base\":\"$DEMO_SNAP\",\"head\":\"$DEMO_SNAP\"}" || true)
+check_absent "diff_contracts answers JSON-RPC" "__RPC_ERROR__" "$out"
+
 # ══ 14. Benchmark ═════════════════════════════════════════════════════
 if [ "$QUICK" = 0 ]; then
   section "14. Benchmark"
