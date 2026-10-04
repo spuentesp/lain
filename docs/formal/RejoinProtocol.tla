@@ -4,6 +4,7 @@
 \* bugs in spec §9.1.
 \*
 \* Spec: docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md §9.1
+\* Plan: docs/superpowers/plans/2026-10-02-coverage-and-protocols.md
 \*
 \* Code mapping (TLA+ → Rust):
 \*   - `dirty: BOOLEAN`           ↔ `contracts_dirty: AtomicBool`
