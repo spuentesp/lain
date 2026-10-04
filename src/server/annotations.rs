@@ -353,12 +353,12 @@ impl AnnotationStore {
 
     /// Read with the live-resolver hook so targets that no longer
     /// exist in the graph are returned with `status = "stale"`.
-    /// Limit applies *before* staleness re-classification, so the
-    /// caller doesn't get a stale entry when an open one would have
-    /// fit in the page.
+    /// Without a status filter the limit applies in SQL. With an
+    /// `Open`/`Stale` filter it applies after re-classification, so the
+    /// page holds the first `limit` rows that really have that status.
     ///
     /// Status filter: the SQL `WHERE status = ?` is intentionally
-    /// *only* applied for `Resolved`. For `Open`, we read every
+    /// *only* applied for `Resolved` (Open/Stale exclude resolved rows). For `Open`, we read every
     /// open row and let the live reclassification down-grade rows
     /// whose target no longer exists in the graph — applying the
     /// SQL filter for `Open` would silently drop rows that should
@@ -386,18 +386,33 @@ impl AnnotationStore {
             sql.push_str(" AND kind = ?");
             args.push(Box::new(kind.as_str().to_string()));
         }
-        if let Some(status) = q.filter.status {
-            // Only pre-filter on `Resolved` — see the doc comment
-            // above for why Open/Stale must be post-filtered.
-            if matches!(status, AnnotationStatus::Resolved) {
+        // `Open`/`Stale` are decided by the live resolver, so they are
+        // post-filtered and the limit must be applied *after* that filter;
+        // a SQL `LIMIT` first would let newer rows of other statuses crowd
+        // matching rows out of the page (found by
+        // `annotations_verification.rs`). A resolved row can never
+        // reclassify to open or stale, so it is safe to exclude in SQL.
+        let post_filtered = matches!(
+            q.filter.status,
+            Some(AnnotationStatus::Open | AnnotationStatus::Stale)
+        );
+        match q.filter.status {
+            Some(AnnotationStatus::Resolved) => {
                 sql.push_str(" AND status = ?");
-                args.push(Box::new(status.as_str().to_string()));
+                args.push(Box::new(AnnotationStatus::Resolved.as_str().to_string()));
             }
+            Some(AnnotationStatus::Open | AnnotationStatus::Stale) => {
+                sql.push_str(" AND status != ?");
+                args.push(Box::new(AnnotationStatus::Resolved.as_str().to_string()));
+            }
+            None => {}
         }
         sql.push_str(" ORDER BY created_at DESC, id ASC");
         let limit = q.filter.limit.unwrap_or(100).min(1000);
-        sql.push_str(" LIMIT ?");
-        args.push(Box::new(limit as i64));
+        if !post_filtered {
+            sql.push_str(" LIMIT ?");
+            args.push(Box::new(limit as i64));
+        }
 
         let conn = self.conn.lock();
         let params_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
@@ -439,6 +454,9 @@ impl AnnotationStore {
                 }
             }
             out.push(a);
+            if post_filtered && out.len() >= limit as usize {
+                break;
+            }
         }
         Ok(out)
     }
@@ -1062,3 +1080,7 @@ mod tests {
         assert!(s.body_excerpt.starts_with(prefix));
     }
 }
+
+#[cfg(test)]
+#[path = "annotations_verification.rs"]
+mod verification;
