@@ -938,13 +938,21 @@ except Exception:
 
 # Each call returns its tool-specific result (often an error envelope
 # because the demo fixture isn't a real federation); what matters is
-# that the JSON-RPC dispatch reached the handler.
-for tool in list_services get_service list_contracts get_contract \
-            list_unresolved check_binding trace_impact get_coverage \
-            resolve_evidence read_source get_snapshot; do
-  out=$(call "$tool" "{\"snapshot\":\"$DEMO_SNAP\"}" || true)
-  check_absent "$tool answers JSON-RPC" "__RPC_ERROR__" "$out"
-done
+# that the JSON-RPC dispatch reached the handler. The names are
+# spelled out explicitly — the coverage self-check below greps the
+# script source for `call <name>` patterns, so a `$tool` variable
+# wouldn't register.
+check_absent "list_services answers JSON-RPC"   "__RPC_ERROR__" "$(call list_services   "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "get_service answers JSON-RPC"     "__RPC_ERROR__" "$(call get_service     "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "list_contracts answers JSON-RPC"  "__RPC_ERROR__" "$(call list_contracts  "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "get_contract answers JSON-RPC"    "__RPC_ERROR__" "$(call get_contract    "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "list_unresolved answers JSON-RPC" "__RPC_ERROR__" "$(call list_unresolved "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "check_binding answers JSON-RPC"   "__RPC_ERROR__" "$(call check_binding   "{\"snapshot\":\"$DEMO_SNAP\",\"consumer\":\"x\",\"endpoint\":\"y\"}" || true)"
+check_absent "trace_impact answers JSON-RPC"    "__RPC_ERROR__" "$(call trace_impact    "{\"snapshot\":\"$DEMO_SNAP\",\"from\":\"x\"}" || true)"
+check_absent "get_coverage answers JSON-RPC"    "__RPC_ERROR__" "$(call get_coverage    "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "resolve_evidence answers JSON-RPC" "__RPC_ERROR__" "$(call resolve_evidence "{\"snapshot\":\"$DEMO_SNAP\",\"refs\":[\"x\"]}" || true)"
+check_absent "read_source answers JSON-RPC"     "__RPC_ERROR__" "$(call read_source     "{\"snapshot\":\"$DEMO_SNAP\",\"repo\":\"subject\",\"path\":\"x\",\"start\":0,\"end\":1}" || true)"
+check_absent "get_snapshot answers JSON-RPC"    "__RPC_ERROR__" "$(call get_snapshot    "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 
 # diff_contracts needs two snapshots; we exercise the handler with
 # dummy base/head ids and assert it answers (its own validation will
