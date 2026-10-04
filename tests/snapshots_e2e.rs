@@ -264,7 +264,10 @@ async fn prepare_snapshot_with_tag_ref_promotes_record_to_resolved_sha() {
     let outcome = mgr.prepare(req).await.expect("prepare_snapshot");
     // The snapshot reached `ready` (not stuck in `indexing` because
     // of a cache-key mismatch).
-    assert_eq!(outcome.record.state, lain::federation::contracts::snapshots::SnapshotState::Ready);
+    assert_eq!(
+        outcome.record.state,
+        lain::federation::contracts::snapshots::SnapshotState::Ready
+    );
     // The record was promoted to the resolved SHA. Without the
     // bug-B fix, `record.repos["orders"]` would still be `"base"`
     // and `cache.has_entry` would miss on the next refresh.
