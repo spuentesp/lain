@@ -20,17 +20,9 @@ pub fn list_repos(fed: &FederatedIndex) -> Vec<RepoInfo> {
                 match repo {
                     Some(r) => {
                         let path = r.source().local_path().display().to_string();
-                        let last_refreshed = r
-                            .source()
-                            .last_refreshed()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        let last_indexed = r
-                            .last_indexed()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
+                        let last_refreshed =
+                            crate::server::time::unix_secs(r.source().last_refreshed());
+                        let last_indexed = crate::server::time::unix_secs(r.last_indexed());
                         (
                             last_refreshed,
                             last_indexed,

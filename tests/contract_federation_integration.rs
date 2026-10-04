@@ -243,8 +243,7 @@ async fn rejoin_does_not_lose_mid_join_mark() {
 
     // Baseline: project + initial rejoin establishes the starting
     // state (dirty=FALSE).
-    fed.rejoin_contracts_if_dirty()
-        .expect("baseline rejoin");
+    fed.rejoin_contracts_if_dirty().expect("baseline rejoin");
     assert!(!fed.contracts_dirty(), "baseline: dirty is clear");
 
     // Mark dirty and run the rejoin on a worker thread. Poll the
@@ -255,9 +254,7 @@ async fn rejoin_does_not_lose_mid_join_mark() {
     assert!(fed.contracts_dirty(), "post-mark: dirty is set");
     let fed_for_rejoin = std::sync::Arc::clone(&fed);
     let rejoin_handle = std::thread::spawn(move || {
-        fed_for_rejoin
-            .rejoin_contracts_if_dirty()
-            .expect("rejoin");
+        fed_for_rejoin.rejoin_contracts_if_dirty().expect("rejoin");
     });
 
     // Wait until the clear-before-read fires. Bounded by a deadline
@@ -734,8 +731,7 @@ async fn rejoin_publishes_index_and_binds_atomically() {
 
     let (_dir, fed, _o, _b) = build_two_repo_federation().await;
     project_both(&fed).await;
-    fed.rejoin_contracts_if_dirty()
-        .expect("baseline rejoin");
+    fed.rejoin_contracts_if_dirty().expect("baseline rejoin");
 
     // Poll the snapshot from the main thread while a worker re-runs
     // the rejoin. The fixture's two-repo config produces a stable
@@ -745,9 +741,7 @@ async fn rejoin_publishes_index_and_binds_atomically() {
     let fed_for_rejoin = std::sync::Arc::clone(&fed);
     let rejoin_handle = std::thread::spawn(move || {
         for _ in 0..50 {
-            fed_for_rejoin
-                .rejoin_contracts_if_dirty()
-                .expect("rejoin");
+            fed_for_rejoin.rejoin_contracts_if_dirty().expect("rejoin");
         }
     });
 

@@ -348,18 +348,11 @@ fn register_if_needed(
             .as_str()
             .context("no session_token")?
             .to_string(),
-        registered_at_unix: chrono_now_unix(),
+        registered_at_unix: crate::server::time::unix_secs_u64(std::time::SystemTime::now()),
         lock_nonces: HashMap::new(),
     };
     write_session(name, &sess)?;
     Ok(sess)
-}
-
-fn chrono_now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Read or create the per-agent hooks session file with a fresh empty
@@ -374,7 +367,7 @@ fn read_or_init_nonce_session(agent_name: &str) -> Result<HookSession> {
     let sess = HookSession {
         agent_id: String::new(),
         session_token: String::new(),
-        registered_at_unix: chrono_now_unix(),
+        registered_at_unix: crate::server::time::unix_secs_u64(std::time::SystemTime::now()),
         lock_nonces: HashMap::new(),
     };
     write_session(agent_name, &sess)?;
@@ -616,11 +609,7 @@ fn claim_filesystem(
             Ok(())
         }
         Err(conflict) => {
-            let mtime_unix = conflict
-                .mtime()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let mtime_unix = crate::server::time::unix_secs_u64(conflict.mtime());
             let body = serde_json::json!({
                 "holder": conflict.agent_id().as_str(),
                 "kind": conflict.kind().as_str(),

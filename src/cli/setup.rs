@@ -662,9 +662,19 @@ fn build_mcp_server_entry(exe: &Path, model: Option<&Path>) -> Value {
 /// that isn't valid JSON or isn't shaped as expected — "nothing was
 /// changed" must actually be true, not just claimed.
 fn merge_mcp_json(path: &Path, server_name: &str, entry: Value) -> Result<Value> {
-    let mut root: Value = if path.is_file() {
+    let mut root = load_json_object(path, false)?;
+    child_object(&mut root, "mcpServers", path)?.insert(server_name.to_string(), entry);
+    Ok(Value::Object(root))
+}
+
+/// Read `path` as a JSON object (`{}` when the file does not exist).
+/// `jsonc` accepts comments and trailing commas. Every refusal says
+/// nothing was changed.
+fn load_json_object(path: &Path, jsonc: bool) -> Result<serde_json::Map<String, Value>> {
+    let root: Value = if path.is_file() {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let text = if jsonc { strip_jsonc(&text) } else { text };
         serde_json::from_str(&text).with_context(|| {
             format!(
                 "{} contains invalid JSON; nothing was changed",
@@ -674,31 +684,38 @@ fn merge_mcp_json(path: &Path, server_name: &str, entry: Value) -> Result<Value>
     } else {
         json!({})
     };
-    let Some(root_obj) = root.as_object_mut() else {
-        return Err(anyhow!(
+    match root {
+        Value::Object(obj) => Ok(obj),
+        _ => Err(anyhow!(
             "{} does not contain a JSON object at the top level; nothing was changed",
             path.display()
-        ));
-    };
-    let servers = root_obj.entry("mcpServers").or_insert_with(|| json!({}));
-    let Some(servers_obj) = servers.as_object_mut() else {
-        return Err(anyhow!(
-            "{}'s \"mcpServers\" key is not an object; nothing was changed",
-            path.display()
-        ));
-    };
-    servers_obj.insert(server_name.to_string(), entry);
-    Ok(root)
+        )),
+    }
+}
+
+/// `obj[key]` as an object, created when absent; errors (without
+/// touching anything) when the key holds a non-object.
+fn child_object<'a>(
+    obj: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+    path: &Path,
+) -> Result<&'a mut serde_json::Map<String, Value>> {
+    obj.entry(key)
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            anyhow!(
+                "{}'s \"{key}\" key is not an object; nothing was changed",
+                path.display()
+            )
+        })
 }
 
 /// Timestamped backup of a user-owned file before this command
 /// modifies it. `with_file_name` (not `with_extension`) so a dotfile
 /// like `.mcp.json` keeps its whole name intact in the backup name.
 fn backup_file(path: &Path) -> Result<PathBuf> {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let ts = crate::server::time::unix_secs_u64(std::time::SystemTime::now());
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -721,6 +738,82 @@ fn backup_file(path: &Path) -> Result<PathBuf> {
     Ok(backup)
 }
 
+impl ConfigurationOutcome {
+    fn new(
+        agent: &str,
+        state: ConfigurationState,
+        target: impl Into<String>,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            agent: agent.into(),
+            state,
+            target: Some(target.into()),
+            detail,
+        }
+    }
+}
+
+fn render_json(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_default()
+}
+
+/// Shared tail of every file-backed adapter. `rendered` is the full new
+/// file text (or the merge error); `note` rides on the printed and
+/// configured outcomes. Honors `--print-config` and `--dry-run`, leaves
+/// an already-correct file alone, backs up an existing one, and writes
+/// atomically.
+fn apply_config(
+    agent: &str,
+    config_path: &Path,
+    rendered: Result<String>,
+    note: Option<&str>,
+    opts: &SetupOptions,
+) -> ConfigurationOutcome {
+    let target = config_path.display().to_string();
+    let outcome = |state, detail| ConfigurationOutcome::new(agent, state, target.clone(), detail);
+    let pretty = match rendered {
+        Ok(text) => text,
+        Err(e) => return outcome(ConfigurationState::Failed, Some(format!("{e:#}"))),
+    };
+    let note = note.map(str::to_string);
+
+    if opts.print_config {
+        println!("{pretty}");
+        return outcome(ConfigurationState::Printed, note);
+    }
+    if opts.dry_run {
+        return outcome(ConfigurationState::WouldConfigure, Some(pretty));
+    }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return outcome(
+            ConfigurationState::Configured,
+            Some("already configured; nothing changed".into()),
+        );
+    }
+    if config_path.is_file() {
+        if let Err(e) = backup_file(config_path) {
+            return outcome(
+                ConfigurationState::Failed,
+                Some(format!(
+                    "backup before write failed: {e:#}; nothing was changed"
+                )),
+            );
+        }
+    }
+    let text = if pretty.ends_with('\n') {
+        pretty
+    } else {
+        format!("{pretty}\n")
+    };
+    match write_file_atomic(config_path, text) {
+        Ok(()) => outcome(ConfigurationState::Configured, note),
+        Err(e) => outcome(ConfigurationState::Failed, Some(e.to_string())),
+    }
+}
+
 fn configure_generic(
     root: &Path,
     exe: &Path,
@@ -728,74 +821,9 @@ fn configure_generic(
     opts: &SetupOptions,
 ) -> ConfigurationOutcome {
     let config_path = root.join(".mcp.json");
-    let target = config_path.display().to_string();
-    let entry = build_mcp_server_entry(exe, model);
-    let merged = match merge_mcp_json(&config_path, "lain", entry) {
-        Ok(v) => v,
-        Err(e) => {
-            return ConfigurationOutcome {
-                agent: "generic".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!("{e:#}")),
-            }
-        }
-    };
-    let pretty = serde_json::to_string_pretty(&merged).unwrap_or_default();
-
-    if opts.print_config {
-        println!("{pretty}");
-        return ConfigurationOutcome {
-            agent: "generic".into(),
-            state: ConfigurationState::Printed,
-            target: Some(target),
-            detail: None,
-        };
-    }
-    if opts.dry_run {
-        return ConfigurationOutcome {
-            agent: "generic".into(),
-            state: ConfigurationState::WouldConfigure,
-            target: Some(target),
-            detail: Some(pretty),
-        };
-    }
-    // A re-run that changes nothing leaves the file (and the repo root)
-    // alone instead of piling up identical backups.
-    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
-        return ConfigurationOutcome {
-            agent: "generic".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: Some("already configured; nothing changed".into()),
-        };
-    }
-    if config_path.is_file() {
-        if let Err(e) = backup_file(&config_path) {
-            return ConfigurationOutcome {
-                agent: "generic".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!(
-                    "backup before write failed: {e:#}; nothing was changed"
-                )),
-            };
-        }
-    }
-    match write_file_atomic(&config_path, format!("{pretty}\n")) {
-        Ok(()) => ConfigurationOutcome {
-            agent: "generic".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: None,
-        },
-        Err(e) => ConfigurationOutcome {
-            agent: "generic".into(),
-            state: ConfigurationState::Failed,
-            target: Some(target),
-            detail: Some(e.to_string()),
-        },
-    }
+    let rendered = merge_mcp_json(&config_path, "lain", build_mcp_server_entry(exe, model))
+        .map(|v| render_json(&v));
+    apply_config("generic", &config_path, rendered, None, opts)
 }
 
 /// `true` if the `claude` CLI is invocable on `PATH`.
@@ -1123,7 +1151,6 @@ fn configure_codex(
     opts: &SetupOptions,
 ) -> ConfigurationOutcome {
     let config_path = codex_config_path();
-    let target = config_path.display().to_string();
 
     // Prefer the CLI when available; fall back to a direct TOML edit.
     if codex_cli_available() {
@@ -1137,113 +1164,28 @@ fn configure_codex(
         add_args.extend(["--".into(), exe.display().to_string(), "mcp".into()]);
         let command_line = format!("codex {}", add_args.join(" "));
 
+        let outcome =
+            |state, detail| ConfigurationOutcome::new("codex", state, "codex mcp", detail);
         if opts.print_config {
             println!("{command_line}");
-            return ConfigurationOutcome {
-                agent: "codex".into(),
-                state: ConfigurationState::Printed,
-                target: Some("codex mcp".into()),
-                detail: Some(command_line),
-            };
+            return outcome(ConfigurationState::Printed, Some(command_line));
         }
         if opts.dry_run {
-            return ConfigurationOutcome {
-                agent: "codex".into(),
-                state: ConfigurationState::WouldConfigure,
-                target: Some("codex mcp".into()),
-                detail: Some(command_line),
-            };
+            return outcome(ConfigurationState::WouldConfigure, Some(command_line));
         }
         return match Command::new("codex").args(&add_args).output() {
-            Ok(out) if out.status.success() => ConfigurationOutcome {
-                agent: "codex".into(),
-                state: ConfigurationState::Configured,
-                target: Some("codex mcp".into()),
-                detail: None,
-            },
-            Ok(out) => ConfigurationOutcome {
-                agent: "codex".into(),
-                state: ConfigurationState::Failed,
-                target: Some("codex mcp".into()),
-                detail: Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-            },
-            Err(e) => ConfigurationOutcome {
-                agent: "codex".into(),
-                state: ConfigurationState::Failed,
-                target: Some("codex mcp".into()),
-                detail: Some(e.to_string()),
-            },
+            Ok(out) if out.status.success() => outcome(ConfigurationState::Configured, None),
+            Ok(out) => outcome(
+                ConfigurationState::Failed,
+                Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+            ),
+            Err(e) => outcome(ConfigurationState::Failed, Some(e.to_string())),
         };
     }
 
     // Fallback: direct TOML edit.
-    let entry_json = build_codex_entry(exe, model);
-    let merged = match merge_codex_toml(&config_path, "lain", entry_json) {
-        Ok(v) => v,
-        Err(e) => {
-            return ConfigurationOutcome {
-                agent: "codex".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!("{e:#}")),
-            }
-        }
-    };
-    let pretty = merged;
-
-    if opts.print_config {
-        println!("{pretty}");
-        return ConfigurationOutcome {
-            agent: "codex".into(),
-            state: ConfigurationState::Printed,
-            target: Some(target),
-            detail: None,
-        };
-    }
-    if opts.dry_run {
-        return ConfigurationOutcome {
-            agent: "codex".into(),
-            state: ConfigurationState::WouldConfigure,
-            target: Some(target),
-            detail: Some(pretty),
-        };
-    }
-    // A re-run that changes nothing leaves the file (and the repo root)
-    // alone instead of piling up identical backups.
-    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
-        return ConfigurationOutcome {
-            agent: "codex".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: Some("already configured; nothing changed".into()),
-        };
-    }
-    if config_path.is_file() {
-        if let Err(e) = backup_file(&config_path) {
-            return ConfigurationOutcome {
-                agent: "codex".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!(
-                    "backup before write failed: {e:#}; nothing was changed"
-                )),
-            };
-        }
-    }
-    match write_file_atomic(&config_path, pretty) {
-        Ok(()) => ConfigurationOutcome {
-            agent: "codex".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: None,
-        },
-        Err(e) => ConfigurationOutcome {
-            agent: "codex".into(),
-            state: ConfigurationState::Failed,
-            target: Some(target),
-            detail: Some(e.to_string()),
-        },
-    }
+    let rendered = merge_codex_toml(&config_path, "lain", build_codex_entry(exe, model));
+    apply_config("codex", &config_path, rendered, None, opts)
 }
 
 // ─── Cursor (M8) ─────────────────────────────────────────────────────────────
@@ -1266,74 +1208,9 @@ fn configure_cursor(
     opts: &SetupOptions,
 ) -> ConfigurationOutcome {
     let config_path = cursor_config_path();
-    let target = config_path.display().to_string();
-    let entry = build_mcp_server_entry(exe, model);
-    let merged = match merge_mcp_json(&config_path, "lain", entry) {
-        Ok(v) => v,
-        Err(e) => {
-            return ConfigurationOutcome {
-                agent: "cursor".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!("{e:#}")),
-            }
-        }
-    };
-    let pretty = serde_json::to_string_pretty(&merged).unwrap_or_default();
-
-    if opts.print_config {
-        println!("{pretty}");
-        return ConfigurationOutcome {
-            agent: "cursor".into(),
-            state: ConfigurationState::Printed,
-            target: Some(target),
-            detail: None,
-        };
-    }
-    if opts.dry_run {
-        return ConfigurationOutcome {
-            agent: "cursor".into(),
-            state: ConfigurationState::WouldConfigure,
-            target: Some(target),
-            detail: Some(pretty),
-        };
-    }
-    // A re-run that changes nothing leaves the file (and the repo root)
-    // alone instead of piling up identical backups.
-    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
-        return ConfigurationOutcome {
-            agent: "cursor".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: Some("already configured; nothing changed".into()),
-        };
-    }
-    if config_path.is_file() {
-        if let Err(e) = backup_file(&config_path) {
-            return ConfigurationOutcome {
-                agent: "cursor".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!(
-                    "backup before write failed: {e:#}; nothing was changed"
-                )),
-            };
-        }
-    }
-    match write_file_atomic(&config_path, format!("{pretty}\n")) {
-        Ok(()) => ConfigurationOutcome {
-            agent: "cursor".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: None,
-        },
-        Err(e) => ConfigurationOutcome {
-            agent: "cursor".into(),
-            state: ConfigurationState::Failed,
-            target: Some(target),
-            detail: Some(e.to_string()),
-        },
-    }
+    let rendered = merge_mcp_json(&config_path, "lain", build_mcp_server_entry(exe, model))
+        .map(|v| render_json(&v));
+    apply_config("cursor", &config_path, rendered, None, opts)
 }
 
 // ─── VS Code (M8) ───────────────────────────────────────────────────────────
@@ -1375,7 +1252,6 @@ fn configure_vscode(
     opts: &SetupOptions,
 ) -> ConfigurationOutcome {
     let (config_path, project_scoped) = vscode_resolve_target(root);
-    let target = config_path.display().to_string();
 
     // VS Code's modern MCP config uses `servers` (not `mcpServers`)
     // and requires an explicit `"type": "stdio"`. Reusing
@@ -1390,115 +1266,20 @@ fn configure_vscode(
     if let Some(model) = model {
         entry["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
     }
-    let merged = match merge_vscode_json(&config_path, "lain", entry) {
-        Ok(v) => v,
-        Err(e) => {
-            return ConfigurationOutcome {
-                agent: "vscode".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!("{e:#}")),
-            }
-        }
-    };
-    let pretty = serde_json::to_string_pretty(&merged).unwrap_or_default();
-
-    if opts.print_config {
-        println!("{pretty}");
-        return ConfigurationOutcome {
-            agent: "vscode".into(),
-            state: ConfigurationState::Printed,
-            target: Some(target),
-            detail: if project_scoped {
-                Some("project-scoped".to_string())
-            } else {
-                None
-            },
-        };
-    }
-    if opts.dry_run {
-        return ConfigurationOutcome {
-            agent: "vscode".into(),
-            state: ConfigurationState::WouldConfigure,
-            target: Some(target),
-            detail: Some(pretty),
-        };
-    }
-    // A re-run that changes nothing leaves the file (and the repo root)
-    // alone instead of piling up identical backups.
-    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
-        return ConfigurationOutcome {
-            agent: "vscode".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: Some("already configured; nothing changed".into()),
-        };
-    }
-    if config_path.is_file() {
-        if let Err(e) = backup_file(&config_path) {
-            return ConfigurationOutcome {
-                agent: "vscode".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!(
-                    "backup before write failed: {e:#}; nothing was changed"
-                )),
-            };
-        }
-    }
-    match write_file_atomic(&config_path, format!("{pretty}\n")) {
-        Ok(()) => ConfigurationOutcome {
-            agent: "vscode".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: if project_scoped {
-                Some("project-scoped".to_string())
-            } else {
-                None
-            },
-        },
-        Err(e) => ConfigurationOutcome {
-            agent: "vscode".into(),
-            state: ConfigurationState::Failed,
-            target: Some(target),
-            detail: Some(e.to_string()),
-        },
-    }
+    let rendered = merge_vscode_json(&config_path, "lain", entry).map(|v| render_json(&v));
+    let note = project_scoped.then_some("project-scoped");
+    apply_config("vscode", &config_path, rendered, note, opts)
 }
 
 /// Merge `entry` into `path`'s top-level `"servers"` object (VS
 /// Code's modern MCP config location), preserving every other key.
 /// Same preservation contract as the JSON adapters.
 fn merge_vscode_json(path: &Path, server_name: &str, entry: Value) -> Result<Value> {
-    let mut root: Value = if path.is_file() {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        // VS Code's `mcp.json` is JSONC: comments and trailing commas
-        // are legal there, so accept them rather than refuse the file.
-        serde_json::from_str(&strip_jsonc(&text)).with_context(|| {
-            format!(
-                "{} contains invalid JSON; nothing was changed",
-                path.display()
-            )
-        })?
-    } else {
-        json!({})
-    };
-    let Some(root_obj) = root.as_object_mut() else {
-        return Err(anyhow!(
-            "{} does not contain a JSON object at the top level; nothing was changed",
-            path.display()
-        ));
-    };
-    let servers = root_obj.entry("servers").or_insert_with(|| json!({}));
-    let Some(servers_obj) = servers.as_object_mut() else {
-        return Err(anyhow!(
-            "{}'s \"servers\" key is not an object; nothing was changed",
-            path.display()
-        ));
-    };
-    servers_obj.insert(server_name.to_string(), entry);
-    Ok(root)
+    // VS Code's `mcp.json` is JSONC: comments and trailing commas are
+    // legal there, so accept them rather than refuse the file.
+    let mut root = load_json_object(path, true)?;
+    child_object(&mut root, "servers", path)?.insert(server_name.to_string(), entry);
+    Ok(Value::Object(root))
 }
 
 /// Plain JSON from JSONC: drops `//` and `/* */` comments outside
@@ -1620,32 +1401,9 @@ fn continue_config_path() -> PathBuf {
 }
 
 fn merge_continue_json(path: &Path, server_name: &str, entry: Value) -> Result<Value> {
-    let mut root: Value = if path.is_file() {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        serde_json::from_str(&text).with_context(|| {
-            format!(
-                "{} contains invalid JSON; nothing was changed",
-                path.display()
-            )
-        })?
-    } else {
-        json!({})
-    };
-    let Some(root_obj) = root.as_object_mut() else {
-        return Err(anyhow!(
-            "{} does not contain a JSON object at the top level; nothing was changed",
-            path.display()
-        ));
-    };
-    let experimental = root_obj.entry("experimental").or_insert_with(|| json!({}));
-    let Some(experimental_obj) = experimental.as_object_mut() else {
-        return Err(anyhow!(
-            "{}'s \"experimental\" key is not an object; nothing was changed",
-            path.display()
-        ));
-    };
-    let servers = experimental_obj
+    let mut root = load_json_object(path, false)?;
+    let experimental = child_object(&mut root, "experimental", path)?;
+    let servers = experimental
         .entry("modelContextProtocolServers")
         .or_insert_with(|| json!([]));
     let Some(servers_arr) = servers.as_array_mut() else {
@@ -1662,7 +1420,7 @@ fn merge_continue_json(path: &Path, server_name: &str, entry: Value) -> Result<V
     // prior version.
     servers_arr.retain(|s| !is_lain_continue_entry(s, server_name));
     servers_arr.push(entry);
-    Ok(root)
+    Ok(Value::Object(root))
 }
 
 fn build_continue_entry(exe: &Path, model: Option<&Path>) -> Value {
@@ -1687,74 +1445,9 @@ fn configure_continue(
     if continue_yaml_path().is_file() || !config_path.is_file() {
         return configure_continue_block(root, exe, model, opts);
     }
-    let target = config_path.display().to_string();
-    let entry = build_continue_entry(exe, model);
-    let merged = match merge_continue_json(&config_path, "lain", entry) {
-        Ok(v) => v,
-        Err(e) => {
-            return ConfigurationOutcome {
-                agent: "continue".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!("{e:#}")),
-            }
-        }
-    };
-    let pretty = serde_json::to_string_pretty(&merged).unwrap_or_default();
-
-    if opts.print_config {
-        println!("{pretty}");
-        return ConfigurationOutcome {
-            agent: "continue".into(),
-            state: ConfigurationState::Printed,
-            target: Some(target),
-            detail: None,
-        };
-    }
-    if opts.dry_run {
-        return ConfigurationOutcome {
-            agent: "continue".into(),
-            state: ConfigurationState::WouldConfigure,
-            target: Some(target),
-            detail: Some(pretty),
-        };
-    }
-    // A re-run that changes nothing leaves the file (and the repo root)
-    // alone instead of piling up identical backups.
-    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
-        return ConfigurationOutcome {
-            agent: "continue".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: Some("already configured; nothing changed".into()),
-        };
-    }
-    if config_path.is_file() {
-        if let Err(e) = backup_file(&config_path) {
-            return ConfigurationOutcome {
-                agent: "continue".into(),
-                state: ConfigurationState::Failed,
-                target: Some(target),
-                detail: Some(format!(
-                    "backup before write failed: {e:#}; nothing was changed"
-                )),
-            };
-        }
-    }
-    match write_file_atomic(&config_path, format!("{pretty}\n")) {
-        Ok(()) => ConfigurationOutcome {
-            agent: "continue".into(),
-            state: ConfigurationState::Configured,
-            target: Some(target),
-            detail: None,
-        },
-        Err(e) => ConfigurationOutcome {
-            agent: "continue".into(),
-            state: ConfigurationState::Failed,
-            target: Some(target),
-            detail: Some(e.to_string()),
-        },
-    }
+    let rendered = merge_continue_json(&config_path, "lain", build_continue_entry(exe, model))
+        .map(|v| render_json(&v));
+    apply_config("continue", &config_path, rendered, None, opts)
 }
 
 fn configure_continue_block(

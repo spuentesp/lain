@@ -160,10 +160,7 @@ impl LainServer {
             return Ok(());
         }
 
-        let lsp_sync_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let lsp_sync_time = crate::server::time::now_unix();
 
         // Batch files into chunks to reduce task spawning overhead
         let files_per_batch = self.ingest().tuning().ingestion.files_per_batch;
@@ -1603,10 +1600,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         return Ok(());
     }
 
-    let lsp_sync_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let lsp_sync_time = crate::server::time::now_unix();
 
     // Tighter batches than the default tuning for federation workloads —
     // repos are loaded concurrently and we want to keep each batch's wall

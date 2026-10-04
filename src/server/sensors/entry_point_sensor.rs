@@ -37,7 +37,6 @@ use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util::{language_for, parse_for_lang, Lang};
-use crate::server::sensors::SensorEntry;
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -79,21 +78,10 @@ pub fn scan_workspace_entry_points(
     let patterns = Patterns::with_overrides(root)?;
     let patterns: &Patterns = &patterns;
 
-    for entry in crate::server::sensors::util::walk_workspace(root) {
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ![
-            "rs", "py", "ts", "js", "go", "java", "cs", "rb", "kt", "kts",
-        ]
-        .contains(&ext)
-        {
-            continue;
-        }
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let graph_path = crate::graph::graph_path(root, path);
+    for (path, content, ext) in crate::server::sensors::util::scan_files(root, |p| {
+        crate::server::sensors::util::ext_in(p, crate::server::sensors::util::SOURCE_EXTS)
+    }) {
+        let graph_path = crate::graph::graph_path(root, &path);
         let detections = detect_in_file(&content, &graph_path, ext, patterns);
         for ((name, _line), kind) in detections {
             // Resolve the name to a graph node id. The scanner may
@@ -864,33 +852,16 @@ fn line_of_match(content: &str, byte_offset: usize) -> u32 {
 
 pub struct EntryPointSensor;
 
-impl crate::server::sensors::Sensor for EntryPointSensor {
-    fn name(&self) -> &'static str {
-        "entry_point"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        crate::server::sensors::SensorCountField::EntryPoints
-    }
-    fn phase(&self) -> u8 {
-        // Phase 2: runs after `http_sensor` (phase 0) has emitted
-        // `CallsHttp` edges and after `field_access_sensor` (phase 2),
-        // so the `HttpHandler` derivation has the edges it needs.
-        // Sharing phase 2 with `field_access_sensor` is fine: order
-        // is determined by `(phase, name)` and `entry_point` sorts
-        // before `field_access` alphabetically.
-        2
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &std::path::Path,
-        namespace: &RepoNamespace,
-    ) -> Result<usize, LainError> {
-        scan_workspace_entry_points(graph, root, namespace)
-    }
-}
-
-inventory::submit!(SensorEntry(&EntryPointSensor));
+// Phase 2: needs `http_sensor`'s `CallsHttp` edges for the `HttpHandler`
+// derivation. Shares the phase with `field_access_sensor`; `(phase, name)`
+// order puts `entry_point` first.
+crate::server::sensors::register_sensor!(
+    EntryPointSensor,
+    "entry_point",
+    EntryPoints,
+    2,
+    scan_workspace_entry_points
+);
 
 // ─── Tests ────────────────────────────────────────────────────────────
 

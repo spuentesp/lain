@@ -342,5 +342,24 @@ async fn clone_sources_accept_a_tag_or_a_branch() {
             .await
             .unwrap_or_else(|e| panic!("shallow refresh {git_ref}: {e}"));
         assert_eq!(&head(&shallow), want, "shallow clone at {git_ref}");
+
+        // Workspace clones share `git_sync`; they used to reset to
+        // `origin/<ref>` and so failed on tags.
+        use crate::federation::workspace::{WorkspaceCloneSource, WorkspaceSource};
+        let ws = WorkspaceCloneSource::new(
+            git_ref.to_string(),
+            url.clone(),
+            Some(git_ref.to_string()),
+            None,
+            tmp.path().join(format!("ws-{git_ref}")),
+        )
+        .unwrap();
+        ws.fetch()
+            .await
+            .unwrap_or_else(|e| panic!("workspace clone {git_ref}: {e}"));
+        ws.fetch()
+            .await
+            .unwrap_or_else(|e| panic!("workspace refresh {git_ref}: {e}"));
+        assert_eq!(&head(ws.local_path()), want, "workspace clone at {git_ref}");
     }
 }

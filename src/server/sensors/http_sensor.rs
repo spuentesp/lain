@@ -643,23 +643,10 @@ pub fn scan_workspace_routes(
     let patterns = Patterns::with_overrides(root)?;
     let patterns: &Patterns = &patterns;
 
-    for entry in crate::server::sensors::util::walk_workspace(root) {
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-        if ![
-            "rs", "py", "ts", "js", "go", "java", "cs", "rb", "kt", "kts",
-        ]
-        .contains(&ext)
-        {
-            continue;
-        }
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue, // a vanished file between walk and read is fine
-        };
-        let mut routes = scan_file_for_routes(path, &content, patterns);
+    for (path, content, _) in crate::server::sensors::util::scan_files(root, |p| {
+        crate::server::sensors::util::ext_in(p, crate::server::sensors::util::SOURCE_EXTS)
+    }) {
+        let mut routes = scan_file_for_routes(&path, &content, patterns);
         for r in &mut routes {
             r.handler_path = crate::graph::graph_path(root, std::path::Path::new(&r.handler_path));
         }
@@ -683,28 +670,16 @@ pub fn scan_workspace_routes(
 /// delegates to whichever name the module uses.
 pub struct HttpRouteSensor;
 
-impl crate::server::sensors::Sensor for HttpRouteSensor {
-    fn name(&self) -> &'static str {
-        "http"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        crate::server::sensors::SensorCountField::HttpRoutes
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &std::path::Path,
-        namespace: &RepoNamespace,
-    ) -> Result<usize, LainError> {
-        let repo_id = RepoId::new(root.to_string_lossy().as_ref()).unwrap_or_else(|_| {
-            // Fall back to a synthetic repo id from the root path.
-            RepoId::new("http-sensor").unwrap()
-        });
+crate::server::sensors::register_sensor!(
+    HttpRouteSensor,
+    "http",
+    HttpRoutes,
+    |graph, root, namespace| {
+        let repo_id = RepoId::new(root.to_string_lossy().as_ref())
+            .unwrap_or_else(|_| RepoId::new("http-sensor").unwrap());
         scan_workspace_routes(graph, root, namespace, &repo_id)
     }
-}
-
-inventory::submit!(crate::server::sensors::SensorEntry(&HttpRouteSensor));
+);
 
 #[cfg(test)]
 mod tests {

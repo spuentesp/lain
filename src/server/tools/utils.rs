@@ -480,10 +480,7 @@ pub fn format_ago(unix_secs: i64) -> String {
     if unix_secs <= 0 {
         return "unknown".to_string();
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now = crate::server::time::now_unix();
     format_duration(now - unix_secs)
 }
 

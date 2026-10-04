@@ -1,123 +1,145 @@
-# Plan: contract-coverage-and-protocols (Phase A → E)
+# Plan: contract-coverage-and-protocols (TLA+ first, then Phase A → E)
 
 **Spec:** `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`
-**TLA+:** `docs/formal/CoverageClaim.tla` (I3), `docs/formal/IndexGeneration.tla` (I7)
 **Branch:** `feat/contract-coverage-and-protocols` (parent `feat/contract-federation`)
 **PR:** #272 (draft, against `dev`)
 **Date:** 2026-10-02
 
+## Order (revised per the updated spec §9)
+
+The spec now requires three TLA+ models that **target existing code**, with TLC finding counterexamples and a follow-up commit fixing each. **No new code lands before the TLA+ confirms what's broken.**
+
+1. **`RejoinProtocol.tla`** (modeled against `federated_index.rs`) — find counterexamples in `rejoin_contracts_if_dirty` / `rejoin_contracts` / `contracts_dirty` / `projection_lock` / `contract_index`. Fix on this branch as a small commit.
+2. **`SnapshotResidency.tla`** (modeled against `snapshots/manager.rs`) — find counterexamples in `from_snapshot_with_wait_ms` / `install_resident` / `try_evict_one_lru_unheld` / `HoldGuard`. Fix on this branch as a small commit.
+3. **`CoverageClaim.tla`** (extended with cache validity per spec §9.3) — gates Phase A. Verifies the `analyzer_version` bump requirement.
+4. **Phase A** (coverage ledger + rule-1 fix) — uses `CoverageClaim.tla` (extended) as the formal-first mapping.
+5. **Phase B → E** — per spec §5–§8, each with their own TLA+ extensions where the spec calls for them.
+
 ## Mapping: TLA+ ⇒ Rust (formal-first)
 
-Phase A (and every subsequent phase) follows the same discipline:
+The TLA+ spec is the contract. The Rust implementation must mirror each action and respect each invariant. Every new function cites its TLA+ action in its doc-comment.
 
-1. **Read the TLA+ action as a contract** — the action's guard is a precondition, the primed state is a postcondition, and the invariant is what the implementation must never violate.
-2. **Cite the TLA+ module + line** in every Rust function's doc-comment.
-3. **Map each TLA+ state variable to a Rust field** (or DB column).
-4. **Map each TLA+ action to a Rust function** with the same name where possible.
+### RejoinProtocol.tla → `federated_index.rs`
 
-### CoverageClaim.tla → Phase A
+Suspected bugs (to be confirmed by TLC):
+- **Lost dirty flag.** `rejoin_contracts` reads inputs → joins → writes `Binds` → swaps `contract_index` → `contracts_dirty.store(false)`. A `mark_contracts_dirty` call landing mid-join is overwritten by the trailing clear.
+- **Torn input.** Nodes (`get_node`) and edges (`all_edges`) are read in separate calls; a concurrent projection can land in between.
+- **Two views of one generation.** `Binds` edges applied before `contract_index` swap.
 
-| TLA+ | Rust |
+| TLA+ state / action | Rust |
 |---|---|
-| `analyzed: [repo → BOOLEAN]` | `CoverageLedger.entry(repo).analyzed` |
-| `langs_present: [repo → SUBSET LANGUAGES]` | `CoverageLedger.entry(repo).languages_present` |
-| `sensors_ran: [repo → SUBSET Sensors]` | `CoverageLedger.entry(repo).sensors_ran` |
-| `sensors_failed: [repo → SUBSET Sensors]` | `CoverageLedger.entry(repo).sensors_failed` |
-| `unresolved: [repo → SUBSET LANGUAGES]` | `CoverageLedger.entry(repo).unresolved_candidates` |
-| `change_in_scope: SUBSET Repos` | `ContractIndex::change_in_scope()` |
-| `claim_fired: BOOLEAN` | the verdict being evaluated (no field — local to the evaluator) |
-| `Reindex(r)` | the `scan_workspace_*` flow + ledger update |
-| `SensorFail(r, s)` | the existing `Sensor::scan` `Err` → `ledger.error` |
-| `AddScopeUnindexed(r)` | **forbidden** path: Rust never adds a repo to scope without reindexing first |
-| `ReportNoKnownImpact` (guarded) | `evaluate()` returning `NoKnownImpact` — gated by `RepoCoverage::is_complete()` |
-| `claim_fired' = FALSE` on reindex/scope-change | verdict re-evaluation must run on every state change |
-| `RepoComplete(r)` predicate | `RepoCoverage::is_complete(&self)` |
-| `NoKnownImpactSound` invariant | proptest `tests/contracts_properties/soundness.rs` |
+| `dirty: BOOLEAN` | `contracts_dirty: AtomicBool` |
+| `index: Generation` | `contract_index: ArcSwap<ContractIndex>` |
+| `binds: Binds` | `binds: Arc<Binds>` (in federated_index) |
+| `ProjectNode(n)` / `ProjectEdge(e)` | the projection paths |
+| `MarkDirty()` | `mark_contracts_dirty()` |
+| `Rejoin()` | `rejoin_contracts_if_dirty()` |
+| Variants checked | (a) current code, (b) clear-before-read-and-reset-on-error, (c) epoch-stamped atomic publish |
+| Invariants | convergence, no-lost-update, I7 reader consistency |
+| Liveness | dirty flag eventually cleared |
 
-### IndexGeneration.tla → Phase A (index-generation machinery)
+### SnapshotResidency.tla → `snapshots/manager.rs`
 
-| TLA+ | Rust |
+Suspected bugs (to be confirmed):
+- `held: AtomicBool` should be a count — two concurrent holds on the same resident share it, first drop clears it, snapshot can leave `resident` while still in use.
+- `install_resident` checks `len() < cap` and inserts under separate lock acquisitions — cap overrun.
+- `try_evict_one_lru_unheld` selects + removes under separate locks — hold can land in between.
+- No single-flight — two builders for one snapshot id both build.
+- Condvar uses a different mutex from the state it guards — possible lost wakeup.
+
+| TLA+ state / action | Rust |
 |---|---|
-| `current_gen: Generation` | `ContractIndex::generation: u64` |
-| `snapshot: [reader → Generation ∪ {Unloaded}]` | `ToolSnapshot::generation` |
-| `dirty: BOOLEAN` | the existing dirty flag |
-| `reader_active: [reader → BOOLEAN]` | implicit in tool-call lifetimes |
-| `Rejoin` (atomic swap) | the swap site in `rejoin_contracts_if_dirty` |
-| `LoadSnapshot(r)` / `ReleaseSnapshot(r)` | tool-call boundaries that pin a generation |
-| `IndexGenerationConsistent` invariant | proptest `tests/contracts_properties/index_generation.rs` |
+| `resident: SUBSET SnapshotId` | the residency set (capped) |
+| `held: [SnapshotId → Nat]` | the hold count (currently `AtomicBool` — bug) |
+| `cap: Nat` | `cap` config |
+| `Hold(s)` / `Release(s)` | `HoldGuard::new` / drop |
+| `Install(s)` | `install_resident` |
+| `Evict(s)` | `try_evict_one_lru_unheld` |
+| Invariants | held never evicted, `|resident| ≤ cap`, at most one federation per id, busy only when all slots held |
 
-## Phases (delivery order)
+### CoverageClaim.tla (extended) → Phase A
+
+Existing model (state space: repos, languages, sensors, sensor outcomes, unresolved). Extended with:
+
+| TLA+ (extended) | Rust |
+|---|---|
+| `cache_key: CacheKey = (analyzer_version, repo_id, commit_id)` | `CacheKey` already exists; add `analyzer_version: SemVer` |
+| `CacheValid(c) ↔ c.analyzer_version = current_version` | `is_valid(key)` check |
+| `InvalidateAllCaches` (triggered by `analyzer_version++`) | bump + clear |
+| `analyzer_version' ≠ analyzer_version ⇒ ledger presence required` | the rule "ledger presence is part of cache validity" |
+
+### Per-call resolution state machine (deferred to Phase B)
+
+I2 / I5 / I6 are pipeline invariants (every call lands in one terminal state; no self-bind; total-order precedence). These will get TLA+ models in Phase B once the wrapper-resolution state machine exists in code. For now, the spec keeps them as property tests.
+
+## Phases
 
 ### Phase A — Coverage ledger + rule-1 fix (soundness; 0.9 gate)
 
-Per spec §4. New types:
+Per spec §4. Implemented *after* the cache-validity extension to CoverageClaim.tla passes.
 
 ```rust
-// Sensor-level ledger
 pub struct SensorLedger {
     pub files_seen: usize,
     pub files_analyzed: usize,
-    pub files_skipped: Vec<SkipRecord>,   // {reason, count, sample_paths(<=5)}
+    pub files_skipped: Vec<SkipRecord>,
     pub emitted: usize,
-    pub unresolved: Vec<UnresolvedRecord>, // {reason, count, sample_ids}
+    pub unresolved: Vec<UnresolvedRecord>,
     pub error: Option<String>,
 }
 
-// Repo-level coverage (extends RepoCoverage)
 pub struct RepoCoverage {
     pub ledger: BTreeMap<SensorId, BTreeMap<Lang, SensorLedger>>,
-    pub languages_present: BTreeSet<Lang>, // extensions in repo, regardless of support
-    pub sensor_counts: SensorCounts,      // derived (kept for back-compat)
+    pub languages_present: BTreeSet<Lang>,
+    pub sensor_counts: SensorCounts,                  // derived; kept for back-compat
+    pub cache_key: CacheKey,                          // analyzer_version + repo_id + commit_id
+    pub error: Option<String>,
+}
+
+impl RepoCoverage {
+    pub fn is_complete(&self, supported_langs: &[Lang]) -> bool { ... }
+    pub fn cache_valid(&self, current_version: SemVer) -> bool { ... }
 }
 ```
 
-Mechanics:
-- `walk_workspace` returns `Vec<FileRecord>` (path, lang, ignored, size-capped) — every file accounted for.
-- `Sensor::scan` keeps its signature; new `scan_with_report(...) -> ScanReport` default-delegates. Five legacy sensors migrate incrementally; unmigrated → `ledger: unknown`, never clean.
-- `run_all` returns `(SensorCounts, CoverageLedger)`. Sensor `Err` → `ledger.error`.
-- Persist `CoverageLedger` in per-commit index cache; `RepoCoverage` gains `ledger`.
-- Tri-state query result: `found | not_found_analyzed | not_analyzed(reasons)`.
-- Verdict change: `evaluate()` downgrades `NoKnownImpact` → `NeedsInvestigation` when any in-scope repo is incomplete. `coverage.complete` derived from same predicate.
-- Rule-1 fix: wrapper candidates without `http_clients` match become `ConsumerTarget::Unresolved{WrapperUnconfigured}`.
+Mechanics (formal-first — each cites the TLA+ action):
+- `walk_workspace` returns `Vec<FileRecord>` — every file classified once.
+- `Sensor::scan_with_report(...)` default-delegates to `scan` (TLA+: `Reindex`).
+- `run_all` returns `(SensorCounts, CoverageLedger)` (TLA+: `RepoComplete`).
+- Cache validity (TLA+: `CacheValid`) — analyzer_version bump invalidates cache.
+- Verdict downgrade: `NoKnownImpact` → `NeedsInvestigation` on incomplete coverage (TLA+: `NoKnownImpactSound`).
+- Rule-1 fix: wrapper candidates → `ConsumerTarget::Unresolved{WrapperUnconfigured}`.
 
 Acceptance (from spec §4):
-- Fixture repo containing a language with no sensor ⇒ `not_analyzed`, `NeedsInvestigation`, not `NoKnownImpact`.
+- Fixture repo containing a language with no sensor ⇒ `not_analyzed`, `NeedsInvestigation`.
 - Corrupt/oversized/unreadable file ⇒ in `files_skipped`.
 - Wrapper call with no config ⇒ in `unresolved`.
-- Snapshot round-trip preserves the ledger.
+- Snapshot round-trip preserves the ledger AND the cache_key.
 - `pr13_hermetic_precision_recall_over_t1_fixture` stays at 1.000 × 6.
-- Each golden test that flips from `NoKnownImpact` to `NeedsInvestigation` is called out in the commit message.
+- Each golden test that flips from `NoKnownImpact` → `NeedsInvestigation` is called out in the commit message.
 
 ### Phase B — Wrapper & base-URL resolution (stretch)
 
-Per spec §5. Cross-file client registry (TS/JS `axios.create`, `ky.create`, `got.extend`; Python existing; later Java/Kotlin/C#/Go). Composition: `normalize(base_parts ++ call_path_parts)`. `CallVia::Receiver` gains `base: Option<BaseOrigin>`.
-
-Resolution precedence (I6 total order): confirmed binding → code-derived base+host → `http_clients` config → `operationId` → heuristic → unresolved.
+Per spec §5. Adds the per-call resolution state machine. Phase B is when I2 / I5 / I6 get their TLA+ model.
 
 ### Phase C — Env aliases
 
-Per spec §6. New `env_sensor` (phase 0) reads `.env*`, docker-compose `environment:`, helm `values.yaml`, k8s `env:` → `EnvBinding{var, host, source}`. Join: `HostPart::Env(vars)` → host → services[]. Unmapped vars in ledger as `env_unmapped`. Conflicting values → ambiguous.
+Per spec §6.
 
 ### Phase D — SQL tables
 
-Per spec §7. New `NodeType::Table`, `EdgeType::ReadsTable`, `EdgeType::WritesTable` (folded into v3, no version bump). `sql_sensor` (phase 1) recognizes sqlx/rusqlite/cursor/JDBC shapes with literal statements; parses with a SQL parser crate (subject to `docs/VULNS.md` policy); CTEs/subselects/joins → reads; INSERT/UPDATE/DELETE/MERGE → writes. ORMs and column lineage: out of scope.
+Per spec §7. `NodeType::Table`, `EdgeType::ReadsTable`, `EdgeType::WritesTable` folded into v3.
 
 ### Phase E — gRPC then GraphQL
 
-Per spec §8. `ContractKey::Rpc { system: Grpc, service, method }`, `ContractKey::Graphql { op, field }` (folded into v3).
-
-**E-gRPC first**: rewrite `proto_sensor` onto a real proto grammar (tree-sitter-proto) emitting `service Foo { rpc Bar }` as providers; `package` part of identity (`pkg.Foo/Bar`). Server registration via `RegisterFooServer` / `add_FooServicer_to_server` / `@GrpcService` links provider to handler.
-
-Generated stub calls (`FooClient.Bar` / `stub.Bar`) resolved to `pkg.Foo` via the channel address (`grpc.NewClient("orders:50051")`, env) reusing Phase B/C host resolution. Join: exact `(pkg.Service, method)` match within target service; no URL prefix tolerance. Unknown stub → ledger candidate `rpc_stub_unknown`.
-
-**E-GraphQL second**: rewrite SDL parsing via real parser (graphql-parser crate, subject to VULNS policy). Resolver linkage by naming convention per framework (Apollo resolver maps, graphql-java `DataFetcher`, gqlgen, Strawberry). Consumer: `gql`/`graphql` tagged templates, `.graphql` documents, persisted operations → top-level selection fields. Fragment-only or interpolated documents → `dynamic_operation`. Endpoint target: `/graphql` HTTP route resolution via Phase B/C; join on `(op, field)`. If several services expose the same root field (federation/gateway) ⇒ ambiguous, never single-bound.
+Per spec §8. `ContractKey::Rpc/Graphql` folded into v3.
 
 ## Delivery cadence
 
-- **One PR per phase, all stacked on #272** (per the user: "MERGE TO THIS PR. NOT TO DEV.").
-- Each phase lands as commits on this branch; the PR description is updated when scope changes.
-- Each phase: `cargo test`, `clippy --all-targets` 0/0, fmt, fresh-named ci-probe full battery + acceptance harness before "done".
-- Bugs found en route are fixed in place.
+- **All on this branch, stacked on PR #272** (per user: "MERGE TO THIS PR. NOT TO DEV.").
+- Each fix / phase lands as commits on this branch.
+- Each landing: `cargo test`, `clippy --all-targets` 0/0, fmt, fresh-named ci-probe + acceptance harness before "done".
+- Bugs found en route (TLC counterexamples, golden flips) fixed in place.
 - Hard-rules compliance: no schema version bumps, no fixture edits, no `Cargo.toml [dependencies]` runtime version bumps. CHANGELOG + `lain reindex` cover the v3-fold-in.
 
 ## Tooling
@@ -127,4 +149,5 @@ Generated stub calls (`FooClient.Bar` / `stub.Bar`) resolved to `pkg.Foo` via th
 
 ## What's not in this plan
 
-- TLA+ for I1, I2, I4, I5, I6 — these get proptest cases (partition, shuffle, monotone precedence) per spec §9. No TLA+ models needed.
+- TLA+ for I1, I2, I4, I5, I6 (until Phase B) — proptest cases per spec §9.
+- Sensor-phase ordering — write-locked swap, model would be trivial.

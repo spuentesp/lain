@@ -228,20 +228,16 @@ pub fn resolve_graphql_consumer(
     // ambiguous, never single-bound").
     let is_graphql_route = |(_, key): &(_, ContractKey)| {
         matches!(key, ContractKey::Http { method, template }
-            if template == "/graphql"
-                && matches!(
-                    method,
-                    MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Post)
-                        | MethodSpec::Unknown
-                ))
+        if template == "/graphql"
+            && matches!(
+                method,
+                MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Post)
+                    | MethodSpec::Unknown
+            ))
     };
     let first_owner = super::endpoints::route_owner(endpoints, is_graphql_route);
     let total_owners = endpoints.keys().filter(|k| is_graphql_route(k)).count();
-    let route_owner: Option<ServiceName> = if total_owners == 1 {
-        first_owner
-    } else {
-        None
-    };
+    let route_owner: Option<ServiceName> = if total_owners == 1 { first_owner } else { None };
     let target_key = ContractKey::Graphql {
         op: consumer.op,
         field: consumer.field.clone(),

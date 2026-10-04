@@ -32,7 +32,6 @@ use crate::error::LainError;
 use crate::federation::contracts::model::SourceSite;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
-use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -64,36 +63,16 @@ enum SiteKind {
 
 pub struct EventSensor;
 
-impl crate::server::sensors::Sensor for EventSensor {
-    fn name(&self) -> &'static str {
-        "event"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        // The topic-event bucket rides on the existing
-        // `SensorCountField::EntryPoints` so the counts surface in
-        // `run_all` without growing the enum. Topics are emitted per
-        // file so the totals stay informative even without a
-        // dedicated bucket.
-        crate::server::sensors::SensorCountField::EntryPoints
-    }
-    fn phase(&self) -> u8 {
-        // §6.7 / §7.7: phase 2 — needs the joiner's service table to
-        // already know which repo a `Topic` belongs to. PR 7 wires
-        // the joiner into the same phase; this sensor mirrors
-        // field_access_sensor's ordering so the graph is consistent.
-        2
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &Path,
-        namespace: &RepoNamespace,
-    ) -> Result<usize, LainError> {
-        scan_workspace_event(graph, root, namespace)
-    }
-}
-
-inventory::submit!(SensorEntry(&EventSensor));
+// Topic events ride on the `EntryPoints` bucket so counts surface in
+// `run_all` without growing the enum. Phase 2 (§6.7 / §7.7): needs the
+// joiner's service table to know which repo a `Topic` belongs to.
+crate::server::sensors::register_sensor!(
+    EventSensor,
+    "event",
+    EntryPoints,
+    2,
+    scan_workspace_event
+);
 
 // ─── Workspace scan ──────────────────────────────────────────────────
 
@@ -109,14 +88,17 @@ pub fn scan_workspace_event(
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
 
-    for entry in crate::server::sensors::util::walk_workspace(root) {
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let path_str = graph_path(root, path);
+    let any_ext = |p: &Path| {
+        Some(
+            p.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string(),
+        )
+    };
+    for (path, content, ext) in crate::server::sensors::util::scan_files(root, any_ext) {
+        let ext = ext.as_str();
+        let path_str = graph_path(root, &path);
         let constants = collect_same_file_constants(&content, ext);
         let sites = detect_sites(&content, ext, &constants);
         let (nodes, edges) = emit_sites(&sites, &path_str, namespace, graph);

@@ -54,7 +54,6 @@ use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util::{
     is_deny_method, lang_for_path as lang_for_path_shared, parse_for_lang, Lang,
 };
-use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tree_sitter::{Node, Tree};
@@ -141,33 +140,19 @@ pub enum Escape {
 /// Unit-struct Sensor impl.
 pub struct FieldAccessSensor;
 
-impl crate::server::sensors::Sensor for FieldAccessSensor {
-    fn name(&self) -> &'static str {
-        "field_access"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        crate::server::sensors::SensorCountField::FieldReads
-    }
-    fn phase(&self) -> u8 {
-        // §6.5: phase 2, runs after the joiner has produced the
-        // `Binds` set (so the scope rules 5 / 6 have something to
-        // walk). PR 6 / 7 are 1; the joiner is wired into phase 2
-        // here.
-        2
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &Path,
-        namespace: &RepoNamespace,
-    ) -> Result<usize, LainError> {
+// §6.5: phase 2, after the joiner has produced the `Binds` set that scope
+// rules 5 / 6 walk.
+crate::server::sensors::register_sensor!(
+    FieldAccessSensor,
+    "field_access",
+    FieldReads,
+    2,
+    |graph, root, namespace| {
         let repo_id = RepoId::new(root.to_string_lossy().as_ref())
             .unwrap_or_else(|_| RepoId::new("field-access-sensor").unwrap());
         scan_workspace_field_access(graph, root, namespace, &repo_id)
     }
-}
-
-inventory::submit!(SensorEntry(&FieldAccessSensor));
+);
 
 // ─── Workspace scan ───────────────────────────────────────────────
 
@@ -197,17 +182,9 @@ pub fn scan_workspace_field_access(
     // would have no effect on field-access suppression.
     let (emissions, _) = super::util::with_current_patterns(patterns, || {
         let mut emissions: Vec<FieldAccessEmission> = Vec::new();
-        for entry in crate::server::sensors::util::walk_workspace(root) {
-            let path = entry.path();
-            let Some(lang) = lang_for_path(&path.to_string_lossy()) else {
-                continue;
-            };
-
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let path_str = graph_path(root, path);
+        let by_lang = |p: &Path| lang_for_path(&p.to_string_lossy());
+        for (path, content, lang) in super::util::scan_files(root, by_lang) {
+            let path_str = graph_path(root, &path);
             emissions.extend(detect_emissions(
                 &path_str,
                 &content,

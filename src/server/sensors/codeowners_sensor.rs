@@ -36,7 +36,6 @@
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::schema::RepoNamespace;
-use crate::server::sensors::SensorEntry;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -239,34 +238,16 @@ pub fn scan_workspace_codeowners(
 /// the sensor reads specific files, not a workspace walk.
 pub struct CodeownersSensor;
 
-impl crate::server::sensors::Sensor for CodeownersSensor {
-    fn name(&self) -> &'static str {
-        "codeowners"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        // Codeowners contributes attribution, not graph nodes — the
-        // bucket is a placeholder so the counts surface in `run_all`
-        // without growing the enum (mirrors the `event_sensor`
-        // convention).
-        crate::server::sensors::SensorCountField::EntryPoints
-    }
-    fn phase(&self) -> u8 {
-        // Phase 1: runs after the http sensors (phase 0), alongside
-        // `entry_point_sensor`. Doesn't need Topic nodes or `Binds`
-        // edges, so the earlier phases are sufficient.
-        1
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &Path,
-        namespace: &RepoNamespace,
-    ) -> Result<usize, LainError> {
-        scan_workspace_codeowners(graph, root, namespace)
-    }
-}
-
-inventory::submit!(SensorEntry(&CodeownersSensor));
+// Codeowners contributes attribution, not graph nodes, so it rides on the
+// `EntryPoints` bucket. Phase 1: after the http sensors, alongside
+// `entry_point_sensor`.
+crate::server::sensors::register_sensor!(
+    CodeownersSensor,
+    "codeowners",
+    EntryPoints,
+    1,
+    scan_workspace_codeowners
+);
 
 // ─── Tests ────────────────────────────────────────────────────────────
 

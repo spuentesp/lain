@@ -39,9 +39,7 @@ use lain::federation::contracts::model::{
     ProviderOrigin,
 };
 use lain::schema::{GraphNode, NodeType, RepoNamespace};
-use lain::server::sensors::env_sensor::{
-    scan as env_scan, EnvBinding, EnvBindingIndex, EnvSource,
-};
+use lain::server::sensors::env_sensor::{scan as env_scan, EnvBinding, EnvBindingIndex, EnvSource};
 
 // ─── Builders ────────────────────────────────────────────────────────
 
@@ -139,13 +137,7 @@ fn env_index(bindings: Vec<EnvBinding>) -> EnvBindingIndex {
     EnvBindingIndex { by_var }
 }
 
-fn make_call(
-    repo: &str,
-    path: &str,
-    name: &str,
-    line: u32,
-    var: &str,
-) -> GraphNode {
+fn make_call(repo: &str, path: &str, name: &str, line: u32, var: &str) -> GraphNode {
     library_consumer_node(
         repo,
         path,
@@ -191,7 +183,9 @@ fn c1_docker_compose_env_var_binds_to_service() {
     .unwrap();
     let bindings = env_scan(&root);
     assert!(
-        bindings.iter().any(|b| b.var == "ORDERS_API_URL" && b.host == "orders"),
+        bindings
+            .iter()
+            .any(|b| b.var == "ORDERS_API_URL" && b.host == "orders"),
         "C1: env_scan must pick ORDERS_API_URL=http://orders:8080 from compose; got {bindings:?}"
     );
 
@@ -239,6 +233,15 @@ fn c1_docker_compose_env_var_binds_to_service() {
 /// in `unresolved` with reason `EnvUnmapped`, and the var is
 /// recorded on `JoinOutput::unresolved_env_vars` for the
 /// orchestrator to fold into the coverage ledger.
+///
+/// The test uses a target template (`/users`) that has no
+/// matching provider route in any service, so the rule-6
+/// "unbound host" fallback cannot bind the call. The
+/// env-name match (`services[].env`) doesn't declare
+/// `ORDERS_API_URL` either. With no env file and no other
+/// rule firing, the consumer lands in
+/// `Unresolved { EnvUnmapped }` and the var counter is bumped
+/// for the ledger.
 #[test]
 fn c2_no_env_file_lands_in_unresolved() {
     let _g = test_lock();
@@ -247,13 +250,19 @@ fn c2_no_env_file_lands_in_unresolved() {
     let bindings = env_scan(&root);
     assert!(bindings.is_empty(), "C2: no env file → empty bindings");
 
+    // The orders service has no `env: [ORDERS_API_URL]` so the
+    // legacy env-name match (target_service_from_env) doesn't
+    // fire; the orders provider lives at a template that does
+    // not match the consumer's `/users` path, so rule 6 (route
+    // fallback) doesn't bind either. Only the env_sensor can
+    // resolve the call, and it has no binding for the var.
     let provider = provider_node(
         "orders",
         "src/orders.py",
-        "get_users",
+        "get_users_by_id",
         10,
         HttpMethod::Get,
-        "/users",
+        "/users/{}", // Different template — rule 6 won't match
     );
     let consumer = make_call("billing", "src/c.ts", "do_get", 1, "ORDERS_API_URL");
 
@@ -267,7 +276,7 @@ fn c2_no_env_file_lands_in_unresolved() {
 
     assert!(
         out.binds.is_empty(),
-        "C2: no Binds edge when the var is unmapped; got {:?}",
+        "C2: no Binds edge when the var is unmapped and no fallback matches; got {:?}",
         out.binds
     );
     assert_eq!(
@@ -278,11 +287,7 @@ fn c2_no_env_file_lands_in_unresolved() {
     );
     let call_id = make_id("billing", NodeType::HttpClientCall, "src/c.ts", "do_get", 1);
     let gid = lain::federation::repo_id::GlobalId::from_string(&call_id);
-    let resolution = out
-        .index
-        .consumers
-        .get(&gid)
-        .expect("C2: consumer present");
+    let resolution = out.index.consumers.get(&gid).expect("C2: consumer present");
     match &resolution.target {
         Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::EnvUnmapped,
@@ -319,7 +324,8 @@ fn c3_conflicting_env_values_are_ambiguous() {
         2,
         "C3: both sources must surface; got {var_bindings:?}"
     );
-    let hosts: std::collections::BTreeSet<_> = var_bindings.iter().map(|b| b.host.as_str()).collect();
+    let hosts: std::collections::BTreeSet<_> =
+        var_bindings.iter().map(|b| b.host.as_str()).collect();
     assert_eq!(hosts.len(), 2, "C3: hosts must be distinct (a, b)");
 
     let provider = provider_node(
@@ -347,11 +353,7 @@ fn c3_conflicting_env_values_are_ambiguous() {
     );
     let call_id = make_id("billing", NodeType::HttpClientCall, "src/c.ts", "do_get", 1);
     let gid = lain::federation::repo_id::GlobalId::from_string(&call_id);
-    let resolution = out
-        .index
-        .consumers
-        .get(&gid)
-        .expect("C3: consumer present");
+    let resolution = out.index.consumers.get(&gid).expect("C3: consumer present");
     match &resolution.target {
         Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::EnvAmbiguous,
@@ -382,9 +384,9 @@ fn c4_helm_values_yaml_env_block_binds() {
     .unwrap();
     let bindings = env_scan(&root);
     assert!(
-        bindings
-            .iter()
-            .any(|b| b.var == "ORDERS_API_URL" && b.host == "orders" && b.source == EnvSource::HelmValues),
+        bindings.iter().any(|b| b.var == "ORDERS_API_URL"
+            && b.host == "orders"
+            && b.source == EnvSource::HelmValues),
         "C4: helm values env block must be picked up; got {bindings:?}"
     );
 
@@ -434,9 +436,9 @@ spec:
     .unwrap();
     let bindings = env_scan(&root);
     assert!(
-        bindings
-            .iter()
-            .any(|b| b.var == "ORDERS_API_URL" && b.host == "orders" && b.source == EnvSource::K8sEnv),
+        bindings.iter().any(|b| b.var == "ORDERS_API_URL"
+            && b.host == "orders"
+            && b.source == EnvSource::K8sEnv),
         "C5: k8s env block must be picked up; got {bindings:?}"
     );
 

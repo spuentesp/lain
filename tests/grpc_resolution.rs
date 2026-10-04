@@ -74,18 +74,16 @@ fn make_id(repo: &str, kind: NodeType, path: &str, name: &str, line: u32) -> Str
         .to_string()
 }
 
-fn rpc_provider_node(
-    repo: &str,
-    path: &str,
-    method: &str,
-    line: u32,
-    service: &str,
-) -> GraphNode {
+fn rpc_provider_node(repo: &str, path: &str, method: &str, line: u32, service: &str) -> GraphNode {
     let id_name = format!("{}/{}", service, method);
     let id = make_id(repo, NodeType::Module, path, &id_name, line);
     let mut n = GraphNode::new_in(
         NodeType::Module,
-        format!("{}.{}", service.rsplit_once('.').map(|(_, s)| s).unwrap_or(service), method),
+        format!(
+            "{}.{}",
+            service.rsplit_once('.').map(|(_, s)| s).unwrap_or(service),
+            method
+        ),
         path.to_string(),
         &ns(),
     );
@@ -115,12 +113,7 @@ fn rpc_consumer_node(
 ) -> GraphNode {
     let id_name = format!("rpc-call:{}:{}", service, method);
     let id = make_id(repo, NodeType::Function, path, &id_name, line);
-    let mut n = GraphNode::new_in(
-        NodeType::Function,
-        id_name.clone(),
-        path.to_string(),
-        &ns(),
-    );
+    let mut n = GraphNode::new_in(NodeType::Function, id_name.clone(), path.to_string(), &ns());
     n.repo_id = Some(repo.to_string());
     n.id = id;
     n.line_start = Some(line);
@@ -144,12 +137,7 @@ fn rpc_handler_node(
 ) -> GraphNode {
     let id_name = format!("rpc-handler:{}", handler_name);
     let id = make_id(repo, NodeType::Module, path, &id_name, line);
-    let mut n = GraphNode::new_in(
-        NodeType::Module,
-        id_name.clone(),
-        path.to_string(),
-        &ns(),
-    );
+    let mut n = GraphNode::new_in(NodeType::Module, id_name.clone(), path.to_string(), &ns());
     n.repo_id = Some(repo.to_string());
     n.id = id;
     n.line_start = Some(line);
@@ -200,7 +188,10 @@ fn config_empty() -> ContractFederationConfig {
     }
 }
 
-fn run(nodes: Vec<GraphNode>, config: ContractFederationConfig) -> lain::federation::contracts::joiner::JoinOutput {
+fn run(
+    nodes: Vec<GraphNode>,
+    config: ContractFederationConfig,
+) -> lain::federation::contracts::joiner::JoinOutput {
     ContractJoiner::run_with_registry(&nodes, &[], &config, &ClientRegistry::new())
 }
 
@@ -362,13 +353,7 @@ public class OrdersImpl extends OrdersGrpc.OrdersImplBase {
     // The handler node the sensor mints carries a
     // `ContractFact::RpcHandler` payload that names both the
     // `ContractKey::Rpc` and the `SymbolKey` for the impl class.
-    let handler_node = rpc_handler_node(
-        "orders",
-        "OrdersImpl.java",
-        4,
-        "Orders",
-        "OrdersImpl",
-    );
+    let handler_node = rpc_handler_node("orders", "OrdersImpl.java", 4, "Orders", "OrdersImpl");
     match &handler_node.contract {
         Some(ContractFact::RpcHandler(rh)) => {
             assert_eq!(rh.handler_function.name, "OrdersImpl");
@@ -415,10 +400,7 @@ fn e4_unresolved_channel_is_rpc_stub_unknown() {
         panic!("consumer must be recorded (even when unresolved)");
     };
     let Some(ConsumerTarget::Unresolved { reason, .. }) = resolution.target.as_ref() else {
-        panic!(
-            "target must be Unresolved, got {:?}",
-            resolution.target
-        );
+        panic!("target must be Unresolved, got {:?}", resolution.target);
     };
     assert!(
         matches!(reason, UnresolvedReason::RpcStubUnknown),

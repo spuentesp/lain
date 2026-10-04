@@ -50,24 +50,7 @@ use super::openapi_schema::flatten_schema;
 /// registry to edit.
 pub struct OpenApiSensor;
 
-impl crate::server::sensors::Sensor for OpenApiSensor {
-    fn name(&self) -> &'static str {
-        "openapi"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        crate::server::sensors::SensorCountField::Openapi
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &std::path::Path,
-        namespace: &crate::schema::RepoNamespace,
-    ) -> Result<usize, LainError> {
-        scan_workspace(graph, root, namespace)
-    }
-}
-
-inventory::submit!(crate::server::sensors::SensorEntry(&OpenApiSensor));
+crate::server::sensors::register_sensor!(OpenApiSensor, "openapi", Openapi, scan_workspace);
 
 // ─── Spec parsing ────────────────────────────────────────────────────
 

@@ -97,11 +97,8 @@ pub fn scan_workspace_handler_link(
                 Some(link.site_line),
                 namespace,
             );
-            let mut node = GraphNode::new(
-                NodeType::Module,
-                id_name.clone(),
-                graph_path_str.clone(),
-            );
+            let mut node =
+                GraphNode::new(NodeType::Module, id_name.clone(), graph_path_str.clone());
             node.id = id;
             node.line_start = Some(link.site_line);
             node.line_end = Some(link.site_line);
@@ -120,11 +117,8 @@ pub fn scan_workspace_handler_link(
         }
     }
     if !all_nodes.is_empty() {
-        let _ = graph.replace_sensor_output(
-            SensorOwner::ProtoSensor,
-            &all_nodes,
-            &[] as &[GraphEdge],
-        );
+        let _ =
+            graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &[] as &[GraphEdge]);
     }
     Ok(total)
 }
@@ -323,7 +317,7 @@ fn detect_java(
                             let stripped = name
                                 .strip_suffix("ImplBase")
                                 .map(|s| s.to_string())
-                            .unwrap_or(name);
+                                .unwrap_or(name);
                             service_name = Some(stripped);
                             break;
                         }

@@ -25,10 +25,10 @@
 //! residency + job-runner paths; this module owns the bookkeeping
 //! and the `Drop` semantics.
 
+use crate::server::time::now_unix;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -540,13 +540,6 @@ fn stage_dir(data_dir: &Path, key: &CacheKey) -> PathBuf {
     cache_root(data_dir)
         .join(&key.repo)
         .join(format!(".{}.staging", key.dir_name()))
-}
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Convenience for the integration test: build a manifest from
