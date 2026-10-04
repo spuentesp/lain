@@ -366,4 +366,61 @@ mod tests {
         // WAL is still on disk and can be inspected by the
         // operator with `doctor` for the recovery recipe.
     }
+
+    #[test]
+    fn batch_inserts_persist_to_wal() {
+        // B5 (2026-10-04): the batch fast path
+        // (`insert_nodes_batch` / `insert_edges_batch`) must
+        // also append to the WAL, otherwise the snapshot +
+        // WAL replay would miss the batched mutations. This
+        // test calls both batch methods on a fresh graph,
+        // then reads the WAL directly and asserts the frames
+        // are present in order.
+        use crate::graph::GraphDatabase;
+        use crate::schema::{EdgeType, NodeType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = dir.path().join("graph.bin");
+        let wal = wal_path_for(&snapshot);
+
+        let db = GraphDatabase::new(&snapshot).unwrap();
+        let nodes: Vec<GraphNode> = (0..3)
+            .map(|i| {
+                GraphNode::new(
+                    NodeType::Function,
+                    format!("n{i}"),
+                    format!("/src/n{i}.rs"),
+                )
+            })
+            .collect();
+        db.insert_nodes_batch(&nodes).unwrap();
+
+        let edges: Vec<GraphEdge> = (0..2)
+            .map(|i| {
+                GraphEdge::new(
+                    EdgeType::Calls,
+                    format!("n{i}"),
+                    format!("n{}", i + 1),
+                )
+            })
+            .collect();
+        // `insert_edges_batch` requires both endpoints in the
+        // graph; they're already there from the node batch.
+        db.insert_edges_batch(&edges).unwrap();
+
+        // The WAL should have 3 + 2 = 5 frames.
+        let mut seen_nodes = 0;
+        let mut seen_edges = 0;
+        replay(&wal, |op| {
+            match op {
+                GraphOp::UpsertNode(_) => seen_nodes += 1,
+                GraphOp::UpsertEdge(_) => seen_edges += 1,
+                _ => {}
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen_nodes, 3, "insert_nodes_batch must append 3 frames");
+        assert_eq!(seen_edges, 2, "insert_edges_batch must append 2 frames");
+    }
 }

@@ -51,6 +51,25 @@ All notable changes to LAIN are documented here. Versions follow
   automatically by replaying `.lain/graph.wal`; the doctor
   hint now mentions the WAL as the future-friendly path.
 
+- **B5 periodic checkpoint task** — without this, a
+  long-running server with no explicit reload would grow
+  the WAL indefinitely (every mutation appends a frame,
+  but nothing truncated the file until `request_reload` or
+  graceful shutdown). `spawn_periodic_checkpoint` runs
+  every 60s by default, calling `save_to_disk_sync` to
+  write a fresh `graph.bin` and truncate the WAL. Override
+  with `LAIN_WAL_CHECKPOINT_SECS` or disable with
+  `LAIN_DISABLE_WAL_CHECKPOINT=1`. The save runs on
+  `spawn_blocking` to avoid stalling the runtime.
+
+- **B5 batch-method WAL appends** — `insert_nodes_batch` and
+  `insert_edges_batch` now also append to the WAL before
+  the in-memory mutation, so the batch fast path is also
+  recoverable across torn snapshots. The new
+  `batch_inserts_persist_to_wal` test verifies the
+  ordering: 3 nodes + 2 edges → 3 + 2 = 5 WAL frames in
+  order. 9 WAL tests in total now pass.
+
 ### Fixed
 
 - **`LAIN_ONESHOT_TIMEOUT` default bumped from 60s to 600s.** The

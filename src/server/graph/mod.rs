@@ -371,6 +371,18 @@ impl GraphDatabase {
 
     pub fn insert_nodes_batch(&self, new_nodes: &[GraphNode]) -> Result<(), LainError> {
         self.check_writable()?;
+        // B5 (2026-10-04): append the batch to the WAL first.
+        // The fsync inside `append_op` is the durability
+        // point. The in-memory mutation below is then safe
+        // to fail — on next load, the WAL tail replays.
+        for node in new_nodes {
+            if let Err(e) = wal::append_op(
+                &wal::wal_path_for(&self.persistence_path),
+                &wal::GraphOp::UpsertNode(node.clone()),
+            ) {
+                return Err(LainError::Database(format!("wal append: {e}")));
+            }
+        }
         // Phase 1: Collect indices and path entries under graph lock
         let mut graph = self.graph.write();
 
@@ -1090,6 +1102,19 @@ impl GraphDatabase {
 
     pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
+        // B5 (2026-10-04): append the batch to the WAL first.
+        // Each edge becomes one `GraphOp::UpsertEdge` frame.
+        // The fsync is the durability point; the in-memory
+        // mutation below is then safe to fail (the WAL tail
+        // replays on next load).
+        for edge in new_edges {
+            if let Err(e) = wal::append_op(
+                &wal::wal_path_for(&self.persistence_path),
+                &wal::GraphOp::UpsertEdge(edge.clone()),
+            ) {
+                return Err(LainError::Database(format!("wal append: {e}")));
+            }
+        }
         let mut graph = self.graph.write();
         let mut external = self.pending_external_edges.lock();
 

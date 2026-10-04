@@ -226,6 +226,13 @@ pub async fn run_mcp(
     // graph never advances past the commit it was first built from.
     crate::server::ingest::background::spawn_commit_sync(server.clone());
 
+    // B5 (2026-10-04): periodic WAL checkpoint. The WAL grows on
+    // every mutation; without a periodic trigger, a
+    // long-running server with no explicit reload would never
+    // truncate the file. The default 60s is short enough to
+    // bound the WAL to a few minutes of mutations.
+    crate::server::ingest::background::spawn_periodic_checkpoint(server.clone());
+
     // Expire stale sessions and claim TTLs. Only the federation server
     // started this, so under `lain mcp` a crashed agent's edit claims — and
     // any `ttl_seconds` claim — were never dropped, blocking every other
