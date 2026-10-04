@@ -5,6 +5,19 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_health` now lists every declared `EdgeType`**, even when the
+  count is zero. A graph with no `Calls` edges used to omit the
+  `Calls: 0` line entirely, so an operator on a repo whose call
+  graph never resolved (LSP didn't start, every file is a script)
+  couldn't tell from `get_health` alone that the impact tools would
+  return empty. The histogram is now seeded from
+  `EdgeType::all()` so every variant is reported. A banner line
+  is also emitted when `Calls == 0` to make the silent-absence
+  mode loud. Surfaced by dogfooding Lain on Lain
+  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B11).
+
 ## [0.9.0] - 2026-10-04
 
 LAIN 0.9 introduces cross-repo contract federation. For every

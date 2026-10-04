@@ -184,6 +184,57 @@ fn test_get_stats() {
 }
 
 #[test]
+fn test_edge_counts_by_type_seeds_zero_for_unused_variants() {
+    // Regression: a graph with no `Calls` edges used to make
+    // `get_health` skip the entry entirely, so an operator on a
+    // repo whose call graph never resolved (LSP didn't start, or
+    // every file is a script) saw only the populated edge types.
+    // `describe_schema` still advertised `Calls`, so the silent
+    // absence looked like a tool bug. Seed every declared variant
+    // at 0 so the absence shows up as `Calls: 0` in the report.
+    //
+    // Build a graph that only has `Contains` edges (file ->
+    // symbol) and no `Calls`. The persistent `make_test_graph` is
+    // a call graph, which is the wrong fixture for this test.
+    let tmp = std::env::temp_dir().join("test_edge_counts_seed_zero");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    let file = GraphNode::new(NodeType::File, "script.py".to_string(), "/src/script.py".to_string());
+    let fn_node = GraphNode::new(
+        NodeType::Function,
+        "do_thing".to_string(),
+        "/src/script.py".to_string(),
+    );
+    graph.upsert_node(file.clone()).unwrap();
+    graph.upsert_node(fn_node.clone()).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Contains,
+            file.id.clone(),
+            fn_node.id.clone(),
+        ))
+        .unwrap();
+
+    let hist = graph.edge_counts_by_type();
+    let declared: HashSet<String> = EdgeType::all()
+        .iter()
+        .map(|v| format!("{v:?}"))
+        .collect();
+    let reported: HashSet<String> = hist.keys().cloned().collect();
+    let missing: Vec<&String> = declared.difference(&reported).collect();
+    assert!(
+        missing.is_empty(),
+        "edge_counts_by_type omitted declared variants: {missing:?}"
+    );
+    // The fixture has no `Calls` edges — the histogram must
+    // explicitly report zero rather than omitting the key.
+    assert_eq!(hist.get("Calls").copied(), Some(0));
+    // And it must still report the populated types accurately.
+    assert_eq!(hist.get("Contains").copied(), Some(1));
+}
+
+#[test]
 fn test_get_node_at_location() {
     let tmp = std::env::temp_dir().join("test_loc");
     let _ = std::fs::remove_dir_all(&tmp);

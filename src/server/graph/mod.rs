@@ -1974,11 +1974,22 @@ impl GraphDatabase {
     /// Without this, the only signal that the call graph is empty
     /// is "every impact query returns nothing," which is the exact
     /// failure the user reported as Bug 2.
+    ///
+    /// Every `EdgeType` variant from [`schema::EdgeType::all()`] is
+    /// seeded at 0 so an absent edge type shows up as
+    /// `Calls: 0` rather than missing. The "missing" case is the
+    /// silent-failure mode operators reported in the 2026-10-04
+    /// dogfood: `describe_schema` advertised `Calls` but the
+    /// health report never mentioned it, so the silent-absence was
+    /// invisible until an impact query returned empty.
     pub fn edge_counts_by_type(&self) -> std::collections::BTreeMap<String, usize> {
         use petgraph::visit::IntoEdgeReferences;
         use std::collections::BTreeMap;
         let graph = self.graph.read();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for variant in crate::schema::EdgeType::all() {
+            counts.insert(format!("{variant:?}"), 0);
+        }
         for edge in graph.edge_references() {
             let key = format!("{:?}", edge.weight().edge_type);
             *counts.entry(key).or_insert(0) += 1;

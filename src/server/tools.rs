@@ -931,12 +931,39 @@ impl ToolExecutor {
         // query returns nothing" looks like a tool bug but is in fact
         // a missing-data bug; the histogram makes the data
         // visible. Sorted alphabetically by EdgeType Debug name for
-        // stable output across runs.
+        // stable output across runs. `edge_counts_by_type` seeds every
+        // declared variant at 0 so a missing edge type is visible as
+        // `Calls: 0` instead of just absent.
         let edge_hist = ctx.graph.edge_counts_by_type();
         if !edge_hist.is_empty() {
             output.push_str("\n### Edge counts by type\n");
             for (kind, count) in &edge_hist {
                 output.push_str(&format!("- **{kind}**: {count}\n"));
+            }
+            // B11 follow-up: when the call graph is empty on a repo
+            // that has Rust/Python/Go/etc. source, every impact query
+            // will return nothing. Surface that as a banner so the
+            // next user doesn't have to diff `get_health` against
+            // `describe_schema` to spot the silent failure.
+            // `Calls == 0` is the headline failure mode: a repo with
+            // a populated Contains tree but no Calls is the exact
+            // pattern we saw in the 2026-10-04 Lain-on-Lain
+            // dogfooding (10k nodes, 0 Calls). `Uses` is a co-signal
+            // but not strictly required (the structural scanner
+            // populates Uses from type references even when the call
+            // resolver fails), so a one-off `Uses: 1` shouldn't mask
+            // the absence of Calls.
+            let calls = edge_hist.get("Calls").copied().unwrap_or(0);
+            if calls == 0 {
+                output.push_str(
+                    "\n⚠ **call graph is empty** — `Calls` is 0. \
+                     Every `get_blast_radius` / `get_call_chain` / \
+                     `assess_change` answer will be empty. Check the \
+                     LSP phase of the indexer (rust-analyzer / pylsp / \
+                     …); the structural edges are present so the \
+                     indexer ran, but the call-resolution phase did \
+                     not.\n",
+                );
             }
         }
 
