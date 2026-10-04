@@ -339,11 +339,7 @@ impl IndexCache {
     ///
     /// Returns the `CacheKey` of the discovered entry, or `None`
     /// when no matching directory exists.
-    pub fn discover(
-        &self,
-        repo: &str,
-        analyzer_version: &str,
-    ) -> Option<CacheKey> {
+    pub fn discover(&self, repo: &str, analyzer_version: &str) -> Option<CacheKey> {
         let repo_dir = cache_root(&self.data_dir).join(repo);
         let entries = std::fs::read_dir(&repo_dir).ok()?;
         let suffix = format!("-{}", analyzer_version);
