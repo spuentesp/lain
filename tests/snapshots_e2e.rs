@@ -1,4 +1,4 @@
-//! End-to-end snapshot tests (`docs/CONTRACT_FEDERATION.md` §8.4–§8.5,
+//! End-to-end snapshot tests (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §8.4–§8.5,
 //! §13). The §15.1 fixture provides the four local repos (all
 //! `workspace_dir`-sourced); the snapshot manager's source resolver
 //! (built from the same `FederationConfig`) maps each repo id to

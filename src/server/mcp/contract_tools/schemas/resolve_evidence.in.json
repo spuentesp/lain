@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "resolve_evidence input",
-  "description": "Input for `resolve_evidence` (`docs/CONTRACT_FEDERATION.md` §12). `refs` accepts GlobalIds or EvidenceRef texts (`<repo>@<sha>:<path>:<line>`).",
+  "description": "Input for `resolve_evidence`.`refs` accepts GlobalIds or EvidenceRef texts (`<repo>@<sha>:<path>:<line>`).",
   "type": "object",
   "additionalProperties": false,
   "properties": {

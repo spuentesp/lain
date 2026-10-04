@@ -1,4 +1,4 @@
-//! `used_by` walk (`docs/CONTRACT_FEDERATION.md` §10.9).
+//! `used_by` walk (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.9).
 
 use crate::federation::contracts::model::EntryKind;
 use crate::graph::GraphDatabase;

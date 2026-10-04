@@ -1,4 +1,4 @@
-//! Snapshot tools (`docs/CONTRACT_FEDERATION.md` §12 + §13).
+//! Snapshot tools (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §12 + §13).
 //!
 //! `prepare_snapshot` and `get_snapshot` are the two MCP tools the
 //! `contracts` package ships for revision-pinning. Both read from

@@ -29,7 +29,7 @@ pub fn success_envelope(
 }
 
 /// Build an error envelope (`§10.2`). `code` is a stable wire
-/// identifier (see `docs/CONTRACT_FEDERATION.md` §13 for the
+/// identifier (see `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §13 for the
 /// canonical list); `details` is omitted when `None`.
 pub fn error_envelope(
     code: &str,

@@ -391,7 +391,7 @@ the federation derives a per-federation `ContractIndex` (PR 7) and
 exposes the 13 `contracts`-package tools (PR 13). See
 [`docs/REPOS_YAML.md`](REPOS_YAML.md) for the config schema; the
 design lives in
-[`docs/CONTRACT_FEDERATION.md`](CONTRACT_FEDERATION.md).
+[`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`](superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md).
 
 ### Services and monorepos
 

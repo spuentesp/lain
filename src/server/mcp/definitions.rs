@@ -160,7 +160,7 @@ pub const WORKSPACE_TOOL_DEFS: &[ToolDef] = &[
     ),
 ];
 
-/// Contract-federation service-view tools (PR 16, `docs/CONTRACT_FEDERATION.md`
+/// Contract-federation service-view tools (PR 16, `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`
 /// §10.1 / §12). Dispatched via the `ContractToolEntry` inventory
 /// (`mcp/contract_tools/mod.rs`) and advertised only when (a) the
 /// server was constructed with a `FederatedIndex` and (b) the

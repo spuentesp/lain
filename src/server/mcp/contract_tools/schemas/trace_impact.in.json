@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "trace_impact input",
-  "description": "Input for `trace_impact` (`docs/CONTRACT_FEDERATION.md` §12). Exactly one of endpoint/field/symbol is required.",
+  "description": "Input for `trace_impact`. Exactly one of endpoint/field/symbol is required.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

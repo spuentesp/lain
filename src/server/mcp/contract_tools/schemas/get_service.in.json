@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "get_service input",
-  "description": "Input for `get_service` (`docs/CONTRACT_FEDERATION.md` §12). Live only — PR 11/13 surfaces named snapshots.",
+  "description": "Input for `get_service`. Live only — PR 11/13 surfaces named snapshots.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

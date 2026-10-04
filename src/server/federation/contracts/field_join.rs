@@ -1,4 +1,4 @@
-//! Field join — `docs/CONTRACT_FEDERATION.md` §7.5.
+//! Field join — `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §7.5.
 //!
 //! PR 9 fills the joiner step that PR 7 left as a documented no-op
 //! (`// §7.5 field join lands with PR 9` in `joiner.rs:163`). For each

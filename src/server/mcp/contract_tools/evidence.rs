@@ -1,5 +1,5 @@
 //! Evidence tools: `resolve_evidence`, `read_source`
-//! (`docs/CONTRACT_FEDERATION.md` §10.7, §12, §13).
+//! (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.7, §12, §13).
 //!
 //! ## Safety (full §10.7)
 //!

@@ -1,8 +1,9 @@
 # Contract federation — coverage ledger, wrapper resolution, env aliases, SQL tables, gRPC + GraphQL (2026-10-02)
 
-Status: DRAFT design. No code yet. Branch: `feat/contract-coverage-and-protocols`
-(child of `feat/contract-federation` / PR #270; parent recorded in
-`git config branch.<name>.parent`; merge the parent in at the start of every phase).
+Status: implemented. Branch: `feat/contract-coverage-and-protocols` →
+PR #272 → squash `24010be5` on `dev`. The `Status: DRAFT` line above
+this one is the original spec's pre-merge marker; it was stale at
+merge time and is replaced by the implementation note below.
 
 ## 1. Intent
 

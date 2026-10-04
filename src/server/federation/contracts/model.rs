@@ -3,7 +3,7 @@
 //! `ContractFact` and its payload types are the per-repo, sensor-written
 //! facts that hang off a `GraphNode.contract` once a sensor has classified
 //! it (HTTP route, HTTP client call, schema, field, field read, …). The
-//! shape is fixed by `docs/CONTRACT_FEDERATION.md` §4.3 so every later
+//! shape is fixed by `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §4.3 so every later
 //! task — sensors, joiner, tools — speaks the same wire form.
 //!
 //! The companion types `ContractKey`, `JsonPath`, `ServiceName`, and the

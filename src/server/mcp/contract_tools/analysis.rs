@@ -1,5 +1,5 @@
 //! Analysis tools: `diff_contracts`, `trace_impact`, `get_coverage`
-//! (`docs/CONTRACT_FEDERATION.md` §10.1, §12, §13).
+//! (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.1, §12, §13).
 //!
 //! Read-only views over the federation's `ContractIndex` (live) or
 //! a named snapshot's `ContractIndex` (`from_snapshot`).

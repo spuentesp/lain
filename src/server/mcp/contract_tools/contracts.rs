@@ -1,5 +1,5 @@
 //! Contract tools: `list_contracts`, `get_contract`, `list_unresolved`,
-//! `check_binding` (`docs/CONTRACT_FEDERATION.md` §12 + §13).
+//! `check_binding` (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §12 + §13).
 //!
 //! Read-only views over the federation's `ContractIndex` (live) or
 //! a named snapshot's `ContractIndex` (`from_snapshot` projection).
