@@ -26,12 +26,33 @@ pub enum NodeType {
     Topic,     // Message queue topic (Kafka, RabbitMQ)
     Resource,  // IaC resource (Terraform, k8s)
     Schema,    // Data schema (OpenAPI, Protobuf, JSON Schema)
+    // Contract-federation nodes (§4.2). Each carries a `GraphNode.contract`
+    // payload whose variant matches the node's role.
+    //
+    // `HttpClientCall` is one outbound HTTP call site emitted by
+    // `http_client_sensor`. `Field` is one flattened field of an
+    // OpenAPI `Schema`, emitted by `openapi_sensor`. `FieldRef` is one
+    // field read from a call's response, emitted by
+    // `field_access_sensor`. The sensors land in later PRs; the
+    // variants ship here so the federated graph, the joiner, and the
+    // `Binds` edge type can refer to them by name today.
+    HttpClientCall,
+    Field,
+    FieldRef,
     // Synthetic node produced by a heuristic detector. The naming
     // convention is `Hub:<detector>` (e.g. `Hub:message_bus_publisher`)
     // and the node carries no source location — it stands in for every
     // receiver the static graph cannot resolve. Tag any query that
     // pulls these in with a confidence filter, or skip them entirely.
     Synthetic,
+    // Phase D (spec §7): a database table surfaced by the
+    // `sql_sensor`. Identified by `(service, name)` carried on the
+    // `Table` contract payload; the joiner fills `service` from
+    // `repos.yaml` the same way it binds `HttpClientCall` to a
+    // service. The variant folds into v3 — `FEDERATION_GRAPH_VERSION`
+    // stays at 3 — so existing graphs continue to load (per spec §2
+    // "v3 is unreleased: new node/edge types fold into v3").
+    Table,
 }
 
 impl NodeType {
@@ -63,7 +84,11 @@ impl NodeType {
             NodeType::Topic,
             NodeType::Resource,
             NodeType::Schema,
+            NodeType::HttpClientCall,
+            NodeType::Field,
+            NodeType::FieldRef,
             NodeType::Synthetic,
+            NodeType::Table,
         ]
     }
 
@@ -115,7 +140,29 @@ impl NodeType {
             // schema node. Writing an indexer is the prerequisite for
             // advertising these, not wiring one up.
             => true,
+            // Contract-federation node types (PR 3 schema v3).
+            // `HttpClientCall`, `Field`, and `FieldRef` are reserved
+            // here so the federated graph, the joiner and the `Binds`
+            // edge can refer to them by name today; the sensors that
+            // emit them land in later PRs (`http_client_sensor`,
+            // `openapi_sensor`, `field_access_sensor`). They will be
+            // flipped to `true` as their producers get wired into
+            // `sensors::run_all`; for now `describe_schema` reports
+            // them as known-but-unindexed so an agent following the
+            // schema can tell "lain knows about HTTP client calls"
+            // from "lain has no notion of HTTP client calls".
+            NodeType::HttpClientCall | NodeType::Field | NodeType::FieldRef => false,
             NodeType::Topic | NodeType::Resource | NodeType::Schema => false,
+            // Phase D (spec §7): `sql_sensor` emits `Table` nodes for
+            // every literal SQL statement it can parse. The sensor
+            // ships in this phase and is wired into `sensors::run_all`,
+            // so `Table` is real indexed data on every supported
+            // language. Until an operator reindexes with the new
+            // build, an existing graph has zero `Table` nodes — the
+            // "no KnownImpact sound with respect to what was
+            // analyzed" predicate is unaffected because `Table` is a
+            // producer, not a coverage gap.
+            NodeType::Table => true,
         }
     }
 
@@ -145,12 +192,35 @@ impl NodeType {
             NodeType::Topic => "A message queue topic (Kafka, RabbitMQ)",
             NodeType::Resource => "An IaC resource (Terraform, k8s)",
             NodeType::Schema => "A data schema (OpenAPI, Protobuf, JSON Schema)",
+            NodeType::HttpClientCall => {
+                "One outbound HTTP call site (fetch / requests.get / axios.get / \
+                 httpx, including wrapper candidates). Carries the call's \
+                 `ConsumerFact` on `GraphNode.contract`. The matching sensor \
+                 (`http_client_sensor`) lands in a later PR."
+            }
+            NodeType::Field => {
+                "One flattened field of an OpenAPI schema, addressed by JSON path. \
+                 Carries `FieldMeta` on `GraphNode.contract`. Emitted by \
+                 `openapi_sensor`."
+            }
+            NodeType::FieldRef => {
+                "One field read from a call's response (e.g. `r.json()` → \
+                 `r['customer']['id']`). Carries `FieldReadFact` on \
+                 `GraphNode.contract`. Emitted by `field_access_sensor`."
+            }
             NodeType::Synthetic => {
                 "A synthetic node produced by a heuristic detector (e.g. \
                  Hub:message_bus_publisher). Carries no source location and \
                  stands in for a receiver the static graph cannot resolve. \
                  Filter to confidence-bearing edges only — see \
                  `EdgeProvenance::Heuristic`."
+            }
+            NodeType::Table => {
+                "A database table surfaced by `sql_sensor` from a literal \
+                 SQL statement. Identified by `(service, name)` on the \
+                 `Table` contract payload; the joiner fills `service` from \
+                 `repos.yaml`. Reach handler → function → table through \
+                 `ReadsTable` / `WritesTable` edges."
             }
         }
     }
@@ -210,6 +280,36 @@ pub enum EdgeType {
     // when a span produced by the running application maps to two
     // graph nodes. Carries a TTL via `EdgeProvenance::Runtime.last_seen_unix`.
     RuntimeCall,
+    // Contract-federation edges (§4.2). All but `Binds` are emitted by
+    // the per-repo sensors and live on the per-repo graph; `Binds` is
+    // the federation-only join (§5.3) connecting a consumer to its
+    // matched provider.
+    //
+    // `SendsHttp`: enclosing function/method → `HttpClientCall`.
+    // `RequestSchema` / `ResponseSchema`: `HttpRoute` → `Schema` for the
+    // request body or the union of 2xx responses. `PayloadSchema`:
+    // `Topic` → `Schema` (stretch, §6.7).
+    // `HasField`: `Schema` → flattened `Field`.
+    // `ReadsField`: reading function/method → `FieldRef` (carries `site`).
+    // `ReadsFrom`: `FieldRef` → the `HttpClientCall` whose response it
+    // reads (impact propagation stops here, §4.2).
+    // `Binds`: consumer → provider — federation-only join, written by
+    // the joiner. Sources for the impact-traversal table in §5.2.
+    SendsHttp,
+    RequestSchema,
+    ResponseSchema,
+    PayloadSchema,
+    HasField,
+    ReadsField,
+    ReadsFrom,
+    Binds,
+    // Phase D (spec §7): edges from a function / method / file to a
+    // `Table` node, emitted by `sql_sensor`. `ReadsTable` covers
+    // SELECT (including CTE bodies, subselects, and joins);
+    // `WritesTable` covers INSERT / UPDATE / DELETE / MERGE. Folded
+    // into v3 — `FEDERATION_GRAPH_VERSION` stays at 3.
+    ReadsTable,
+    WritesTable,
 }
 
 impl EdgeType {
@@ -241,6 +341,16 @@ impl EdgeType {
             EdgeType::BusTopic,
             EdgeType::RouteMatches,
             EdgeType::RuntimeCall,
+            EdgeType::SendsHttp,
+            EdgeType::RequestSchema,
+            EdgeType::ResponseSchema,
+            EdgeType::PayloadSchema,
+            EdgeType::HasField,
+            EdgeType::ReadsField,
+            EdgeType::ReadsFrom,
+            EdgeType::Binds,
+            EdgeType::ReadsTable,
+            EdgeType::WritesTable,
         ]
     }
 
@@ -269,6 +379,45 @@ impl EdgeType {
             // Indexed so consumers can build queries even before any
             // spans have arrived; they just see an empty result.
             | EdgeType::RuntimeCall => true,
+            // Contract-federation edge types (PR 3 schema v3).
+            // Reserved here so the joiner and impact-traversal table
+            // (§5.2) can refer to them by name today; the per-repo
+            // sensors and the federation joiner that emit them land
+            // in later PRs (`http_client_sensor`, `openapi_sensor`,
+            // `field_access_sensor`, `ContractJoiner`). Each is
+            // flipped to `true` when its producer gets wired in —
+            // for now `describe_schema` reports them as
+            // known-but-unindexed so an agent following the schema
+            // can tell "lain knows about HTTP bindings" from
+            // "lain has no notion of HTTP bindings".
+            //
+            // `Binds` is the federation-only join (§5.3); it
+            // materializes once `ContractJoiner::run` is wired into
+            // `FederatedIndex::rejoin_contracts_if_dirty`.
+            //
+            // `ReadsField` / `ReadsFrom` are produced by the wired
+            // field-access sensor (§6.5, PR 9) but deliberately stay
+            // `false` here: flipping them expands `describe_schema`'s
+            // advertised edge set and is deferred to PR 13, which
+            // owns the `indexed_flags_match_reality` test that flips
+            // them with confidence. The other types still ship here
+            // as known-but-unindexed.
+            EdgeType::SendsHttp
+            | EdgeType::RequestSchema
+            | EdgeType::ResponseSchema
+            | EdgeType::PayloadSchema
+            | EdgeType::HasField => false,
+            // `ReadsField` / `ReadsFrom` are produced by the wired
+            // `field_access_sensor` (§6.5); `Binds` is the joiner's
+            // cross-service edge (§5.3). All three are real
+            // indexed data on every contract-tool surface (`§10.1`).
+            EdgeType::ReadsField | EdgeType::ReadsFrom | EdgeType::Binds => true,
+            // Phase D (spec §7): `sql_sensor` emits `ReadsTable` and
+            // `WritesTable` from a function / method / file to the
+            // `Table` nodes it just minted. The sensor is wired in
+            // this phase so both edges are real indexed data on
+            // every supported language.
+            EdgeType::ReadsTable | EdgeType::WritesTable => true,
             // No producer anywhere in the codebase. `Imports` in
             // particular reads like a core relationship and has never
             // been emitted by any indexer.
@@ -312,6 +461,52 @@ impl EdgeType {
             EdgeType::RuntimeCall => {
                 "Runtime edge: caller-callee relationship observed in an OpenTelemetry span"
             }
+            EdgeType::SendsHttp => {
+                "Enclosing function/method → HttpClientCall. Carries the call's \
+                 SourceSite on `GraphEdge.site` so `find_call_sites` can answer \
+                 without a separate map. Emitted by `http_client_sensor`."
+            }
+            EdgeType::RequestSchema => {
+                "HttpRoute → Schema. The request body (OpenAPI `requestBody`, \
+                 `application/json` / `*/*+json`). Emitted by `openapi_sensor`."
+            }
+            EdgeType::ResponseSchema => {
+                "HttpRoute → Schema. The union of 2xx response JSON bodies. \
+                 Emitted by `openapi_sensor`."
+            }
+            EdgeType::PayloadSchema => {
+                "Topic → Schema. Topic payload schema (stretch, §6.7). Emitted \
+                 by `event_sensor` once Kafka is wired up."
+            }
+            EdgeType::HasField => {
+                "Schema → Field. One flattened field of a schema, addressed by \
+                 JSON path. Emitted by `openapi_sensor`."
+            }
+            EdgeType::ReadsField => {
+                "Reading function/method → FieldRef. Carries the read site on \
+                 `GraphEdge.site`. Emitted by `field_access_sensor`."
+            }
+            EdgeType::ReadsFrom => {
+                "FieldRef → the HttpClientCall whose response it reads. Impact \
+                 propagation stops here — the field read doesn't carry further \
+                 dependents (§4.2)."
+            }
+            EdgeType::Binds => {
+                "Federation-only join: consumer → provider. Written by \
+                 `ContractJoiner::run` (§5.3). Confirmed bindings carry \
+                 `EdgeProvenance::Confirmed` with the `repos.yaml#bindings[<i>]` \
+                 reference."
+            }
+            EdgeType::ReadsTable => {
+                "Enclosing function/method/file → Table. Emitted by \
+                 `sql_sensor` for SELECT (including CTE bodies, \
+                 subselects, and joins). Spec §7."
+            }
+            EdgeType::WritesTable => {
+                "Enclosing function/method/file → Table. Emitted by \
+                 `sql_sensor` for INSERT / UPDATE / DELETE / MERGE. \
+                 Spec §7."
+            }
         }
     }
 
@@ -341,6 +536,46 @@ impl EdgeType {
             // Runtime edges always come from a function/method symbol
             // because that's what spans describe.
             EdgeType::RuntimeCall => &[NodeType::Function, NodeType::Method],
+            // Contract-federation edges (§4.2).
+            //
+            // `SendsHttp` originates from the enclosing function or
+            // method, or the file when the call is at module scope
+            // (mirrors the `DynamicDispatch` / `BusTopic` rule).
+            EdgeType::SendsHttp => &[
+                NodeType::Function,
+                NodeType::Method,
+                NodeType::File,
+                NodeType::Module,
+            ],
+            // Schema / field / payload edges all originate from a
+            // schema-bearing node.
+            EdgeType::RequestSchema | EdgeType::ResponseSchema => &[NodeType::HttpRoute],
+            EdgeType::PayloadSchema => &[NodeType::Topic],
+            EdgeType::HasField => &[NodeType::Schema],
+            EdgeType::ReadsField => &[NodeType::Function, NodeType::Method],
+            // `ReadsFrom` runs from the `FieldRef` back to the
+            // `HttpClientCall` whose response the field came from.
+            EdgeType::ReadsFrom => &[NodeType::FieldRef],
+            // `Binds` is federation-only: consumer (HttpClientCall /
+            // FieldRef / Topic) → provider (HttpRoute / Field / Topic).
+            // Source types are the three consumer shapes a joiner can
+            // produce.
+            EdgeType::Binds => &[
+                NodeType::HttpClientCall,
+                NodeType::FieldRef,
+                NodeType::Topic,
+            ],
+            // Phase D (spec §7): the SQL-shaped edges mirror
+            // `SendsHttp`'s source rules — the enclosing
+            // function/method when resolvable, otherwise the file or
+            // module. Module-level SQL is rare but possible (an init
+            // script).
+            EdgeType::ReadsTable | EdgeType::WritesTable => &[
+                NodeType::Function,
+                NodeType::Method,
+                NodeType::File,
+                NodeType::Module,
+            ],
         }
     }
 
@@ -377,6 +612,21 @@ impl EdgeType {
             EdgeType::BusTopic => &[NodeType::Topic, NodeType::Function, NodeType::Method],
             EdgeType::RouteMatches => &[NodeType::Function, NodeType::Method],
             EdgeType::RuntimeCall => &[NodeType::Function, NodeType::Method],
+            // Contract-federation edges (§4.2). All targets are
+            // contract-federation node types.
+            EdgeType::SendsHttp => &[NodeType::HttpClientCall],
+            EdgeType::RequestSchema | EdgeType::ResponseSchema => &[NodeType::Schema],
+            EdgeType::PayloadSchema => &[NodeType::Schema],
+            EdgeType::HasField => &[NodeType::Field],
+            EdgeType::ReadsField => &[NodeType::FieldRef],
+            EdgeType::ReadsFrom => &[NodeType::HttpClientCall],
+            // `Binds` targets: the provider side. HttpClientCall →
+            // HttpRoute, FieldRef → Field, consumer Topic → producer
+            // Topic.
+            EdgeType::Binds => &[NodeType::HttpRoute, NodeType::Field, NodeType::Topic],
+            // Phase D (spec §7): the SQL edges always target a
+            // `Table` node (the destination of a read or a write).
+            EdgeType::ReadsTable | EdgeType::WritesTable => &[NodeType::Table],
         }
     }
 }
@@ -476,6 +726,30 @@ pub struct GraphNode {
     /// `"repo_id": null` for None.
     #[serde(default)]
     pub repo_id: Option<String>,
+    /// Contract-federation payload (`§4.2`/`§4.3`). Set by the
+    /// per-repo sensors after a node has been classified as a
+    /// contract surface (HTTP route, HTTP client call, schema,
+    /// field, field read). `None` for non-contract nodes. The
+    /// variant of the inner `ContractFact` matches the node's
+    /// `node_type`:
+    ///
+    /// - `HttpRoute` → `ContractFact::Provider`
+    /// - `HttpClientCall` → `ContractFact::Consumer`
+    /// - `Schema` → `ContractFact::Schema { direction }`
+    /// - `Field` → `ContractFact::Field`
+    /// - `FieldRef` → `ContractFact::FieldRead`
+    ///
+    /// `#[serde(default)]` so JSON readers tolerate absence for
+    /// pre-schema-v3 callers; bincode forwards it on the wire (see
+    /// the comment on `repo_id` above).
+    #[serde(default)]
+    pub contract: Option<crate::federation::contracts::model::ContractFact>,
+    /// How a function is invoked at runtime. Set by
+    /// `entry_point_sensor` on function nodes (`§6.6`). `None`
+    /// for nodes that are not entry points or whose sensor has
+    /// not yet classified them.
+    #[serde(default)]
+    pub entry: Option<crate::federation::contracts::model::EntryKind>,
 }
 
 /// Per-repository UUID namespace for `GraphNode` ids. Mints a stable
@@ -631,6 +905,8 @@ impl GraphNode {
             commit_hash: None,
             is_hydrated: true,
             repo_id: None,
+            contract: None,
+            entry: None,
         }
     }
 
@@ -711,12 +987,53 @@ pub enum EdgeProvenance {
         trace_id: String,
         last_seen_unix: i64,
     },
+    /// Person-confirmed via `repos.yaml#bindings[<i>]`. `source`
+    /// carries the canonical reference string
+    /// (`repos.yaml#bindings[<i>]`) so downstream tools can show the
+    /// operator which binding entry the edge came from. Counts as
+    /// "certain" for the `Verified` traversal (§4.6).
+    Confirmed { source: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StaticSource {
     TreeSitter,
     Lsp,
+    /// Regex-first detector (event sensor, dynamic dispatch, etc.).
+    /// The exact `&str` regex isn't recorded; only that the edge came
+    /// from a static regex pass.
+    Regex,
+}
+
+/// Per-edge join metadata. Carried on `GraphEdge.detail` for `Binds`
+/// edges so the joiner and the impact-traversal pass can tell an
+/// exact method+template match from a prefix-stripped match. The
+/// fields are `Option` because not every edge has detail: a non-`Binds`
+/// edge with no detail round-trips as `None`, the same shape a
+/// pre-schema-v3 graph had.
+///
+/// Externally tagged enums (bincode constraint).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct EdgeDetail {
+    /// How the joiner matched this binding.
+    pub route_match: Option<RouteMatch>,
+    /// For `RouteMatch::PrefixStripped`, the prefix that was stripped
+    /// from the provider's template before matching (e.g.
+    /// `/api/v1`). The joiner carries it so the tools can show the
+    /// original provider template alongside the matched consumer
+    /// template.
+    pub stripped_prefix: Option<String>,
+}
+
+/// How a `Binds` edge's join matched. `Exact` is method + template
+/// identical after normalization; `Pattern` is a wildcard or
+/// `{var}` match; `PrefixStripped` is a match after stripping the
+/// service's `base_path` from the provider template.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RouteMatch {
+    Exact,
+    Pattern,
+    PrefixStripped,
 }
 
 /// An edge in the knowledge graph
@@ -735,6 +1052,25 @@ pub struct GraphEdge {
     /// as `Some(Static { source: TreeSitter })`.
     #[serde(default)]
     pub provenance: Option<EdgeProvenance>,
+    /// Where in a source file this edge originated. Carried on
+    /// `SendsHttp`, `ReadsField`, and similar per-call-site edges
+    /// (`§4.2`) so `find_call_sites` can answer without a separate
+    /// map. `None` when the edge has no meaningful single site
+    /// (cross-cutting container edges, structural edges).
+    ///
+    /// `#[serde(default)]` so bincode files written before the
+    /// schema-v3 bump decode cleanly once the version gate accepts
+    /// them — but they will not, because the bump rejects them on
+    /// load. See `FEDERATION_GRAPH_VERSION` in
+    /// `federation/graph_backend.rs`.
+    #[serde(default)]
+    pub site: Option<crate::federation::contracts::model::SourceSite>,
+    /// Per-edge join metadata. Carried on `Binds` edges
+    /// (`§4.3`) so the joiner and the impact-traversal pass can
+    /// distinguish an exact match from a prefix-stripped one.
+    /// `None` when the edge has no join detail.
+    #[serde(default)]
+    pub detail: Option<EdgeDetail>,
 }
 
 impl GraphEdge {
@@ -746,6 +1082,8 @@ impl GraphEdge {
             weight: None,
             cross_repo: false,
             provenance: None,
+            site: None,
+            detail: None,
         }
     }
 
@@ -768,6 +1106,8 @@ impl GraphEdge {
                 detector: detector.into(),
                 confidence,
             }),
+            site: None,
+            detail: None,
         }
     }
 }

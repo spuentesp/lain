@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "read_source data",
+  "description": "`data` field of the `read_source` envelope (§10.2). `end` is clamped to file length; start past end yields empty `text`.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "commit": { "type": "string" },
+    "path": { "type": "string" },
+    "start": { "type": "integer" },
+    "end": { "type": "integer" },
+    "total_lines": { "type": "integer" },
+    "text": { "type": "string" },
+    "source": { "type": "string", "enum": ["live", "snapshot"] }
+  },
+  "required": ["commit", "path", "start", "end", "total_lines", "text"]
+}

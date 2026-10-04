@@ -224,6 +224,9 @@ static DETECTORS: Lazy<Vec<CompiledDetector>> = Lazy::new(|| {
         .collect()
 });
 
+/// Extensions the dynamic-dispatch detectors understand.
+const DISPATCH_EXTS: &[&str] = &["rs", "py", "ts", "js", "tsx", "jsx", "go", "java"];
+
 /// Walks the workspace, runs each detector over each source file, and
 /// inserts the resulting heuristic edges into `graph`. Returns the
 /// number of edges created.
@@ -242,18 +245,10 @@ pub fn scan_workspace_dispatch(
     let mut seen_hubs: HashSet<String> = HashSet::new();
     let mut ensured_files: HashSet<String> = HashSet::new();
 
-    for entry in crate::server::sensors::util::walk_workspace(root) {
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !["rs", "py", "ts", "js", "tsx", "jsx", "go", "java"].contains(&ext) {
-            continue;
-        }
-
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-
-        let rel_path = graph_path(root, path);
+    for (path, content, _) in crate::server::sensors::util::scan_files(root, |p| {
+        crate::server::sensors::util::ext_in(p, DISPATCH_EXTS)
+    }) {
+        let rel_path = graph_path(root, &path);
         // The scanner's own File node for this path — same name, same id.
         // A nameless one (the old id) was a second File node for every file
         // this walked, whether or not a detector fired.
@@ -302,6 +297,8 @@ pub fn scan_workspace_dispatch(
                     detector: det.detector.to_string(),
                     confidence: det.confidence,
                 }),
+                site: None,
+                detail: None,
             });
         }
     }
@@ -321,24 +318,12 @@ pub fn scan_workspace_dispatch(
 /// `inventory::submit!(SensorEntry(&DynamicDispatchSensor))` below.
 pub struct DynamicDispatchSensor;
 
-impl crate::server::sensors::Sensor for DynamicDispatchSensor {
-    fn name(&self) -> &'static str {
-        "dynamic_dispatch"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        crate::server::sensors::SensorCountField::DynamicDispatch
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &std::path::Path,
-        namespace: &RepoNamespace,
-    ) -> Result<usize, LainError> {
-        scan_workspace_dispatch(graph, root, namespace)
-    }
-}
-
-inventory::submit!(crate::server::sensors::SensorEntry(&DynamicDispatchSensor));
+crate::server::sensors::register_sensor!(
+    DynamicDispatchSensor,
+    "dynamic_dispatch",
+    DynamicDispatch,
+    scan_workspace_dispatch
+);
 
 #[cfg(test)]
 mod tests {

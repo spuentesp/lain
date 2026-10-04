@@ -123,6 +123,12 @@ impl From<serde_yaml::Error> for LainError {
     }
 }
 
+impl From<crate::server::sensors::patterns::PatternsError> for LainError {
+    fn from(err: crate::server::sensors::patterns::PatternsError) -> Self {
+        LainError::Serialization(format!("patterns override: {err}"))
+    }
+}
+
 impl From<toml::de::Error> for LainError {
     fn from(err: toml::de::Error) -> Self {
         LainError::Config(format!("toml decode: {err}"))

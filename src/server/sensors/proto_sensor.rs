@@ -174,21 +174,4 @@ pub fn scan_workspace(
 /// registry to edit.
 pub struct ProtoSensor;
 
-impl crate::server::sensors::Sensor for ProtoSensor {
-    fn name(&self) -> &'static str {
-        "proto"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        crate::server::sensors::SensorCountField::Proto
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &std::path::Path,
-        namespace: &crate::schema::RepoNamespace,
-    ) -> Result<usize, LainError> {
-        scan_workspace(graph, root, namespace)
-    }
-}
-
-inventory::submit!(crate::server::sensors::SensorEntry(&ProtoSensor));
+crate::server::sensors::register_sensor!(ProtoSensor, "proto", Proto, scan_workspace);

@@ -245,6 +245,32 @@ pub async fn run_rebuild(
                 .map_err(|e| LainError::Config(format!("remove_repo({}): {e}", id)))?;
         }
 
+        // PR-7 (§5.3): every hot-reload add/remove marks the
+        // federation contract-dirty. Run the joiner once before
+        // returning so the reload lands a complete state. We
+        // also reload the contract config from the just-read
+        // file; a parse error keeps the previous config in place
+        // (the §7.1 hot-reload semantics, mirroring the existing
+        // `FederationConfig::load`).
+        if let Some(fed) = server.federation() {
+            if let Ok(text) = std::fs::read_to_string(&repos_yaml) {
+                if let Ok(cfg) =
+                    crate::federation::contracts::config::ContractFederationConfig::load_from_str(
+                        &text,
+                    )
+                {
+                    let repo_ids: Vec<String> =
+                        repos_file.repos.iter().map(|r| r.id.clone()).collect();
+                    if cfg.validate(&repo_ids).is_ok() {
+                        fed.set_contract_config(cfg);
+                    }
+                }
+            }
+            if let Err(e) = fed.rejoin_contracts_if_dirty() {
+                tracing::warn!("reload: rejoin_contracts_if_dirty failed: {e}");
+            }
+        }
+
         // Update the workspaces slot. The MCP server rebuild path
         // (cli/server.rs) consumes this through `server.workspaces_snapshot()`
         // before tearing down the old LainMcpServer.
@@ -482,6 +508,8 @@ mod tests {
                             path: path.to_path_buf(),
                         },
                     }],
+                    contract:
+                        crate::federation::contracts::config::ContractFederationConfig::default(),
                 };
                 let source = cfg
                     .build_source_for(&cfg.repos[0])

@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "check_binding input",
+  "description": "Input for `check_binding` (`docs/CONTRACT_FEDERATION.md` §12). Validates a proposed consumer→endpoint link and emits its `bindings_entry` YAML for `repos.yaml`.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": { "type": "string" },
+    "consumer": {
+      "type": "string",
+      "description": "Consumer GlobalId."
+    },
+    "endpoint": {
+      "type": "object",
+      "properties": {
+        "service": { "type": "string" },
+        "key": { "type": "string" }
+      },
+      "required": ["service", "key"]
+    }
+  },
+  "required": ["snapshot", "consumer", "endpoint"]
+}

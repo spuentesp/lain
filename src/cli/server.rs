@@ -498,6 +498,14 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
                 }
             }
         }
+        // PR-7 (§5.3): the loop above re-projected one or more
+        // repos, each of which marks the federation contract-dirty
+        // via `project_edges`. Run the joiner once at the end of
+        // the tick so any reader that lands next sees the new
+        // state. Non-fatal — the next tick will retry.
+        if let Err(e) = fed.rejoin_contracts_if_dirty() {
+            tracing::warn!("lain server: rejoin_contracts_if_dirty failed: {e}");
+        }
     }
 }
 

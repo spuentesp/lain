@@ -1277,7 +1277,19 @@ fn symbol_weight(kind: &NodeType) -> u32 {
         | NodeType::HttpRoute
         | NodeType::Topic
         | NodeType::Resource
-        | NodeType::Synthetic => 1,
+        | NodeType::Synthetic
+        // Contract-federation nodes (schema v3). Each is a leaf from a
+        // symbol-overlap perspective: a single HTTP call, schema field,
+        // or field read is rarely co-edited by two agents at once, so
+        // weight 1 is the same bucket as the cross-runtime markers.
+        | NodeType::HttpClientCall
+        | NodeType::Field
+        | NodeType::FieldRef
+        // Phase D (spec §7): a `Table` is a leaf from a
+        // symbol-overlap perspective too — a single table reference
+        // is rarely co-edited by two agents, so weight 1 is the
+        // same bucket as the other contract-federation leaves.
+        | NodeType::Table => 1,
     }
 }
 

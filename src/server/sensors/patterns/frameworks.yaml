@@ -1,0 +1,218 @@
+# Bundled Camp-A pattern registry for `src/server/sensors/`.
+#
+# Each entry is one framework the contract-federation sensors know
+# about. The walker in `http_sensor.rs` (regex-based) and
+# `http_client_sensor.rs` (tree-sitter-based) consume the per-lang
+# entries via `Patterns::route_patterns(lang)` /
+# `Patterns::outbound_patterns(lang)` /
+# `Patterns::deny_methods_for(lang, lib)`.
+#
+# Adding a new framework is a data change: append one entry here and
+# (for tree-sitter shapes) a matching `<lang>/<framework>.scm` file.
+# Tasks 2-4 wire the consumers to read this data instead of the
+# hardcoded tables in the sensors' source.
+#
+# Source-of-truth mappings (today's code, future-proofed as data):
+#   - Route regex strings: `http_sensor.rs::get_route_patterns`
+#     (lines 182-366).
+#   - Outbound `lib_match` regexes + `deny_methods`: per-language
+#     `detect_<lang>_call` in `http_client_sensor.rs`.
+#
+# BTreeMap iteration order follows YAML load order. Override files in
+# `<repo>/.lain/patterns/*.yaml` REPLACE entries with matching `id`.
+
+languages:
+
+  # ── Python ───────────────────────────────────────────────────────
+  python:
+    - id: fastapi-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '@[\w\.]+\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: '(?:async\s+)?def\s+(\w+)\s*\('
+    - id: flask-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '@[\w\.]+\.route\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: 'def\s+(\w+)\s*\('
+    - id: requests-outbound
+      kind: outbound
+      lib_match: '^requests$'
+      deny_methods: [json, text, data, body, content, encoding, raise_for_status, status_code, headers, url, ok, elapsed, is_redirect]
+    - id: httpx-outbound
+      kind: outbound
+      lib_match: '^httpx$'
+      deny_methods: [json, text, data, body, content, encoding, raise_for_status, status_code, headers, url, ok, elapsed, is_redirect]
+    - id: aiohttp-outbound
+      kind: outbound
+      lib_match: '^aiohttp$'
+    # Task 8 (data-driven sensor-patterns proof): Django's
+    # `path("foo/", handler)` / `re_path(r"^bar/$", handler)`
+    # constructor — a non-decorator route shape that's
+    # tree-sitter distinct from `fastapi-route` / `flask-route`
+    # (matches a `path` or `re_path` identifier function with a
+    # string literal + positional handler identifier). Pure data
+    # change: this YAML entry + the matching
+    # `python/django-route.scm`. No production code in
+    # `src/server/sensors/*.rs` is touched.
+    - id: django-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '\b(?:path|re_path)\s*\(\s*r?["'']([^"'']+)["'']'
+      handler_regex: '\b(?:path|re_path)\s*\(\s*r?["''][^"'']+["'']\s*,\s*(\w+)'
+
+  # ── TypeScript / JavaScript ─────────────────────────────────────
+  tsjs:
+    - id: express-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`]([^"''`]+)["''`]'
+      handler_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`][^"''`]+["''`]\s*,\s*(?:async\s*)?(\w+)'
+    - id: fastify-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`]([^"''`]+)["''`]'
+      handler_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`][^"''`]+["''`]\s*,\s*(?:async\s*)?(\w+)'
+    - id: fetch-outbound
+      kind: outbound
+      lib_match: '^(fetch|globalThis\.fetch)$'
+      deny_methods: [json, text, blob, arrayBuffer, formData, status, redirected, headers, ok, url]
+    - id: axios-outbound
+      kind: outbound
+      lib_match: '^axios$'
+      deny_methods: [json, text, data, body, status, statusText, headers, config]
+    - id: got-outbound
+      kind: outbound
+      lib_match: '^(got|ky)$'
+
+  # ── Rust ─────────────────────────────────────────────────────────
+  rust:
+    - id: axum-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '\.route\s*\(\s*"([^"]+)"'
+      handler_regex: '(?i:(?:get|post|put|delete|patch|head|options))\s*\(\s*(\w+)\s*[,)]'
+    - id: actix-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '#\[(?i:(?:get|post|put|delete|patch|head|options))\s*\(\s*(?:path\s*=\s*)?"([^"]+)"'
+      handler_regex: '(?:async\s+)?fn\s+(\w+)\s*[(<]'
+    - id: reqwest-outbound
+      kind: outbound
+      lib_match: '^(reqwest|.*reqwest::Client.*|ureq.*)$'
+      deny_methods: [json, text, bytes, status, headers, url, error_for_status]
+    - id: ureq-outbound
+      kind: outbound
+      lib_match: '^ureq$'
+      deny_methods: [json, text, bytes, status, headers, url, error_for_status]
+    - id: awc-outbound
+      kind: outbound
+      lib_match: '^awc$'
+
+  # ── Go ───────────────────────────────────────────────────────────
+  go:
+    - id: stdlib-http-route
+      kind: route
+      verbs: [any]
+      path_regex: 'HandleFunc\s*\(\s*"([^"]+)"'
+      handler_regex: 'HandleFunc\s*\(\s*"[^"]+"\s*,\s*(\w+)'
+    - id: gin-route
+      kind: route
+      verbs: [GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD]
+      path_regex: '\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"([^"]+)"'
+      handler_regex: '\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"[^"]+"\s*,\s*(\w+)'
+    - id: stdlib-http-outbound
+      kind: outbound
+      lib_match: '^http$'
+      deny_methods: [decode, Decode, Close, Body, StatusCode, Status, Header, Proto, Request, TLS, Trailer, ContentLength]
+
+  # ── Java ─────────────────────────────────────────────────────────
+  java:
+    - id: spring-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      annotation: '(GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\b'
+      path_regex: '@(?i:(?:GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping))\s*\(\s*(?:value\s*=\s*|path\s*=\s*)?["'']([^"'']+)["'']'
+      handler_regex: 'public\s+[\w<>,\s]+\s+(\w+)\s*\('
+    - id: jaxrs-route
+      kind: route
+      verbs: [GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS]
+      annotation: '@(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'
+      path_regex: '@Path\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: 'public\s+[\w<>,\s]+\s+(\w+)\s*\('
+    - id: okhttp-outbound
+      kind: outbound
+      display_name: okhttp
+      lib_match: '^(OkHttpClient|.*OkHttpClient.*|okhttp3\..*)$'
+      deny_methods: [getStatusCode, statusCode, getHeaders, headers, firstValue, getMessage, message, body, code]
+    - id: httpclient-outbound
+      kind: outbound
+      display_name: httpclient
+      lib_match: '^HttpClient$'
+      deny_methods: [getStatusCode, statusCode, getHeaders, headers, firstValue, getMessage, message, body, code]
+
+  # ── C# ───────────────────────────────────────────────────────────
+  csharp:
+    - id: aspnet-route
+      kind: route
+      verbs: [get, post, put, delete, head, options, patch]
+      annotation: '\[(HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch|HttpHead|HttpOptions|HttpRequest)\]'
+      path_regex: '\[(?i:(?:HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch|HttpHead|HttpOptions))\s*(?:\(\s*["'']([^"'']+)["'']\s*\))?'
+      handler_regex: '(?:public|private|internal|async|protected)\s+[\w<>,\s\[\]?]+\s+(\w+)\s*\('
+    - id: minimal-api-route
+      kind: route
+      verbs: [get, post, put, delete, patch]
+      annotation: 'MapGet|MapPost|MapPut|MapDelete|MapPatch'
+      path_regex: '\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: '\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*["''][^"'']+["'']\s*,\s*(?:async\s*)?\([^)]*\)\s*=>'
+    - id: httpclient-outbound
+      kind: outbound
+      display_name: httpclient
+      lib_match: '^(HttpClient|.*HttpClient.*|WebClient.*)$'
+      deny_methods: [IsSuccessStatusCode, StatusCode, Headers, GetValues, DownloadString, DownloadStringTaskAsync]
+
+  # ── Ruby ─────────────────────────────────────────────────────────
+  ruby:
+    - id: sinatra-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '(?m)^[ \t]*(?:get|post|put|delete|patch|options|head)\s+["'']([^"'']+)["'']'
+      handler_regex: 'do\s*$'
+    - id: rails-route
+      kind: route
+      verbs: [get, post, put, patch, delete, options, head]
+      source: 'config/routes.rb'
+      path_regex: '(?m)^[ \t]*(?:get|post|put|patch|delete|options|head)\s+["'']([^"'']+)["'']'
+    - id: net-http-outbound
+      kind: outbound
+      lib_match: '^(Net::HTTP|HTTParty|Faraday|RestClient)$'
+      deny_methods: [body, code, message, read_body, back]
+    - id: httparty-outbound
+      kind: outbound
+      display_name: httparty
+      lib_match: '^HTTParty$'
+      deny_methods: [body, code, message, read_body, back]
+    - id: faraday-outbound
+      kind: outbound
+      lib_match: '^Faraday$'
+    - id: restclient-outbound
+      kind: outbound
+      lib_match: '^RestClient$'
+
+  # ── Kotlin ───────────────────────────────────────────────────────
+  kotlin:
+    - id: ktor-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '(?m)(?:^|\W)(?:get|post|put|patch|delete|head|options)\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: '(get|post|put|patch|delete|head|options)\s*\(\s*"[^"]+"\s*\)'
+    - id: ktor-client-outbound
+      kind: outbound
+      display_name: ktor
+      lib_match: '^(HttpClient|OkHttpClient)$'
+      deny_methods: [statusCode, call, headers, body]
+    - id: okhttp-outbound
+      kind: outbound
+      display_name: okhttp
+      lib_match: '^OkHttpClient$'
+      deny_methods: [statusCode, call, headers, body]

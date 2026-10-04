@@ -2,7 +2,8 @@
 
 You're editing the multi-repo coordination layer (`federated_index.rs`,
 `repo_index.rs`, `repo_source.rs`, `cross_repo.rs`, `workspace.rs`,
-`manifest.rs`, `loader.rs`, etc.).
+`manifest.rs`, `loader.rs`, etc.) or the contract-federation
+sub-tree (`contracts/*`).
 
 **Before you write any code, read
 [`docs/CONTRIBUTING_AGENTS.md`](../../../docs/CONTRIBUTING_AGENTS.md).**
@@ -17,10 +18,28 @@ The short version:
   (`PetgraphBackend`). Don't reach into petgraph directly from
   `FederatedIndex`; go through the trait. A `MemgraphBackend` is
   the deferred escape hatch.
-- `cross_repo.rs` is the only file that should join edges across
-  repos. Don't add cross-repo joins in `repo_index.rs`.
+- `cross_repo.rs` joins symbol edges across repos; the
+  contract-federation `Binds` edges are owned by
+  `contracts/joiner.rs` (PR 7). Don't add cross-repo joins in
+  `repo_index.rs`.
 - Federation tools are MCP tools — see `src/server/mcp/AGENTS.md`
   for how to register them.
+- Contract tools (`list_services`, `get_service` — PR 16, and the
+  eleven additions in PR 13) live in `mcp/contract_tools/`. They ride
+  the `ContractToolEntry` inventory (see `mcp/AGENTS.md`) and read the
+  federation's `ContractIndex` after `rejoin_contracts_if_dirty`.
+  New contract tools should add a `ToolDef` to `CONTRACT_TOOL_DEFS`
+  (`mcp/definitions.rs`), a handler in `mcp/contract_tools/`, and an
+  inventory `submit!`. Don't extend `dispatch_tool_call`.
+- `contracts/diff.rs` holds the pure diff / classify / evaluate
+  functions and the `ChangedFilesSource` trait. The git2-backed
+  implementation lives in `contracts/changed_files.rs`
+  (`MirrorChangedFiles`, `MultiRepoChangedFiles`,
+  `RepoScopedChangedFiles`). PR 13 wired the real impl; do not
+  regress to the test-only `StaticChangedFiles` for production
+  call sites. The `ChangedFilesSource` is what makes
+  `ChangedWithoutSchema` fire — `diff_contracts` will silently
+  drop that rule if the trait is left wired to a static set.
 
 The federation is the only place in Lain where per-process and
 cross-process state can disagree. Be conservative: prefer reading

@@ -53,3 +53,6 @@ tests/js/screenshots/*.png
 docs/screenshots/spa-demo.mp4
 docs/screenshots/spa-demo.webm
 docs/screenshots/spa-demo-poster.png
+
+# TLA+ TLC model-checker output (state dumps / fingerprints).
+/states/

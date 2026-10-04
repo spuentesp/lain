@@ -10,7 +10,7 @@ high-level agent workflow lives in [`AGENTS.md`](../AGENTS.md).
 ## TL;DR — five rules, no exceptions
 
 1. **Adding a per-repo tool?** Use `inventory::submit!(ToolHandlerEntry(&…))`. Don't add to `dispatch_tool_call`.
-2. **Adding a sensor?** Use the `Sensor` trait + `inventory::submit!(SensorEntry(&…))`. Don't copy the walker from another sensor.
+2. **Adding a sensor?** Use `register_sensor!` (the `Sensor` impl + `inventory::submit!(SensorEntry(&…))`) and `util::scan_files` for the walk. Don't copy the walker from another sensor.
 3. **Adding a node/edge DTO?** Extend `schema::GraphNode` / `schema::GraphEdge`. Don't create a parallel struct in `federation_tools/dto.rs`.
 4. **Adding a time/duration formatter?** Add it to `tools/utils.rs`. Don't redefine in your handler.
 5. **Adding a CLI timestamp helper?** Use `crate::server::time::unix_secs_u64`. Don't redefine `chrono_now_unix` in your file.

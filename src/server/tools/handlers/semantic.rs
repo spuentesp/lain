@@ -591,6 +591,15 @@ fn node_type_label(nt: &NodeType) -> &'static str {
         NodeType::Resource => "resource",
         NodeType::Schema => "schema",
         NodeType::Synthetic => "synthetic",
+        // Contract-federation nodes (schema v3). Same kebab-case form
+        // as the existing labels; `describe_schema` and the
+        // `find_symbol` tool see them as ordinary node kinds.
+        NodeType::HttpClientCall => "http-client-call",
+        NodeType::Field => "field",
+        NodeType::FieldRef => "field-ref",
+        // Phase D (spec §7): a database table. Same kebab-case
+        // shape as the existing contract-federation labels.
+        NodeType::Table => "table",
     }
 }
 
@@ -1157,6 +1166,8 @@ mod m6_tests {
                     detector: "message_bus_publisher".to_string(),
                     confidence: 0.7,
                 }),
+                site: None,
+                detail: None,
             }])
             .unwrap();
 
@@ -1244,6 +1255,8 @@ mod m6_tests {
                     detector: "message_bus_publisher".to_string(),
                     confidence: 0.7,
                 }),
+                site: None,
+                detail: None,
             }])
             .unwrap();
 
@@ -1448,6 +1461,8 @@ mod m6_tests {
                     detector: "message_bus_publisher".to_string(),
                     confidence: 0.7,
                 }),
+                site: None,
+                detail: None,
             }])
             .unwrap();
 
@@ -1527,6 +1542,8 @@ mod m6_tests {
                         detector: "message_bus_publisher".to_string(),
                         confidence: 0.7,
                     }),
+                    site: None,
+                    detail: None,
                 }])
                 .unwrap();
         }
@@ -1602,6 +1619,8 @@ mod m6_tests {
                     detector: "message_bus_publisher".to_string(),
                     confidence: 0.7,
                 }),
+                site: None,
+                detail: None,
             }])
             .unwrap();
 

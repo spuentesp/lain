@@ -1,0 +1,169 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "get_service data",
+  "description": "`data` field of the `get_service` envelope (§10.2). Consumers of one service.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "service": { "type": "string" },
+    "repo":   { "type": "string" },
+    "paths":  { "type": "array", "items": { "type": "string" } },
+    "provider_reviewed": {
+      "type": "boolean",
+      "description": "False when the service's repo is not in `RepoHealth::Ready` (§12 guarantee)."
+    },
+    "endpoints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Contract keys the service provides."
+    },
+    "consumers": {
+      "type": "array",
+      "description": "Consumer services that bind to at least one of this service's endpoints.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "service": { "type": "string" },
+          "repo":    { "type": "string" },
+          "uses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "endpoint": {
+                  "type": "object",
+                  "properties": {
+                    "service": { "type": "string" },
+                    "key": { "type": "string" }
+                  },
+                  "required": ["service", "key"]
+                },
+                "site":     { "$ref": "#/$defs/EvidenceRef" },
+                "caller":   { "$ref": "#/$defs/EvidenceRef" },
+                "binding":  { "$ref": "#/$defs/Provenance" },
+                "match":    { "type": "string", "enum": ["exact", "pattern", "prefix_stripped"] },
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "json_path":  { "type": "string" },
+                      "site":       { "$ref": "#/$defs/EvidenceRef" },
+                      "provenance": { "$ref": "#/$defs/Provenance" }
+                    },
+                    "required": ["json_path", "site", "provenance"]
+                  }
+                },
+                "reads_complete":     { "type": "boolean" },
+                "used_by":            { "$ref": "#/$defs/EntryPointList" },
+                "used_by_truncated":  { "type": "boolean" }
+              },
+              "required": ["endpoint", "site", "caller", "binding", "match", "fields", "reads_complete", "used_by", "used_by_truncated"]
+            }
+          }
+        },
+        "required": ["service", "repo", "uses"]
+      }
+    },
+    "unresolved_candidates": {
+      "type": "array",
+      "description": "Unresolved consumers that could match any endpoint of this service (§9.7).",
+      "items": { "$ref": "#/$defs/Unresolved" }
+    },
+    "scope": { "$ref": "#/$defs/Scope" },
+    "cursor": { "type": "string" }
+  },
+  "required": ["service", "repo", "paths", "provider_reviewed", "endpoints", "consumers", "scope"],
+  "$defs": {
+    "EvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id":     { "type": "string" },
+        "repo":   { "type": "string" },
+        "commit": { "type": "string" },
+        "path":   { "type": "string" },
+        "line":   { "type": "integer" },
+        "text":   { "type": "string" },
+        "dirty":  { "type": "boolean" }
+      },
+      "required": ["id", "repo", "commit", "path", "line", "text"]
+    },
+    "Provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind":       { "type": "string", "enum": ["static", "heuristic", "runtime", "confirmed"] },
+        "detector":   { "type": "string" },
+        "source":     { "type": "string" },
+        "confidence": { "type": "number" }
+      },
+      "required": ["kind", "confidence"]
+    },
+    "EntryPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["http_handler", "scheduled", "cli", "main", "unreferenced"] },
+        "name": { "type": "string" },
+        "ref":  { "$ref": "#/$defs/EvidenceRef" }
+      },
+      "required": ["kind", "name"]
+    },
+    "EntryPointList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/EntryPoint" }
+    },
+    "Unresolved": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "consumer":  { "$ref": "#/$defs/EvidenceRef" },
+        "url_expr":  { "type": "string" },
+        "method":    { "type": "string" },
+        "template":  { "type": "string" },
+        "host":      { "type": "string" },
+        "reason":    { "type": "string", "enum": ["no_route_in_service", "no_match"] },
+        "target_service": { "type": "string" }
+      },
+      "required": ["consumer", "url_expr", "method", "reason"]
+    },
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repo":   { "type": "string" },
+              "commit": { "type": ["string", "null"] },
+              "dirty":  { "type": "boolean" }
+            },
+            "required": ["repo"]
+          }
+        },
+        "unreviewed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repo":   { "type": "string" },
+              "reason": { "type": "string", "enum": ["failed", "fetch_failed", "excluded", "not_ready"] },
+              "error":  { "type": "string" }
+            },
+            "required": ["repo", "reason"]
+          }
+        },
+        "configured_only": { "type": "boolean", "enum": [true] }
+      },
+      "required": ["reviewed", "unreviewed", "configured_only"]
+    }
+  }
+}
