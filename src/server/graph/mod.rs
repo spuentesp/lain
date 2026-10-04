@@ -6,6 +6,7 @@
 //! in [`persist`].
 
 pub(crate) mod persist;
+pub(crate) mod wal;
 
 pub use persist::{inspect_persisted_graph, GraphInspectionError, PATH_FORMAT_VERSION};
 
@@ -339,6 +340,17 @@ impl GraphDatabase {
 
     pub fn upsert_node(&self, node: GraphNode) -> Result<(), LainError> {
         self.check_writable()?;
+        // B5 (2026-10-04): write-ahead log. Append the op to
+        // `graph.wal` first so a torn `graph.bin` can recover
+        // by replaying the WAL on top of the last good
+        // snapshot. The fsync inside `append_op` is the
+        // durability point.
+        if let Err(e) = wal::append_op(
+            &wal::wal_path_for(&self.persistence_path),
+            &wal::GraphOp::UpsertNode(node.clone()),
+        ) {
+            return Err(LainError::Database(format!("wal append: {e}")));
+        }
         let mut graph = self.graph.write();
 
         if let Some(idx) = self.index_map.get(&node.id).map(|r| *r.value()) {
@@ -662,6 +674,13 @@ impl GraphDatabase {
     /// two repos can share a path, so path is not a usable key there.
     pub fn remove_nodes_by_ids(&self, ids: &[String]) -> Result<usize, LainError> {
         self.check_writable()?;
+        // B5 (2026-10-04): WAL append before mutating in-memory.
+        if let Err(e) = wal::append_op(
+            &wal::wal_path_for(&self.persistence_path),
+            &wal::GraphOp::RemoveNodesByIds(ids.to_vec()),
+        ) {
+            return Err(LainError::Database(format!("wal append: {e}")));
+        }
 
         let mut removed = 0usize;
         let mut cleared_paths: Vec<(String, NodeIndex)> = Vec::new();
@@ -1010,6 +1029,14 @@ impl GraphDatabase {
                 LainError::NotFound(format!("Target node {} not found", edge.target_id))
             })?;
 
+        // B5 (2026-10-04): append the op to the WAL first; the
+        // fsync inside `append_op` is the durability point.
+        if let Err(e) = wal::append_op(
+            &wal::wal_path_for(&self.persistence_path),
+            &wal::GraphOp::UpsertEdge(edge.clone()),
+        ) {
+            return Err(LainError::Database(format!("wal append: {e}")));
+        }
         graph.add_edge(source_idx, target_idx, edge.clone());
         Ok(())
     }
@@ -1141,6 +1168,11 @@ impl GraphDatabase {
             }
         }
         drop(graph);
+        // B5 (2026-10-04): write-ahead log. `insert_edge` is
+        // the actual mutator; the WAL append happens there
+        // too, but `upsert_edge` short-circuits above when the
+        // edge already exists, so we only append on the
+        // insert path.
         self.insert_edge(&edge)
     }
 
@@ -2137,6 +2169,11 @@ impl GraphDatabase {
             .map_err(|e| LainError::Database(e.to_string()))?;
         crate::cli::io::write_file_atomic(&self.persistence_path, &data)
             .map_err(|e| LainError::Database(e.to_string()))?;
+        // B5 (2026-10-04): truncate the WAL now that the
+        // snapshot in `graph.bin` is consistent with it. The
+        // next load will read the snapshot only.
+        wal::truncate(&wal::wal_path_for(&self.persistence_path))
+            .map_err(|e| LainError::Database(format!("wal truncate: {e}")))?;
         Ok(())
     }
 
@@ -2200,7 +2237,55 @@ impl GraphDatabase {
             return Ok(());
         }
 
-        self.apply_state_loaded(state)
+        self.apply_state_loaded(state)?;
+
+        // B5 (2026-10-04): replay the WAL on top of the snapshot.
+        // The snapshot is consistent up to some commit; ops in
+        // `graph.wal` were appended after the last checkpoint
+        // and represent post-snapshot state. Replay applies them
+        // in order. A torn frame (truncated tail or bad CRC)
+        // stops the replay; the snapshot is intact.
+        let wal_path = wal::wal_path_for(&self.persistence_path);
+        let replayed = wal::replay(&wal_path, |op| -> std::io::Result<()> {
+            match op {
+                wal::GraphOp::UpsertNode(n) => self
+                    .upsert_node(n.clone())
+                    .map_err(|e| std::io::Error::other(e.to_string())),
+                wal::GraphOp::UpsertEdge(e) => self
+                    .upsert_edge(e.clone())
+                    .map_err(|e| std::io::Error::other(e.to_string())),
+                wal::GraphOp::RemoveNodesByIds(ids) => self
+                    .remove_nodes_by_ids(&ids)
+                    .map(|_| ())
+                    .map_err(|e| std::io::Error::other(e.to_string())),
+                wal::GraphOp::RemoveEdges { endpoints } => {
+                    let edges: Vec<crate::schema::GraphEdge> = endpoints
+                        .iter()
+                        .map(|(s, t, ty)| {
+                            crate::schema::GraphEdge::new(
+                                ty.clone(),
+                                s.clone(),
+                                t.clone(),
+                            )
+                        })
+                        .collect();
+                    self.remove_edges(&edges)
+                        .map(|_| ())
+                        .map_err(|e| std::io::Error::other(e.to_string()))
+                }
+                wal::GraphOp::CommitIndexMap { .. } => Ok(()),
+            }
+        })
+        .map_err(|e| LainError::Database(format!("wal replay: {e}")))?;
+        if replayed > 0 {
+            tracing::info!(
+                "{} replayed {} WAL ops from {}",
+                self.persistence_path.display(),
+                replayed,
+                wal_path.display()
+            );
+        }
+        Ok(())
     }
 
     /// Apply an already-decoded `persist::GraphState` to this graph
