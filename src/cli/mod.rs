@@ -16,6 +16,7 @@ pub mod schema;
 pub mod server;
 pub mod setup;
 pub mod signal;
+pub mod socket_session;
 pub mod workspace;
 pub mod workspaces;
 

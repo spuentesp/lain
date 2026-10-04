@@ -38,12 +38,65 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
 
 /// JSON-RPC id of the `initialize` request.
 const ID_INITIALIZE: i64 = 1;
 /// JSON-RPC id of the first `tools/call` request; a retry (see the
 /// warming-up handling below) increments from here.
 const ID_CALL: i64 = 2;
+
+/// Try to connect to a shared `lain mcp` for `workspace`. Returns
+/// `Some` only if the socket exists AND the recorded PID is
+/// alive. A stale socket from a crashed process is left to
+/// the spawn path; the next spawn will overwrite it.
+fn try_connect_to_shared(
+    socket_path: &std::path::Path,
+) -> Option<crate::cli::socket_session::SocketSession> {
+    use std::os::unix::net::UnixStream;
+    if !socket_path.exists() {
+        return None;
+    }
+    // Liveness: read the sidecar pid file and check /proc.
+    let pid_path = {
+        let mut p = socket_path.to_path_buf();
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| format!("{n}.pid"))
+            .unwrap_or_default();
+        if name.is_empty() {
+            return None;
+        }
+        p.set_file_name(name);
+        p
+    };
+    let pid_text = std::fs::read_to_string(&pid_path).ok()?;
+    let pid: u32 = pid_text.trim().parse().ok()?;
+    #[cfg(target_os = "linux")]
+    {
+        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            return None;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        return None;
+    }
+    // Probe the socket with a non-blocking connect. If it
+    // succeeds the server is up; if it fails we treat the
+    // server as dead.
+    let _ = UnixStream::connect(socket_path)
+        .ok()?;
+    match crate::cli::socket_session::connect(socket_path) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!("shared `lain mcp` socket probe failed: {e}");
+            None
+        }
+    }
+}
 
 /// Shut the session down and build an error carrying whatever it
 /// printed to stderr, for the three give-up points in the wait loop
@@ -59,6 +112,118 @@ fn give_up(session: &mut StdioSession, message: String) -> anyhow::Error {
             stderr_text
         }
     )
+}
+
+/// Run the call loop using an already-connected `SocketSession`
+/// against a shared `lain mcp`. Mirrors the stdio call loop
+/// but with the simpler `&self` session API. Returns `Ok(())`
+/// after printing the tool's result.
+fn run_call_loop_via_socket(
+    session: crate::cli::socket_session::SocketSession,
+    tool: &str,
+    args_obj: Value,
+    timeout_secs: u64,
+) -> Result<()> {
+    let init = initialize_request(ID_INITIALIZE, "lain-oneshot");
+    let call_id = ID_CALL;
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": call_id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args_obj}
+    });
+    session.send(&init)?;
+    session.send(&call)?;
+
+    let overall_deadline = Duration::from_secs(timeout_secs);
+    let started = std::time::Instant::now();
+    let mut next_id = call_id;
+    let tool_response = loop {
+        let remaining = overall_deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(anyhow!(
+                "no tools/call response from shared `lain mcp` within {timeout_secs}s"
+            ));
+        }
+        let response = match session.recv_timeout(remaining) {
+            Ok(v) => v,
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(anyhow!(
+                    "no tools/call response from shared `lain mcp` within {timeout_secs}s"
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!(
+                    "shared `lain mcp` exited without answering tools/call"
+                ));
+            }
+        };
+        if response.get("id").and_then(|i| i.as_i64()) == Some(ID_INITIALIZE) {
+            continue;
+        }
+        let gate_envelope = response
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let partial = response
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t.contains(crate::server::mcp::handler::INDEXING_NOTE_MARKER));
+        let is_warming_up = partial
+            || gate_envelope
+                .as_ref()
+                .and_then(|v| v.get("state"))
+                .and_then(|s| s.as_str())
+                == Some("warming_up");
+        if !is_warming_up {
+            break response;
+        }
+        let retry_after_ms = gate_envelope
+            .as_ref()
+            .and_then(|v| v.get("retry_after_ms"))
+            .and_then(|r| r.as_u64())
+            .unwrap_or(1000);
+        let remaining_after_retry = overall_deadline.saturating_sub(started.elapsed());
+        if remaining_after_retry.is_zero() {
+            continue;
+        }
+        std::thread::sleep(
+            Duration::from_millis(retry_after_ms).min(remaining_after_retry),
+        );
+        next_id += 1;
+        let retry_call = json!({
+            "jsonrpc": "2.0",
+            "id": next_id,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": args_obj}
+        });
+        session.send(&retry_call)?;
+    };
+
+    if let Some(err) = tool_response.get("error") {
+        return Err(anyhow!("tool error: {err}"));
+    }
+    let raw_text = tool_response
+        .pointer("/result/content/0/text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let is_tool_error = tool_response
+        .pointer("/result/isError")
+        .and_then(|v| v.as_bool())
+        == Some(true);
+    match serde_json::from_str::<Value>(raw_text) {
+        Ok(v) => println!(
+            "{}",
+            serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw_text.into())
+        ),
+        Err(_) => println!("{}", raw_text),
+    }
+    if is_tool_error {
+        return Err(anyhow!(
+            "tool {tool} returned isError=true (see output above)"
+        ));
+    }
+    Ok(())
 }
 
 /// Run `lain mcp` as a subprocess, send one `tools/call`, print the
@@ -146,6 +311,21 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         // pipelines.
         .unwrap_or(600);
 
+    // B1 (2026-10-04): before spawning a fresh `lain mcp`,
+    // consult the per-workspace Unix socket. If a previous
+    // `lain mcp` is alive and serving this workspace, connect
+    // to it and reuse the warm in-memory graph. This is the
+    // fix for "every `oneshot` call costs 5 min of cold
+    // reindex." The socket path is BLAKE3(workspace) under
+    // `config::run_dir()`; the server writes a `<socket>.pid`
+    // sidecar so we can verify liveness before connecting.
+    let socket_path = crate::config::oneshot_socket_path(&workspace);
+    if let Some(socket_session) = try_connect_to_shared(&socket_path) {
+        return run_call_loop_via_socket(socket_session, tool, args_obj, timeout_secs);
+    }
+
+    // No shared server. Spawn a fresh one with the `--socket`
+    // flag so the NEXT `oneshot` will hit the cheap path.
     let exe = std::env::current_exe().context("locate current lain binary")?;
 
     let mut command = Command::new(exe);
@@ -153,6 +333,8 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         .arg("mcp")
         .arg("--workspace")
         .arg(&workspace)
+        .arg("--socket")
+        .arg(&socket_path)
         .env("RUST_LOG", "lain=debug");
     let mut session = StdioSession::spawn(command, true).context("spawn `lain mcp`")?;
 

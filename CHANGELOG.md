@@ -140,6 +140,19 @@ All notable changes to LAIN are documented here. Versions follow
   consult-the-socket-first behavior is a follow-up commit
   on this branch.
 
+- **B1 oneshot side: `lain oneshot` consults the per-workspace
+  socket first.** New `cli::socket_session::SocketSession`
+  (mirrors `StdioSession`'s API) lets a oneshot call connect
+  to a running shared server. The connection is gated on a
+  `/proc/<pid>` liveness check of the server's recorded PID;
+  if that fails (no server, dead server, or socket error),
+  oneshot falls through to the existing spawn-stdio path and
+  adds `--socket PATH` so the NEXT oneshot hits the cheap
+  path. Round-trip test in `socket_session::tests` proves
+  the wire protocol. The end-to-end test (spawn shared
+  server, connect via socket, see warm graph) is on the
+  same branch and uses the same code path.
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call
