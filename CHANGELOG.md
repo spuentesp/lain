@@ -29,6 +29,15 @@ All notable changes to LAIN are documented here. Versions follow
   by dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
   finding B9).
 
+- **Quickstart now warns about the `head -N` pipe footgun.** A user
+  running `lain oneshot find_anchors | head -60` will see the
+  upstream `lain mcp` process aborted by `SIGPIPE` when `head` exits
+  on a cold graph, leaving a partial `graph.bin` on disk. The
+  symptom is "no tools/call response from `lain mcp`" plus a
+  corrupt on-disk graph; the fix is to pipe to a file or to a tool
+  that reads to EOF. The new Quickstart row links the reader to
+  `DOGFOODING_REPORT.md` (B7) for the full trace.
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call
