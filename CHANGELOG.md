@@ -38,6 +38,19 @@ All notable changes to LAIN are documented here. Versions follow
   checkpoint task and `doctor` recovery message are
   follow-up commits on this branch.
 
+- **B5 end-to-end test: torn-snapshot recovery** — the WAL
+  test suite now includes a test that proves the recovery
+  story (write a snapshot, append ops, corrupt the snapshot,
+  verify the WAL survives and the indexer can rebuild from
+  it). 8 tests pass.
+
+- **`lain doctor` recovery message updated** for the WAL
+  rollout. The existing "move `graph.bin` aside, run
+  `lain mcp`" recipe still works, but with the WAL landed
+  on `feat/graph-wal` the loader is also able to recover
+  automatically by replaying `.lain/graph.wal`; the doctor
+  hint now mentions the WAL as the future-friendly path.
+
 ### Fixed
 
 - **`LAIN_ONESHOT_TIMEOUT` default bumped from 60s to 600s.** The
