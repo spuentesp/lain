@@ -109,6 +109,14 @@ fn run_oneshot(workspace: &std::path::Path, budget: Duration) -> (bool, String, 
 #[test]
 fn oneshot_returns_on_cold_graph() {
     let (_tmp, root) = make_repo(30);
+    // 2026-10-04 fix: LAIN_ONESHOT_TIMEOUT default bumped to 600s to
+    // match LAIN_REINDEX_TIMEOUT so a cold reindex on a non-trivial
+    // repo (e.g. Lain on Lain, ~5 min) doesn't time out at 60s and
+    // leave the user with a "no tools/call response" error that
+    // doesn't distinguish "server is busy" from "server is hung".
+    // The wrapper here still passes a 75s budget — internal default
+    // is now well above this, so the assertion "oneshot returns
+    // within 75s of cold start" is still meaningful as a hang probe.
     let (ok, out, elapsed) = run_oneshot(&root, Duration::from_secs(75));
     assert!(
         ok,

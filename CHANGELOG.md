@@ -7,6 +7,17 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **`LAIN_ONESHOT_TIMEOUT` default bumped from 60s to 600s.** The
+  previous default was too short for a cold reindex on a non-trivial
+  repo (Lain-on-Lain in 2026-10-04: ~5 min for 41k LOC + LSP
+  prewarm), and the resulting "no tools/call response from `lain
+  mcp` within 60s" error didn't tell the user whether the server was
+  busy indexing or hung. The new default matches
+  `LAIN_REINDEX_TIMEOUT`. Override with
+  `LAIN_ONESHOT_TIMEOUT=<seconds>` for tighter pipelines. Found by
+  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B6).
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call

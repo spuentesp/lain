@@ -13,8 +13,10 @@
 //! current directory's graph.
 //!
 //! The server process is killed after a configurable timeout
-//! (default 60s, override with `LAIN_ONESHOT_TIMEOUT=<seconds>`)
-//! because `lain mcp`'s stdio loop doesn't exit on its own.
+//! (default 600s, override with `LAIN_ONESHOT_TIMEOUT=<seconds>`)
+//! because `lain mcp`'s stdio loop doesn't exit on its own. The
+//! 600s default matches `LAIN_REINDEX_TIMEOUT` so a cold reindex
+//! on a non-trivial repo doesn't time out silently.
 //!
 //! Two protocol details matter here, both learned from live hangs:
 //!
@@ -133,7 +135,16 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
     let timeout_secs: u64 = std::env::var("LAIN_ONESHOT_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
+        // 60s is too short for a cold reindex on a non-trivial repo
+        // (Lain-on-Lain in 2026-10-04: ~5 min for 41k LOC + LSP
+        // prewarm). The error "no tools/call response from `lain
+        // mcp` within 60s" doesn't tell the user whether the server
+        // is busy indexing or hung, so they have no signal that 60s
+        // is a too-small budget. 600s is the same default the
+        // reindex path already uses (`LAIN_REINDEX_TIMEOUT`).
+        // Override with `LAIN_ONESHOT_TIMEOUT=<seconds>` for tighter
+        // pipelines.
+        .unwrap_or(600);
 
     let exe = std::env::current_exe().context("locate current lain binary")?;
 
