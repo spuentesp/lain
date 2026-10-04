@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "get_snapshot output",
-  "description": "Output for `get_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Same shape as `prepare_snapshot`.",
+  "description": "Output for `get_snapshot`. Same shape as `prepare_snapshot`.",
   "type": "object",
   "required": ["snapshot", "state", "repos"],
   "properties": {

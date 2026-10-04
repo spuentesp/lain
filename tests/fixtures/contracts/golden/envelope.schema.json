@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Tool envelope",
-  "description": "Per-tool response envelope (`docs/CONTRACT_FEDERATION.md` §10.2). Successful tools return `{api_version, analyzer_version, snapshot, reproducible, data, meta}`; errors return `{api_version, analyzer_version, snapshot, error: {code, message, retryable, details?}, meta}`.",
+  "description": "Per-tool response envelope (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.2). Successful tools return `{api_version, analyzer_version, snapshot, reproducible, data, meta}`; errors return `{api_version, analyzer_version, snapshot, error: {code, message, retryable, details?}, meta}`.",
   "type": "object",
   "oneOf": [
     {

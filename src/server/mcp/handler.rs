@@ -4316,7 +4316,7 @@ fn invoke_inventory(
     None
 }
 
-/// Look up a contract-federation tool (`docs/CONTRACT_FEDERATION.md`
+/// Look up a contract-federation tool (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`
 /// §10.1) by name. Returns the tool's `ToolOutcome` already rendered,
 /// or `None` when no contract tool matches. Used by
 /// `dispatch_tool_call` after `invoke_inventory`; contract tools

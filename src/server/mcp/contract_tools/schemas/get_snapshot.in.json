@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "get_snapshot input",
-  "description": "Input for `get_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Reads the on-disk record and refreshes `last_access_unix` per §8.4.",
+  "description": "Input for `get_snapshot`. Reads the on-disk record and refreshes `last_access_unix` per §8.4.",
   "type": "object",
   "additionalProperties": false,
   "required": ["snapshot"],

@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "prepare_snapshot input",
-  "description": "Input for `prepare_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Same inputs after ref resolution produce the same snapshot id (§8.4) — `prepare_snapshot` is idempotent.",
+  "description": "Input for `prepare_snapshot`. Same inputs after ref resolution produce the same snapshot id (§8.4) — `prepare_snapshot` is idempotent.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

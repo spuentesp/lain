@@ -1,4 +1,4 @@
-//! Memory ceiling test (`docs/CONTRACT_FEDERATION.md` §8.5
+//! Memory ceiling test (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §8.5
 //! "Memory ceiling").
 //!
 //! The committed fixture at

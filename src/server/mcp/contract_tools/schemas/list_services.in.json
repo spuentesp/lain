@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "list_services input",
-  "description": "Input for `list_services` (`docs/CONTRACT_FEDERATION.md` §12). On `live` only — PR 16 scope; PR 11/13 will route the value through the snapshot manager.",
+  "description": "Input for `list_services`. On `live` only — PR 16 scope; PR 11/13 will route the value through the snapshot manager.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

@@ -1,4 +1,4 @@
-//! Route matching (`docs/CONTRACT_FEDERATION.md` §7.4).
+//! Route matching (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §7.4).
 //!
 //! A pure-logic function [`match_route`] that decides whether a
 //! consumer template matches a provider template, applying the method

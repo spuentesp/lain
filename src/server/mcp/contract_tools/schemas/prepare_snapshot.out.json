@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "prepare_snapshot output",
-  "description": "Output for `prepare_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). The `data` field of the §10.2 envelope.",
+  "description": "Output for `prepare_snapshot`. The `data` field of the §10.2 envelope.",
   "type": "object",
   "required": ["snapshot", "state", "repos"],
   "properties": {

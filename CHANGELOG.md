@@ -5,6 +5,37 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-04
+
+LAIN 0.9 introduces cross-repo contract federation. For every
+service the agent can now see who provides it, who consumes it,
+which endpoints and fields they reach, and which of the
+consumer's own entry points land on each call. A proposed change
+returns `Verified`, `NeedsInvestigation`, or "no known impact"
+with the list of repos that could not be checked.
+
+The 13 read-only contract tools live in the new `contracts`
+package — opt in with `LAIN_TOOL_PROFILE=contracts` or
+`load_package("contracts")`. The full design is in
+`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`
+(supersedes the earlier `docs/CONTRACT_FEDERATION.md` design
+and its 15-PR tracker, both removed in this release).
+
+Sensors in each repo find routes, client calls, schema fields,
+and field reads; a join step links consumers to providers using
+`repos.yaml` (including several services in one repo);
+snapshots pin every repo to a commit so a contract diff is
+deterministic and reviewable. The verdict soundness gap that
+let `NoKnownImpact` be claimed for repos LAIN couldn't analyze
+is closed: incomplete coverage downgrades the verdict to
+`NeedsInvestigation` instead.
+
+Twelve TLA+ models in `docs/formal/` cover the coverage claim,
+the rejoin protocol, snapshot residency, install-resident
+eviction, snapshot in-flight slots, joining tier-2 plumbing,
+and the rejoin-mid-rejoin invariant. They found and verified
+fixes for issues that the Rust review caught second.
+
 ### Migration required — schema v3
 
 - **Federation graph schema is now v3** (`FEDERATION_GRAPH_VERSION`
