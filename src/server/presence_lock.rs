@@ -135,12 +135,13 @@ impl std::error::Error for ReleaseError {}
 /// matching `<sanitized>.lock-*` whose mtime is within the TTL
 /// window. Stale siblings are removed during the scan so a competing
 /// acquire for the same path always sees a clean slate. The
-/// directory-scan race window (two concurrent acquires both seeing no
-/// live holders and both writing) is acceptable: the in-memory
-/// `OccupancyMap` is authoritative when a server is running and the
-/// filesystem layer is best-effort; the non-overwrite property of
-/// nonce-bearing filenames means a stale holder can never clobber a
-/// replacement's file.
+/// scan-then-create is serialised per path by an `O_EXCL` guard file
+/// (`AcquireGuard`), so concurrent acquirers cannot both pass the scan
+/// (`docs/formal/FsLeaseGuard.tla`; a stress test failed 8-of-8 before).
+/// The remaining window is a guard holder frozen for longer than
+/// `GUARD_TTL`; the in-memory `OccupancyMap` stays authoritative when a
+/// server is running, and the non-overwrite property of nonce-bearing
+/// filenames means a stale holder can never clobber a replacement's file.
 pub fn try_lock(
     workspace_root: &Path,
     path: &Path,
@@ -195,6 +196,91 @@ fn try_lock_once(
 ) -> Result<FileLock, StaleOrConflict> {
     let lock_dir = workspace_root.join(".lain").join("locks");
     let _ = std::fs::create_dir_all(&lock_dir);
+    // The scan below and the create further down are two syscalls; without
+    // mutual exclusion every concurrent acquirer passes the scan and then
+    // creates its own file (all of N threads "won" in testing;
+    // docs/formal/FsLeaseGuard.tla). `create_new` on one fixed path is the
+    // atomic primitive that closes it.
+    let _guard = AcquireGuard::take(&lock_dir, path)?;
+    try_lock_once_guarded(&lock_dir, workspace_root, path, agent_id, kind, intent)
+}
+
+/// How long a guard file may exist before an acquirer treats it as left
+/// behind by a crashed process and takes it over. The critical section is a
+/// directory scan plus one file create, so a live holder is gone in
+/// milliseconds; a process frozen for longer than this is the documented
+/// residual window (`FsLeaseGuard_Stall.cfg`).
+const GUARD_TTL: Duration = Duration::from_secs(2);
+/// Upper bound on waiting for a contended guard before reporting `Stale`.
+const GUARD_WAIT: Duration = Duration::from_millis(1500);
+
+/// RAII guard for the acquire critical section: a file created with
+/// `O_EXCL`, removed on drop.
+struct AcquireGuard {
+    path: Option<PathBuf>,
+}
+
+impl AcquireGuard {
+    fn take(lock_dir: &Path, path: &Path) -> Result<Self, StaleOrConflict> {
+        let guard_path = lock_dir.join(format!("{}.guard", sanitize(path)));
+        let deadline = std::time::Instant::now() + GUARD_WAIT;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&guard_path)
+            {
+                Ok(_) => {
+                    return Ok(Self {
+                        path: Some(guard_path),
+                    })
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let age = std::fs::metadata(&guard_path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| SystemTime::now().duration_since(t).ok())
+                        .unwrap_or(Duration::ZERO);
+                    if age > GUARD_TTL {
+                        // Left by a crashed acquirer. `rename` is atomic, so
+                        // exactly one contender removes it.
+                        let tomb =
+                            lock_dir.join(format!(".guard-stale-{}.tmp", uuid::Uuid::new_v4()));
+                        if std::fs::rename(&guard_path, &tomb).is_ok() {
+                            let _ = std::fs::remove_file(&tomb);
+                        }
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(StaleOrConflict::Stale);
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                // Cannot create guard files here (read-only dir, ...): the
+                // filesystem layer is best-effort by design, so proceed
+                // unguarded exactly as before.
+                Err(_) => return Ok(Self { path: None }),
+            }
+        }
+    }
+}
+
+impl Drop for AcquireGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+fn try_lock_once_guarded(
+    lock_dir: &Path,
+    workspace_root: &Path,
+    path: &Path,
+    agent_id: &AgentId,
+    kind: AgentKind,
+    intent: ClaimIntent,
+) -> Result<FileLock, StaleOrConflict> {
     let prefix = lock_filename_prefix(path);
     let ttl = LOCK_TTL;
     let now = SystemTime::now();

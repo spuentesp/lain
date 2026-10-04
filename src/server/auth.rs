@@ -409,3 +409,7 @@ mod tests {
         assert!(!constant_time_eq(b"", b"x"));
     }
 }
+
+#[cfg(kani)]
+#[path = "auth_kani.rs"]
+mod kani_proofs;

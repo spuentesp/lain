@@ -72,3 +72,102 @@ fn long_path_can_be_locked() {
         r.err()
     );
 }
+
+/// N threads race to lock one path, round after round. Exactly one may win
+/// each round (`docs/formal/FsLeaseGuard.tla`, `MutualExclusion`).
+#[test]
+fn concurrent_acquirers_never_both_win() {
+    use std::sync::{Arc, Barrier};
+    const THREADS: usize = 8;
+    for round in 0..60 {
+        let ws = Arc::new(tempfile::tempdir().unwrap());
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let (ws, barrier) = (Arc::clone(&ws), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    try_lock(
+                        ws.path(),
+                        Path::new("src/contended.rs"),
+                        &AgentId(format!("agent-{i}")),
+                        AgentKind::Other("t".into()),
+                        ClaimIntent::Edit,
+                    )
+                    .is_ok()
+                })
+            })
+            .collect();
+        let winners = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|w| *w)
+            .count();
+        assert_eq!(
+            winners, 1,
+            "round {round}: {winners} acquirers hold the same lock"
+        );
+    }
+}
+
+fn guard_files(ws: &Path) -> Vec<String> {
+    std::fs::read_dir(ws.join(".lain/locks"))
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".guard") || n.contains(".guard-stale"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn acquire_leaves_no_guard_file_behind() {
+    let ws = tempfile::tempdir().unwrap();
+    let r = try_lock(
+        ws.path(),
+        Path::new("a.rs"),
+        &AgentId("a".into()),
+        AgentKind::Other("t".into()),
+        ClaimIntent::Edit,
+    );
+    assert!(r.is_ok());
+    assert!(
+        guard_files(ws.path()).is_empty(),
+        "{:?}",
+        guard_files(ws.path())
+    );
+    // A losing acquirer must clean up too.
+    let r2 = try_lock(
+        ws.path(),
+        Path::new("a.rs"),
+        &AgentId("b".into()),
+        AgentKind::Other("t".into()),
+        ClaimIntent::Edit,
+    );
+    assert!(r2.is_err());
+    assert!(guard_files(ws.path()).is_empty());
+}
+
+/// A guard left behind by a crashed acquirer must not wedge the path forever.
+#[test]
+fn stale_guard_from_a_crashed_acquirer_is_taken_over() {
+    let ws = tempfile::tempdir().unwrap();
+    let dir = ws.path().join(".lain/locks");
+    std::fs::create_dir_all(&dir).unwrap();
+    let guard = dir.join(format!("{}.guard", sanitize(Path::new("a.rs"))));
+    let f = std::fs::File::create(&guard).unwrap();
+    f.set_modified(SystemTime::now() - GUARD_TTL - Duration::from_secs(1))
+        .unwrap();
+    drop(f);
+
+    let r = try_lock(
+        ws.path(),
+        Path::new("a.rs"),
+        &AgentId("a".into()),
+        AgentKind::Other("t".into()),
+        ClaimIntent::Edit,
+    );
+    assert!(r.is_ok(), "stale guard wedged the lock: {:?}", r.err());
+    assert!(guard_files(ws.path()).is_empty());
+}
