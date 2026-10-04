@@ -1,6 +1,6 @@
 //! Contract tool: `list_services` and `get_service`.
 //!
-//! `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.1 / §10.2 / §10.5 / §10.9 / §12.
+//! `docs/CONTRACT_FEDERATION.md` §10.1 / §10.2 / §10.5 / §10.9 / §12.
 //!
 //! The two tools read from the in-process `FederatedIndex::contract_index()`
 //! after calling `rejoin_contracts_if_dirty()` (§10.1 / §5.3). They

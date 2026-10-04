@@ -1,4 +1,4 @@
-//! Per-federation `ContractIndex` (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §4.3).
+//! Per-federation `ContractIndex` (`docs/CONTRACT_FEDERATION.md` §4.3).
 //!
 //! The index is derived by `FederatedIndex::rejoin_contracts` (PR 7)
 //! and never persisted. It carries every fact a contract tool needs

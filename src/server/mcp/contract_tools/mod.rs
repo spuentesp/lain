@@ -1,4 +1,4 @@
-//! Contract-federation MCP tools (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.1,
+//! Contract-federation MCP tools (`docs/CONTRACT_FEDERATION.md` §10.1,
 //! §10.2, §10.5, §10.9, §12).
 //!
 //! PR 16 ships the first two: `list_services` and `get_service`. The

@@ -6,7 +6,7 @@
 //! are pure-function tests — no disk, no git, no full federation
 //! wiring — so they run in the standard `cargo test` cycle.
 //!
-//! Reference (docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md §15.2):
+//! Reference (docs/CONTRACT_FEDERATION.md §15.2):
 //!   13: literal `/api/orders/me` binds the literal route, not
 //!       `/api/orders/{}`.
 //!   14: `api.stripe.com` ends up in `coverage.external`, not

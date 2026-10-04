@@ -2,7 +2,7 @@
 //!
 //! Reads `CODEOWNERS`, `.github/CODEOWNERS` and `docs/CODEOWNERS` files
 //! from the workspace root and exposes a `(repo, path) -> [owner]`
-//! lookup. `get_service` (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.9) consults
+//! lookup. `get_service` (`docs/CONTRACT_FEDERATION.md` §10.9) consults
 //! the lookup when building each `used_by` entry, attaching an
 //! `owners: [String]` field. PR 17 stretch goal — owners on provider
 //! and consumer sites in `get_service`.

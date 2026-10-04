@@ -1,5 +1,5 @@
 //! Snapshot records, jobs, residency, and the `from_snapshot`
-//! projection (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §8.4–§8.5, §11).
+//! projection (`docs/CONTRACT_FEDERATION.md` §8.4–§8.5, §11).
 //!
 //! The split is by concern:
 //!

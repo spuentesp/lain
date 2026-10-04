@@ -1,4 +1,4 @@
-//! URL normalization (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §4.5).
+//! URL normalization (`docs/CONTRACT_FEDERATION.md` §4.5).
 //!
 //! One pure function [`normalize`], used by every provider and consumer
 //! sensor. Input is a URL argument as a sequence of [`UrlPart`]s

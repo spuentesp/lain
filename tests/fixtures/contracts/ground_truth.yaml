@@ -3,7 +3,7 @@
 # Source of truth for the assertions that later verification tests
 # run against this fixture. The fixture itself is built by
 # `scripts/contracts-fixture.sh` (PR 1); the scenarios below are the
-# exact ones listed in `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §15.2.
+# exact ones listed in `docs/CONTRACT_FEDERATION.md` §15.2.
 #
 # Three things are asserted here:
 #

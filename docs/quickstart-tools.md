@@ -434,7 +434,7 @@ are documented where they are central to the workflow they belong to:
   `get_repo_info`, `get_federation_health`, `search_org`,
   `get_cross_repo_blast_radius` (pass `repo_id` to disambiguate; the
   old `_for_repo` variant remains as a dispatch alias).
-- **Contract federation** ([`superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`](superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md)):
+- **Contract federation** ([`CONTRACT_FEDERATION.md`](CONTRACT_FEDERATION.md)):
   the `contracts` package adds 13 read-only tools in five groups
   (§12): `list_services`, `get_service`, `prepare_snapshot`,
   `get_snapshot`, `list_contracts`, `get_contract`,

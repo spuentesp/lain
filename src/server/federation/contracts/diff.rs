@@ -1,4 +1,4 @@
-//! Contract diff and evaluation (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §9).
+//! Contract diff and evaluation (`docs/CONTRACT_FEDERATION.md` §9).
 //!
 //! Pure functions only. Inputs are `ContractIndex`-derived surfaces
 //! plus an injected changed-files source for `ChangedWithoutSchema`

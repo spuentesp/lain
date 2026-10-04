@@ -31,7 +31,7 @@ pub enum Package {
     Social,
     Notes,
     Ops,
-    /// Contract federation service view (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` PR 16).
+    /// Contract federation service view (`docs/CONTRACT_FEDERATION.md` PR 16).
     /// Opt-in via `LAIN_TOOL_PROFILE=contracts` (combinable) or `load_package contracts`.
     /// The default profile is unchanged and stays at 18 tools or fewer; the
     /// two contract tools (`list_services`, `get_service`) live behind this

@@ -1,26 +1,18 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "get_coverage input",
-  "description": "Input for `get_coverage` ",
+  "description": "Input for `get_coverage` (`docs/CONTRACT_FEDERATION.md` §12).",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "snapshot": {
-      "type": "string"
-    },
+    "snapshot": { "type": "string" },
     "endpoint": {
       "type": "object",
       "properties": {
-        "service": {
-          "type": "string"
-        },
-        "key": {
-          "type": "string"
-        }
+        "service": { "type": "string" },
+        "key": { "type": "string" }
       }
     }
   },
-  "required": [
-    "snapshot"
-  ]
+  "required": ["snapshot"]
 }

@@ -1,4 +1,4 @@
-//! Contract-federation configuration (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §7.1).
+//! Contract-federation configuration (`docs/CONTRACT_FEDERATION.md` §7.1).
 //!
 //! `ContractFederationConfig` is the parsed form of the contract-federation
 //! sections in `repos.yaml`: `services`, `http_clients`, `generic_keys`,

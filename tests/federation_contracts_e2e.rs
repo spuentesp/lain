@@ -1,5 +1,5 @@
 //! End-to-end tests for the contract-federation service-view tools
-//! (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` PR 16).
+//! (`docs/CONTRACT_FEDERATION.md` PR 16).
 //!
 //! Exercises scenarios 17 and 18 from §15.2 — `get_service(billing)`
 //! and `get_service(orders)` — by building a small synthetic
@@ -1301,7 +1301,7 @@ async fn pr13_federation_disabled_when_no_fed() {
 //
 // Ground truth: `tests/fixtures/contracts/ground_truth.yaml`
 // (scenarios 1, 2, 5, 5b, 6, 11, 12, 19, 20, 21, 22) and the §15.2
-// table in `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`. One base snapshot at the
+// table in `docs/CONTRACT_FEDERATION.md`. One base snapshot at the
 // fixture's `base` tag; each scenario derives `from: <base>` with its
 // scenario tag as the override and runs `diff_contracts` through the
 // same handler path the MCP dispatcher uses.

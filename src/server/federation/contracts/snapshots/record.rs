@@ -1,4 +1,4 @@
-//! Snapshot record (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §8.4).
+//! Snapshot record (`docs/CONTRACT_FEDERATION.md` §8.4).
 //!
 //! The on-disk shape is a JSON file at
 //! `<data_dir>/snapshots/<snapshot_id>.json` carrying every fact the

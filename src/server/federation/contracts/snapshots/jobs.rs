@@ -1,4 +1,4 @@
-//! Snapshot job runner (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §8.4 "Jobs").
+//! Snapshot job runner (`docs/CONTRACT_FEDERATION.md` §8.4 "Jobs").
 //!
 //! One job per missing `(repo, sha, analyzer_version)` cache entry.
 //! Jobs are deduplicated across snapshots — two snapshots that need

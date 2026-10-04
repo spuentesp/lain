@@ -605,7 +605,7 @@ fn reconstruct_path(
 // `Outgoing` follows edges whose source is the node. `Stop` ignores
 // the edge type entirely.
 //
-// The per-PR carve-out is recorded in `.
+// The per-PR carve-out is recorded in `docs/CONTRACT_FEDERATION_TRACKER.md`.
 // The §5.2 code block describes the *final* propagation table; the
 // tracker checklist governs what actually ships. PR 4 turned on
 // `Calls`. PR 7 turned on `CallsHttp`, `SendsHttp`, `Binds`. PR 8

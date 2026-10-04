@@ -896,7 +896,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `list_services`. On `live` only — PR 16 scope; PR 11/13 will route the value through the snapshot manager.",
+      "description": "Input for `list_services` (`docs/CONTRACT_FEDERATION.md` §12). On `live` only — PR 16 scope; PR 11/13 will route the value through the snapshot manager.",
       "properties": {
         "cursor": {
           "description": "Opaque paging cursor (base64url of `{v:1, after, q}`). Reused with different args → `cursor_mismatch`.",
@@ -1061,7 +1061,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `get_service`. Live only — PR 11/13 surfaces named snapshots.",
+      "description": "Input for `get_service` (`docs/CONTRACT_FEDERATION.md` §12). Live only — PR 11/13 surfaces named snapshots.",
       "properties": {
         "cursor": {
           "description": "Opaque paging cursor.",
@@ -1466,7 +1466,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `prepare_snapshot`. Same inputs after ref resolution produce the same snapshot id (§8.4) — `prepare_snapshot` is idempotent.",
+      "description": "Input for `prepare_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Same inputs after ref resolution produce the same snapshot id (§8.4) — `prepare_snapshot` is idempotent.",
       "properties": {
         "exclude": {
           "description": "Repos to exclude from the snapshot (§8.4).",
@@ -1504,7 +1504,7 @@
     "name": "prepare_snapshot",
     "outputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
-      "description": "Output for `prepare_snapshot`. The `data` field of the §10.2 envelope.",
+      "description": "Output for `prepare_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). The `data` field of the §10.2 envelope.",
       "properties": {
         "created_unix": {
           "type": "integer"
@@ -1573,7 +1573,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `get_snapshot`. Reads the on-disk record and refreshes `last_access_unix` per §8.4.",
+      "description": "Input for `get_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Reads the on-disk record and refreshes `last_access_unix` per §8.4.",
       "properties": {
         "snapshot": {
           "description": "Snapshot id (`snap_` + 16 hex). Same shape as `prepare_snapshot` returns.",
@@ -1595,7 +1595,7 @@
     "name": "get_snapshot",
     "outputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
-      "description": "Output for `get_snapshot`. Same shape as `prepare_snapshot`.",
+      "description": "Output for `get_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Same shape as `prepare_snapshot`.",
       "properties": {
         "created_unix": {
           "type": "integer"
@@ -1661,7 +1661,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `list_contracts` Filters endpoints by service, repo, and kind; supports paging via `cursor`/`limit`.",
+      "description": "Input for `list_contracts` (`docs/CONTRACT_FEDERATION.md` §12). Filters endpoints by service, repo, and kind; supports paging via `cursor`/`limit`.",
       "properties": {
         "cursor": {
           "description": "Opaque paging cursor.",
@@ -1874,7 +1874,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `get_contract` Returns providers, schema fields and bound consumers for one endpoint.",
+      "description": "Input for `get_contract` (`docs/CONTRACT_FEDERATION.md` §12). Returns providers, schema fields and bound consumers for one endpoint.",
       "properties": {
         "key": {
           "description": "Contract key (`http:<METHOD> <template>` or `topic:<broker>/<name>`).",
@@ -2163,7 +2163,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `list_unresolved` Lists every ambiguous and unresolved consumer with the candidate endpoints that could match it.",
+      "description": "Input for `list_unresolved` (`docs/CONTRACT_FEDERATION.md` §12). Lists every ambiguous and unresolved consumer with the candidate endpoints that could match it.",
       "properties": {
         "cursor": {
           "type": "string"
@@ -2383,7 +2383,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `check_binding`. Validates a proposed consumer→endpoint link and emits its `bindings_entry` YAML for `repos.yaml`.",
+      "description": "Input for `check_binding` (`docs/CONTRACT_FEDERATION.md` §12). Validates a proposed consumer→endpoint link and emits its `bindings_entry` YAML for `repos.yaml`.",
       "properties": {
         "consumer": {
           "description": "Consumer GlobalId.",
@@ -2470,7 +2470,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `diff_contracts`. Both `base` and `head` must be `ready` snapshots; `live` is not allowed.",
+      "description": "Input for `diff_contracts` (`docs/CONTRACT_FEDERATION.md` §12). Both `base` and `head` must be `ready` snapshots; `live` is not allowed.",
       "properties": {
         "base": {
           "description": "Snapshot id (`snap_<hex>`); must be `ready`.",
@@ -2619,7 +2619,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `trace_impact`. Exactly one of endpoint/field/symbol is required.",
+      "description": "Input for `trace_impact` (`docs/CONTRACT_FEDERATION.md` §12). Exactly one of endpoint/field/symbol is required.",
       "properties": {
         "cap": {
           "maximum": 500,
@@ -2758,7 +2758,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `get_coverage` ",
+      "description": "Input for `get_coverage` (`docs/CONTRACT_FEDERATION.md` §12).",
       "properties": {
         "endpoint": {
           "properties": {
@@ -2937,7 +2937,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `resolve_evidence` `refs` accepts GlobalIds or EvidenceRef texts (`<repo>@<sha>:<path>:<line>`).",
+      "description": "Input for `resolve_evidence` (`docs/CONTRACT_FEDERATION.md` §12). `refs` accepts GlobalIds or EvidenceRef texts (`<repo>@<sha>:<path>:<line>`).",
       "properties": {
         "context_lines": {
           "maximum": 20,
@@ -3067,7 +3067,7 @@
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `read_source`. Reads a bounded line range from a file the view's index walked. The §10.7 safety rules apply.",
+      "description": "Input for `read_source` (`docs/CONTRACT_FEDERATION.md` §12). Reads a bounded line range from a file the view's index walked. The §10.7 safety rules apply.",
       "properties": {
         "end": {
           "minimum": 0,
