@@ -61,6 +61,23 @@ All notable changes to LAIN are documented here. Versions follow
   underlying metric is `GraphDatabase::call_graph_file_coverage`
   and has its own regression test.
 
+- **`find_git_workspace_root` no longer refuses a published
+  install whose symlink target lives in the source tree.** The
+  dev-runner heuristic (intended to keep `cargo test` from
+  indexing its own source) compares `current_exe().canonicalize()`
+  to the resolved workspace root. When the binary is installed
+  via a symlink (e.g. `~/.local/bin/lain -> .../target/debug/
+  lain`), the canonical path was inside the tree and the
+  heuristic fired, so `lain oneshot` from inside the source tree
+  failed with "no `.git` found in any parent directory" — a
+  misleading error for a published install. The fix also
+  canonicalizes the symlink's parent directory and applies the
+  same test there. A symlink path *outside* the tree is now
+  treated as a published install even when the symlink target
+  happens to live in the tree. Found by dogfooding Lain on Lain
+  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B2). Three new
+  tests cover the symlink cases.
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call
