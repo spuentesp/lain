@@ -139,6 +139,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 [dev-dependencies]
 tempfile = "3.8"
 proptest = { version = "1.5", features = ["std"] }
+proptest-state-machine = "0.3"
 inventory = "0.2"
 jsonschema = { version = "0.29", default-features = false }
 
@@ -163,6 +164,14 @@ tree-sitter-c-sharp = "0.23"
 tree-sitter-ruby = "0.23"
 tree-sitter-kotlin-ng = "1.1"
 tree-sitter-cli = "0.25"
+
+# `cfg(lain_loom)` (concurrency model checking, see docs/formal/README.md) and
+# `cfg(kani)` (bounded model checking) are set by those tools, not by cargo.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(lain_loom)", "cfg(kani)"] }
+
+[target.'cfg(lain_loom)'.dependencies]
+loom = "0.7"
 
 [lib]
 name = "lain"
