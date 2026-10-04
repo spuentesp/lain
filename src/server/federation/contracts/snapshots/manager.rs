@@ -718,9 +718,7 @@ impl SnapshotManager {
             // what they typed). Look up the job by the spec we
             // *submitted* (with the real source URL) and prefer its
             // `resolved_sha` for the cache key.
-            let source = self
-                .resolve_repo_source_inner(&repo)
-                .unwrap_or_default();
+            let source = self.resolve_repo_source_inner(&repo).unwrap_or_default();
             let spec = JobSpec {
                 repo: repo.clone(),
                 sha: key.sha.clone(),
@@ -1820,7 +1818,10 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
         } else {
             idle_polls += 1;
             if idle_polls == 50 {
-                info!(total_jobs = mgr.runner.total_jobs(), "snapshot worker: idle");
+                info!(
+                    total_jobs = mgr.runner.total_jobs(),
+                    "snapshot worker: idle"
+                );
                 idle_polls = 0;
             }
             // No work right now — sleep briefly and re-check. A

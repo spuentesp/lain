@@ -18,8 +18,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{debug, info};
 use std::sync::Arc;
+use tracing::{debug, info};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};

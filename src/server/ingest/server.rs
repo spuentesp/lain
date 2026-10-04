@@ -313,7 +313,8 @@ impl LainServer {
         let mcp = if let Some(repos_yaml) = self.federation.repos_yaml() {
             match crate::federation::config::FederationConfig::load(repos_yaml) {
                 Ok(cfg) => {
-                    let resolved = crate::server::federation::loader::resolve_data_dir(cfg, repos_yaml);
+                    let resolved =
+                        crate::server::federation::loader::resolve_data_dir(cfg, repos_yaml);
                     let cache = crate::federation::contracts::index_cache::IndexCache::new(
                         &resolved.data_dir,
                     );
@@ -337,14 +338,14 @@ impl LainServer {
 
         let mcp = mcp
             .with_status(
-            Some(transport),
-            Some(port),
-            self.lifecycle.started_at(),
-            self.refresh.sync_status().last_sync_at_handle(),
-            self.refresh.sync_status().last_error_handle(),
-        )
-        .with_reload_bus(self.hot_reload.reload_bus())
-        .with_server(server_arc);
+                Some(transport),
+                Some(port),
+                self.lifecycle.started_at(),
+                self.refresh.sync_status().last_sync_at_handle(),
+                self.refresh.sync_status().last_error_handle(),
+            )
+            .with_reload_bus(self.hot_reload.reload_bus())
+            .with_server(server_arc);
         match transport {
             super::config::Transport::Http => mcp
                 .run_http(addr)
