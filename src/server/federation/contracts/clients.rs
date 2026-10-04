@@ -423,7 +423,12 @@ fn canonical_module(path: &str) -> String {
 /// not match `constants` (no space), so a real keyword + space
 /// is the boundary we need.
 const ASSIGN_PREFIXES: &[&str] = &[
-    "export var ", "export let ", "export const ", "var ", "let ", "const ",
+    "export var ",
+    "export let ",
+    "export const ",
+    "var ",
+    "let ",
+    "const ",
 ];
 
 fn extract_assigned_name(line: &str) -> Option<String> {
@@ -554,15 +559,21 @@ fn extract_base_value(rest: &str, key: &str) -> Option<BaseValue> {
 /// review §S10); the only deviation is the trailing-punctuation
 /// strip — `host_env_name` requires a clean shape but the value
 /// here often carries `,` / `}` / `)` / `;` from the enclosing
-/// object literal.
+/// object literal. The closing `]` of `process.env["X"]` is part
+/// of the syntax, not trailing punctuation, so it must NOT be
+/// stripped (review finding 2026-10-03: stripping it turned
+/// `process.env["BILLING_URL"]` into `process.env["BILLING_URL`
+/// and `host_env_name` returned `None`).
 #[allow(clippy::manual_pattern_char_comparison)]
 fn extract_process_env_name(s: &str) -> Option<&str> {
     // `host_env_name` requires a clean shape; the value here often
     // carries `,` / `}` / `)` / `;` from the enclosing object
-    // literal. Strip those before delegating.
+    // literal. Strip those before delegating. Note: `]` is
+    // deliberately NOT in this set — it is the closing bracket of
+    // the `process.env["X"]` syntax and must survive the trim.
     let t = s
         .trim()
-        .trim_end_matches(|c: char| matches!(c, ',' | ')' | '}' | ';' | ' ' | '\t' | '\n' | ']'));
+        .trim_end_matches(|c: char| matches!(c, ',' | ')' | '}' | ';' | ' ' | '\t' | '\n'));
     if !t.starts_with("process.env") {
         return None;
     }
@@ -905,5 +916,51 @@ const orders = axios.create({baseURL: 'https://orders'});
         assert_eq!(ClientLibrary::Requests.wire_name(), "requests");
         assert_eq!(ClientLibrary::Aiohttp.wire_name(), "aiohttp");
         assert_eq!(ClientLibrary::Custom.wire_name(), "custom");
+    }
+
+    /// Regression for the 2026-10-03 review finding: the
+    /// `trim_end_matches` in `extract_process_env_name` must NOT
+    /// strip `]`, which is the closing bracket of the
+    /// `process.env["X"]` syntax. Before the fix, the trim
+    /// produced `process.env["BILLING_URL"` (no closing bracket)
+    /// and `host_env_name` returned `None` for the value of a
+    /// `ky.create({prefixUrl: process.env["BILLING_URL"]})`
+    /// call.
+    #[test]
+    fn extract_process_env_name_keeps_closing_bracket() {
+        // The exact shape that broke end-to-end (`});` trailing).
+        assert_eq!(
+            extract_process_env_name(r#"process.env["BILLING_URL"]});"#),
+            Some("BILLING_URL"),
+        );
+        // Clean bracketed form, no trailing punctuation.
+        assert_eq!(
+            extract_process_env_name(r#"process.env["BILLING_URL"]"#),
+            Some("BILLING_URL"),
+        );
+        // Trailing `},` (object literal end).
+        assert_eq!(
+            extract_process_env_name(r#"process.env["BILLING_URL"]}, "#),
+            Some("BILLING_URL"),
+        );
+        // Trailing `}` only.
+        assert_eq!(
+            extract_process_env_name(r#"process.env["BILLING_URL"]}"#),
+            Some("BILLING_URL"),
+        );
+        // Dotted form still works (unchanged behavior).
+        assert_eq!(
+            extract_process_env_name("process.env.ORDERS_API_URL"),
+            Some("ORDERS_API_URL"),
+        );
+        assert_eq!(
+            extract_process_env_name("process.env.ORDERS_API_URL});"),
+            Some("ORDERS_API_URL"),
+        );
+        // Negative: not a process.env expression.
+        assert_eq!(
+            extract_process_env_name(r#"config["BILLING_URL"]});"#),
+            None
+        );
     }
 }
