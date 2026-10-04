@@ -38,6 +38,18 @@ All notable changes to LAIN are documented here. Versions follow
   that reads to EOF. The new Quickstart row links the reader to
   `DOGFOODING_REPORT.md` (B7) for the full trace.
 
+- **`get_audit_log` is now advertised by default.** The audit log
+  (the durable counterpart to the in-memory presence state) used to
+  live in the `social` package, so a solo session asking "what
+  changed while I was away?" had to `load_package("social")` first
+  even when the answer was just their own previous run's events.
+  Moved to `core` (Level::Plumbing) so the default 19-tool
+  surface includes it. The 6 other `social` tools
+  (`who_am_i`, `list_active_agents`, `list_subagents`,
+  `unregister_agent`, `detect_overlap`) stay opt-in. Found by
+  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B10).
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call

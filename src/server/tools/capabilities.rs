@@ -665,7 +665,15 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     c(
         "get_audit_log",
-        Package::Social,
+        // Promoted from Social to Core (B10, 2026-10-04): the audit
+        // log is the durable counterpart to the in-memory presence
+        // state and is useful in solo sessions too. With the old
+        // placement an agent asking "what changed while I was away?"
+        // had to load the `social` package first, even when the
+        // answer was just the events from their own previous run.
+        // Surfaced as a Plumbing-level tool: cheap, read-only, and
+        // safe to advertise by default.
+        Package::Core,
         Level::Plumbing,
         "recent coordination events for this workspace",
         "reviewing what happened while you were away",
