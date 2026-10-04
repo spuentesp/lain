@@ -5,6 +5,119 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- **`LAIN_ONESHOT_TIMEOUT` default bumped from 60s to 600s.** The
+  previous default was too short for a cold reindex on a non-trivial
+  repo (Lain-on-Lain in 2026-10-04: ~5 min for 41k LOC + LSP
+  prewarm), and the resulting "no tools/call response from `lain
+  mcp` within 60s" error didn't tell the user whether the server was
+  busy indexing or hung. The new default matches
+  `LAIN_REINDEX_TIMEOUT`. Override with
+  `LAIN_ONESHOT_TIMEOUT=<seconds>` for tighter pipelines. Found by
+  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B6).
+
+- **`get_coupling_radar` doc clarified** — the section heading
+  "Files that co-change with this one" suggested an arg named
+  `path`; the input schema actually requires `symbol`. The doc now
+  states the arg name explicitly and notes that the value is a file
+  path. New lint
+  `scripts/check-tool-doc-args.py` validates every JSON example in
+  `docs/quickstart-tools.md` against its tool's input schema, so
+  this class of drift can't recur without failing the build. Found
+  by dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B9).
+
+- **Quickstart now warns about the `head -N` pipe footgun.** A user
+  running `lain oneshot find_anchors | head -60` will see the
+  upstream `lain mcp` process aborted by `SIGPIPE` when `head` exits
+  on a cold graph, leaving a partial `graph.bin` on disk. The
+  symptom is "no tools/call response from `lain mcp`" plus a
+  corrupt on-disk graph; the fix is to pipe to a file or to a tool
+  that reads to EOF. The new Quickstart row links the reader to
+  `DOGFOODING_REPORT.md` (B7) for the full trace.
+
+- **`get_audit_log` is now advertised by default.** The audit log
+  (the durable counterpart to the in-memory presence state) used to
+  live in the `social` package, so a solo session asking "what
+  changed while I was away?" had to `load_package("social")` first
+  even when the answer was just their own previous run's events.
+  Moved to `core` (Level::Plumbing) so the default 19-tool
+  surface includes it. The 6 other `social` tools
+  (`who_am_i`, `list_active_agents`, `list_subagents`,
+  `unregister_agent`, `detect_overlap`) stay opt-in. Found by
+  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B10).
+
+- **`get_health` now reports per-file call-graph coverage.** A new
+  line shows "X / Y files (Z%) have at least one `Calls` or
+  `Uses` edge", with a warning when uncovered > 0. The same
+  number was already in `find_dead_code`'s "⚠ N files have no
+  call edges" line, but only visible to users who ran that tool
+  (B4 in 2026-10-04 dogfooding: 198 of 224 files in `scripts/`
+  and `tests/` were uncovered). `get_health` is the first place
+  an operator looks, so the number lives there now too. The
+  underlying metric is `GraphDatabase::call_graph_file_coverage`
+  and has its own regression test.
+
+- **`find_git_workspace_root` no longer refuses a published
+  install whose symlink target lives in the source tree.** The
+  dev-runner heuristic (intended to keep `cargo test` from
+  indexing its own source) compares `current_exe().canonicalize()`
+  to the resolved workspace root. When the binary is installed
+  via a symlink (e.g. `~/.local/bin/lain -> .../target/debug/
+  lain`), the canonical path was inside the tree and the
+  heuristic fired, so `lain oneshot` from inside the source tree
+  failed with "no `.git` found in any parent directory" — a
+  misleading error for a published install. The fix also
+  canonicalizes the symlink's parent directory and applies the
+  same test there. A symlink path *outside* the tree is now
+  treated as a published install even when the symlink target
+  happens to live in the tree. Found by dogfooding Lain on Lain
+  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B2). Three new
+  tests cover the symlink cases.
+
+- **`find_anchors` now excludes test and script paths by
+  default.** The 2026-10-04 dogfooding found the top of the
+  anchor list dominated by Python test fixtures
+  (`uc_presence_register_heartbeat_unregister` in
+  `scripts/use_cases_e2e.py`, `e_setup_writes_prompt_md` in
+  `scripts/test_all_promises.py`) because tests are heavily
+  called by other tests and scripts by other scripts. A user
+  trusting rank over path lands on a test fixture, not a real
+  architectural pillar. The default now filters paths under
+  `tests/`, `*_test*` files, and `scripts/`. Opt in with
+  `include_tests=true` for the raw list. The new
+  `is_anchor_excluded_path` predicate has its own regression
+  test covering the production's expected `excluded` and `kept`
+  cases.
+
+- **`run_enrichment` promoted to core, Quickstart now documents
+  the `Calls: 0` recovery path.** B3 (2026-10-04): the on-disk
+  `graph.bin` from a prior build had zero `Calls` edges even
+  though `rust-analyzer` was installed — a silent-absence
+  failure mode that made every impact tool return empty. The
+  headline B11 fix already surfaces the absence as a banner;
+  this commit makes the recovery reachable without first
+  loading a package. The Quickstart's first-aid table now
+  spells out the recipe: from inside the repo, run
+  `lain reindex` to rebuild the graph from source (~5 min for
+  41k LOC). The lighter pass `run_enrichment` is in core
+  alongside `get_audit_log`, so an agent seeing the B11
+  warning can ask for it without `load_package("ops")`.
+
+- **`get_health` now lists every declared `EdgeType`**, even when the
+  count is zero. A graph with no `Calls` edges used to omit the
+  `Calls: 0` line entirely, so an operator on a repo whose call
+  graph never resolved (LSP didn't start, every file is a script)
+  couldn't tell from `get_health` alone that the impact tools would
+  return empty. The histogram is now seeded from
+  `EdgeType::all()` so every variant is reported. A banner line
+  is also emitted when `Calls == 0` to make the silent-absence
+  mode loud. Surfaced by dogfooding Lain on Lain
+  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B11).
+
 ## [0.9.0] - 2026-10-04
 
 LAIN 0.9 introduces cross-repo contract federation. For every
