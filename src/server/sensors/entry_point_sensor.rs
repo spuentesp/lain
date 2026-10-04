@@ -1,4 +1,4 @@
-//! Entry-point sensor (`docs/CONTRACT_FEDERATION.md` §6.6).
+//! Entry-point sensor (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §6.6).
 //!
 //! Sets `GraphNode.entry` on function nodes so `used_by` (`§10.9`) can say
 //! why code runs:

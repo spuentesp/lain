@@ -1,15 +1,29 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "list_unresolved input",
-  "description": "Input for `list_unresolved` (`docs/CONTRACT_FEDERATION.md` §12). Lists every ambiguous and unresolved consumer with the candidate endpoints that could match it.",
+  "description": "Input for `list_unresolved` Lists every ambiguous and unresolved consumer with the candidate endpoints that could match it.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "snapshot": { "type": "string" },
-    "repo": { "type": "string" },
-    "service": { "type": "string" },
-    "cursor": { "type": "string" },
-    "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+    "snapshot": {
+      "type": "string"
+    },
+    "repo": {
+      "type": "string"
+    },
+    "service": {
+      "type": "string"
+    },
+    "cursor": {
+      "type": "string"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    }
   },
-  "required": ["snapshot"]
+  "required": [
+    "snapshot"
+  ]
 }

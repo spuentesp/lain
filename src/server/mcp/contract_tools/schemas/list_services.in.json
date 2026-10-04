@@ -1,14 +1,16 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "list_services input",
-  "description": "Input for `list_services` (`docs/CONTRACT_FEDERATION.md` §12). On `live` only — PR 16 scope; PR 11/13 will route the value through the snapshot manager.",
+  "description": "Input for `list_services`. On `live` only \u2014 PR 16 scope; PR 11/13 will route the value through the snapshot manager.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "snapshot": {
       "type": "string",
       "description": "Snapshot id (`live` for the in-process view; PR 11 surfaces named snapshots)",
-      "enum": ["live"]
+      "enum": [
+        "live"
+      ]
     },
     "repo": {
       "type": "string",
@@ -16,7 +18,7 @@
     },
     "cursor": {
       "type": "string",
-      "description": "Opaque paging cursor (base64url of `{v:1, after, q}`). Reused with different args → `cursor_mismatch`."
+      "description": "Opaque paging cursor (base64url of `{v:1, after, q}`). Reused with different args \u2192 `cursor_mismatch`."
     },
     "limit": {
       "type": "integer",
@@ -25,5 +27,7 @@
       "description": "Max items returned (default 100, max 1000)."
     }
   },
-  "required": ["snapshot"]
+  "required": [
+    "snapshot"
+  ]
 }

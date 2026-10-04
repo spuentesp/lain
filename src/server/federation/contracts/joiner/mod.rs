@@ -1,4 +1,4 @@
-//! Contract joiner (`docs/CONTRACT_FEDERATION.md` §5.3 + §7.2 /
+//! Contract joiner (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §5.3 + §7.2 /
 //! §7.3 / §7.4 / §7.5 / §7.6).
 //!
 //! `ContractJoiner::run(nodes, edges, config) -> JoinOutput` is

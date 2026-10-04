@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "list_contracts input",
-  "description": "Input for `list_contracts` (`docs/CONTRACT_FEDERATION.md` §12). Filters endpoints by service, repo, and kind; supports paging via `cursor`/`limit`.",
+  "description": "Input for `list_contracts` Filters endpoints by service, repo, and kind; supports paging via `cursor`/`limit`.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -19,7 +19,10 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["http", "topic"],
+      "enum": [
+        "http",
+        "topic"
+      ],
       "description": "Filter by contract kind."
     },
     "cursor": {
@@ -33,5 +36,7 @@
       "description": "Max items per page (default 100, max 1000)."
     }
   },
-  "required": ["snapshot"]
+  "required": [
+    "snapshot"
+  ]
 }

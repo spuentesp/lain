@@ -1,10 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "get_snapshot input",
-  "description": "Input for `get_snapshot` (`docs/CONTRACT_FEDERATION.md` §12). Reads the on-disk record and refreshes `last_access_unix` per §8.4.",
+  "description": "Input for `get_snapshot`. Reads the on-disk record and refreshes `last_access_unix` per \u00a78.4.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["snapshot"],
+  "required": [
+    "snapshot"
+  ],
   "properties": {
     "snapshot": {
       "type": "string",
@@ -14,7 +16,7 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 60000,
-      "description": "Maximum time to wait for a non-terminal state. Defaults to 5,000 ms; capped at 60,000 ms (§10.5)."
+      "description": "Maximum time to wait for a non-terminal state. Defaults to 5,000 ms; capped at 60,000 ms (\u00a710.5)."
     }
   }
 }

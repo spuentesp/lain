@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "get_contract input",
-  "description": "Input for `get_contract` (`docs/CONTRACT_FEDERATION.md` §12). Returns providers, schema fields and bound consumers for one endpoint.",
+  "description": "Input for `get_contract` Returns providers, schema fields and bound consumers for one endpoint.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -18,5 +18,8 @@
       "description": "Optional service filter; without it every service providing `key` is returned."
     }
   },
-  "required": ["snapshot", "key"]
+  "required": [
+    "snapshot",
+    "key"
+  ]
 }
