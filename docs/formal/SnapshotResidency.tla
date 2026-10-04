@@ -5,7 +5,6 @@
 \* granularity, targeting the four suspected bugs in spec §9.2.
 \*
 \* Spec: docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md §9.2
-\* Plan: docs/superpowers/plans/2026-10-02-coverage-and-protocols.md
 \*
 \* Code mapping (TLA+ → Rust):
 \*   - `resident: SUBSET SnapshotId`      ↔ `resident: Mutex<BTreeMap<…>>`
