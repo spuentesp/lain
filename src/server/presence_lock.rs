@@ -420,6 +420,14 @@ pub fn read_nonce(lock_path: &Path) -> String {
 /// construction. The output stays a single path component (no `/`),
 /// and the result remains readable in `ls` (only ASCII alphanumerics,
 /// `_`, `-`, `%`, and hex digits).
+///
+/// Percent-encoding triples every separator, so a deep path can exceed the
+/// 255-byte `NAME_MAX` once `.lock-<uuid>` is appended (the acquire then
+/// failed with `ENAMETOOLONG` and surfaced as a bogus conflict with an empty
+/// holder). Past [`MAX_SANITIZED_LEN`] the tail is replaced by `~` and a
+/// 128-bit BLAKE3 digest of the whole encoded name. `~` is always
+/// percent-encoded in a plain name, so hashed and plain names cannot collide
+/// and injectivity is preserved up to a 2^-128 hash collision.
 fn sanitize(path: &Path) -> String {
     let bytes = path.to_string_lossy();
     let mut out = String::with_capacity(bytes.len());
@@ -431,8 +439,22 @@ fn sanitize(path: &Path) -> String {
             let _ = write!(out, "%{:02X}", b);
         }
     }
+    if out.len() > MAX_SANITIZED_LEN {
+        let digest = blake3::hash(out.as_bytes());
+        out.truncate(SANITIZED_KEEP_LEN);
+        out.push('~');
+        for byte in &digest.as_bytes()[..16] {
+            use std::fmt::Write;
+            let _ = write!(out, "{byte:02x}");
+        }
+    }
     out
 }
+
+/// `NAME_MAX` (255) minus `.lock-` (6) and a 36-byte UUID nonce, with margin.
+const MAX_SANITIZED_LEN: usize = 200;
+/// Readable head kept when hashing; `+ 1 + 32` stays within the limit.
+const SANITIZED_KEEP_LEN: usize = 160;
 
 /// Outcome of attempting to refresh an advisory filesystem lock lease.
 #[derive(Debug, PartialEq, Eq)]
@@ -776,3 +798,7 @@ mod tests {
     /// process-wide env table.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
+
+#[cfg(test)]
+#[path = "presence_lock_verification.rs"]
+mod verification;
