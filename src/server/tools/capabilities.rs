@@ -794,10 +794,18 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     c(
         "run_enrichment",
-        Package::Ops,
+        // Promoted from Ops to Core (B3, 2026-10-04): the
+        // recovery path for "get_health says Calls: 0". The
+        // existing recovery was `lain reindex` (full rebuild)
+        // and `run_enrichment` (lighter pass). With this in
+        // core, an agent seeing the B11 warning banner
+        // ("⚠ call graph is empty") can ask for the lighter
+        // pass without first having to `load_package("ops")`.
+        // Full reindex is still a CLI subcommand.
+        Package::Core,
         Level::Plumbing,
         "force a full architectural enrichment pass",
-        "graph metadata looks stale",
+        "graph metadata looks stale, or `get_health` reports Calls: 0",
     ),
     c(
         "sync_state",

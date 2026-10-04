@@ -93,6 +93,20 @@ All notable changes to LAIN are documented here. Versions follow
   test covering the production's expected `excluded` and `kept`
   cases.
 
+- **`run_enrichment` promoted to core, Quickstart now documents
+  the `Calls: 0` recovery path.** B3 (2026-10-04): the on-disk
+  `graph.bin` from a prior build had zero `Calls` edges even
+  though `rust-analyzer` was installed — a silent-absence
+  failure mode that made every impact tool return empty. The
+  headline B11 fix already surfaces the absence as a banner;
+  this commit makes the recovery reachable without first
+  loading a package. The Quickstart's first-aid table now
+  spells out the recipe: from inside the repo, run
+  `lain reindex` to rebuild the graph from source (~5 min for
+  41k LOC). The lighter pass `run_enrichment` is in core
+  alongside `get_audit_log`, so an agent seeing the B11
+  warning can ask for it without `load_package("ops")`.
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call
