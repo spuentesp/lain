@@ -759,7 +759,11 @@ impl GraphDatabase {
     pub fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
 
-        let targets: std::collections::HashSet<(String, String, EdgeType)> = edges
+        // B5 (2026-10-04): append a single batched
+        // `GraphOp::RemoveEdges` op to the WAL before mutating
+        // in-memory. The whole batch is one frame; replay
+        // reconstructs it atomically.
+        let endpoints: Vec<(String, String, EdgeType)> = edges
             .iter()
             .map(|e| {
                 (
@@ -769,6 +773,16 @@ impl GraphDatabase {
                 )
             })
             .collect();
+        if let Err(e) = wal::append_op(
+            &wal::wal_path_for(&self.persistence_path),
+            &wal::GraphOp::RemoveEdges {
+                endpoints: endpoints.clone(),
+            },
+        ) {
+            return Err(LainError::Database(format!("wal append: {e}")));
+        }
+        let targets: std::collections::HashSet<(String, String, EdgeType)> =
+            endpoints.into_iter().collect();
 
         let mut removed = 0usize;
         {

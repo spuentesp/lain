@@ -423,4 +423,51 @@ mod tests {
         assert_eq!(seen_nodes, 3, "insert_nodes_batch must append 3 frames");
         assert_eq!(seen_edges, 2, "insert_edges_batch must append 2 frames");
     }
+
+    #[test]
+    fn remove_edges_persists_to_wal() {
+        // B5 (2026-10-04): `remove_edges` is the matching
+        // batch removal path. It must append a single
+        // `GraphOp::RemoveEdges` op to the WAL so a torn
+        // snapshot can reconstruct which edges were
+        // removed.
+        use crate::graph::GraphDatabase;
+        use crate::schema::{EdgeType, NodeType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = dir.path().join("graph.bin");
+        let wal = wal_path_for(&snapshot);
+
+        let db = GraphDatabase::new(&snapshot).unwrap();
+        let a = GraphNode::new(NodeType::Function, "a".into(), "/src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "/src/b.rs".into());
+        db.upsert_node(a.clone()).unwrap();
+        db.upsert_node(b.clone()).unwrap();
+        let edge = GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone());
+        db.upsert_edge(edge.clone()).unwrap();
+
+        // Snapshot the WAL so we can compare deltas; truncate
+        // would also work but this keeps the UpsertNode
+        // frames visible.
+        let before = std::fs::metadata(&wal).unwrap().len();
+        db.remove_edges(&[edge.clone()]).unwrap();
+        let after = std::fs::metadata(&wal).unwrap().len();
+        assert!(after > before, "remove_edges must append at least one frame");
+
+        // The WAL tail must contain a single `RemoveEdges` op
+        // with the (source, target, type) triple.
+        let mut seen = 0;
+        replay(&wal, |op| {
+            if let GraphOp::RemoveEdges { endpoints } = op {
+                assert_eq!(endpoints.len(), 1);
+                assert_eq!(endpoints[0].0, a.id);
+                assert_eq!(endpoints[0].1, b.id);
+                assert_eq!(endpoints[0].2, EdgeType::Calls);
+                seen += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, 1, "the WAL must record one RemoveEdges op");
+    }
 }
