@@ -30,3 +30,7 @@ FsLeaseGuard_Stall                | FsLeaseGuard                      | fail | r
 FsLease                           | FsLease                           | fail | scan-then-create (same bug, fine-grained)
 FsLease_Excl                      | FsLease                           | pass | fixed-path O_EXCL lease, no expiry
 FsLease_ExclExpiry                | FsLease                           | fail | residual: expiry + steal needs fencing tokens
+JobRegistry_RacyCap               | JobRegistry                       | fail | pre-fix: cap counted and inserted under separate locks
+JobRegistry_PanicLeak             | JobRegistry                       | fail | pre-fix: a panicking job stays Running (slot leak)
+JobRegistry_GhostRestore          | JobRegistry                       | fail | pre-fix: persisted Running jobs reload as Running
+JobRegistry_Fixed                 | JobRegistry                       | pass | fixed: job_store::{try_start,finish,restore}

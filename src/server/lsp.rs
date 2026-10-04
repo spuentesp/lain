@@ -1445,23 +1445,10 @@ impl LspMultiplexer {
         }
     }
 
-    /// Record one LSP restart attempt for `binary`. Sliding-window
-    /// budget: if `LSP_RESTART_BUDGET` restarts happen within
-    /// `LSP_RESTART_WINDOW`, mark the binary unavailable. Otherwise
-    /// the count is informational (logged at DEBUG for operator
-    /// tracing).
-    ///
-    /// `now_ms` defaults to the monotonic clock via `unix_millis_now`;
-    /// the explicit parameter exists so tests can pin time without
-    /// racing the wall clock or relying on `Instant::now()` happening to
-    /// be far enough into the process for `saturating_sub` arithmetic
-    /// to make sense.
-    fn record_restart(&mut self, binary: &str) {
-        let now_ms = unix_millis_now();
-        self.record_restart_at(binary, now_ms);
-    }
-
-    /// Same as [`Self::record_restart`] but with the window reference
+    /// Record one LSP restart attempt for `binary` at `now_ms`: sliding-window
+    /// budget — more than `LSP_RESTART_BUDGET` restarts inside
+    /// `LSP_RESTART_WINDOW` mark the binary unavailable. Same as the old
+    /// wall-clock variant but with the window reference
     /// time pinned explicitly. Visible for tests.
     fn record_restart_at(&mut self, binary: &str, now_ms: u64) {
         let window_ms = LSP_RESTART_WINDOW.as_millis() as u64;

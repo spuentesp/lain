@@ -31,7 +31,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task;
 use tracing::{error, info};
-use uuid::Uuid;
 
 /// Shared registry types used by interactive tool responses. Keeping these
 /// aliases in the tools module gives handlers a stable vocabulary and avoids
@@ -191,12 +190,7 @@ impl ToolExecutor {
             let jobs_path_for_log = jobs_path.clone();
             task::spawn(async move {
                 match serde_json::from_str::<Vec<JobInfo>>(&contents) {
-                    Ok(vec) => {
-                        let mut guard = jobs_registry.lock();
-                        for j in vec {
-                            guard.insert(j.id.clone(), j);
-                        }
-                    }
+                    Ok(vec) => crate::server::job_store::restore(&jobs_registry, vec),
                     // A store that exists but will not parse means jobs
                     // were lost, most likely to an interrupted write.
                     // Skipping in silence made that indistinguishable
@@ -321,6 +315,11 @@ impl ToolExecutor {
     async fn persist_jobs_snapshot(
         jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     ) -> Result<(), LainError> {
+        // Snapshot AND write under one lock: with the snapshot taken first and
+        // the write racing, a slower writer holding an OLDER snapshot could
+        // land last and roll `jobs.json` back past a newer completion.
+        static PERSIST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _ordered = PERSIST.lock().await;
         let path = std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
         let vec: Vec<JobInfo> = {
             let guard = jobs.lock();
@@ -371,58 +370,43 @@ impl ToolExecutor {
                     let name_owned = name.to_string();
 
                     const MAX_CONCURRENT_JOBS: usize = 10;
-                    {
-                        let guard = self.jobs.lock();
-                        let running = guard
-                            .values()
-                            .filter(|j| matches!(j.state, JobState::Running))
-                            .count();
-                        if running >= MAX_CONCURRENT_JOBS {
-                            return Err(LainError::Mcp(format!(
-                                "Too many concurrent jobs (max {})",
-                                MAX_CONCURRENT_JOBS
-                            )));
-                        }
-                    }
-
-                    let job_id = Uuid::new_v4().to_string();
-                    let job = JobInfo {
-                        id: job_id.clone(),
-                        created_at: std::time::SystemTime::now(),
-                        state: JobState::Running,
-                    };
-
-                    {
-                        let mut guard = self.jobs.lock();
-                        guard.insert(job_id.clone(), job.clone());
-                    }
+                    // Count and insert in one critical section (CapBound,
+                    // docs/formal/JobRegistry.tla).
+                    let job_id =
+                        crate::server::job_store::try_start(&self.jobs, MAX_CONCURRENT_JOBS)
+                            .map_err(|_| {
+                                LainError::Mcp(format!(
+                                    "Too many concurrent jobs (max {})",
+                                    MAX_CONCURRENT_JOBS
+                                ))
+                            })?;
 
                     let jobs_registry = Arc::clone(&self.jobs);
                     let webhooks = Arc::clone(&self.job_webhooks);
                     let job_id_clone = job_id.clone();
                     task::spawn(async move {
-                        let res = exec.call_inner(&name_owned, Some(&owned)).await;
+                        // The tool runs in its own task so a panic surfaces as
+                        // a `JoinError` here instead of unwinding past the
+                        // bookkeeping and leaving the job `Running` forever
+                        // (which also leaked one of the concurrency slots).
+                        let res = match task::spawn(async move {
+                            exec.call_inner(&name_owned, Some(&owned)).await
+                        })
+                        .await
                         {
-                            let mut guard = jobs_registry.lock();
-                            if let Some(j) = guard.get_mut(&job_id_clone) {
-                                match &res {
-                                    Ok(out) => {
-                                        j.state = JobState::Completed {
-                                            success: true,
-                                            output: Some(out.clone()),
-                                            error: None,
-                                        }
-                                    }
-                                    Err(e) => {
-                                        j.state = JobState::Completed {
-                                            success: false,
-                                            output: None,
-                                            error: Some(e.to_string()),
-                                        }
-                                    }
-                                }
-                            }
-                        } // guard dropped here — must release before webhook/persist
+                            Ok(res) => res,
+                            Err(join_err) => Err(LainError::Other(format!(
+                                "background job panicked or was cancelled: {join_err}"
+                            ))),
+                        };
+                        crate::server::job_store::finish(
+                            &jobs_registry,
+                            &job_id_clone,
+                            match &res {
+                                Ok(out) => Ok(out.clone()),
+                                Err(e) => Err(e.to_string()),
+                            },
+                        );
 
                         let hooks = {
                             let h = webhooks.lock().await;
@@ -536,6 +520,10 @@ impl ToolExecutor {
                     None => return Err(LainError::NotFound(format!("Job not found: {}", job_id))),
                 }
             }
+            // Test-only: lets the job registry's panic handling be exercised
+            // through the real executor. Not compiled into release builds.
+            #[cfg(test)]
+            "debug_panic" => panic!("debug_panic: deliberate test panic"),
             "debug_sleep" => {
                 let secs = args.get("secs").and_then(|v| v.as_u64()).unwrap_or(1);
                 tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
@@ -1513,6 +1501,51 @@ mod tests {
         assert!(
             banner.contains("0s"),
             "future timestamp must clamp to 0s, not panic: {banner}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod job_panic_tests {
+    use super::*;
+
+    /// A background tool that panics must end as a *failed* job, not stay
+    /// `Running` forever (JobRegistry.tla, `NoGhost`) — and must free its slot.
+    #[tokio::test]
+    async fn a_panicking_background_job_is_recorded_as_failed_and_frees_its_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("LAIN_JOB_STORE", tmp.path().join("jobs.json"));
+        let graph = crate::graph::GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let exec = create_test_executor_with_graph(graph);
+
+        let mut args = Map::new();
+        args.insert("background".into(), Value::Bool(true));
+        let resp = exec.call("debug_panic", Some(&args)).await.unwrap();
+        let id = serde_json::from_str::<Value>(&resp).unwrap()["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut status = Map::new();
+        status.insert("job_id".into(), Value::String(id));
+        let mut last = String::new();
+        for _ in 0..100 {
+            last = exec.call("get_job_status", Some(&status)).await.unwrap();
+            if !last.contains("Running") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !last.contains("Running"),
+            "job stuck Running after panic: {last}"
+        );
+        assert!(last.contains("panicked"), "failure not recorded: {last}");
+        assert!(last.contains("\"success\":false"), "{last}");
+        assert_eq!(
+            crate::server::job_store::try_start(&exec.jobs, 1).map(|_| ()),
+            Ok(()),
+            "the panicked job still occupies a slot"
         );
     }
 }
