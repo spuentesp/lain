@@ -13,14 +13,14 @@
 //! the tools touch snapshot state.
 
 use crate::server::time::now_unix;
+use crate::sync::{AtomicUsize, Ordering};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::LainError;
 use crate::federation::contracts::config::ContractFederationConfig;
@@ -2961,3 +2961,7 @@ repos:
         );
     }
 }
+
+#[cfg(lain_loom)]
+#[path = "manager_verification.rs"]
+mod verification;
