@@ -789,6 +789,27 @@ impl FileOccupancy {
         }
     }
 
+    /// `agent`'s strongest intent across *every* scope on this file —
+    /// file-level included. `Edit` if any scope is an Edit, `Read` if all
+    /// are Reads, `None` if the agent holds nothing here.
+    ///
+    /// Conflict checks must use this, not `intent_for(.., "__file_level__")`
+    /// with `any_symbol_intent` as a fallback: that lookup stops at a
+    /// file-level `Read` and never sees the same agent's symbol-level
+    /// `Edit`, so a file-level Edit by someone else was granted over a live
+    /// edit (found by `presence_verification.rs`).
+    fn strongest_intent(&self, agent: &AgentId) -> Option<ClaimIntent> {
+        let mut saw_read = false;
+        for per_agent in self.intents.values() {
+            match per_agent.get(agent) {
+                Some(ClaimIntent::Edit) => return Some(ClaimIntent::Edit),
+                Some(ClaimIntent::Read) => saw_read = true,
+                None => {}
+            }
+        }
+        saw_read.then_some(ClaimIntent::Read)
+    }
+
     /// Last-touched timestamp for `agent` on `sym`. Mirrors
     /// `intent_for`. Falls back to `UNIX_EPOCH` when absent — callers
     /// turn this directly into a `ConflictEntry.last_seen_unix`
@@ -1215,9 +1236,7 @@ impl OccupancyMap {
                     // deserves to know someone is rewriting the file
                     // while it reads. Advisory, never blocking.
                     for other in entry.agents.iter().filter(|a| *a != agent_id) {
-                        let holder_intent = entry
-                            .intent_for(other, "__file_level__")
-                            .or_else(|| entry.any_symbol_intent(other));
+                        let holder_intent = entry.strongest_intent(other);
                         if holder_intent == Some(ClaimIntent::Edit) {
                             advisories.push(ConflictEntry {
                                 agent_id: other.clone(),
@@ -1258,10 +1277,8 @@ impl OccupancyMap {
                             // (no conflict). Any Edit → Edit (conflict,
                             // and the reported intent is the actual
                             // holder intent, not a synthetic default).
-                            let other_intent = entry
-                                .intent_for(other, "__file_level__")
-                                .or_else(|| entry.any_symbol_intent(other))
-                                .unwrap_or(ClaimIntent::Edit);
+                            let other_intent =
+                                entry.strongest_intent(other).unwrap_or(ClaimIntent::Edit);
                             if other_intent != ClaimIntent::Edit {
                                 continue;
                             }
@@ -3678,3 +3695,7 @@ mod load_persistence_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "presence_verification.rs"]
+mod verification;

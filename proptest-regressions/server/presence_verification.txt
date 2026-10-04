@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ce5688e3e8fc5029030015c3310658796d1ba166415a9cea6ec7955ba9fa8a33 # shrinks to (initial_state, transitions, seen_counter) = ({}, [Claim("b", [Req { path: "zz_verif_p2.rs", syms: ["s2"], intent: Edit }]), Claim("b", [Req { path: "zz_verif_p2.rs", syms: [], intent: Read }]), Claim("c", [Req { path: "zz_verif_p2.rs", syms: [], intent: Edit }])], None)
