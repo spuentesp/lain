@@ -5,6 +5,23 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+### Added
+
+- **B5 design: graph WAL for torn-write recovery** -
+  `docs/formal/GraphWal.tla` + `.cfg` + `-impl.md`. The spec
+  models the on-disk state machine: `log` (the post-checkpoint
+  WAL tail) and `checkpoint` (the last atomic `graph.bin`
+  snapshot). The durable history is `checkpoint \o log`.
+  Steady-state actions: `AppendOp`, `Checkpoint` (truncate the
+  WAL), `SoftCheckpoint` (record without truncating);
+  recovery actions: `Crash`, `RecoveryComplete` (rebuild
+  in-memory state from durable history). TLC checks
+  3 ops, checkpoint size 2, log cap 4 - 85,672 states, 28,796
+  distinct, depth 11; all invariants hold. The Rust-side
+  implementation (a `GraphOp` enum, an fsync-after-write WAL,
+  CRC-checked frame decoding, periodic checkpoint task) is a
+  follow-up commit on this branch.
+
 ### Fixed
 
 - **`LAIN_ONESHOT_TIMEOUT` default bumped from 60s to 600s.** The
