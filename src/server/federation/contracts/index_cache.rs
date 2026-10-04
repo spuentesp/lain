@@ -127,6 +127,14 @@ pub fn cache_root(data_dir: &Path) -> PathBuf {
     data_dir.join("index-cache")
 }
 
+/// True if `s` looks like a 40-character lowercase hex SHA — the
+/// shape `git2` and `git rev-parse` produce. `IndexCache::discover`
+/// uses this to decide whether the operator's hint pins the cache
+/// to an exact SHA or lets the most-recently-used entry win.
+pub(crate) fn looks_like_full_sha(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 pub fn entry_dir(data_dir: &Path, key: &CacheKey) -> PathBuf {
     cache_root(data_dir).join(&key.repo).join(key.dir_name())
 }
@@ -326,9 +334,18 @@ impl IndexCache {
 
     /// Discover a cache entry for `(repo, analyzer_version)` by
     /// scanning the on-disk directory. The cache's directory name
-    /// is `<sha>-<analyzer_version>`, so a single match is the
-    /// entry the indexer wrote (only one `<repo>/<sha>-<ver>/`
-    /// directory can exist for a given `analyzer_version`).
+    /// is `<sha>-<analyzer_version>`.
+    ///
+    /// `ref_hint` disambiguates when multiple SHAs are cached for
+    /// the same `(repo, analyzer_version)`. The hint is the string
+    /// the operator passed (a SHA, tag, or branch):
+    /// - If the hint already looks like a full SHA, only the entry
+    ///   whose `<sha>` matches exactly is returned. A typo or
+    ///   unrelated SHA never silently substitutes.
+    /// - If the hint is a tag/branch, the most-recently-`touch`ed
+    ///   entry is returned. `IndexCache::touch` advances
+    ///   `last_used_unix` on every read, so the most recent
+    ///   operator intent wins.
     ///
     /// This is the restart-survival fallback for
     /// `SnapshotManager::refresh_repo_states`: when the runner is
@@ -336,29 +353,44 @@ impl IndexCache {
     /// record's `repos[repo]` holds an unresolved ref, scanning the
     /// directory is the only way to find the cache entry the
     /// previous run wrote under the resolved SHA.
-    ///
-    /// Returns the `CacheKey` of the discovered entry, or `None`
-    /// when no matching directory exists.
-    pub fn discover(&self, repo: &str, analyzer_version: &str) -> Option<CacheKey> {
+    pub fn discover(&self, repo: &str, analyzer_version: &str, ref_hint: &str) -> Option<CacheKey> {
         let repo_dir = cache_root(&self.data_dir).join(repo);
         let entries = std::fs::read_dir(&repo_dir).ok()?;
         let suffix = format!("-{}", analyzer_version);
+        // Collect every valid (sha, manifest) candidate first so we
+        // can sort deterministically. Doing it in one pass after
+        // scanning keeps the "most recently used" tiebreak honest
+        // even when a stale dir lingers from a torn write.
+        let mut candidates: Vec<(String, i64)> = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if let Some(sha) = name.strip_suffix(&suffix) {
-                // The entry's directory name is `<sha>-<analyzer_version>`;
-                // the cache key lives at `<repo>/<sha>-<ver>/{manifest.json, graph.bin}`.
-                if manifest_path(&self.data_dir, &CacheKey::new(repo, sha, analyzer_version))
-                    .exists()
-                    && graph_path(&self.data_dir, &CacheKey::new(repo, sha, analyzer_version))
-                        .exists()
-                {
-                    return Some(CacheKey::new(repo, sha, analyzer_version));
-                }
+            let Some(sha) = name.strip_suffix(&suffix) else {
+                continue;
+            };
+            let key = CacheKey::new(repo, sha, analyzer_version);
+            if !manifest_path(&self.data_dir, &key).exists()
+                || !graph_path(&self.data_dir, &key).exists()
+            {
+                continue;
             }
+            // If the hint is a full SHA, only exact matches qualify.
+            if looks_like_full_sha(ref_hint) && sha != ref_hint {
+                continue;
+            }
+            // Read the manifest's `last_used_unix` for the
+            // tiebreak. Missing/invalid manifests rank lowest so a
+            // torn entry doesn't beat a healthy one.
+            let last_used = std::fs::read(manifest_path(&self.data_dir, &key))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<CacheManifest>(&b).ok())
+                .map(|m| m.last_used_unix)
+                .unwrap_or(i64::MIN);
+            candidates.push((sha.to_string(), last_used));
         }
-        None
+        candidates.sort_by_key(|a| std::cmp::Reverse(a.1)); // newest first
+        let (sha, _) = candidates.first()?;
+        Some(CacheKey::new(repo, sha, analyzer_version))
     }
 
     /// Read `graph.bin` into a `Vec<u8>`. Used by PR 11's
@@ -1054,7 +1086,7 @@ mod tests {
     fn discover_returns_none_for_missing_repo() {
         let tmp = empty_dir();
         let cache = IndexCache::new(tmp.path());
-        assert!(cache.discover("orders", "0.9.0+c1").is_none());
+        assert!(cache.discover("orders", "0.9.0+c1", "any").is_none());
     }
 
     #[test]
@@ -1072,7 +1104,7 @@ mod tests {
         );
         cache.write_entry(&key, b"payload", &m).unwrap();
         // Same repo, different analyzer version: no match.
-        assert!(cache.discover("orders", "0.9.0+c2").is_none());
+        assert!(cache.discover("orders", "0.9.0+c2", "any").is_none());
     }
 
     #[test]
@@ -1081,11 +1113,10 @@ mod tests {
         let cache = IndexCache::new(tmp.path());
         // Write two entries for the same analyzer version under
         // different SHAs (the typical case when the indexer
-        // re-resolves a ref to a new commit). `discover` must
-        // return *some* key; the manager will use the SHA it
-        // returns to build the cache lookup.
+        // re-resolves a ref to a new commit). With a non-SHA hint,
+        // `discover` returns the most-recently-touched entry.
         let key_a = CacheKey::new("orders", "aaaa1111", "0.9.0+c1");
-        let m_a = build_manifest(
+        let mut m_a = build_manifest(
             "orders",
             &key_a.sha,
             &key_a.analyzer_version,
@@ -1093,9 +1124,10 @@ mod tests {
             BTreeMap::new(),
             64,
         );
+        m_a.last_used_unix = 1_000_000;
         cache.write_entry(&key_a, b"a", &m_a).unwrap();
         let key_b = CacheKey::new("orders", "bbbb2222", "0.9.0+c1");
-        let m_b = build_manifest(
+        let mut m_b = build_manifest(
             "orders",
             &key_b.sha,
             &key_b.analyzer_version,
@@ -1103,16 +1135,61 @@ mod tests {
             BTreeMap::new(),
             64,
         );
+        m_b.last_used_unix = 2_000_000;
         cache.write_entry(&key_b, b"b", &m_b).unwrap();
         let found = cache
-            .discover("orders", "0.9.0+c1")
+            .discover("orders", "0.9.0+c1", "base")
             .expect("discover must find an entry");
-        assert!(found.sha == "aaaa1111" || found.sha == "bbbb2222");
+        // Non-SHA hint → most recent `last_used_unix` wins.
+        assert_eq!(found.sha, "bbbb2222");
         assert_eq!(found.repo, "orders");
         assert_eq!(found.analyzer_version, "0.9.0+c1");
         // Both entries must still be valid cache hits.
         assert!(cache.has_entry(&key_a));
         assert!(cache.has_entry(&key_b));
+    }
+
+    #[test]
+    fn discover_pins_to_exact_sha_when_hint_is_a_full_sha() {
+        // The hint is a full SHA → only the matching entry wins.
+        // Codex P1: a stray SHA in the directory must not silently
+        // substitute.
+        let tmp = empty_dir();
+        let cache = IndexCache::new(tmp.path());
+        let key_a = CacheKey::new(
+            "orders",
+            "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
+            "0.9.0+c1",
+        );
+        let mut m_a = build_manifest(
+            "orders",
+            &key_a.sha,
+            &key_a.analyzer_version,
+            vec![],
+            BTreeMap::new(),
+            64,
+        );
+        m_a.last_used_unix = 1_000_000;
+        cache.write_entry(&key_a, b"a", &m_a).unwrap();
+        let key_b = CacheKey::new(
+            "orders",
+            "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+            "0.9.0+c1",
+        );
+        let mut m_b = build_manifest(
+            "orders",
+            &key_b.sha,
+            &key_b.analyzer_version,
+            vec![],
+            BTreeMap::new(),
+            64,
+        );
+        m_b.last_used_unix = 9_000_000; // newer, but the hint pins to a
+        cache.write_entry(&key_b, b"b", &m_b).unwrap();
+        let found = cache
+            .discover("orders", "0.9.0+c1", &key_a.sha)
+            .expect("discover must find the hinted entry");
+        assert_eq!(found.sha, key_a.sha);
     }
 
     #[test]
@@ -1127,7 +1204,7 @@ mod tests {
             .join("aaaa1111-0.9.0+c1");
         std::fs::create_dir_all(&dir).unwrap();
         // No manifest.json, no graph.bin → not a valid entry.
-        assert!(cache.discover("orders", "0.9.0+c1").is_none());
+        assert!(cache.discover("orders", "0.9.0+c1", "any").is_none());
     }
 
     /// Env-var tests serialize on this lock to keep the

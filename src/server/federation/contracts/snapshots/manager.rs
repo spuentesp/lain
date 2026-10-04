@@ -714,7 +714,6 @@ impl SnapshotManager {
         let mut all_cached = true;
         let mut any_failed = false;
         let mut ref_not_found: Vec<(String, String)> = Vec::new();
-        let mut mutated = false;
         for (repo, _) in record.repos.clone() {
             let key = cache_key_for(&record, &repo);
             let Some(key) = key else { continue };
@@ -744,10 +743,12 @@ impl SnapshotManager {
             // wasn't published. The cache is keyed on the resolved
             // SHA but `record.repos[repo]` may still hold the
             // operator's ref; `discover` finds the entry a
-            // previous run wrote under whatever SHA `resolve_ref`
-            // produced.
+            // previous run wrote. The `&repo` (re-derived from
+            // `key.sha`) is the operator's original hint, so a
+            // full-SHA hint pins to an exact match and a tag/
+            // branch hint picks the most-recently-touched entry.
             if effective_sha == key.sha && state.is_none() {
-                if let Some(found) = self.cache.discover(&repo, &key.analyzer_version) {
+                if let Some(found) = self.cache.discover(&repo, &key.analyzer_version, &key.sha) {
                     effective_sha = found.sha.clone();
                 }
             }
@@ -759,11 +760,17 @@ impl SnapshotManager {
             // Cache hit short-circuits to `cached`. No need to
             // re-queue; the indexer ran once and the bytes are
             // already on disk.
+            //
+            // Codex P2 (re-keying): the record's `repos` map is NOT
+            // mutated to the resolved SHA. The id is hashed from
+            // the input refs (per §13 "same inputs after ref
+            // resolution → same id"); mutating `repos` would
+            // change the canonical content and produce a
+            // different id for the same logical request.
+            // The resolved SHA is surfaced in `repo_states[repo].commit`
+            // and in the cache key — the two pieces of state that
+            // the user actually queries.
             if self.cache.has_entry(&cache_key) {
-                if effective_sha != key.sha {
-                    record.repos.insert(repo.clone(), effective_sha.clone());
-                    mutated = true;
-                }
                 record.repo_states.insert(
                     repo.clone(),
                     RepoSnapshotState::Cached {
@@ -809,14 +816,9 @@ impl SnapshotManager {
                 }
                 JobStatus::Done { .. } => {
                     // The worker wrote the cache under
-                    // `effective_sha`. Promote the record's commit
-                    // so the next refresh sees a cache hit and the
-                    // tool layer surfaces the resolved SHA in
-                    // `get_snapshot`.
-                    if effective_sha != key.sha {
-                        record.repos.insert(repo.clone(), effective_sha.clone());
-                        mutated = true;
-                    }
+                    // `effective_sha`. Surface that SHA in
+                    // `repo_states[repo].commit`; do NOT mutate
+                    // `repos` (see Codex P2 comment above).
                     record.repo_states.insert(
                         repo.clone(),
                         RepoSnapshotState::Cached {
@@ -874,13 +876,12 @@ impl SnapshotManager {
                     .values()
                     .filter(|s| matches!(s, RepoSnapshotState::Failed { .. }))
                     .count();
-        // Persist the resolved SHAs we picked up. After a restart
-        // the runner is empty, but the cache is on disk; the next
-        // `refresh_repo_states` reads the resolved SHA from
-        // `record.repos` and `has_entry` succeeds directly.
-        if mutated {
-            let _ = write_record(&self.data_dir, &record);
-        }
+        // Codex P2 (re-keying): no `mutated` write-back here. The
+        // record keeps its input refs in `repos` so the snapshot id
+        // — hashed from the canonical input — stays stable for
+        // repeated `prepare_snapshot` calls with the same args.
+        // The resolved SHAs are surfaced in `repo_states[repo].commit`
+        // and the cache is keyed on them via `effective_sha`.
         RefreshOutcome {
             record,
             ref_not_found: if only_ref_not_found {
@@ -894,7 +895,11 @@ impl SnapshotManager {
     /// Spin up `LAIN_SNAPSHOT_WORKERS` workers (idempotent — once the
     /// pool is running, every snapshot just feeds it). Workers are
     /// detached OS threads; they exit when the manager drops.
-    fn ensure_workers_running(self: &Arc<Self>) {
+    /// Spawn the worker pool if it isn't already running. Idempotent.
+    /// Public so the cold path's recovery (`with_snapshots` →
+    /// `recover_from_disk`) can kick workers without waiting for the
+    /// next `prepare_snapshot` call to do it incidentally.
+    pub fn ensure_workers_running(self: &Arc<Self>) {
         // Each manager owns its own worker threads. Tests that
         // construct multiple managers get their own workers; the
         // Arc<JoinHandle> keeps the threads alive as long as the
@@ -2814,5 +2819,56 @@ repos:
         };
         let derived_override_id = snapshot_id_for(&derived_override_input);
         assert_ne!(base_id, derived_override_id);
+    }
+
+    /// Codex P2: when the operator passes `repos: {orders: "base"}`
+    /// (a tag) and the worker resolves it to a SHA, the snapshot
+    /// id is computed from the INPUT ref — not from the resolved
+    /// SHA. The post-fix invariant: hashing the canonical input
+    /// `{repos: {orders: "base"}, excluded: [], config_hash: ...}`
+    /// yields the same id whether the record's `repos[orders]`
+    /// still says `"base"` (the input) or has been mutated to a
+    /// SHA (the prior bug). A future prepare with the resolved
+    /// SHA computes a DIFFERENT id — that's the design: inputs
+    /// are what the user asked for; resolutions are an internal
+    /// detail. The mutation-on-resolution is what we removed.
+    #[test]
+    fn snapshot_id_hashes_inputs_not_resolutions() {
+        let mut repos = BTreeMap::new();
+        repos.insert("orders".into(), "base".into());
+        let excluded = Vec::<String>::new();
+        let cfg = ContractFederationConfig::default();
+        let config_hash = cfg.config_hash();
+        let analyzer_version = crate::federation::contracts::analyzer_version();
+        let input = SnapshotInput {
+            repos: repos.clone(),
+            excluded: excluded.clone(),
+            refs_: BTreeMap::new(),
+            join_config: cfg.clone(),
+            config_hash: config_hash.clone(),
+            analyzer_version: analyzer_version.clone(),
+        };
+        let id = snapshot_id_for(&input);
+        // The id must include the literal "base" — not a
+        // post-resolution SHA. A SHA-typed input gets its own
+        // distinct id.
+        let mut sha_repos = BTreeMap::new();
+        sha_repos.insert(
+            "orders".into(),
+            "b5bf29abfe8c4e23d2bd8fa48d4e3a4b6f5b8c0d".into(),
+        );
+        let sha_input = SnapshotInput {
+            repos: sha_repos,
+            excluded,
+            refs_: BTreeMap::new(),
+            join_config: cfg,
+            config_hash,
+            analyzer_version,
+        };
+        let sha_id = snapshot_id_for(&sha_input);
+        assert_ne!(
+            id, sha_id,
+            "tag input and SHA input must compute different ids"
+        );
     }
 }
