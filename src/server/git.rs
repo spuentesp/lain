@@ -11,21 +11,13 @@ use tracing::{debug, info};
 
 /// Git repository sensor
 pub struct GitSensor {
-    repo: Repository,
+    /// `git2::Repository` is `Send` but not `Sync`: libgit2 requires external
+    /// synchronisation for one handle. `GitSensor` is shared through
+    /// `Arc<AnyGitSensor>` between the watcher thread and tool handlers, so
+    /// every method takes this lock instead of relying on callers.
+    repo: parking_lot::Mutex<Repository>,
     workspace: PathBuf,
 }
-
-// SAFETY: `git2::Repository` is internally thread-safe per libgit2's
-// design (it guards its own internals with refcounts and per-handle locks).
-// git2 explicitly provides `unsafe impl Send for Repository` but no `Sync`
-// impl; we extend the same trust to `GitSensor` (whose only other field,
-// `PathBuf`, is `Sync`) so that `&GitSensor` is `Send` and can be passed
-// across `.await` points in the federation runtime. Callers must still
-// serialize concurrent method calls (e.g. via a `Mutex`) — libgit2 has
-// no cross-call synchronization, but the data races we'd hit without
-// the Mutex are about cache coherency on the `git2::Repository` handle,
-// not about memory unsafety at the Rust level.
-unsafe impl Sync for GitSensor {}
 
 impl GitSensor {
     /// Open a Git repository at the given path
@@ -36,14 +28,16 @@ impl GitSensor {
         // temp dirs: `/var` → `/private/var`) the two modes otherwise
         // reported the same tracked files under different spellings.
         Ok(Self {
-            repo,
+            repo: parking_lot::Mutex::new(repo),
             workspace: dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()),
         })
     }
 
     /// Check if this is a valid Git repository with a working HEAD
     pub fn is_valid(&self) -> bool {
-        self.repo.head().is_ok()
+        let repo = self.repo.lock();
+        let ok = repo.head().is_ok();
+        ok
     }
 
     /// Get all tracked files in the repository.
@@ -55,9 +49,10 @@ impl GitSensor {
     /// `test`, and 40-odd tracked files under `tests/unity/**/test/` were
     /// never indexed.
     pub fn get_all_tracked_files(&self) -> Result<Vec<PathBuf>, LainError> {
+        let repo = self.repo.lock();
         let mut files = Vec::new();
 
-        let mut index = self.repo.index()?;
+        let mut index = repo.index()?;
         // libgit2 caches the index in memory; this sensor lives as long as
         // the server, so without a re-read a file added by a later commit
         // was missing here — and the orphan sweep then deleted the nodes
@@ -80,6 +75,7 @@ impl GitSensor {
     /// ignore rules only apply to untracked files — so the watcher still
     /// sees edits to tracked files an ignore pattern happens to match.
     pub fn is_ignored(&self, path: &Path) -> Result<bool, LainError> {
+        let repo = self.repo.lock();
         // Relative to the workspace, through symlinks and 8.3 short names
         // (`/var` vs `/private/var` on macOS, `RUNNER~1` on Windows).
         // `Index::get_path` panics on an absolute path instead of returning
@@ -87,31 +83,32 @@ impl GitSensor {
         let rel = crate::server::graph::graph_path(&self.workspace, path);
         let rel_path = Path::new(&rel);
         if rel_path.is_relative() && !rel.contains(':') && {
-            let mut index = self.repo.index()?;
+            let mut index = repo.index()?;
             index.read(false)?;
             index.get_path(rel_path, 0).is_some()
         } {
             return Ok(false);
         }
-        Ok(self.repo.is_path_ignored(path)?)
+        Ok(repo.is_path_ignored(path)?)
     }
 
     /// Get all uncommitted changes (staged and unstaged)
     pub fn get_uncommitted_changes(&self) -> Result<Vec<FileChange>, LainError> {
+        let repo = self.repo.lock();
         // One status pass, one entry per path. It was three diffs appended
         // together: an untracked file came back as both Modified (the
         // index-to-workdir diff with untracked included) and Added (the
         // status pass), a staged-and-edited file twice, and a deleted file
         // as Modified.
         // libgit2 caches the index; another process's `git add` must show.
-        if let Ok(mut index) = self.repo.index() {
+        if let Ok(mut index) = repo.index() {
             let _ = index.read(false);
         }
         let mut status_opts = StatusOptions::new();
         status_opts.include_untracked(true);
         status_opts.recurse_untracked_dirs(true);
         status_opts.include_ignored(false);
-        let statuses = self.repo.statuses(Some(&mut status_opts))?;
+        let statuses = repo.statuses(Some(&mut status_opts))?;
 
         let mut changes = Vec::new();
         for entry in statuses.iter() {
@@ -152,6 +149,7 @@ impl GitSensor {
 
     /// Get diff content for a specific file
     pub fn get_file_diff(&self, path: &Path) -> Result<String, LainError> {
+        let repo = self.repo.lock();
         // Callers may spell the path through a symlink; the workspace is
         // canonical.
         let relative = crate::server::graph::graph_path(&self.workspace, path);
@@ -159,7 +157,7 @@ impl GitSensor {
         let mut opts = DiffOptions::new();
         opts.pathspec(relative);
 
-        let diff = self.repo.diff_index_to_workdir(None, Some(&mut opts))?;
+        let diff = repo.diff_index_to_workdir(None, Some(&mut opts))?;
 
         let mut diff_text = String::new();
         diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
@@ -181,21 +179,24 @@ impl GitSensor {
 
     /// Get the current branch name
     pub fn get_current_branch(&self) -> Result<String, LainError> {
-        let head = self.repo.head()?;
+        let repo = self.repo.lock();
+        let head = repo.head()?;
         let branch = head.shorthand().unwrap_or("unknown");
         Ok(branch.to_string())
     }
 
     /// Get the latest commit hash
     pub fn get_latest_commit(&self) -> Result<String, LainError> {
-        let head = self.repo.head()?;
+        let repo = self.repo.lock();
+        let head = repo.head()?;
         let commit = head.peel_to_commit()?;
         Ok(commit.id().to_string())
     }
 
     /// Get latest commit hash and its timestamp
     pub fn get_latest_commit_info(&self) -> Result<(String, i64), LainError> {
-        let head = self.repo.head()?;
+        let repo = self.repo.lock();
+        let head = repo.head()?;
         let commit = head.peel_to_commit()?;
         Ok((commit.id().to_string(), commit.time().seconds()))
     }
@@ -203,13 +204,14 @@ impl GitSensor {
     /// Get commit history for co-change analysis
     /// Returns a list of commits with their associated files
     pub fn get_commit_history(&self, count: usize) -> Result<Vec<CommitInfo>, LainError> {
+        let repo = self.repo.lock();
         let mut commits = Vec::new();
 
-        let mut revwalk = self.repo.revwalk()?;
+        let mut revwalk = repo.revwalk()?;
         revwalk.push_head()?;
 
         for oid in revwalk.flatten().take(count) {
-            let commit = self.repo.find_commit(oid)?;
+            let commit = repo.find_commit(oid)?;
             let message = commit.message().unwrap_or("").to_string();
 
             // Get the parent commit tree to find changed files
@@ -221,9 +223,7 @@ impl GitSensor {
             };
 
             // Diff to find changed files
-            let diff = self
-                .repo
-                .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
+            let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
 
             let mut files = Vec::new();
             diff.foreach(
@@ -316,9 +316,10 @@ impl GitSensor {
     /// Get commits newer than the given commit hash
     /// Returns commits after (not including) the specified hash
     pub fn get_new_commits_since(&self, since_hash: &str) -> Result<Vec<CommitInfo>, LainError> {
+        let repo = self.repo.lock();
         let mut commits = Vec::new();
 
-        let mut revwalk = self.repo.revwalk()?;
+        let mut revwalk = repo.revwalk()?;
         revwalk.push_head()?;
 
         // A revwalk from HEAD yields newest-first, so the commits we want are
@@ -340,7 +341,7 @@ impl GitSensor {
                 break;
             }
 
-            let commit = self.repo.find_commit(oid)?;
+            let commit = repo.find_commit(oid)?;
             let message = commit.message().unwrap_or("").to_string();
 
             let tree = commit.tree()?;
@@ -350,9 +351,7 @@ impl GitSensor {
                 None
             };
 
-            let diff = self
-                .repo
-                .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
+            let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
 
             let mut files = Vec::new();
             diff.foreach(
@@ -481,13 +480,14 @@ impl RepoIdentity {
 impl GitSensor {
     /// Get the GitHub repository identity from the git remote
     pub fn get_repo_identity(&self) -> Result<Option<RepoIdentity>, LainError> {
-        let remotes = self.repo.remotes()?;
+        let repo = self.repo.lock();
+        let remotes = repo.remotes()?;
         for remote_name in remotes.iter().flatten() {
             let Some(remote_name) = remote_name else {
                 continue;
             };
             if remote_name == "origin" {
-                let remote = self.repo.find_remote(remote_name)?;
+                let remote = repo.find_remote(remote_name)?;
                 if let Ok(url) = remote.url() {
                     return Ok(RepoIdentity::from_remote(url));
                 }
@@ -1097,3 +1097,7 @@ mod tracked_files_tests {
         let _ = sensor.is_ignored(&elsewhere.path().join("x.rs"));
     }
 }
+
+#[cfg(test)]
+#[path = "git_verification.rs"]
+mod verification;

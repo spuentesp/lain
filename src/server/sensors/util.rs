@@ -119,10 +119,11 @@ fn grammar_for(lang: Lang) -> Language {
 /// singleton (`Patterns::patterns()`), preserving the no-override
 /// baseline.
 pub fn is_deny_method(lang: Lang, key: &str) -> bool {
-    let patterns: &'static Patterns = current_patterns().unwrap_or_else(Patterns::patterns);
-    patterns
-        .outbound_patterns(lang)
-        .any(|def| def.deny_methods.iter().any(|m| m == key))
+    with_active_patterns(|patterns| {
+        patterns
+            .outbound_patterns(lang)
+            .any(|def| def.deny_methods.iter().any(|m| m == key))
+    })
 }
 
 // Thread-local `Patterns` reference for the currently-running
@@ -137,25 +138,26 @@ thread_local! {
         const { std::cell::RefCell::new(std::ptr::null()) };
 }
 
-/// Read the thread-local `&Patterns` if one was installed via
-/// [`with_current_patterns`] for the current sensor scan. Returns
-/// `None` for callers outside a scan (e.g., lib tests that exercise
-/// the walker without going through `scan_workspace_*`).
-pub fn current_patterns() -> Option<&'static Patterns> {
-    CURRENT_PATTERNS.with(|c| {
-        let ptr = *c.borrow();
-        if ptr.is_null() {
-            None
-        } else {
-            // SAFETY: The pointer was installed by
-            // `with_current_patterns` for the duration of a single
-            // `scan_workspace_*` call. The `Patterns` `f` outlives
-            // the scan (it's a local in the caller), and the
-            // thread-local is cleared before `f` is dropped, so
-            // any read of the thread-local pointer is well-defined.
-            Some(unsafe { &*ptr })
-        }
-    })
+/// Run `f` with the `&Patterns` installed by [`with_current_patterns`] for
+/// the current sensor scan, or the bundled singleton outside a scan.
+///
+/// The borrow is handed to a closure instead of being returned: the pointer
+/// is only valid for the duration of the enclosing scan, and a returned
+/// `&'static Patterns` (what this used to be) would let a caller keep it
+/// past that point — a use-after-free the compiler could not see. With the
+/// closure shape the reference cannot escape `f`.
+fn with_active_patterns<R>(f: impl FnOnce(&Patterns) -> R) -> R {
+    let ptr = CURRENT_PATTERNS.with(|c| *c.borrow());
+    if ptr.is_null() {
+        f(Patterns::patterns())
+    } else {
+        // SAFETY: `ptr` was installed by `with_current_patterns`, which keeps
+        // the pointee alive (a borrow held in its caller's frame) and restores
+        // the previous pointer before returning, panic or not. We are inside
+        // that scope on this thread (the cell is thread-local), and `f`
+        // cannot retain the reference beyond this call.
+        f(unsafe { &*ptr })
+    }
 }
 
 /// Run `f` with `patterns` installed as the thread-local current
@@ -673,3 +675,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "util_verification.rs"]
+mod verification;
