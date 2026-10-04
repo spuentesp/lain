@@ -1,0 +1,14 @@
+{
+  "_comment": "Ground truth for the real-repos fixture (bytes + tokio + serde, built by scripts/demo-federation-fixture.sh). Three independent Rust libraries that share a toolchain but no service contract in LAIN's model. The ground truth is therefore 'no cross-repo Binds, no unresolved consumers' — i.e. precision=1.0 is the assertion. coverage_complete=true (all 3 repos indexed successfully) is the safety floor.",
+  "fixture": {
+    "repos": ["bytes", "tokio", "serde"],
+    "builder": "scripts/demo-federation-fixture.sh",
+    "network_required": true
+  },
+  "invariants": {
+    "list_contracts_items": 0,
+    "list_unresolved_total": 0,
+    "get_coverage_complete": true,
+    "all_repos_state": "cached"
+  }
+}

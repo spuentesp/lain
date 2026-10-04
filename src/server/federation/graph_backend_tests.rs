@@ -286,7 +286,7 @@ fn contract_remove_edges_drops_only_matching_endpoints_stay() {
     let edge = GraphEdge::new(EdgeType::Calls, n1.id.clone(), n2.id.clone());
     b.upsert_edge(edge.clone()).unwrap();
 
-    let removed = b.remove_edges(&[edge.clone()]).unwrap();
+    let removed = b.remove_edges(std::slice::from_ref(&edge)).unwrap();
     assert_eq!(removed, 1);
     assert_eq!(b.edge_count(), 0);
     assert_eq!(b.node_count(), 2, "endpoints must survive edge removal");

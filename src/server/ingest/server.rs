@@ -298,16 +298,64 @@ impl LainServer {
                 self.ingest.tool_executor().clone(),
                 federation,
             ),
-        }
-        .with_status(
-            Some(transport),
-            Some(port),
-            self.lifecycle.started_at(),
-            self.refresh.sync_status().last_sync_at_handle(),
-            self.refresh.sync_status().last_error_handle(),
-        )
-        .with_reload_bus(self.hot_reload.reload_bus())
-        .with_server(server_arc);
+        };
+
+        // Phase 0 audit (2026-10-04): the snapshot manager that backs
+        // `prepare_snapshot`, `get_snapshot`, `diff_contracts`,
+        // `trace_impact`, `resolve_evidence`, and `read_source` is
+        // not wired by `LainMcpServer::with_federation`. The wiring
+        // exists in `constructors::with_federation_with_attribution`
+        // (line 405) but that entry point is not used by the live
+        // boot path. Without this block, the six snapshot-backed
+        // contract tools are advertised in `tools/list` but every call
+        // returns `snapshot_manager_unavailable`. Wire it here when
+        // `repos.yaml` is configured so the tools work in production.
+        let mcp = if let Some(repos_yaml) = self.federation.repos_yaml() {
+            match crate::federation::config::FederationConfig::load(repos_yaml) {
+                Ok(cfg) => {
+                    let resolved =
+                        crate::server::federation::loader::resolve_data_dir(cfg, repos_yaml);
+                    // Codex finding: snapshot tools must honor the
+                    // active workspace scope. Filter the config to
+                    // the workspace's members before installing the
+                    // source resolver; without this, `prepare_snapshot`
+                    // would accept any repo in `repos.yaml` and not
+                    // just the ones the federation is currently
+                    // serving.
+                    let scoped = self.federation.filter_config_by_workspace(&resolved);
+                    let cache = crate::federation::contracts::index_cache::IndexCache::new(
+                        &resolved.data_dir,
+                    );
+                    let mgr = crate::federation::contracts::snapshots::SnapshotManager::new(
+                        &resolved.data_dir,
+                        cache,
+                    );
+                    let mcp = mcp.with_snapshots(mgr.clone(), Some(&scoped));
+                    self.federation.set_snapshot_manager(mgr);
+                    mcp
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "snapshot manager not wired: failed to load {}: {e}",
+                        repos_yaml.display()
+                    );
+                    mcp
+                }
+            }
+        } else {
+            mcp
+        };
+
+        let mcp = mcp
+            .with_status(
+                Some(transport),
+                Some(port),
+                self.lifecycle.started_at(),
+                self.refresh.sync_status().last_sync_at_handle(),
+                self.refresh.sync_status().last_error_handle(),
+            )
+            .with_reload_bus(self.hot_reload.reload_bus())
+            .with_server(server_arc);
         match transport {
             super::config::Transport::Http => mcp
                 .run_http(addr)

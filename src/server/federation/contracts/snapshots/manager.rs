@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 use parking_lot::Mutex;
 
@@ -252,7 +253,13 @@ impl SnapshotManager {
     /// Read every record on disk back into the in-memory state and
     /// re-enqueue jobs whose snapshot is `pending` or `indexing`
     /// (`§8.4` "Restart"). Called once from the constructor.
-    fn recover_from_disk(&self) {
+    /// Re-enqueue every pending/indexing record's jobs into the
+    /// runner. Public so callers can re-run after the source
+    /// resolver is installed — `with_cap` invokes this once at
+    /// construction (the cold path's first pass has no resolver
+    /// and silently skips every record; the public re-invocation
+    /// is what actually submits the work).
+    pub fn recover_from_disk(&self) {
         let ids = match list_record_ids(&self.data_dir) {
             Ok(ids) => ids,
             Err(_) => return,
@@ -309,6 +316,12 @@ impl SnapshotManager {
     ) -> Result<PrepareOutcome, PrepareError> {
         let wait_ms = req.wait_ms.min(MAX_SNAPSHOT_WAIT_MS);
         let started = Instant::now();
+        info!(
+            repos_count = req.repos.len(),
+            excluded_count = req.excluded.len(),
+            wait_ms,
+            "snapshot manager: prepare() called"
+        );
 
         // Resolve `from` if supplied. A `from` snapshot inherits
         // the base's `join_config` and commits; the request's
@@ -704,25 +717,69 @@ impl SnapshotManager {
         for (repo, _) in record.repos.clone() {
             let key = cache_key_for(&record, &repo);
             let Some(key) = key else { continue };
+            // The cache is keyed on the *resolved* SHA, but the
+            // record carries the operator-supplied ref (which the
+            // tool layer surfaces in `refs_` so callers can see
+            // what they typed). Look up the job by the spec we
+            // *submitted* (with the real source URL) and prefer its
+            // `resolved_sha` for the cache key.
+            let source = self.resolve_repo_source_inner(&repo).unwrap_or_default();
             let spec = JobSpec {
                 repo: repo.clone(),
                 sha: key.sha.clone(),
                 analyzer_version: key.analyzer_version.clone(),
-                source: String::new(),
+                source,
+            };
+            let state = self.runner.lookup(&spec);
+            // Pick the SHA the cache actually lives under. The
+            // worker's `JobState::resolved_sha` is the post-`resolve_ref`
+            // value; the cache write uses it (`CacheKey::new`).
+            let mut effective_sha = state
+                .as_ref()
+                .and_then(|s| s.resolved_sha.lock().clone())
+                .unwrap_or_else(|| key.sha.clone());
+            // Fall back to a directory scan when the runner is
+            // empty (post-restart) and `JobState::resolved_sha`
+            // wasn't published. The cache is keyed on the resolved
+            // SHA but `record.repos[repo]` may still hold the
+            // operator's ref; `discover` finds the entry a
+            // previous run wrote. The `&repo` (re-derived from
+            // `key.sha`) is the operator's original hint, so a
+            // full-SHA hint pins to an exact match and a tag/
+            // branch hint picks the most-recently-touched entry.
+            if effective_sha == key.sha && state.is_none() {
+                if let Some(found) = self.cache.discover(&repo, &key.analyzer_version, &key.sha) {
+                    effective_sha = found.sha.clone();
+                }
+            }
+            let cache_key = if effective_sha == key.sha {
+                key.clone()
+            } else {
+                CacheKey::new(&repo, &effective_sha, &key.analyzer_version)
             };
             // Cache hit short-circuits to `cached`. No need to
             // re-queue; the indexer ran once and the bytes are
             // already on disk.
-            if self.cache.has_entry(&key) {
+            //
+            // Codex P2 (re-keying): the record's `repos` map is NOT
+            // mutated to the resolved SHA. The id is hashed from
+            // the input refs (per §13 "same inputs after ref
+            // resolution → same id"); mutating `repos` would
+            // change the canonical content and produce a
+            // different id for the same logical request.
+            // The resolved SHA is surfaced in `repo_states[repo].commit`
+            // and in the cache key — the two pieces of state that
+            // the user actually queries.
+            if self.cache.has_entry(&cache_key) {
                 record.repo_states.insert(
                     repo.clone(),
                     RepoSnapshotState::Cached {
-                        commit: key.sha.clone(),
+                        commit: effective_sha,
                     },
                 );
                 continue;
             }
-            let Some(state) = self.runner.lookup(&spec) else {
+            let Some(state) = state else {
                 // No record of this job in the runner. Could be
                 // because the manager restarted and the record
                 // was loaded before the runner was re-populated —
@@ -758,10 +815,14 @@ impl SnapshotManager {
                     all_cached = false;
                 }
                 JobStatus::Done { .. } => {
+                    // The worker wrote the cache under
+                    // `effective_sha`. Surface that SHA in
+                    // `repo_states[repo].commit`; do NOT mutate
+                    // `repos` (see Codex P2 comment above).
                     record.repo_states.insert(
                         repo.clone(),
                         RepoSnapshotState::Cached {
-                            commit: key.sha.clone(),
+                            commit: effective_sha,
                         },
                     );
                 }
@@ -815,6 +876,12 @@ impl SnapshotManager {
                     .values()
                     .filter(|s| matches!(s, RepoSnapshotState::Failed { .. }))
                     .count();
+        // Codex P2 (re-keying): no `mutated` write-back here. The
+        // record keeps its input refs in `repos` so the snapshot id
+        // — hashed from the canonical input — stays stable for
+        // repeated `prepare_snapshot` calls with the same args.
+        // The resolved SHAs are surfaced in `repo_states[repo].commit`
+        // and the cache is keyed on them via `effective_sha`.
         RefreshOutcome {
             record,
             ref_not_found: if only_ref_not_found {
@@ -828,7 +895,11 @@ impl SnapshotManager {
     /// Spin up `LAIN_SNAPSHOT_WORKERS` workers (idempotent — once the
     /// pool is running, every snapshot just feeds it). Workers are
     /// detached OS threads; they exit when the manager drops.
-    fn ensure_workers_running(self: &Arc<Self>) {
+    /// Spawn the worker pool if it isn't already running. Idempotent.
+    /// Public so the cold path's recovery (`with_snapshots` →
+    /// `recover_from_disk`) can kick workers without waiting for the
+    /// next `prepare_snapshot` call to do it incidentally.
+    pub fn ensure_workers_running(self: &Arc<Self>) {
         // Each manager owns its own worker threads. Tests that
         // construct multiple managers get their own workers; the
         // Arc<JoinHandle> keeps the threads alive as long as the
@@ -842,15 +913,26 @@ impl SnapshotManager {
         if self.worker_handles.lock().is_some() {
             return;
         }
+        let n_workers = snapshot_workers();
+        info!(
+            data_dir = %self.data_dir.display(),
+            n_workers,
+            "snapshot manager: spawning worker pool"
+        );
         let mut handles = Vec::new();
-        for n in 0..snapshot_workers() {
+        for n in 0..n_workers {
             let mgr = Arc::clone(self);
             let handle = std::thread::Builder::new()
                 .name(format!("lain-snapshot-worker-{n}"))
-                .spawn(move || snapshot_worker_loop(mgr))
+                .spawn(move || {
+                    info!("snapshot worker thread: starting");
+                    snapshot_worker_loop(mgr);
+                    info!("snapshot worker thread: exiting");
+                })
                 .expect("spawn snapshot worker");
             handles.push(handle);
         }
+        info!(n_workers, "snapshot manager: worker pool ready");
         *self.worker_handles.lock() = Some(handles);
     }
 
@@ -1734,6 +1816,7 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
     // `SHUTDOWN_REQUESTED` flag is set only by `request_snapshot_workers_shutdown`
     // (a test-only escape hatch) so the loop can exit cleanly when
     // a test case needs it to.
+    let mut idle_polls = 0u64;
     loop {
         if SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
             return;
@@ -1748,8 +1831,22 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
                 .cloned()
         };
         if let Some(state) = next {
-            let _ = run_job(&mgr.runner, state);
+            idle_polls = 0;
+            info!(repo = %state.spec.repo, sha = %state.spec.sha, "snapshot worker: picked job");
+            let result = run_job(&mgr.runner, state);
+            match &result {
+                Ok(_) => info!("snapshot worker: job finished OK"),
+                Err(e) => warn!(error = %e, "snapshot worker: job failed"),
+            }
         } else {
+            idle_polls += 1;
+            if idle_polls == 50 {
+                info!(
+                    total_jobs = mgr.runner.total_jobs(),
+                    "snapshot worker: idle"
+                );
+                idle_polls = 0;
+            }
             // No work right now — sleep briefly and re-check. A
             // long-lived worker is the simplest way to keep
             // snapshot indexing responsive; the worker pool is
@@ -2722,5 +2819,56 @@ repos:
         };
         let derived_override_id = snapshot_id_for(&derived_override_input);
         assert_ne!(base_id, derived_override_id);
+    }
+
+    /// Codex P2: when the operator passes `repos: {orders: "base"}`
+    /// (a tag) and the worker resolves it to a SHA, the snapshot
+    /// id is computed from the INPUT ref — not from the resolved
+    /// SHA. The post-fix invariant: hashing the canonical input
+    /// `{repos: {orders: "base"}, excluded: [], config_hash: ...}`
+    /// yields the same id whether the record's `repos[orders]`
+    /// still says `"base"` (the input) or has been mutated to a
+    /// SHA (the prior bug). A future prepare with the resolved
+    /// SHA computes a DIFFERENT id — that's the design: inputs
+    /// are what the user asked for; resolutions are an internal
+    /// detail. The mutation-on-resolution is what we removed.
+    #[test]
+    fn snapshot_id_hashes_inputs_not_resolutions() {
+        let mut repos = BTreeMap::new();
+        repos.insert("orders".into(), "base".into());
+        let excluded = Vec::<String>::new();
+        let cfg = ContractFederationConfig::default();
+        let config_hash = cfg.config_hash();
+        let analyzer_version = crate::federation::contracts::analyzer_version();
+        let input = SnapshotInput {
+            repos: repos.clone(),
+            excluded: excluded.clone(),
+            refs_: BTreeMap::new(),
+            join_config: cfg.clone(),
+            config_hash: config_hash.clone(),
+            analyzer_version: analyzer_version.clone(),
+        };
+        let id = snapshot_id_for(&input);
+        // The id must include the literal "base" — not a
+        // post-resolution SHA. A SHA-typed input gets its own
+        // distinct id.
+        let mut sha_repos = BTreeMap::new();
+        sha_repos.insert(
+            "orders".into(),
+            "b5bf29abfe8c4e23d2bd8fa48d4e3a4b6f5b8c0d".into(),
+        );
+        let sha_input = SnapshotInput {
+            repos: sha_repos,
+            excluded,
+            refs_: BTreeMap::new(),
+            join_config: cfg,
+            config_hash,
+            analyzer_version,
+        };
+        let sha_id = snapshot_id_for(&sha_input);
+        assert_ne!(
+            id, sha_id,
+            "tag input and SHA input must compute different ids"
+        );
     }
 }
