@@ -139,6 +139,37 @@ All notable changes to LAIN are documented here. Versions follow
   `lain mcp` plus a `oneshot` client that consults the
   socket first) is a follow-up commit on this branch.
 
+- **B1 implementation: `lain mcp --socket PATH` binds a
+  per-workspace Unix socket** that subsequent `oneshot` calls
+  can connect to. Adds `config::oneshot_socket_path`
+  (BLAKE3 of the canonicalized workspace, 16 hex chars;
+  lives under `config::run_dir()`) and the
+  `server::mcp::socket_server` module. The socket server
+  handles `initialize`, `notifications/initialized`,
+  `tools/list`, and `tools/call`; dispatch goes through the
+  same `ToolExecutor` and `Arc<LainServer>` as the stdio
+  path, so a call coming through the socket sees the warm
+  in-memory graph. A sidecar `<socket>.pid` file lets
+  `oneshot` check liveness (`/proc/<pid>` on Linux) before
+  attempting to connect; a stale socket from a crashed
+  previous process is removed on start. Three unit tests
+  cover the pid-path and round-trip. The `oneshot`-side
+  consult-the-socket-first behavior is a follow-up commit
+  on this branch.
+
+- **B1 oneshot side: `lain oneshot` consults the per-workspace
+  socket first.** New `cli::socket_session::SocketSession`
+  (mirrors `StdioSession`'s API) lets a oneshot call connect
+  to a running shared server. The connection is gated on a
+  `/proc/<pid>` liveness check of the server's recorded PID;
+  if that fails (no server, dead server, or socket error),
+  oneshot falls through to the existing spawn-stdio path and
+  adds `--socket PATH` so the NEXT oneshot hits the cheap
+  path. Round-trip test in `socket_session::tests` proves
+  the wire protocol. The end-to-end test (spawn shared
+  server, connect via socket, see warm graph) is on the
+  same branch and uses the same code path.
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call
