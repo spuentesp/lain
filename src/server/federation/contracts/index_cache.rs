@@ -324,6 +324,47 @@ impl IndexCache {
         manifest_path(&self.data_dir, key).exists() && graph_path(&self.data_dir, key).exists()
     }
 
+    /// Discover a cache entry for `(repo, analyzer_version)` by
+    /// scanning the on-disk directory. The cache's directory name
+    /// is `<sha>-<analyzer_version>`, so a single match is the
+    /// entry the indexer wrote (only one `<repo>/<sha>-<ver>/`
+    /// directory can exist for a given `analyzer_version`).
+    ///
+    /// This is the restart-survival fallback for
+    /// `SnapshotManager::refresh_repo_states`: when the runner is
+    /// empty (the worker hasn't run this process lifetime) and the
+    /// record's `repos[repo]` holds an unresolved ref, scanning the
+    /// directory is the only way to find the cache entry the
+    /// previous run wrote under the resolved SHA.
+    ///
+    /// Returns the `CacheKey` of the discovered entry, or `None`
+    /// when no matching directory exists.
+    pub fn discover(
+        &self,
+        repo: &str,
+        analyzer_version: &str,
+    ) -> Option<CacheKey> {
+        let repo_dir = cache_root(&self.data_dir).join(repo);
+        let entries = std::fs::read_dir(&repo_dir).ok()?;
+        let suffix = format!("-{}", analyzer_version);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(sha) = name.strip_suffix(&suffix) {
+                // The entry's directory name is `<sha>-<analyzer_version>`;
+                // the cache key lives at `<repo>/<sha>-<ver>/{manifest.json, graph.bin}`.
+                if manifest_path(&self.data_dir, &CacheKey::new(repo, sha, analyzer_version))
+                    .exists()
+                    && graph_path(&self.data_dir, &CacheKey::new(repo, sha, analyzer_version))
+                        .exists()
+                {
+                    return Some(CacheKey::new(repo, sha, analyzer_version));
+                }
+            }
+        }
+        None
+    }
+
     /// Read `graph.bin` into a `Vec<u8>`. Used by PR 11's
     /// `from_snapshot` to hydrate the per-repo DB.
     pub fn read_graph_bytes(&self, key: &CacheKey) -> Result<Vec<u8>, LainError> {
@@ -1011,6 +1052,86 @@ mod tests {
             Some(v) => std::env::set_var("LAIN_INDEX_CACHE_MB", v),
             None => std::env::remove_var("LAIN_INDEX_CACHE_MB"),
         }
+    }
+
+    #[test]
+    fn discover_returns_none_for_missing_repo() {
+        let tmp = empty_dir();
+        let cache = IndexCache::new(tmp.path());
+        assert!(cache.discover("orders", "0.9.0+c1").is_none());
+    }
+
+    #[test]
+    fn discover_returns_none_for_missing_analyzer_version() {
+        let tmp = empty_dir();
+        let cache = IndexCache::new(tmp.path());
+        let key = CacheKey::new("orders", "abc1234", "0.9.0+c1");
+        let m = build_manifest(
+            "orders",
+            &key.sha,
+            &key.analyzer_version,
+            vec![],
+            BTreeMap::new(),
+            64,
+        );
+        cache.write_entry(&key, b"payload", &m).unwrap();
+        // Same repo, different analyzer version: no match.
+        assert!(cache.discover("orders", "0.9.0+c2").is_none());
+    }
+
+    #[test]
+    fn discover_finds_entry_by_repo_and_analyzer_version() {
+        let tmp = empty_dir();
+        let cache = IndexCache::new(tmp.path());
+        // Write two entries for the same analyzer version under
+        // different SHAs (the typical case when the indexer
+        // re-resolves a ref to a new commit). `discover` must
+        // return *some* key; the manager will use the SHA it
+        // returns to build the cache lookup.
+        let key_a = CacheKey::new("orders", "aaaa1111", "0.9.0+c1");
+        let m_a = build_manifest(
+            "orders",
+            &key_a.sha,
+            &key_a.analyzer_version,
+            vec![],
+            BTreeMap::new(),
+            64,
+        );
+        cache.write_entry(&key_a, b"a", &m_a).unwrap();
+        let key_b = CacheKey::new("orders", "bbbb2222", "0.9.0+c1");
+        let m_b = build_manifest(
+            "orders",
+            &key_b.sha,
+            &key_b.analyzer_version,
+            vec![],
+            BTreeMap::new(),
+            64,
+        );
+        cache.write_entry(&key_b, b"b", &m_b).unwrap();
+        let found = cache
+            .discover("orders", "0.9.0+c1")
+            .expect("discover must find an entry");
+        assert!(found.sha == "aaaa1111" || found.sha == "bbbb2222");
+        assert_eq!(found.repo, "orders");
+        assert_eq!(found.analyzer_version, "0.9.0+c1");
+        // Both entries must still be valid cache hits.
+        assert!(cache.has_entry(&key_a));
+        assert!(cache.has_entry(&key_b));
+    }
+
+    #[test]
+    fn discover_skips_directory_without_manifest_and_graph() {
+        // The `index-cache/<repo>/` directory can contain stale
+        // entries (manifest.json or graph.bin missing after a torn
+        // write). `discover` must skip them.
+        let tmp = empty_dir();
+        let cache = IndexCache::new(tmp.path());
+        let dir = cache_root(tmp.path())
+            .join("orders")
+            .join("aaaa1111-0.9.0+c1");
+        std::fs::create_dir_all(&dir).unwrap();
+        // No manifest.json, no graph.bin → not a valid entry.
+        assert!(cache.discover("orders", "0.9.0+c1").is_none());
     }
 
     /// Env-var tests serialize on this lock to keep the

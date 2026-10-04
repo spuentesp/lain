@@ -729,10 +729,22 @@ impl SnapshotManager {
             // Pick the SHA the cache actually lives under. The
             // worker's `JobState::resolved_sha` is the post-`resolve_ref`
             // value; the cache write uses it (`CacheKey::new`).
-            let effective_sha = state
+            let mut effective_sha = state
                 .as_ref()
                 .and_then(|s| s.resolved_sha.lock().clone())
                 .unwrap_or_else(|| key.sha.clone());
+            // Fall back to a directory scan when the runner is
+            // empty (post-restart) and `JobState::resolved_sha`
+            // wasn't published. The cache is keyed on the resolved
+            // SHA but `record.repos[repo]` may still hold the
+            // operator's ref; `discover` finds the entry a
+            // previous run wrote under whatever SHA `resolve_ref`
+            // produced.
+            if effective_sha == key.sha && state.is_none() {
+                if let Some(found) = self.cache.discover(&repo, &key.analyzer_version) {
+                    effective_sha = found.sha.clone();
+                }
+            }
             let cache_key = if effective_sha == key.sha {
                 key.clone()
             } else {
