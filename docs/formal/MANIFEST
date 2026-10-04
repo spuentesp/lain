@@ -34,3 +34,5 @@ JobRegistry_RacyCap               | JobRegistry                       | fail | p
 JobRegistry_PanicLeak             | JobRegistry                       | fail | pre-fix: a panicking job stays Running (slot leak)
 JobRegistry_GhostRestore          | JobRegistry                       | fail | pre-fix: persisted Running jobs reload as Running
 JobRegistry_Fixed                 | JobRegistry                       | pass | fixed: job_store::{try_start,finish,restore}
+HoldGate                          | HoldGate                          | fail | pre-fix: mark_ready vs hold_ready(false) can leave a repo stuck Indexing
+HoldGate_Fixed                    | HoldGate                          | pass | fixed: HealthGate decides under one lock

@@ -48,6 +48,7 @@ becomes the regression check.
 | `SnapshotInstallHold.tla` | `install_resident` → `HoldGuard::new` window | pre-fix: entry evictable between insert and hold. Fixed: `install_resident_held`. |
 | `FsLeaseGuard.tla` | `presence_lock::try_lock` acquire | pre-fix: scan-then-create, all acquirers win. Fixed: `O_EXCL` guard. Residual (`_Stall`): a guard holder frozen > `GUARD_TTL`. |
 | `JobRegistry.tla` | background-job registry (cap, task panic, persist/restore) | three independent pre-fix defects (cap race, panic leaks a slot, orphaned `Running` after restart), each switchable; fixed in `job_store.rs`. |
+| `HoldGate.tla` | `RepoIndex::mark_ready` vs `hold_ready(false)` | pre-fix: a release racing the end of indexing leaves the repo stuck `Indexing` (5 steps). Fixed by `HealthGate` (one lock). |
 | `FsLease.tla` | alternative: fixed-path `O_EXCL` lease with rename-based steal/release | Exact without expiry; with expiry a 10-step residual remains (needs fencing tokens). Kept to document why it was not adopted: a non-owner's rename-and-verify release can move a stranger's live lock. |
 
 ## Beyond TLA+: other deterministic tooling

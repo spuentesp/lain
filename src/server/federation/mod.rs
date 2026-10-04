@@ -8,6 +8,7 @@ pub mod cross_repo;
 pub mod federated_index;
 pub mod graph_backend;
 pub mod health;
+pub(crate) mod health_gate;
 pub mod loader;
 pub mod manifest;
 pub mod matching;
