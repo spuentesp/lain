@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::{debug, info};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -88,6 +89,12 @@ pub struct JobState {
     /// wake a parked thread without a Tokio runtime.
     pub revision: AtomicU64,
     pub bytes_written: AtomicU64,
+    /// Resolved SHA after the worker has called `resolve_ref`.
+    /// `None` until that step finishes (or fails). The manager
+    /// uses this in `refresh_repo_states` to build the correct
+    /// cache key — the cache is written under the resolved SHA,
+    /// not the operator-supplied ref.
+    pub resolved_sha: Mutex<Option<String>>,
 }
 
 impl JobState {
@@ -97,6 +104,7 @@ impl JobState {
             status: Mutex::new(JobStatus::Queued),
             revision: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
+            resolved_sha: Mutex::new(None),
         }
     }
 }
@@ -179,10 +187,21 @@ impl JobRunner {
     pub fn submit(&self, spec: JobSpec) -> (Arc<JobState>, bool) {
         let mut inner = self.inner.lock();
         if let Some(existing) = inner.by_key.get(&spec) {
+            debug!(
+                repo = %spec.repo,
+                sha = %spec.sha,
+                "JobRunner::submit: reusing existing job"
+            );
             return (Arc::clone(existing), false);
         }
         let state = Arc::new(JobState::new(spec.clone()));
-        inner.by_key.insert(spec, Arc::clone(&state));
+        inner.by_key.insert(spec.clone(), Arc::clone(&state));
+        info!(
+            repo = %spec.repo,
+            sha = %spec.sha,
+            total_jobs = inner.by_key.len(),
+            "JobRunner::submit: enqueued new job"
+        );
         (state, true)
     }
 
@@ -323,6 +342,11 @@ fn run_job_inner(
         )),
         other => LainError::Io(format!("snapshot job: mirror error: {other}")),
     })?;
+
+    // Publish the resolved SHA so the manager's `refresh_repo_states`
+    // can build the right cache key. The cache is keyed on the
+    // resolved SHA, not the operator-supplied ref (`spec.sha`).
+    *_state.resolved_sha.lock() = Some(sha.clone());
 
     let wt_path = worktree_add(runner.data_dir(), &spec.repo, &sha)
         .map_err(|e| LainError::Io(format!("snapshot job: worktree_add failed: {e}")))?;

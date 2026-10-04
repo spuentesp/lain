@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 use parking_lot::Mutex;
 
@@ -309,6 +310,12 @@ impl SnapshotManager {
     ) -> Result<PrepareOutcome, PrepareError> {
         let wait_ms = req.wait_ms.min(MAX_SNAPSHOT_WAIT_MS);
         let started = Instant::now();
+        info!(
+            repos_count = req.repos.len(),
+            excluded_count = req.excluded.len(),
+            wait_ms,
+            "snapshot manager: prepare() called"
+        );
 
         // Resolve `from` if supplied. A `from` snapshot inherits
         // the base's `join_config` and commits; the request's
@@ -701,28 +708,55 @@ impl SnapshotManager {
         let mut all_cached = true;
         let mut any_failed = false;
         let mut ref_not_found: Vec<(String, String)> = Vec::new();
+        let mut mutated = false;
         for (repo, _) in record.repos.clone() {
             let key = cache_key_for(&record, &repo);
             let Some(key) = key else { continue };
+            // The cache is keyed on the *resolved* SHA, but the
+            // record carries the operator-supplied ref (which the
+            // tool layer surfaces in `refs_` so callers can see
+            // what they typed). Look up the job by the spec we
+            // *submitted* (with the real source URL) and prefer its
+            // `resolved_sha` for the cache key.
+            let source = self
+                .resolve_repo_source_inner(&repo)
+                .unwrap_or_default();
             let spec = JobSpec {
                 repo: repo.clone(),
                 sha: key.sha.clone(),
                 analyzer_version: key.analyzer_version.clone(),
-                source: String::new(),
+                source,
+            };
+            let state = self.runner.lookup(&spec);
+            // Pick the SHA the cache actually lives under. The
+            // worker's `JobState::resolved_sha` is the post-`resolve_ref`
+            // value; the cache write uses it (`CacheKey::new`).
+            let effective_sha = state
+                .as_ref()
+                .and_then(|s| s.resolved_sha.lock().clone())
+                .unwrap_or_else(|| key.sha.clone());
+            let cache_key = if effective_sha == key.sha {
+                key.clone()
+            } else {
+                CacheKey::new(&repo, &effective_sha, &key.analyzer_version)
             };
             // Cache hit short-circuits to `cached`. No need to
             // re-queue; the indexer ran once and the bytes are
             // already on disk.
-            if self.cache.has_entry(&key) {
+            if self.cache.has_entry(&cache_key) {
+                if effective_sha != key.sha {
+                    record.repos.insert(repo.clone(), effective_sha.clone());
+                    mutated = true;
+                }
                 record.repo_states.insert(
                     repo.clone(),
                     RepoSnapshotState::Cached {
-                        commit: key.sha.clone(),
+                        commit: effective_sha,
                     },
                 );
                 continue;
             }
-            let Some(state) = self.runner.lookup(&spec) else {
+            let Some(state) = state else {
                 // No record of this job in the runner. Could be
                 // because the manager restarted and the record
                 // was loaded before the runner was re-populated —
@@ -758,10 +792,19 @@ impl SnapshotManager {
                     all_cached = false;
                 }
                 JobStatus::Done { .. } => {
+                    // The worker wrote the cache under
+                    // `effective_sha`. Promote the record's commit
+                    // so the next refresh sees a cache hit and the
+                    // tool layer surfaces the resolved SHA in
+                    // `get_snapshot`.
+                    if effective_sha != key.sha {
+                        record.repos.insert(repo.clone(), effective_sha.clone());
+                        mutated = true;
+                    }
                     record.repo_states.insert(
                         repo.clone(),
                         RepoSnapshotState::Cached {
-                            commit: key.sha.clone(),
+                            commit: effective_sha,
                         },
                     );
                 }
@@ -815,6 +858,13 @@ impl SnapshotManager {
                     .values()
                     .filter(|s| matches!(s, RepoSnapshotState::Failed { .. }))
                     .count();
+        // Persist the resolved SHAs we picked up. After a restart
+        // the runner is empty, but the cache is on disk; the next
+        // `refresh_repo_states` reads the resolved SHA from
+        // `record.repos` and `has_entry` succeeds directly.
+        if mutated {
+            let _ = write_record(&self.data_dir, &record);
+        }
         RefreshOutcome {
             record,
             ref_not_found: if only_ref_not_found {
@@ -842,15 +892,26 @@ impl SnapshotManager {
         if self.worker_handles.lock().is_some() {
             return;
         }
+        let n_workers = snapshot_workers();
+        info!(
+            data_dir = %self.data_dir.display(),
+            n_workers,
+            "snapshot manager: spawning worker pool"
+        );
         let mut handles = Vec::new();
-        for n in 0..snapshot_workers() {
+        for n in 0..n_workers {
             let mgr = Arc::clone(self);
             let handle = std::thread::Builder::new()
                 .name(format!("lain-snapshot-worker-{n}"))
-                .spawn(move || snapshot_worker_loop(mgr))
+                .spawn(move || {
+                    info!("snapshot worker thread: starting");
+                    snapshot_worker_loop(mgr);
+                    info!("snapshot worker thread: exiting");
+                })
                 .expect("spawn snapshot worker");
             handles.push(handle);
         }
+        info!(n_workers, "snapshot manager: worker pool ready");
         *self.worker_handles.lock() = Some(handles);
     }
 
@@ -1734,6 +1795,7 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
     // `SHUTDOWN_REQUESTED` flag is set only by `request_snapshot_workers_shutdown`
     // (a test-only escape hatch) so the loop can exit cleanly when
     // a test case needs it to.
+    let mut idle_polls = 0u64;
     loop {
         if SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
             return;
@@ -1748,8 +1810,19 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
                 .cloned()
         };
         if let Some(state) = next {
-            let _ = run_job(&mgr.runner, state);
+            idle_polls = 0;
+            info!(repo = %state.spec.repo, sha = %state.spec.sha, "snapshot worker: picked job");
+            let result = run_job(&mgr.runner, state);
+            match &result {
+                Ok(_) => info!("snapshot worker: job finished OK"),
+                Err(e) => warn!(error = %e, "snapshot worker: job failed"),
+            }
         } else {
+            idle_polls += 1;
+            if idle_polls == 50 {
+                info!(total_jobs = mgr.runner.total_jobs(), "snapshot worker: idle");
+                idle_polls = 0;
+            }
             // No work right now — sleep briefly and re-check. A
             // long-lived worker is the simplest way to keep
             // snapshot indexing responsive; the worker pool is
