@@ -22,6 +22,22 @@ All notable changes to LAIN are documented here. Versions follow
   CRC-checked frame decoding, periodic checkpoint task) is a
   follow-up commit on this branch.
 
+- **B5 implementation: WAL writer + replay wired into the
+  mutation methods.** `upsert_node`, `upsert_edge`, and
+  `remove_nodes_by_ids` now append a `GraphOp` to
+  `.lain/graph.wal` (length-prefixed bincode frame, CRC32C
+  trailer, fsync) before mutating in-memory state.
+  `load_from_disk` now reads `graph.bin` (the snapshot) and
+  then replays `graph.wal` on top, so a torn snapshot
+  recovers from the WAL tail (CRC-verified, torn-frame
+  tolerant). `save_to_disk_sync` truncates the WAL after a
+  successful snapshot write. The full write path is wired
+  for single-mutation calls; `insert_edges_batch` and
+  `insert_nodes_batch` are follow-up work because they
+  bypass the WAL append on the batch fast path. Periodic
+  checkpoint task and `doctor` recovery message are
+  follow-up commits on this branch.
+
 ### Fixed
 
 - **`LAIN_ONESHOT_TIMEOUT` default bumped from 60s to 600s.** The
