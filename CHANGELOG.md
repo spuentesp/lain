@@ -107,6 +107,21 @@ All notable changes to LAIN are documented here. Versions follow
   alongside `get_audit_log`, so an agent seeing the B11
   warning can ask for it without `load_package("ops")`.
 
+- **B1 design: shared `lain mcp` per workspace** —
+  `docs/formal/OneshotSharedServer.tla` + `.cfg`. The spec
+  models the per-workspace server lifecycle (NoServer →
+  ServerAlive → ServerDead, plus concurrent client arrival
+  / leave / crash). The new `OneshotSharedServer` invariants
+  are: at most one server process holds the per-workspace
+  socket at a time (S1), a client bound to a server implies
+  that server is alive (S2), and the serving-set state is
+  consistent with the per-client socket map (S3, S4). TLC
+  exhaustively checks the 2-client / 2-server state space
+  (39 states, 10 distinct, depth 5) — all invariants hold.
+  The Rust-side implementation (a `--socket <path>` flag on
+  `lain mcp` plus a `oneshot` client that consults the
+  socket first) is a follow-up commit on this branch.
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call
