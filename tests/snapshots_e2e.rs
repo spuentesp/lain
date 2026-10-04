@@ -221,6 +221,88 @@ async fn prepare_snapshot_workspace_dir_lands_cache_entry_and_record() {
     assert_eq!(got.record.state, outcome.record.state);
 }
 
+/// When the operator passes a *tag* (e.g. `base`) instead of a SHA,
+/// the worker must resolve it to a commit, write the cache under the
+/// resolved SHA, and have the record surface that resolved SHA
+/// (instead of the tag string) in `record.repos[repo]`. This is the
+/// bug-B regression: the cache is keyed on the resolved SHA, so the
+/// record's commit map must be promoted to the resolved value
+/// before the next `refresh_repo_states` runs — otherwise a
+/// successful index run looks like a cache miss.
+#[tokio::test]
+async fn prepare_snapshot_with_tag_ref_promotes_record_to_resolved_sha() {
+    std::env::set_var("LAIN_SNAPSHOT_WORKER_IDLE_TIMEOUT_MS", "1000");
+    let fix = build_fixture();
+    let cfg = federation_config(&fix);
+    let mgr = manager_with_resolver(&fix, &cfg);
+    let orders_root = fix.repos_root.join("orders");
+    // Resolve `base` ourselves so we know the expected SHA the
+    // worker will land at.
+    let base_sha = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "base"])
+            .current_dir(&orders_root)
+            .output()
+            .expect("git rev-parse base");
+        assert!(out.status.success(), "base tag missing in fixture");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+
+    // The record starts with the unresolved ref (`base`).
+    let mut repos = BTreeMap::new();
+    repos.insert("orders".to_string(), "base".to_string());
+    let req = PrepareRequest {
+        refs_: BTreeMap::new(),
+        repos,
+        excluded: Vec::new(),
+        from: None,
+        max_base_age_s: None,
+        wait_ms: 60_000,
+        config: Arc::new(ContractFederationConfig::default()),
+    };
+
+    let outcome = mgr.prepare(req).await.expect("prepare_snapshot");
+    // The snapshot reached `ready` (not stuck in `indexing` because
+    // of a cache-key mismatch).
+    assert_eq!(outcome.record.state, lain::federation::contracts::snapshots::SnapshotState::Ready);
+    // The record was promoted to the resolved SHA. Without the
+    // bug-B fix, `record.repos["orders"]` would still be `"base"`
+    // and `cache.has_entry` would miss on the next refresh.
+    assert_eq!(
+        outcome.record.repos.get("orders").map(String::as_str),
+        Some(base_sha.as_str()),
+        "record.repos[orders] must hold the resolved SHA, not the tag"
+    );
+    // The per-repo state surfaces the resolved SHA in `commit`.
+    let repo_state = outcome
+        .record
+        .repo_states
+        .get("orders")
+        .expect("orders repo state");
+    let commit = repo_state.commit().expect("orders commit");
+    assert_eq!(commit, base_sha);
+    // The cache is keyed on the resolved SHA.
+    let key = CacheKey::new("orders", &base_sha, &outcome.record.analyzer_version);
+    assert!(
+        mgr.cache().has_entry(&key),
+        "cache entry missing for orders@{base_sha}"
+    );
+    // The on-disk record also has the resolved SHA (so a server
+    // restart hits the cache without re-running the worker).
+    let record_path = cfg
+        .data_dir
+        .join("snapshots")
+        .join(format!("{}.json", outcome.record.id));
+    let raw = std::fs::read(&record_path).expect("read snapshot record");
+    let stored: lain::federation::contracts::snapshots::SnapshotRecord =
+        serde_json::from_slice(&raw).expect("parse snapshot record");
+    assert_eq!(
+        stored.repos.get("orders").map(String::as_str),
+        Some(base_sha.as_str()),
+        "on-disk record must hold the resolved SHA (restart-survivable)"
+    );
+}
+
 /// `prepare_snapshot` against an unknown repo surfaces
 /// `repo_not_registered` with `details.repo` populated (§13).
 #[tokio::test]
