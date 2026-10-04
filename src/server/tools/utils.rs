@@ -461,15 +461,17 @@ pub fn u32_arg(args: &Map<String, Value>, key: &str) -> Option<u32> {
 /// (the git history path can see negative diffs when the commit's
 /// recorded time is in the future relative to a slightly stale clock).
 pub fn format_duration(seconds: i64) -> String {
+    // Work on the absolute value throughout: dividing the signed input
+    // rendered a future timestamp as "-2m ago", contradicting the doc above.
     let s = seconds.unsigned_abs();
     if s < 60 {
-        format!("{seconds}s ago")
+        format!("{s}s ago")
     } else if s < 3600 {
-        format!("{}m ago", seconds / 60)
+        format!("{}m ago", s / 60)
     } else if s < 86400 {
-        format!("{}h ago", seconds / 3600)
+        format!("{}h ago", s / 3600)
     } else {
-        format!("{}d ago", seconds / 86400)
+        format!("{}d ago", s / 86400)
     }
 }
 
@@ -957,3 +959,7 @@ mod tests {
         assert_eq!(required_str_arg(&args, "depth").unwrap(), "1..3");
     }
 }
+
+#[cfg(test)]
+#[path = "utils_verification.rs"]
+mod verification;

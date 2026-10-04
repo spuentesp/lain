@@ -171,30 +171,40 @@ fn glob_match_unanchored(pattern: &str, text: &str) -> bool {
     false
 }
 
+/// Glob match where `*` matches zero or more characters other than `/`.
+///
+/// Iterative with single-star backtracking, O(|p|·|s|) time and O(1) space.
+/// The previous recursive form re-tried every continuation for every `*`, so
+/// `*a*a*a*a*a*a*a*b` against a long run of `a`s took exponential time — a
+/// hostile `CODEOWNERS` could hang indexing. Equivalence with the recursive
+/// definition is property-tested in `codeowners_verification.rs`.
 fn glob_rec(p: &[u8], s: &[u8]) -> bool {
-    if p.is_empty() {
-        return s.is_empty();
-    }
-    if p[0] == b'*' {
-        // `*` matches zero or more characters other than `/`. Try
-        // every continuation that doesn't cross a `/`.
-        for i in 0..=s.len() {
-            if i > 0 && s[i - 1] == b'/' {
-                break;
-            }
-            if glob_rec(&p[1..], &s[i..]) {
-                return true;
-            }
+    let (mut pi, mut si) = (0usize, 0usize);
+    // (pattern index just after the last `*`, text index that `*` has consumed up to)
+    let mut star: Option<(usize, usize)> = None;
+    loop {
+        if pi < p.len() && p[pi] == b'*' {
+            pi += 1;
+            star = Some((pi, si));
+            continue;
         }
-        return false;
-    }
-    if s.is_empty() {
-        return false;
-    }
-    if p[0] == s[0] {
-        glob_rec(&p[1..], &s[1..])
-    } else {
-        false
+        if pi == p.len() && si == s.len() {
+            return true;
+        }
+        if pi < p.len() && si < s.len() && p[pi] == s[si] {
+            pi += 1;
+            si += 1;
+            continue;
+        }
+        // Mismatch: let the last `*` swallow one more character, but never a `/`.
+        match star {
+            Some((spi, ssi)) if ssi < s.len() && s[ssi] != b'/' => {
+                star = Some((spi, ssi + 1));
+                pi = spi;
+                si = ssi + 1;
+            }
+            _ => return false,
+        }
     }
 }
 
@@ -459,3 +469,7 @@ mod tests {
         assert!(codeowners_for("does-not-exist", "/src/x.py").is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "codeowners_verification.rs"]
+mod verification;
