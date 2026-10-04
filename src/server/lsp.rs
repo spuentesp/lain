@@ -1401,6 +1401,12 @@ impl LspMultiplexer {
     /// In both cases the transition is logged at WARN level so
     /// operators see when LSP silently degrades.
     fn record_lsp_failure(&mut self, binary: &str, kind: FailureKind) {
+        self.record_lsp_failure_at(binary, kind, unix_millis_now());
+    }
+
+    /// [`Self::record_lsp_failure`] with the clock injected (restart-window
+    /// arithmetic), so the breaker can be verified deterministically.
+    fn record_lsp_failure_at(&mut self, binary: &str, kind: FailureKind, now_ms: u64) {
         match kind {
             FailureKind::ProcessExited => {
                 // If the binary is already marked unavailable (by the
@@ -1418,7 +1424,7 @@ impl LspMultiplexer {
                 // Drop the dead child; the next ensure_server call
                 // will see `!started.contains(binary)` and respawn.
                 self.started.remove(binary);
-                self.record_restart(binary);
+                self.record_restart_at(binary, now_ms);
             }
             FailureKind::RequestError | FailureKind::Timeout => {
                 let count = self
@@ -3221,3 +3227,7 @@ pub mod test_support {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "lsp_verification.rs"]
+mod verification;
