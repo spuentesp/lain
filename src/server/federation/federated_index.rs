@@ -29,7 +29,6 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// The global id a node gets once its owning repo is known: `GlobalId::new`
@@ -102,7 +101,7 @@ pub struct FederatedIndex {
     /// Set by `project_nodes` / `project_edges` whenever the
     /// projected graph could change `Binds` outcomes. Cleared by
     /// `rejoin_contracts_if_dirty` after the join lands (§5.3).
-    contracts_dirty: AtomicBool,
+    contracts_dirty: crate::sync::DirtyFlag,
     /// Per-repo set of `GlobalId`s that carry a `ContractFact`.
     /// Maintained by `project_nodes` / `project_edges` so the joiner
     /// never scans the whole backend (§5.3 Cost).
@@ -170,7 +169,7 @@ impl FederatedIndex {
             projection_lock: parking_lot::Mutex::new(()),
             depends_cache: DashMap::new(),
             load_errors: RwLock::new(Vec::new()),
-            contracts_dirty: AtomicBool::new(false),
+            contracts_dirty: crate::sync::DirtyFlag::new(false),
             contract_node_ids: DashMap::new(),
             contract_config: RwLock::new(None),
             contract_snapshot: RwLock::new(None),
@@ -344,7 +343,7 @@ impl FederatedIndex {
             // previously-unbound consumer can see its new
             // provider). Mark dirty; the lock guards against
             // concurrent reads.
-            self.contracts_dirty.store(true, Ordering::Release);
+            self.contracts_dirty.mark();
         }
         // Refresh the on-disk manifest so a runtime add survives a
         // restart. Best-effort; a save failure doesn't fail the add.
@@ -373,7 +372,7 @@ impl FederatedIndex {
             // edge whose source or target lived in it. Mark
             // dirty so the next `rejoin_contracts_if_dirty`
             // retracts them.
-            self.contracts_dirty.store(true, Ordering::Release);
+            self.contracts_dirty.mark();
         }
         // Mirror `add_repo`: keep the manifest in sync with live
         // membership. See `persist_manifest` for the failure semantics.
@@ -560,7 +559,7 @@ impl FederatedIndex {
             }
         }
         self.contract_node_ids.insert(id.clone(), contract_ids);
-        self.contracts_dirty.store(true, Ordering::Release);
+        self.contracts_dirty.mark();
 
         // Retract what this repo no longer has. Projection was upsert-only, so
         // the federated view accumulated every symbol a repo ever contained: a
@@ -900,7 +899,7 @@ impl FederatedIndex {
         // so the next `rejoin_contracts_if_dirty` re-derives them.
         // The dirty flag is set even when the batch is empty — a
         // no-op reproject must not leave stale `Binds` behind.
-        self.contracts_dirty.store(true, Ordering::Release);
+        self.contracts_dirty.mark();
 
         // Rebuild the federation-wide `symbol_to_repos` only when this
         // projection actually surfaced nodes. The federation loader
@@ -980,7 +979,7 @@ impl FederatedIndex {
     pub fn set_contract_config(&self, config: ContractFederationConfig) {
         *self.contract_config.write() = Some(Arc::new(config));
         // A config change invalidates the current join.
-        self.contracts_dirty.store(true, Ordering::Release);
+        self.contracts_dirty.mark();
     }
 
     /// The current contract config, or `None` when none has been
@@ -1087,30 +1086,14 @@ impl FederatedIndex {
     /// inline. PR 11 will hook `from_snapshot` here.
     pub fn rejoin_contracts_if_dirty(&self) -> Result<(), LainError> {
         let _guard = self.projection_lock.lock();
-        if !self.contracts_dirty.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        // Clear-before-read (§9.1 RejoinProtocol variant (b)): the
-        // TLA+ model found a 10-state counterexample where a
-        // `set_contract_config` lands between the rejoin's read of
-        // `contract_config` and its trailing clear, the trailing
-        // clear overwrites the writer's `dirty := TRUE`, and the
-        // system settles into `~dirty ∧ binds ≠ ComputeBinds(config)`.
-        // We hold `projection_lock` for the whole sequence, so the
-        // only writers that can interleave are the lockless paths
+        // Clear-before-read (RejoinProtocol.tla variant (b)), implemented by
+        // `DirtyFlag::run_if_dirty`: a lockless writer
         // (`set_contract_config`, `mark_contracts_dirty`,
-        // `register_contract_node_for_test`); clearing dirty BEFORE
-        // reading inputs means any mark those writers set after the
-        // clear re-arms the dirty flag, and the next call will redo.
-        self.contracts_dirty.store(false, Ordering::Release);
-        if let Err(e) = self.rejoin_contracts() {
-            // Restore dirty so the next call retries — losing the
-            // mark here would silently swallow the change that
-            // triggered this rejoin.
-            self.contracts_dirty.store(true, Ordering::Release);
-            return Err(e);
-        }
-        Ok(())
+        // `register_contract_node_for_test`) that lands mid-rebuild re-arms
+        // the flag, and a failed rebuild restores it. Loom-checked in
+        // `sync_verification.rs`.
+        self.contracts_dirty
+            .run_if_dirty(|| self.rejoin_contracts())
     }
 
     /// Mark the contract join as dirty so the next
@@ -1121,7 +1104,7 @@ impl FederatedIndex {
     /// synthesize contract edges by hand need this to trigger a
     /// rejoin on the next read.
     pub fn mark_contracts_dirty(&self) {
-        self.contracts_dirty.store(true, Ordering::Release);
+        self.contracts_dirty.mark();
     }
 
     /// Read the current dirty flag. Public observation hook used
@@ -1129,7 +1112,7 @@ impl FederatedIndex {
     /// (TLA+ RejoinProtocol.tla 10-state counterexample for
     /// `NoLostUpdate`) — also useful for diagnostics.
     pub fn contracts_dirty(&self) -> bool {
-        self.contracts_dirty.load(Ordering::Acquire)
+        self.contracts_dirty.is_dirty()
     }
 
     /// Register a synthetic contract node id (and the host repo) so
@@ -1141,7 +1124,7 @@ impl FederatedIndex {
             .entry(repo)
             .or_default()
             .insert(node_id);
-        self.contracts_dirty.store(true, Ordering::Release);
+        self.contracts_dirty.mark();
     }
 
     /// The dirty-flagged inner work: compute the desired
