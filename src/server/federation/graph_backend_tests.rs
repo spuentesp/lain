@@ -2,8 +2,8 @@
 //! in Task 7. Here we use a simple in-memory HashMap impl to define the contract.
 use crate::error::LainError;
 use crate::federation::graph_backend::{
-    GraphBackend, ImpactHop, ImpactPath, ImpactResult, PetgraphBackend, Propagation,
-    FEDERATION_GRAPH_MAGIC, impact_propagation,
+    impact_propagation, GraphBackend, ImpactHop, ImpactPath, ImpactResult, PetgraphBackend,
+    Propagation, FEDERATION_GRAPH_MAGIC,
 };
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::collections::{HashMap, HashSet, VecDeque};
