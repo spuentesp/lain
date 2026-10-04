@@ -12,10 +12,28 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Test and script paths inflate anchor scores because tests are
+/// heavily called by other tests and scripts by other scripts.
+/// B8 (2026-10-04) — the default `find_anchors` filters these
+/// out so the top of the list is real architectural pillars, not
+/// test fixtures.
+pub(crate) fn is_anchor_excluded_path(path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.iter().any(|c| *c == "tests" || *c == "scripts") {
+        return true;
+    }
+    let stem = segments.last().copied().unwrap_or(path);
+    let stem = stem.strip_suffix(".rs").unwrap_or(stem);
+    let stem = stem.strip_suffix(".py").unwrap_or(stem);
+    let stem = stem.strip_suffix(".sh").unwrap_or(stem);
+    stem == "test" || stem == "tests" || stem.ends_with("_test") || stem.ends_with("_tests")
+}
+
 pub fn find_anchors(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     limit: usize,
+    include_tests: bool,
 ) -> Result<String, LainError> {
     let mut anchors = graph.find_anchors(limit)?;
 
@@ -32,6 +50,22 @@ pub fn find_anchors(
         )
     });
 
+    // B8 (2026-10-04): test and script paths inflate anchor scores
+    // because they are heavily called *by other tests* and *by
+    // other scripts*. The 2026-10-04 Lain-on-Lain dogfood found
+    // `uc_presence_register_heartbeat_unregister` (a Python test in
+    // `scripts/use_cases_e2e.py`) and `e_setup_writes_prompt_md`
+    // (a Python test in `scripts/test_all_promises.py`) at the top
+    // of the anchor list, above the real `bfs_traverse` in
+    // `src/server/query/executor.rs`. A user who trusts the rank
+    // over the path lands on a test fixture, not an
+    // architectural pillar. Default to filtering out
+    // `tests/`, `*_test*` files, and `scripts/` paths; opt in
+    // with `include_tests=true` for users who want the raw list.
+    if !include_tests {
+        anchors.retain(|n| !is_anchor_excluded_path(&n.path));
+    }
+
     let overlay_anchors = overlay
         .get_all_nodes()
         .into_iter()
@@ -42,6 +76,7 @@ pub fn find_anchors(
                 crate::server::schema::NodeType::Function | crate::server::schema::NodeType::Method
             )
         })
+        .filter(|n| include_tests || !is_anchor_excluded_path(&n.path))
         .collect::<Vec<_>>();
 
     let mut seen_ids: std::collections::HashSet<String> =

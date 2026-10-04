@@ -78,6 +78,21 @@ All notable changes to LAIN are documented here. Versions follow
   (`DOGFOODING_REPORT.md`, 2026-10-04, finding B2). Three new
   tests cover the symlink cases.
 
+- **`find_anchors` now excludes test and script paths by
+  default.** The 2026-10-04 dogfooding found the top of the
+  anchor list dominated by Python test fixtures
+  (`uc_presence_register_heartbeat_unregister` in
+  `scripts/use_cases_e2e.py`, `e_setup_writes_prompt_md` in
+  `scripts/test_all_promises.py`) because tests are heavily
+  called by other tests and scripts by other scripts. A user
+  trusting rank over path lands on a test fixture, not a real
+  architectural pillar. The default now filters paths under
+  `tests/`, `*_test*` files, and `scripts/`. Opt in with
+  `include_tests=true` for the raw list. The new
+  `is_anchor_excluded_path` predicate has its own regression
+  test covering the production's expected `excluded` and `kept`
+  cases.
+
 - **`get_health` now lists every declared `EdgeType`**, even when the
   count is zero. A graph with no `Calls` edges used to omit the
   `Calls: 0` line entirely, so an operator on a repo whose call
