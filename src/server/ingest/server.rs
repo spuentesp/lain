@@ -315,6 +315,14 @@ impl LainServer {
                 Ok(cfg) => {
                     let resolved =
                         crate::server::federation::loader::resolve_data_dir(cfg, repos_yaml);
+                    // Codex finding: snapshot tools must honor the
+                    // active workspace scope. Filter the config to
+                    // the workspace's members before installing the
+                    // source resolver; without this, `prepare_snapshot`
+                    // would accept any repo in `repos.yaml` and not
+                    // just the ones the federation is currently
+                    // serving.
+                    let scoped = self.federation.filter_config_by_workspace(&resolved);
                     let cache = crate::federation::contracts::index_cache::IndexCache::new(
                         &resolved.data_dir,
                     );
@@ -322,7 +330,9 @@ impl LainServer {
                         &resolved.data_dir,
                         cache,
                     );
-                    mcp.with_snapshots(mgr, Some(&resolved))
+                    let mcp = mcp.with_snapshots(mgr.clone(), Some(&scoped));
+                    self.federation.set_snapshot_manager(mgr);
+                    mcp
                 }
                 Err(e) => {
                     tracing::warn!(

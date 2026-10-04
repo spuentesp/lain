@@ -253,7 +253,13 @@ impl SnapshotManager {
     /// Read every record on disk back into the in-memory state and
     /// re-enqueue jobs whose snapshot is `pending` or `indexing`
     /// (`§8.4` "Restart"). Called once from the constructor.
-    fn recover_from_disk(&self) {
+    /// Re-enqueue every pending/indexing record's jobs into the
+    /// runner. Public so callers can re-run after the source
+    /// resolver is installed — `with_cap` invokes this once at
+    /// construction (the cold path's first pass has no resolver
+    /// and silently skips every record; the public re-invocation
+    /// is what actually submits the work).
+    pub fn recover_from_disk(&self) {
         let ids = match list_record_ids(&self.data_dir) {
             Ok(ids) => ids,
             Err(_) => return,

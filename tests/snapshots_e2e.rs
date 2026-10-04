@@ -626,3 +626,86 @@ async fn derived_head_with_one_override_indexes_only_overridden_repo() {
     let base_record = mgr_cached_record(&mgr, &base_id);
     assert_eq!(stored.config_hash, base_record.config_hash);
 }
+
+/// Cold-start: a `pending` record on disk (one whose `prepare`
+/// never reached `ready`) must have its jobs re-submitted by
+/// `recover_from_disk` once the source resolver is installed.
+/// The pre-fix behavior: `SnapshotManager::new` calls
+/// `recover_from_disk` *before* the resolver is wired, so the
+/// `resolve_repo_source_inner` lookup returns `None` and every
+/// pending record is silently skipped. `with_snapshots` then
+/// re-runs `recover_from_disk` after the resolver is installed
+/// (the fix); this test asserts that re-run picks the record
+/// up.
+#[tokio::test]
+async fn recover_from_disk_resubmits_pending_records_after_resolver_install() {
+    std::env::set_var("LAIN_SNAPSHOT_WORKER_IDLE_TIMEOUT_MS", "1000");
+    let fix = build_fixture();
+    let cfg = federation_config(&fix);
+    let orders_root = fix.repos_root.join("orders");
+    let orders_sha = head_sha(&orders_root);
+
+    // Step 1: build a manager with NO resolver, write a pending
+    // record to its data_dir, and confirm `recover_from_disk` (in
+    // `new`) skips it because the source is unknown.
+    let cache = IndexCache::new(&cfg.data_dir);
+    let mgr = SnapshotManager::new(&cfg.data_dir, cache);
+    let pending = lain::federation::contracts::snapshots::SnapshotRecord {
+        id: "snap_recover_probe".into(),
+        repos: BTreeMap::from([("orders".into(), orders_sha.clone())]),
+        excluded: Vec::new(),
+        refs_: BTreeMap::new(),
+        join_config: serde_json::Value::Null,
+        config_hash: "h".into(),
+        analyzer_version: lain::federation::contracts::analyzer_version(),
+        state: lain::federation::contracts::snapshots::SnapshotState::Pending,
+        repo_states: BTreeMap::from([(
+            "orders".into(),
+            lain::federation::contracts::snapshots::RepoSnapshotState::Queued {
+                commit: orders_sha.clone(),
+            },
+        )]),
+        created_unix: 0,
+        last_access_unix: 0,
+    };
+    lain::federation::contracts::snapshots::record::write_record(&cfg.data_dir, &pending)
+        .expect("write pending record");
+    // No resolver yet → the cold-path recover did nothing.
+    assert!(
+        mgr.runner()
+            .lookup(&lain::federation::contracts::snapshots::jobs::JobSpec {
+                repo: "orders".into(),
+                sha: orders_sha.clone(),
+                analyzer_version: pending.analyzer_version.clone(),
+                source: String::new(),
+            })
+            .is_none(),
+        "no resolver, no job submitted"
+    );
+
+    // Step 2: install a known resolver and re-run
+    // `recover_from_disk`. The source is a fixed sentinel so the
+    // JobSpec we look up matches the one submitted.
+    const SENTINEL_SOURCE: &str = "/tmp/sentinel/source";
+    let resolver = std::sync::Arc::new(move |repo: &str| {
+        if repo == "orders" {
+            Some(SENTINEL_SOURCE.to_string())
+        } else {
+            None
+        }
+    }) as lain::federation::contracts::snapshots::manager::RepoSourceResolver;
+    mgr.set_repo_source_resolver(resolver);
+    mgr.recover_from_disk();
+    let state = mgr
+        .runner()
+        .lookup(&lain::federation::contracts::snapshots::jobs::JobSpec {
+            repo: "orders".into(),
+            sha: orders_sha.clone(),
+            analyzer_version: pending.analyzer_version.clone(),
+            source: SENTINEL_SOURCE.to_string(),
+        });
+    assert!(
+        state.is_some(),
+        "recover_from_disk must resubmit pending records once the resolver is installed"
+    );
+}

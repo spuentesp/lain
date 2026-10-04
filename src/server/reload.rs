@@ -278,6 +278,22 @@ pub async fn run_rebuild(
             server.set_workspace(ws);
         }
 
+        // Codex finding: refresh the snapshot manager's source
+        // resolver with the just-rebuilt config. Without this, a
+        // hot-added repo is rejected as `repo_not_registered`
+        // until the process restarts, and a removed repo is
+        // still accepted for snapshot operations.
+        if let Some(mgr) = server.federation_handle().snapshot_manager() {
+            let scoped = server
+                .federation_handle()
+                .filter_config_by_workspace(&repos_file);
+            let resolver =
+                crate::federation::contracts::snapshots::SnapshotManager::resolver_from_config(
+                    &scoped,
+                );
+            mgr.set_repo_source_resolver(resolver);
+        }
+
         Ok(())
     })
     .await;

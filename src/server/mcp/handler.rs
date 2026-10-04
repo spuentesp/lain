@@ -1308,6 +1308,12 @@ impl LainMcpServer {
             let resolver =
                 crate::federation::contracts::snapshots::SnapshotManager::resolver_from_config(cfg);
             snapshots.set_repo_source_resolver(resolver);
+            // The cold path's `SnapshotManager::new` already ran
+            // `recover_from_disk`, but with no resolver in place
+            // every record was silently skipped. Re-run now that
+            // the resolver is installed so pending/indexing records
+            // from a previous process get their jobs submitted.
+            snapshots.recover_from_disk();
         }
         self.snapshots = Some(snapshots);
         self
