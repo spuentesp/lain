@@ -72,6 +72,8 @@ the "end-to-end recovery" test never reloaded anything.
 | 29 | A zero in `tuning.toml` (`lsp_pool_size`, `files_per_batch`, `nlp_batch_size`, `ingest_batch_size`) hit `% 0` / `chunks(0)` and crashed indexing | targeted test | `IngestionConfig::sanitized` in the loader (warns); the pool never builds empty |
 | 30 | Selector glob, tokenizer (doubled newlines, byte-vector stripping, tail handling) and `cosine_similarity` (NaN / out-of-range results) defects | proptest against reference definitions | see the commits on this branch |
 
+Test-harness flake found and fixed: a parallel test's `fork()` briefly holds a copy of a just-dropped listener's fd, so a dead socket probed as live (1 in ~8 runs under load); the socket tests now wait for the kernel to see it dead. Not a product bug: liveness is a connect probe, and the window is the length of a fork-to-exec.
+
 Also added without a defect found: arbitrary JSON-RPC requests always get one
 well-formed response; 600 arbitrary calls across every safe tool never panic,
 hang or leak; `GitSensor` differential-tested against the git CLI;

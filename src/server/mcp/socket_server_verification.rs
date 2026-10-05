@@ -7,6 +7,18 @@ fn sock(dir: &Path) -> PathBuf {
     dir.join("s.sock")
 }
 
+/// A concurrent test's fork() can briefly hold a copy of a just-dropped
+/// listener's fd (until its exec closes it), making the socket look live.
+/// Wait for the kernel to see it as dead before asserting on it.
+fn wait_until_dead(p: &Path) {
+    for _ in 0..300 {
+        if !probe_alive(p) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn probe_is_false_for_missing_and_for_a_dead_leftover_and_true_for_a_live_listener() {
     let dir = tempfile::tempdir().unwrap();
@@ -16,6 +28,7 @@ fn probe_is_false_for_missing_and_for_a_dead_leftover_and_true_for_a_live_listen
     assert!(probe_alive(&p), "live listener");
     drop(l); // the socket FILE stays behind, as after a crash
     assert!(p.exists());
+    wait_until_dead(&p);
     assert!(
         !probe_alive(&p),
         "a leftover socket file is not a live server"
@@ -33,6 +46,7 @@ async fn bind_clears_a_stale_socket_but_refuses_a_live_one() {
     let dir = tempfile::tempdir().unwrap();
     let p = sock(dir.path());
     drop(StdListener::bind(&p).unwrap()); // stale leftover
+    wait_until_dead(&p);
     let first = bind_exclusive(&p).expect("a stale socket must be replaced");
     let err = bind_exclusive(&p)
         .err()
@@ -63,6 +77,7 @@ async fn concurrent_starters_on_a_stale_socket_yield_exactly_one_server() {
         let dir = tempfile::tempdir().unwrap();
         let p = sock(dir.path());
         drop(StdListener::bind(&p).unwrap());
+        wait_until_dead(&p);
         let barrier = Arc::new(std::sync::Barrier::new(6));
         let handles: Vec<_> = (0..6)
             .map(|_| {
@@ -159,6 +174,10 @@ fn test_server(root: &Path) -> Arc<LainServer> {
 fn rpc(stream: &mut UnixStream, req: Value) -> Value {
     let mut line = serde_json::to_string(&req).unwrap();
     line.push('\n');
+    // A server that never answers must fail the test, not hang it.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     stream.write_all(line.as_bytes()).unwrap();
     let mut reply = String::new();
     StdBufReader::new(stream.try_clone().unwrap())
@@ -896,4 +915,26 @@ async fn dispatch_methods_have_their_documented_results() {
         .unwrap()
         .contains("no/such/method"));
     assert!(unknown.get("result").is_none());
+}
+
+/// A notification (no id) gets no reply: the next response on the connection is
+/// the answer to the NEXT request, not to the notification.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notifications_get_no_reply_and_requests_do() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path());
+    let p = sock(dir.path());
+    let _task = start(p.clone(), server, None).unwrap();
+    let reply = tokio::task::spawn_blocking(move || {
+        let mut c = UnixStream::connect(&p).unwrap();
+        c.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .unwrap();
+        c.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n")
+            .unwrap(); // notification form of ping
+        rpc(&mut c, json!({"jsonrpc":"2.0","id":42,"method":"ping"}))
+    })
+    .await
+    .unwrap();
+    assert_eq!(reply["id"], 42, "a notification was answered: {reply}");
+    assert_eq!(reply["result"], json!({}));
 }
