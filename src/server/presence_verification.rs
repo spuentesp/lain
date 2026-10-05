@@ -265,3 +265,166 @@ fn file_level_read_does_not_hide_a_symbol_edit() {
     let r = map.claim(&c, vec![req(&[], ClaimIntent::Read)]);
     assert_eq!(r.advisories.len(), 1);
 }
+
+// ---- the pieces the model above does not reach --------------------------------------------
+
+mod pieces {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as O};
+    use std::sync::Arc;
+
+    fn agent(s: &str) -> AgentId {
+        AgentId(s.into())
+    }
+
+    fn req(path: &str, syms: &[&str], intent: ClaimIntent) -> ClaimRequest {
+        ClaimRequest {
+            path: path.into(),
+            symbols: syms.iter().map(|s| s.to_string()).collect(),
+            intent,
+            ttl_seconds: None,
+            plan_revision: None,
+        }
+    }
+
+    #[test]
+    fn any_symbol_intent_ignores_file_level_and_prefers_edit() {
+        let a = agent("a");
+        let mut f = FileOccupancy::default();
+        assert_eq!(f.any_symbol_intent(&a), None, "no claims");
+        // A file-level claim is not a symbol claim.
+        f.intents
+            .entry(FILE_LEVEL.into())
+            .or_default()
+            .insert(a.clone(), ClaimIntent::Edit);
+        assert_eq!(f.any_symbol_intent(&a), None, "file-level only");
+        f.intents
+            .entry("s1".into())
+            .or_default()
+            .insert(a.clone(), ClaimIntent::Read);
+        assert_eq!(
+            f.any_symbol_intent(&a),
+            Some(ClaimIntent::Read),
+            "all symbol claims are reads"
+        );
+        f.intents
+            .entry("s2".into())
+            .or_default()
+            .insert(a.clone(), ClaimIntent::Edit);
+        assert_eq!(
+            f.any_symbol_intent(&a),
+            Some(ClaimIntent::Edit),
+            "one edit wins"
+        );
+        // Another agent's claims are not this agent's.
+        assert_eq!(f.any_symbol_intent(&agent("b")), None);
+    }
+
+    #[test]
+    fn last_touched_is_per_scope_and_per_agent() {
+        let (a, b) = (agent("a"), agent("b"));
+        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1234);
+        let mut f = FileOccupancy::default();
+        assert_eq!(f.last_touched_for(&a, "s"), None);
+        f.last_touched
+            .entry("s".into())
+            .or_default()
+            .insert(a.clone(), t);
+        assert_eq!(f.last_touched_for(&a, "s"), Some(t));
+        assert_eq!(f.last_touched_for(&b, "s"), None);
+        assert_eq!(f.last_touched_for(&a, "other"), None);
+    }
+
+    #[test]
+    fn debug_reports_the_map_sizes() {
+        let m = OccupancyMap::new();
+        let _ = m.claim(
+            &agent("a"),
+            vec![
+                req("zz_dbg1.rs", &[], ClaimIntent::Edit),
+                req("zz_dbg2.rs", &[], ClaimIntent::Read),
+            ],
+        );
+        let s = format!("{m:?}");
+        assert!(s.contains("OccupancyMap"), "{s}");
+        assert!(s.contains("files: 2") && s.contains("agents: 1"), "{s}");
+    }
+
+    #[test]
+    fn persist_callback_fires_on_mutation_and_can_be_swapped_and_restored() {
+        let m = Arc::new(OccupancyMap::new());
+        let orig = Arc::new(AtomicUsize::new(0));
+        let o2 = orig.clone();
+        m.set_persist_callback(move || {
+            o2.fetch_add(1, O::SeqCst);
+        });
+        let a = agent("a");
+        let _ = m.claim(&a, vec![req("zz_pc1.rs", &[], ClaimIntent::Edit)]);
+        let after_claim = orig.load(O::SeqCst);
+        assert!(
+            after_claim >= 1,
+            "a mutation must fire the persist callback"
+        );
+
+        // Swap in a capturing callback: the original stops firing, the capture records.
+        let dir = tempfile::tempdir().unwrap();
+        let cell = Arc::new(parking_lot::Mutex::new(None));
+        let prev = m
+            .swap_persist_capture(
+                cell.clone(),
+                dir.path().join("presence.json"),
+                Arc::new(PresenceRegistry::new()),
+                m.clone(),
+                Arc::new(crate::server::intent::IntentRegistry::new()),
+                Arc::new(crate::server::activity::ActivityTracker::new()),
+            )
+            .expect("the previous callback is returned");
+        let _ = m.claim(&a, vec![req("zz_pc2.rs", &[], ClaimIntent::Edit)]);
+        assert_eq!(
+            orig.load(O::SeqCst),
+            after_claim,
+            "the replaced callback must not fire"
+        );
+        assert!(
+            matches!(&*cell.lock(), Some(Ok(()))),
+            "the capture records the save result"
+        );
+
+        // Restore: the original fires again.
+        m.restore_persist_callback(prev);
+        let _ = m.claim(&a, vec![req("zz_pc3.rs", &[], ClaimIntent::Edit)]);
+        assert!(
+            orig.load(O::SeqCst) > after_claim,
+            "the restored callback must fire"
+        );
+    }
+
+    #[test]
+    fn claim_roots_keep_the_workspace_first_and_deduplicate() {
+        let ws = tempfile::tempdir().unwrap();
+        let m = OccupancyMap::new();
+        assert!(m.claim_roots_snapshot().is_empty());
+        m.add_claim_roots(&[
+            PathBuf::from("/repo/a"),
+            PathBuf::from("/repo/b"),
+            PathBuf::from("/repo/a"),
+        ]);
+        assert_eq!(
+            m.claim_roots_snapshot(),
+            vec![PathBuf::from("/repo/a"), PathBuf::from("/repo/b")]
+        );
+        m.add_claim_roots(&[]);
+        assert_eq!(m.claim_roots_snapshot().len(), 2);
+        m.set_workspace_root(ws.path());
+        let roots = m.claim_roots_snapshot();
+        let canon = lexical_normalize(&std::fs::canonicalize(ws.path()).unwrap());
+        assert_eq!(roots[0], canon, "the workspace anchors first");
+        assert_eq!(roots.len(), 3);
+        // Setting it again moves it to the front without duplicating it.
+        m.add_claim_roots(&[canon.clone()]);
+        m.set_workspace_root(ws.path());
+        let roots = m.claim_roots_snapshot();
+        assert_eq!(roots.iter().filter(|r| **r == canon).count(), 1);
+        assert_eq!(roots[0], canon);
+    }
+}
