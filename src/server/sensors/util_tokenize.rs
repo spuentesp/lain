@@ -32,9 +32,10 @@ pub enum CommentSyntax {
     HashBlockString,
 }
 
-/// Strip comments from `src`, preserving the byte length of the
-/// result (newlines inside comments are kept so the caller's
-/// line-number math remains correct).
+/// Strip comments from `src`. The comment text is removed; the newlines in
+/// and after it are kept, so line numbers computed from the result still match
+/// the source. Everything outside comments, non-ASCII text included, is copied
+/// byte for byte.
 pub fn strip_comments(src: &str, syntax: CommentSyntax) -> String {
     match syntax {
         CommentSyntax::CStyle => strip_c_style(src),
@@ -42,8 +43,17 @@ pub fn strip_comments(src: &str, syntax: CommentSyntax) -> String {
     }
 }
 
+/// The stripped bytes as text. Only ASCII-delimited regions are ever cut, so
+/// the copied bytes stay whole UTF-8 sequences; the lossy fallback is a
+/// safety net, not an expected path. (Each byte used to be pushed as
+/// `bytes[i] as char`, which widens every non-ASCII byte into two UTF-8
+/// bytes: `é` became `Ã©`, corrupting extracted string literals.)
+fn into_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 fn strip_c_style(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -57,48 +67,53 @@ fn strip_c_style(input: &str) -> String {
             i += 2;
             while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                 if bytes[i] == b'\n' {
-                    out.push('\n');
+                    out.push(b'\n');
                 }
                 i += 1;
             }
             if i + 1 < bytes.len() {
                 i += 2;
             } else {
-                i = bytes.len();
+                // Unterminated comment: the loop above stops one byte short
+                // of the end, so keep any newline in what remains.
+                while i < bytes.len() {
+                    if bytes[i] == b'\n' {
+                        out.push(b'\n');
+                    }
+                    i += 1;
+                }
             }
             continue;
         }
         if bytes[i] == b'"' {
-            out.push('"');
+            out.push(b'"');
             i += 1;
+            // The bytes are copied as they are: a newline inside a string
+            // literal is one newline in the output. (It used to be pushed
+            // explicitly *and* copied, doubling every line break in a string
+            // and shifting the line number of everything declared after it.)
             while i < bytes.len() && bytes[i] != b'"' {
-                if bytes[i] == b'\n' {
-                    out.push('\n');
-                }
-                out.push(bytes[i] as char);
+                out.push(bytes[i]);
                 if bytes[i] == b'\\' && i + 1 < bytes.len() {
                     i += 1;
-                    if bytes[i] == b'\n' {
-                        out.push('\n');
-                    }
-                    out.push(bytes[i] as char);
+                    out.push(bytes[i]);
                 }
                 i += 1;
             }
             if i < bytes.len() {
-                out.push('"');
+                out.push(b'"');
                 i += 1;
             }
             continue;
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    into_string(out)
 }
 
 fn strip_hash_block(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -109,33 +124,33 @@ fn strip_hash_block(input: &str) -> String {
             continue;
         }
         if i + 2 < bytes.len() && bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
-            out.push('"');
-            out.push('"');
-            out.push('"');
+            out.push(b'"');
+            out.push(b'"');
+            out.push(b'"');
             i += 3;
             while i + 2 < bytes.len()
                 && !(bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"')
             {
-                if bytes[i] == b'\n' {
-                    out.push('\n');
-                }
-                out.push(bytes[i] as char);
+                // Copied as is; see the string branch of `strip_c_style`.
+                out.push(bytes[i]);
                 i += 1;
             }
             if i + 2 < bytes.len() {
-                out.push('"');
-                out.push('"');
-                out.push('"');
+                out.push(b'"');
+                out.push(b'"');
+                out.push(b'"');
                 i += 3;
             } else {
+                // Unterminated block string: keep the rest as written.
+                out.extend_from_slice(&bytes[i..]);
                 i = bytes.len();
             }
             continue;
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    into_string(out)
 }
 
 // ─── Brace balancing ───────────────────────────────────────────────────
@@ -544,3 +559,7 @@ not a call
         assert_eq!(calls[0].method, "b");
     }
 }
+
+#[cfg(test)]
+#[path = "util_tokenize_verification.rs"]
+mod verification;
