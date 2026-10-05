@@ -224,3 +224,34 @@ fn the_public_failure_entry_point_trips_the_breaker() {
         "the breaker never tripped through the wrapper"
     );
 }
+
+/// The restart window is closed on the right: a restart exactly
+/// `LSP_RESTART_WINDOW` after the window opened still counts toward it; one
+/// millisecond later opens a new window.
+#[test]
+fn restart_window_boundary_is_inclusive() {
+    let w = LSP_RESTART_WINDOW.as_millis() as u64;
+    let mk =
+        || LspMultiplexer::new(Path::new("."), &crate::tuning::RuntimeConfig::default()).unwrap();
+    // Budget restarts early in the window, then one exactly at the boundary: trips.
+    let mut m = mk();
+    for i in 0..LSP_RESTART_BUDGET as u64 {
+        m.record_restart_at("b", i);
+    }
+    assert!(!m.unavailable.contains("b"));
+    m.record_restart_at("b", w);
+    assert!(
+        m.unavailable.contains("b"),
+        "a restart at exactly the window edge must still count"
+    );
+    // One millisecond past the edge: a fresh window, nothing trips.
+    let mut m = mk();
+    for i in 0..LSP_RESTART_BUDGET as u64 {
+        m.record_restart_at("b", i);
+    }
+    m.record_restart_at("b", w + 1);
+    assert!(
+        !m.unavailable.contains("b"),
+        "an expired window must reset the count"
+    );
+}
