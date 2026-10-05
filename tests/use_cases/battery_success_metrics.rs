@@ -86,7 +86,7 @@ fn find_anchors_returns_real_hub_at_position_1() {
     use lain::server::tools::handlers::metrics::find_anchors;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let text = find_anchors(&db, &overlay, 10).unwrap();
+    let text = find_anchors(&db, &overlay, 10, true).unwrap();
     // Success metric: find the line starting with "1." (the first
     // anchor position) and assert it mentions real_hub. line 0 is
     // the "Top 7 anchors" header — not the first anchor.
@@ -105,7 +105,7 @@ fn find_anchors_dedup_count_matches_distinct_names() {
     use lain::server::tools::handlers::metrics::find_anchors;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let text = find_anchors(&db, &overlay, 100).unwrap();
+    let text = find_anchors(&db, &overlay, 100, true).unwrap();
     // Success metric: distinct function names in the response.
     let lines: Vec<&str> = text
         .lines()
@@ -130,7 +130,7 @@ fn find_anchors_test_path_appears_with_zero_score() {
     use lain::server::tools::handlers::metrics::find_anchors;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let text = find_anchors(&db, &overlay, 100).unwrap();
+    let text = find_anchors(&db, &overlay, 100, true).unwrap();
     // Success metric: test-path symbols appear in the dedup'd list
     // but with score 0 (per the wishlist #13 fix that test code
     // is not a product anchor). The score=0 is the contract; the
