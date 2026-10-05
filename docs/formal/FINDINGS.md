@@ -22,6 +22,35 @@ does **not** cover. Every row below was reproduced by a failing model or test
 | 12 | Sidecar respawn budget counted only *successful* respawns, so a sidecar that dies on startup was retried without limit | targeted test | budget never tripped | record the attempt first |
 | 13 | `mark_ready` vs `hold_ready(false)`: a release racing the end of indexing left a repo stuck `Indexing` | TLA+ `HoldGate`, loom | 5-step trace | `HealthGate` (one lock) |
 
+### Review of the merged B1 (shared oneshot server) and B5 (graph WAL) work
+
+Both arrived with TLA+ specs that passed TLC and unit tests that passed, and
+both were unsafe or non-functional. The specs were too weak to notice:
+`GraphWal.tla`'s only real invariant was a length bound (`S2` was `TRUE`), and
+the "end-to-end recovery" test never reloaded anything.
+
+| # | Defect | Found by | Fix |
+|---|--------|----------|-----|
+| 14 | **WAL replay never terminated**: replay re-logged each op into the file it was reading, so any restart with a non-empty WAL hung and filled the disk | reload test under a watchdog | replay with logging suppressed; compact after recovery |
+| 15 | A torn WAL tail was ignored but left in place, so every frame appended after recovery was unreachable at the next crash | test | `replay_and_repair` truncates to the last intact frame |
+| 16 | WAL order differed from in-memory order (4 of 6 mutators logged before taking the graph write lock): recovery diverged from the pre-crash graph | TLA+ `GraphWalOrder`, concurrent test | log under the write lock |
+| 17 | Checkpoint serialised, wrote, then truncated the live WAL, dropping ops acknowledged meanwhile (16 of 400 lost) | TLA+ `GraphWalCheckpoint`, concurrent test | rotate under the lock, discard after the snapshot |
+| 18 | `insert_edges_batch` logged edges it then dropped, and replay aborted on the first "not found", failing startup; one existing test asserted exactly that bug | test | log only applied edges; tolerate stale ops |
+| 19 | The "CRC-32C" table was the IEEE polynomial; one open+fsync per node in batch inserts | test vector, review | real Castagnoli; one write+fsync per batch |
+| 20 | **The "shared" oneshot server died with the first call** (owned by `StdioSession`, killed on drop): nothing was ever shared, every call cold-started | real-binary probe | detached daemon mode with idle exit; 2nd call 12.1s → 0.00s |
+| 21 | Socket `tools/call` skipped the readiness gate, and could not reach presence/audit/status tools | review, test | same gate → dispatch → envelope pipeline as stdio/HTTP |
+| 22 | Liveness by PID file and `/proc`: wrong after PID reuse, always "dead" on macOS (deleting a live server's socket); two daemons starting together could delete each other's socket | review, concurrent test | connect probe; `O_EXCL` start guard |
+| 23 | Socket mode left to umask although `tools/call` runs builds/tests; unbounded request lines | review, test | `0600`/`0700`; 16 MiB frame cap |
+| 24 | `std::os::unix` / `UnixListener` unconditional: the Windows build would break | review | `cfg(unix)` with a private-stdio fallback (**not compiled here**; needs the CI Windows lane) |
+| 25 | `find_anchors` ranked tied scores by `HashMap` order: a second call listed different symbols | e2e test | total order (score, name, path, id) |
+| 26 | Uncommitted test-suite fallout: core is 20 tools, manual table stale (the previous session died on a billing error mid-fix) | full test run | counts derived from the registry |
+
+WAL recovery stays a best-effort accelerator, not a complete log: mutators that
+rebuild derived state (`replace_nodes`, `set_embedding`, `reset`, ...) are not
+logged, and replay never advances `last_commit`, so the next index pass
+reconciles. Recovery also cannot repair a corrupt `graph.bin` (the WAL holds
+only post-checkpoint ops).
+
 ## Checked and found sound
 
 Token-bucket rate limiter (rate bound, `Retry-After` honesty, map cap);
@@ -41,6 +70,8 @@ version refusal (already well tested).
   is not guaranteed to be served before newer ones (no loss, just no FIFO).
 * Kani proofs of the date arithmetic cover 1970–9999, not all of `u64`
   (unbounded 64-bit division is intractable for the SAT backend).
+* Windows is not compiled locally (no cross C compiler here); the B1 `cfg(unix)`
+  gating and every platform-sensitive change needs the CI Windows/macOS lanes.
 * None of this runs in CI yet. `make verify` runs TLC + property tests + loom;
   `make kani`, `make miri` and `make mutants` are separate.
 
