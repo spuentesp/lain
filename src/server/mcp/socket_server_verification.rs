@@ -758,3 +758,19 @@ fn start_guard_waits_for_a_live_holder_and_takes_over_a_dead_one() {
     let _taken = StartGuard::take(g.clone()).expect("a stale guard must be taken over");
     assert!(t.elapsed() < Duration::from_secs(2));
 }
+
+/// A guard that cannot be created for a reason other than "it exists" fails at
+/// once with that reason; it is not retried for five seconds as if contended.
+#[test]
+fn start_guard_reports_a_real_io_error_immediately() {
+    let dir = tempfile::tempdir().unwrap();
+    let g = dir.path().join("no/such/dir/sock.start");
+    let t = Instant::now();
+    let err = StartGuard::take(g).err().expect("must fail");
+    assert!(
+        t.elapsed() < Duration::from_secs(2),
+        "retried a non-contention error for {:?}",
+        t.elapsed()
+    );
+    assert!(format!("{err:#}").contains("start guard"), "{err:#}");
+}
