@@ -678,4 +678,71 @@ mod pieces {
             "skewed claim fails secure"
         );
     }
+
+    #[test]
+    fn listing_a_path_shows_sorted_holders_and_symbols_without_the_file_level_sentinel() {
+        let m = OccupancyMap::new();
+        let (a, b, c) = (agent("a"), agent("b"), agent("c"));
+        let p = "zz_list.rs";
+        let _ = m.claim(&b, vec![req(p, &["s2", "s1"], ClaimIntent::Read)]);
+        let _ = m.claim(&c, vec![req(p, &["s3"], ClaimIntent::Edit)]);
+        let _ = m.claim(&a, vec![req(p, &["s4"], ClaimIntent::Read)]);
+        let e = m.list_for_path(Path::new(p)).expect("occupied");
+        let ids: Vec<&str> = e.holders.iter().map(|h| h.agent_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"], "holders sorted by agent id");
+        let intents: Vec<ClaimIntent> = e.holders.iter().map(|h| h.intent.clone()).collect();
+        assert_eq!(
+            intents,
+            vec![ClaimIntent::Read, ClaimIntent::Read, ClaimIntent::Edit]
+        );
+        let syms: Vec<&str> = e.symbols.iter().map(|s| s.symbol.as_str()).collect();
+        assert_eq!(
+            syms,
+            vec!["s1", "s2", "s3", "s4"],
+            "sorted, and no __file_level__"
+        );
+        assert_eq!(e.agents.len(), 3);
+        // A file-level claim by someone else shows up as a holder, not as a symbol.
+        let d = agent("d");
+        let _ = m.claim(&d, vec![req(p, &[], ClaimIntent::Read)]);
+        let e = m.list_for_path(Path::new(p)).unwrap();
+        assert!(e.symbols.iter().all(|s| s.symbol != "__file_level__"));
+        assert_eq!(e.holders.len(), 4);
+        // Unoccupied path: nothing; list_all has each occupied file once.
+        assert!(m.list_for_path(Path::new("zz_nobody.rs")).is_none());
+        let _ = m.claim(&a, vec![req("zz_list2.rs", &[], ClaimIntent::Read)]);
+        let mut all: Vec<PathBuf> = m.list_all().into_iter().map(|e| e.path).collect();
+        all.sort();
+        assert_eq!(
+            all,
+            vec![PathBuf::from("zz_list.rs"), PathBuf::from("zz_list2.rs")]
+        );
+    }
+
+    #[test]
+    fn ttl_expiry_persists_only_when_something_expired() {
+        let m = OccupancyMap::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f2 = fired.clone();
+        m.set_persist_callback(move || {
+            f2.fetch_add(1, O::SeqCst);
+        });
+        let a = agent("a");
+        let mut later = req("zz_pe.rs", &[], ClaimIntent::Edit);
+        later.ttl_seconds = Some(3600);
+        let _ = m.claim(&a, vec![later]);
+        let n = fired.load(O::SeqCst);
+        assert!(m.expire_by_ttl().is_empty());
+        assert_eq!(fired.load(O::SeqCst), n, "nothing expired: nothing to save");
+        let mut due = req("zz_pe2.rs", &[], ClaimIntent::Edit);
+        due.ttl_seconds = Some(0);
+        let _ = m.claim(&a, vec![due]);
+        let n = fired.load(O::SeqCst);
+        assert_eq!(m.expire_by_ttl().len(), 1);
+        assert_eq!(
+            fired.load(O::SeqCst),
+            n + 1,
+            "an expiry is saved exactly once"
+        );
+    }
 }
