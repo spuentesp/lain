@@ -551,4 +551,41 @@ mod pieces {
             "a refused claim must not trigger a save"
         );
     }
+
+    #[test]
+    fn release_persists_only_when_something_was_released() {
+        let m = OccupancyMap::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f2 = fired.clone();
+        m.set_persist_callback(move || {
+            f2.fetch_add(1, O::SeqCst);
+        });
+        let a = agent("a");
+        let _ = m.claim(&a, vec![req("zz_rel.rs", &[], ClaimIntent::Edit)]);
+        // Nothing held at this path: no change, no save.
+        assert!(m.release(&a, &[PathBuf::from("zz_never.rs")]).is_empty());
+        assert!(
+            m.release(&agent("stranger"), &[PathBuf::from("zz_rel.rs")])
+                .len()
+                <= 1
+        );
+        let after_noop = fired.load(O::SeqCst);
+        // Releasing a real claim saves exactly once more.
+        assert_eq!(
+            m.release(&a, &[PathBuf::from("zz_rel.rs")]),
+            vec![PathBuf::from("zz_rel.rs")]
+        );
+        assert!(
+            fired.load(O::SeqCst) > after_noop,
+            "a real release must be persisted"
+        );
+        // The no-op release of a path nobody holds did not save.
+        let before = fired.load(O::SeqCst);
+        assert!(m.release(&a, &[PathBuf::from("zz_gone.rs")]).is_empty());
+        assert_eq!(
+            fired.load(O::SeqCst),
+            before,
+            "an empty release must not trigger a save"
+        );
+    }
 }

@@ -31,6 +31,9 @@ exclude_re = [
     'socket_server\.rs:137.*replace && with \|\| in bind_exclusive',
     # Only changes WHEN the idle check wakes (within the documented 1-2 windows).
     'socket_server\.rs:235.*replace == with != in accept_loop',
+    # A file entry has agents iff it has symbols (a file-level claim records the
+    # `__file_level__` scope), so `&&` and `||` agree.
+    'presence\.rs.*replace && with \|\| in OccupancyMap::release',
     'wal\.rs:355.*replace > with >= in replay_inner',
     'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
 ]
