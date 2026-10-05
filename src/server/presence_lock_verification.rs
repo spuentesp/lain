@@ -401,3 +401,231 @@ fn an_expired_foreign_lock_is_taken_over_but_a_live_one_conflicts() {
     );
     assert!(!theirs.exists(), "the expired lock file was removed");
 }
+
+// ---- release and refresh: only the holder may, and every outcome is observable -----------
+
+mod release_refresh {
+    use super::*;
+
+    fn acquire(ws: &Path, name: &str, who: &str) -> FileLock {
+        try_lock(
+            ws,
+            Path::new(name),
+            &AgentId(who.into()),
+            AgentKind::Other("t".into()),
+            ClaimIntent::Edit,
+        )
+        .expect("acquire")
+    }
+
+    #[test]
+    fn release_by_the_holder_removes_the_file_and_is_repeatable() {
+        let ws = tempfile::tempdir().unwrap();
+        let l = acquire(ws.path(), "a.rs", "alice");
+        assert!(l.path.exists());
+        release_lock(&l).expect("holder releases");
+        assert!(!l.path.exists(), "release must delete the lock file");
+        // The goal state "no sentinel" already holds: a second release is a NotOwner
+        // with an empty `found`, never an I/O error and never a deletion of anything.
+        match release_lock(&l) {
+            Err(ReleaseError::NotOwner { found, .. }) => assert!(found.is_empty()),
+            other => panic!("expected NotOwner for a missing file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn release_with_the_wrong_nonce_leaves_the_holders_lock_untouched() {
+        let ws = tempfile::tempdir().unwrap();
+        let l = acquire(ws.path(), "a.rs", "alice");
+        let mut forged = FileLock {
+            path: l.path.clone(),
+            agent_id: l.agent_id.clone(),
+            kind: l.kind.clone(),
+            intent: l.intent.clone(),
+            claimed_at: l.claimed_at,
+            nonce: "not-the-nonce".into(),
+        };
+        match release_lock(&forged) {
+            Err(ReleaseError::NotOwner {
+                expected, found, ..
+            }) => {
+                assert_eq!(expected, "not-the-nonce");
+                assert_eq!(
+                    found, l.nonce,
+                    "the error must name the real holder's nonce"
+                );
+            }
+            other => panic!("expected NotOwner, got {other:?}"),
+        }
+        assert!(l.path.exists(), "a refused release must restore the lock");
+        assert_eq!(read_nonce(&l.path), l.nonce, "...with its content intact");
+        forged.nonce = l.nonce.clone();
+        release_lock(&forged).expect("the right nonce works");
+        assert!(!l.path.exists());
+    }
+
+    #[test]
+    fn release_for_path_checks_the_nonce_too() {
+        let ws = tempfile::tempdir().unwrap();
+        let l = acquire(ws.path(), "a.rs", "alice");
+        assert!(release_lock_for_path(ws.path(), Path::new("a.rs"), "wrong").is_err());
+        assert!(l.path.exists());
+        release_lock_for_path(ws.path(), Path::new("a.rs"), &l.nonce).expect("right nonce");
+        assert!(!l.path.exists());
+    }
+
+    #[test]
+    fn release_lock_at_removes_and_tolerates_a_missing_file() {
+        let ws = tempfile::tempdir().unwrap();
+        let f = ws.path().join("x.lock");
+        std::fs::write(&f, "{}").unwrap();
+        release_lock_at(&f).unwrap();
+        assert!(!f.exists(), "the file must actually be removed");
+        release_lock_at(&f).expect("missing is success");
+        // Any other failure is reported, not swallowed: a directory cannot be unlinked as a file.
+        let d = ws.path().join("d.lock");
+        std::fs::create_dir(&d).unwrap();
+        assert!(
+            release_lock_at(&d).is_err(),
+            "a non-NotFound error must surface"
+        );
+    }
+
+    #[test]
+    fn conditional_release_by_holder_reports_what_it_did() {
+        let ws = tempfile::tempdir().unwrap();
+        let l = acquire(ws.path(), "a.rs", "alice");
+        let me = AgentId("alice".into());
+        let other = AgentId("bob".into());
+        assert!(
+            !release_lock_if_owned(&l.path, &other).unwrap(),
+            "not the holder: false"
+        );
+        assert!(l.path.exists());
+        assert!(release_lock_if_owned(&l.path, &me).unwrap(), "holder: true");
+        assert!(!l.path.exists());
+        assert!(
+            !release_lock_if_owned(&l.path, &me).unwrap(),
+            "already gone: false"
+        );
+        // The matcher is consulted with the recorded holder, once, and only if the file exists.
+        let l2 = acquire(ws.path(), "b.rs", "carol");
+        let mut seen = None;
+        let r = release_lock_if_holder_matches(&l2.path, |h| {
+            seen = Some(h.0.clone());
+            false
+        })
+        .unwrap();
+        assert!(!r && l2.path.exists());
+        assert_eq!(seen.as_deref(), Some("carol"));
+        let mut called = false;
+        release_lock_if_holder_matches(&ws.path().join("missing"), |_| {
+            called = true;
+            true
+        })
+        .unwrap();
+        assert!(!called, "no file, no matcher call");
+    }
+
+    #[test]
+    fn agent_name_match_accepts_exact_and_at_suffix_only() {
+        let ws = tempfile::tempdir().unwrap();
+        for (holder, name, expect) in [
+            ("claude@123", "claude", true),
+            ("claude", "claude", true),
+            ("claudette@1", "claude", false),
+            ("claude2", "claude", false),
+            ("other@claude", "claude", false),
+            ("", "claude", false),
+        ] {
+            let l = acquire(
+                ws.path(),
+                "m.rs",
+                if holder.is_empty() { "x" } else { holder },
+            );
+            if holder.is_empty() {
+                std::fs::write(&l.path, "{}").unwrap(); // a lock whose holder is unreadable
+            }
+            let got = release_lock_if_agent_matches(&l.path, name).unwrap();
+            assert_eq!(got, expect, "holder {holder:?} vs {name:?}");
+            assert_eq!(
+                !l.path.exists(),
+                expect,
+                "file presence after {holder:?} vs {name:?}"
+            );
+            let _ = std::fs::remove_file(&l.path);
+        }
+    }
+
+    #[test]
+    fn refresh_if_owned_distinguishes_missing_stolen_and_refreshed() {
+        let ws = tempfile::tempdir().unwrap();
+        let l = acquire(ws.path(), "a.rs", "alice");
+        let me = AgentId("alice".into());
+        assert_eq!(
+            refresh_lock_if_owned(&ws.path().join("nope"), &me),
+            RefreshOutcome::Missing
+        );
+        assert_eq!(
+            refresh_lock_if_owned(&l.path, &AgentId("bob".into())),
+            RefreshOutcome::StolenBy(me.clone())
+        );
+        // Age the lock, then refresh: the mtime must move forward to ~now.
+        let old = SystemTime::now() - Duration::from_secs(3);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&l.path)
+            .unwrap();
+        f.set_modified(old).unwrap();
+        drop(f);
+        assert_eq!(
+            refresh_lock_if_owned(&l.path, &me),
+            RefreshOutcome::Refreshed
+        );
+        let m = std::fs::metadata(&l.path).unwrap().modified().unwrap();
+        assert!(
+            m > old + Duration::from_secs(1),
+            "refresh did not touch the mtime"
+        );
+    }
+
+    #[test]
+    fn file_lock_refresh_requires_our_nonce_and_bumps_mtime() {
+        let ws = tempfile::tempdir().unwrap();
+        let l = acquire(ws.path(), "a.rs", "alice");
+        let old = SystemTime::now() - Duration::from_secs(3);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&l.path)
+            .unwrap();
+        f.set_modified(old).unwrap();
+        drop(f);
+        l.refresh_lock().expect("owner refreshes");
+        let m = std::fs::metadata(&l.path).unwrap().modified().unwrap();
+        assert!(m > old + Duration::from_secs(1), "the mtime was not bumped");
+        // Someone else's file under our path: refuse, and do not touch it.
+        std::fs::write(
+            &l.path,
+            r#"{"agent_id":"bob","kind":"other","intent":"edit","nonce":"bobs"}"#,
+        )
+        .unwrap();
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&l.path)
+            .unwrap();
+        f.set_modified(old).unwrap();
+        drop(f);
+        let e = l
+            .refresh_lock()
+            .expect_err("a stolen lock must not be refreshed");
+        assert!(e.contains("no longer owned"), "{e}");
+        let m2 = std::fs::metadata(&l.path).unwrap().modified().unwrap();
+        assert!(
+            m2 < old + Duration::from_secs(1),
+            "refreshed a lock that is not ours"
+        );
+        // A vanished file reports <missing>.
+        std::fs::remove_file(&l.path).unwrap();
+        assert!(l.refresh_lock().unwrap_err().contains("<missing>"));
+    }
+}
