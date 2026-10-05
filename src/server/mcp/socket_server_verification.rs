@@ -850,3 +850,50 @@ async fn frame_limit_boundary_is_exact() {
         );
     }
 }
+
+/// Each JSON-RPC method does what the protocol says, not merely "answers".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_methods_have_their_documented_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path());
+    let d = |m: &str, p: Value| {
+        let server = server.clone();
+        let m = m.to_string();
+        async move { dispatch(&m, p, json!(9), &server).await }
+    };
+    let init = d("initialize", Value::Null).await;
+    assert_eq!(init["id"], 9);
+    assert_eq!(init["result"]["serverInfo"]["name"], "lain");
+    assert_eq!(
+        init["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
+    assert!(init["result"]["capabilities"]["tools"].is_object());
+
+    assert_eq!(d("ping", Value::Null).await["result"], json!({}));
+    assert_eq!(
+        d("notifications/initialized", Value::Null).await,
+        Value::Null
+    );
+
+    let list = d("tools/list", Value::Null).await;
+    let tools = list["result"]["tools"].as_array().expect("tools array");
+    assert!(tools.len() > 50);
+    assert!(tools
+        .iter()
+        .all(|t| t["name"].is_string() && t["inputSchema"].is_object()));
+    assert!(tools.iter().any(|t| t["name"] == "find_anchors"));
+
+    let call = d("tools/call", json!({"name": "get_health", "arguments": {}})).await;
+    assert!(call["result"]["content"].is_array(), "{call}");
+    assert!(call.get("error").is_none());
+
+    let unknown = d("no/such/method", Value::Null).await;
+    assert_eq!(unknown["error"]["code"], -32601);
+    assert!(unknown["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no/such/method"));
+    assert!(unknown.get("result").is_none());
+}
