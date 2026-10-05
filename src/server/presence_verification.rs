@@ -588,4 +588,94 @@ mod pieces {
             "an empty release must not trigger a save"
         );
     }
+
+    #[test]
+    fn release_all_for_drops_only_that_agents_claims_and_lock_leases() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = OccupancyMap::new();
+        let (a, b) = (agent("a"), agent("b"));
+        let _ = m.claim(
+            &a,
+            vec![
+                req("zz_ra1.rs", &[], ClaimIntent::Edit),
+                req("zz_ra2.rs", &["s"], ClaimIntent::Edit),
+            ],
+        );
+        let _ = m.claim(&b, vec![req("zz_rb1.rs", &[], ClaimIntent::Edit)]);
+        let lock = |name: &str, who: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(
+                &p,
+                format!(r#"{{"agent_id":"{who}","kind":"other","intent":"edit","nonce":"n"}}"#),
+            )
+            .unwrap();
+            p
+        };
+        let (la, lb) = (lock("a.lock", "a"), lock("b.lock", "b"));
+        m.lock_leases
+            .lock()
+            .insert((a.clone(), PathBuf::from("zz_lease_a.rs")), la.clone());
+        m.lock_leases
+            .lock()
+            .insert((b.clone(), PathBuf::from("zz_lease_b.rs")), lb.clone());
+
+        let mut released = m.release_all_for(&a);
+        released.sort();
+        assert_eq!(
+            released,
+            vec![PathBuf::from("zz_ra1.rs"), PathBuf::from("zz_ra2.rs")]
+        );
+        assert!(m.list_for_agent(&a).is_empty());
+        assert_eq!(
+            m.list_for_agent(&b).len(),
+            1,
+            "another agent's claims are untouched"
+        );
+        assert!(!la.exists(), "a's leased lock file is removed");
+        assert!(lb.exists(), "b's leased lock file is untouched");
+        let leases = m.lock_leases.lock();
+        assert!(
+            leases.keys().all(|(who, _)| who != &a),
+            "a's leases are forgotten"
+        );
+        assert_eq!(leases.len(), 1);
+    }
+
+    #[test]
+    fn ttl_expiry_removes_due_claims_and_fails_secure_when_the_clock_went_backwards() {
+        let m = OccupancyMap::new();
+        let a = agent("a");
+        let mut due = req("zz_due.rs", &[], ClaimIntent::Edit);
+        due.ttl_seconds = Some(0);
+        let mut later = req("zz_later.rs", &[], ClaimIntent::Edit);
+        later.ttl_seconds = Some(3600);
+        let _ = m.claim(
+            &a,
+            vec![due, later, req("zz_forever.rs", &[], ClaimIntent::Edit)],
+        );
+        let expired = m.expire_by_ttl();
+        assert_eq!(expired, vec![(a.clone(), PathBuf::from("zz_due.rs"))]);
+        assert_eq!(m.list_for_agent(&a).len(), 2, "only the due claim goes");
+
+        // A claim that appears to have been made in the FUTURE (the wall clock
+        // jumped backwards) with a TTL must not live until the clock catches up.
+        {
+            let mut s = m.inner.lock();
+            let c = s
+                .by_agent
+                .get_mut(&a)
+                .unwrap()
+                .iter_mut()
+                .find(|c| c.path == PathBuf::from("zz_later.rs"))
+                .unwrap();
+            c.claimed_at = SystemTime::now() + std::time::Duration::from_secs(7200);
+            c.expires_at = Some(SystemTime::now() + std::time::Duration::from_secs(9000));
+        }
+        let expired = m.expire_by_ttl();
+        assert_eq!(
+            expired,
+            vec![(a.clone(), PathBuf::from("zz_later.rs"))],
+            "skewed claim fails secure"
+        );
+    }
 }
