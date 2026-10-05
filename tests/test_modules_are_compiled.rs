@@ -78,6 +78,24 @@ fn every_rust_file_under_src_is_declared_as_a_module() {
                 })
                 .unwrap_or(false)
         });
+        // ...or by an explicit `#[path = "<file>.rs"]` attribute in a sibling
+        // module file (the verification suites use this to keep a module's
+        // models and proofs next to it without growing the module itself).
+        let file_name = f.file_name().unwrap().to_string_lossy().to_string();
+        let path_attr = format!("#[path = \"{file_name}\"]");
+        let declared = declared
+            || std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries.flatten().any(|e| {
+                        let sib = e.path();
+                        sib != *f
+                            && sib.extension().is_some_and(|x| x == "rs")
+                            && std::fs::read_to_string(&sib)
+                                .map(|s| s.lines().any(|l| l.trim() == path_attr))
+                                .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
         if !declared {
             orphans.push(f.strip_prefix(&root).unwrap_or(f).display().to_string());
         }
