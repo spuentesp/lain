@@ -200,3 +200,155 @@ fn a_truncated_annotation_database_never_panics() {
         assert!(r.is_ok(), "panic with the file cut to {cut} bytes");
     }
 }
+
+// ---- state machine: the store refines a status model, across reopen ---------------------
+
+mod lifecycle {
+    use super::*;
+    use proptest_state_machine::{prop_state_machine, ReferenceStateMachine, StateMachineTest};
+
+    /// Model: ids in creation order with their status and resolver.
+    #[derive(Clone, Debug, Default)]
+    pub struct Model {
+        rows: Vec<(usize, Option<String>)>, // (seq, resolved_by)
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum Op {
+        Add,
+        Resolve(usize, bool), // row index (mod len), which agent
+        Reopen,               // close and reopen the sqlite file
+        Check(usize),
+    }
+
+    pub struct Ref;
+    impl ReferenceStateMachine for Ref {
+        type State = Model;
+        type Transition = Op;
+        fn init_state() -> BoxedStrategy<Model> {
+            Just(Model::default()).boxed()
+        }
+        fn transitions(m: &Model) -> BoxedStrategy<Op> {
+            let mut ops = vec![Just(Op::Add).boxed(), Just(Op::Reopen).boxed()];
+            if !m.rows.is_empty() {
+                ops.push(
+                    (0usize..64, any::<bool>())
+                        .prop_map(|(i, b)| Op::Resolve(i, b))
+                        .boxed(),
+                );
+                ops.push((0usize..64).prop_map(Op::Check).boxed());
+            }
+            proptest::strategy::Union::new(ops).boxed()
+        }
+        fn apply(mut m: Model, op: &Op) -> Model {
+            match op {
+                Op::Add => {
+                    let n = m.rows.len();
+                    m.rows.push((n, None));
+                }
+                Op::Resolve(i, b) => {
+                    let n = m.rows.len();
+                    let row = &mut m.rows[i % n];
+                    if row.1.is_none() {
+                        row.1 = Some(if *b { "alice" } else { "bob" }.to_string());
+                    }
+                }
+                Op::Reopen | Op::Check(_) => {}
+            }
+            m
+        }
+    }
+
+    pub struct Sut {
+        _tmp: tempfile::TempDir,
+        path: std::path::PathBuf,
+        store: AnnotationStore,
+        ids: Vec<String>,
+        resolved: std::collections::HashSet<usize>,
+    }
+
+    fn assert_matches(sut: &Sut, m: &Model) {
+        for (i, (_, resolved_by)) in m.rows.iter().enumerate() {
+            let a = sut.store.get(&sut.ids[i]).unwrap().expect("row exists");
+            match resolved_by {
+                None => {
+                    assert_eq!(a.status, "open");
+                    assert!(a.resolved_by.is_none() && a.resolved_at_unix_ms.is_none());
+                }
+                Some(by) => {
+                    assert_eq!(a.status, "resolved");
+                    assert_eq!(
+                        a.resolved_by.as_ref().map(|x| x.0.as_str()),
+                        Some(by.as_str())
+                    );
+                    assert!(a.resolved_at_unix_ms.is_some());
+                }
+            }
+        }
+    }
+
+    impl StateMachineTest for Sut {
+        type SystemUnderTest = Sut;
+        type Reference = Ref;
+        fn init_test(_: &Model) -> Sut {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("a.sqlite");
+            let store = AnnotationStore::open(&path).unwrap();
+            Sut {
+                _tmp: tmp,
+                path,
+                store,
+                ids: vec![],
+                resolved: Default::default(),
+            }
+        }
+        fn apply(mut sut: Sut, _m: &Model, op: Op) -> Sut {
+            match op {
+                Op::Add => {
+                    let id = add(&sut.store, &format!("s{}", sut.ids.len()));
+                    sut.ids.push(id);
+                }
+                Op::Resolve(i, b) => {
+                    if sut.ids.is_empty() {
+                        return sut; // shrinking can drop the Add this depended on
+                    }
+                    let idx = i % sut.ids.len();
+                    let by = AgentId(if b { "alice" } else { "bob" }.into());
+                    let already = !sut.resolved.insert(idx);
+                    let r = sut.store.resolve(&sut.ids[idx], &by);
+                    // Resolving twice is refused, never silently re-attributed.
+                    assert_eq!(r.is_err(), already, "resolve outcome vs model: {r:?}");
+                }
+                Op::Reopen => {
+                    sut.store = AnnotationStore::open(&sut.path).unwrap();
+                }
+                Op::Check(_) => {}
+            }
+            sut
+        }
+        fn check_invariants(sut: &Sut, m: &Model) {
+            assert_matches(sut, m);
+            let all = sut
+                .store
+                .list_with_staleness(&ListQuery {
+                    filter: &ListFilter {
+                        limit: Some(1000),
+                        ..Default::default()
+                    },
+                    exists: &|_| true,
+                })
+                .unwrap();
+            assert_eq!(
+                all.len(),
+                m.rows.len(),
+                "list must contain every row exactly once"
+            );
+        }
+    }
+
+    prop_state_machine! {
+        #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+        #[test]
+        fn annotation_store_refines_the_status_model(sequential 1..30 => Sut);
+    }
+}
