@@ -46,8 +46,9 @@ Legend: ● checked · ◐ partly · ○ not checked.
   (HTTP, gRPC, GraphQL, SQL, OpenAPI, entry points), query-language parsing.
   Example-based tests and the existing `fuzz/` harness only.
 * **Protocol framing and servers**: JSON-RPC dispatch and every safe tool are
-  fuzzed in-process (no panic, hang or out-of-workspace read). HTTP framing,
-  Command Center and SSE are integration tests only; process-spawning tools
+  fuzzed in-process (no panic, hang or out-of-workspace read). SSE frame text is property-tested against a spec-style parser (hostile
+  agent ids / paths cannot split or inject frames). HTTP framing and the
+  Command Center are integration tests only; process-spawning tools
   (`run_build`, `run_tests`, ...) are excluded from the fuzz.
 * **Federation indexing pipeline** end to end (ordering across repos,
   cross-repo resolution) beyond the specific protocols above.

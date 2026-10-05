@@ -237,3 +237,65 @@ mod tests {
         build_frame(1, event)
     }
 }
+
+#[cfg(test)]
+mod framing_properties {
+    //! A frame is rendered as `event: E\ndata: D\nid: N\n\n` (handler.rs). SSE
+    //! has no escaping: a newline inside `data` would end the frame early and
+    //! let attacker-chosen text (an agent id, a path) inject fields or whole
+    //! extra events. Check the wire text against a spec-style parser.
+    use super::*;
+    use crate::server::presence::AgentId;
+    use proptest::prelude::*;
+    use std::path::PathBuf;
+
+    fn render(f: &SseFrame) -> String {
+        format!("event: {}\ndata: {}\nid: {}\n\n", f.event, f.data, f.id)
+    }
+
+    /// Minimal SSE parser: events end at a blank line; fields are `name: value`.
+    fn parse(wire: &str) -> Vec<Vec<(String, String)>> {
+        let mut events = Vec::new();
+        let mut cur: Vec<(String, String)> = Vec::new();
+        for line in wire.split('\n') {
+            if line.is_empty() {
+                if !cur.is_empty() {
+                    events.push(std::mem::take(&mut cur));
+                }
+            } else if let Some((k, v)) = line.split_once(": ") {
+                cur.push((k.into(), v.into()));
+            } else {
+                cur.push((line.into(), String::new()));
+            }
+        }
+        events
+    }
+
+    proptest! {
+        #[test]
+        fn hostile_strings_cannot_split_or_inject_frames(
+            agent in "\\PC{0,20}|[a-z]{0,5}(\\n|\\r|\\r\\n)event: x\\ndata: y\\n\\n[a-z]{0,5}",
+            path in "[ -~\\n\\r]{0,30}",
+            id in any::<u64>(),
+        ) {
+            let events = [
+                PresenceEvent::AgentLeft(AgentId(agent.clone())),
+                PresenceEvent::HeartbeatExpired(AgentId(agent.clone())),
+                PresenceEvent::ClaimGranted { agent_id: AgentId(agent.clone()), path: PathBuf::from(&path) },
+                PresenceEvent::ClaimRevoked { agent_id: AgentId(agent), path: PathBuf::from(path), reason: "ttl_expired".into() },
+            ];
+            for e in events {
+                let frame = build_frame(id, e);
+                let wire = render(&frame);
+                let parsed = parse(&wire);
+                prop_assert_eq!(parsed.len(), 1, "one event must stay one event: {:?}", wire);
+                let names: Vec<&str> = parsed[0].iter().map(|(k, _)| k.as_str()).collect();
+                prop_assert_eq!(names, vec!["event", "data", "id"], "injected field: {:?}", wire);
+                prop_assert!(!wire[..wire.len() - 2].contains('\r'), "raw CR in frame: {wire:?}");
+                let (_, data) = &parsed[0][1];
+                prop_assert!(serde_json::from_str::<serde_json::Value>(data).is_ok(), "data is not JSON");
+                prop_assert_eq!(&parsed[0][2].1, &id.to_string());
+            }
+        }
+    }
+}
