@@ -74,3 +74,22 @@ fn bucket_map_never_exceeds_its_cap_and_keeps_recent_keys() {
         "the oldest key is the one evicted"
     );
 }
+
+/// `Retry-After` is tight, not just sufficient: with a partly refilled bucket the
+/// hint is the time to reach one token, and waiting a second less is not enough.
+/// (Sign-flipping `1.0 - tokens` into `1.0 + tokens` only ever over-waits, so a
+/// "waited as told, was allowed" check cannot see it.)
+#[test]
+fn retry_after_is_the_time_to_one_token_with_a_partial_bucket() {
+    let rl = RateLimit::new(6); // refill 0.1 token/s, capacity 6
+    let t0 = Instant::now();
+    for _ in 0..6 {
+        rl.try_consume_at("k", t0).unwrap();
+    }
+    // 5 s later: 0.5 token. Needs 0.5 more = 5 s.
+    let t = t0 + Duration::from_secs(5);
+    assert_eq!(rl.try_consume_at("k", t), Err(5));
+    // Waiting 4 more seconds is not enough; 5 is.
+    assert!(rl.try_consume_at("k", t + Duration::from_secs(4)).is_err());
+    assert!(rl.try_consume_at("k", t + Duration::from_secs(5)).is_ok());
+}
