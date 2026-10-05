@@ -207,3 +207,20 @@ fn round_robin_is_balanced_across_racing_clones() {
         "unbalanced: {counts:?}"
     );
 }
+
+/// The clock-free entry point (what the request path calls) feeds the breaker
+/// exactly like the injected-clock one: `MAX_CONSECUTIVE_LSP_FAILURES`
+/// request errors mark the binary unavailable.
+#[test]
+fn the_public_failure_entry_point_trips_the_breaker() {
+    let mut m =
+        LspMultiplexer::new(Path::new("."), &crate::tuning::RuntimeConfig::default()).unwrap();
+    for _ in 0..MAX_CONSECUTIVE_LSP_FAILURES {
+        assert!(!m.unavailable.contains("fake-lsp"), "tripped early");
+        m.record_lsp_failure("fake-lsp", FailureKind::RequestError);
+    }
+    assert!(
+        m.unavailable.contains("fake-lsp"),
+        "the breaker never tripped through the wrapper"
+    );
+}
