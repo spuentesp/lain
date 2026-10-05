@@ -27,6 +27,8 @@ exclude_re = [
     # `on_disk > good_end` vs `>=`: equal lengths make set_len a no-op.
     # Same wall-clock boundary as the presence lock guard.
     'socket_server\.rs:97.*replace > with >= in StartGuard::take',
+    # `recursive(true)` create of an existing directory is a no-op.
+    'socket_server\.rs:137.*replace && with \|\| in bind_exclusive',
     'wal\.rs:355.*replace > with >= in replay_inner',
     'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
 ]
