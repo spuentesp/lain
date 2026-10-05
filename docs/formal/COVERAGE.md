@@ -22,6 +22,7 @@ Legend: ● checked · ◐ partly · ○ not checked.
 | Graph WAL / checkpoint (`graph/wal.rs`) | ● (2 specs) | ● crash, order, checkpoint races | ○ | ○ | ● |
 | Shared oneshot server (B1) | ◐ spec as merged | ● socket properties, real-binary e2e | ○ | ○ | ○ |
 | LSP circuit breaker / restart budget | ○ | ● refines the documented spec | ○ | ○ | ○ |
+| Federation repo add / project / remove | ● | ● concurrent stress | ○ | ○ | ○ |
 | Auth token bucket | ○ | ● rate bound, `Retry-After`, cap | ○ | ● `constant_time_eq` | ○ |
 | Sidecar respawn budget | ○ | ◐ targeted test | ○ | ○ | ○ |
 | File-watcher batching (`take_batch`) | ○ | ● partition | ○ | ○ | ○ |
