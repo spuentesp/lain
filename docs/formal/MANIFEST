@@ -44,3 +44,5 @@ GraphWalOrder_Unlocked            | GraphWalOrder                     | fail | p
 GraphWalOrder_Locked              | GraphWalOrder                     | pass | fixed: log + apply in one critical section
 FederationRepoLifecycle           | FederationRepoLifecycle           | pass | repo removal vs projection: resolve+write inside projection_lock
 FederationRepoLifecycle_Unchecked | FederationRepoLifecycle           | fail | if the repo lookup is hoisted out of the lock, a removed repo is resurrected
+RateLimit                         | RateLimit                         | pass | auth token bucket: range + rate bound
+RateLimit_NoClamp                 | RateLimit                         | fail | no clamp: idle key banks unbounded credit

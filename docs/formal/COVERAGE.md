@@ -24,7 +24,7 @@ Legend: ● checked · ◐ partly · ○ not checked.
 | LSP circuit breaker / restart budget | ○ | ● refines the documented spec | ○ | ○ | ○ |
 | Federation repo add / project / remove | ● | ● concurrent stress | ○ | ○ | ○ |
 | Federation readiness aggregation | ○ | ● permutation, exact blocking set, severity | ○ | ○ | ○ |
-| Auth token bucket | ○ | ● rate bound, `Retry-After`, cap | ○ | ● `constant_time_eq` | ○ |
+| Auth token bucket | ● range, burst, rate bound | ● rate bound, `Retry-After`, cap | ○ | ● `constant_time_eq` | ○ |
 | Sidecar respawn budget | ○ | ◐ targeted test | ○ | ○ | ○ |
 | LSP pool (size, round-robin) | ○ | ● zero size, balance under racing clones | ○ | ○ | ○ |
 | File-watcher batching (`take_batch`) | ○ | ● partition | ○ | ○ | ○ |
