@@ -28,6 +28,25 @@ use lain::graph::GraphDatabase;
 use lain::schema::RepoNamespace;
 use lain::server::ingest::ingestion::{index_one_repo, IndexMode, IndexRequest};
 
+/// `bash` for the fixture script: on Windows a bare `bash` is the WSL launcher,
+/// so prefer Git for Windows' own; `LAIN_TEST_BASH` overrides.
+fn git_bash() -> std::ffi::OsString {
+    if let Some(p) = std::env::var_os("LAIN_TEST_BASH") {
+        return p;
+    }
+    if cfg!(windows) {
+        for cand in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ] {
+            if std::path::Path::new(cand).exists() {
+                return cand.into();
+            }
+        }
+    }
+    "bash".into()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -41,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the fixture into a fresh tempdir so a future fixture
     // edit cannot make the committed digest stale by accident.
     let fixture_root = make_tempdir("lain-fixture")?;
-    let status = Command::new("bash")
+    let status = Command::new(git_bash())
         .arg(&fixture_script)
         .arg(&fixture_root)
         .status()
