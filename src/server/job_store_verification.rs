@@ -233,3 +233,94 @@ prop_state_machine! {
     #[test]
     fn registry_refines_the_cap_model(sequential 1..50 => Sut);
 }
+
+// ---- persistence: jobs.json written -> read -> restored ---------------------------------
+
+mod persistence {
+    use super::*;
+    use crate::server::tools::{JobInfo, JobState};
+    use std::time::Duration;
+
+    type RawJob = (String, u64, Option<(bool, Option<String>, Option<String>)>);
+
+    fn raw_job() -> impl Strategy<Value = RawJob> {
+        (
+            "[a-z0-9-]{1,12}",
+            0u64..2_000_000_000,
+            proptest::option::of((
+                any::<bool>(),
+                proptest::option::of("\\PC{0,30}"),
+                proptest::option::of("\\PC{0,30}"),
+            )),
+        )
+    }
+
+    fn build((id, secs, done): RawJob) -> JobInfo {
+        JobInfo {
+            id,
+            created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            state: match done {
+                None => JobState::Running,
+                Some((success, output, error)) => JobState::Completed {
+                    success,
+                    output,
+                    error,
+                },
+            },
+        }
+    }
+
+    proptest! {
+        /// Whatever was on disk, after restore nothing is `Running` (no process
+        /// backs it), completed results are preserved verbatim, and the
+        /// retention bound holds.
+        #[test]
+        fn written_then_restored_jobs_keep_results_and_never_run(
+            jobs in prop::collection::vec(raw_job(), 0..40),
+        ) {
+            let mut unique: HashMap<String, JobInfo> = HashMap::new();
+            for j in jobs.into_iter().map(build) { unique.insert(j.id.clone(), j); }
+            let on_disk: Vec<JobInfo> = unique.values().cloned().collect();
+            let json = serde_json::to_string(&on_disk).unwrap();
+            let read: Vec<JobInfo> = serde_json::from_str(&json).unwrap();
+
+            let map = new_map();
+            restore(&map, read);
+            let m = map.lock();
+            prop_assert!(m.values().all(|j| !matches!(j.state, JobState::Running)));
+            let done = m.len();
+            prop_assert!(done <= unique.len());
+            for (id, j) in m.iter() {
+                match (&unique[id].state, &j.state) {
+                    (JobState::Completed { success: a, output: o1, error: e1 },
+                     JobState::Completed { success: b, output: o2, error: e2 }) => {
+                        prop_assert_eq!((a, o1, e1), (b, o2, e2));
+                    }
+                    (JobState::Running, JobState::Completed { success, error, .. }) => {
+                        prop_assert!(!success && error.is_some(), "an orphan must read as failed, with a reason");
+                    }
+                    _ => prop_assert!(false, "state flipped to Running"),
+                }
+            }
+            let completed = m.values().filter(|j| matches!(j.state, JobState::Completed { .. })).count();
+            prop_assert!(completed <= COMPLETED_JOB_RETENTION, "retention bound broken: {}", completed);
+        }
+
+        /// Damaged job files are a parse error the loader reports, never a panic.
+        #[test]
+        fn damaged_job_files_do_not_panic(
+            jobs in prop::collection::vec(raw_job(), 1..6),
+            cut in 0.0f64..1.0,
+            noise in prop::collection::vec(any::<u8>(), 0..40),
+        ) {
+            let jobs: Vec<JobInfo> = jobs.into_iter().map(build).collect();
+            let json = serde_json::to_string(&jobs).unwrap();
+            let n = ((json.len() as f64) * cut) as usize;
+            let mut bytes = json.as_bytes()[..n].to_vec();
+            bytes.extend(noise);
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                let _ = serde_json::from_str::<Vec<JobInfo>>(text);
+            }
+        }
+    }
+}

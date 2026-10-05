@@ -54,8 +54,10 @@ Legend: ● checked · ◐ partly · ○ not checked.
   cross-repo resolution) beyond the specific protocols above.
 * **NLP / embeddings**, LSP process management, git semantics.
 * **Persistence formats**: the WAL, graph snapshot and annotations sqlite are
-  round-trip / corruption tested; the LNF2 federation envelope and `jobs.json`
-  are covered by example tests only. Schema-version refusal is not modelled.
+  round-trip / corruption tested; the LNF2 federation envelope (arbitrary bytes, garbage
+  bodies, truncation, byte flips: typed refusal, never a panic or partial
+  graph) and `jobs.json` (round trip + restore invariants) are property
+  tested. Schema-version refusal is example-tested, not modelled.
 * `OccupancyMap`, `job_store`, `manager.rs`, `DirtyFlag` and the socket server
   have property tests but have not been through mutation testing.
 

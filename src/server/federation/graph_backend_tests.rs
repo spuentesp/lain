@@ -1114,3 +1114,88 @@ fn reconstruct_test_path(
         min_confidence: if pred.is_empty() { 1.0 } else { min_conf },
     }
 }
+
+mod envelope_fuzz {
+    //! `federated_graph.bin` is read at startup from disk the operator may have
+    //! hand-edited, truncated by a crash, or filled by another version. Loading
+    //! must produce a graph or a *typed* refusal; never a panic, and never a
+    //! silently partial graph from a damaged body.
+    use super::*;
+    use proptest::prelude::*;
+
+    fn valid_file() -> (tempfile::TempDir, Vec<u8>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let b = PetgraphBackend::new(tmp.path()).unwrap();
+        for i in 0..5 {
+            b.upsert_node_global(
+                &format!("r:Function:src/lib.rs:f{i}:0"),
+                NodeType::Function,
+                "src/lib.rs",
+                &format!("f{i}"),
+            )
+            .unwrap();
+        }
+        drop(b);
+        let bytes = std::fs::read(tmp.path().join("federated_graph.bin")).unwrap();
+        (tmp, bytes)
+    }
+
+    fn load(bytes: &[u8]) -> Result<usize, LainError> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("federated_graph.bin"), bytes).unwrap();
+        PetgraphBackend::new(dir.path()).map(|b| b.node_count())
+    }
+
+    fn typed(e: &LainError) -> bool {
+        matches!(
+            e,
+            LainError::FederationSchemaMismatch { .. } | LainError::FederationPayloadCorrupt { .. }
+        )
+    }
+
+    #[test]
+    fn a_valid_file_reloads_every_node() {
+        let (_t, bytes) = valid_file();
+        assert_eq!(load(&bytes).unwrap(), 5);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+
+        #[test]
+        fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..200)) {
+            if let Err(e) = load(&bytes) { prop_assert!(typed(&e), "untyped error: {e:?}"); }
+        }
+
+        /// Arbitrary bytes behind a *valid* header exercise the payload validator.
+        #[test]
+        fn valid_header_with_garbage_body_is_refused_or_loads_cleanly(
+            body in prop::collection::vec(any::<u8>(), 0..300),
+        ) {
+            let mut bytes = FEDERATION_GRAPH_MAGIC.to_vec();
+            bytes.extend_from_slice(&crate::federation::graph_backend::FEDERATION_GRAPH_VERSION.to_le_bytes());
+            bytes.extend_from_slice(&body);
+            if let Err(e) = load(&bytes) { prop_assert!(typed(&e), "untyped error: {e:?}"); }
+        }
+
+        /// Every truncation of a real file is refused (not loaded as a smaller graph).
+        #[test]
+        fn truncated_real_files_are_never_loaded_partially(cut_frac in 0.0f64..0.999) {
+            let (_t, bytes) = valid_file();
+            let cut = ((bytes.len() as f64) * cut_frac) as usize;
+            match load(&bytes[..cut]) {
+                Ok(n) => prop_assert_eq!(n, 5, "a truncated file loaded as a partial graph ({} bytes of {})", cut, bytes.len()),
+                Err(e) => prop_assert!(typed(&e), "untyped error: {e:?}"),
+            }
+        }
+
+        /// A flipped byte either keeps the graph intact or is refused; it never panics.
+        #[test]
+        fn single_byte_corruption_never_panics(pos_frac in 0.0f64..1.0, xor in 1u8..=255) {
+            let (_t, mut bytes) = valid_file();
+            let pos = ((bytes.len() - 1) as f64 * pos_frac) as usize;
+            bytes[pos] ^= xor;
+            if let Err(e) = load(&bytes) { prop_assert!(typed(&e), "untyped error: {e:?}"); }
+        }
+    }
+}
