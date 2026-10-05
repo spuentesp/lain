@@ -721,3 +721,40 @@ async fn pid_file_is_beside_the_socket_and_names_this_process() {
         std::process::id().to_string()
     );
 }
+
+/// The start guard waits for a live starter to finish rather than giving up at
+/// once, and takes over a guard left by a crashed one.
+#[test]
+fn start_guard_waits_for_a_live_holder_and_takes_over_a_dead_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = sock(dir.path());
+    let g = guard_path_for(&p);
+
+    // Live holder: fresh file, released after 300 ms. `take` must wait, not bail.
+    std::fs::write(&g, "").unwrap();
+    let g2 = g.clone();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::remove_file(g2).unwrap();
+    });
+    let t = Instant::now();
+    let guard = StartGuard::take(g.clone()).expect("must wait for the holder, not give up at once");
+    assert!(
+        t.elapsed() >= Duration::from_millis(250),
+        "did not actually wait: {:?}",
+        t.elapsed()
+    );
+    releaser.join().unwrap();
+    drop(guard);
+    assert!(!g.exists(), "the guard is removed on drop");
+
+    // Dead holder: an old file is taken over immediately.
+    std::fs::write(&g, "").unwrap();
+    let f = std::fs::OpenOptions::new().write(true).open(&g).unwrap();
+    f.set_modified(std::time::SystemTime::now() - START_GUARD_TTL - Duration::from_secs(5))
+        .unwrap();
+    drop(f);
+    let t = Instant::now();
+    let _taken = StartGuard::take(g.clone()).expect("a stale guard must be taken over");
+    assert!(t.elapsed() < Duration::from_secs(2));
+}
