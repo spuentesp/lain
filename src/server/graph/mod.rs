@@ -190,6 +190,10 @@ pub struct GraphDatabase {
     wal_replaying: Arc<std::sync::atomic::AtomicBool>,
     /// Open append handle for the WAL (see `wal::WalWriter`); shared by clones.
     wal_writer: Arc<parking_lot::Mutex<wal::WalWriter>>,
+    /// One checkpoint at a time: rotate / snapshot / discard must not interleave
+    /// with another checkpoint's (a second saver merged into the first one's
+    /// retired log, then the first deleted it; both also shared one temp file).
+    checkpoint_lock: Arc<parking_lot::Mutex<()>>,
     persistence_path: PathBuf,
     /// When true, every public `insert_*` / `set_*` / `save_to_disk` returns
     /// `LainError::Other("graph is read-only")`. Set by `open_read_only`,
@@ -306,6 +310,7 @@ impl GraphDatabase {
                 wal::wal_path_for(memory_path),
                 wal::SyncPolicy::from_env(),
             ))),
+            checkpoint_lock: Arc::new(parking_lot::Mutex::new(())),
             persistence_path: memory_path.to_path_buf(),
             read_only: false,
             // Default to the test namespace so existing callers
@@ -2208,6 +2213,7 @@ impl GraphDatabase {
     }
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
+        let _one_checkpoint_at_a_time = self.checkpoint_lock.lock();
         // Start the checkpoint under the graph write lock: every logging
         // mutator appends under that same lock, so after this point all
         // previously acknowledged ops live in the retired log and new ones go

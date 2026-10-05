@@ -241,6 +241,58 @@ fn checkpoint_never_loses_an_acknowledged_op() {
     );
 }
 
+/// Two checkpoints at once used to interleave rotate / snapshot / discard: one
+/// discarded the retired log the other had just merged live frames into (and on
+/// Windows its delete hit the other's open handle: "wal discard: Access is
+/// denied", seen in CI). Several savers racing writers must neither error nor
+/// lose an acknowledged op.
+#[test]
+fn concurrent_checkpoints_do_not_error_or_lose_acknowledged_ops() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = dir.path().join("graph.bin");
+    let db = Arc::new(GraphDatabase::new(&snap).unwrap());
+    db.upsert_node(node("seed")).unwrap();
+    db.save_to_disk_sync().unwrap();
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let savers: Vec<_> = (0..3)
+        .map(|_| {
+            let (db, stop) = (Arc::clone(&db), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut n = 0;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    db.save_to_disk_sync().expect("a checkpoint must not fail");
+                    n += 1;
+                }
+                n
+            })
+        })
+        .collect();
+    let mut acked = Vec::new();
+    for i in 0..300 {
+        let name = format!("c{i}");
+        db.upsert_node(node(&name)).unwrap();
+        acked.push(name);
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let total: usize = savers.into_iter().map(|h| h.join().unwrap()).sum();
+    assert!(total >= 3, "the savers never ran");
+    drop(db); // crash: no final checkpoint
+
+    let p = snap.clone();
+    let recovered = within(30, move || GraphDatabase::new(&p).unwrap());
+    let missing: Vec<_> = acked
+        .iter()
+        .filter(|n| recovered.get_node(&node(n).id).unwrap().is_none())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} acknowledged ops lost, e.g. {:?}",
+        missing.len(),
+        &missing[..missing.len().min(5)]
+    );
+}
+
 /// A bulk insert must not pay one open+fsync per node.
 #[test]
 fn bulk_insert_is_not_one_fsync_per_node() {
