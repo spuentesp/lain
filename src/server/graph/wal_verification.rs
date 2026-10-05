@@ -293,3 +293,107 @@ fn find_anchors_breaks_score_ties_deterministically() {
         );
     }
 }
+
+fn some_op(i: usize) -> GraphOp {
+    GraphOp::UpsertNode(node(&format!("w{i}")))
+}
+
+/// How many `fsync`s each policy issues for 200 appends.
+#[test]
+fn sync_policy_controls_the_number_of_fsyncs() {
+    let dir = tempfile::tempdir().unwrap();
+    let count_for = |policy: SyncPolicy, name: &str| {
+        let mut w = WalWriter::new(dir.path().join(name), policy);
+        for i in 0..200 {
+            w.append(&[some_op(i)]).unwrap();
+        }
+        w.sync_count()
+    };
+    assert_eq!(count_for(SyncPolicy::Always, "always.wal"), 200);
+    assert_eq!(count_for(SyncPolicy::Never, "never.wal"), 0);
+    // A long interval: nothing is due during the burst, one explicit sync lands it.
+    let mut w = WalWriter::new(
+        dir.path().join("interval.wal"),
+        SyncPolicy::Interval(Duration::from_secs(3600)),
+    );
+    for i in 0..200 {
+        w.append(&[some_op(i)]).unwrap();
+    }
+    assert_eq!(
+        w.sync_count(),
+        0,
+        "a burst inside the window must not fsync"
+    );
+    w.sync().unwrap();
+    assert_eq!(w.sync_count(), 1);
+    w.sync().unwrap();
+    assert_eq!(w.sync_count(), 1, "nothing new to sync");
+    assert_eq!(frames_at(&dir.path().join("interval.wal")), 200);
+}
+
+fn frames_at(wal: &Path) -> usize {
+    replay(wal, |_| Ok(())).unwrap()
+}
+
+/// An interval policy does sync once the window has passed.
+#[test]
+fn interval_policy_syncs_after_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = WalWriter::new(
+        dir.path().join("i.wal"),
+        SyncPolicy::Interval(Duration::from_millis(30)),
+    );
+    w.append(&[some_op(0)]).unwrap();
+    assert_eq!(w.sync_count(), 0);
+    std::thread::sleep(Duration::from_millis(60));
+    w.append(&[some_op(1)]).unwrap();
+    assert_eq!(
+        w.sync_count(),
+        1,
+        "the window elapsed, so this append syncs"
+    );
+}
+
+/// After a rotate the writer must reopen: appends belong in the fresh WAL,
+/// not the retired file its old handle points at.
+#[test]
+fn closing_the_writer_lets_rotate_swap_the_file_under_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("graph.bin.wal");
+    let mut w = WalWriter::new(path.clone(), SyncPolicy::Never);
+    w.append(&[some_op(0), some_op(1)]).unwrap();
+    w.close().unwrap();
+    rotate(&path).unwrap();
+    w.append(&[some_op(2)]).unwrap();
+    w.close().unwrap();
+    assert_eq!(
+        frames_at(&prev_path_for(&path)),
+        2,
+        "retired log keeps the old frames"
+    );
+    assert_eq!(frames_at(&path), 1, "the fresh WAL got only the new frame");
+}
+
+#[test]
+fn sync_policy_parses_the_environment_forms() {
+    // `from_env` reads process state, so exercise the parser through a helper
+    // that mirrors it without mutating the environment shared by other tests.
+    let parse = |v: &str| match v.trim() {
+        "always" => SyncPolicy::Always,
+        "never" => SyncPolicy::Never,
+        ms => ms
+            .parse::<u64>()
+            .map(|ms| SyncPolicy::Interval(Duration::from_millis(ms)))
+            .unwrap_or(SyncPolicy::Interval(SyncPolicy::DEFAULT_INTERVAL)),
+    };
+    assert_eq!(parse("always"), SyncPolicy::Always);
+    assert_eq!(parse("never"), SyncPolicy::Never);
+    assert_eq!(
+        parse("250"),
+        SyncPolicy::Interval(Duration::from_millis(250))
+    );
+    assert_eq!(
+        parse("garbage"),
+        SyncPolicy::Interval(SyncPolicy::DEFAULT_INTERVAL)
+    );
+}

@@ -22,6 +22,24 @@ does **not** cover. Every row below was reproduced by a failing model or test
 | 12 | Sidecar respawn budget counted only *successful* respawns, so a sidecar that dies on startup was retried without limit | targeted test | budget never tripped | record the attempt first |
 | 13 | `mark_ready` vs `hold_ready(false)`: a release racing the end of indexing left a repo stuck `Indexing` | TLA+ `HoldGate`, loom | 5-step trace | `HealthGate` (one lock) |
 
+### Cross-platform CI (the lanes that never ran on `dev`)
+
+The `ci-probe/*` workflow runs macOS, Windows and coverage. Plain `dev` fails
+macOS, Windows and the `lain-version` check; each round of fixes exposed the
+next pre-existing failure:
+
+* macOS: `socket_path_for` hashed an unresolved path before a config existed
+  and the canonical one after, so behind a symlinked temp dir (`/var` →
+  `/private/var`) the reload socket moved and the signal went nowhere;
+  `contracts-fixture.sh` used GNU-only `date -d`.
+* Windows: index-cache reads failed with `ACCESS_DENIED` while another thread
+  replaced the file (now retried); `.sh` fixtures were executed directly and,
+  once routed through `bash`, picked up the WSL launcher instead of Git Bash.
+* coverage: a daemon process still running (or killed) when profile data was
+  merged corrupted it; the e2e test now requires the process itself to exit.
+* `lain-version default tracks latest release` still fails: the action pins
+  v0.7.4 and v0.8.0 is released. That is a release-PR change (AGENTS.md), left alone.
+
 ### Review of the merged B1 (shared oneshot server) and B5 (graph WAL) work
 
 Both arrived with TLA+ specs that passed TLC and unit tests that passed, and
@@ -43,6 +61,7 @@ the "end-to-end recovery" test never reloaded anything.
 | 23 | Socket mode left to umask although `tools/call` runs builds/tests; unbounded request lines | review, test | `0600`/`0700`; 16 MiB frame cap |
 | 24 | `std::os::unix` / `UnixListener` unconditional: the Windows build would break | review | `cfg(unix)` with a private-stdio fallback (**not compiled here**; needs the CI Windows lane) |
 | 25 | `find_anchors` ranked tied scores by `HashMap` order: a second call listed different symbols | e2e test | total order (score, name, path, id) |
+| 27 | The WAL paid one open + `fsync` per mutation: harmless on Linux (0.3 s for the graph benchmarks) but it pushed the Windows lane past its 30-minute cap, and bulk indexing would pay a milder version of it | CI probe (Windows job cancelled in `graph_benchmark`) | `WalWriter`: one open handle, `fsync` per `LAIN_WAL_SYNC` (`always`, `never`, or ms; default 100 ms). A process crash loses nothing (frames are in the OS cache after `write`); only a power loss can lose the last window |
 | 26 | Uncommitted test-suite fallout: core is 20 tools, manual table stale (the previous session died on a billing error mid-fix) | full test run | counts derived from the registry |
 
 WAL recovery stays a best-effort accelerator, not a complete log: mutators that

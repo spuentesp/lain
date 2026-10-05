@@ -22,6 +22,11 @@
 //! A torn frame (truncated, bad CRC) is treated as the end of
 //! the WAL; the loader stops reading at that point and the
 //! snapshot is unchanged.
+//!
+//! Durability: a frame survives the *process* dying as soon as `write`
+//! returns. `fsync` (only needed for OS/power failure) follows
+//! [`SyncPolicy`], default at most once per 100 ms; set `LAIN_WAL_SYNC` to
+//! `always`, `never` or a number of milliseconds.
 
 use crate::schema::{EdgeType, GraphEdge, GraphNode};
 use serde::{Deserialize, Serialize};
@@ -101,35 +106,152 @@ pub fn append_op(wal_path: &Path, op: &GraphOp) -> std::io::Result<()> {
     append_ops(wal_path, std::slice::from_ref(op))
 }
 
-/// Append `ops` as consecutive frames with ONE write and ONE fsync. A batch
-/// insert of N nodes used to pay N opens and N fsyncs. A crash mid-write
-/// tears at most the tail frame, which replay discards.
-pub fn append_ops(wal_path: &Path, ops: &[GraphOp]) -> std::io::Result<()> {
-    if ops.is_empty() {
-        return Ok(());
-    }
-    let mut buf = Vec::new();
-    for op in ops {
-        encode_frame(op, &mut buf)?;
-    }
-    let created = !wal_path.exists();
-    if let Some(parent) = wal_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+/// When appended frames are forced to stable storage.
+///
+/// A frame is in the kernel's buffers as soon as `write` returns, so it
+/// survives the *process* dying (a crash, a kill, a panic) whatever the
+/// policy. `fsync` only matters for the OS or power failing, and paying it per
+/// op made a 5000-node insert cost 5000 flushes: minutes on a Windows CI disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPolicy {
+    /// `fsync` after every append (the old behaviour).
+    Always,
+    /// `fsync` at most once per interval, and at checkpoint/shutdown. A
+    /// power loss can lose frames written in the last interval.
+    Interval(std::time::Duration),
+    /// Never `fsync` except at checkpoint/shutdown.
+    Never,
+}
+
+impl SyncPolicy {
+    /// Default window: 100 ms.
+    pub const DEFAULT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+    /// `LAIN_WAL_SYNC`: `always`, `never`, or a number of milliseconds.
+    pub fn from_env() -> Self {
+        match std::env::var("LAIN_WAL_SYNC")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("always") => SyncPolicy::Always,
+            Some("never") => SyncPolicy::Never,
+            Some(ms) => ms
+                .parse::<u64>()
+                .map(|ms| SyncPolicy::Interval(std::time::Duration::from_millis(ms)))
+                .unwrap_or(SyncPolicy::Interval(Self::DEFAULT_INTERVAL)),
+            None => SyncPolicy::Interval(Self::DEFAULT_INTERVAL),
         }
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(wal_path)?;
-    file.write_all(&buf)?;
-    file.sync_data()?;
-    if created {
-        // Make the new directory entry itself durable, or a crash right
-        // after the first append can lose the whole file.
-        sync_parent_dir(wal_path);
+}
+
+/// Append handle for one WAL file: opened once, synced per [`SyncPolicy`].
+///
+/// Callers serialise access (the graph write lock). [`WalWriter::close`] must
+/// run before the file is rotated or truncated: the handle would otherwise
+/// keep pointing at the retired log (and Windows cannot rename an open file).
+#[derive(Debug)]
+pub struct WalWriter {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    policy: SyncPolicy,
+    last_sync: std::time::Instant,
+    unsynced: bool,
+    /// Number of `fsync` calls issued (observable by tests).
+    syncs: u64,
+}
+
+impl WalWriter {
+    pub fn new(path: PathBuf, policy: SyncPolicy) -> Self {
+        Self {
+            path,
+            file: None,
+            policy,
+            last_sync: std::time::Instant::now(),
+            unsynced: false,
+            syncs: 0,
+        }
     }
-    Ok(())
+
+    /// Append `ops` as consecutive frames with ONE write. A crash mid-write
+    /// tears at most the tail frame, which replay discards.
+    pub fn append(&mut self, ops: &[GraphOp]) -> std::io::Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let mut buf = Vec::new();
+        for op in ops {
+            encode_frame(op, &mut buf)?;
+        }
+        if self.file.is_none() {
+            let created = !self.path.exists();
+            if let Some(parent) = self.path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            self.file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?,
+            );
+            if created {
+                // Make the new directory entry itself durable, or a crash
+                // right after the first append can lose the whole file.
+                sync_parent_dir(&self.path);
+            }
+        }
+        let file = self.file.as_mut().expect("opened above");
+        file.write_all(&buf)?;
+        self.unsynced = true;
+        let due = match self.policy {
+            SyncPolicy::Always => true,
+            SyncPolicy::Interval(d) => self.last_sync.elapsed() >= d,
+            SyncPolicy::Never => false,
+        };
+        if due {
+            self.sync()?;
+        }
+        Ok(())
+    }
+
+    /// Force everything written so far to stable storage.
+    pub fn sync(&mut self) -> std::io::Result<()> {
+        if self.unsynced {
+            if let Some(f) = self.file.as_mut() {
+                f.sync_data()?;
+                self.syncs += 1;
+            }
+            self.unsynced = false;
+        }
+        self.last_sync = std::time::Instant::now();
+        Ok(())
+    }
+
+    /// Sync and release the file handle; the next append reopens the path.
+    pub fn close(&mut self) -> std::io::Result<()> {
+        self.sync()?;
+        self.file = None;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn sync_count(&self) -> u64 {
+        self.syncs
+    }
+}
+
+impl Drop for WalWriter {
+    fn drop(&mut self) {
+        let _ = self.sync();
+    }
+}
+
+/// One-shot append with an immediate `fsync` (tests and tooling).
+#[cfg(test)]
+pub fn append_ops(wal_path: &Path, ops: &[GraphOp]) -> std::io::Result<()> {
+    WalWriter::new(wal_path.to_path_buf(), SyncPolicy::Always).append(ops)
 }
 
 #[cfg(unix)]

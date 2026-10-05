@@ -188,6 +188,8 @@ pub struct GraphDatabase {
     /// the normal mutators and must not be logged again (doing so appended to
     /// the very file being read, so replay never reached EOF).
     wal_replaying: Arc<std::sync::atomic::AtomicBool>,
+    /// Open append handle for the WAL (see `wal::WalWriter`); shared by clones.
+    wal_writer: Arc<parking_lot::Mutex<wal::WalWriter>>,
     persistence_path: PathBuf,
     /// When true, every public `insert_*` / `set_*` / `save_to_disk` returns
     /// `LainError::Other("graph is read-only")`. Set by `open_read_only`,
@@ -300,6 +302,10 @@ impl GraphDatabase {
             name_index: Arc::new(DashMap::new()),
             last_commit: Arc::new(RwLock::new(None)),
             wal_replaying: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            wal_writer: Arc::new(parking_lot::Mutex::new(wal::WalWriter::new(
+                wal::wal_path_for(memory_path),
+                wal::SyncPolicy::from_env(),
+            ))),
             persistence_path: memory_path.to_path_buf(),
             read_only: false,
             // Default to the test namespace so existing callers
@@ -372,7 +378,9 @@ impl GraphDatabase {
         if ops.is_empty() || !self.wal_enabled() {
             return Ok(());
         }
-        wal::append_ops(&wal::wal_path_for(&self.persistence_path), ops)
+        self.wal_writer
+            .lock()
+            .append(ops)
             .map_err(|e| LainError::Database(format!("wal append: {e}")))
     }
 
@@ -2209,6 +2217,13 @@ impl GraphDatabase {
         let logging = self.wal_enabled();
         if logging {
             let _guard = self.graph.write();
+            // Release the append handle first (it would keep writing to the
+            // retired file, and Windows cannot rename an open one); everything
+            // acknowledged so far is synced into the retired log.
+            self.wal_writer
+                .lock()
+                .close()
+                .map_err(|e| LainError::Database(format!("wal close: {e}")))?;
             wal::rotate(&wal_path).map_err(|e| LainError::Database(format!("wal rotate: {e}")))?;
         }
         let data = persist::encode_state(&self.build_state())
