@@ -100,3 +100,7 @@ impl DirtyFlag {
 #[cfg(test)]
 #[path = "sync_verification.rs"]
 mod verification;
+
+#[cfg(kani)]
+#[path = "sync_kani.rs"]
+mod kani_proofs;

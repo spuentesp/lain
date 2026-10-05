@@ -17,7 +17,7 @@ Legend: ● checked · ◐ partly · ○ not checked.
 | Filesystem lease (`presence_lock.rs`) | ● | ● stress + properties | ○ | ○ | ● |
 | Background jobs (`job_store.rs`) | ● | ● refines a cap model + threaded | ○ | ○ | ○ |
 | Snapshot residency (`manager.rs`) | ● (4 specs) | ● | ● install/evict/hold | ○ | ○ |
-| Contract rejoin flag (`DirtyFlag`) | ● | ● | ● | ○ | ○ |
+| Contract rejoin flag (`DirtyFlag`) | ● | ● | ● | ● all op sequences ≤5 | ○ |
 | Repo health + startup hold (`HealthGate`) | ● | ● | ● | ● decision rules, all op sequences ≤4 | ● |
 | Graph WAL / checkpoint (`graph/wal.rs`) | ● (2 specs) | ● crash, order, checkpoint races | ○ | ○ | ● |
 | Shared oneshot server (B1) | ◐ spec as merged | ● socket properties, real-binary e2e | ○ | ○ | ○ |
