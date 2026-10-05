@@ -3,6 +3,8 @@
 # Mutants that cannot change observable behaviour in a normal build are
 # excluded with the reason, so a "missed" mutant always means a real test gap.
 exclude_re = [
+    # Test-only helper module inside lsp.rs.
+    'test_support::',
     # Only compiled under `--cfg lain_loom`; checked by `make loom`, not here.
     'src/sync\.rs.*Mutex<T>::lock',
     # Rolling an existing-file collision on a UUID v4 nonce: unreachable.
