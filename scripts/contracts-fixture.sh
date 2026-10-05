@@ -51,6 +51,12 @@ export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 # possible. Keeps history sortable without needing `git rebase`.
 BASE_EPOCH=1736140800
 
+# epoch_to_iso <unix_seconds>: UTC ISO-8601. GNU date takes `-d @N`; BSD date
+# (macOS) takes `-r N` and rejects `-d`, which made this script fail there.
+epoch_to_iso() {
+  date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
 # make_commit <message> <offset_days>
 # Stage everything in the current directory and commit with fixed
 # author/committer dates so the resulting object hash is stable.
@@ -58,7 +64,7 @@ make_commit() {
   local msg="$1"
   local offset="${2:-0}"
   local dt
-  dt="$(date -u -d "@$((BASE_EPOCH + offset * 86400))" +%Y-%m-%dT%H:%M:%SZ)"
+  dt="$(epoch_to_iso $((BASE_EPOCH + offset * 86400)))"
   git add -A
   GIT_AUTHOR_DATE="$dt" GIT_COMMITTER_DATE="$dt" \
     git -c user.name="$GIT_AUTHOR_NAME" -c user.email="$GIT_AUTHOR_EMAIL" \
