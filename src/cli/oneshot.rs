@@ -46,55 +46,60 @@ const ID_INITIALIZE: i64 = 1;
 /// warming-up handling below) increments from here.
 const ID_CALL: i64 = 2;
 
-/// Try to connect to a shared `lain mcp` for `workspace`. Returns
-/// `Some` only if the socket exists AND the recorded PID is
-/// alive. A stale socket from a crashed process is left to
-/// the spawn path; the next spawn will overwrite it.
-fn try_connect_to_shared(
+/// Connect to a live shared `lain mcp` on `socket_path`, if one is serving.
+/// Liveness is whether the socket accepts a connection: a PID file is wrong
+/// after PID reuse, and the old `/proc` check made this path Linux-only.
+#[cfg(unix)]
+fn connect_shared(
     socket_path: &std::path::Path,
 ) -> Option<crate::cli::socket_session::SocketSession> {
-    use std::os::unix::net::UnixStream;
-    if !socket_path.exists() {
-        return None;
-    }
-    // Liveness: read the sidecar pid file and check /proc.
-    let pid_path = {
-        let mut p = socket_path.to_path_buf();
-        let name = p
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| format!("{n}.pid"))
-            .unwrap_or_default();
-        if name.is_empty() {
-            return None;
-        }
-        p.set_file_name(name);
-        p
-    };
-    let pid_text = std::fs::read_to_string(&pid_path).ok()?;
-    let pid: u32 = pid_text.trim().parse().ok()?;
-    #[cfg(target_os = "linux")]
-    {
-        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
-            return None;
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        return None;
-    }
-    // Probe the socket with a non-blocking connect. If it
-    // succeeds the server is up; if it fails we treat the
-    // server as dead.
-    let _ = UnixStream::connect(socket_path).ok()?;
     match crate::cli::socket_session::connect(socket_path) {
         Ok(s) => Some(s),
-        Err(e) => {
-            tracing::warn!("shared `lain mcp` socket probe failed: {e}");
-            None
-        }
+        Err(_) => None,
     }
+}
+
+/// Start a detached daemon-mode `lain mcp` for `workspace` and wait until its
+/// socket accepts connections. The daemon outlives this process (own process
+/// group, no stdio) and exits by itself after an idle window, so the NEXT
+/// one-shot connects to the warm graph instead of cold-starting. Returns
+/// `None` if the daemon exits early or does not come up within `wait`; the
+/// caller then falls back to a private stdio server.
+#[cfg(unix)]
+fn start_shared_daemon(
+    workspace: &Path,
+    socket_path: &std::path::Path,
+    wait: Duration,
+) -> Option<crate::cli::socket_session::SocketSession> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let exe = std::env::current_exe().ok()?;
+    let mut child = Command::new(exe)
+        .arg("mcp")
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--socket")
+        .arg(socket_path)
+        .arg("--daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < deadline {
+        if let Some(session) = connect_shared(socket_path) {
+            return Some(session);
+        }
+        // The daemon died (e.g. another one won the start race and this one
+        // exited, or startup failed): stop waiting, the caller falls back.
+        if let Ok(Some(_)) = child.try_wait() {
+            return connect_shared(socket_path);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
 }
 
 /// Shut the session down and build an error carrying whatever it
@@ -117,6 +122,7 @@ fn give_up(session: &mut StdioSession, message: String) -> anyhow::Error {
 /// against a shared `lain mcp`. Mirrors the stdio call loop
 /// but with the simpler `&self` session API. Returns `Ok(())`
 /// after printing the tool's result.
+#[cfg(unix)]
 fn run_call_loop_via_socket(
     session: crate::cli::socket_session::SocketSession,
     tool: &str,
@@ -308,21 +314,33 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         // pipelines.
         .unwrap_or(600);
 
-    // B1 (2026-10-04): before spawning a fresh `lain mcp`,
-    // consult the per-workspace Unix socket. If a previous
-    // `lain mcp` is alive and serving this workspace, connect
-    // to it and reuse the warm in-memory graph. This is the
-    // fix for "every `oneshot` call costs 5 min of cold
-    // reindex." The socket path is BLAKE3(workspace) under
-    // `config::run_dir()`; the server writes a `<socket>.pid`
-    // sidecar so we can verify liveness before connecting.
-    let socket_path = crate::config::oneshot_socket_path(&workspace);
-    if let Some(socket_session) = try_connect_to_shared(&socket_path) {
-        return run_call_loop_via_socket(socket_session, tool, args_obj, timeout_secs);
+    // B1 (2026-10-04): share one warm `lain mcp` across one-shot calls. Use a
+    // live shared server if there is one; otherwise start a detached daemon
+    // (it outlives this process and exits when idle) and talk to that. Any
+    // failure, a platform without Unix sockets, a socket path too long for
+    // the platform, or `LAIN_ONESHOT_NO_SHARE=1` falls back to the private
+    // stdio server below.
+    #[cfg(unix)]
+    {
+        let socket_path = crate::config::oneshot_socket_path(&workspace);
+        let sharing = std::env::var_os("LAIN_ONESHOT_NO_SHARE").is_none()
+            && crate::server::mcp::socket_server::path_fits(&socket_path);
+        if sharing {
+            let session = connect_shared(&socket_path).or_else(|| {
+                start_shared_daemon(
+                    &workspace,
+                    &socket_path,
+                    Duration::from_secs(timeout_secs.min(60)),
+                )
+            });
+            if let Some(session) = session {
+                return run_call_loop_via_socket(session, tool, args_obj, timeout_secs);
+            }
+            tracing::warn!("shared `lain mcp` unavailable; using a private server");
+        }
     }
 
-    // No shared server. Spawn a fresh one with the `--socket`
-    // flag so the NEXT `oneshot` will hit the cheap path.
+    // Private server for this call only (stdio; it dies with this process).
     let exe = std::env::current_exe().context("locate current lain binary")?;
 
     let mut command = Command::new(exe);
@@ -330,8 +348,6 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         .arg("mcp")
         .arg("--workspace")
         .arg(&workspace)
-        .arg("--socket")
-        .arg(&socket_path)
         .env("RUST_LOG", "lain=debug");
     let mut session = StdioSession::spawn(command, true).context("spawn `lain mcp`")?;
 

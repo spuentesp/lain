@@ -169,7 +169,15 @@ pub async fn run_mcp(
     embedding_model: Option<&Path>,
     reindex_timeout: Option<std::time::Duration>,
     socket: Option<&Path>,
+    daemon: bool,
 ) -> Result<()> {
+    #[cfg(not(unix))]
+    if socket.is_some() || daemon {
+        return Err(anyhow!("`--socket` / `--daemon` require a Unix platform"));
+    }
+    if daemon && socket.is_none() {
+        return Err(anyhow!("`--daemon` requires `--socket PATH`"));
+    }
     let workspaces = resolve_workspaces_strict(argv_workspaces)?;
 
     if workspaces.len() > 1 {
@@ -256,39 +264,38 @@ pub async fn run_mcp(
     // the same `Arc<LainServer>` so a call coming through the
     // socket sees the warm in-memory graph.
     let server_arc = std::sync::Arc::new(server);
+    #[cfg(unix)]
     if let Some(socket_path) = socket {
-        // Remove a stale socket from a prior crashed process. The
-        // `bind()` below is what catches a *running* previous
-        // process; removing the file is safe iff the previous
-        // process is dead.
-        if let Some(pid) = read_pid_for_socket(socket_path) {
-            if !pid_alive(pid) {
-                let _ = std::fs::remove_file(socket_path);
-                let _ = std::fs::remove_file(pid_path_for(socket_path));
-            } else {
-                return Err(anyhow!(
-                    "another `lain mcp` is already running for this socket ({}); \
-                     pass a different `--socket PATH` or stop the other process (pid {pid})",
-                    socket_path.display()
-                ));
-            }
+        // Daemon mode serves the socket only and exits after an idle window;
+        // plain `--socket` serves it alongside stdio for as long as stdio runs.
+        let idle = daemon.then(shared_idle_window);
+        // Binds now: a live server already on this socket, or a path too long
+        // for the platform, fails the command instead of being logged away.
+        let socket_task = crate::server::mcp::socket_server::start(
+            socket_path.to_path_buf(),
+            server_arc.clone(),
+            idle,
+        )?;
+        if daemon {
+            // No stdio transport here, so nothing else would run the startup
+            // re-index that `run_stdio` normally starts. Calls arriving
+            // meanwhile are turned back by the readiness gate with
+            // `warming_up`, exactly as over stdio.
+            let cancel = server_arc.lifecycle_handle().cancel_token();
+            let startup = tokio::spawn(crate::server::mcp::handler::await_startup_reindex(
+                Some(server_arc.clone()),
+                reindex_timeout,
+                None,
+                cancel,
+            ));
+            server_arc.lifecycle_handle().install_startup_task(startup);
+            let result = socket_task
+                .await
+                .map_err(|e| anyhow!("socket server task failed: {e}"))?;
+            server_arc.lifecycle_handle().cancel();
+            return result;
         }
-        let socket_path_buf = socket_path.to_path_buf();
-        let server_for_socket = server_arc.clone();
-        let workspace_for_log = workspace.clone();
-        let socket_task = tokio::spawn(async move {
-            if let Err(e) =
-                crate::server::mcp::socket_server::serve(socket_path_buf.clone(), server_for_socket)
-                    .await
-            {
-                tracing::warn!("socket server on {} exited: {e}", socket_path_buf.display());
-            }
-            tracing::info!("socket server for {} exited", workspace_for_log.display());
-        });
-        // Hold the JoinHandle so the task isn't dropped. We don't
-        // join on it - run_stdio is the foreground; the socket
-        // task runs until the stdio path finishes (the runtime
-        // tears it down on shutdown).
+        // Held for the life of the process; the runtime reaps it on exit.
         std::mem::forget(socket_task);
     }
 
@@ -308,39 +315,16 @@ pub async fn run_mcp(
     Ok(())
 }
 
-fn pid_path_for(socket_path: &Path) -> std::path::PathBuf {
-    let mut p = socket_path.to_path_buf();
-    let new_name = match p.file_name().and_then(|n| n.to_str()) {
-        Some(n) => format!("{n}.pid"),
-        None => return p,
-    };
-    p.set_file_name(new_name);
-    p
-}
-
-fn read_pid_for_socket(socket_path: &Path) -> Option<u32> {
-    std::fs::read_to_string(pid_path_for(socket_path))
+/// How long a daemon-mode server waits with no connection before exiting.
+/// Override with `LAIN_SHARED_IDLE_SECS`.
+#[cfg(unix)]
+fn shared_idle_window() -> std::time::Duration {
+    let secs = std::env::var("LAIN_SHARED_IDLE_SECS")
         .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-}
-
-fn pid_alive(pid: u32) -> bool {
-    // Check `/proc/<pid>` on Linux, fall back to a no-op on
-    // other platforms (the unix-socket shared server is
-    // Linux-only). This is conservative: when we can't tell,
-    // assume the previous process is still alive and refuse
-    // to start, so the only false positive is "PID got recycled
-    // and we won't start" — recoverable by the operator
-    // deleting the stale socket.
-    #[cfg(target_os = "linux")]
-    {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        false
-    }
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(900);
+    std::time::Duration::from_secs(secs)
 }
 
 /// Multi-workspace delegation path. Generates a `repos.yaml` with one

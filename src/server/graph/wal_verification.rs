@@ -256,3 +256,40 @@ fn bulk_insert_is_not_one_fsync_per_node() {
         "3000-node batch took {took:?}"
     );
 }
+
+/// `find_anchors` ranks tied scores deterministically: the same symbols in the
+/// same order on every call, in every graph instance (it used to depend on a
+/// randomly seeded `HashMap`'s iteration order, so a second `lain oneshot`
+/// listed different symbols than the first).
+#[test]
+fn find_anchors_breaks_score_ties_deterministically() {
+    let build = |dir: &Path| {
+        let db = GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+        for i in (0..40).rev() {
+            let mut n = node(&format!("sym{i:02}"));
+            n.anchor_score = Some(100.0); // every score tied
+            db.upsert_node(n).unwrap();
+        }
+        db
+    };
+    let d1 = tempfile::tempdir().unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let names = |db: &GraphDatabase| -> Vec<String> {
+        db.find_anchors(10)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect()
+    };
+    let (a, b) = (build(d1.path()), build(d2.path()));
+    let expected: Vec<String> = (0..10).map(|i| format!("sym{i:02}")).collect();
+    assert_eq!(names(&a), expected, "ties must rank by name");
+    for _ in 0..20 {
+        assert_eq!(names(&a), expected);
+        assert_eq!(
+            names(&b),
+            expected,
+            "a second graph instance ranked ties differently"
+        );
+    }
+}

@@ -72,6 +72,9 @@ fn run_oneshot(workspace: &std::path::Path, budget: Duration) -> (bool, String, 
             "find_anchors",
         ])
         .env("XDG_STATE_HOME", state.path())
+        // These tests pin the private-server path; without this a oneshot
+        // would start a detached shared daemon that outlives the test.
+        .env("LAIN_ONESHOT_NO_SHARE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -155,6 +158,9 @@ fn oneshot_discovers_workspace_from_cwd() {
         .args(["oneshot", "find_anchors"])
         .current_dir(root.join("src"))
         .env("XDG_STATE_HOME", state.path())
+        // These tests pin the private-server path; without this a oneshot
+        // would start a detached shared daemon that outlives the test.
+        .env("LAIN_ONESHOT_NO_SHARE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -194,6 +200,9 @@ fn oneshot_exits_nonzero_on_tool_error() {
             "explain_symbol",
         ])
         .env("XDG_STATE_HOME", state.path())
+        // These tests pin the private-server path; without this a oneshot
+        // would start a detached shared daemon that outlives the test.
+        .env("LAIN_ONESHOT_NO_SHARE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -221,5 +230,74 @@ fn oneshot_exits_nonzero_on_tool_error() {
     assert!(
         out.contains("symbol") || err.contains("symbol"),
         "the isError payload naming the missing arg should still be printed; stdout:\n{out}\nstderr:\n{err}"
+    );
+}
+
+/// B1: the first `oneshot` leaves a shared daemon behind, the second reuses
+/// it, and the daemon removes itself after the idle window. Isolated run dir
+/// (short path: `sun_path` is ~104 bytes) so nothing leaks into the user's.
+#[cfg(unix)]
+#[test]
+fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
+    use std::os::unix::net::UnixStream;
+    let run = tempfile::Builder::new()
+        .prefix("lr")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let (_repo, root) = make_repo(3);
+    let sock_dir = run.path().join("lain");
+
+    let oneshot = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_lain"))
+            .args([
+                "oneshot",
+                "--workspace",
+                root.to_str().unwrap(),
+                "find_anchors",
+            ])
+            .env("XDG_RUNTIME_DIR", run.path())
+            .env("HOME", home.path())
+            .env("XDG_STATE_HOME", home.path())
+            .env("LAIN_SHARED_IDLE_SECS", "3")
+            .stderr(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "oneshot failed");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let socket = || {
+        std::fs::read_dir(&sock_dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "sock"))
+    };
+
+    let first = oneshot();
+    let sock = socket().expect("first call must leave a shared server's socket behind");
+    assert!(
+        UnixStream::connect(&sock).is_ok(),
+        "the shared server must still be alive after the first call"
+    );
+
+    let second = oneshot();
+    assert_eq!(first, second, "the shared server must answer the same");
+
+    // Idle shutdown. Do NOT probe the socket while waiting: every connection
+    // counts as activity and would keep the daemon alive. Wait out the idle
+    // window (3s) plus margin, then check once.
+    std::thread::sleep(Duration::from_secs(8));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while sock.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250)); // file check only: no connect
+    }
+    assert!(
+        !sock.exists(),
+        "the idle shared server never removed its socket"
+    );
+    assert!(
+        UnixStream::connect(&sock).is_err(),
+        "something still accepts on the socket"
     );
 }

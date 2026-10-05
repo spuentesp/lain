@@ -148,6 +148,18 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
     }
 }
 
+/// Total order for ranking anchors: score descending, then name, path and id
+/// ascending, so equal scores rank the same way on every call and in every
+/// process (`find_anchors` returned different symbols for tied scores).
+pub(crate) fn anchor_order(a: &GraphNode, b: &GraphNode) -> std::cmp::Ordering {
+    b.anchor_score
+        .unwrap_or(0.0)
+        .total_cmp(&a.anchor_score.unwrap_or(0.0))
+        .then_with(|| a.name.cmp(&b.name))
+        .then_with(|| a.path.cmp(&b.path))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 #[derive(Clone)]
 pub struct GraphDatabase {
     graph: Arc<RwLock<StableGraph<GraphNode, GraphEdge>>>,
@@ -1756,26 +1768,19 @@ impl GraphDatabase {
     pub fn find_anchors(&self, limit: usize) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
         let mut sorted: Vec<_> = graph.node_weights().cloned().collect();
-        sorted.sort_by(|a, b| {
-            b.anchor_score
-                .unwrap_or(0.0)
-                .total_cmp(&a.anchor_score.unwrap_or(0.0))
-        });
+        sorted.sort_by(anchor_order);
         let mut by_name: std::collections::HashMap<String, GraphNode> =
             std::collections::HashMap::new();
         for n in sorted {
-            // Insert only the first (best-scoring) instance per name.
-            // `sorted` is already descending by score.
+            // Insert only the first (best-ranked) instance per name.
+            // `sorted` is already in `anchor_order`.
             by_name.entry(n.name.clone()).or_insert(n);
         }
-        // Re-sort the deduped set by score (the HashMap insert order
-        // is not guaranteed to be sorted).
+        // Re-sort the deduped set: HashMap iteration order is random per
+        // process, so sorting by score alone made which tied symbols
+        // survived `take(limit)` differ from one run to the next.
         let mut out: Vec<GraphNode> = by_name.into_values().collect();
-        out.sort_by(|a, b| {
-            b.anchor_score
-                .unwrap_or(0.0)
-                .total_cmp(&a.anchor_score.unwrap_or(0.0))
-        });
+        out.sort_by(anchor_order);
         Ok(out.into_iter().take(limit).collect())
     }
 
