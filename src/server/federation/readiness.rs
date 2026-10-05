@@ -319,7 +319,7 @@ mod properties {
             let fed = vec![(RepoId::new("r").unwrap(), health)];
             let core = gate_tool_call("find_anchors", &repo_health_to_snapshot(health), model);
             let agg = gate_federated_tool_call("find_anchors", &fed, model);
-            prop_assert_eq!(core.as_ref().map(|g| g.state.clone()), agg.as_ref().map(|g| g.state.clone()));
+            prop_assert_eq!(core.as_ref().map(|g| g.state), agg.as_ref().map(|g| g.state));
             prop_assert_eq!(core.is_some(), agg.is_some());
         }
 
