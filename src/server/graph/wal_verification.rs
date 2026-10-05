@@ -341,11 +341,11 @@ fn interval_policy_syncs_after_the_window() {
     let dir = tempfile::tempdir().unwrap();
     let mut w = WalWriter::new(
         dir.path().join("i.wal"),
-        SyncPolicy::Interval(Duration::from_millis(30)),
+        SyncPolicy::Interval(Duration::from_millis(400)),
     );
     w.append(&[some_op(0)]).unwrap();
-    assert_eq!(w.sync_count(), 0);
-    std::thread::sleep(Duration::from_millis(60));
+    assert_eq!(w.sync_count(), 0, "inside the window: no sync");
+    std::thread::sleep(Duration::from_millis(450));
     w.append(&[some_op(1)]).unwrap();
     assert_eq!(
         w.sync_count(),
