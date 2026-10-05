@@ -2965,3 +2965,7 @@ repos:
 #[cfg(lain_loom)]
 #[path = "manager_verification.rs"]
 mod verification;
+
+#[cfg(all(test, not(lain_loom)))]
+#[path = "manager_residency_verification.rs"]
+mod residency_verification;

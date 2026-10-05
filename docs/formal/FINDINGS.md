@@ -101,6 +101,10 @@ version refusal (already well tested).
   expiry-plus-steal sequence, can still produce two believers. Closing it needs
   a fencing token checked by the consumer. The in-memory `OccupancyMap` stays
   authoritative when a server runs.
+* Snapshot LRU eviction compares `last_used` at one-second resolution, so entries
+  touched within the same second are evicted in `HashMap` order. Safety (a held
+  entry is never evicted, the cap holds) is unaffected; only which unheld entry
+  goes is arbitrary within a second.
 * `take_batch` iterates a `HashSet`, so under sustained overload an old path
   is not guaranteed to be served before newer ones (no loss, just no FIFO).
 * Kani proofs of the date arithmetic cover 1970–9999, not all of `u64`
