@@ -695,3 +695,29 @@ fn frame_cap_is_sixteen_mebibytes() {
     assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
     assert_eq!(MAX_SOCKET_PATH_BYTES, 103);
 }
+
+/// The diagnostic pid file sits next to the socket, holds this process's pid,
+/// and is replaced (not left stale) when a dead leftover is cleared.
+#[tokio::test]
+async fn pid_file_is_beside_the_socket_and_names_this_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = sock(dir.path());
+    let expect = dir
+        .path()
+        .join(format!("{}.pid", p.file_name().unwrap().to_string_lossy()));
+    assert_eq!(pid_path_for(&p), expect);
+    let _l = bind_exclusive(&p).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&expect).unwrap(),
+        std::process::id().to_string()
+    );
+    // A stale pid file from a previous owner is overwritten by the next bind.
+    drop(_l);
+    std::fs::remove_file(&p).unwrap();
+    std::fs::write(&expect, "1").unwrap();
+    let _l2 = bind_exclusive(&p).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&expect).unwrap(),
+        std::process::id().to_string()
+    );
+}
