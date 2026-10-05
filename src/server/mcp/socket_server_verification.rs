@@ -687,3 +687,11 @@ async fn a_file_replaced_by_an_escaping_symlink_is_retracted_not_indexed() {
         "the old nodes were not retracted: {after:?}"
     );
 }
+
+/// The frame cap is part of the documented contract (16 MiB): big enough for
+/// the largest legitimate tool call, small enough to bound memory per client.
+#[test]
+fn frame_cap_is_sixteen_mebibytes() {
+    assert_eq!(MAX_FRAME_BYTES, 16 * 1024 * 1024);
+    assert_eq!(MAX_SOCKET_PATH_BYTES, 103);
+}
