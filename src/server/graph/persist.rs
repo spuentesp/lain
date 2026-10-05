@@ -186,3 +186,7 @@ mod decode_limit_tests {
         assert!(decode_state(&bytes).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "persist_verification.rs"]
+mod verification;
