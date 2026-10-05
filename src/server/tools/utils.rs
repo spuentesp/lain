@@ -553,6 +553,14 @@ fn read_body_excerpt(
         workspace.join(path)
     };
     let path = resolved.as_path();
+    // Defense in depth: even if a node somehow points at a file outside the
+    // workspace (e.g. through a symlink), never read it back to the caller.
+    if !crate::server::path_util::resolves_inside(workspace, path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "path resolves outside the workspace",
+        ));
+    }
     // B2 — try the file-content cache first. The cache hit serves
     // the lines without an `open()` + `read_line()` loop on every
     // call, which is the common case once a corpus has been read

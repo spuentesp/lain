@@ -61,7 +61,12 @@ impl GitSensor {
         for entry in index.iter() {
             if let Ok(path) = std::str::from_utf8(&entry.path) {
                 let full_path = self.workspace.join(path);
-                if full_path.is_file() {
+                // A committed symlink may point anywhere the user can read;
+                // such a file is not part of this workspace and must never be
+                // indexed (its contents would be served back by the tools).
+                if full_path.is_file()
+                    && crate::server::path_util::resolves_inside(&self.workspace, &full_path)
+                {
                     files.push(full_path);
                 }
             }
@@ -136,8 +141,14 @@ impl GitSensor {
             } else {
                 ChangeType::Modified
             };
+            let full_path = self.workspace.join(path);
+            // Same containment rule as `get_all_tracked_files`. A deleted path
+            // does not exist, so it is judged by its ancestor (and reported).
+            if !crate::server::path_util::resolves_inside(&self.workspace, &full_path) {
+                continue;
+            }
             changes.push(FileChange {
-                path: self.workspace.join(path),
+                path: full_path,
                 change_type,
                 staged,
             });

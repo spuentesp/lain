@@ -259,3 +259,59 @@ mod differential {
         }
     }
 }
+
+/// A repository is untrusted: a committed symlink to a file outside the
+/// workspace must not be listed (and so never indexed); one that stays inside
+/// is fine. The same rule applies to uncommitted changes.
+#[cfg(unix)]
+#[test]
+fn escaping_symlinks_are_not_listed_as_tracked_or_changed() {
+    let ws = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(ws.path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.rs"), "fn leaked() {}\n").unwrap();
+    std::fs::write(root.join("real.rs"), "fn real() {}\n").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("secret.rs"), root.join("out.rs")).unwrap();
+    std::os::unix::fs::symlink(root.join("real.rs"), root.join("in.rs")).unwrap();
+    let run = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+    };
+    run(&["init", "-q"]);
+    run(&["add", "-A"]);
+    run(&["commit", "-qm", "x"]);
+    std::os::unix::fs::symlink(outside.path().join("secret.rs"), root.join("new_out.rs")).unwrap();
+
+    let sensor = GitSensor::new(&root).unwrap();
+    let name = |p: &PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+    let tracked: Vec<String> = sensor
+        .get_all_tracked_files()
+        .unwrap()
+        .iter()
+        .map(name)
+        .collect();
+    assert!(tracked.contains(&"real.rs".to_string()));
+    assert!(
+        tracked.contains(&"in.rs".to_string()),
+        "an inside symlink is fine: {tracked:?}"
+    );
+    assert!(
+        !tracked.contains(&"out.rs".to_string()),
+        "escaping symlink listed: {tracked:?}"
+    );
+    let changed: Vec<String> = sensor
+        .get_uncommitted_changes()
+        .unwrap()
+        .iter()
+        .map(|c| name(&c.path))
+        .collect();
+    assert!(
+        !changed.contains(&"new_out.rs".to_string()),
+        "escaping symlink reported as a change: {changed:?}"
+    );
+}

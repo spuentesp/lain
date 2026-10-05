@@ -1151,7 +1151,12 @@ impl LainServer {
             return Err(LainError::Cancelled);
         }
         let key = graph_path(&self.ingest().config().workspace, path);
-        if !path.is_file() {
+        // A file replaced by a symlink that leaves the workspace is treated as
+        // gone: it must not be (re)indexed, and anything already indexed under
+        // that path is retracted.
+        let escapes = path.is_file()
+            && !crate::server::path_util::resolves_inside(&self.ingest().config().workspace, path);
+        if !path.is_file() || escapes {
             self.remove_owned_overlay_path(&key);
             // The file is gone; drop its hash entry so a future
             // re-creation starts with a clean cache.

@@ -265,3 +265,425 @@ async fn idle_daemon_exits_and_removes_its_socket_but_an_open_connection_keeps_i
     assert!(res.is_ok(), "did not exit after the idle window");
     assert!(!p.exists(), "socket file left behind after idle exit");
 }
+
+// ---- the protocol surface: arbitrary requests, arbitrary tool calls ----------------------
+
+mod surface {
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+
+    /// Tools that run builds/tests, spawn processes, reach the network, sleep, or
+    /// reconfigure the server: not safe to call with random arguments.
+    const UNSAFE: &[&str] = &[
+        "run_build",
+        "run_clippy",
+        "run_tests",
+        "run_enrichment",
+        "install_language_server",
+        "register_job_webhook",
+        "debug_sleep",
+        "request_reload",
+        "sync_state",
+        "prepare_snapshot",
+    ];
+
+    fn safe_tool_names() -> Vec<String> {
+        crate::server::mcp::definitions::dump_tools_schema(&[])
+            .into_iter()
+            .filter_map(|d| d.get("name").and_then(Value::as_str).map(str::to_string))
+            .filter(|n| !UNSAFE.contains(&n.as_str()))
+            .collect()
+    }
+
+    fn arb_value(secret: String) -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| json!(n)),
+            any::<f64>()
+                .prop_filter("finite", |f| f.is_finite())
+                .prop_map(|f| json!(f)),
+            "\\PC{0,24}".prop_map(Value::String),
+            Just(json!("")),
+            Just(json!("../../../../etc/passwd")),
+            Just(json!("..\\..\\windows\\system32")),
+            Just(json!("lib.rs")),
+            Just(json!("hi")),
+            Just(json!("x".repeat(20_000))),
+            Just(Value::String(secret.clone())),
+            Just(Value::String(format!(
+                "../{}",
+                secret.rsplit('/').next().unwrap_or("")
+            ))),
+            Just(json!(u64::MAX)),
+            Just(json!(-1)),
+        ];
+        leaf.prop_recursive(2, 16, 4, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+                prop::collection::vec(("[a-z_]{1,12}", inner), 0..4)
+                    .prop_map(|kv| Value::Object(kv.into_iter().collect())),
+            ]
+        })
+    }
+
+    fn arb_args(secret: String) -> impl Strategy<Value = serde_json::Map<String, Value>> {
+        const KEYS: &[&str] = &[
+            "symbol",
+            "name",
+            "query",
+            "path",
+            "file",
+            "from",
+            "to",
+            "limit",
+            "depth",
+            "repo_id",
+            "id",
+            "agent_id",
+            "paths",
+            "session_token",
+            "kind",
+            "status",
+            "target",
+            "ref",
+            "a",
+            "b",
+            "line",
+            "code",
+            "text",
+            "body",
+            "intent",
+            "scopes",
+            "service",
+            "snapshot_id",
+        ];
+        prop::collection::vec(
+            (prop::sample::select(KEYS.to_vec()), arb_value(secret)),
+            0..6,
+        )
+        .prop_map(|kv| kv.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+
+    fn texts(result: &Value) -> String {
+        result["content"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| c["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every safe tool, called with arbitrary arguments — including traversal
+    /// paths and the absolute path of a secret OUTSIDE the workspace — never
+    /// panics, never hangs, always returns a well-formed result, and never
+    /// returns the secret's contents.
+    #[test]
+    fn arbitrary_tool_calls_never_panic_hang_or_leak_a_file_outside_the_workspace() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        const MARKER: &str = "TOP-SECRET-MARKER-9f3a7c1e";
+        let secret_path = outside.path().join("secret.txt");
+        std::fs::write(&secret_path, format!("{MARKER}\nfn secret() {{}}\n")).unwrap();
+        let secret = secret_path.to_string_lossy().into_owned();
+
+        let server = rt.block_on(async { test_server(ws.path()) });
+        server.readiness().ready(None); // ungate graph tools so they really run
+        let names = safe_tool_names();
+        assert!(names.len() > 50, "tool list looks wrong: {}", names.len());
+
+        let tool = prop_oneof![
+            4 => prop::sample::select(names.clone()),
+            1 => "[a-z_]{1,16}".prop_map(String::from), // unknown names too
+        ];
+        let strategy = (tool, arb_args(secret.clone()));
+        let mut runner = TestRunner::new(Config {
+            cases: 600,
+            max_shrink_iters: 100,
+            ..Config::default()
+        });
+        let result = runner.run(&strategy, |(name, args)| {
+            let server = server.clone();
+            let (n2, a2) = (name.clone(), args.clone());
+            let call = rt.block_on(async move {
+                tokio::time::timeout(
+                    Duration::from_secs(20),
+                    crate::server::mcp::handler::call_tool_in_process(&server, &n2, a2),
+                )
+                .await
+            });
+            let result = call.map_err(|_| {
+                TestCaseError::fail(format!("{name} {args:?} did not finish in 20s"))
+            })?;
+            let v = serde_json::to_value(&result)
+                .map_err(|e| TestCaseError::fail(format!("unserialisable result: {e}")))?;
+            let body = texts(&v);
+            prop_assert!(
+                !body.contains(MARKER),
+                "{name} {args:?} leaked a file outside the workspace"
+            );
+            prop_assert!(v.get("content").is_some(), "{name}: result has no content");
+            Ok(())
+        });
+        if let Err(e) = result {
+            panic!("{e}");
+        }
+    }
+
+    /// The JSON-RPC layer: any method/params/id yields exactly one well-formed
+    /// response (or none for a notification), echoing the id.
+    #[test]
+    fn arbitrary_json_rpc_requests_get_one_well_formed_response() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let server = rt.block_on(async { test_server(ws.path()) });
+        let strategy = (
+            prop_oneof![
+                Just("initialize".to_string()),
+                Just("ping".to_string()),
+                Just("tools/list".to_string()),
+                Just("tools/call".to_string()),
+                Just("notifications/initialized".to_string()),
+                "[a-z/]{0,16}".prop_map(String::from),
+            ],
+            arb_value(String::new()),
+            prop_oneof![
+                Just(Value::Null),
+                any::<i64>().prop_map(|n| json!(n)),
+                "\\PC{0,8}".prop_map(Value::String)
+            ],
+        );
+        let mut runner = TestRunner::new(Config {
+            cases: 400,
+            ..Config::default()
+        });
+        runner
+            .run(&strategy, |(method, params, id)| {
+                let server = server.clone();
+                let (m, p, i) = (method.clone(), params, id.clone());
+                let resp = rt.block_on(async move { dispatch(&m, p, i, &server).await });
+                if method == "notifications/initialized" {
+                    prop_assert_eq!(resp, Value::Null);
+                    return Ok(());
+                }
+                prop_assert_eq!(&resp["jsonrpc"], &json!("2.0"));
+                prop_assert_eq!(&resp["id"], &id);
+                let (has_result, has_error) =
+                    (resp.get("result").is_some(), resp.get("error").is_some());
+                prop_assert!(
+                    has_result ^ has_error,
+                    "need exactly one of result/error: {resp}"
+                );
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+}
+
+/// Positive control for the leak test above: tools that read files DO return
+/// content for a path inside the workspace. Without this, "the secret never
+/// appears" would hold trivially.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_reading_tools_do_return_workspace_content_so_the_leak_test_has_teeth() {
+    let ws = tempfile::tempdir().unwrap();
+    let server = test_server(ws.path());
+    std::fs::write(
+        ws.path().join("marked.rs"),
+        "// WS-MARKER-77\npub fn marked_fn() {}\n",
+    )
+    .unwrap();
+    server.readiness().ready(None);
+    let mut returned = Vec::new();
+    for (tool, args) in [
+        (
+            "get_code_snippet",
+            json!({"path": "marked.rs", "file": "marked.rs", "symbol": "marked_fn", "line": 1}),
+        ),
+        (
+            "read_source",
+            json!({"path": "marked.rs", "file": "marked.rs"}),
+        ),
+        ("get_file_diff", json!({"path": "marked.rs"})),
+        (
+            "get_test_template",
+            json!({"symbol": "marked_fn", "path": "marked.rs"}),
+        ),
+    ] {
+        let r = crate::server::mcp::handler::call_tool_in_process(
+            &server,
+            tool,
+            args.as_object().unwrap().clone(),
+        )
+        .await;
+        let v = serde_json::to_value(&r).unwrap();
+        let text = v["content"][0]["text"].as_str().unwrap_or("").to_string();
+        if text.contains("WS-MARKER-77") || text.contains("marked_fn") {
+            returned.push(tool);
+        }
+    }
+    assert!(
+        !returned.is_empty(),
+        "no tool returned the workspace file's content: the secret-leak property would be vacuous"
+    );
+}
+
+/// Targeted containment check. A repository is untrusted input: tools that
+/// read files must not hand back a file outside the workspace, whether it is
+/// named by an absolute path, by `..` traversal, or reached through a symlink
+/// that the repository itself contains.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_tools_do_not_escape_the_workspace_by_path_traversal_or_symlink() {
+    const MARKER: &str = "ESCAPED-SECRET-5d2b";
+    let ws = tempfile::tempdir().unwrap();
+    let server = test_server(ws.path());
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.rs");
+    std::fs::write(&secret, format!("// {MARKER}\npub fn leaked() {{}}\n")).unwrap();
+    // A symlink the repository itself contains, pointing outside.
+    std::os::unix::fs::symlink(&secret, ws.path().join("link.rs")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), ws.path().join("linkdir")).unwrap();
+    // Commit the symlinks and index the repository, so the secret's symbols are
+    // real nodes in the graph (a tool can only return what a node points at).
+    for args in [
+        vec!["add", "-A"],
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "links",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(&args)
+            .current_dir(ws.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    server
+        .build_core_memory_until_complete()
+        .await
+        .expect("index the repo");
+    let indexed: Vec<String> = server
+        .ingest()
+        .graph()
+        .get_all_nodes()
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    eprintln!("indexed symbols: {indexed:?}");
+    server.readiness().ready(None);
+
+    let rel_up = format!(
+        "../{}/secret.rs",
+        outside.path().file_name().unwrap().to_string_lossy()
+    );
+    let spellings = [
+        secret.to_string_lossy().into_owned(),
+        rel_up,
+        "link.rs".to_string(),
+        "linkdir/secret.rs".to_string(),
+        "./link.rs".to_string(),
+    ];
+    let mut leaks = Vec::new();
+    for tool in [
+        "get_code_snippet",
+        "read_source",
+        "get_file_diff",
+        "get_test_template",
+        "get_context",
+        "explain_symbol",
+        "get_call_sites",
+        "get_context_for_prompt",
+    ] {
+        for p in &spellings {
+            for key in ["path", "file", "target"] {
+                let mut args = serde_json::Map::new();
+                args.insert(key.into(), json!(p));
+                args.insert("symbol".into(), json!("leaked"));
+                args.insert("name".into(), json!("leaked"));
+                args.insert("line".into(), json!(1));
+                let r =
+                    crate::server::mcp::handler::call_tool_in_process(&server, tool, args).await;
+                let v = serde_json::to_value(&r).unwrap();
+                let text = v["content"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                if text.contains(MARKER) {
+                    leaks.push(format!("{tool}({key}={p})"));
+                }
+            }
+        }
+    }
+    assert!(
+        leaks.is_empty(),
+        "files outside the workspace were returned: {leaks:#?}"
+    );
+}
+
+/// A file replaced by a symlink that leaves the workspace is retracted and not
+/// re-indexed (the watcher path, `process_change`).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_replaced_by_an_escaping_symlink_is_retracted_not_indexed() {
+    let ws = tempfile::tempdir().unwrap();
+    let server = test_server(ws.path());
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.rs");
+    std::fs::write(&secret, "pub fn leaked_symbol() {}\n").unwrap();
+
+    let f = ws.path().join("swap.rs");
+    std::fs::write(&f, "pub fn inside_symbol() {}\n").unwrap();
+    server.process_change(&f).await.unwrap();
+    let names = |s: &Arc<LainServer>| -> Vec<String> {
+        let mut v: Vec<String> = s
+            .ingest()
+            .graph()
+            .get_all_nodes()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        v.extend(s.overlay().get_all_nodes().into_iter().map(|n| n.name));
+        v
+    };
+    assert!(
+        names(&server).contains(&"inside_symbol".to_string()),
+        "control: indexed normally"
+    );
+
+    std::fs::remove_file(&f).unwrap();
+    std::os::unix::fs::symlink(&secret, &f).unwrap();
+    server.process_change(&f).await.unwrap();
+    let after = names(&server);
+    assert!(
+        !after.contains(&"leaked_symbol".to_string()),
+        "indexed through the symlink: {after:?}"
+    );
+    assert!(
+        !after.contains(&"inside_symbol".to_string()),
+        "the old nodes were not retracted: {after:?}"
+    );
+}
