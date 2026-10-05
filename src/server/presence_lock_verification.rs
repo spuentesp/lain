@@ -207,20 +207,20 @@ fn lock_paths_are_exactly_where_the_docs_say() {
 
 #[test]
 fn canonical_lock_key_agrees_for_every_spelling_of_one_file() {
-    let ws = Path::new("/work/space");
-    let rel = canonical_lock_key(ws, Path::new("src/a.rs"));
+    // Platform-absolute paths: `/work/space` is not absolute on Windows.
+    let base = std::env::temp_dir();
+    let ws = base.join("work").join("space");
+    let rel = canonical_lock_key(&ws, Path::new("src/a.rs"));
     assert_eq!(rel, "src/a.rs");
-    assert_eq!(
-        canonical_lock_key(ws, Path::new("/work/space/src/a.rs")),
-        rel
-    );
-    assert_eq!(canonical_lock_key(ws, Path::new("./src/../src/a.rs")), rel);
+    assert_eq!(canonical_lock_key(&ws, &ws.join("src").join("a.rs")), rel);
+    assert_eq!(canonical_lock_key(&ws, Path::new("./src/../src/a.rs")), rel);
     // Outside the workspace stays absolute and distinct.
+    let outside = base.join("elsewhere").join("a.rs");
     assert_eq!(
-        canonical_lock_key(ws, Path::new("/elsewhere/a.rs")),
-        "/elsewhere/a.rs"
+        canonical_lock_key(&ws, &outside),
+        crate::server::path_util::posix_string(&outside)
     );
-    assert_ne!(canonical_lock_key(ws, Path::new("src/b.rs")), rel);
+    assert_ne!(canonical_lock_key(&ws, Path::new("src/b.rs")), rel);
 }
 
 #[test]
