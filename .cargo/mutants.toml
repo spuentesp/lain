@@ -25,6 +25,8 @@ exclude_re = [
     # cannot be produced by a test.
     'wal\.rs.*UnexpectedEof with true in replay_inner',
     # `on_disk > good_end` vs `>=`: equal lengths make set_len a no-op.
+    # Same wall-clock boundary as the presence lock guard.
+    'socket_server\.rs:97.*replace > with >= in StartGuard::take',
     'wal\.rs:355.*replace > with >= in replay_inner',
     'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
 ]
