@@ -87,8 +87,7 @@ fn try_connect_to_shared(
     // Probe the socket with a non-blocking connect. If it
     // succeeds the server is up; if it fails we treat the
     // server as dead.
-    let _ = UnixStream::connect(socket_path)
-        .ok()?;
+    let _ = UnixStream::connect(socket_path).ok()?;
     match crate::cli::socket_session::connect(socket_path) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -187,9 +186,7 @@ fn run_call_loop_via_socket(
         if remaining_after_retry.is_zero() {
             continue;
         }
-        std::thread::sleep(
-            Duration::from_millis(retry_after_ms).min(remaining_after_retry),
-        );
+        std::thread::sleep(Duration::from_millis(retry_after_ms).min(remaining_after_retry));
         next_id += 1;
         let retry_call = json!({
             "jsonrpc": "2.0",

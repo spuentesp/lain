@@ -172,6 +172,10 @@ pub struct GraphDatabase {
     /// per ref.
     name_index: Arc<DashMap<String, Vec<NodeIndex>>>,
     last_commit: Arc<RwLock<Option<String>>>,
+    /// True while `load_from_disk` replays the WAL: replayed ops go through
+    /// the normal mutators and must not be logged again (doing so appended to
+    /// the very file being read, so replay never reached EOF).
+    wal_replaying: Arc<std::sync::atomic::AtomicBool>,
     persistence_path: PathBuf,
     /// When true, every public `insert_*` / `set_*` / `save_to_disk` returns
     /// `LainError::Other("graph is read-only")`. Set by `open_read_only`,
@@ -283,6 +287,7 @@ impl GraphDatabase {
             path_index: Arc::new(DashMap::new()),
             name_index: Arc::new(DashMap::new()),
             last_commit: Arc::new(RwLock::new(None)),
+            wal_replaying: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistence_path: memory_path.to_path_buf(),
             read_only: false,
             // Default to the test namespace so existing callers
@@ -338,20 +343,36 @@ impl GraphDatabase {
         self.upsert_node(node.clone())
     }
 
+    /// Whether mutations are logged: only for graphs that persist to disk, and
+    /// never while the log itself is being replayed.
+    fn wal_enabled(&self) -> bool {
+        !self.persistence_path.as_os_str().is_empty()
+            && !self
+                .wal_replaying
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Log `ops` (one write, one fsync). **Callers must hold the graph write
+    /// lock**, so the log's order is exactly the order mutations take effect
+    /// and a checkpoint (which rotates under the same lock) cannot slip
+    /// between an op being logged and being applied.
+    fn log_ops(&self, ops: &[wal::GraphOp]) -> Result<(), LainError> {
+        if ops.is_empty() || !self.wal_enabled() {
+            return Ok(());
+        }
+        wal::append_ops(&wal::wal_path_for(&self.persistence_path), ops)
+            .map_err(|e| LainError::Database(format!("wal append: {e}")))
+    }
+
+    fn log_op(&self, op: wal::GraphOp) -> Result<(), LainError> {
+        self.log_ops(std::slice::from_ref(&op))
+    }
+
     pub fn upsert_node(&self, node: GraphNode) -> Result<(), LainError> {
         self.check_writable()?;
-        // B5 (2026-10-04): write-ahead log. Append the op to
-        // `graph.wal` first so a torn `graph.bin` can recover
-        // by replaying the WAL on top of the last good
-        // snapshot. The fsync inside `append_op` is the
-        // durability point.
-        if let Err(e) = wal::append_op(
-            &wal::wal_path_for(&self.persistence_path),
-            &wal::GraphOp::UpsertNode(node.clone()),
-        ) {
-            return Err(LainError::Database(format!("wal append: {e}")));
-        }
         let mut graph = self.graph.write();
+        // Logged under the write lock, before the mutation (see `log_ops`).
+        self.log_op(wal::GraphOp::UpsertNode(node.clone()))?;
 
         if let Some(idx) = self.index_map.get(&node.id).map(|r| *r.value()) {
             let existing_hydrated = graph[idx].is_hydrated;
@@ -371,20 +392,13 @@ impl GraphDatabase {
 
     pub fn insert_nodes_batch(&self, new_nodes: &[GraphNode]) -> Result<(), LainError> {
         self.check_writable()?;
-        // B5 (2026-10-04): append the batch to the WAL first.
-        // The fsync inside `append_op` is the durability
-        // point. The in-memory mutation below is then safe
-        // to fail — on next load, the WAL tail replays.
-        for node in new_nodes {
-            if let Err(e) = wal::append_op(
-                &wal::wal_path_for(&self.persistence_path),
-                &wal::GraphOp::UpsertNode(node.clone()),
-            ) {
-                return Err(LainError::Database(format!("wal append: {e}")));
-            }
-        }
         // Phase 1: Collect indices and path entries under graph lock
         let mut graph = self.graph.write();
+        let wal_ops: Vec<wal::GraphOp> = new_nodes
+            .iter()
+            .map(|n| wal::GraphOp::UpsertNode(n.clone()))
+            .collect();
+        self.log_ops(&wal_ops)?;
 
         // Collect work: also update the indexes inline (still holding
         // the graph write lock). The previous code released the graph
@@ -686,19 +700,12 @@ impl GraphDatabase {
     /// two repos can share a path, so path is not a usable key there.
     pub fn remove_nodes_by_ids(&self, ids: &[String]) -> Result<usize, LainError> {
         self.check_writable()?;
-        // B5 (2026-10-04): WAL append before mutating in-memory.
-        if let Err(e) = wal::append_op(
-            &wal::wal_path_for(&self.persistence_path),
-            &wal::GraphOp::RemoveNodesByIds(ids.to_vec()),
-        ) {
-            return Err(LainError::Database(format!("wal append: {e}")));
-        }
-
         let mut removed = 0usize;
         let mut cleared_paths: Vec<(String, NodeIndex)> = Vec::new();
         let mut cleared_names: Vec<(String, NodeIndex)> = Vec::new();
         {
             let mut graph = self.graph.write();
+            self.log_op(wal::GraphOp::RemoveNodesByIds(ids.to_vec()))?;
             for id in ids {
                 let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
                     continue;
@@ -773,20 +780,14 @@ impl GraphDatabase {
                 )
             })
             .collect();
-        if let Err(e) = wal::append_op(
-            &wal::wal_path_for(&self.persistence_path),
-            &wal::GraphOp::RemoveEdges {
-                endpoints: endpoints.clone(),
-            },
-        ) {
-            return Err(LainError::Database(format!("wal append: {e}")));
-        }
-        let targets: std::collections::HashSet<(String, String, EdgeType)> =
-            endpoints.into_iter().collect();
-
         let mut removed = 0usize;
         {
             let mut graph = self.graph.write();
+            self.log_op(wal::GraphOp::RemoveEdges {
+                endpoints: endpoints.clone(),
+            })?;
+            let targets: std::collections::HashSet<(String, String, EdgeType)> =
+                endpoints.into_iter().collect();
             // Collect first, mutate after: `remove_edge` invalidates the
             // edge-index iterator (`edges_directed` / `edges_connecting`)
             // the moment a removal lands.
@@ -1055,14 +1056,7 @@ impl GraphDatabase {
                 LainError::NotFound(format!("Target node {} not found", edge.target_id))
             })?;
 
-        // B5 (2026-10-04): append the op to the WAL first; the
-        // fsync inside `append_op` is the durability point.
-        if let Err(e) = wal::append_op(
-            &wal::wal_path_for(&self.persistence_path),
-            &wal::GraphOp::UpsertEdge(edge.clone()),
-        ) {
-            return Err(LainError::Database(format!("wal append: {e}")));
-        }
+        self.log_op(wal::GraphOp::UpsertEdge(edge.clone()))?;
         graph.add_edge(source_idx, target_idx, edge.clone());
         Ok(())
     }
@@ -1116,20 +1110,19 @@ impl GraphDatabase {
 
     pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
-        // B5 (2026-10-04): append the batch to the WAL first.
-        // Each edge becomes one `GraphOp::UpsertEdge` frame.
-        // The fsync is the durability point; the in-memory
-        // mutation below is then safe to fail (the WAL tail
-        // replays on next load).
-        for edge in new_edges {
-            if let Err(e) = wal::append_op(
-                &wal::wal_path_for(&self.persistence_path),
-                &wal::GraphOp::UpsertEdge(edge.clone()),
-            ) {
-                return Err(LainError::Database(format!("wal append: {e}")));
-            }
-        }
         let mut graph = self.graph.write();
+        // Log only the edges this call will actually add (both endpoints
+        // local). Logging every edge, including the ones dropped below, made
+        // replay hit "node not found" and fail the whole load.
+        let wal_ops: Vec<wal::GraphOp> = new_edges
+            .iter()
+            .filter(|e| {
+                self.index_map.get(&e.source_id).is_some()
+                    && self.index_map.get(&e.target_id).is_some()
+            })
+            .map(|e| wal::GraphOp::UpsertEdge(e.clone()))
+            .collect();
+        self.log_ops(&wal_ops)?;
         let mut external = self.pending_external_edges.lock();
 
         let mut dropped = 0usize;
@@ -2098,9 +2091,7 @@ impl GraphDatabase {
         let mut covered_files: HashSet<NodeIndex> = HashSet::new();
         for edge in graph.edge_references() {
             let kind = &edge.weight().edge_type;
-            if kind != &crate::schema::EdgeType::Calls
-                && kind != &crate::schema::EdgeType::Uses
-            {
+            if kind != &crate::schema::EdgeType::Calls && kind != &crate::schema::EdgeType::Uses {
                 continue;
             }
             // Map the source symbol back to the file it lives in via
@@ -2204,15 +2195,26 @@ impl GraphDatabase {
     }
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
+        // Start the checkpoint under the graph write lock: every logging
+        // mutator appends under that same lock, so after this point all
+        // previously acknowledged ops live in the retired log and new ones go
+        // to a fresh WAL. (Serialising, writing, then truncating the live WAL
+        // dropped ops acknowledged in between: docs/formal/GraphWalCheckpoint.tla.)
+        let wal_path = wal::wal_path_for(&self.persistence_path);
+        let logging = self.wal_enabled();
+        if logging {
+            let _guard = self.graph.write();
+            wal::rotate(&wal_path).map_err(|e| LainError::Database(format!("wal rotate: {e}")))?;
+        }
         let data = persist::encode_state(&self.build_state())
             .map_err(|e| LainError::Database(e.to_string()))?;
         crate::cli::io::write_file_atomic(&self.persistence_path, &data)
             .map_err(|e| LainError::Database(e.to_string()))?;
-        // B5 (2026-10-04): truncate the WAL now that the
-        // snapshot in `graph.bin` is consistent with it. The
-        // next load will read the snapshot only.
-        wal::truncate(&wal::wal_path_for(&self.persistence_path))
-            .map_err(|e| LainError::Database(format!("wal truncate: {e}")))?;
+        // The snapshot is durable and covers the retired log.
+        if logging {
+            wal::discard_prev(&wal_path)
+                .map_err(|e| LainError::Database(format!("wal discard: {e}")))?;
+        }
         Ok(())
     }
 
@@ -2285,37 +2287,44 @@ impl GraphDatabase {
         // in order. A torn frame (truncated tail or bad CRC)
         // stops the replay; the snapshot is intact.
         let wal_path = wal::wal_path_for(&self.persistence_path);
-        let replayed = wal::replay(&wal_path, |op| -> std::io::Result<()> {
-            match op {
-                wal::GraphOp::UpsertNode(n) => self
-                    .upsert_node(n.clone())
-                    .map_err(|e| std::io::Error::other(e.to_string())),
-                wal::GraphOp::UpsertEdge(e) => self
-                    .upsert_edge(e.clone())
-                    .map_err(|e| std::io::Error::other(e.to_string())),
-                wal::GraphOp::RemoveNodesByIds(ids) => self
-                    .remove_nodes_by_ids(&ids)
-                    .map(|_| ())
-                    .map_err(|e| std::io::Error::other(e.to_string())),
+        // Replayed ops go through the normal mutators; keep them out of the log.
+        self.wal_replaying
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut apply = |op: &wal::GraphOp| -> std::io::Result<()> {
+            let result = match op {
+                wal::GraphOp::UpsertNode(n) => self.upsert_node(n.clone()),
+                wal::GraphOp::UpsertEdge(e) => self.upsert_edge(e.clone()),
+                wal::GraphOp::RemoveNodesByIds(ids) => self.remove_nodes_by_ids(ids).map(|_| ()),
                 wal::GraphOp::RemoveEdges { endpoints } => {
                     let edges: Vec<crate::schema::GraphEdge> = endpoints
                         .iter()
                         .map(|(s, t, ty)| {
-                            crate::schema::GraphEdge::new(
-                                ty.clone(),
-                                s.clone(),
-                                t.clone(),
-                            )
+                            crate::schema::GraphEdge::new(ty.clone(), s.clone(), t.clone())
                         })
                         .collect();
-                    self.remove_edges(&edges)
-                        .map(|_| ())
-                        .map_err(|e| std::io::Error::other(e.to_string()))
+                    self.remove_edges(&edges).map(|_| ())
                 }
                 wal::GraphOp::CommitIndexMap { .. } => Ok(()),
+            };
+            match result {
+                Ok(()) => Ok(()),
+                // An op that refers to something the snapshot no longer has
+                // is stale, not fatal: skip it instead of failing startup.
+                Err(LainError::NotFound(_)) => Ok(()),
+                Err(e) => Err(std::io::Error::other(e.to_string())),
             }
-        })
-        .map_err(|e| LainError::Database(format!("wal replay: {e}")))?;
+        };
+        // The retired log of an interrupted checkpoint comes first, then the
+        // live one; each is repaired so later appends stay reachable.
+        let replayed = (|| -> std::io::Result<usize> {
+            let prev = wal::prev_path_for(&wal_path);
+            let a = wal::replay_and_repair(&prev, &mut apply)?;
+            let b = wal::replay_and_repair(&wal_path, &mut apply)?;
+            Ok(a + b)
+        })();
+        self.wal_replaying
+            .store(false, std::sync::atomic::Ordering::Release);
+        let replayed = replayed.map_err(|e| LainError::Database(format!("wal replay: {e}")))?;
         if replayed > 0 {
             tracing::info!(
                 "{} replayed {} WAL ops from {}",
@@ -2323,6 +2332,11 @@ impl GraphDatabase {
                 replayed,
                 wal_path.display()
             );
+            // Fold the replayed ops into a fresh snapshot so the log does not
+            // accumulate across restarts. Read-only views never write.
+            if !self.read_only {
+                self.save_to_disk_sync()?;
+            }
         }
         Ok(())
     }

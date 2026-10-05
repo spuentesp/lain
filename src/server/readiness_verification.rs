@@ -75,12 +75,21 @@ mod sequential {
         const YEAR_2023_MS: u64 = 1_672_531_200_000;
         let h = ReadinessHandle::default();
         let started = h.snapshot().started_at_unix_ms;
-        assert!(started > YEAR_2023_MS, "started_at is not a wall-clock time: {started}");
+        assert!(
+            started > YEAR_2023_MS,
+            "started_at is not a wall-clock time: {started}"
+        );
         assert!(h.snapshot().completed_at_unix_ms.is_none());
 
         assert!(h.ready(None));
-        let done = h.snapshot().completed_at_unix_ms.expect("ready stamps completion");
-        assert!(done >= started, "completed before it started: {done} < {started}");
+        let done = h
+            .snapshot()
+            .completed_at_unix_ms
+            .expect("ready stamps completion");
+        assert!(
+            done >= started,
+            "completed before it started: {done} < {started}"
+        );
 
         let h = ReadinessHandle::default();
         h.failed("e".into());

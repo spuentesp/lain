@@ -36,3 +36,9 @@ JobRegistry_GhostRestore          | JobRegistry                       | fail | p
 JobRegistry_Fixed                 | JobRegistry                       | pass | fixed: job_store::{try_start,finish,restore}
 HoldGate                          | HoldGate                          | fail | pre-fix: mark_ready vs hold_ready(false) can leave a repo stuck Indexing
 HoldGate_Fixed                    | HoldGate                          | pass | fixed: HealthGate decides under one lock
+GraphWal                          | GraphWal                          | pass | (B5) weak: only bounds log length; superseded by the two below
+OneshotSharedServer               | OneshotSharedServer               | pass | (B1) shared oneshot server invariants
+GraphWalCheckpoint_TruncateAfter  | GraphWalCheckpoint                | fail | pre-fix: ops acknowledged during a checkpoint were lost
+GraphWalCheckpoint_Rotate         | GraphWalCheckpoint                | pass | fixed: rotate under the lock, discard after the snapshot
+GraphWalOrder_Unlocked            | GraphWalOrder                     | fail | pre-fix: WAL order != apply order under concurrent writers
+GraphWalOrder_Locked              | GraphWalOrder                     | pass | fixed: log + apply in one critical section

@@ -277,21 +277,13 @@ pub async fn run_mcp(
         let server_for_socket = server_arc.clone();
         let workspace_for_log = workspace.clone();
         let socket_task = tokio::spawn(async move {
-            if let Err(e) = crate::server::mcp::socket_server::serve(
-                socket_path_buf.clone(),
-                server_for_socket,
-            )
-            .await
+            if let Err(e) =
+                crate::server::mcp::socket_server::serve(socket_path_buf.clone(), server_for_socket)
+                    .await
             {
-                tracing::warn!(
-                    "socket server on {} exited: {e}",
-                    socket_path_buf.display()
-                );
+                tracing::warn!("socket server on {} exited: {e}", socket_path_buf.display());
             }
-            tracing::info!(
-                "socket server for {} exited",
-                workspace_for_log.display()
-            );
+            tracing::info!("socket server for {} exited", workspace_for_log.display());
         });
         // Hold the JoinHandle so the task isn't dropped. We don't
         // join on it - run_stdio is the foreground; the socket
@@ -305,10 +297,11 @@ pub async fn run_mcp(
     // against `server.tool_executor.graph` directly. The re-index
     // timeout is wired through to run_stdio so the spawn honors
     // it (or the env var if None).
-    let mcp =
-        crate::server::mcp::handler::LainMcpServer::new(server_arc.ingest().tool_executor().clone())
-            .with_server(server_arc)
-            .with_reindex_timeout(reindex_timeout);
+    let mcp = crate::server::mcp::handler::LainMcpServer::new(
+        server_arc.ingest().tool_executor().clone(),
+    )
+    .with_server(server_arc)
+    .with_reindex_timeout(reindex_timeout);
     mcp.run_stdio()
         .await
         .map_err(|e| anyhow!("MCP stdio run failed: {e}"))?;

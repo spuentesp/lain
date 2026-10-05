@@ -94,11 +94,7 @@ fn binary_lives_inside(root: &Path) -> bool {
 /// Pure predicate for `binary_lives_inside`. Public-in-crate so the
 /// tests in this module can exercise the symlink cases without
 /// needing to mutate `current_exe()`.
-fn binary_inside_canonicalized(
-    exe: &Path,
-    canonical: &Path,
-    canonical_root: &Path,
-) -> bool {
+fn binary_inside_canonicalized(exe: &Path, canonical: &Path, canonical_root: &Path) -> bool {
     if !canonical.starts_with(canonical_root) {
         return false;
     }
@@ -349,7 +345,11 @@ mod tests {
         // The naive `canonical.starts_with(root)` check would be
         // true here; the B2 fix correctly returns false.
         assert!(canonical.starts_with(&root));
-        assert!(!binary_inside_canonicalized(&outside_bin, &canonical, &root));
+        assert!(!binary_inside_canonicalized(
+            &outside_bin,
+            &canonical,
+            &root
+        ));
     }
 
     #[cfg(unix)]

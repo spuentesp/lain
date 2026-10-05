@@ -26,7 +26,7 @@
 use crate::schema::{EdgeType, GraphEdge, GraphNode};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// The set of operations the WAL records. Each variant maps to
@@ -47,7 +47,9 @@ pub enum GraphOp {
     /// cycle so a future reader knows the data is self-consistent
     /// up to this point. Currently informational; not required for
     /// correctness.
-    CommitIndexMap { version: u64 },
+    CommitIndexMap {
+        version: u64,
+    },
 }
 
 const CRC_TABLE: [u32; 256] = {
@@ -58,7 +60,7 @@ const CRC_TABLE: [u32; 256] = {
         let mut j = 0;
         while j < 8 {
             crc = if crc & 1 != 0 {
-                0xedb8_8320 ^ (crc >> 1)
+                0x82f6_3b78 ^ (crc >> 1)
             } else {
                 crc >> 1
             };
@@ -70,6 +72,8 @@ const CRC_TABLE: [u32; 256] = {
     table
 };
 
+/// CRC-32C (Castagnoli, reflected polynomial `0x82F63B78`). The table used
+/// the IEEE polynomial `0xEDB88320` (plain CRC-32) under this name.
 fn crc32c(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xffff_ffff;
     for &b in data {
@@ -82,30 +86,96 @@ fn crc32c(data: &[u8]) -> u32 {
 const FRAME_HEADER_LEN: usize = 4;
 const FRAME_CRC_LEN: usize = 4;
 
-/// Append a single op to `wal_path`. Each call is one fsync
-/// so a torn write loses at most the last op.
-pub fn append_op(wal_path: &Path, op: &GraphOp) -> std::io::Result<()> {
+fn encode_frame(op: &GraphOp, out: &mut Vec<u8>) -> std::io::Result<()> {
     let payload = bincode::serde::encode_to_vec(op, bincode::config::legacy())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let crc = crc32c(&payload);
-    let len = payload.len() as u32;
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(&payload);
+    out.extend_from_slice(&crc32c(&payload).to_le_bytes());
+    Ok(())
+}
+
+#[cfg(test)]
+/// Append a single op to `wal_path` (one fsync).
+pub fn append_op(wal_path: &Path, op: &GraphOp) -> std::io::Result<()> {
+    append_ops(wal_path, std::slice::from_ref(op))
+}
+
+/// Append `ops` as consecutive frames with ONE write and ONE fsync. A batch
+/// insert of N nodes used to pay N opens and N fsyncs. A crash mid-write
+/// tears at most the tail frame, which replay discards.
+pub fn append_ops(wal_path: &Path, ops: &[GraphOp]) -> std::io::Result<()> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+    let mut buf = Vec::new();
+    for op in ops {
+        encode_frame(op, &mut buf)?;
+    }
+    let created = !wal_path.exists();
+    if let Some(parent) = wal_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(wal_path)?;
-    file.write_all(&len.to_le_bytes())?;
-    file.write_all(&payload)?;
-    file.write_all(&crc.to_le_bytes())?;
+    file.write_all(&buf)?;
     file.sync_data()?;
+    if created {
+        // Make the new directory entry itself durable, or a crash right
+        // after the first append can lose the whole file.
+        sync_parent_dir(wal_path);
+    }
     Ok(())
 }
 
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let dir = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) {}
+
+#[cfg(test)]
 /// Replay every op from `wal_path` and apply it via
 /// `apply`. Stops on the first truncated or bad-CRC frame.
 /// Returns the number of ops replayed.
 pub fn replay(
     wal_path: &Path,
+    apply: impl FnMut(&GraphOp) -> std::io::Result<()>,
+) -> std::io::Result<usize> {
+    replay_inner(wal_path, apply, false)
+}
+
+/// [`replay`], then truncate the file to the end of the last intact frame.
+///
+/// Required after a crash: replay stops at a torn tail but leaves the garbage
+/// in place, so every frame appended afterwards sits behind it and is
+/// unreachable by the next recovery.
+pub fn replay_and_repair(
+    wal_path: &Path,
+    apply: impl FnMut(&GraphOp) -> std::io::Result<()>,
+) -> std::io::Result<usize> {
+    replay_inner(wal_path, apply, true)
+}
+
+fn replay_inner(
+    wal_path: &Path,
     mut apply: impl FnMut(&GraphOp) -> std::io::Result<()>,
+    repair: bool,
 ) -> std::io::Result<usize> {
     let mut file = match std::fs::File::open(wal_path) {
         Ok(f) => f,
@@ -113,6 +183,8 @@ pub fn replay(
         Err(e) => return Err(e),
     };
     let mut count = 0usize;
+    // Byte offset just past the last intact frame.
+    let mut good_end: u64 = 0;
     let mut len_bytes = [0u8; FRAME_HEADER_LEN];
     let mut crc_bytes = [0u8; FRAME_CRC_LEN];
     loop {
@@ -146,28 +218,81 @@ pub fn replay(
             // Torn write: stop here. The snapshot is intact.
             break;
         }
-        let op: GraphOp = match bincode::serde::decode_from_slice(
-            &payload,
-            bincode::config::legacy(),
-        ) {
-            Ok((op, _)) => op,
-            Err(_) => break,
-        };
+        let op: GraphOp =
+            match bincode::serde::decode_from_slice(&payload, bincode::config::legacy()) {
+                Ok((op, _)) => op,
+                Err(_) => break,
+            };
         apply(&op)?;
         count += 1;
+        good_end += (FRAME_HEADER_LEN + len + FRAME_CRC_LEN) as u64;
     }
-    file.seek(SeekFrom::Start(0))?;
+    drop(file);
+    if repair {
+        let on_disk = std::fs::metadata(wal_path)?.len();
+        if on_disk > good_end {
+            let f = OpenOptions::new().write(true).open(wal_path)?;
+            f.set_len(good_end)?;
+            f.sync_all()?;
+        }
+    }
     Ok(count)
 }
 
-/// Truncate the WAL to zero bytes. Called after a successful
-/// checkpoint; the snapshot in `graph.bin` now contains the
-/// post-WAL state.
+#[cfg(test)]
+/// Truncate the WAL to zero bytes.
 pub fn truncate(wal_path: &Path) -> std::io::Result<()> {
     if wal_path.exists() {
         std::fs::File::create(wal_path)?;
     }
     Ok(())
+}
+
+/// The retired-log path used while a checkpoint is in flight.
+pub fn prev_path_for(wal_path: &Path) -> PathBuf {
+    let mut name = wal_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".prev");
+    wal_path.with_file_name(name)
+}
+
+/// Start a checkpoint: move every frame logged so far out of the live WAL so
+/// new appends go to a fresh file. Must run while no writer can append (the
+/// caller holds the graph write lock). The snapshot written afterwards covers
+/// everything in the retired log; [`discard_prev`] deletes it once the
+/// snapshot is durable. A crash in between leaves the retired log for
+/// recovery to replay. (Truncating the live WAL *after* the snapshot, as this
+/// used to, also dropped ops acknowledged while the snapshot was being
+/// written.)
+pub fn rotate(wal_path: &Path) -> std::io::Result<()> {
+    if !wal_path.exists() {
+        return Ok(());
+    }
+    let prev = prev_path_for(wal_path);
+    if prev.exists() {
+        // An earlier checkpoint died before discarding its retired log. Keep
+        // those frames and append the live ones behind them.
+        let live = std::fs::read(wal_path)?;
+        let mut f = OpenOptions::new().append(true).open(&prev)?;
+        f.write_all(&live)?;
+        f.sync_all()?;
+        std::fs::File::create(wal_path)?;
+    } else {
+        std::fs::rename(wal_path, &prev)?;
+        sync_parent_dir(wal_path);
+    }
+    Ok(())
+}
+
+/// Finish a checkpoint: the snapshot now covers the retired log.
+pub fn discard_prev(wal_path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(prev_path_for(wal_path)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Return the conventional WAL path next to the snapshot.
@@ -186,7 +311,11 @@ mod tests {
     use super::*;
 
     fn node(id: &str) -> GraphNode {
-        GraphNode::new(crate::schema::NodeType::Function, id.to_string(), format!("/src/{id}.rs"))
+        GraphNode::new(
+            crate::schema::NodeType::Function,
+            id.to_string(),
+            format!("/src/{id}.rs"),
+        )
     }
 
     #[test]
@@ -385,27 +514,23 @@ mod tests {
 
         let db = GraphDatabase::new(&snapshot).unwrap();
         let nodes: Vec<GraphNode> = (0..3)
-            .map(|i| {
-                GraphNode::new(
-                    NodeType::Function,
-                    format!("n{i}"),
-                    format!("/src/n{i}.rs"),
-                )
-            })
+            .map(|i| GraphNode::new(NodeType::Function, format!("n{i}"), format!("/src/n{i}.rs")))
             .collect();
         db.insert_nodes_batch(&nodes).unwrap();
 
         let edges: Vec<GraphEdge> = (0..2)
             .map(|i| {
+                // Real node ids, not names: an edge whose endpoints are not
+                // in the graph is dropped by `insert_edges_batch` and must
+                // not be logged (this test used names and only passed
+                // because dropped edges were logged anyway).
                 GraphEdge::new(
                     EdgeType::Calls,
-                    format!("n{i}"),
-                    format!("n{}", i + 1),
+                    nodes[i].id.clone(),
+                    nodes[i + 1].id.clone(),
                 )
             })
             .collect();
-        // `insert_edges_batch` requires both endpoints in the
-        // graph; they're already there from the node batch.
         db.insert_edges_batch(&edges).unwrap();
 
         // The WAL should have 3 + 2 = 5 frames.
@@ -452,7 +577,10 @@ mod tests {
         let before = std::fs::metadata(&wal).unwrap().len();
         db.remove_edges(&[edge.clone()]).unwrap();
         let after = std::fs::metadata(&wal).unwrap().len();
-        assert!(after > before, "remove_edges must append at least one frame");
+        assert!(
+            after > before,
+            "remove_edges must append at least one frame"
+        );
 
         // The WAL tail must contain a single `RemoveEdges` op
         // with the (source, target, type) triple.
@@ -471,3 +599,7 @@ mod tests {
         assert_eq!(seen, 1, "the WAL must record one RemoveEdges op");
     }
 }
+
+#[cfg(test)]
+#[path = "wal_verification.rs"]
+mod verification;

@@ -53,9 +53,8 @@ pub async fn serve(socket_path: PathBuf, server: Arc<LainServer>) -> Result<()> 
         let _ = std::fs::remove_file(pid_path_for(&socket_path));
     }
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("create socket parent dir {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create socket parent dir {}", parent.display()))?;
     }
 
     let listener = UnixListener::bind(&socket_path)
@@ -96,10 +95,7 @@ async fn accept_loop(listener: UnixListener, server: Arc<LainServer>) -> Result<
     }
 }
 
-async fn handle_connection(
-    stream: tokio::net::UnixStream,
-    server: Arc<LainServer>,
-) -> Result<()> {
+async fn handle_connection(stream: tokio::net::UnixStream, server: Arc<LainServer>) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
@@ -130,14 +126,8 @@ async fn handle_connection(
         };
 
         let id = request.get("id").cloned();
-        let method = request
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let params = request
-            .get("params")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
 
         // A notification has no id and expects no response.
         let is_notification = id.is_none();
@@ -153,12 +143,7 @@ async fn handle_connection(
     }
 }
 
-async fn dispatch(
-    method: &str,
-    params: Value,
-    id: Value,
-    server: &Arc<LainServer>,
-) -> Value {
+async fn dispatch(method: &str, params: Value, id: Value, server: &Arc<LainServer>) -> Value {
     let mut response = json!({"jsonrpc": "2.0", "id": id});
 
     match method {
@@ -203,10 +188,7 @@ async fn dispatch(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            let arguments = params
-                .get("arguments")
-                .and_then(Value::as_object)
-                .cloned();
+            let arguments = params.get("arguments").and_then(Value::as_object).cloned();
             let result = server
                 .ingest()
                 .tool_executor()

@@ -262,7 +262,11 @@ fn test_edge_counts_by_type_seeds_zero_for_unused_variants() {
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
 
-    let file = GraphNode::new(NodeType::File, "script.py".to_string(), "/src/script.py".to_string());
+    let file = GraphNode::new(
+        NodeType::File,
+        "script.py".to_string(),
+        "/src/script.py".to_string(),
+    );
     let fn_node = GraphNode::new(
         NodeType::Function,
         "do_thing".to_string(),
@@ -279,10 +283,7 @@ fn test_edge_counts_by_type_seeds_zero_for_unused_variants() {
         .unwrap();
 
     let hist = graph.edge_counts_by_type();
-    let declared: HashSet<String> = EdgeType::all()
-        .iter()
-        .map(|v| format!("{v:?}"))
-        .collect();
+    let declared: HashSet<String> = EdgeType::all().iter().map(|v| format!("{v:?}")).collect();
     let reported: HashSet<String> = hist.keys().cloned().collect();
     let missing: Vec<&String> = declared.difference(&reported).collect();
     assert!(

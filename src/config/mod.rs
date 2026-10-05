@@ -69,10 +69,7 @@ mod socket_path_tests {
     fn different_for_different_workspaces() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        assert_ne!(
-            oneshot_socket_path(a.path()),
-            oneshot_socket_path(b.path())
-        );
+        assert_ne!(oneshot_socket_path(a.path()), oneshot_socket_path(b.path()));
     }
 
     #[test]

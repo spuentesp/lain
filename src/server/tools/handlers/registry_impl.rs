@@ -453,12 +453,7 @@ impl ToolHandler for FindAnchorsHandler {
             .get("include_tests")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        handlers::metrics::find_anchors(
-            &ctx.graph,
-            &ctx.overlay,
-            limit,
-            include_tests,
-        )
+        handlers::metrics::find_anchors(&ctx.graph, &ctx.overlay, limit, include_tests)
     }
 }
 inventory::submit!(ToolHandlerEntry(&FindAnchorsHandler));

@@ -111,9 +111,7 @@ mod tests {
         session
             .send(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
             .unwrap();
-        let response = session
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
+        let response = session.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(response["id"], json!(1));
         assert_eq!(response["result"], "echo");
         server_thread.join().unwrap();

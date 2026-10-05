@@ -1219,10 +1219,7 @@ fn is_anchor_excluded_path_filters_test_and_script_paths() {
         "src/tests.rs",
     ];
     for p in excluded {
-        assert!(
-            is_anchor_excluded_path(p),
-            "expected excluded: {p}"
-        );
+        assert!(is_anchor_excluded_path(p), "expected excluded: {p}");
     }
     let kept = [
         "src/server/query/executor.rs",
@@ -1231,9 +1228,6 @@ fn is_anchor_excluded_path_filters_test_and_script_paths() {
         "src/bin/lain-git-sidecar.rs",
     ];
     for p in kept {
-        assert!(
-            !is_anchor_excluded_path(p),
-            "expected kept: {p}"
-        );
+        assert!(!is_anchor_excluded_path(p), "expected kept: {p}");
     }
 }
