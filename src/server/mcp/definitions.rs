@@ -118,7 +118,7 @@ pub const FEDERATION_TOOL_DEFS: &[ToolDef] = &[
     ),
     ToolDef::legacy(
         "search_org",
-        "Case-insensitive substring search across every repo's symbols (matched on name or path). Args: query (substring), limit (max results, parsed as usize). Returns matches sorted by (repo_id, name).",
+        "Case-insensitive substring search across every repo's symbols (matched on name or path). Args: query (substring), limit (max results, parsed as usize). Returns matches sorted by (repo_id, name); when more than `limit` match, the set is spread across repos (best matches first within each repo) so one repo cannot crowd out the rest.",
         &["query", "limit"],
         &[],
     ),
