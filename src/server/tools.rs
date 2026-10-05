@@ -186,21 +186,20 @@ impl ToolExecutor {
         let jobs_path =
             std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
         if let Ok(contents) = std::fs::read_to_string(&jobs_path) {
-            let jobs_registry = Arc::clone(&jobs_registry);
-            let jobs_path_for_log = jobs_path.clone();
-            task::spawn(async move {
-                match serde_json::from_str::<Vec<JobInfo>>(&contents) {
-                    Ok(vec) => crate::server::job_store::restore(&jobs_registry, vec),
-                    // A store that exists but will not parse means jobs
-                    // were lost, most likely to an interrupted write.
-                    // Skipping in silence made that indistinguishable
-                    // from having had no jobs at all.
-                    Err(e) => tracing::warn!(
-                        "job store at {jobs_path_for_log} could not be read ({e}); \
-                         previously running jobs will not be resumed"
-                    ),
-                }
-            });
+            // Restored inline: the file is already read synchronously, so a
+            // spawned task bought nothing and panicked ("no reactor
+            // running") when an executor was built outside a Tokio runtime.
+            match serde_json::from_str::<Vec<JobInfo>>(&contents) {
+                Ok(vec) => crate::server::job_store::restore(&jobs_registry, vec),
+                // A store that exists but will not parse means jobs
+                // were lost, most likely to an interrupted write.
+                // Skipping in silence made that indistinguishable
+                // from having had no jobs at all.
+                Err(e) => tracing::warn!(
+                    "job store at {jobs_path} could not be read ({e}); \
+                     previously running jobs will not be resumed"
+                ),
+            }
         }
 
         Self {
@@ -1514,7 +1513,21 @@ mod job_panic_tests {
     #[tokio::test]
     async fn a_panicking_background_job_is_recorded_as_failed_and_frees_its_slot() {
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("LAIN_JOB_STORE", tmp.path().join("jobs.json"));
+        // `LAIN_JOB_STORE` is process-global: set it only around executor
+        // construction and the persistence at the end, and restore it, so
+        // sibling tests never see this test's store.
+        let store = tmp.path().join("jobs.json");
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("LAIN_JOB_STORE", v),
+                    None => std::env::remove_var("LAIN_JOB_STORE"),
+                }
+            }
+        }
+        let _restore = RestoreEnv(std::env::var_os("LAIN_JOB_STORE"));
+        std::env::set_var("LAIN_JOB_STORE", &store);
         let graph = crate::graph::GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
         let exec = create_test_executor_with_graph(graph);
 
@@ -1540,6 +1553,16 @@ mod job_panic_tests {
             !last.contains("Running"),
             "job stuck Running after panic: {last}"
         );
+        // The job persists its snapshot after finishing; wait for it so the
+        // write lands in THIS test's store, not the default path, once the
+        // env var is restored.
+        for _ in 0..200 {
+            if store.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(store.exists(), "job snapshot was never persisted");
         assert!(last.contains("panicked"), "failure not recorded: {last}");
         assert!(last.contains("\"success\":false"), "{last}");
         assert_eq!(

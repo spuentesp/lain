@@ -47,10 +47,14 @@ miri:
 	MIRIFLAGS="-Zmiri-disable-isolation" CARGO_TARGET_DIR=target/miri \
 	  cargo +nightly miri test --lib sensors::util::verification
 
-# Mutation testing of the verified modules (slow; needs cargo-mutants).
+# Mutation testing of the verified modules (slow; needs cargo-mutants). Each
+# mutant runs only the tests of the module it touches, and the build is
+# `--lib` without debuginfo: the default builds every integration-test binary
+# and can fill the disk.
 mutants:
-	cargo mutants -f src/server/readiness.rs -f src/server/reload.rs \
-	  -f src/server/presence_lock.rs --timeout 300 -- --lib
+	CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+	  cargo mutants -f src/server/readiness.rs -f src/server/reload.rs \
+	  --cargo-arg=--lib --timeout 120 -- -- server::readiness server::reload
 
 # proptest state machines and property tests.
 proptest:

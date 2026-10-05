@@ -67,6 +67,38 @@ mod sequential {
         assert!(h.snapshot().problem.is_none());
     }
 
+    /// Timestamps are real wall-clock milliseconds, and a completion never
+    /// predates the start of the attempt it completes (mutation testing found
+    /// `unix_ms` could return a constant without any test noticing).
+    #[test]
+    fn timestamps_are_real_and_ordered() {
+        const YEAR_2023_MS: u64 = 1_672_531_200_000;
+        let h = ReadinessHandle::default();
+        let started = h.snapshot().started_at_unix_ms;
+        assert!(started > YEAR_2023_MS, "started_at is not a wall-clock time: {started}");
+        assert!(h.snapshot().completed_at_unix_ms.is_none());
+
+        assert!(h.ready(None));
+        let done = h.snapshot().completed_at_unix_ms.expect("ready stamps completion");
+        assert!(done >= started, "completed before it started: {done} < {started}");
+
+        let h = ReadinessHandle::default();
+        h.failed("e".into());
+        let s = h.snapshot();
+        assert!(s.completed_at_unix_ms.unwrap() >= s.started_at_unix_ms);
+
+        let h = ReadinessHandle::default();
+        h.cancelled();
+        let s = h.snapshot();
+        assert!(s.completed_at_unix_ms.unwrap() >= s.started_at_unix_ms);
+        // Re-arming clears the completion stamp.
+        let h = ReadinessHandle::default();
+        h.ready(None);
+        let _p = h.begin_pass();
+        assert!(h.snapshot().completed_at_unix_ms.is_none());
+        assert!(unix_ms() >= started);
+    }
+
     // ---- proptest-state-machine -------------------------------------------------
 
     #[derive(Clone, Debug)]
