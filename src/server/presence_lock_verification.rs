@@ -355,3 +355,49 @@ fn an_unusable_lock_directory_fails_in_bounded_time() {
         started.elapsed()
     );
 }
+
+/// An expired lock held by someone else is cleaned up and the acquire
+/// succeeds; a live one still conflicts. (Pins the `age > ttl` decision in
+/// the scan: weakening it to `==` left expired locks blocking forever.)
+#[test]
+fn an_expired_foreign_lock_is_taken_over_but_a_live_one_conflicts() {
+    let ws = tempfile::tempdir().unwrap();
+    let dir = lock_dir(ws.path());
+    let p = Path::new("a.rs");
+    let theirs = dir.join(format!("{}.lock-theirs", sanitize(p)));
+    std::fs::write(
+        &theirs,
+        r#"{"agent_id":"other","kind":"other","intent":"edit","nonce":"theirs"}"#,
+    )
+    .unwrap();
+    let me = AgentId("me".into());
+    let live = try_lock(
+        ws.path(),
+        p,
+        &me,
+        AgentKind::Other("t".into()),
+        ClaimIntent::Edit,
+    );
+    assert!(live.is_err(), "a live foreign lock must conflict");
+
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&theirs)
+        .unwrap();
+    f.set_modified(SystemTime::now() - LOCK_TTL - Duration::from_secs(5))
+        .unwrap();
+    drop(f);
+    let got = try_lock(
+        ws.path(),
+        p,
+        &me,
+        AgentKind::Other("t".into()),
+        ClaimIntent::Edit,
+    );
+    assert!(
+        got.is_ok(),
+        "an expired foreign lock must not block: {:?}",
+        got.err()
+    );
+    assert!(!theirs.exists(), "the expired lock file was removed");
+}
