@@ -227,6 +227,39 @@ pub struct IndexCache {
     holds: Arc<Mutex<HoldRegistry>>,
 }
 
+/// Errors worth retrying when opening a cache file: Windows refuses to open a
+/// file for a moment while another thread atomically replaces it (the target
+/// is delete-pending), reporting `ERROR_ACCESS_DENIED` (5) or
+/// `ERROR_SHARING_VIOLATION` (32) instead of either version of the file.
+fn is_transient_open_error(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        return true;
+    }
+    // The raw codes are only meaningful on Windows (elsewhere 5 is EIO and
+    // 32 is EPIPE, which must not be retried).
+    #[cfg(windows)]
+    if matches!(e.raw_os_error(), Some(5) | Some(32)) {
+        return true;
+    }
+    false
+}
+
+/// Run `op`, retrying a bounded number of times while it fails with a
+/// transient open error. Any other error, or the last transient one, is returned.
+fn retry_transient<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    const ATTEMPTS: u32 = 200;
+    let mut tries = 0;
+    loop {
+        match op() {
+            Err(e) if tries < ATTEMPTS && is_transient_open_error(&e) => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_micros(250));
+            }
+            other => return other,
+        }
+    }
+}
+
 impl IndexCache {
     pub fn new(data_dir: &Path) -> Self {
         Self {
@@ -313,7 +346,7 @@ impl IndexCache {
     /// by future "is this entry fresh?" checks.
     pub fn read_manifest(&self, key: &CacheKey) -> Result<Option<CacheManifest>, LainError> {
         let path = manifest_path(&self.data_dir, key);
-        match std::fs::read(&path) {
+        match retry_transient(|| std::fs::read(&path)) {
             Ok(bytes) => match serde_json::from_slice::<CacheManifest>(&bytes) {
                 Ok(m) => Ok(Some(m)),
                 Err(e) => Err(LainError::Serialization(format!(
@@ -397,7 +430,7 @@ impl IndexCache {
     /// `from_snapshot` to hydrate the per-repo DB.
     pub fn read_graph_bytes(&self, key: &CacheKey) -> Result<Vec<u8>, LainError> {
         let path = graph_path(&self.data_dir, key);
-        match std::fs::read(&path) {
+        match retry_transient(|| std::fs::read(&path)) {
             Ok(bytes) => Ok(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(LainError::NotFound(
                 format!("graph.bin at {}", path.display()),
@@ -696,6 +729,53 @@ impl ResidencyTracker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retry_transient_rides_out_a_brief_open_failure() {
+        let mut left = 3;
+        let r = super::retry_transient(|| {
+            if left > 0 {
+                left -= 1;
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(r.unwrap(), 7);
+    }
+
+    #[test]
+    fn retry_transient_does_not_retry_other_errors_and_is_bounded() {
+        let mut calls = 0;
+        let r: std::io::Result<()> = super::retry_transient(|| {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert!(r.is_err());
+        assert_eq!(calls, 1, "NotFound is not transient");
+
+        let mut calls = 0;
+        let r: std::io::Result<()> = super::retry_transient(|| {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+        assert!(r.is_err());
+        assert_eq!(
+            calls, 201,
+            "a persistent denial must give up after the bound"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sharing_errors_count_as_transient() {
+        assert!(super::is_transient_open_error(
+            &std::io::Error::from_raw_os_error(5)
+        ));
+        assert!(super::is_transient_open_error(
+            &std::io::Error::from_raw_os_error(32)
+        ));
+    }
+
     use super::*;
     use std::collections::BTreeMap;
 

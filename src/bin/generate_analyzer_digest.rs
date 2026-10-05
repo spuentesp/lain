@@ -41,7 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the fixture into a fresh tempdir so a future fixture
     // edit cannot make the committed digest stale by accident.
     let fixture_root = make_tempdir("lain-fixture")?;
-    let status = Command::new(&fixture_script)
+    let status = Command::new("bash")
+        .arg(&fixture_script)
         .arg(&fixture_root)
         .status()
         .map_err(|e| format!("spawn contracts-fixture.sh: {e}"))?;

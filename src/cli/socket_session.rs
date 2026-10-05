@@ -83,7 +83,6 @@ fn spawn_reader(stream: UnixStream, tx: Sender<Value>) -> thread::JoinHandle<()>
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Write as _;
     use std::os::unix::net::UnixListener;
 
     #[test]

@@ -51,7 +51,10 @@ fn fixture_script() -> std::path::PathBuf {
 fn build_fixture() -> (tempfile::TempDir, FixtureRepos) {
     let tmp = tempfile::tempdir().expect("fixture tempdir");
     let root = tmp.path().to_path_buf();
-    let status = Command::new(fixture_script())
+    // Through `bash`: Windows cannot execute a `.sh` file directly
+    // ("%1 is not a valid Win32 application"); CI has Git Bash.
+    let status = Command::new("bash")
+        .arg(fixture_script())
         .arg(&root)
         .status()
         .expect("spawn contracts-fixture.sh");
