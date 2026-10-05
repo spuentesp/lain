@@ -218,7 +218,7 @@ mod lifecycle {
         Add,
         Resolve(usize, bool), // row index (mod len), which agent
         Reopen,               // close and reopen the sqlite file
-        Check(usize),
+        Check,
     }
 
     pub struct Ref;
@@ -236,7 +236,7 @@ mod lifecycle {
                         .prop_map(|(i, b)| Op::Resolve(i, b))
                         .boxed(),
                 );
-                ops.push((0usize..64).prop_map(Op::Check).boxed());
+                ops.push(Just(Op::Check).boxed());
             }
             proptest::strategy::Union::new(ops).boxed()
         }
@@ -253,7 +253,7 @@ mod lifecycle {
                         row.1 = Some(if *b { "alice" } else { "bob" }.to_string());
                     }
                 }
-                Op::Reopen | Op::Check(_) => {}
+                Op::Reopen | Op::Check => {}
             }
             m
         }
@@ -322,7 +322,7 @@ mod lifecycle {
                 Op::Reopen => {
                     sut.store = AnnotationStore::open(&sut.path).unwrap();
                 }
-                Op::Check(_) => {}
+                Op::Check => {}
             }
             sut
         }

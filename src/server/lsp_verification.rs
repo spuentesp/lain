@@ -260,7 +260,6 @@ fn restart_window_boundary_is_inclusive() {
 
 mod framing {
     use super::*;
-    use proptest::prelude::*;
 
     fn run<T>(f: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()

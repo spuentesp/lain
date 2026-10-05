@@ -398,6 +398,7 @@ def main():
                     help="embedding model for the semantic check (what `lain setup` installs)")
     args = ap.parse_args()
     args.lain = os.path.abspath(args.lain)
+    args.work = os.path.abspath(args.work)
     os.makedirs(args.work, exist_ok=True)
     home = os.path.join(args.work, "home")
     os.makedirs(home, exist_ok=True)
