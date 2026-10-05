@@ -774,3 +774,27 @@ fn start_guard_reports_a_real_io_error_immediately() {
     );
     assert!(format!("{err:#}").contains("start guard"), "{err:#}");
 }
+
+/// `serve` binds and answers until idle, then returns Ok; it is not a no-op.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_binds_serves_and_returns_after_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path());
+    let p = sock(dir.path());
+    let task = tokio::spawn(serve(p.clone(), server, Some(Duration::from_millis(400))));
+    let mut up = false;
+    for _ in 0..40 {
+        if probe_alive(&p) {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(up, "serve never started listening");
+    let done = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("idle exit")
+        .unwrap();
+    assert!(done.is_ok());
+    assert!(!p.exists());
+}
