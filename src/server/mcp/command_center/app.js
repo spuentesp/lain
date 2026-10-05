@@ -560,23 +560,31 @@ async function renderStatusBar() {
 
 async function renderOverviewTab() {
   const tab = document.getElementById('tab-overview');
-  let health, status;
+  let health, status, healthText, statusText;
   try {
     const h = await mcpCall('get_federation_health');
     health = parseJson(h);
-  } catch (_) { health = null; }
+    healthText = unwrapText(h);
+  } catch (_) { health = null; healthText = null; }
   try {
     const s = await mcpCall('get_health');
     status = parseJson(s);
-  } catch (_) { status = null; }
+    statusText = unwrapText(s);
+  } catch (_) { status = null; statusText = null; }
   const lines = [];
   if (status) {
     lines.push(`<h3>Server health</h3>`);
     lines.push(`<pre>${escapeHtml(JSON.stringify(status, null, 2))}</pre>`);
+  } else if (statusText) {
+    lines.push(`<h3>Server health</h3>`);
+    lines.push(`<pre class="health-text">${escapeHtml(statusText)}</pre>`);
   }
   if (health) {
     lines.push(`<h3>Federation health</h3>`);
     lines.push(`<pre>${escapeHtml(JSON.stringify(health, null, 2))}</pre>`);
+  } else if (healthText) {
+    lines.push(`<h3>Federation health</h3>`);
+    lines.push(`<pre class="health-text">${escapeHtml(healthText)}</pre>`);
   }
   if (lines.length === 0) {
     lines.push('<p class="muted">No health data available.</p>');
@@ -2470,6 +2478,8 @@ const TOOL_CATEGORY_MAP = {
   get_call_chain: 'Impact',
   get_cross_runtime_callers: 'Impact',
   find_dead_code: 'Impact',
+  get_branch_status: 'Impact',
+  get_commit_history: 'Impact',
 
   // Context & Source
   get_code_snippet: 'Context',
@@ -2477,8 +2487,11 @@ const TOOL_CATEGORY_MAP = {
   get_context_for_prompt: 'Context',
   query_graph: 'Context',
   describe_schema: 'Context',
+  explain_dispatch: 'Context',
 
   // Multiplayer & Presence
+  register_agent: 'Multiplayer',
+  unregister_agent: 'Multiplayer',
   who_am_i: 'Multiplayer',
   list_active_agents: 'Multiplayer',
   claim_files: 'Multiplayer',
@@ -2487,6 +2500,9 @@ const TOOL_CATEGORY_MAP = {
   my_claims: 'Multiplayer',
   heartbeat: 'Multiplayer',
   list_subagents: 'Multiplayer',
+  lain_intent: 'Multiplayer',
+  list_active_intents: 'Multiplayer',
+  get_recent_activity: 'Multiplayer',
 
   // Annotations & Handoffs
   add_annotation: 'Annotations',
@@ -2505,6 +2521,22 @@ const TOOL_CATEGORY_MAP = {
   get_cross_repo_blast_radius_for_repo: 'Federation',
   get_active_workspace: 'Federation',
   list_workspaces: 'Federation',
+  get_workspace: 'Federation',
+
+  // Contracts (Contract Federation & Protocol Invariants)
+  list_services: 'Contracts',
+  get_service: 'Contracts',
+  prepare_snapshot: 'Contracts',
+  get_snapshot: 'Contracts',
+  list_contracts: 'Contracts',
+  get_contract: 'Contracts',
+  list_unresolved: 'Contracts',
+  check_binding: 'Contracts',
+  diff_contracts: 'Contracts',
+  trace_impact: 'Contracts',
+  get_coverage: 'Contracts',
+  resolve_evidence: 'Contracts',
+  read_source: 'Contracts',
 
   // Execution & Testing
   run_build: 'Execution',
@@ -2530,6 +2562,8 @@ const TOOL_CATEGORY_MAP = {
   get_job_status: 'System',
   install_language_server: 'System',
   debug_sleep: 'System',
+  list_packages: 'System',
+  load_package: 'System',
 };
 
 const CATEGORY_ORDER = [
@@ -2540,6 +2574,7 @@ const CATEGORY_ORDER = [
   'Multiplayer',
   'Annotations',
   'Federation',
+  'Contracts',
   'Execution',
   'System',
 ];
@@ -2570,7 +2605,7 @@ async function renderToolsTab() {
     <div class="tools-layout">
       <div class="tools-sidebar-panel">
         <div class="tools-filter-bar">
-          <input type="search" id="tools-search" class="tools-search" placeholder="Search 75+ tools…" aria-label="Search tools">
+          <input type="search" id="tools-search" class="tools-search" placeholder="Search 95+ tools…" aria-label="Search tools">
           <div id="tools-categories" class="tools-category-chips" role="tablist"></div>
         </div>
         <ul id="tools-list" class="tools-list"></ul>
