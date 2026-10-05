@@ -397,3 +397,124 @@ fn sync_policy_parses_the_environment_forms() {
         SyncPolicy::Interval(SyncPolicy::DEFAULT_INTERVAL)
     );
 }
+
+// ---- replay edge cases found by mutation testing ---------------------------------
+
+fn raw_frame(op: &GraphOp) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_frame(op, &mut buf).unwrap();
+    buf
+}
+
+/// Only "does not exist" means "no WAL"; any other open/read failure must
+/// surface instead of silently reading as an empty log.
+#[test]
+fn replay_distinguishes_a_missing_wal_from_an_unreadable_one() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        replay(&dir.path().join("absent.wal"), |_| Ok(())).unwrap(),
+        0
+    );
+
+    // A directory opens but cannot be read: an I/O error, not an empty log.
+    let as_dir = dir.path().join("is-a-dir.wal");
+    std::fs::create_dir(&as_dir).unwrap();
+    assert!(
+        replay(&as_dir, |_| Ok(())).is_err(),
+        "an unreadable WAL read as empty"
+    );
+}
+
+/// The frame-size cap is 64 MiB: a header of exactly that size is merely
+/// truncated (torn tail), one byte more is corrupt.
+#[test]
+fn frame_length_cap_boundary() {
+    const CAP: u32 = 64 * 1024 * 1024;
+    let dir = tempfile::tempdir().unwrap();
+    let at_cap = dir.path().join("at.wal");
+    std::fs::write(&at_cap, CAP.to_le_bytes()).unwrap();
+    assert_eq!(
+        replay(&at_cap, |_| Ok(())).unwrap(),
+        0,
+        "exactly the cap is allowed, then torn"
+    );
+
+    let over = dir.path().join("over.wal");
+    std::fs::write(&over, (CAP + 1).to_le_bytes()).unwrap();
+    assert!(
+        replay(&over, |_| Ok(())).is_err(),
+        "over the cap is corrupt"
+    );
+}
+
+/// A realistic large frame (a node with a long docstring) must replay.
+#[test]
+fn frames_larger_than_a_few_kib_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("big.wal");
+    let mut n = node("big");
+    n.docstring = Some("x".repeat(200_000));
+    append_op(&wal, &GraphOp::UpsertNode(n.clone())).unwrap();
+    let mut seen = 0;
+    replay(&wal, |op| {
+        if let GraphOp::UpsertNode(got) = op {
+            assert_eq!(got.docstring.as_ref().map(|d| d.len()), Some(200_000));
+            seen += 1;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, 1);
+}
+
+/// Repair truncates to exactly the end of the last intact frame.
+#[test]
+fn repair_truncates_to_the_last_intact_frame_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("r.wal");
+    let f1 = raw_frame(&GraphOp::UpsertNode(node("a")));
+    let f2 = raw_frame(&GraphOp::UpsertNode(node("bb")));
+    let mut bytes = [f1.clone(), f2.clone()].concat();
+    bytes.extend_from_slice(&[0xde, 0xad, 0xbe]); // torn tail
+    std::fs::write(&wal, &bytes).unwrap();
+
+    let n = replay_and_repair(&wal, |_| Ok(())).unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(
+        std::fs::metadata(&wal).unwrap().len() as usize,
+        f1.len() + f2.len(),
+        "repair must cut exactly at the end of the last good frame"
+    );
+    // Idempotent: a clean file is left byte-for-byte alone.
+    let before = std::fs::read(&wal).unwrap();
+    assert_eq!(replay_and_repair(&wal, |_| Ok(())).unwrap(), 2);
+    assert_eq!(std::fs::read(&wal).unwrap(), before);
+}
+
+/// A bad CRC in the middle stops replay there; repair drops it and everything after.
+#[test]
+fn repair_cuts_at_a_corrupt_middle_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("m.wal");
+    let f1 = raw_frame(&GraphOp::UpsertNode(node("a")));
+    let mut f2 = raw_frame(&GraphOp::UpsertNode(node("b")));
+    let last = f2.len() - 1;
+    f2[last] ^= 0xff; // break the CRC
+    let f3 = raw_frame(&GraphOp::UpsertNode(node("c")));
+    std::fs::write(&wal, [f1.clone(), f2, f3].concat()).unwrap();
+    assert_eq!(replay_and_repair(&wal, |_| Ok(())).unwrap(), 1);
+    assert_eq!(std::fs::metadata(&wal).unwrap().len() as usize, f1.len());
+}
+
+#[test]
+fn discard_prev_is_idempotent_but_reports_real_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = dir.path().join("graph.bin.wal");
+    discard_prev(&wal).unwrap(); // nothing to discard: fine
+    std::fs::write(prev_path_for(&wal), b"x").unwrap();
+    discard_prev(&wal).unwrap();
+    assert!(!prev_path_for(&wal).exists());
+    // A path that cannot be removed as a file is a real error, not "already gone".
+    std::fs::create_dir(prev_path_for(&wal)).unwrap();
+    assert!(discard_prev(&wal).is_err());
+}
