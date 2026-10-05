@@ -144,6 +144,13 @@ pub const COMMIT_SYNC_INTERVAL_ENV: &str = "LAIN_COMMIT_SYNC_SECS";
 /// Default gap between commit checks.
 const COMMIT_SYNC_DEFAULT_SECS: u64 = 300;
 
+/// Environment escape hatch for [`spawn_periodic_checkpoint`].
+pub const DISABLE_WAL_CHECKPOINT_ENV: &str = "LAIN_DISABLE_WAL_CHECKPOINT";
+/// Override for the WAL-checkpoint interval, in seconds.
+pub const WAL_CHECKPOINT_INTERVAL_ENV: &str = "LAIN_WAL_CHECKPOINT_SECS";
+/// Default gap between WAL checkpoints.
+const WAL_CHECKPOINT_DEFAULT_SECS: u64 = 60;
+
 /// Re-index when the checkout moves to a new commit.
 ///
 /// `LainServer::run_background_sync` — the loop that compares the current
@@ -189,6 +196,67 @@ pub fn spawn_commit_sync(server: crate::server::LainServer) {
     tracing::info!("commit sync: re-index check every {secs}s");
     tokio::spawn(async move {
         server.run_background_sync(secs).await;
+    });
+}
+
+/// Periodic WAL checkpoint (B5, 2026-10-04).
+///
+/// `save_to_disk_sync` writes the in-memory graph to `graph.bin`
+/// and truncates the WAL. Without a periodic trigger, a
+/// long-running server with no explicit reload would grow the
+/// WAL indefinitely — every mutation appends a frame, but
+/// nothing checkpoints until a manual `request_reload` or
+/// graceful shutdown. This task does the checkpoint on a
+/// timer.
+///
+/// Defaults: every 60s. Override with `LAIN_WAL_CHECKPOINT_SECS`
+/// or disable with `LAIN_DISABLE_WAL_CHECKPOINT=1`.
+///
+/// The task uses the server's `Arc<LainServer>` and reads the
+/// `GraphDatabase` through `ingest().graph()`. The save is
+/// blocking (`save_to_disk_sync` is sync), so we run it on a
+/// `spawn_blocking` to avoid stalling the runtime. A failure
+/// is logged but does not stop the loop — the next tick
+/// tries again, and an in-memory mutation that lands between
+/// ticks is replayed on next load regardless of whether the
+/// snapshot succeeded.
+pub fn spawn_periodic_checkpoint(server: crate::server::LainServer) {
+    if env_disables(std::env::var(DISABLE_WAL_CHECKPOINT_ENV).ok().as_deref()) {
+        tracing::info!(
+            "WAL periodic checkpoint disabled by {}",
+            DISABLE_WAL_CHECKPOINT_ENV
+        );
+        return;
+    }
+    let secs = std::env::var(WAL_CHECKPOINT_INTERVAL_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(WAL_CHECKPOINT_DEFAULT_SECS);
+    tracing::info!("WAL periodic checkpoint: every {secs}s");
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(secs));
+        // Skip the first immediate tick — `run_mcp` already
+        // calls `sync_volatile_overlay` and the next mutation
+        // will land in the WAL on its own; we just want
+        // steady-state truncation.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let graph = server.ingest().graph();
+            let graph = graph.clone();
+            let result = tokio::task::spawn_blocking(move || graph.save_to_disk_sync()).await;
+            match result {
+                Ok(Ok(())) => {
+                    tracing::debug!("WAL checkpoint: graph.bin written, WAL truncated");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("WAL checkpoint: save_to_disk_sync failed: {e}");
+                }
+                Err(e) => {
+                    tracing::warn!("WAL checkpoint: spawn_blocking join failed: {e}");
+                }
+            }
+        }
     });
 }
 

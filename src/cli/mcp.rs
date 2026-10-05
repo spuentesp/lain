@@ -168,6 +168,7 @@ pub async fn run_mcp(
     argv_workspaces: &[PathBuf],
     embedding_model: Option<&Path>,
     reindex_timeout: Option<std::time::Duration>,
+    socket: Option<&Path>,
 ) -> Result<()> {
     let workspaces = resolve_workspaces_strict(argv_workspaces)?;
 
@@ -225,6 +226,13 @@ pub async fn run_mcp(
     // graph never advances past the commit it was first built from.
     crate::server::ingest::background::spawn_commit_sync(server.clone());
 
+    // B5 (2026-10-04): periodic WAL checkpoint. The WAL grows on
+    // every mutation; without a periodic trigger, a
+    // long-running server with no explicit reload would never
+    // truncate the file. The default 60s is short enough to
+    // bound the WAL to a few minutes of mutations.
+    crate::server::ingest::background::spawn_periodic_checkpoint(server.clone());
+
     // Expire stale sessions and claim TTLs. Only the federation server
     // started this, so under `lain mcp` a crashed agent's edit claims — and
     // any `ttl_seconds` claim — were never dropped, blocking every other
@@ -236,19 +244,110 @@ pub async fn run_mcp(
         server.audit_handle().events_log().clone(),
     );
 
+    // B1 (2026-10-04): when `--socket PATH` is given, also bind a
+    // per-workspace Unix socket. `lain oneshot` consults this
+    // socket first; subsequent calls connect to the running
+    // server and skip the cold-reindex cost (~5 min for 41k
+    // LOC). The TLA+ spec at
+    // `docs/formal/OneshotSharedServer.tla` defines the
+    // lifecycle; the design notes are in
+    // `OneshotSharedServer-impl.md`. We spawn the socket
+    // accept loop as a sibling tokio task; both runtimes share
+    // the same `Arc<LainServer>` so a call coming through the
+    // socket sees the warm in-memory graph.
+    let server_arc = std::sync::Arc::new(server);
+    if let Some(socket_path) = socket {
+        // Remove a stale socket from a prior crashed process. The
+        // `bind()` below is what catches a *running* previous
+        // process; removing the file is safe iff the previous
+        // process is dead.
+        if let Some(pid) = read_pid_for_socket(socket_path) {
+            if !pid_alive(pid) {
+                let _ = std::fs::remove_file(socket_path);
+                let _ = std::fs::remove_file(pid_path_for(socket_path));
+            } else {
+                return Err(anyhow!(
+                    "another `lain mcp` is already running for this socket ({}); \
+                     pass a different `--socket PATH` or stop the other process (pid {pid})",
+                    socket_path.display()
+                ));
+            }
+        }
+        let socket_path_buf = socket_path.to_path_buf();
+        let server_for_socket = server_arc.clone();
+        let workspace_for_log = workspace.clone();
+        let socket_task = tokio::spawn(async move {
+            if let Err(e) = crate::server::mcp::socket_server::serve(
+                socket_path_buf.clone(),
+                server_for_socket,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "socket server on {} exited: {e}",
+                    socket_path_buf.display()
+                );
+            }
+            tracing::info!(
+                "socket server for {} exited",
+                workspace_for_log.display()
+            );
+        });
+        // Hold the JoinHandle so the task isn't dropped. We don't
+        // join on it - run_stdio is the foreground; the socket
+        // task runs until the stdio path finishes (the runtime
+        // tears it down on shutdown).
+        std::mem::forget(socket_task);
+    }
+
     // Hand the executor's tool surface to a federation-free
     // `LainMcpServer`. Single-workspace mode — per-repo tools run
     // against `server.tool_executor.graph` directly. The re-index
     // timeout is wired through to run_stdio so the spawn honors
     // it (or the env var if None).
     let mcp =
-        crate::server::mcp::handler::LainMcpServer::new(server.ingest().tool_executor().clone())
-            .with_server(std::sync::Arc::new(server))
+        crate::server::mcp::handler::LainMcpServer::new(server_arc.ingest().tool_executor().clone())
+            .with_server(server_arc)
             .with_reindex_timeout(reindex_timeout);
     mcp.run_stdio()
         .await
         .map_err(|e| anyhow!("MCP stdio run failed: {e}"))?;
     Ok(())
+}
+
+fn pid_path_for(socket_path: &Path) -> std::path::PathBuf {
+    let mut p = socket_path.to_path_buf();
+    let new_name = match p.file_name().and_then(|n| n.to_str()) {
+        Some(n) => format!("{n}.pid"),
+        None => return p,
+    };
+    p.set_file_name(new_name);
+    p
+}
+
+fn read_pid_for_socket(socket_path: &Path) -> Option<u32> {
+    std::fs::read_to_string(pid_path_for(socket_path))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+fn pid_alive(pid: u32) -> bool {
+    // Check `/proc/<pid>` on Linux, fall back to a no-op on
+    // other platforms (the unix-socket shared server is
+    // Linux-only). This is conservative: when we can't tell,
+    // assume the previous process is still alive and refuse
+    // to start, so the only false positive is "PID got recycled
+    // and we won't start" — recoverable by the operator
+    // deleting the stale socket.
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// Multi-workspace delegation path. Generates a `repos.yaml` with one

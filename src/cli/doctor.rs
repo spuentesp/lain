@@ -370,7 +370,7 @@ fn observe_repository(report: &mut DoctorReport, root: &Path) -> Result<()> {
                 GraphInspectionError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => ("graph_missing", refresh),
                 GraphInspectionError::Io(_) => ("graph_unreadable", "Check read permissions on .lain/graph.bin and its parent directories."),
                 GraphInspectionError::Incompatible(_) => ("graph_incompatible", "Stop LAIN processes using this repository, back up .lain/graph.bin, then run `lain mcp` to rebuild."),
-                _ => ("graph_corrupt", "Stop LAIN processes using this repository, move .lain/graph.bin to a backup, then run `lain mcp` to rebuild."),
+                _ => ("graph_corrupt", "Stop LAIN processes using this repository, move .lain/graph.bin to a backup, then run `lain mcp` to rebuild. (B5 2026-10-04: with the write-ahead log landed on `feat/graph-wal`, a torn snapshot is recoverable by replaying `.lain/graph.wal`; until that branch merges, the move-aside recovery is the only path.)"),
             };
             report.structural(
                 CapabilityState::UnavailableError,

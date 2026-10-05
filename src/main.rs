@@ -118,6 +118,7 @@ fn main() -> Result<()> {
             embedding_model,
             reindex_timeout,
             owner_url,
+            socket,
         }) => {
             // `lain mcp` — MCP server on stdio. Resolves the workspace
             // list from `--workspace` (repeatable), the `LAIN_WORKSPACE`
@@ -150,6 +151,7 @@ fn main() -> Result<()> {
                     &workspace,
                     embedding_model.as_deref(),
                     reindex_timeout.map(std::time::Duration::from_secs),
+                    socket.as_deref(),
                 )),
             }
         }

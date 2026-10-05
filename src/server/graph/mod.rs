@@ -6,6 +6,7 @@
 //! in [`persist`].
 
 pub(crate) mod persist;
+pub(crate) mod wal;
 
 pub use persist::{inspect_persisted_graph, GraphInspectionError, PATH_FORMAT_VERSION};
 
@@ -339,6 +340,17 @@ impl GraphDatabase {
 
     pub fn upsert_node(&self, node: GraphNode) -> Result<(), LainError> {
         self.check_writable()?;
+        // B5 (2026-10-04): write-ahead log. Append the op to
+        // `graph.wal` first so a torn `graph.bin` can recover
+        // by replaying the WAL on top of the last good
+        // snapshot. The fsync inside `append_op` is the
+        // durability point.
+        if let Err(e) = wal::append_op(
+            &wal::wal_path_for(&self.persistence_path),
+            &wal::GraphOp::UpsertNode(node.clone()),
+        ) {
+            return Err(LainError::Database(format!("wal append: {e}")));
+        }
         let mut graph = self.graph.write();
 
         if let Some(idx) = self.index_map.get(&node.id).map(|r| *r.value()) {
@@ -359,6 +371,18 @@ impl GraphDatabase {
 
     pub fn insert_nodes_batch(&self, new_nodes: &[GraphNode]) -> Result<(), LainError> {
         self.check_writable()?;
+        // B5 (2026-10-04): append the batch to the WAL first.
+        // The fsync inside `append_op` is the durability
+        // point. The in-memory mutation below is then safe
+        // to fail — on next load, the WAL tail replays.
+        for node in new_nodes {
+            if let Err(e) = wal::append_op(
+                &wal::wal_path_for(&self.persistence_path),
+                &wal::GraphOp::UpsertNode(node.clone()),
+            ) {
+                return Err(LainError::Database(format!("wal append: {e}")));
+            }
+        }
         // Phase 1: Collect indices and path entries under graph lock
         let mut graph = self.graph.write();
 
@@ -662,6 +686,13 @@ impl GraphDatabase {
     /// two repos can share a path, so path is not a usable key there.
     pub fn remove_nodes_by_ids(&self, ids: &[String]) -> Result<usize, LainError> {
         self.check_writable()?;
+        // B5 (2026-10-04): WAL append before mutating in-memory.
+        if let Err(e) = wal::append_op(
+            &wal::wal_path_for(&self.persistence_path),
+            &wal::GraphOp::RemoveNodesByIds(ids.to_vec()),
+        ) {
+            return Err(LainError::Database(format!("wal append: {e}")));
+        }
 
         let mut removed = 0usize;
         let mut cleared_paths: Vec<(String, NodeIndex)> = Vec::new();
@@ -728,7 +759,11 @@ impl GraphDatabase {
     pub fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
 
-        let targets: std::collections::HashSet<(String, String, EdgeType)> = edges
+        // B5 (2026-10-04): append a single batched
+        // `GraphOp::RemoveEdges` op to the WAL before mutating
+        // in-memory. The whole batch is one frame; replay
+        // reconstructs it atomically.
+        let endpoints: Vec<(String, String, EdgeType)> = edges
             .iter()
             .map(|e| {
                 (
@@ -738,6 +773,16 @@ impl GraphDatabase {
                 )
             })
             .collect();
+        if let Err(e) = wal::append_op(
+            &wal::wal_path_for(&self.persistence_path),
+            &wal::GraphOp::RemoveEdges {
+                endpoints: endpoints.clone(),
+            },
+        ) {
+            return Err(LainError::Database(format!("wal append: {e}")));
+        }
+        let targets: std::collections::HashSet<(String, String, EdgeType)> =
+            endpoints.into_iter().collect();
 
         let mut removed = 0usize;
         {
@@ -1010,6 +1055,14 @@ impl GraphDatabase {
                 LainError::NotFound(format!("Target node {} not found", edge.target_id))
             })?;
 
+        // B5 (2026-10-04): append the op to the WAL first; the
+        // fsync inside `append_op` is the durability point.
+        if let Err(e) = wal::append_op(
+            &wal::wal_path_for(&self.persistence_path),
+            &wal::GraphOp::UpsertEdge(edge.clone()),
+        ) {
+            return Err(LainError::Database(format!("wal append: {e}")));
+        }
         graph.add_edge(source_idx, target_idx, edge.clone());
         Ok(())
     }
@@ -1063,6 +1116,19 @@ impl GraphDatabase {
 
     pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
+        // B5 (2026-10-04): append the batch to the WAL first.
+        // Each edge becomes one `GraphOp::UpsertEdge` frame.
+        // The fsync is the durability point; the in-memory
+        // mutation below is then safe to fail (the WAL tail
+        // replays on next load).
+        for edge in new_edges {
+            if let Err(e) = wal::append_op(
+                &wal::wal_path_for(&self.persistence_path),
+                &wal::GraphOp::UpsertEdge(edge.clone()),
+            ) {
+                return Err(LainError::Database(format!("wal append: {e}")));
+            }
+        }
         let mut graph = self.graph.write();
         let mut external = self.pending_external_edges.lock();
 
@@ -1141,6 +1207,11 @@ impl GraphDatabase {
             }
         }
         drop(graph);
+        // B5 (2026-10-04): write-ahead log. `insert_edge` is
+        // the actual mutator; the WAL append happens there
+        // too, but `upsert_edge` short-circuits above when the
+        // edge already exists, so we only append on the
+        // insert path.
         self.insert_edge(&edge)
     }
 
@@ -1974,16 +2045,87 @@ impl GraphDatabase {
     /// Without this, the only signal that the call graph is empty
     /// is "every impact query returns nothing," which is the exact
     /// failure the user reported as Bug 2.
+    ///
+    /// Every `EdgeType` variant from [`schema::EdgeType::all()`] is
+    /// seeded at 0 so an absent edge type shows up as
+    /// `Calls: 0` rather than missing. The "missing" case is the
+    /// silent-failure mode operators reported in the 2026-10-04
+    /// dogfood: `describe_schema` advertised `Calls` but the
+    /// health report never mentioned it, so the silent-absence was
+    /// invisible until an impact query returned empty.
     pub fn edge_counts_by_type(&self) -> std::collections::BTreeMap<String, usize> {
         use petgraph::visit::IntoEdgeReferences;
         use std::collections::BTreeMap;
         let graph = self.graph.read();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for variant in crate::schema::EdgeType::all() {
+            counts.insert(format!("{variant:?}"), 0);
+        }
         for edge in graph.edge_references() {
             let key = format!("{:?}", edge.weight().edge_type);
             *counts.entry(key).or_insert(0) += 1;
         }
         counts
+    }
+
+    /// How many files in the graph have at least one `Calls` or
+    /// `Uses` edge out of any symbol in them. Returns
+    /// `(covered, total)` where `total` is the number of `File`
+    /// nodes in the graph.
+    ///
+    /// This is the B4 metric for `get_health`: a repo with a
+    /// populated `Contains` tree but few files covered by calls
+    /// means the indexer's call-extraction phase didn't run on
+    /// those files (LSP missing, file is a script, etc.). The 198
+    /// of 224 files in the 2026-10-04 Lain-on-Lain dogfood were
+    /// uncovered — surfaced in `find_dead_code` as the "⚠ N files
+    /// have no call edges" warning. Surfacing the same number in
+    /// `get_health` makes the gap visible to anyone running
+    /// `lain doctor` or wiring a CI check.
+    pub fn call_graph_file_coverage(&self) -> (usize, usize) {
+        use petgraph::stable_graph::NodeIndex;
+        use petgraph::visit::EdgeRef;
+        use std::collections::HashSet;
+        let graph = self.graph.read();
+        let mut total_files = 0usize;
+        let mut file_ids: HashSet<NodeIndex> = HashSet::new();
+        for idx in graph.node_indices() {
+            if matches!(graph[idx].node_type, crate::schema::NodeType::File) {
+                total_files += 1;
+                file_ids.insert(idx);
+            }
+        }
+        let mut covered_files: HashSet<NodeIndex> = HashSet::new();
+        for edge in graph.edge_references() {
+            let kind = &edge.weight().edge_type;
+            if kind != &crate::schema::EdgeType::Calls
+                && kind != &crate::schema::EdgeType::Uses
+            {
+                continue;
+            }
+            // Map the source symbol back to the file it lives in via
+            // incoming `Contains` edges. The simplest pass is "does
+            // either endpoint have a File ancestor"; the cheaper one
+            // is to walk each endpoint's `Contains` predecessors
+            // once. The endpoint symbols have a `.path` already,
+            // so we go via that — no graph walk needed.
+            for &endpoint in &[edge.source(), edge.target()] {
+                let path_key = graph[endpoint].path.clone();
+                let mut file_idx: Option<NodeIndex> = None;
+                if let Some(indices) = self.path_index.get(&path_key) {
+                    for i in indices.iter() {
+                        if graph[*i].node_type == crate::schema::NodeType::File {
+                            file_idx = Some(*i);
+                            break;
+                        }
+                    }
+                }
+                if let Some(idx) = file_idx {
+                    covered_files.insert(idx);
+                }
+            }
+        }
+        (covered_files.len(), total_files)
     }
 
     pub fn get_node_at_location(&self, path: &str, line: u32) -> Option<GraphNode> {
@@ -2066,6 +2208,11 @@ impl GraphDatabase {
             .map_err(|e| LainError::Database(e.to_string()))?;
         crate::cli::io::write_file_atomic(&self.persistence_path, &data)
             .map_err(|e| LainError::Database(e.to_string()))?;
+        // B5 (2026-10-04): truncate the WAL now that the
+        // snapshot in `graph.bin` is consistent with it. The
+        // next load will read the snapshot only.
+        wal::truncate(&wal::wal_path_for(&self.persistence_path))
+            .map_err(|e| LainError::Database(format!("wal truncate: {e}")))?;
         Ok(())
     }
 
@@ -2129,7 +2276,55 @@ impl GraphDatabase {
             return Ok(());
         }
 
-        self.apply_state_loaded(state)
+        self.apply_state_loaded(state)?;
+
+        // B5 (2026-10-04): replay the WAL on top of the snapshot.
+        // The snapshot is consistent up to some commit; ops in
+        // `graph.wal` were appended after the last checkpoint
+        // and represent post-snapshot state. Replay applies them
+        // in order. A torn frame (truncated tail or bad CRC)
+        // stops the replay; the snapshot is intact.
+        let wal_path = wal::wal_path_for(&self.persistence_path);
+        let replayed = wal::replay(&wal_path, |op| -> std::io::Result<()> {
+            match op {
+                wal::GraphOp::UpsertNode(n) => self
+                    .upsert_node(n.clone())
+                    .map_err(|e| std::io::Error::other(e.to_string())),
+                wal::GraphOp::UpsertEdge(e) => self
+                    .upsert_edge(e.clone())
+                    .map_err(|e| std::io::Error::other(e.to_string())),
+                wal::GraphOp::RemoveNodesByIds(ids) => self
+                    .remove_nodes_by_ids(&ids)
+                    .map(|_| ())
+                    .map_err(|e| std::io::Error::other(e.to_string())),
+                wal::GraphOp::RemoveEdges { endpoints } => {
+                    let edges: Vec<crate::schema::GraphEdge> = endpoints
+                        .iter()
+                        .map(|(s, t, ty)| {
+                            crate::schema::GraphEdge::new(
+                                ty.clone(),
+                                s.clone(),
+                                t.clone(),
+                            )
+                        })
+                        .collect();
+                    self.remove_edges(&edges)
+                        .map(|_| ())
+                        .map_err(|e| std::io::Error::other(e.to_string()))
+                }
+                wal::GraphOp::CommitIndexMap { .. } => Ok(()),
+            }
+        })
+        .map_err(|e| LainError::Database(format!("wal replay: {e}")))?;
+        if replayed > 0 {
+            tracing::info!(
+                "{} replayed {} WAL ops from {}",
+                self.persistence_path.display(),
+                replayed,
+                wal_path.display()
+            );
+        }
+        Ok(())
     }
 
     /// Apply an already-decoded `persist::GraphState` to this graph
