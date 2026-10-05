@@ -108,6 +108,39 @@ mod sequential {
         assert!(unix_ms() >= started);
     }
 
+    /// `update` stamps every publication: the sequence moves forward and the
+    /// warnings come out in a deterministic order (mutation testing showed
+    /// both `touch` and `update` could be replaced by no-ops unnoticed).
+    #[test]
+    fn update_bumps_the_sequence_and_sorts_warnings() {
+        let h = ReadinessHandle::default();
+        let before = h.snapshot().sequence;
+        h.update(|s| {
+            for (code, msg) in [("z", "b"), ("a", "z"), ("a", "b")] {
+                s.warnings.push(Problem {
+                    code: code.into(),
+                    message: msg.into(),
+                    remediation: String::new(),
+                    retryable: false,
+                });
+            }
+        });
+        let s = h.snapshot();
+        assert_eq!(s.sequence, before + 1);
+        let order: Vec<_> = s
+            .warnings
+            .iter()
+            .map(|w| (w.code.as_str(), w.message.as_str()))
+            .collect();
+        assert_eq!(order, vec![("a", "b"), ("a", "z"), ("z", "b")]);
+        h.update(|_| {});
+        assert_eq!(
+            h.snapshot().sequence,
+            before + 2,
+            "every update advances the sequence"
+        );
+    }
+
     // ---- proptest-state-machine -------------------------------------------------
 
     #[derive(Clone, Debug)]

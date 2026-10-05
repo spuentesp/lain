@@ -171,3 +171,187 @@ fn stale_guard_from_a_crashed_acquirer_is_taken_over() {
     assert!(r.is_ok(), "stale guard wedged the lock: {:?}", r.err());
     assert!(guard_files(ws.path()).is_empty());
 }
+
+// ---- found by mutation testing -------------------------------------------------
+
+fn lock_dir(ws: &Path) -> PathBuf {
+    let d = ws.join(".lain").join("locks");
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+#[test]
+fn sanitize_hashes_only_past_the_limit() {
+    // Exactly MAX_SANITIZED_LEN encoded bytes: still the plain, readable form.
+    let at_limit = "a".repeat(MAX_SANITIZED_LEN);
+    assert_eq!(sanitize(Path::new(&at_limit)), at_limit);
+    // One byte more: hashed and bounded.
+    let over = "a".repeat(MAX_SANITIZED_LEN + 1);
+    let s = sanitize(Path::new(&over));
+    assert!(s.contains('~'), "over-limit names must be hashed: {s}");
+    assert!(s.len() <= MAX_SANITIZED_LEN);
+}
+
+#[test]
+fn lock_paths_are_exactly_where_the_docs_say() {
+    let ws = Path::new("/w");
+    assert_eq!(
+        lock_path_for(ws, Path::new("src/a.rs")),
+        PathBuf::from("/w/.lain/locks/src%2Fa%2Ers.lock")
+    );
+    assert_eq!(
+        lock_path_for_with_nonce(ws, Path::new("src/a.rs"), "N"),
+        PathBuf::from("/w/.lain/locks/src%2Fa%2Ers.lock-N")
+    );
+}
+
+#[test]
+fn canonical_lock_key_agrees_for_every_spelling_of_one_file() {
+    let ws = Path::new("/work/space");
+    let rel = canonical_lock_key(ws, Path::new("src/a.rs"));
+    assert_eq!(rel, "src/a.rs");
+    assert_eq!(
+        canonical_lock_key(ws, Path::new("/work/space/src/a.rs")),
+        rel
+    );
+    assert_eq!(canonical_lock_key(ws, Path::new("./src/../src/a.rs")), rel);
+    // Outside the workspace stays absolute and distinct.
+    assert_eq!(
+        canonical_lock_key(ws, Path::new("/elsewhere/a.rs")),
+        "/elsewhere/a.rs"
+    );
+    assert_ne!(canonical_lock_key(ws, Path::new("src/b.rs")), rel);
+}
+
+#[test]
+fn release_error_display_names_the_path_and_both_nonces() {
+    let e = ReleaseError::NotOwner {
+        path: PathBuf::from("/w/x.lock-1"),
+        expected: "mine".into(),
+        found: "theirs".into(),
+    };
+    let text = e.to_string();
+    assert!(
+        text.contains("/w/x.lock-1") && text.contains("mine") && text.contains("theirs"),
+        "{text}"
+    );
+    let io = ReleaseError::Io(std::io::Error::other("disk on fire")).to_string();
+    assert!(io.contains("disk on fire"), "{io}");
+}
+
+#[test]
+fn a_read_intent_holder_is_reported_as_read() {
+    let ws = tempfile::tempdir().unwrap();
+    let first = try_lock(
+        ws.path(),
+        Path::new("a.rs"),
+        &AgentId("reader".into()),
+        AgentKind::Other("t".into()),
+        ClaimIntent::Read,
+    )
+    .unwrap();
+    let conflict = try_lock(
+        ws.path(),
+        Path::new("a.rs"),
+        &AgentId("other".into()),
+        AgentKind::Other("t".into()),
+        ClaimIntent::Edit,
+    )
+    .err()
+    .expect("the file is held");
+    assert_eq!(conflict.agent_id().0, "reader");
+    assert_eq!(conflict.intent(), ClaimIntent::Read);
+    drop(first);
+}
+
+#[test]
+fn current_holder_reports_live_locks_only() {
+    let ws = tempfile::tempdir().unwrap();
+    let dir = lock_dir(ws.path());
+    assert!(
+        current_holder(ws.path(), Path::new("a.rs")).is_none(),
+        "no lock file"
+    );
+
+    let live = dir.join(format!("{}.lock-live", sanitize(Path::new("a.rs"))));
+    std::fs::write(
+        &live,
+        r#"{"agent_id":"holder","kind":"other","intent":"edit","nonce":"live"}"#,
+    )
+    .unwrap();
+    let h = current_holder(ws.path(), Path::new("a.rs")).expect("a live lock is a holder");
+    assert_eq!(h.agent_id().0, "holder");
+    // A lock for a different path is not this path's holder.
+    assert!(current_holder(ws.path(), Path::new("b.rs")).is_none());
+
+    // Expired: no longer a holder.
+    let f = std::fs::OpenOptions::new().write(true).open(&live).unwrap();
+    f.set_modified(SystemTime::now() - LOCK_TTL - Duration::from_secs(5))
+        .unwrap();
+    drop(f);
+    assert!(
+        current_holder(ws.path(), Path::new("a.rs")).is_none(),
+        "an expired lock holds nothing"
+    );
+}
+
+/// A guard that cannot be created for any reason other than "it exists" must
+/// not be mistaken for contention: proceed unguarded, immediately.
+#[test]
+fn an_uncreatable_guard_does_not_block_the_acquire() {
+    let ws = tempfile::tempdir().unwrap();
+    let missing_dir = ws.path().join("no-such-dir");
+    let started = std::time::Instant::now();
+    let g = AcquireGuard::take(&missing_dir, Path::new("a.rs"));
+    assert!(
+        g.is_ok(),
+        "an unwritable guard location must degrade to unguarded"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+/// A fresh guard held by someone else: wait, but only up to GUARD_WAIT.
+#[test]
+fn a_contended_guard_is_waited_on_for_a_bounded_time() {
+    let ws = tempfile::tempdir().unwrap();
+    let dir = lock_dir(ws.path());
+    std::fs::File::create(dir.join(format!("{}.guard", sanitize(Path::new("a.rs"))))).unwrap();
+    let started = std::time::Instant::now();
+    let r = AcquireGuard::take(&dir, Path::new("a.rs"));
+    let waited = started.elapsed();
+    assert!(r.is_err(), "a live guard must not be taken");
+    assert!(
+        waited >= GUARD_WAIT - Duration::from_millis(100),
+        "gave up after only {waited:?}"
+    );
+    assert!(
+        waited < GUARD_WAIT + Duration::from_secs(2),
+        "waited {waited:?}"
+    );
+}
+
+/// When nothing under `.lain/` can be created (it is a file), acquiring must
+/// fail in bounded time, not retry forever.
+#[test]
+fn an_unusable_lock_directory_fails_in_bounded_time() {
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join(".lain"), b"not a directory").unwrap();
+    let started = std::time::Instant::now();
+    let r = try_lock(
+        ws.path(),
+        Path::new("a.rs"),
+        &AgentId("a".into()),
+        AgentKind::Other("t".into()),
+        ClaimIntent::Edit,
+    );
+    assert!(r.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
+}

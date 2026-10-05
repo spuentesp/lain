@@ -1,0 +1,16 @@
+# cargo-mutants configuration (see `make mutants`).
+#
+# Mutants that cannot change observable behaviour in a normal build are
+# excluded with the reason, so a "missed" mutant always means a real test gap.
+exclude_re = [
+    # Only compiled under `--cfg lain_loom`; checked by `make loom`, not here.
+    'src/sync\.rs.*Mutex<T>::lock',
+    # Rolling an existing-file collision on a UUID v4 nonce: unreachable.
+    'try_lock_once_guarded.*AlreadyExists',
+    # Equality at an exact timestamp boundary (`>` vs `>=` on a Duration compared
+    # against a wall-clock reading): not observable without controlling the clock.
+    'presence_lock\.rs.*(try_lock_once_guarded|AcquireGuard::take|current_holder).*replace > with >=',
+    # Retry bound off-by-one (`>=` vs `<`): the 2nd attempt is a re-scan with no
+    # observable difference but timing.
+    'presence_lock\.rs:166.*replace >= with <',
+]
