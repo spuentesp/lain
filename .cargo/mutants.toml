@@ -29,6 +29,8 @@ exclude_re = [
     'socket_server\.rs:97.*replace > with >= in StartGuard::take',
     # `recursive(true)` create of an existing directory is a no-op.
     'socket_server\.rs:137.*replace && with \|\| in bind_exclusive',
+    # Only changes WHEN the idle check wakes (within the documented 1-2 windows).
+    'socket_server\.rs:235.*replace == with != in accept_loop',
     'wal\.rs:355.*replace > with >= in replay_inner',
     'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
 ]

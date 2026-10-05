@@ -798,3 +798,34 @@ async fn serve_binds_serves_and_returns_after_idle() {
     assert!(done.is_ok());
     assert!(!p.exists());
 }
+
+/// Idle exit is bounded: it fires no sooner than one idle window after the LAST
+/// connection closes and no later than two (the loop re-checks once per window
+/// while a connection is open, so the check can land just before the deadline).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_exit_follows_the_last_connection_within_two_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path());
+    let p = sock(dir.path());
+    let window = Duration::from_millis(500);
+    let task = start(p.clone(), server, Some(window)).unwrap();
+    let held = UnixStream::connect(&p).unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await; // longer than the window, connection open
+    assert!(!task.is_finished());
+    let closed_at = Instant::now();
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("exit")
+        .unwrap()
+        .unwrap();
+    let after = closed_at.elapsed();
+    assert!(
+        after >= window.saturating_sub(Duration::from_millis(50)),
+        "exited before a full idle window: {after:?}"
+    );
+    assert!(
+        after < window + Duration::from_millis(450),
+        "exit lagged the idle window by {after:?}"
+    );
+}
