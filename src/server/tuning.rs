@@ -170,6 +170,19 @@ pub struct IngestionConfig {
     pub default_query_limit: usize,
 }
 
+impl IngestionConfig {
+    /// Raise to 1 the settings that are used as a chunk size or a modulus and
+    /// panic at 0 (`chunks(0)`, `% 0`): a hand-edited `tuning.toml` with
+    /// `files_per_batch = 0` (a plausible "disable" or typo) crashed indexing.
+    pub fn sanitized(mut self) -> Self {
+        self.lsp_pool_size = self.lsp_pool_size.max(1);
+        self.files_per_batch = self.files_per_batch.max(1);
+        self.ingest_batch_size = self.ingest_batch_size.max(1);
+        self.nlp_batch_size = self.nlp_batch_size.max(1);
+        self
+    }
+}
+
 impl Default for IngestionConfig {
     fn default() -> Self {
         Self {
@@ -288,7 +301,21 @@ pub fn load_tuning_config(workspace: &Path) -> TuningConfig {
     let path = workspace.join(".lain").join("tuning.toml");
     if let Ok(contents) = std::fs::read_to_string(&path) {
         match toml::from_str::<TuningConfig>(&contents) {
-            Ok(config) => {
+            Ok(mut config) => {
+                let sanitized = config.ingestion.clone().sanitized();
+                if sanitized.lsp_pool_size != config.ingestion.lsp_pool_size
+                    || sanitized.files_per_batch != config.ingestion.files_per_batch
+                    || sanitized.ingest_batch_size != config.ingestion.ingest_batch_size
+                    || sanitized.nlp_batch_size != config.ingestion.nlp_batch_size
+                {
+                    tracing::warn!(
+                        "tuning.toml at {:?}: a size setting of 0 was raised to 1 \
+                         (lsp_pool_size, files_per_batch, ingest_batch_size, nlp_batch_size \
+                         must be at least 1)",
+                        path
+                    );
+                }
+                config.ingestion = sanitized;
                 tracing::info!("Loaded tuning config from {:?}", path);
                 return config;
             }
@@ -482,5 +509,36 @@ mod knob_reachability_tests {
              by nothing — setting them does nothing, silently:\n  {}",
             unread.join("\n  ")
         );
+    }
+}
+
+#[cfg(test)]
+mod zero_size_tests {
+    use super::*;
+
+    /// Every setting that is a chunk size or modulus survives a 0 in the file.
+    #[test]
+    fn zero_sizes_in_tuning_toml_are_raised_not_crashed_on() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".lain")).unwrap();
+        std::fs::write(
+            dir.path().join(".lain/tuning.toml"),
+            "[ingestion]\nlsp_pool_size = 0\nfiles_per_batch = 0\ningest_batch_size = 0\nnlp_batch_size = 0\n",
+        )
+        .unwrap();
+        let i = load_tuning_config(dir.path()).ingestion;
+        assert_eq!(
+            (
+                i.lsp_pool_size,
+                i.files_per_batch,
+                i.ingest_batch_size,
+                i.nlp_batch_size
+            ),
+            (1, 1, 1, 1)
+        );
+        // The defaults and sensible values are untouched.
+        let d = IngestionConfig::default();
+        assert_eq!(d.clone().sanitized().files_per_batch, d.files_per_batch);
+        assert_eq!(d.clone().sanitized().lsp_pool_size, d.lsp_pool_size);
     }
 }

@@ -143,3 +143,67 @@ prop_state_machine! {
     #[test]
     fn circuit_breaker_refines_specification(sequential 1..40 => Sut);
 }
+
+// ---- the pool ----------------------------------------------------------------------------
+
+/// A pool must always hand out a multiplexer, whatever size tuning asked for.
+/// (`lsp_pool_size = 0` in `.lain/tuning.toml` made `next()` compute
+/// `counter % 0`.)
+#[test]
+fn a_zero_sized_pool_still_serves() {
+    let pool = LspPool::new(Path::new("."), 0, &crate::tuning::RuntimeConfig::default()).unwrap();
+    assert!(pool.size() >= 1, "a pool of size 0 has nothing to hand out");
+    let _ = pool.next(); // must not panic
+}
+
+#[test]
+fn a_tuning_file_cannot_configure_an_empty_pool() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".lain")).unwrap();
+    std::fs::write(
+        dir.path().join(".lain/tuning.toml"),
+        "[ingestion]\nlsp_pool_size = 0\n",
+    )
+    .unwrap();
+    let cfg = crate::tuning::load_tuning_config(dir.path());
+    assert!(
+        cfg.ingestion.lsp_pool_size >= 1,
+        "tuning accepted lsp_pool_size = 0"
+    );
+}
+
+/// Round-robin spreads calls evenly even when clones race.
+#[test]
+fn round_robin_is_balanced_across_racing_clones() {
+    let pool = LspPool::new(Path::new("."), 3, &crate::tuning::RuntimeConfig::default()).unwrap();
+    let hits: Vec<std::sync::Arc<std::sync::atomic::AtomicUsize>> =
+        (0..3).map(|_| Default::default()).collect();
+    let muxes: Vec<_> = (0..3).map(|_| pool.next()).collect(); // one full cycle -> the 3 distinct muxes
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let (pool, hits, muxes) = (pool.clone(), hits.clone(), muxes.clone());
+            std::thread::spawn(move || {
+                for _ in 0..300 {
+                    let m = pool.next();
+                    let i = muxes
+                        .iter()
+                        .position(|x| std::sync::Arc::ptr_eq(x, &m))
+                        .unwrap();
+                    hits[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    let counts: Vec<usize> = hits
+        .iter()
+        .map(|h| h.load(std::sync::atomic::Ordering::Relaxed))
+        .collect();
+    assert_eq!(counts.iter().sum::<usize>(), 1800);
+    assert!(
+        counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 1,
+        "unbalanced: {counts:?}"
+    );
+}

@@ -1785,6 +1785,9 @@ impl LspPool {
         size: usize,
         runtime: &crate::tuning::RuntimeConfig,
     ) -> Result<Self, LainError> {
+        // At least one: `next()` indexes with `counter % len`, which divides by
+        // zero for an empty pool.
+        let size = size.max(1);
         let mut multiplexers = Vec::with_capacity(size);
         for _ in 0..size {
             multiplexers.push(Arc::new(AsyncMutex::new(LspMultiplexer::new(
