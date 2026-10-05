@@ -16,4 +16,8 @@ exclude_re = [
     # Directory fsync after creating the WAL: protects against power loss only,
     # not observable from a test.
     'wal\.rs.*replace sync_parent_dir with',
+    # `created` only decides whether to fsync the parent directory (power-loss
+    # durability) and Drop's final fsync: neither is observable without a crash.
+    'wal\.rs:189.*delete ! in WalWriter::append',
+    'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
 ]

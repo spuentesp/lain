@@ -518,3 +518,31 @@ fn discard_prev_is_idempotent_but_reports_real_failures() {
     std::fs::create_dir(prev_path_for(&wal)).unwrap();
     assert!(discard_prev(&wal).is_err());
 }
+
+/// The first append creates the WAL's directory chain (a fresh `.lain/`).
+#[test]
+fn append_creates_missing_parent_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a/b/c/graph.wal");
+    let mut w = WalWriter::new(path.clone(), SyncPolicy::Always);
+    w.append(&[GraphOp::RemoveNodesByIds(vec!["x".into()])])
+        .expect("must create parents");
+    assert!(path.exists());
+}
+
+/// Only "no WAL yet" means "nothing to replay"; any other open failure is an error
+/// the caller must see (it would otherwise look like a clean, empty recovery).
+#[cfg(unix)]
+#[test]
+fn replay_reports_open_errors_other_than_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("file");
+    std::fs::write(&blocker, "x").unwrap();
+    let under_a_file = blocker.join("graph.wal"); // ENOTDIR, not ENOENT
+    let r = replay_and_repair(&under_a_file, |_| Ok(()));
+    assert!(r.is_err(), "ENOTDIR was reported as an empty WAL: {r:?}");
+    assert_eq!(
+        replay_and_repair(&dir.path().join("missing.wal"), |_| Ok(())).unwrap(),
+        0
+    );
+}
