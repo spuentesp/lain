@@ -240,3 +240,102 @@ mod tests {
         assert_eq!(gated.state, "unavailable_optional");
     }
 }
+
+#[cfg(test)]
+mod properties {
+    //! The aggregation is a pure function of the (repo, health) set, so its
+    //! contract is checked as properties over arbitrary federations.
+    use super::*;
+    use proptest::prelude::*;
+
+    const HEALTHS: [RepoHealth; 5] = [
+        RepoHealth::Ready,
+        RepoHealth::Indexing,
+        RepoHealth::Degraded,
+        RepoHealth::Unavailable,
+        RepoHealth::Missing,
+    ];
+
+    /// 0..8 repos with distinct ids and arbitrary health.
+    fn federation() -> impl Strategy<Value = Vec<(RepoId, RepoHealth)>> {
+        prop::collection::btree_map("[a-z]{1,5}", 0usize..5, 0..8).prop_map(|m| {
+            m.into_iter()
+                .map(|(k, h)| (RepoId::new(&k).unwrap(), HEALTHS[h]))
+                .collect()
+        })
+    }
+
+    proptest! {
+        /// Input order never changes the answer (list_repos order is arbitrary).
+        #[test]
+        fn permutation_invariant(fed in federation(), seed in any::<u64>()) {
+            let mut shuffled = fed.clone();
+            // deterministic shuffle
+            let n = shuffled.len();
+            for i in (1..n).rev() {
+                let j = (seed.wrapping_mul(6364136223846793005).wrapping_add(i as u64) % (i as u64 + 1)) as usize;
+                shuffled.swap(i, j);
+            }
+            let a = gate_federated_tool_call("find_anchors", &fed, true);
+            let b = gate_federated_tool_call("find_anchors", &shuffled, true);
+            prop_assert_eq!(a.map(|g| (g.state, g.blocking_repos)), b.map(|g| (g.state, g.blocking_repos)));
+        }
+
+        /// A graph tool is gated iff some repo is not Ready, and the blocking
+        /// list names exactly the not-Ready repos, sorted.
+        #[test]
+        fn blocks_exactly_the_unready_repos(fed in federation()) {
+            let mut expect: Vec<String> = fed.iter()
+                .filter(|(_, h)| *h != RepoHealth::Ready)
+                .map(|(id, _)| id.as_str().to_string())
+                .collect();
+            expect.sort();
+            match gate_federated_tool_call("find_anchors", &fed, true) {
+                None => prop_assert!(expect.is_empty(), "ungated with unready repos {expect:?}"),
+                Some(g) => prop_assert_eq!(g.blocking_repos, expect),
+            }
+        }
+
+        /// A terminal failure anywhere makes the whole answer an error; with
+        /// only indexing repos blocking, it is a retryable wait.
+        #[test]
+        fn terminal_outranks_wait(fed in federation()) {
+            let any_terminal = fed.iter().any(|(_, h)| matches!(h, RepoHealth::Degraded | RepoHealth::Unavailable | RepoHealth::Missing));
+            let any_indexing = fed.iter().any(|(_, h)| *h == RepoHealth::Indexing);
+            if let Some(g) = gate_federated_tool_call("find_anchors", &fed, true) {
+                if any_terminal {
+                    prop_assert_eq!(g.state, "unavailable_error");
+                } else {
+                    prop_assert!(any_indexing);
+                    prop_assert_eq!(g.state, "warming_up");
+                }
+            }
+        }
+
+        /// One repo behaves exactly like the single-workspace gate on its snapshot.
+        #[test]
+        fn single_repo_agrees_with_the_core_gate(h in 0usize..5, model in any::<bool>()) {
+            let health = HEALTHS[h];
+            let fed = vec![(RepoId::new("r").unwrap(), health)];
+            let core = gate_tool_call("find_anchors", &repo_health_to_snapshot(health), model);
+            let agg = gate_federated_tool_call("find_anchors", &fed, model);
+            prop_assert_eq!(core.as_ref().map(|g| g.state.clone()), agg.as_ref().map(|g| g.state.clone()));
+            prop_assert_eq!(core.is_some(), agg.is_some());
+        }
+
+        /// Graph-independent tools are never gated, whatever the federation.
+        #[test]
+        fn health_tool_never_gated(fed in federation(), model in any::<bool>()) {
+            prop_assert!(gate_federated_tool_call("get_health", &fed, model).is_none());
+        }
+
+        /// The staleness mapping and the snapshot mapping agree on readiness.
+        #[test]
+        fn mappings_agree(h in 0usize..5) {
+            use crate::server::readiness::CapabilityState;
+            let health = HEALTHS[h];
+            let ready_snapshot = repo_health_to_snapshot(health).state == IndexState::Ready;
+            prop_assert_eq!(ready_snapshot, repo_health_to_capability_state(health) == CapabilityState::Ready);
+        }
+    }
+}
