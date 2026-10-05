@@ -64,6 +64,20 @@ the "end-to-end recovery" test never reloaded anything.
 | 27 | The WAL paid one open + `fsync` per mutation: harmless on Linux (0.3 s for the graph benchmarks) but it pushed the Windows lane past its 30-minute cap, and bulk indexing would pay a milder version of it | CI probe (Windows job cancelled in `graph_benchmark`) | `WalWriter`: one open handle, `fsync` per `LAIN_WAL_SYNC` (`always`, `never`, or ms; default 100 ms). A process crash loses nothing (frames are in the OS cache after `write`); only a power loss can lose the last window |
 | 26 | Uncommitted test-suite fallout: core is 20 tools, manual table stale (the previous session died on a billing error mid-fix) | full test run | counts derived from the registry |
 
+### Parsing, protocol surface and configuration
+
+| # | Defect | Found by | Fix |
+|---|--------|----------|-----|
+| 28 | **A symlink in a repository exfiltrated files outside it.** A committed symlink to a file outside the workspace was indexed (`is_file()` follows links), and `get_context` / `explain_symbol` returned the target's contents. A hostile repo could read any file the user can through an agent's tool call | containment test over every safe tool (with a positive control so it cannot pass vacuously) | `path_util::resolves_inside` guards `GitSensor` listings, `process_change` (retracts a file swapped for an escaping link) and the node-keyed readers |
+| 29 | A zero in `tuning.toml` (`lsp_pool_size`, `files_per_batch`, `nlp_batch_size`, `ingest_batch_size`) hit `% 0` / `chunks(0)` and crashed indexing | targeted test | `IngestionConfig::sanitized` in the loader (warns); the pool never builds empty |
+| 30 | Selector glob, tokenizer (doubled newlines, byte-vector stripping, tail handling) and `cosine_similarity` (NaN / out-of-range results) defects | proptest against reference definitions | see the commits on this branch |
+
+Also added without a defect found: arbitrary JSON-RPC requests always get one
+well-formed response; 600 arbitrary calls across every safe tool never panic,
+hang or leak; `GitSensor` differential-tested against the git CLI;
+federation repo add/project/remove (TLA+ and a concurrent stress test) never
+resurrects a removed repo.
+
 WAL recovery stays a best-effort accelerator, not a complete log: mutators that
 rebuild derived state (`replace_nodes`, `set_embedding`, `reset`, ...) are not
 logged, and replay never advances `last_commit`, so the next index pass
