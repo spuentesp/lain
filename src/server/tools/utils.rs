@@ -619,41 +619,36 @@ fn read_body_excerpt(
     Ok(trimmed)
 }
 
-/// Compute cosine similarity between two embedding vectors
+/// Compute cosine similarity between two embedding vectors.
+///
+/// Always a finite value in `[-1, 1]`: scores feed `sort_by` comparators that
+/// treat NaN as "equal", which is not a total order, and Rust's sort may panic
+/// on an inconsistent comparator. Accumulation is in `f64`: squaring in `f32`
+/// overflowed for components beyond ~1e19 (`[1e30]·[1e30]` was NaN). Rounding
+/// can push a perfect match a hair past 1.0, so the result is clamped, and a
+/// vector containing a non-finite component has no meaningful direction (0).
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let len = a.len();
-    if len != b.len() || len == 0 {
+    if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-
-    let mut dot = 0.0;
-    let mut norm_a = 0.0;
-    let mut norm_b = 0.0;
-
-    // Manually unroll for performance (MiniLM is 384d, multiple of 8 and 16)
-    let chunks = len / 8;
-    for i in 0..chunks {
-        let idx = i * 8;
-        for j in 0..8 {
-            let val_a = a[idx + j];
-            let val_b = b[idx + j];
-            dot += val_a * val_b;
-            norm_a += val_a * val_a;
-            norm_b += val_b * val_b;
+    let (mut dot, mut norm_a, mut norm_b) = (0.0f64, 0.0f64, 0.0f64);
+    for (&x, &y) in a.iter().zip(b) {
+        if !x.is_finite() || !y.is_finite() {
+            return 0.0;
         }
+        let (x, y) = (f64::from(x), f64::from(y));
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
     }
-
-    // Handle remaining
-    for i in (chunks * 8)..len {
-        dot += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
-    }
-
     if norm_a <= 0.0 || norm_b <= 0.0 {
-        0.0
+        return 0.0;
+    }
+    let c = dot / (norm_a.sqrt() * norm_b.sqrt());
+    if c.is_finite() {
+        (c as f32).clamp(-1.0, 1.0)
     } else {
-        dot / (norm_a.sqrt() * norm_b.sqrt())
+        0.0
     }
 }
 
@@ -963,3 +958,7 @@ mod tests {
 #[cfg(test)]
 #[path = "utils_verification.rs"]
 mod verification;
+
+#[cfg(test)]
+#[path = "utils_cosine_verification.rs"]
+mod cosine_verification;

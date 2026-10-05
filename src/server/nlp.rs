@@ -638,13 +638,27 @@ impl CrossEncoder {
 /// Non-zero `max_threads` is honored as-is (subject to system
 /// availability), letting ops cap usage when sharing the box.
 pub fn resolve_intra_threads(max_threads: usize) -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    intra_threads_for(max_threads, cores)
+}
+
+/// The rule behind [`resolve_intra_threads`], on plain integers so Kani can
+/// check it for every input (`nlp_kani.rs`): at least one thread always; the
+/// automatic choice (`max_threads == 0`) is `cores` clamped to 1..=4; an
+/// explicit cap is honoured as given.
+pub(crate) const fn intra_threads_for(max_threads: usize, cores: usize) -> usize {
     if max_threads == 0 {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        cores.clamp(1, 4)
+        if cores < 1 {
+            1
+        } else if cores > 4 {
+            4
+        } else {
+            cores
+        }
     } else {
-        max_threads.max(1)
+        max_threads
     }
 }
 
@@ -784,3 +798,11 @@ mod model_path_tests {
         assert!(NlpEmbedder::load_or_stub(Some(&d.path().join("m.onnx")), 1).is_stub());
     }
 }
+
+#[cfg(test)]
+#[path = "nlp_verification.rs"]
+mod verification;
+
+#[cfg(kani)]
+#[path = "nlp_kani.rs"]
+mod kani_proofs;
