@@ -36,7 +36,7 @@ exclude_re = [
     'presence\.rs.*replace && with \|\| in OccupancyMap::release',
     # The retain predicate's `&&` vs `||`: rows `||` would additionally drop are
     # dropped by their own to_drop entry in the same pass.
-    'presence\.rs:1735.*replace && with \|\| in OccupancyMap::expire_by_ttl',
+    'presence\.rs:17(35|41).*replace && with \|\| in OccupancyMap::expire_by_ttl',
     'wal\.rs:355.*replace > with >= in replay_inner',
     'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
 ]
