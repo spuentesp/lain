@@ -21,6 +21,9 @@ exclude_re = [
     # Retry bound off-by-one (`>=` vs `<`): the 2nd attempt is a re-scan with no
     # observable difference but timing.
     'presence_lock\.rs.*replace >= with < in try_lock$',
+    # The mtime read-back drift guard: `set_modified(now)` then reading it back
+    # differs by far less than the TTL, so `>` vs `>=`/`==` cannot be told apart.
+    'presence_lock\.rs:666.*in FileLock::refresh_lock',
     # Directory fsync after creating the WAL: protects against power loss only,
     # not observable from a test.
     'wal\.rs.*replace sync_parent_dir with',

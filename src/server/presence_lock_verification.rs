@@ -628,4 +628,30 @@ mod release_refresh {
         std::fs::remove_file(&l.path).unwrap();
         assert!(l.refresh_lock().unwrap_err().contains("<missing>"));
     }
+
+    /// A lock path with no parent directory cannot be released atomically (the
+    /// private tempfile needs a sibling directory): an `InvalidInput` I/O error,
+    /// not a rename attempted relative to whatever the cwd happens to be.
+    #[test]
+    fn compare_and_delete_rejects_a_path_without_a_parent() {
+        match release_lock_compare_and_delete(Path::new("bare.lock"), "n") {
+            Err(ReleaseError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// Only "the file is not there" means "nobody holds it"; any other rename
+    /// failure is an I/O error the caller must see, never a fabricated NotOwner.
+    #[cfg(unix)]
+    #[test]
+    fn compare_and_delete_surfaces_io_errors_other_than_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("plain");
+        std::fs::write(&file, "x").unwrap();
+        let under_a_file = file.join("x.lock"); // ENOTDIR, not ENOENT
+        match release_lock_compare_and_delete(&under_a_file, "n") {
+            Err(ReleaseError::Io(_)) => {}
+            other => panic!("expected an I/O error, got {other:?}"),
+        }
+    }
 }
