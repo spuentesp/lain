@@ -8,7 +8,13 @@ exclude_re = [
     # Only compiled under `--cfg lain_loom`; checked by `make loom`, not here.
     'src/sync\.rs.*Mutex<T>::lock',
     # Rolling an existing-file collision on a UUID v4 nonce: unreachable.
-    'try_lock_once_guarded.*AlreadyExists',
+    'AlreadyExists.* in try_lock_once_guarded',
+    'ErrorKind::AlreadyExists with .* in try_lock_once_guarded',
+    'presence_lock\.rs:349.*in try_lock_once_guarded',
+    # remove_file racing a concurrent remover between the exists() check and the
+    # unlink: needs an interleaving a sequential test cannot produce.
+    'NotFound with (true|false) in release_lock_if_holder_matches',
+    'presence_lock\.rs:596.*release_lock_if_holder_matches',
     # Equality at an exact timestamp boundary (`>` vs `>=` on a Duration compared
     # against a wall-clock reading): not observable without controlling the clock.
     'presence_lock\.rs.*replace > with >= in (try_lock_once_guarded|AcquireGuard::take|current_holder)',
