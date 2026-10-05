@@ -274,8 +274,45 @@ fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
             .find(|p| p.extension().is_some_and(|x| x == "sock"))
     };
 
+    // The daemon must not outlive this test: under `cargo llvm-cov` a process
+    // still running (or killed) when profile data is merged corrupts the merge
+    // ("file header is corrupt"). Track its pid and always reap it.
+    struct ReapDaemon(Option<String>);
+    fn alive(pid: &str) -> bool {
+        Command::new("kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    impl Drop for ReapDaemon {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0.take() {
+                if alive(&pid) {
+                    let _ = Command::new("kill").args(["-TERM", &pid]).status();
+                    for _ in 0..50 {
+                        if !alive(&pid) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+        }
+    }
+    let mut reaper = ReapDaemon(None);
+
     let first = oneshot();
     let sock = socket().expect("first call must leave a shared server's socket behind");
+    let pid_file = std::path::PathBuf::from(format!("{}.pid", sock.display()));
+    reaper.0 = std::fs::read_to_string(&pid_file)
+        .ok()
+        .map(|p| p.trim().to_string());
+    assert!(
+        reaper.0.is_some(),
+        "the daemon must record its pid at {pid_file:?}"
+    );
     assert!(
         UnixStream::connect(&sock).is_ok(),
         "the shared server must still be alive after the first call"
@@ -299,5 +336,16 @@ fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
     assert!(
         UnixStream::connect(&sock).is_err(),
         "something still accepts on the socket"
+    );
+    // Removing the socket is not exiting: wait for the process itself to be
+    // gone, so its coverage profile is fully written before the harness moves on.
+    let pid = reaper.0.clone().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while alive(&pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !alive(&pid),
+        "the idle daemon (pid {pid}) removed its socket but never exited"
     );
 }
