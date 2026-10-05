@@ -829,3 +829,24 @@ async fn idle_exit_follows_the_last_connection_within_two_windows() {
         "exit lagged the idle window by {after:?}"
     );
 }
+
+/// The cap is exact: a line of `max` bytes (newline included) is accepted, one
+/// byte more is refused.
+#[tokio::test]
+async fn frame_limit_boundary_is_exact() {
+    for (payload, ok) in [
+        (&b"123456789\n"[..], true),
+        (&b"1234567890\n"[..], false),
+        (&b"12345678\n"[..], true),
+    ] {
+        let mut reader = BufReader::new(payload);
+        let mut line = String::new();
+        let r = read_frame_limited(&mut reader, &mut line, 10).await;
+        assert_eq!(
+            r.is_ok(),
+            ok,
+            "{:?}: {r:?}",
+            String::from_utf8_lossy(payload)
+        );
+    }
+}
