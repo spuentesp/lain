@@ -427,4 +427,32 @@ mod pieces {
         assert_eq!(roots.iter().filter(|r| **r == canon).count(), 1);
         assert_eq!(roots[0], canon);
     }
+
+    #[test]
+    fn a_reader_is_advised_of_each_editor_and_the_symbols_they_hold() {
+        let m = OccupancyMap::new();
+        let (a, c, b) = (agent("a"), agent("c"), agent("b"));
+        let p = "zz_adv.rs";
+        let _ = m.claim(&a, vec![req(p, &["s1"], ClaimIntent::Edit)]);
+        let _ = m.claim(&c, vec![req(p, &["s2"], ClaimIntent::Edit)]);
+        let _ = m.claim(&agent("d"), vec![req(p, &["s3"], ClaimIntent::Read)]); // a reader: no advisory
+        let r = m.claim(&b, vec![req(p, &[], ClaimIntent::Read)]);
+        assert!(r.conflicts.is_empty(), "a read never conflicts");
+        assert_eq!(r.granted.len(), 1);
+        let mut adv = r.advisories.clone();
+        adv.sort_by(|x, y| x.agent_id.0.cmp(&y.agent_id.0));
+        assert_eq!(adv.len(), 2, "one advisory per editing agent: {adv:?}");
+        assert_eq!(adv[0].agent_id, a);
+        assert_eq!(
+            adv[0].symbols,
+            vec!["s1".to_string()],
+            "c's s2 is not a's symbol"
+        );
+        assert_eq!(adv[0].intent, ClaimIntent::Edit);
+        assert_eq!(adv[1].agent_id, c);
+        assert_eq!(adv[1].symbols, vec!["s2".to_string()]);
+        // The reader's own claims never advise itself.
+        let again = m.claim(&a, vec![req(p, &[], ClaimIntent::Read)]);
+        assert!(again.advisories.iter().all(|e| e.agent_id != a));
+    }
 }
