@@ -255,3 +255,87 @@ fn restart_window_boundary_is_inclusive() {
         "an expired window must reset the count"
     );
 }
+
+// ---- the LSP wire framing ----------------------------------------------------------------
+
+mod framing {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn run<T>(f: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    fn frame(body: &str) -> Vec<u8> {
+        format!("Content-Length: {}\r\n\r\n{}", body.len(), body).into_bytes()
+    }
+
+    proptest! {
+        /// Any UTF-8 body (multi-byte included) survives framing, back to back,
+        /// and a clean end of stream is `None`.
+        #[test]
+        fn frames_round_trip_in_sequence(bodies in prop::collection::vec("\\PC{1,60}", 1..5)) {
+            let mut wire = Vec::new();
+            for b in &bodies { wire.extend(frame(b)); }
+            let got = run(async {
+                let mut r = tokio::io::BufReader::new(&wire[..]);
+                let mut out = Vec::new();
+                while let Some(s) = read_frame(&mut r).await.unwrap() { out.push(s); }
+                out
+            });
+            prop_assert_eq!(got, bodies);
+        }
+
+        /// Arbitrary bytes never panic: an `Ok` frame or a typed LSP error.
+        #[test]
+        fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..200)) {
+            let r = run(async {
+                let mut r = tokio::io::BufReader::new(&bytes[..]);
+                read_frame(&mut r).await
+            });
+            if let Err(e) = r { prop_assert!(matches!(e, LainError::Lsp(_)), "untyped error {e:?}"); }
+        }
+    }
+
+    #[test]
+    fn malformed_frames_are_errors_and_clean_close_is_none() {
+        let cases: [(&[u8], bool); 6] = [
+            (b"", false),                                 // clean close -> Ok(None)
+            (b"\r\n\r\n", true),                          // no Content-Length
+            (b"Content-Length: x\r\n\r\n", true),         // not a number
+            (b"Content-Length: 10\r\n\r\nabc", true),     // short body
+            (b"Content-Length: 2\r\n\r\n\xff\xfe", true), // not UTF-8
+            (b"Content-Length: 0\r\n\r\n", true),         // zero length is refused
+        ];
+        for (bytes, is_err) in cases {
+            let r = run(async {
+                let mut r = tokio::io::BufReader::new(bytes);
+                read_frame(&mut r).await
+            });
+            assert_eq!(
+                r.is_err(),
+                is_err,
+                "{:?}: {r:?}",
+                String::from_utf8_lossy(bytes)
+            );
+            if !is_err {
+                assert!(matches!(r, Ok(None)), "clean close must be Ok(None)");
+            }
+        }
+    }
+
+    #[test]
+    fn header_name_is_accepted_in_either_case_and_other_headers_are_ignored() {
+        let wire =
+            b"Content-Type: application/vscode-jsonrpc\r\ncontent-length: 2\r\n\r\n{}".to_vec();
+        let got = run(async {
+            let mut r = tokio::io::BufReader::new(&wire[..]);
+            read_frame(&mut r).await.unwrap()
+        });
+        assert_eq!(got.as_deref(), Some("{}"));
+    }
+}
