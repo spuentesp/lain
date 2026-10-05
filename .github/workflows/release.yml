@@ -162,7 +162,7 @@ jobs:
       - name: Compute per-binary SHA256
         run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
       - name: Generate SBOM (CycloneDX JSON)
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           format: cyclonedx-json
           file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
@@ -258,7 +258,7 @@ jobs:
       - name: Compute per-binary SHA256
         run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
       - name: Generate SBOM (CycloneDX JSON)
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           format: cyclonedx-json
           file: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
@@ -348,7 +348,7 @@ jobs:
         shell: bash
         run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
       - name: Generate SBOM (CycloneDX JSON)
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           format: cyclonedx-json
           file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
