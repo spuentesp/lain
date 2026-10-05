@@ -745,4 +745,57 @@ mod pieces {
             "an expiry is saved exactly once"
         );
     }
+
+    /// `claim_with_session` writes the filesystem lease under the configured
+    /// workspace root (for edit intents only), remembers it, and `release`
+    /// removes it. With no workspace root nothing is written anywhere.
+    #[test]
+    fn session_claims_write_the_lock_file_under_the_workspace_root() {
+        let ws = tempfile::tempdir().unwrap();
+        let m = OccupancyMap::new();
+        let id = agent("lockholder");
+        let session = AgentSession::new(
+            id.clone(),
+            "n".into(),
+            AgentKind::Other("t".into()),
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+
+        // No workspace root: in-memory only.
+        let r = m.claim_with_session(&session, vec![req("zz_nolock.rs", &[], ClaimIntent::Edit)]);
+        assert_eq!(r.granted.len(), 1);
+        assert!(
+            m.lock_leases.lock().is_empty(),
+            "no workspace root, no lease"
+        );
+        let _ = m.release(&id, &[PathBuf::from("zz_nolock.rs")]);
+
+        m.set_workspace_root(ws.path());
+        let r = m.claim_with_session(
+            &session,
+            vec![
+                req("zz_lock.rs", &[], ClaimIntent::Edit),
+                req("zz_read.rs", &[], ClaimIntent::Read),
+            ],
+        );
+        assert_eq!(r.granted.len(), 2);
+        let leases: Vec<PathBuf> = m.lock_leases.lock().values().cloned().collect();
+        assert_eq!(
+            leases.len(),
+            1,
+            "only the Edit claim takes a lease: {leases:?}"
+        );
+        let root = std::fs::canonicalize(ws.path()).unwrap();
+        assert!(
+            leases[0].starts_with(root.join(".lain").join("locks")),
+            "{:?}",
+            leases[0]
+        );
+        assert!(leases[0].exists(), "the lock file is on disk");
+        let _ = m.release(&id, &[PathBuf::from("zz_lock.rs")]);
+        assert!(!leases[0].exists(), "release removes the lock file");
+        assert!(m.lock_leases.lock().is_empty());
+    }
 }
