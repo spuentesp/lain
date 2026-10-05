@@ -23,6 +23,7 @@ Legend: ● checked · ◐ partly · ○ not checked.
 | Shared oneshot server (B1) | ◐ spec as merged | ● socket properties, real-binary e2e | ○ | ○ | ○ |
 | LSP circuit breaker / restart budget | ○ | ● refines the documented spec | ○ | ○ | ○ |
 | Federation repo add / project / remove | ● | ● concurrent stress | ○ | ○ | ○ |
+| Federation readiness aggregation | ○ | ● permutation, exact blocking set, severity | ○ | ○ | ○ |
 | Auth token bucket | ○ | ● rate bound, `Retry-After`, cap | ○ | ● `constant_time_eq` | ○ |
 | Sidecar respawn budget | ○ | ◐ targeted test | ○ | ○ | ○ |
 | LSP pool (size, round-robin) | ○ | ● zero size, balance under racing clones | ○ | ○ | ○ |
@@ -51,8 +52,9 @@ Legend: ● checked · ◐ partly · ○ not checked.
 * **Federation indexing pipeline** end to end (ordering across repos,
   cross-repo resolution) beyond the specific protocols above.
 * **NLP / embeddings**, LSP process management, git semantics.
-* **Persistence formats** other than the WAL: schema-version refusal is tested
-  by examples, not modelled.
+* **Persistence formats**: the WAL, graph snapshot and annotations sqlite are
+  round-trip / corruption tested; the LNF2 federation envelope and `jobs.json`
+  are covered by example tests only. Schema-version refusal is not modelled.
 * `OccupancyMap`, `job_store`, `manager.rs`, `DirtyFlag` and the socket server
   have property tests but have not been through mutation testing.
 

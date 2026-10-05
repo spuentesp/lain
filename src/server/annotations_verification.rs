@@ -116,3 +116,87 @@ fn open_rows_are_not_hidden_behind_newer_resolved_rows() {
         vec![old_open]
     );
 }
+
+// ---- persistence: what is written is what is read back, across a reopen ------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Any valid annotation survives write -> close -> reopen -> read unchanged.
+    #[test]
+    fn annotations_round_trip_through_the_sqlite_file(
+        body in "\\PC{1,300}",
+        author in "[a-z]{1,8}",
+        symbol in "[A-Za-z_:]{1,20}",
+        nrefs in 0usize..4,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ann.sqlite");
+        let refs: Vec<AnnotationTarget> = (0..nrefs)
+            .map(|i| AnnotationTarget::Symbol { symbol: format!("r{i}") })
+            .collect();
+        let a = AddAnnotationInputs {
+            target: AnnotationTarget::Symbol { symbol },
+            kind: AnnotationKind::Note,
+            body,
+            author: AgentId(author),
+            refs,
+        }
+        .into_annotation();
+        {
+            let s = AnnotationStore::open(&path).unwrap();
+            s.add(&a).unwrap();
+        }
+        let s = AnnotationStore::open(&path).unwrap();
+        prop_assert_eq!(s.get(&a.id).unwrap(), Some(a));
+    }
+}
+
+/// A file that is not a database (truncated, overwritten) is an error the
+/// caller can handle, never a panic, and never silently treated as empty data
+/// that a later write would paper over.
+#[test]
+fn a_corrupt_annotation_file_is_an_error_not_a_panic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("ann.sqlite");
+    std::fs::write(
+        &path,
+        b"this is not a sqlite database, just text padding ".repeat(50),
+    )
+    .unwrap();
+    let r = std::panic::catch_unwind(|| AnnotationStore::open(&path).and_then(|s| s.get("x")));
+    let r = r.expect("opening a corrupt file panicked");
+    assert!(r.is_err(), "a corrupt file must be reported: {r:?}");
+}
+
+/// Truncating a real database mid-file must not panic on open or read.
+#[test]
+fn a_truncated_annotation_database_never_panics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("ann.sqlite");
+    let id = {
+        let s = AnnotationStore::open(&path).unwrap();
+        let a = AddAnnotationInputs {
+            target: AnnotationTarget::Symbol { symbol: "f".into() },
+            kind: AnnotationKind::Note,
+            body: "hello".into(),
+            author: AgentId("a".into()),
+            refs: vec![],
+        }
+        .into_annotation();
+        s.add(&a).unwrap();
+        a.id
+    };
+    let full = std::fs::read(&path).unwrap();
+    for cut in [0, 1, 100, full.len() / 2, full.len().saturating_sub(1)] {
+        std::fs::write(&path, &full[..cut]).unwrap();
+        let id = id.clone();
+        let p = path.clone();
+        let r = std::panic::catch_unwind(move || {
+            if let Ok(s) = AnnotationStore::open(&p) {
+                let _ = s.get(&id);
+            }
+        });
+        assert!(r.is_ok(), "panic with the file cut to {cut} bytes");
+    }
+}
