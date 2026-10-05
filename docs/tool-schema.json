@@ -114,6 +114,10 @@
     "description": "Use this when asking 'what should I read first?': the most foundational, stable components by corpus-wide anchor score.",
     "inputSchema": {
       "properties": {
+        "include_tests": {
+          "description": "By default, anchors in `tests/` and `scripts/` are filtered out — those paths are heavily called by tests/scripts and inflate the score above real architectural pillars. Pass `true` to include them.",
+          "type": "boolean"
+        },
         "limit": {
           "type": "integer"
         }

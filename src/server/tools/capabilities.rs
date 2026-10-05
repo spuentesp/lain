@@ -1025,11 +1025,14 @@ mod tests {
     }
 
     #[test]
-    fn core_is_the_eighteen_tool_default() {
+    fn core_is_the_twenty_tool_default() {
         // 16 comprehension/impact tools plus the two skill-layer
         // tools (list_packages / load_package) that make every other
-        // package discoverable.
-        assert_eq!(package_tools(Package::Core).len(), 18);
+        // package discoverable, plus `get_audit_log` and
+        // `run_enrichment`, promoted to core by the 2026-10-04 dogfooding so
+        // an agent seeing the "Calls: 0" warning can ask for the lighter
+        // recovery pass without first loading the `social` / `ops` packages.
+        assert_eq!(package_tools(Package::Core).len(), 20);
     }
 
     #[test]
