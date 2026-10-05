@@ -489,4 +489,66 @@ mod pieces {
         let _ = m.claim(&x, vec![req("zz_inf2.rs", &[], ClaimIntent::Edit)]);
         assert!(!probe("zz_inf2.rs"));
     }
+
+    #[test]
+    fn ttl_becomes_an_absolute_expiry_and_a_reclaim_replaces_instead_of_duplicating() {
+        let m = OccupancyMap::new();
+        let a = agent("a");
+        let mut r = req("zz_ttl.rs", &[], ClaimIntent::Edit);
+        r.ttl_seconds = Some(3600);
+        let _ = m.claim(
+            &a,
+            vec![r.clone(), req("zz_ttl_none.rs", &[], ClaimIntent::Edit)],
+        );
+        let claims = m.list_for_agent(&a);
+        let with_ttl = claims
+            .iter()
+            .find(|c| c.path == PathBuf::from("zz_ttl.rs"))
+            .unwrap();
+        let none = claims
+            .iter()
+            .find(|c| c.path == PathBuf::from("zz_ttl_none.rs"))
+            .unwrap();
+        assert_eq!(none.expires_at, None);
+        let exp = with_ttl.expires_at.expect("a TTL claim carries an expiry");
+        assert_eq!(
+            exp.duration_since(with_ttl.claimed_at).unwrap(),
+            std::time::Duration::from_secs(3600)
+        );
+        // Not yet due.
+        assert!(m
+            .expire_by_ttl()
+            .iter()
+            .all(|(who, p)| !(who == &a && p == &PathBuf::from("zz_ttl.rs"))));
+        // Re-claiming the same scope replaces the row (no duplicates inflating the count).
+        let _ = m.claim(&a, vec![r]);
+        let n = m
+            .list_for_agent(&a)
+            .iter()
+            .filter(|c| c.path == PathBuf::from("zz_ttl.rs"))
+            .count();
+        assert_eq!(n, 1, "a re-claim must replace, not append");
+    }
+
+    #[test]
+    fn persist_fires_only_when_something_was_granted() {
+        let m = OccupancyMap::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f2 = fired.clone();
+        m.set_persist_callback(move || {
+            f2.fetch_add(1, O::SeqCst);
+        });
+        let (a, b) = (agent("a"), agent("b"));
+        let _ = m.claim(&a, vec![req("zz_pf.rs", &[], ClaimIntent::Edit)]);
+        let after_grant = fired.load(O::SeqCst);
+        assert!(after_grant >= 1);
+        // b's edit is refused: nothing changed, so nothing to persist.
+        let r = m.claim(&b, vec![req("zz_pf.rs", &[], ClaimIntent::Edit)]);
+        assert!(r.granted.is_empty() && !r.conflicts.is_empty());
+        assert_eq!(
+            fired.load(O::SeqCst),
+            after_grant,
+            "a refused claim must not trigger a save"
+        );
+    }
 }
