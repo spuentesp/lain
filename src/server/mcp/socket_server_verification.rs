@@ -825,7 +825,7 @@ async fn idle_exit_follows_the_last_connection_within_two_windows() {
         "exited before a full idle window: {after:?}"
     );
     assert!(
-        after < window + Duration::from_millis(450),
+        after < window * 2 + Duration::from_millis(450),
         "exit lagged the idle window by {after:?}"
     );
 }
