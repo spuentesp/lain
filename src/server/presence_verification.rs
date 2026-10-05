@@ -455,4 +455,38 @@ mod pieces {
         let again = m.claim(&a, vec![req(p, &[], ClaimIntent::Read)]);
         assert!(again.advisories.iter().all(|e| e.agent_id != a));
     }
+
+    /// A declaration always wins over a guess: an inferred claim is marked as such,
+    /// an explicit one clears the mark, and a later guess never downgrades it.
+    #[test]
+    fn inferred_marker_is_set_by_guesses_cleared_by_declarations_and_never_re_set() {
+        let m = OccupancyMap::new();
+        let (x, y) = (agent("x"), agent("y"));
+        let probe = |path: &str| -> bool {
+            let r = m.claim(&y, vec![req(path, &[], ClaimIntent::Edit)]);
+            assert_eq!(r.conflicts.len(), 1, "y must collide with x on {path}");
+            r.conflicts[0].inferred
+        };
+        // A guess is marked.
+        let _ = m.claim_inferred(&x, vec![req("zz_inf1.rs", &[], ClaimIntent::Edit)]);
+        assert!(
+            probe("zz_inf1.rs"),
+            "a guessed claim is reported as inferred"
+        );
+        // Declaring it clears the mark.
+        let _ = m.claim(&x, vec![req("zz_inf1.rs", &[], ClaimIntent::Edit)]);
+        assert!(
+            !probe("zz_inf1.rs"),
+            "an explicit claim clears the inferred mark"
+        );
+        // A guess on top of a declaration does not downgrade it.
+        let _ = m.claim_inferred(&x, vec![req("zz_inf1.rs", &[], ClaimIntent::Edit)]);
+        assert!(
+            !probe("zz_inf1.rs"),
+            "a guess must not downgrade a declared claim"
+        );
+        // A declaration first, never guessed: not inferred either.
+        let _ = m.claim(&x, vec![req("zz_inf2.rs", &[], ClaimIntent::Edit)]);
+        assert!(!probe("zz_inf2.rs"));
+    }
 }
