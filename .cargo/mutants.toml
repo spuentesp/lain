@@ -29,7 +29,7 @@ exclude_re = [
     'wal\.rs.*replace sync_parent_dir with',
     # `created` only decides whether to fsync the parent directory (power-loss
     # durability) and Drop's final fsync: neither is observable without a crash.
-    'wal\.rs:189.*delete ! in WalWriter::append',
+    'wal\.rs:18[79].*delete ! in WalWriter::append',
     # read_exact on a regular file fails only with UnexpectedEof; another kind
     # cannot be produced by a test.
     'wal\.rs.*UnexpectedEof with true in replay_inner',
