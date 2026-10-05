@@ -46,3 +46,5 @@ FederationRepoLifecycle           | FederationRepoLifecycle           | pass | r
 FederationRepoLifecycle_Unchecked | FederationRepoLifecycle           | fail | if the repo lookup is hoisted out of the lock, a removed repo is resurrected
 RateLimit                         | RateLimit                         | pass | auth token bucket: range + rate bound
 RateLimit_NoClamp                 | RateLimit                         | fail | no clamp: idle key banks unbounded credit
+PresenceClaims                    | PresenceClaims                    | pass | presence claim arbitration: no conflicting holders
+PresenceClaims_LastWins           | PresenceClaims                    | fail | pre-fix: last claim hides strongest intent (finding 3)

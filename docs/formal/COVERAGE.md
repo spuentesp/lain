@@ -13,7 +13,7 @@ Legend: ● checked · ◐ partly · ○ not checked.
 |------|:----:|:------------------------------:|:----:|:----:|:--------:|
 | Readiness lifecycle (`readiness.rs`) | ● | ● refines the model | ● | ● publication rule | ● |
 | Reload bus (`reload.rs`, rebuild loop) | ● | ● status machine | ● | ○ | ● |
-| Presence claims (`OccupancyMap`) | ○ | ● refines the claim spec | ○ | ○ | ○ |
+| Presence claims (`OccupancyMap`) | ● (+ pre-fix variant) | ● refines the claim spec | ○ | ○ | ○ |
 | Filesystem lease (`presence_lock.rs`) | ● | ● stress + properties | ○ | ○ | ● |
 | Background jobs (`job_store.rs`) | ● | ● refines a cap model + threaded | ○ | ○ | ○ |
 | Snapshot residency (`manager.rs`) | ● (4 specs) | ● | ● install/evict/hold | ○ | ○ |
