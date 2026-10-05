@@ -5,10 +5,33 @@
 //! and atomics from here instead of `parking_lot` / `std::sync::atomic`.
 //! Production builds re-export the real primitives: zero cost, same API.
 
-#[cfg(not(lain_loom))]
+#[cfg(not(any(lain_loom, kani)))]
 pub use parking_lot::Mutex;
 #[cfg(not(lain_loom))]
 pub use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// Kani cannot see through either real mutex (futex syscalls, errno), so
+/// proofs run against a `parking_lot`-shaped `RefCell`: sequential semantics are
+/// identical and a re-entrant `lock` panics, which Kani reports. Interleavings
+/// are loom's job. Only built under `cargo kani`; the `Sync` impl is sound
+/// there because proof harnesses are single-threaded.
+#[cfg(kani)]
+#[derive(Debug)]
+pub struct Mutex<T>(std::cell::RefCell<T>);
+
+#[cfg(kani)]
+unsafe impl<T: Send> Sync for Mutex<T> {}
+
+#[cfg(kani)]
+impl<T> Mutex<T> {
+    pub fn new(value: T) -> Self {
+        Self(std::cell::RefCell::new(value))
+    }
+
+    pub fn lock(&self) -> std::cell::RefMut<'_, T> {
+        self.0.borrow_mut()
+    }
+}
 
 /// `parking_lot`-shaped wrapper over `loom::sync::Mutex` (no poisoning).
 #[cfg(lain_loom)]

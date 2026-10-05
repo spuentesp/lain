@@ -64,3 +64,7 @@ impl HealthGate {
 #[cfg(test)]
 #[path = "health_gate_verification.rs"]
 mod verification;
+
+#[cfg(kani)]
+#[path = "health_gate_kani.rs"]
+mod kani_proofs;

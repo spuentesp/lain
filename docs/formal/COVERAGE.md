@@ -18,7 +18,7 @@ Legend: ● checked · ◐ partly · ○ not checked.
 | Background jobs (`job_store.rs`) | ● | ● refines a cap model + threaded | ○ | ○ | ○ |
 | Snapshot residency (`manager.rs`) | ● (4 specs) | ● | ● install/evict/hold | ○ | ○ |
 | Contract rejoin flag (`DirtyFlag`) | ● | ● | ● | ○ | ○ |
-| Repo health + startup hold (`HealthGate`) | ● | ● | ● | ○ | ● |
+| Repo health + startup hold (`HealthGate`) | ● | ● | ● | ● decision rules, all op sequences ≤4 | ● |
 | Graph WAL / checkpoint (`graph/wal.rs`) | ● (2 specs) | ● crash, order, checkpoint races | ○ | ○ | ● |
 | Shared oneshot server (B1) | ◐ spec as merged | ● socket properties, real-binary e2e | ○ | ○ | ○ |
 | LSP circuit breaker / restart budget | ○ | ● refines the documented spec | ○ | ○ | ○ |
