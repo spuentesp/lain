@@ -48,3 +48,5 @@ RateLimit                         | RateLimit                         | pass | a
 RateLimit_NoClamp                 | RateLimit                         | fail | no clamp: idle key banks unbounded credit
 PresenceClaims                    | PresenceClaims                    | pass | presence claim arbitration: no conflicting holders
 PresenceClaims_LastWins           | PresenceClaims                    | fail | pre-fix: last claim hides strongest intent (finding 3)
+LspPool                           | LspPool                           | pass | LSP pool round-robin: balanced across clones
+LspPool_PerCloneCounter           | LspPool                           | fail | pre-fix: per-clone counter starves multiplexers

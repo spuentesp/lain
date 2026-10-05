@@ -26,7 +26,7 @@ Legend: ● checked · ◐ partly · ○ not checked.
 | Federation readiness aggregation | ○ | ● permutation, exact blocking set, severity | ○ | ○ | ○ |
 | Auth token bucket | ● range, burst, rate bound | ● rate bound, `Retry-After`, cap | ○ | ● `constant_time_eq` | ○ |
 | Sidecar respawn budget | ○ | ◐ targeted test | ○ | ○ | ○ |
-| LSP pool (size, round-robin) | ○ | ● zero size, balance under racing clones | ○ | ○ | ○ |
+| LSP pool (size, round-robin) | ● (+ pre-fix variant) | ● zero size, balance under racing clones | ○ | ○ | ○ |
 | File-watcher batching (`take_batch`) | ○ | ● partition | ○ | ○ | ○ |
 
 ## Pure functions and unsafe code
