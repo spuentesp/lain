@@ -111,6 +111,16 @@ fn changed_set() -> Box<dyn crate::federation::contracts::diff::ChangedFilesSour
 }
 
 fn minimal_coverage() -> Coverage {
+    let mut repo_coverages = std::collections::BTreeMap::new();
+    let cover = crate::federation::contracts::coverage::RepoCoverage {
+        cache_key: crate::federation::contracts::index_cache::CacheKey::new(
+            "billing",
+            "abc",
+            crate::federation::contracts::analyzer_version(),
+        ),
+        ..Default::default()
+    };
+    repo_coverages.insert("billing".into(), cover);
     Coverage {
         repos: Vec::new(),
         unresolved_consumers: Vec::new(),
@@ -129,7 +139,7 @@ fn minimal_coverage() -> Coverage {
             unreviewed: Vec::new(),
             configured_only: true,
         },
-        repo_coverages: std::collections::BTreeMap::new(),
+        repo_coverages,
     }
 }
 
@@ -589,10 +599,10 @@ fn phase_a_no_known_impact_downgraded_on_incomplete_repo() {
     assert_eq!(impact.reason, Some(Reason::UnresolvedCandidates));
 }
 
-/// TLA+ `NoKnownImpactSound`: a `NoKnownImpact` verdict with no
-/// ledger attached (the pre-Phase-A shape) is unchanged.
+/// TLA+ `NoKnownImpactSound`: a `NoKnownImpact` verdict with valid
+/// ledger attached succeeds.
 #[test]
-fn phase_a_no_known_impact_unchanged_without_ledger() {
+fn phase_a_no_known_impact_with_valid_ledger() {
     let change = Change {
         service: svc("billing"),
         kind: ChangeKind::EndpointAdded {
@@ -606,6 +616,28 @@ fn phase_a_no_known_impact_unchanged_without_ledger() {
         &minimal_coverage(),
     );
     assert_eq!(impact.class, Class::NoKnownImpact);
+}
+
+/// TLA+ `NoKnownImpactSound`: a change without coverage ledger attached
+/// must downgrade from NoKnownImpact to NeedsInvestigation.
+#[test]
+fn phase_a_no_known_impact_downgraded_without_ledger() {
+    let mut cov = minimal_coverage();
+    cov.repo_coverages.clear();
+    let change = Change {
+        service: svc("billing"),
+        kind: ChangeKind::EndpointAdded {
+            key: http_key(HttpMethod::Get, "/api/x"),
+        },
+    };
+    let impact = evaluate(
+        &change,
+        &ContractSurface::default(),
+        &ContractSurface::default(),
+        &cov,
+    );
+    assert_eq!(impact.class, Class::NeedsInvestigation);
+    assert_eq!(impact.reason, Some(Reason::UnresolvedCandidates));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -680,7 +712,7 @@ fn evaluate_breaking_with_static_provenance_and_reading_consumer_is_verified() {
     assert_eq!(impact.class, Class::Verified);
     assert_eq!(impact.affected.len(), 1);
     assert_eq!(impact.affected[0].class, Class::Verified);
-    assert_eq!(impact.affected[0].reason, Reason::HeuristicBinding);
+    assert_eq!(impact.affected[0].reason, Reason::StaticBinding);
 }
 
 #[test]
@@ -1072,6 +1104,51 @@ fn evaluate_unresolved_candidate_in_reviewed_repo_is_ni_unresolved_candidates() 
         .affected
         .iter()
         .any(|a| a.reason == Reason::UnresolvedCandidates));
+}
+
+#[test]
+fn evaluate_optional_response_field_add_stays_compatible_with_unresolved_consumer() {
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let key = consumer_key_for_call(&call, endpoint.1.clone());
+    let consumer = ConsumerDef {
+        call,
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service: None,
+        },
+        reads: BTreeSet::new(),
+        reads_complete: false,
+    };
+    let mut surface = ContractSurface::default();
+    surface.consumers.insert(key.clone(), consumer);
+    let mut coverage = coverage_with_reviewed(vec!["orders"]);
+    coverage.repo_coverages.insert(
+        "orders".into(),
+        crate::federation::contracts::coverage::RepoCoverage {
+            cache_key: crate::federation::contracts::index_cache::CacheKey::new(
+                "orders",
+                "abc",
+                crate::federation::contracts::analyzer_version(),
+            ),
+            ..Default::default()
+        },
+    );
+    coverage.unresolved_consumers.push(key);
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldAdded {
+            endpoint,
+            direction: Direction::Response,
+            path: path(&["currency"]),
+            required: false,
+        },
+    };
+
+    let impact = evaluate(&change, &surface, &surface, &coverage);
+    assert_eq!(impact.class, Class::NoKnownImpact);
+    assert_eq!(impact.compatible_changes, 1);
+    assert!(impact.affected.is_empty());
 }
 
 // ─── consumer-side change ───────────────────────────────────────────
@@ -2653,5 +2730,163 @@ fn source_files_empty_does_not_fire_changed_without_schema() {
         "ChangedWithoutSchema fired on a no-files endpoint (source_files \
          empty, has_schema=false); an empty intersection must not produce \
          a change. got {changes:?}"
+    );
+}
+
+#[test]
+fn changed_without_schema_isolates_by_provider_repo() {
+    use crate::federation::contracts::diff::StaticRepoChangedFiles;
+    use crate::federation::contracts::index::EndpointProvider;
+
+    let mut index = ContractIndex::default();
+    let orders_ep = endpoint_id("orders", HttpMethod::Get, "/orders");
+    let billing_ep = endpoint_id("billing", HttpMethod::Get, "/billing");
+
+    // orders provider in repo orders with handler in src/main.rs
+    let orders_handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/main.rs".to_string(),
+        container: None,
+        name: "get_orders".to_string(),
+    };
+    index.endpoints.insert(
+        orders_ep.clone(),
+        Endpoint {
+            id: orders_ep.clone(),
+            method: HttpMethod::Get,
+            template: "/orders".into(),
+            providers: vec![EndpointProvider {
+                node_id: id("orders", "HttpRoute", "src/main.rs", "get_orders", 1),
+                origin: ProviderOrigin::Code,
+                handler: Some(orders_handler),
+                operation_id: None,
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+
+    // billing provider in repo billing with handler ALSO in src/main.rs
+    let billing_handler = SymbolKey {
+        repo: repo("billing"),
+        path: "src/main.rs".to_string(),
+        container: None,
+        name: "get_billing".to_string(),
+    };
+    index.endpoints.insert(
+        billing_ep.clone(),
+        Endpoint {
+            id: billing_ep.clone(),
+            method: HttpMethod::Get,
+            template: "/billing".into(),
+            providers: vec![EndpointProvider {
+                node_id: id("billing", "HttpRoute", "src/main.rs", "get_billing", 1),
+                origin: ProviderOrigin::Code,
+                handler: Some(billing_handler),
+                operation_id: None,
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+
+    let surface = ContractSurface::from_index(&index);
+    let base = surface.clone();
+    let head = surface;
+
+    // Only orders repo changed src/main.rs; billing has no changes
+    let mut by_repo = BTreeMap::new();
+    let mut orders_changed = BTreeSet::new();
+    orders_changed.insert("src/main.rs".to_string());
+    by_repo.insert("orders".to_string(), orders_changed);
+    by_repo.insert("billing".to_string(), BTreeSet::new());
+
+    let src = StaticRepoChangedFiles(by_repo);
+    let changes = diff_contracts(&base, &head, &src);
+
+    let orders_fired = changes.iter().any(|c| {
+        c.service == svc("orders") && matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. })
+    });
+    let billing_fired = changes.iter().any(|c| {
+        c.service == svc("billing") && matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. })
+    });
+
+    assert!(orders_fired, "expected orders to fire ChangedWithoutSchema");
+    assert!(
+        !billing_fired,
+        "billing must NOT fire ChangedWithoutSchema when src/main.rs only changed in orders repo! got {changes:?}"
+    );
+}
+
+#[test]
+fn unavailable_diff_does_not_invent_a_handler_change() {
+    use crate::federation::contracts::changed_files::RepoDiffResult;
+    use crate::federation::contracts::diff::ChangedFilesSource;
+    use crate::federation::contracts::index::EndpointProvider;
+
+    struct UnavailableSource;
+    impl ChangedFilesSource for UnavailableSource {
+        fn changed_files(&self, _base: &str, _head: &str) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+        fn changed_files_for_repo(&self, _repo: &str, _base: &str, _head: &str) -> RepoDiffResult {
+            RepoDiffResult::Unavailable("missing mirror".into())
+        }
+        fn unavailable_repos(&self) -> BTreeSet<String> {
+            let mut s = BTreeSet::new();
+            s.insert("orders".into());
+            s
+        }
+    }
+
+    let mut index = ContractIndex::default();
+    let orders_ep = endpoint_id("orders", HttpMethod::Get, "/orders");
+    let orders_handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/main.rs".to_string(),
+        container: None,
+        name: "get_orders".to_string(),
+    };
+    index.endpoints.insert(
+        orders_ep.clone(),
+        Endpoint {
+            id: orders_ep.clone(),
+            method: HttpMethod::Get,
+            template: "/orders".into(),
+            providers: vec![EndpointProvider {
+                node_id: id("orders", "HttpRoute", "src/main.rs", "get_orders", 1),
+                origin: ProviderOrigin::Code,
+                handler: Some(orders_handler),
+                operation_id: None,
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+
+    let mut surface = ContractSurface::from_index(&index);
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Binds {
+            endpoints: vec![orders_ep.clone()],
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::TreeSitter,
+            },
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    let consumer_key = consumer_key_for_call(&call, orders_ep.1.clone());
+    surface.consumers.insert(consumer_key, consumer_def);
+
+    let base = surface.clone();
+    let head = surface;
+
+    let src = UnavailableSource;
+    let changes = diff_contracts(&base, &head, &src);
+
+    assert!(
+        !changes.iter().any(|c| {
+            c.service == svc("orders") && matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. })
+        }),
+        "an unavailable git diff is not proof that provider source changed"
     );
 }

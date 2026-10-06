@@ -248,8 +248,28 @@ async fn run_diff_contracts(
     all_changes.extend(consumer_changes);
 
     let scope = build_scope(&head_record);
-    let coverage_repos = build_repo_coverage(&head_record);
-    let coverage = build_coverage(&head_index, coverage_repos, scope.clone());
+    let (coverage_repos, repo_coverages) =
+        build_repo_coverage_with_ledgers(&data_dir, &head_record);
+    let mut coverage = build_coverage(&head_index, coverage_repos, scope.clone());
+    coverage.repo_coverages = repo_coverages;
+
+    for repo in changed_source.unavailable_repos() {
+        if !coverage.scope.unreviewed.iter().any(|u| u.repo == repo) {
+            coverage
+                .scope
+                .unreviewed
+                .push(crate::federation::contracts::diff::UnreviewedRepo {
+                    repo: repo.clone(),
+                    reason: "diff_unavailable".to_string(),
+                    error: Some("git mirror missing or diff failed".to_string()),
+                });
+        }
+        if let Some(cover) = coverage.repo_coverages.get_mut(&repo) {
+            cover.error = Some("git diff unavailable".to_string());
+        }
+    }
+
+    coverage.complete = coverage_complete(&coverage, None, &head_index);
 
     // §15.2 scenario 12: a rename whose type changed splits into
     // `FieldRemoved` + `FieldAdded` (the wire kinds §12 lists), but
@@ -663,7 +683,7 @@ fn build_changed_source(
             .get(repo)
             .cloned()
             .unwrap_or_else(|| base_sha.clone());
-        by_repo.insert(repo.clone(), src.diff(repo, base_sha, &head_sha));
+        by_repo.insert(repo.clone(), src.diff_repo(repo, base_sha, &head_sha));
     }
     MultiRepoChangedFiles { by_repo }
 }
@@ -848,17 +868,82 @@ fn build_scope(head: &SnapshotRecord) -> DiffScope {
     }
 }
 
-fn build_repo_coverage(
+fn build_repo_coverage_with_ledgers(
+    data_dir: &std::path::Path,
     head: &SnapshotRecord,
-) -> Vec<crate::federation::contracts::diff::RepoCoverage> {
+) -> (
+    Vec<crate::federation::contracts::diff::RepoCoverage>,
+    BTreeMap<String, crate::federation::contracts::coverage::RepoCoverage>,
+) {
     let mut out = Vec::new();
+    let mut ledgers = BTreeMap::new();
     for (repo, commit) in &head.repos {
+        let key = crate::federation::contracts::index_cache::CacheKey::new(
+            repo,
+            commit,
+            &head.analyzer_version,
+        );
+        let ledger_path = crate::federation::contracts::index_cache::entry_dir(data_dir, &key)
+            .join(crate::federation::contracts::coverage::LEDGER_FILE);
+        let ledger_read = crate::federation::contracts::coverage::read_ledger(&ledger_path);
+        let loaded_cover = ledger_read
+            .as_ref()
+            .ok()
+            .and_then(|l| l.as_ref())
+            .and_then(|l| l.by_repo.get(repo).cloned());
+        let ledger_error = match &ledger_read {
+            Err(e) => Some(format!("coverage ledger unreadable: {e}")),
+            Ok(None) => Some("coverage ledger missing; reindex required".to_string()),
+            Ok(Some(ledger)) if !ledger.by_repo.contains_key(repo) => {
+                Some("coverage ledger has no entry for repository".to_string())
+            }
+            Ok(Some(_)) => None,
+        };
+
+        let mut sensor_counts = BTreeMap::new();
+        let mut languages = std::collections::BTreeSet::new();
+        let mut skips = Vec::new();
+        let mut unresolved = Vec::new();
+        let mut analyzer_version = Some(head.analyzer_version.clone());
+
+        if let Some(ref c) = loaded_cover {
+            for (k, v) in &c.sensor_counts {
+                sensor_counts.insert(k.clone(), *v as u32);
+            }
+            languages = c.languages_present.clone();
+            analyzer_version = Some(c.cache_key.analyzer_version.clone());
+            for bucket in c.ledger.values() {
+                for s in bucket.values() {
+                    skips.extend(s.files_skipped.clone());
+                    unresolved.extend(s.unresolved.clone());
+                }
+            }
+            ledgers.insert(repo.clone(), c.clone());
+        } else {
+            let cache = crate::federation::contracts::index_cache::IndexCache::new(data_dir);
+            if let Ok(Some(m)) = cache.read_manifest(&key) {
+                for (k, v) in &m.sensor_counts {
+                    sensor_counts.insert(k.clone(), *v as u32);
+                }
+            }
+            let missing = crate::federation::contracts::coverage::RepoCoverage {
+                cache_key: key.clone(),
+                error: ledger_error.clone(),
+                ..Default::default()
+            };
+            ledgers.insert(repo.clone(), missing);
+        }
+
         let mut entry = crate::federation::contracts::diff::RepoCoverage {
             repo: repo.clone(),
             commit: Some(commit.clone()),
             state: "indexed".to_string(),
-            sensor_counts: BTreeMap::new(),
-            error: None,
+            sensor_counts,
+            error: ledger_error,
+            languages,
+            skips,
+            unresolved,
+            analyzer_version,
         };
         if let Some(state) = head.repo_states.get(repo) {
             match state {
@@ -883,7 +968,16 @@ fn build_repo_coverage(
         }
         out.push(entry);
     }
-    out
+    (out, ledgers)
+}
+
+#[allow(dead_code)]
+fn build_repo_coverage(
+    head: &SnapshotRecord,
+) -> Vec<crate::federation::contracts::diff::RepoCoverage> {
+    let default_dir = std::path::PathBuf::from(".");
+    let (repos, _) = build_repo_coverage_with_ledgers(&default_dir, head);
+    repos
 }
 
 fn impact_to_value(
@@ -999,6 +1093,26 @@ fn impact_to_value(
     {
         value["from"] = json!(from.to_string());
         value["to"] = json!(to.to_string());
+    }
+    if let ChangeKind::ChangedWithoutSchema { endpoint } = kind {
+        if let Some(ep) = head_index.endpoints.get(endpoint) {
+            let handlers: Vec<Value> = ep
+                .providers
+                .iter()
+                .filter_map(|p| {
+                    p.handler.as_ref().map(|h| {
+                        json!({
+                            "repo": h.repo.as_str(),
+                            "file": h.path,
+                            "symbol": h.name,
+                        })
+                    })
+                })
+                .collect();
+            if !handlers.is_empty() {
+                value["handlers"] = json!(handlers);
+            }
+        }
     }
     value
 }
@@ -1442,32 +1556,43 @@ fn direction_label_str(d: Direction) -> &'static str {
 }
 
 fn scope_to_value(s: &DiffScope) -> Value {
-    let reviewed: Vec<Value> = s
-        .reviewed
-        .iter()
-        .map(|r| {
-            json!({
-                "repo": r.repo,
-                "commit": r.commit,
-                "dirty": r.dirty,
-            })
-        })
-        .collect();
-    let unreviewed: Vec<Value> = s
-        .unreviewed
-        .iter()
-        .map(|r| {
-            json!({
-                "repo": r.repo,
-                "reason": r.reason,
-                "error": r.error,
-            })
-        })
-        .collect();
+    let mut reviewed: Vec<Value> = Vec::new();
+    let mut unreviewed: Vec<Value> = Vec::new();
+    let mut excluded: Vec<String> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
+    for r in &s.reviewed {
+        reviewed.push(json!({
+            "repo": r.repo,
+            "commit": r.commit,
+            "dirty": r.dirty,
+        }));
+    }
+    for u in &s.unreviewed {
+        unreviewed.push(json!({
+            "repo": u.repo,
+            "reason": u.reason,
+            "error": u.error,
+        }));
+        if u.reason == "excluded" {
+            excluded.push(u.repo.clone());
+        } else if u.reason == "failed" {
+            failed.push(json!({
+                "repo": u.repo,
+                "error": u.error,
+            }));
+        }
+    }
     json!({
         "reviewed": reviewed,
         "unreviewed": unreviewed,
+        "excluded": excluded.clone(),
+        "failed": failed.clone(),
         "configured_only": s.configured_only,
+        "caveats": {
+            "unconfigured_scope": "Only explicitly configured repositories were reviewed; unconfigured organization repositories are not visible to analysis.",
+            "excluded_repositories": excluded,
+            "failed_repositories": failed,
+        }
     })
 }
 
@@ -1481,6 +1606,10 @@ fn coverage_to_value(c: &DiffCoverage) -> Value {
                 "commit": r.commit,
                 "state": r.state,
                 "sensors": r.sensor_counts,
+                "languages": r.languages,
+                "skips": r.skips,
+                "unresolved": r.unresolved,
+                "analyzer_version": r.analyzer_version,
                 "error": r.error,
             })
         }).collect::<Vec<_>>(),
@@ -1507,13 +1636,18 @@ fn render_diff_contracts(data: &Value) -> String {
         let kind = ch["kind"].as_str().unwrap_or("");
         let compat = ch["compat"].as_str().unwrap_or("");
         let cls = ch["impact"]["class"].as_str().unwrap_or("");
+        let display_cls = if cls == "NoKnownImpact" {
+            "no known impact in reviewed scope"
+        } else {
+            cls
+        };
         out.push_str(&format!(
             "- {} {} ({} {}) → {}\n",
             endpoint["service"].as_str().unwrap_or(""),
             endpoint["key"].as_str().unwrap_or(""),
             kind,
             compat,
-            cls,
+            display_cls,
         ));
     }
     out
@@ -1854,27 +1988,84 @@ async fn run_get_coverage(
     let endpoint_arg = args_map.get("endpoint").cloned();
     let scope_value = scope_for_view(ctx, &args_map);
     let scope = parse_scope(scope_value);
-    let mut coverage_repos: Vec<crate::federation::contracts::diff::RepoCoverage> = Vec::new();
-    if let Some(fed) = ctx.federation {
-        for (id, health) in fed.list_repos() {
-            let commit = fed
-                .get_repo(&id)
-                .and_then(|r| r.db().get_last_commit().ok().flatten());
-            let state_str = match health {
-                crate::federation::health::RepoHealth::Ready => "indexed",
-                crate::federation::health::RepoHealth::Indexing => "not_ready",
-                _ => "failed",
-            };
-            coverage_repos.push(crate::federation::contracts::diff::RepoCoverage {
-                repo: id.as_str().to_string(),
-                commit,
-                state: state_str.to_string(),
-                sensor_counts: BTreeMap::new(),
-                error: None,
-            });
+    let (coverage_repos, repo_coverages) = if snap_label != "live" {
+        if let Some(mgr) = ctx.snapshots {
+            if let Ok(outcome) = mgr.get(&snap_label, 5_000).await {
+                build_repo_coverage_with_ledgers(mgr.data_dir(), &outcome.record)
+            } else {
+                (Vec::new(), BTreeMap::new())
+            }
+        } else {
+            (Vec::new(), BTreeMap::new())
         }
-    }
-    let coverage = build_coverage(&view, coverage_repos, scope);
+    } else {
+        let mut repos = Vec::new();
+        let mut coverages = BTreeMap::new();
+        if let Some(fed) = ctx.federation {
+            for (id, health) in fed.list_repos() {
+                let commit = fed
+                    .get_repo(&id)
+                    .and_then(|r| r.db().get_last_commit().ok().flatten());
+                let state_str = match health {
+                    crate::federation::health::RepoHealth::Ready => "indexed",
+                    crate::federation::health::RepoHealth::Indexing => "not_ready",
+                    _ => "failed",
+                };
+                let mut sensor_counts: BTreeMap<String, u32> = BTreeMap::new();
+                if let Some(r) = fed.get_repo(&id) {
+                    let all_nodes = r.db().get_all_nodes();
+                    let mut http_routes = 0u32;
+                    let mut tables = 0u32;
+                    for n in all_nodes {
+                        match n.node_type {
+                            crate::schema::NodeType::HttpRoute => http_routes += 1,
+                            crate::schema::NodeType::Table => tables += 1,
+                            _ => {}
+                        }
+                    }
+                    if http_routes > 0 {
+                        sensor_counts.insert("http_routes".into(), http_routes);
+                    }
+                    if tables > 0 {
+                        sensor_counts.insert("sql_tables".into(), tables);
+                    }
+                }
+                let live_coverage_error =
+                    "coverage ledger unavailable for live view; prepare a pinned snapshot"
+                        .to_string();
+                let cover = crate::federation::contracts::coverage::RepoCoverage {
+                    cache_key: crate::federation::contracts::index_cache::CacheKey::new(
+                        id.as_str(),
+                        commit.as_deref().unwrap_or(""),
+                        crate::federation::contracts::analyzer_version(),
+                    ),
+                    sensor_counts: sensor_counts
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v as u64))
+                        .collect(),
+                    error: Some(live_coverage_error.clone()),
+                    ..Default::default()
+                };
+                coverages.insert(id.as_str().to_string(), cover);
+                repos.push(crate::federation::contracts::diff::RepoCoverage {
+                    repo: id.as_str().to_string(),
+                    commit,
+                    state: state_str.to_string(),
+                    sensor_counts,
+                    error: Some(live_coverage_error),
+                    languages: std::collections::BTreeSet::new(),
+                    skips: Vec::new(),
+                    unresolved: Vec::new(),
+                    analyzer_version: Some(crate::federation::contracts::analyzer_version()),
+                });
+            }
+        }
+        (repos, coverages)
+    };
+
+    let mut coverage = build_coverage(&view, coverage_repos, scope);
+    coverage.repo_coverages = repo_coverages;
+
     let endpoint_id = if let Some(v) = endpoint_arg {
         let eid = parse_endpoint_for_trace(&v).ok();
         if let Some((service, key)) = eid {
@@ -1886,11 +2077,10 @@ async fn run_get_coverage(
     } else {
         None
     };
+    let complete = coverage_complete(&coverage, endpoint_id.as_ref(), &view);
+    coverage.complete = complete;
     let mut value = coverage_to_value(&coverage);
-    if let Some(eid) = &endpoint_id {
-        let complete = coverage_complete(&coverage, Some(eid), &view);
-        value["complete"] = json!(complete);
-    }
+    value["complete"] = json!(complete);
     let envelope = success_envelope(value.clone(), &snap_label, snap_label != "live", started);
     let text = render_coverage(&value);
     Ok(outcome(envelope, &value, text))
@@ -2133,5 +2323,7 @@ mod tests {
         // a UUID-based id).
         assert!(v["start"].is_string());
         assert_eq!(v["min_confidence"], 1.0);
+        assert_eq!(v["hops"][0]["provenance"]["kind"], "unknown");
+        assert_eq!(v["hops"][0]["provenance"]["confidence"], 0.0);
     }
 }

@@ -6,6 +6,74 @@ use crate::server::mcp::contract_tools::{
 use serde_json::{json, Value};
 use std::time::Instant;
 
+use std::collections::BTreeMap;
+
+/// View descriptor exposing live vs snapshot revision state (Gap P1.10).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ViewInfo {
+    pub kind: String, // "live" | "snapshot"
+    pub snapshot_id: Option<String>,
+    pub git_commits: BTreeMap<String, String>,
+}
+
+impl ViewInfo {
+    pub fn live(git_commits: BTreeMap<String, String>) -> Self {
+        Self {
+            kind: "live".to_string(),
+            snapshot_id: None,
+            git_commits,
+        }
+    }
+
+    pub fn snapshot(snapshot_id: impl Into<String>, git_commits: BTreeMap<String, String>) -> Self {
+        Self {
+            kind: "snapshot".to_string(),
+            snapshot_id: Some(snapshot_id.into()),
+            git_commits,
+        }
+    }
+
+    pub fn from_snapshot_and_data(snapshot: &str, data: &Value) -> Self {
+        let is_live = snapshot == "live";
+        let mut git_commits = BTreeMap::new();
+        if let Some(repos) = data.get("repos").and_then(|r| r.as_array()) {
+            for r in repos {
+                if let (Some(repo), Some(commit)) = (
+                    r.get("repo").and_then(|s| s.as_str()),
+                    r.get("commit").and_then(|s| s.as_str()),
+                ) {
+                    git_commits.insert(repo.to_string(), commit.to_string());
+                }
+            }
+        }
+        if let Some(scope) = data.get("scope").and_then(|s| s.as_object()) {
+            if let Some(reviewed) = scope.get("reviewed").and_then(|r| r.as_array()) {
+                for r in reviewed {
+                    if let (Some(repo), Some(commit)) = (
+                        r.get("repo").and_then(|s| s.as_str()),
+                        r.get("commit").and_then(|s| s.as_str()),
+                    ) {
+                        git_commits.insert(repo.to_string(), commit.to_string());
+                    }
+                }
+            }
+        }
+        Self {
+            kind: if is_live {
+                "live".to_string()
+            } else {
+                "snapshot".to_string()
+            },
+            snapshot_id: if is_live {
+                None
+            } else {
+                Some(snapshot.to_string())
+            },
+            git_commits,
+        }
+    }
+}
+
 /// Build a successful envelope (`§10.2`). `started` is the `Instant`
 /// recorded when the tool started; `meta.elapsed_ms` is the only
 /// non-deterministic field — every other key is byte-identical across
@@ -16,14 +84,32 @@ pub fn success_envelope(
     reproducible: bool,
     started: Instant,
 ) -> Value {
+    let view = ViewInfo::from_snapshot_and_data(snapshot, &data);
+    success_envelope_with_view(data, snapshot, reproducible, view, started)
+}
+
+pub fn success_envelope_with_view(
+    data: Value,
+    snapshot: &str,
+    reproducible: bool,
+    view: ViewInfo,
+    started: Instant,
+) -> Value {
+    let view_val = json!({
+        "kind": view.kind,
+        "snapshot_id": view.snapshot_id,
+        "git_commits": view.git_commits,
+    });
     json!({
         "api_version": API_VERSION,
         "analyzer_version": ANALYZER_VERSION,
         "snapshot": snapshot,
         "reproducible": reproducible,
+        "view": view_val,
         "data": data,
         "meta": {
             "elapsed_ms": started.elapsed().as_millis() as u64,
+            "view": view_val,
         }
     })
 }

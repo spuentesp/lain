@@ -23,6 +23,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::federation::contracts::changed_files::RepoDiffResult;
 use crate::federation::contracts::index::{
     ConsumerResolution, ConsumerTarget as IndexConsumerTarget, ContractIndex, Endpoint, EndpointId,
     EndpointSchema, UnresolvedReason,
@@ -400,6 +401,19 @@ pub enum ChangeKind {
 /// pure-function seam tests use.
 pub trait ChangedFilesSource {
     fn changed_files(&self, base: &str, head: &str) -> BTreeSet<String>;
+
+    fn changed_files_for_repo(&self, _repo: &str, base: &str, head: &str) -> RepoDiffResult {
+        let files = self.changed_files(base, head);
+        if files.is_empty() {
+            RepoDiffResult::Unchanged
+        } else {
+            RepoDiffResult::Changed(files)
+        }
+    }
+
+    fn unavailable_repos(&self) -> BTreeSet<String> {
+        BTreeSet::new()
+    }
 }
 
 /// A precomputed changed-files set. Used by tests and by callers that
@@ -409,6 +423,35 @@ pub struct StaticChangedFiles(pub BTreeSet<String>);
 impl ChangedFilesSource for StaticChangedFiles {
     fn changed_files(&self, _base: &str, _head: &str) -> BTreeSet<String> {
         self.0.clone()
+    }
+
+    fn changed_files_for_repo(&self, _repo: &str, _base: &str, _head: &str) -> RepoDiffResult {
+        if self.0.is_empty() {
+            RepoDiffResult::Unchanged
+        } else {
+            RepoDiffResult::Changed(self.0.clone())
+        }
+    }
+}
+
+/// Precomputed per-repo changed files map for testing multi-repo isolation.
+pub struct StaticRepoChangedFiles(pub BTreeMap<String, BTreeSet<String>>);
+
+impl ChangedFilesSource for StaticRepoChangedFiles {
+    fn changed_files(&self, _base: &str, _head: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for set in self.0.values() {
+            out.extend(set.iter().cloned());
+        }
+        out
+    }
+
+    fn changed_files_for_repo(&self, repo: &str, _base: &str, _head: &str) -> RepoDiffResult {
+        match self.0.get(repo) {
+            Some(set) if !set.is_empty() => RepoDiffResult::Changed(set.clone()),
+            Some(_) => RepoDiffResult::Unchanged,
+            None => RepoDiffResult::Unchanged,
+        }
     }
 }
 
@@ -538,24 +581,52 @@ pub fn diff_contracts(
                 head_def.schemas.get(&direction),
             );
         }
-        // ChangedWithoutSchema rule — both sides have no schema and a
-        // source file differs.
+        // ChangedWithoutSchema rule (§9.2, Gaps P1.6, P1.7, P1.8) —
+        // both sides have no schema and handler/provider source file
+        // differs in the provider repository.
+        // File-level change is classified conservatively as PossibleBehaviorChange
+        // (Compat::NeedsReview, Class::NeedsInvestigation).
         if !base_def.has_schema && !head_def.has_schema {
             let base_sha = "";
             let head_sha = "";
-            let changed = changed_files.changed_files(base_sha, head_sha);
-            // The probe is "did any file in `source_files` (route,
-            // spec, or handler) differ between base and head?".
-            // Either side's `source_files` entry matching is
-            // sufficient — `ChangedFilesSource` is the caller-supplied
-            // git2-backed source that returns the changed set for
-            // `(base_sha, head_sha)`.
-            if base_def
-                .source_files
-                .iter()
-                .chain(head_def.source_files.iter())
-                .any(|f| changed.contains(f))
-            {
+            let provider_repos = endpoint_provider_repos(base_def, head_def);
+
+            let mut fired = false;
+            if provider_repos.is_empty() {
+                let changed = changed_files.changed_files(base_sha, head_sha);
+                if base_def
+                    .source_files
+                    .iter()
+                    .chain(head_def.source_files.iter())
+                    .any(|f| changed.contains(f))
+                {
+                    fired = true;
+                }
+            } else {
+                for repo in &provider_repos {
+                    match changed_files.changed_files_for_repo(repo, base_sha, head_sha) {
+                        // An unavailable diff is a coverage gap, not evidence
+                        // that a handler changed. The tool layer records the
+                        // repository as unreviewed and prevents a
+                        // NoKnownImpact conclusion.
+                        RepoDiffResult::Unavailable(_) => {}
+                        RepoDiffResult::Changed(ref changed) => {
+                            if base_def
+                                .source_files
+                                .iter()
+                                .chain(head_def.source_files.iter())
+                                .any(|f| changed.contains(f))
+                            {
+                                fired = true;
+                                break;
+                            }
+                        }
+                        RepoDiffResult::Unchanged => {}
+                    }
+                }
+            }
+
+            if fired {
                 changes.push(Change {
                     service: head_id.0.clone(),
                     kind: ChangeKind::ChangedWithoutSchema {
@@ -570,6 +641,22 @@ pub fn diff_contracts(
         change_sort_key(&a.service, &a.kind).cmp(&change_sort_key(&b.service, &b.kind))
     });
     changes
+}
+
+fn endpoint_provider_repos(base: &EndpointDef, head: &EndpointDef) -> BTreeSet<String> {
+    let mut repos = BTreeSet::new();
+    for p in base.providers.iter().chain(head.providers.iter()) {
+        let repo_id = p.node_id.repo_id();
+        if !repo_id.is_empty() {
+            repos.insert(repo_id.to_string());
+        }
+        if let Some(h) = &p.handler {
+            if !h.repo.as_str().is_empty() {
+                repos.insert(h.repo.as_str().to_string());
+            }
+        }
+    }
+    repos
 }
 
 fn change_sort_key(service: &ServiceName, kind: &ChangeKind) -> String {
@@ -1158,6 +1245,25 @@ impl Compat {
     }
 }
 
+/// Schema-level changes classified as compatible do not depend on
+/// enumerating every consumer: the schema change itself cannot break
+/// existing callers. Keep endpoint-level additions/rebindings out of
+/// this set; those can still be relevant to unresolved callers.
+fn is_schema_compatible_change(kind: &ChangeKind, compat: Compat) -> bool {
+    if !matches!(compat, Compat::Compatible) {
+        return false;
+    }
+    matches!(
+        kind,
+        ChangeKind::FieldRemoved { .. }
+            | ChangeKind::FieldAdded { .. }
+            | ChangeKind::RequirednessChanged { .. }
+            | ChangeKind::NullabilityChanged { .. }
+            | ChangeKind::EnumValueAdded { .. }
+            | ChangeKind::EnumValueRemoved { .. }
+    )
+}
+
 /// Map a `ChangeKind` + `Direction` to its `Compat` (§9.4 table, every
 /// cell verbatim). The §9.4 table's "Response / payload" column
 /// groups `Direction::Response` and `Direction::Payload` together;
@@ -1296,6 +1402,8 @@ impl Class {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
+    StaticBinding,
+    ConfirmedBinding,
     HeuristicBinding,
     SendsNotModeled,
     ReadsNotFullyTraced,
@@ -1307,6 +1415,8 @@ pub enum Reason {
 impl Reason {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Reason::StaticBinding => "static_binding",
+            Reason::ConfirmedBinding => "confirmed_binding",
             Reason::HeuristicBinding => "heuristic_binding",
             Reason::SendsNotModeled => "sends_not_modeled",
             Reason::ReadsNotFullyTraced => "reads_not_fully_traced",
@@ -1362,12 +1472,8 @@ pub struct Coverage {
     pub scope: Scope,
     pub complete: bool,
     /// TLA+ CoverageClaim.tla: the per-repo `RepoCoverage` state
-    /// vectors. Phase A wires the coverage ledger into the
-    /// evaluator's `is_complete` check (Task 7) — empty here means
-    /// "no ledger attached", which the evaluator treats as
-    /// pre-Phase-A behaviour (no coverage downgrade). When the
-    /// federation hydrates from the per-commit cache, every in-scope
-    /// repo carries an entry.
+    /// vectors. An absent entry is a coverage gap: the evaluator must
+    /// never promote an unmeasured repository to `NoKnownImpact`.
     pub repo_coverages:
         std::collections::BTreeMap<String, crate::federation::contracts::coverage::RepoCoverage>,
 }
@@ -1379,6 +1485,26 @@ pub struct RepoCoverage {
     pub state: String,
     pub sensor_counts: BTreeMap<String, u32>,
     pub error: Option<String>,
+    pub languages: std::collections::BTreeSet<String>,
+    pub skips: Vec<crate::federation::contracts::coverage::SkipRecord>,
+    pub unresolved: Vec<crate::federation::contracts::coverage::UnresolvedRecord>,
+    pub analyzer_version: Option<String>,
+}
+
+impl Default for RepoCoverage {
+    fn default() -> Self {
+        Self {
+            repo: String::new(),
+            commit: None,
+            state: "indexed".to_string(),
+            sensor_counts: BTreeMap::new(),
+            error: None,
+            languages: std::collections::BTreeSet::new(),
+            skips: Vec::new(),
+            unresolved: Vec::new(),
+            analyzer_version: None,
+        }
+    }
 }
 
 // ─── evaluate (§9.5) ──────────────────────────────────────────────────
@@ -1546,9 +1672,12 @@ pub fn evaluate(
     if !any_affected {
         // No bound consumer is affected. The could-match rule
         // applies first (§9.5): an unresolved consumer in a reviewed
-        // repo that **could match** the change makes the verdict
-        // `NeedsInvestigation (unresolved_candidates)` regardless of
-        // the change's `Compat` classification.
+        // repo that could match a potentially breaking or review-
+        // required change makes the verdict `NeedsInvestigation`.
+        // Schema changes whose compatibility is guaranteed by §9.4
+        // (for example, an optional response-field addition) do not
+        // depend on consumer enumeration; coverage still exposes
+        // unresolved consumers.
         if let Some(target) = &target_endpoint {
             let candidates: Vec<ConsumerKey> = coverage
                 .unresolved_consumers
@@ -1556,7 +1685,7 @@ pub fn evaluate(
                 .filter(|u| could_match(u, target, head))
                 .cloned()
                 .collect();
-            if !candidates.is_empty() {
+            if !candidates.is_empty() && !is_schema_compatible_change(&change.kind, compat) {
                 class_overall = Class::NeedsInvestigation;
                 reason_overall = Some(Reason::UnresolvedCandidates);
                 for c in candidates {
@@ -1596,25 +1725,32 @@ pub fn evaluate(
 
     // TLA+ CoverageClaim.tla `NoKnownImpactSound`: when `claim_fired`
     // (here, `NoKnownImpact`), every in-scope repo must be `RepoComplete(r)`.
-    // Phase A enforces this in `evaluate()`: if the coverage ledger is
-    // attached AND any in-scope repo's `RepoCoverage::is_complete` is false
+    // When any in-scope repo's `RepoCoverage::is_complete` is false
     // (missing ledger entry, sensor error, unresolved could-match,
-    // cache-version mismatch), downgrade `NoKnownImpact` →
-    // `NeedsInvestigation` with `Reason::UnresolvedCandidates`. The
-    // downgrade is opt-in via `coverage.repo_coverages` being non-empty
-    // so existing tests that do not wire a ledger preserve the
-    // pre-Phase-A verdicts.
-    if matches!(class_overall, Class::NoKnownImpact) && !coverage.repo_coverages.is_empty() {
+    // cache-version mismatch) or when coverage is unattached, downgrade
+    // `NoKnownImpact` → `NeedsInvestigation` with `Reason::UnresolvedCandidates`.
+    // Compatibility is a property of the contract change itself, not
+    // an inference from the observed consumer set. An additive optional
+    // response field remains compatible even when some consumers are
+    // unresolved; coverage still reports that limitation separately.
+    if matches!(class_overall, Class::NoKnownImpact)
+        && !is_schema_compatible_change(&change.kind, compat)
+    {
         let current_analyzer_version = crate::federation::contracts::analyzer_version();
         let capable = crate::federation::contracts::coverage::consumer_capable_langs();
         let mut incomplete_repos: Vec<String> = Vec::new();
-        for repo in scope_repo_names(coverage) {
-            let Some(cover) = coverage.repo_coverages.get(&repo) else {
-                incomplete_repos.push(repo);
-                continue;
-            };
-            if !cover.is_complete(&capable, &current_analyzer_version) {
-                incomplete_repos.push(repo);
+        let in_scope = scope_repo_names(coverage);
+        if in_scope.is_empty() || coverage.repo_coverages.is_empty() {
+            incomplete_repos.push("<uncovered_scope>".into());
+        } else {
+            for repo in in_scope {
+                let Some(cover) = coverage.repo_coverages.get(&repo) else {
+                    incomplete_repos.push(repo);
+                    continue;
+                };
+                if !cover.is_complete(&capable, &current_analyzer_version) {
+                    incomplete_repos.push(repo);
+                }
             }
         }
         if !incomplete_repos.is_empty() {
@@ -1803,6 +1939,18 @@ fn path_is_ancestor(parent: &JsonPath, descendant: &JsonPath) -> bool {
     parent.0.len() < descendant.0.len() && descendant.0.starts_with(&parent.0)
 }
 
+fn binding_reason(consumer: &ConsumerDef) -> Reason {
+    match &consumer.resolution {
+        SurfaceResolution::Binds { provenance, .. } => match provenance {
+            EdgeProvenance::Static { .. } => Reason::StaticBinding,
+            EdgeProvenance::Confirmed { .. } => Reason::ConfirmedBinding,
+            EdgeProvenance::Heuristic { .. } => Reason::HeuristicBinding,
+            EdgeProvenance::Runtime { .. } => Reason::HeuristicBinding,
+        },
+        _ => Reason::HeuristicBinding,
+    }
+}
+
 fn per_consumer_verdict(
     compat: Compat,
     change: &Change,
@@ -1811,12 +1959,13 @@ fn per_consumer_verdict(
     consumer: &ConsumerDef,
 ) -> (Class, Reason) {
     let certain = is_certain(consumer);
+    let reason = binding_reason(consumer);
     match compat {
         Compat::Breaking => {
             if certain {
-                (Class::Verified, Reason::HeuristicBinding)
+                (Class::Verified, reason)
             } else {
-                (Class::NeedsInvestigation, Reason::HeuristicBinding)
+                (Class::NeedsInvestigation, reason)
             }
         }
         Compat::BreakingIfRead => {
@@ -1834,12 +1983,12 @@ fn per_consumer_verdict(
                 if !reads_complete {
                     (Class::NeedsInvestigation, Reason::ReadsNotFullyTraced)
                 } else if certain {
-                    (Class::Verified, Reason::HeuristicBinding)
+                    (Class::Verified, reason)
                 } else {
-                    (Class::NeedsInvestigation, Reason::HeuristicBinding)
+                    (Class::NeedsInvestigation, reason)
                 }
             } else if reads_complete {
-                (Class::NoKnownImpact, Reason::HeuristicBinding)
+                (Class::NoKnownImpact, reason)
             } else {
                 (Class::NeedsInvestigation, Reason::ReadsNotFullyTraced)
             }
@@ -1850,7 +1999,7 @@ fn per_consumer_verdict(
                 if reads {
                     (Class::NeedsInvestigation, Reason::NeedsReview)
                 } else if reads_complete {
-                    (Class::NoKnownImpact, Reason::NeedsReview)
+                    (Class::NoKnownImpact, reason)
                 } else {
                     (Class::NeedsInvestigation, Reason::ReadsNotFullyTraced)
                 }
@@ -1866,7 +2015,7 @@ fn per_consumer_verdict(
             }
             _ => (Class::NeedsInvestigation, Reason::NeedsReview),
         },
-        Compat::Compatible => (Class::NoKnownImpact, Reason::HeuristicBinding),
+        Compat::Compatible => (Class::NoKnownImpact, reason),
     }
 }
 
@@ -2139,6 +2288,18 @@ pub fn coverage_complete(
 ) -> bool {
     if !coverage.scope.unreviewed.is_empty() {
         return false;
+    }
+    if !coverage.repo_coverages.is_empty() {
+        let current_analyzer_version = crate::federation::contracts::analyzer_version();
+        let capable = crate::federation::contracts::coverage::consumer_capable_langs();
+        for r in &coverage.scope.reviewed {
+            let Some(cover) = coverage.repo_coverages.get(&r.repo) else {
+                return false;
+            };
+            if !cover.is_complete(&capable, &current_analyzer_version) {
+                return false;
+            }
+        }
     }
     if let Some(target) = endpoint {
         let surface = ContractSurface::from_index(index);

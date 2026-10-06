@@ -12,12 +12,28 @@
         "analyzer_version": { "type": "string" },
         "snapshot": { "type": "string" },
         "reproducible": { "type": "boolean" },
+        "view": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["live", "snapshot"] },
+            "snapshot_id": { "type": ["string", "null"] },
+            "git_commits": { "type": "object" }
+          }
+        },
         "data": {},
         "meta": {
           "type": "object",
           "required": ["elapsed_ms"],
           "properties": {
-            "elapsed_ms": { "type": "integer", "minimum": 0 }
+            "elapsed_ms": { "type": "integer", "minimum": 0 },
+            "view": {
+              "type": "object",
+              "properties": {
+                "kind": { "type": "string", "enum": ["live", "snapshot"] },
+                "snapshot_id": { "type": ["string", "null"] },
+                "git_commits": { "type": "object" }
+              }
+            }
           }
         }
       },

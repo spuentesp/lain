@@ -328,7 +328,7 @@ impl SnapshotManager {
         // `repos` map (which may be empty) overrides selected
         // entries. Derived does NOT inherit failure (the §11
         // rule).
-        let (resolved_repos, resolved_excluded, join_config, config_hash) =
+        let (candidate_repos, resolved_excluded, join_config, config_hash) =
             match req.from.as_deref() {
                 Some(from_id) => {
                     let Some(base) = read_record(&self.data_dir, from_id)
@@ -379,7 +379,7 @@ impl SnapshotManager {
                     // age with the same `config_hash` /
                     // `analyzer_version` / `exclude` set.
                     let repos = self.apply_max_base_age(
-                        req.repos,
+                        req.repos.clone(),
                         req.max_base_age_s,
                         req.config.config_hash(),
                         req.config.clone(),
@@ -394,13 +394,28 @@ impl SnapshotManager {
                 }
             };
 
-        // Ref-not-found check is the manager's job: a ref that
-        // resolves to nothing surfaces here. The tool layer
-        // surfaces it via `details: {repo, ref}`.
-        // (PR 11 keeps the simple shape: every entry's ref is
-        // assumed resolved already by the tool. The manager
-        // surfaces a `repo_not_registered` for repos it has no
-        // source for.)
+        // Mirror creation/fetch and libgit2 ref resolution are blocking I/O.
+        // Keep them off the async server worker so a slow remote cannot stall
+        // unrelated MCP/HTTP requests.
+        let manager = Arc::clone(self);
+        let input_refs = req.refs_.clone();
+        let (resolved_repos, display_refs) = tokio::task::spawn_blocking(move || {
+            let mut display_refs = input_refs;
+            let mut resolved_repos = BTreeMap::new();
+            for (repo, ref_str) in candidate_repos {
+                let source = manager
+                    .resolve_repo_source_inner(&repo)
+                    .ok_or_else(|| PrepareError::RepoNotRegistered { repo: repo.clone() })?;
+                display_refs
+                    .entry(repo.clone())
+                    .or_insert_with(|| ref_str.clone());
+                let sha = manager.resolve_repo_ref(&repo, &ref_str, &source)?;
+                resolved_repos.insert(repo, sha);
+            }
+            Ok::<_, PrepareError>((resolved_repos, display_refs))
+        })
+        .await
+        .map_err(|e| PrepareError::Other(format!("snapshot ref resolver task failed: {e}")))??;
 
         let analyzer_version = crate::federation::contracts::analyzer_version();
         let input = SnapshotInput {
@@ -410,7 +425,7 @@ impl SnapshotManager {
             // record keeps the input form so `get_snapshot` can
             // surface what the operator originally typed, distinct
             // from the resolved commit.
-            refs_: req.refs_.clone(),
+            refs_: display_refs.clone(),
             join_config: parse_join_config(&join_config)?,
             config_hash: config_hash.clone(),
             analyzer_version: analyzer_version.clone(),
@@ -435,7 +450,7 @@ impl SnapshotManager {
                 id: id.clone(),
                 repos: resolved_repos.clone(),
                 excluded: resolved_excluded.clone(),
-                refs_: req.refs_.clone(),
+                refs_: display_refs.clone(),
                 join_config: join_config.clone(),
                 config_hash: config_hash.clone(),
                 analyzer_version: analyzer_version.clone(),
@@ -985,6 +1000,44 @@ impl SnapshotManager {
             })
             .collect();
         Arc::new(move |repo: &str| map.get(repo).cloned())
+    }
+
+    /// Resolve a caller-supplied ref (branch, tag, sha) to its canonical commit SHA
+    /// using the repository's mirror.
+    fn resolve_repo_ref(
+        &self,
+        repo: &str,
+        ref_str: &str,
+        source: &str,
+    ) -> Result<String, PrepareError> {
+        let trimmed = ref_str.trim();
+        crate::federation::contracts::mirrors::ensure_mirror(&self.data_dir, repo, source)
+            .map_err(|e| PrepareError::Other(format!("ensure mirror failed for {repo}: {e}")))?;
+        let lock = crate::federation::contracts::mirrors::RepoLock::acquire(&self.data_dir, repo)
+            .map_err(|e| {
+            PrepareError::Other(format!("acquire repo lock failed for {repo}: {e}"))
+        })?;
+        let sha = crate::federation::contracts::mirrors::resolve_ref(
+            &lock,
+            &self.data_dir,
+            repo,
+            trimmed,
+            source,
+        )
+        .map_err(|e| match e {
+            crate::federation::contracts::mirrors::MirrorError::RefNotFound { repo, ref_str } => {
+                PrepareError::RefNotFound {
+                    entries: vec![(repo, ref_str)],
+                }
+            }
+            crate::federation::contracts::mirrors::MirrorError::FetchFailed {
+                repo,
+                source,
+                stderr,
+            } => PrepareError::Other(format!("fetch failed for {repo} ({source}): {stderr}")),
+            other => PrepareError::Other(format!("mirror error for {repo}: {other}")),
+        })?;
+        Ok(sha)
     }
 
     /// Apply `max_base_age_s` to the request's `repos` map
@@ -2821,43 +2874,33 @@ repos:
         assert_ne!(base_id, derived_override_id);
     }
 
-    /// Codex P2: when the operator passes `repos: {orders: "base"}`
-    /// (a tag) and the worker resolves it to a SHA, the snapshot
-    /// id is computed from the INPUT ref — not from the resolved
-    /// SHA. The post-fix invariant: hashing the canonical input
-    /// `{repos: {orders: "base"}, excluded: [], config_hash: ...}`
-    /// yields the same id whether the record's `repos[orders]`
-    /// still says `"base"` (the input) or has been mutated to a
-    /// SHA (the prior bug). A future prepare with the resolved
-    /// SHA computes a DIFFERENT id — that's the design: inputs
-    /// are what the user asked for; resolutions are an internal
-    /// detail. The mutation-on-resolution is what we removed.
+    /// Snapshot identity is computed from the resolved canonical commit SHAs,
+    /// while caller-supplied refs (`refs_`) are kept for display and do not
+    /// alter the snapshot ID.
     #[test]
-    fn snapshot_id_hashes_inputs_not_resolutions() {
-        let mut repos = BTreeMap::new();
-        repos.insert("orders".into(), "base".into());
-        let excluded = Vec::<String>::new();
-        let cfg = ContractFederationConfig::default();
-        let config_hash = cfg.config_hash();
-        let analyzer_version = crate::federation::contracts::analyzer_version();
-        let input = SnapshotInput {
-            repos: repos.clone(),
-            excluded: excluded.clone(),
-            refs_: BTreeMap::new(),
-            join_config: cfg.clone(),
-            config_hash: config_hash.clone(),
-            analyzer_version: analyzer_version.clone(),
-        };
-        let id = snapshot_id_for(&input);
-        // The id must include the literal "base" — not a
-        // post-resolution SHA. A SHA-typed input gets its own
-        // distinct id.
+    fn snapshot_id_hashes_canonical_shas_independent_of_display_refs() {
         let mut sha_repos = BTreeMap::new();
         sha_repos.insert(
             "orders".into(),
             "b5bf29abfe8c4e23d2bd8fa48d4e3a4b6f5b8c0d".into(),
         );
-        let sha_input = SnapshotInput {
+        let excluded = Vec::<String>::new();
+        let cfg = ContractFederationConfig::default();
+        let config_hash = cfg.config_hash();
+        let analyzer_version = crate::federation::contracts::analyzer_version();
+        let mut tag_refs = BTreeMap::new();
+        tag_refs.insert("orders".into(), "base".into());
+        let input_from_tag = SnapshotInput {
+            repos: sha_repos.clone(),
+            excluded: excluded.clone(),
+            refs_: tag_refs,
+            join_config: cfg.clone(),
+            config_hash: config_hash.clone(),
+            analyzer_version: analyzer_version.clone(),
+        };
+        let tag_id = snapshot_id_for(&input_from_tag);
+
+        let input_from_sha = SnapshotInput {
             repos: sha_repos,
             excluded,
             refs_: BTreeMap::new(),
@@ -2865,10 +2908,10 @@ repos:
             config_hash,
             analyzer_version,
         };
-        let sha_id = snapshot_id_for(&sha_input);
-        assert_ne!(
-            id, sha_id,
-            "tag input and SHA input must compute different ids"
+        let sha_id = snapshot_id_for(&input_from_sha);
+        assert_eq!(
+            tag_id, sha_id,
+            "requests resolved to the same canonical commit SHA must compute the same snapshot id"
         );
     }
 }

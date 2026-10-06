@@ -228,7 +228,6 @@ fn test_graph_edge_all_types() {
         EdgeType::SendsHttp,
         EdgeType::RequestSchema,
         EdgeType::ResponseSchema,
-        EdgeType::PayloadSchema,
         EdgeType::HasField,
         EdgeType::ReadsField,
         EdgeType::ReadsFrom,
@@ -397,28 +396,26 @@ fn test_edge_type_all_includes_contract_variants() {
 /// the default ingest pipeline (the schema/edge information is
 /// reconstructed at joiner time, not at sensor time).
 #[test]
-fn test_contract_nodes_and_edges_are_marked_unindexed_until_wired() {
-    assert!(!NodeType::HttpClientCall.is_indexed());
-    assert!(!NodeType::Field.is_indexed());
-    assert!(!NodeType::FieldRef.is_indexed());
+fn test_contract_nodes_and_edges_are_marked_indexed() {
+    assert!(NodeType::HttpClientCall.is_indexed());
+    assert!(NodeType::Field.is_indexed());
+    assert!(NodeType::FieldRef.is_indexed());
+    assert!(NodeType::Topic.is_indexed());
+    assert!(NodeType::Schema.is_indexed());
     for e in [
         EdgeType::SendsHttp,
         EdgeType::RequestSchema,
         EdgeType::ResponseSchema,
-        EdgeType::PayloadSchema,
         EdgeType::HasField,
+        EdgeType::ReadsField,
+        EdgeType::ReadsFrom,
+        EdgeType::Binds,
+        EdgeType::Produces,
+        EdgeType::Consumes,
     ] {
-        assert!(
-            !e.is_indexed(),
-            "{e} has no producer in this codebase yet (sensor lands later)"
-        );
-    }
-    // PR 13: the contract-edge pipeline (`field_access_sensor`,
-    // `ContractJoiner`) is wired; flip the flags so `describe_schema`
-    // advertises them.
-    for e in [EdgeType::ReadsField, EdgeType::ReadsFrom, EdgeType::Binds] {
         assert!(e.is_indexed(), "{e} is wired and must be marked indexed");
     }
+    assert!(!EdgeType::PayloadSchema.is_indexed());
 }
 
 /// `source_types` / `target_types` for each new edge — `describe_schema`

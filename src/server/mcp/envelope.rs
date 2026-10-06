@@ -31,13 +31,34 @@ pub fn tool_text_result(
     overlay: &VolatileOverlay,
     static_graph_generation_unix: Option<i64>,
 ) -> CallToolResult {
+    tool_result_with_structured(text, is_error, None, overlay, static_graph_generation_unix)
+}
+
+pub fn tool_result_with_structured(
+    text: String,
+    is_error: bool,
+    structured: Option<serde_json::Value>,
+    overlay: &VolatileOverlay,
+    static_graph_generation_unix: Option<i64>,
+) -> CallToolResult {
+    let mut meta = revision_meta(overlay, static_graph_generation_unix);
+    if let Some(ref st) = structured {
+        if let Some(view) = st
+            .get("view")
+            .or_else(|| st.get("meta").and_then(|m| m.get("view")))
+        {
+            if let Some(ref mut m) = meta {
+                m.insert("view".to_string(), view.clone());
+            }
+        }
+    }
     CallToolResult {
         content: vec![ContentBlock::TextContent(TextContent::new(
             text, None, None,
         ))],
         is_error: Some(is_error),
-        meta: revision_meta(overlay, static_graph_generation_unix),
-        structured_content: None,
+        meta,
+        structured_content: structured.and_then(|v| v.as_object().cloned()),
     }
 }
 

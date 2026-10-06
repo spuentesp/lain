@@ -489,6 +489,21 @@ pub fn run_all_with_coverage(
     cache_key: &IcCacheKey,
 ) -> (SensorCounts, RepoCoverage) {
     let (counts, reports) = run_all_with_reports(graph, root, namespace);
+    let ledger = coverage_from_reports(root, cache_key, &counts, &reports);
+    let _ = repo_id;
+    (counts, ledger)
+}
+
+/// Build the persisted coverage record from the reports produced by the
+/// *same* sensor pass that populated the graph. Snapshot indexing uses this
+/// helper so it never manufactures coverage from aggregate node counts or
+/// runs the sensors a second time.
+pub(crate) fn coverage_from_reports(
+    root: &Path,
+    cache_key: &IcCacheKey,
+    counts: &SensorCounts,
+    reports: &[(&'static str, crate::server::sensors::ScanReport)],
+) -> RepoCoverage {
     let mut ledger = RepoCoverage {
         cache_key: cache_key.clone(),
         ..Default::default()
@@ -512,7 +527,7 @@ pub fn run_all_with_coverage(
         .count();
     for (sensor_name, report) in reports {
         let bucket: &mut BTreeMap<String, SensorLedger> =
-            ledger.ledger.entry(sensor_name.to_string()).or_default();
+            ledger.ledger.entry((*sensor_name).to_string()).or_default();
         // The sensor's per-lang ledger is unknown until the sensor
         // migrates to a richer `scan_with_report`. The legacy
         // integer is recorded as the sensor's emitted count against
@@ -526,8 +541,8 @@ pub fn run_all_with_coverage(
     }
     // Derive the per-sensor totals for back-compat with the existing
     // `SensorCounts.sensor_counts` field.
-    let _ = repo_id;
-    (counts, ledger)
+    ledger.sensor_counts = counts.as_map();
+    ledger
 }
 
 /// TLA+ `Reindex(repo)` per-(sensor, lang) outcome. `run_all` asks

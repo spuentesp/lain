@@ -83,6 +83,7 @@ proptest! {
                 state: "indexed".into(),
                 sensor_counts: std::collections::BTreeMap::new(),
                 error: None,
+                ..Default::default()
             });
         }
         let index = ContractIndex::default();

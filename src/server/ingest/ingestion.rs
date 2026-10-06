@@ -1494,7 +1494,16 @@ impl IndexMode {
     }
 }
 
-pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> {
+/// Sensor output from the exact indexing pass that populated a repository
+/// graph. Keeping reports with the aggregate counters lets snapshot jobs
+/// persist a conservative coverage ledger without re-running sensors.
+#[derive(Debug)]
+pub struct IndexOutcome {
+    pub sensor_counts: crate::server::sensors::SensorCounts,
+    pub sensor_reports: Vec<(&'static str, crate::server::sensors::ScanReport)>,
+}
+
+pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, LainError> {
     let IndexRequest {
         path,
         graph,
@@ -1548,7 +1557,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         if let Some(ref last) = last_commit {
             if last == &latest_commit {
                 info!("[federation] {:?} already up to date at {}", path, last);
-                return Ok(());
+                return Ok(IndexOutcome {
+                    sensor_counts: crate::server::sensors::SensorCounts::default(),
+                    sensor_reports: Vec::new(),
+                });
             }
         }
     }
@@ -1597,7 +1609,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         if let Err(e) = graph.save_to_disk_sync() {
             warn!("could not persist the graph ({e}); serving it from memory only");
         }
-        return Ok(());
+        return Ok(IndexOutcome {
+            sensor_counts: crate::server::sensors::SensorCounts::default(),
+            sensor_reports: Vec::new(),
+        });
     }
 
     let lsp_sync_time = crate::server::time::now_unix();
@@ -1821,7 +1836,8 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     // explicit that sensors are part of the snapshot-indexing
     // surface ("tree-sitter symbols + static resolve + sensors
     // only").
-    let sensor_counts = crate::server::sensors::run_all(graph, path, namespace);
+    let (sensor_counts, sensor_reports) =
+        crate::server::sensors::run_all_with_reports(graph, path, namespace);
     if sensor_counts.total() > 0 {
         info!(
             "[federation] {:?}: protocol sensors contributed {:?}",
@@ -1883,7 +1899,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     if let Some(overlay) = overlay {
         overlay.touch();
     }
-    Ok(())
+    Ok(IndexOutcome {
+        sensor_counts,
+        sensor_reports,
+    })
 }
 
 /// References from files an incremental pass did *not* rescan to symbols

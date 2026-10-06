@@ -67,7 +67,9 @@ use crate::server::mcp::definitions::{
     defs_to_tools, defs_to_value_tools, CONTRACT_TOOL_DEFS, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS,
     WORKSPACE_TOOL_DEFS,
 };
-use crate::server::mcp::envelope::{gated_tool_result, tool_text_result};
+#[cfg(test)]
+use crate::server::mcp::envelope::tool_text_result;
+use crate::server::mcp::envelope::{gated_tool_result, tool_result_with_structured};
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 
 /// Parse a half-open `Range<u32>` from a string like `"1..3"`.
@@ -680,7 +682,7 @@ async fn dispatch_tool_call(
     snapshots: Option<&Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     name: &str,
     mut args_map: Map<String, serde_json::Value>,
-) -> (String, bool) {
+) -> (String, bool, Option<serde_json::Value>) {
     // Phase 3.2: presence / audit / status / reload tools now go through
     // `inventory::iter::<McpToolEntry>()` instead of a 15-arm match ladder.
     // Federation / workspace tools stay on the second match arm below
@@ -695,7 +697,8 @@ async fn dispatch_tool_call(
         snapshots,
     };
     if let Some(result) = invoke_inventory(&ctx, name, args_map.clone()) {
-        return tool_result(name, result);
+        let (text, is_err) = tool_result(name, result);
+        return (text, is_err, None);
     }
 
     // Contract-federation tools (PR 16): `list_services`, `get_service`.
@@ -708,8 +711,12 @@ async fn dispatch_tool_call(
     // tools can answer before the repo-resolution gate.
     if let Some(fut) = invoke_contract_inventory(&ctx, name, args_map.clone()) {
         match fut.await {
-            Ok(outcome) => return tool_result(name, Ok(outcome.structured)),
-            Err(text) => return (text, true),
+            Ok(outcome) => {
+                let serialized = serde_json::to_string(&outcome.structured)
+                    .unwrap_or_else(|e| format!("{name}: serialization error: {e}"));
+                return (serialized, outcome.is_error, Some(outcome.structured));
+            }
+            Err(text) => return (text, true, None),
         }
     }
 
@@ -724,7 +731,7 @@ async fn dispatch_tool_call(
             && !args_map.contains_key("repo_id")
             && !args_map.contains_key("symbol")
         {
-            return (federation_health_report(fed), false);
+            return (federation_health_report(fed), false, None);
         }
         if requires_repo_scope(name) {
             match resolve_repo_or_error(fed, name, &args_map) {
@@ -734,7 +741,7 @@ async fn dispatch_tool_call(
                         serde_json::Value::String(rid.as_str().to_string()),
                     );
                 }
-                Err(text) => return (text, true),
+                Err(text) => return (text, true, None),
             }
         }
     }
@@ -759,9 +766,9 @@ async fn dispatch_tool_call(
             if let Some(note) = note {
                 text.push_str(&note);
             }
-            (text, false)
+            (text, false, None)
         }
-        Err(e) => (format!("Error: {e}"), true),
+        Err(e) => (format!("Error: {e}"), true, None),
     }
 }
 
@@ -1034,7 +1041,7 @@ impl ServerHandler for LainHandler {
             ));
         }
 
-        let (text, is_error) = dispatch_tool_call(
+        let (text, is_error, structured) = dispatch_tool_call(
             &self.executor,
             self.federation.as_deref(),
             self.workspaces.as_ref(),
@@ -1047,9 +1054,10 @@ impl ServerHandler for LainHandler {
         )
         .await;
 
-        Ok(tool_text_result(
+        Ok(tool_result_with_structured(
             text,
             is_error,
+            structured,
             self.executor.overlay(),
             static_graph_generation_unix,
         ))
@@ -1251,6 +1259,55 @@ pub(crate) async fn await_startup_reindex(
 }
 
 impl LainMcpServer {
+    /// Invoke the same bounded dispatcher used by stdio and HTTP without
+    /// attaching a transport. This is useful for embedding LAIN and for
+    /// transport-parity tests; callers receive the canonical structured
+    /// payload before transport-specific JSON-RPC framing is applied.
+    pub async fn call_tool_embedded(
+        &self,
+        name: &str,
+        args: Map<String, Value>,
+    ) -> (String, bool, Option<Value>) {
+        if let Some(gated) =
+            gate_for_dispatch(&self.executor, self.federation.as_deref(), name, &args)
+        {
+            let is_error = gated.is_error();
+            let value = serde_json::to_value(&gated).unwrap_or_default();
+            let text = serde_json::to_string(&value).unwrap_or_default();
+            return (text, is_error, Some(value));
+        }
+
+        let status = HandlerStatus {
+            transport: self.status_transport,
+            port: self.status_port,
+            started_at: self.status_started_at,
+            last_sync_at: self.status_last_sync_at.clone(),
+            last_error: self.status_last_error.clone(),
+            repo_count: self
+                .federation
+                .as_ref()
+                .map(|f| f.list_repos().len())
+                .unwrap_or(0),
+            workspaces_count: self
+                .workspaces
+                .as_ref()
+                .map(|w| w.read().workspaces.len())
+                .unwrap_or(0),
+        };
+        dispatch_tool_call(
+            &self.executor,
+            self.federation.as_deref(),
+            self.workspaces.as_ref(),
+            &status,
+            self.reload_bus.as_deref(),
+            self.server.as_deref(),
+            self.snapshots.as_ref(),
+            name,
+            args,
+        )
+        .await
+    }
+
     pub fn new(executor: ToolExecutor) -> Self {
         let now = std::time::SystemTime::now();
         Self {
@@ -1645,39 +1702,14 @@ impl LainMcpServer {
     /// trusts that the caller has already validated it.
     #[allow(clippy::redundant_locals)]
     pub async fn run_http(self, addr: std::net::SocketAddr) -> SdkResult<()> {
-        info!("Starting Lain MCP HTTP server on {addr}");
-
-        // Bind the HTTP listener *before* spawning the background
-        // re-index. The original order spawned the startup task first
-        // and only then reached `TcpListener::bind`, which let the
-        // startup task starve the bind on the same runtime when the
-        // startup task itself hung — Bug #2 from the 2026-09-18 Tauri
-        // postmortem: the CLI server hung in `Dl` state, port 9999
-        // never opened, no log lines after the projection log.
-        // Binding first means the listener is up even if the re-index
-        // hangs; clients hitting the port then get the structured
-        // `warming_up` response from `dispatch_tool_call` (see the
-        // comment in `run_stdio`) instead of a connection refused, and
-        // operators can poll `/health` to observe the stuck state.
         let listener = TcpListener::bind(addr).await?;
+        self.run_http_listener(listener).await
+    }
 
-        // Same backgrounded re-index as `run_stdio`; see there for
-        // the full rationale. HTTP has no equivalent to stdio's
-        // "session ended" moment (the accept loop below runs until
-        // the process is killed), but unlike the pre-fix code we now
-        // retain the `JoinHandle` in `LifecycleInfo::startup_task` so
-        // a future `LainServer::shutdown` (or `Drop`) can cancel the
-        // server-owned token and bound-await the task. The
-        // transport's own loop keeps running until the runtime tears
-        // it down — the same shutdown story every other HTTP server
-        // in the project's stack uses — but the backgrounded indexer
-        // no longer races a teardown.
-        //
-        // No notifier: this transport is a plain request/response
-        // JSON-RPC loop with no persistent connection to push an
-        // unsolicited notification through. `get_capabilities`
-        // polling is the only freshness signal HTTP clients get
-        // today.
+    pub async fn run_http_listener(self, listener: TcpListener) -> SdkResult<()> {
+        let real_addr = listener.local_addr()?;
+        info!("Starting Lain MCP HTTP server on {real_addr}");
+
         let cancel = self
             .server
             .as_ref()
@@ -1695,7 +1727,7 @@ impl LainMcpServer {
 
         // Publish the real listener port so tool output can link to
         // `/ui/...` sessions; stdio mode leaves it at 0 (no links).
-        self.executor.set_diagnostics_port(addr.port());
+        self.executor.set_diagnostics_port(real_addr.port());
         let executor = Arc::new(self.executor);
         let federation = self.federation;
         let workspaces = self.workspaces;
@@ -1707,7 +1739,7 @@ impl LainMcpServer {
         let status_last_error = self.status_last_error;
         let reload_bus = self.reload_bus;
         let server = self.server;
-        let loopback_bound = addr.ip().is_loopback();
+        let loopback_bound = real_addr.ip().is_loopback();
 
         loop {
             match listener.accept().await {
@@ -1716,14 +1748,10 @@ impl LainMcpServer {
                     let federation = federation.clone();
                     let workspaces = workspaces.clone();
                     let snapshots = snapshots.clone();
-                    let status_transport = status_transport;
-                    let status_port = status_port;
-                    let status_started_at = status_started_at;
                     let status_last_sync_at = status_last_sync_at.clone();
                     let status_last_error = status_last_error.clone();
                     let reload_bus = reload_bus.clone();
                     let server = server.clone();
-                    let loopback_bound = loopback_bound;
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
@@ -2009,13 +2037,24 @@ async fn handle_request(
             let sgg = server
                 .as_deref()
                 .and_then(|s| s.static_graph_generation_unix());
+            let mut meta_map = serde_json::json!({
+                "revision": rev,
+                "static_graph_generation": sgg,
+            });
+            if let Some(ref st) = structured {
+                if let Some(view) = st
+                    .get("view")
+                    .or_else(|| st.get("meta").and_then(|m| m.get("view")))
+                {
+                    if let Some(m) = meta_map.as_object_mut() {
+                        m.insert("view".to_string(), view.clone());
+                    }
+                }
+            }
             let mut result = serde_json::json!({
                 "content": [{"type": "text", "text": text}],
                 "isError": is_error,
-                "_meta": {
-                    "revision": rev,
-                    "static_graph_generation": sgg,
-                }
+                "_meta": meta_map,
             });
             // Additive: only present for the gated warm-up/error envelope
             // today, so every existing response's shape is unchanged.
@@ -2368,7 +2407,7 @@ async fn handle_request(
                             return Ok(jsonrpc_tool_result(id, &text, is_error, Some(value)));
                         }
 
-                        let (text, is_error) = dispatch_tool_call(
+                        let (text, is_error, structured) = dispatch_tool_call(
                             &executor,
                             federation.as_deref(),
                             workspaces.as_ref(),
@@ -2381,7 +2420,7 @@ async fn handle_request(
                         )
                         .await;
 
-                        return Ok(jsonrpc_tool_result(id, &text, is_error, None));
+                        return Ok(jsonrpc_tool_result(id, &text, is_error, structured));
                     }
                     _ => {
                         serde_json::json!({

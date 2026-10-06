@@ -31,6 +31,14 @@ use crate::federation::contracts::mirrors::{
     RepoLock,
 };
 
+type IndexedJobPayload = (
+    u64,
+    Vec<String>,
+    Vec<u8>,
+    std::collections::BTreeMap<String, u64>,
+    crate::federation::contracts::coverage::RepoCoverage,
+);
+
 /// Default worker count (`§8.4`): `LAIN_SNAPSHOT_WORKERS` or 2.
 pub fn snapshot_workers() -> usize {
     match std::env::var("LAIN_SNAPSHOT_WORKERS") {
@@ -354,7 +362,7 @@ fn run_job_inner(
     // Indexing: open a fresh in-memory `GraphDatabase` (with a temp
     // payload path that gets cleaned up after we serialize) and run
     // `index_one_repo` in snapshot mode.
-    let index_result = (|| -> Result<(u64, Vec<String>, Vec<u8>), LainError> {
+    let index_result = (|| -> Result<IndexedJobPayload, LainError> {
         // Per-job tempdir for the per-repo graph. Created in
         // `std::env::temp_dir()` so it does not collide with the
         // federation's own per-repo state directories. The path is
@@ -376,20 +384,28 @@ fn run_job_inner(
         // Run a synchronous indexing pass against the per-job graph.
         // We use the `run_job_index` helper which avoids the async
         // runtime because the job runner is on its own OS thread.
-        let files: Vec<String> =
+        let (files, sensor_counts, repo_coverage) =
             crate::server::federation::contracts::snapshots::jobs::sync::run_job_index(
                 &wt_path,
                 &tmp.join("graph.bin"),
                 &spec.repo,
+                &sha,
+                &spec.analyzer_version,
             )?;
 
         let bytes = std::fs::read(tmp.join("graph.bin"))
             .map_err(|e| LainError::Io(format!("snapshot job: read indexed graph: {e}")))?;
         let _ = std::fs::remove_dir_all(&tmp);
-        Ok((bytes.len() as u64, files, bytes))
+        Ok((
+            bytes.len() as u64,
+            files,
+            bytes,
+            sensor_counts,
+            repo_coverage,
+        ))
     })();
 
-    let (bytes, files, graph_bytes) = match index_result {
+    let (bytes, files, graph_bytes, sensor_counts, repo_coverage) = match index_result {
         Ok(t) => t,
         Err(e) => {
             // Best-effort worktree cleanup so the lock release
@@ -406,13 +422,25 @@ fn run_job_inner(
         &sha,
         &spec.analyzer_version,
         files.clone(),
-        BTreeMap::new(),
+        sensor_counts,
         bytes,
     );
     let key = CacheKey::new(&spec.repo, &sha, &spec.analyzer_version);
     if let Err(e) = runner.cache().write_entry(&key, &graph_bytes, &manifest) {
         let _ = worktree_remove(runner.data_dir(), &spec.repo, &sha);
         return Err(e);
+    }
+    // Write the coverage ledger alongside the manifest
+    let mut ledger = crate::federation::contracts::coverage::CoverageLedger::default();
+    ledger.insert(spec.repo.clone(), repo_coverage);
+    let ledger_path =
+        crate::federation::contracts::index_cache::entry_dir(runner.cache().data_dir(), &key)
+            .join(crate::federation::contracts::coverage::LEDGER_FILE);
+    if let Err(e) = crate::federation::contracts::coverage::write_ledger(&ledger_path, &ledger) {
+        tracing::warn!(
+            "could not write coverage ledger to {}: {e}",
+            ledger_path.display()
+        );
     }
     let _ = worktree_remove(runner.data_dir(), &spec.repo, &sha);
     drop(lock);
@@ -430,6 +458,12 @@ pub mod sync {
     use crate::schema::RepoNamespace;
     use crate::server::ingest::ingestion::{index_one_repo, IndexMode, IndexRequest};
 
+    pub type SnapshotIndexResult = (
+        Vec<String>,
+        std::collections::BTreeMap<String, u64>,
+        crate::federation::contracts::coverage::RepoCoverage,
+    );
+
     /// Run `index_one_repo` in `IndexMode::Snapshot` against a
     /// fresh `GraphDatabase` opened at `graph_path`. Returns the
     /// list of files the indexer walked, ready to record in the
@@ -438,7 +472,9 @@ pub mod sync {
         workspace: &Path,
         graph_path: &Path,
         repo_id: &str,
-    ) -> Result<Vec<String>, LainError> {
+        sha: &str,
+        analyzer_version: &str,
+    ) -> Result<SnapshotIndexResult, LainError> {
         let db = GraphDatabase::new(graph_path)?;
         let git = AnyGitSensor::new(workspace, GitSensorMode::InProcess)
             .map_err(|e| LainError::Git(format!("AnyGitSensor: {e}")))?;
@@ -458,7 +494,7 @@ pub mod sync {
             .enable_all()
             .build()
             .map_err(|e| LainError::Other(format!("tokio runtime: {e}")))?;
-        let files = rt.block_on(async {
+        let (files, outcome) = rt.block_on(async {
             let request = IndexRequest {
                 path: &workspace_box,
                 graph: &db,
@@ -472,7 +508,7 @@ pub mod sync {
                 cancel: &cancel,
                 mode: IndexMode::Snapshot,
             };
-            index_one_repo(request).await?;
+            let outcome = index_one_repo(request).await?;
             let all = db.get_all_nodes();
             let mut paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for n in all {
@@ -480,9 +516,22 @@ pub mod sync {
                     paths.insert(n.path);
                 }
             }
-            Ok::<_, LainError>(paths.into_iter().collect())
+            Ok::<_, LainError>((paths.into_iter().collect(), outcome))
         })?;
-        Ok(files)
+
+        let sensor_counts = outcome.sensor_counts.as_map();
+        let key = crate::federation::contracts::index_cache::CacheKey::new(
+            repo_id,
+            sha,
+            analyzer_version,
+        );
+        let repo_coverage = crate::federation::contracts::coverage::coverage_from_reports(
+            workspace,
+            &key,
+            &outcome.sensor_counts,
+            &outcome.sensor_reports,
+        );
+        Ok((files, sensor_counts, repo_coverage))
     }
 }
 

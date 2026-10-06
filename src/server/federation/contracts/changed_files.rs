@@ -23,6 +23,30 @@ use git2::{DiffFormat, DiffOptions, Oid, Repository};
 
 use super::diff::ChangedFilesSource;
 
+/// Tri-state outcome of diffing a repository between two revisions (§9.2, Gap P1.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoDiffResult {
+    /// Diff succeeded and found the specified changed paths (relative to repository root).
+    Changed(BTreeSet<String>),
+    /// Diff succeeded and found zero differences between base and head.
+    Unchanged,
+    /// Diff could not be computed (missing git mirror, corrupt repository, invalid SHA, etc.).
+    Unavailable(String),
+}
+
+impl RepoDiffResult {
+    pub fn changed_files(&self) -> Option<&BTreeSet<String>> {
+        match self {
+            Self::Changed(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable(_))
+    }
+}
+
 /// A `git2` mirror-backed source. Builds an in-memory cache keyed by
 /// repo id; per-repo handles are opened lazily on first use.
 ///
@@ -89,21 +113,43 @@ impl MirrorChangedFiles {
     /// contains every repo-relative path that differs (add, modify,
     /// delete, rename — both old and new names on rename).
     pub fn diff(&self, repo: &str, base_sha: &str, head_sha: &str) -> BTreeSet<String> {
-        self.diff_impl(repo, base_sha, head_sha).unwrap_or_default()
+        match self.diff_repo(repo, base_sha, head_sha) {
+            RepoDiffResult::Changed(files) => files,
+            _ => BTreeSet::new(),
+        }
+    }
+
+    /// Compute tri-state diff for a single repository.
+    pub fn diff_repo(&self, repo: &str, base_sha: &str, head_sha: &str) -> RepoDiffResult {
+        if !base_sha.is_empty() && base_sha == head_sha {
+            return RepoDiffResult::Unchanged;
+        }
+        let r = match self.repo(repo) {
+            Some(r) => r,
+            None => {
+                return RepoDiffResult::Unavailable(format!("git mirror missing for repo {repo}"));
+            }
+        };
+        match self.diff_impl(&r, base_sha, head_sha) {
+            Ok(files) => {
+                if files.is_empty() {
+                    RepoDiffResult::Unchanged
+                } else {
+                    RepoDiffResult::Changed(files)
+                }
+            }
+            Err(e) => RepoDiffResult::Unavailable(format!("git error diffing repo {repo}: {e}")),
+        }
     }
 
     fn diff_impl(
         &self,
-        repo: &str,
+        r: &Repository,
         base_sha: &str,
         head_sha: &str,
     ) -> Result<BTreeSet<String>, git2::Error> {
-        let r = match self.repo(repo) {
-            Some(r) => r,
-            None => return Ok(BTreeSet::new()),
-        };
-        let base_tree = lookup_tree(&r, base_sha)?;
-        let head_tree = lookup_tree(&r, head_sha)?;
+        let base_tree = lookup_tree(r, base_sha)?;
+        let head_tree = lookup_tree(r, head_sha)?;
         let mut opts = DiffOptions::new();
         opts.include_typechange(true);
         let diff = r.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))?;
@@ -177,20 +223,77 @@ impl ChangedFilesSource for RepoScopedChangedFiles {
     fn changed_files(&self, _base: &str, _head: &str) -> BTreeSet<String> {
         self.files.clone()
     }
+
+    fn changed_files_for_repo(&self, repo: &str, _base: &str, _head: &str) -> RepoDiffResult {
+        if repo == self.repo {
+            if self.files.is_empty() {
+                RepoDiffResult::Unchanged
+            } else {
+                RepoDiffResult::Changed(self.files.clone())
+            }
+        } else {
+            RepoDiffResult::Unchanged
+        }
+    }
 }
 
 /// Variant that exposes the multi-repo case to `diff_contracts`:
-/// returns the union of every cached repo's diff.
+/// maps each repo to its tri-state diff outcome.
 pub struct MultiRepoChangedFiles {
-    pub by_repo: BTreeMap<String, BTreeSet<String>>,
+    pub by_repo: BTreeMap<String, RepoDiffResult>,
+}
+
+impl MultiRepoChangedFiles {
+    pub fn unavailable_repos(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for (repo, res) in &self.by_repo {
+            if res.is_unavailable() {
+                out.insert(repo.clone());
+            }
+        }
+        out
+    }
+
+    pub fn from_sets(by_repo: BTreeMap<String, BTreeSet<String>>) -> Self {
+        let mapped = by_repo
+            .into_iter()
+            .map(|(repo, set)| {
+                let res = if set.is_empty() {
+                    RepoDiffResult::Unchanged
+                } else {
+                    RepoDiffResult::Changed(set)
+                };
+                (repo, res)
+            })
+            .collect();
+        Self { by_repo: mapped }
+    }
 }
 
 impl ChangedFilesSource for MultiRepoChangedFiles {
     fn changed_files(&self, _base: &str, _head: &str) -> BTreeSet<String> {
         let mut out: BTreeSet<String> = BTreeSet::new();
         for s in self.by_repo.values() {
-            for f in s {
-                out.insert(f.clone());
+            if let RepoDiffResult::Changed(f) = s {
+                for file in f {
+                    out.insert(file.clone());
+                }
+            }
+        }
+        out
+    }
+
+    fn changed_files_for_repo(&self, repo: &str, _base: &str, _head: &str) -> RepoDiffResult {
+        self.by_repo.get(repo).cloned().unwrap_or_else(|| {
+            RepoDiffResult::Unavailable(format!("repo {repo} not found in snapshot diff"))
+        })
+    }
+
+    fn unavailable_repos(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for (repo, res) in &self.by_repo {
+            if res.is_unavailable() {
+                out.insert(repo.clone());
             }
         }
         out
@@ -291,6 +394,37 @@ mod tests {
         let src = MirrorChangedFiles::new(tmp.path());
         let out = src.diff("missing", "deadbeef", "deadbeef");
         assert!(out.is_empty());
+        let res = src.diff_repo("missing", "deadbeef", "cafebabe");
+        assert!(matches!(res, RepoDiffResult::Unavailable(_)));
+    }
+
+    #[test]
+    fn diff_repo_reports_tri_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("src");
+        let mirror = tmp.path().join("mirrors").join("src.git");
+        let (base, head, path) =
+            init_repo_with_history(&work, &[("a.txt", "hello\n"), ("b.txt", "world\n")]);
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        setup_mirror(&work, &mirror);
+        let src = MirrorChangedFiles::new(tmp.path());
+
+        // Changed
+        let res = src.diff_repo("src", &base, &head);
+        match res {
+            RepoDiffResult::Changed(files) => {
+                assert!(files.contains(&path));
+            }
+            other => panic!("expected Changed, got {other:?}"),
+        }
+
+        // Unchanged (same SHAs)
+        let same = src.diff_repo("src", &base, &base);
+        assert_eq!(same, RepoDiffResult::Unchanged);
+
+        // Unavailable (missing repo)
+        let unavail = src.diff_repo("missing", &base, &head);
+        assert!(unavail.is_unavailable());
     }
 
     #[test]
@@ -329,13 +463,24 @@ mod tests {
         let mut by_repo = BTreeMap::new();
         let mut a = BTreeSet::new();
         a.insert("src/a.rs".to_string());
-        by_repo.insert("orders".into(), a);
+        by_repo.insert("orders".into(), a.clone());
         let mut b = BTreeSet::new();
         b.insert("src/b.rs".to_string());
-        by_repo.insert("billing".into(), b);
-        let src = MultiRepoChangedFiles { by_repo };
+        by_repo.insert("billing".into(), b.clone());
+        let src = MultiRepoChangedFiles::from_sets(by_repo);
         let out = src.changed_files("base", "head");
         assert!(out.contains("src/a.rs"));
         assert!(out.contains("src/b.rs"));
+        assert_eq!(
+            src.changed_files_for_repo("orders", "base", "head"),
+            RepoDiffResult::Changed(a)
+        );
+        assert_eq!(
+            src.changed_files_for_repo("billing", "base", "head"),
+            RepoDiffResult::Changed(b)
+        );
+        assert!(src
+            .changed_files_for_repo("unknown", "base", "head")
+            .is_unavailable());
     }
 }

@@ -258,10 +258,6 @@ scenarios:
             - service: billing
               class: Verified
               reasons: []
-            - service: reports       # transitively, via billing
-              class: Verified
-              reasons: []
-              transitive: true
         - side: provider
           endpoint: { service: orders, key: "http:GET /api/orders/me" }
           kind: FieldRemoved
@@ -269,16 +265,12 @@ scenarios:
           field: customer_id
           compat: BreakingIfRead
           impact:
-            class: Verified
-            reasons: []
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
           affected:
-            - service: billing
-              class: Verified
-              reasons: []
-            - service: reports       # transitively, via billing
-              class: Verified
-              reasons: []
-              transitive: true
+            - service: orders
+              class: NeedsInvestigation
+              reasons: [unresolved_candidates]
         - side: provider
           endpoint: { service: orders, key: "http:POST /api/orders" }
           kind: FieldRemoved
@@ -286,19 +278,15 @@ scenarios:
           field: customer_id
           compat: BreakingIfRead
           impact:
-            class: Verified
-            reasons: []
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
           affected:
-            - service: billing
-              class: Verified
-              reasons: []
-            - service: reports       # transitively, via billing
-              class: Verified
-              reasons: []
-              transitive: true
+            - service: orders
+              class: NeedsInvestigation
+              reasons: [unresolved_candidates]
       compatible_changes: 0
       coverage:
-        complete: true
+        complete: false
         scope:
           reviewed:    [orders, billing, reports, platform]
           unreviewed:  []
@@ -314,7 +302,7 @@ scenarios:
       changes: []   # optional response field add: Compatible, not reported (§9.4)
       compatible_changes: 1
       coverage:
-        complete: true
+        complete: false
         scope:
           reviewed:    [orders, billing, reports, platform]
           unreviewed:  []
@@ -432,8 +420,8 @@ scenarios:
           added: [refunded]
           compat: NeedsReview
           impact:
-            class: NoKnownImpact
-            reasons: []
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
             scope:
               reviewed:    [orders, billing, reports, platform]
               unreviewed:  []
@@ -446,8 +434,8 @@ scenarios:
           added: [refunded]
           compat: NeedsReview
           impact:
-            class: NoKnownImpact
-            reasons: []
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
             scope:
               reviewed:    [orders, billing, reports, platform]
               unreviewed:  []
@@ -460,8 +448,8 @@ scenarios:
           added: [refunded]
           compat: NeedsReview
           impact:
-            class: NoKnownImpact
-            reasons: []
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
             scope:
               reviewed:    [orders, billing, reports, platform]
               unreviewed:  []

@@ -112,6 +112,80 @@ pub fn live_scope(fed: &FederatedIndex) -> Value {
     })
 }
 
+pub fn snapshot_scope(
+    record: &crate::federation::contracts::snapshots::record::SnapshotRecord,
+) -> Value {
+    let mut reviewed: Vec<Value> = Vec::new();
+    let mut unreviewed: Vec<Value> = Vec::new();
+    for (repo, commit) in &record.repos {
+        let is_cached = record
+            .repo_states
+            .get(repo)
+            .map(|s| {
+                matches!(
+                    s,
+                    crate::federation::contracts::snapshots::RepoSnapshotState::Cached { .. }
+                )
+            })
+            .unwrap_or(false);
+        if is_cached {
+            reviewed.push(json!({
+                "repo": repo,
+                "commit": commit,
+                "dirty": false,
+            }));
+        }
+    }
+    for (repo, state) in &record.repo_states {
+        let entry = match state {
+            crate::federation::contracts::snapshots::RepoSnapshotState::Excluded => {
+                Some(("excluded", None))
+            }
+            crate::federation::contracts::snapshots::RepoSnapshotState::Failed {
+                error, ..
+            } => Some(("failed", Some(error.clone()))),
+            crate::federation::contracts::snapshots::RepoSnapshotState::Indexing { .. }
+            | crate::federation::contracts::snapshots::RepoSnapshotState::Queued { .. } => {
+                Some(("not_ready", None))
+            }
+            crate::federation::contracts::snapshots::RepoSnapshotState::Cached { .. } => None,
+        };
+        if let Some((reason, error)) = entry {
+            let mut obj = json!({
+                "repo": repo,
+                "reason": reason,
+            });
+            if let Some(err) = error {
+                obj["error"] = json!(err);
+            }
+            unreviewed.push(obj);
+        }
+    }
+    reviewed.sort_by(|a, b| {
+        a.get("repo")
+            .and_then(|v| v.as_str())
+            .cmp(&b.get("repo").and_then(|v| v.as_str()))
+    });
+    unreviewed.sort_by(|a, b| {
+        a.get("repo")
+            .and_then(|v| v.as_str())
+            .cmp(&b.get("repo").and_then(|v| v.as_str()))
+    });
+    json!({
+        "reviewed": reviewed,
+        "unreviewed": unreviewed,
+        "configured_only": true,
+    })
+}
+
+pub fn empty_scope() -> Value {
+    json!({
+        "reviewed": [],
+        "unreviewed": [],
+        "configured_only": true,
+    })
+}
+
 /// Whether the repo's health means `provider_reviewed: true` for
 /// `get_service` (`§12` guarantee). Only `RepoHealth::Ready`
 /// counts as reviewed.

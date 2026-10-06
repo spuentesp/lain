@@ -193,6 +193,25 @@ impl ContractFederationConfig {
                     out.bindings = serde_yaml::from_value(v.clone())
                         .map_err(|e| LainError::Config(format!("bindings: {e}")))?
                 }
+                "contract" => {
+                    let nested: ContractFederationConfig = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("contract: {e}")))?;
+                    if out.services.is_empty() {
+                        out.services = nested.services;
+                    }
+                    if out.http_clients.is_empty() {
+                        out.http_clients = nested.http_clients;
+                    }
+                    if out.generic_keys.is_empty() {
+                        out.generic_keys = nested.generic_keys;
+                    }
+                    if out.schemas.is_empty() {
+                        out.schemas = nested.schemas;
+                    }
+                    if out.bindings.is_empty() {
+                        out.bindings = nested.bindings;
+                    }
+                }
                 // Other top-level keys are the existing
                 // `FederationConfig`'s. They're handled by the
                 // federation loader, not by us; here we just skip
@@ -237,7 +256,7 @@ impl ContractFederationConfig {
         }
         // Rule 3: service name equal to another repo id.
         for s in &self.services {
-            if repo_ids.iter().any(|r| r == &s.name) {
+            if repo_ids.iter().any(|r| r == &s.name && r != &s.repo) {
                 return Err(LainError::Config(format!(
                     "service name '{}' collides with a configured repo id",
                     s.name
@@ -250,13 +269,29 @@ impl ContractFederationConfig {
         // `services/shipping` and `services/shipping-api` don't
         // overlap.
         for s in &self.services {
-            for a in &s.paths {
-                for b in &s.paths {
+            for (i, a) in s.paths.iter().enumerate() {
+                for b in s.paths.iter().skip(i + 1) {
                     if path_prefixes_overlap(a, b) {
                         return Err(LainError::Config(format!(
                             "service '{}' has overlapping paths '{a}' and '{b}'",
                             s.name
                         )));
+                    }
+                }
+            }
+        }
+        for (i, s1) in self.services.iter().enumerate() {
+            for s2 in self.services.iter().skip(i + 1) {
+                if s1.repo == s2.repo {
+                    for a in &s1.paths {
+                        for b in &s2.paths {
+                            if path_prefixes_overlap(a, b) {
+                                return Err(LainError::Config(format!(
+                                    "services '{}' and '{}' in repo '{}' have overlapping paths '{a}' and '{b}'",
+                                    s1.name, s2.name, s1.repo
+                                )));
+                            }
+                        }
                     }
                 }
             }
@@ -547,6 +582,41 @@ services:
                 .contains("collides with a configured repo id"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn allows_service_name_equal_to_own_repo_id() {
+        let yaml = r#"
+services:
+  - name: alpha
+    repo: alpha
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        assert!(cfg.validate(&repo_ids()).is_ok());
+    }
+
+    #[test]
+    fn allows_single_path_in_service() {
+        let yaml = r#"
+services:
+  - name: shipping
+    repo: alpha
+    paths: ["services/shipping/"]
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        assert!(cfg.validate(&repo_ids()).is_ok());
+    }
+
+    #[test]
+    fn allows_disjoint_paths_in_service() {
+        let yaml = r#"
+services:
+  - name: shipping
+    repo: alpha
+    paths: ["services/shipping/", "services/inventory/"]
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        assert!(cfg.validate(&repo_ids()).is_ok());
     }
 
     #[test]

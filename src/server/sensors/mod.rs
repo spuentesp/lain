@@ -99,6 +99,44 @@ impl SensorCounts {
             SensorCountField::SqlTables => self.sql_tables += n,
         }
     }
+
+    pub fn as_map(&self) -> std::collections::BTreeMap<String, u64> {
+        let mut map = std::collections::BTreeMap::new();
+        if self.http_routes > 0 {
+            map.insert("http_routes".to_string(), self.http_routes as u64);
+        }
+        if self.openapi > 0 {
+            map.insert("openapi".to_string(), self.openapi as u64);
+        }
+        if self.proto > 0 {
+            map.insert("proto".to_string(), self.proto as u64);
+        }
+        if self.graphql > 0 {
+            map.insert("graphql".to_string(), self.graphql as u64);
+        }
+        if self.websocket > 0 {
+            map.insert("websocket".to_string(), self.websocket as u64);
+        }
+        if self.dynamic_dispatch > 0 {
+            map.insert("dynamic_dispatch".to_string(), self.dynamic_dispatch as u64);
+        }
+        if self.http_clients > 0 {
+            map.insert("http_clients".to_string(), self.http_clients as u64);
+        }
+        if self.fields > 0 {
+            map.insert("fields".to_string(), self.fields as u64);
+        }
+        if self.field_reads > 0 {
+            map.insert("field_reads".to_string(), self.field_reads as u64);
+        }
+        if self.entry_points > 0 {
+            map.insert("entry_points".to_string(), self.entry_points as u64);
+        }
+        if self.sql_tables > 0 {
+            map.insert("sql_tables".to_string(), self.sql_tables as u64);
+        }
+        map
+    }
 }
 
 /// Which `SensorCounts` field this sensor's count contributes to.

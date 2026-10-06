@@ -809,7 +809,7 @@ fn object_or_empty(args: Value) -> Map<String, Value> {
     }
 }
 
-fn snapshot_label(args_map: &Map<String, Value>) -> String {
+pub(crate) fn snapshot_label(args_map: &Map<String, Value>) -> String {
     args_map
         .get("snapshot")
         .and_then(|v| v.as_str())

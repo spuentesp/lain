@@ -221,14 +221,18 @@ async fn prepare_snapshot_workspace_dir_lands_cache_entry_and_record() {
     assert_eq!(got.record.state, outcome.record.state);
 }
 
-/// When the operator passes a *tag* (e.g. `base`) instead of a SHA,
-/// the worker must resolve it to a commit, write the cache under the
-/// resolved SHA, and have the record surface that resolved SHA
-/// (instead of the tag string) in `record.repos[repo]`. This is the
-/// bug-B regression: the cache is keyed on the resolved SHA, so the
-/// record's commit map must be promoted to the resolved value
-/// before the next `refresh_repo_states` runs — otherwise a
-/// successful index run looks like a cache miss.
+/// Black-box regression test for symbolic-ref snapshot preparation:
+/// When the operator passes a tag (e.g. `base`), the ref is resolved to a commit SHA upfront,
+/// the record's `repos` map is populated with the resolved canonical commit SHA, and the
+/// caller's tag input is stored in `refs_` for display.
+///
+/// Black-box flow:
+/// 1. Prepare snapshot by tag `base`.
+/// 2. Verify `record.repos` contains the resolved SHA and `record.refs_` contains `"base"`.
+/// 3. Query the snapshot successfully (`get`).
+/// 4. Verify cache entry is written under the canonical resolved SHA.
+/// 5. Restart snapshot manager; query again and verify it is ready.
+/// 6. Prepare snapshot with the resolved SHA directly and assert the SAME snapshot ID.
 #[tokio::test]
 async fn prepare_snapshot_with_tag_ref_promotes_record_to_resolved_sha() {
     std::env::set_var("LAIN_SNAPSHOT_WORKER_IDLE_TIMEOUT_MS", "1000");
@@ -236,8 +240,6 @@ async fn prepare_snapshot_with_tag_ref_promotes_record_to_resolved_sha() {
     let cfg = federation_config(&fix);
     let mgr = manager_with_resolver(&fix, &cfg);
     let orders_root = fix.repos_root.join("orders");
-    // Resolve `base` ourselves so we know the expected SHA the
-    // worker will land at.
     let base_sha = {
         let out = std::process::Command::new("git")
             .args(["rev-parse", "base"])
@@ -248,7 +250,6 @@ async fn prepare_snapshot_with_tag_ref_promotes_record_to_resolved_sha() {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     };
 
-    // The record starts with the unresolved ref (`base`).
     let mut repos = BTreeMap::new();
     repos.insert("orders".to_string(), "base".to_string());
     let req = PrepareRequest {
@@ -262,42 +263,50 @@ async fn prepare_snapshot_with_tag_ref_promotes_record_to_resolved_sha() {
     };
 
     let outcome = mgr.prepare(req).await.expect("prepare_snapshot");
-    // The snapshot reached `ready` (not stuck in `indexing` because
-    // of a cache-key mismatch).
     assert_eq!(
         outcome.record.state,
         lain::federation::contracts::snapshots::SnapshotState::Ready
     );
-    // Codex P2 (re-keying): the record's `repos` keeps the INPUT
-    // ref (`"base"`), not the resolved SHA. The id is hashed from
-    // the input refs (§13: "same inputs after ref resolution → same
-    // id"); mutating `repos` to the SHA would change the canonical
-    // content and produce a different id for the same logical
-    // request — preparing the same SHA directly would create a
-    // duplicate snapshot.
+    // Canonical SHA promotion: record.repos contains the resolved SHA
     assert_eq!(
         outcome.record.repos.get("orders").map(String::as_str),
-        Some("base"),
-        "record.repos[orders] must keep the input ref, not the resolved SHA"
+        Some(base_sha.as_str()),
+        "record.repos[orders] must be promoted to the resolved SHA"
     );
-    // The per-repo state surfaces the resolved SHA in `commit`
-    // (this is what the user actually queries).
-    let repo_state = outcome
-        .record
-        .repo_states
-        .get("orders")
-        .expect("orders repo state");
-    let commit = repo_state.commit().expect("orders commit");
-    assert_eq!(commit, base_sha);
-    // The cache is keyed on the resolved SHA — the worker wrote it
-    // there after `resolve_ref` returned the SHA.
+    // Caller-supplied input ref is preserved in refs_ for display
+    assert_eq!(
+        outcome.record.refs_.get("orders").map(String::as_str),
+        Some("base"),
+        "record.refs_[orders] must preserve the input ref"
+    );
+
+    // Query snapshot successfully
+    let queried = mgr
+        .get(&outcome.record.id, 5_000)
+        .await
+        .expect("get_snapshot");
+    assert_eq!(queried.record.id, outcome.record.id);
+
+    // Cache entry is stored under resolved SHA
     let key = CacheKey::new("orders", &base_sha, &outcome.record.analyzer_version);
     assert!(
         mgr.cache().has_entry(&key),
         "cache entry missing for orders@{base_sha}"
     );
-    // Re-keying invariant: preparing the resolved SHA directly
-    // must hit the SAME record id, not create a duplicate.
+
+    // Restart manager: fresh manager instance pointing at same data dir
+    let restarted_mgr = manager_with_resolver(&fix, &cfg);
+    let queried_after_restart = restarted_mgr
+        .get(&outcome.record.id, 5_000)
+        .await
+        .expect("get after restart");
+    assert_eq!(queried_after_restart.record.id, outcome.record.id);
+    assert_eq!(
+        queried_after_restart.record.state,
+        lain::federation::contracts::snapshots::SnapshotState::Ready
+    );
+
+    // Prepare by SHA directly and assert the SAME snapshot ID is returned!
     let mut sha_repos = BTreeMap::new();
     sha_repos.insert("orders".to_string(), base_sha.clone());
     let sha_req = PrepareRequest {
@@ -313,16 +322,10 @@ async fn prepare_snapshot_with_tag_ref_promotes_record_to_resolved_sha() {
         .prepare(sha_req)
         .await
         .expect("prepare with resolved SHA");
-    // The two requests compute different ids today (`base` vs the
-    // SHA) because the input is what hashes; the design says a
-    // future §13 rule can re-key. The post-fix invariant for this
-    // PR is: the first request's record still has the input ref.
-    let stored_first = mgr_cached_record(&mgr, &outcome.record.id);
     assert_eq!(
-        stored_first.repos.get("orders").map(String::as_str),
-        Some("base")
+        outcome.record.id, sha_outcome.record.id,
+        "preparing by tag and preparing by equivalent SHA must return the same snapshot ID"
     );
-    let _ = sha_outcome; // re-keying across id spaces is a separate concern
 }
 
 /// `prepare_snapshot` against an unknown repo surfaces
@@ -612,9 +615,20 @@ async fn derived_head_with_one_override_indexes_only_overridden_repo() {
     // 2. Derived: only `billing` overridden to a different ref.
     // `orders` and `platform` inherit the base's commits (no new
     // jobs for them — the cache entries are reused).
-    let override_ref = "deadbeef0000000000000000000000000000000000";
+    let override_sha = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "s20-read-discount"])
+            .current_dir(&billing_root)
+            .output()
+            .expect("git rev-parse s20-read-discount");
+        assert!(
+            out.status.success(),
+            "s20-read-discount tag missing in billing fixture"
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
     let mut derived_repos = BTreeMap::new();
-    derived_repos.insert("billing".into(), override_ref.to_string());
+    derived_repos.insert("billing".into(), "s20-read-discount".to_string());
     let outcome = mgr
         .prepare(PrepareRequest {
             refs_: BTreeMap::new(),
@@ -631,13 +645,10 @@ async fn derived_head_with_one_override_indexes_only_overridden_repo() {
     assert_ne!(outcome.record.id, base_id);
     // Re-read the record from disk to verify inheritance:
     // `orders` and `platform` keep the base's commits; `billing`
-    // uses the override.
+    // uses the override (promoted to canonical SHA).
     let stored = mgr_cached_record(&mgr, &outcome.record.id);
     assert_eq!(stored.repos.get("orders").unwrap(), &orders_sha);
-    assert_eq!(
-        stored.repos.get("billing").unwrap(),
-        &override_ref.to_string()
-    );
+    assert_eq!(stored.repos.get("billing").unwrap(), &override_sha);
     assert_eq!(stored.repos.get("platform").unwrap(), &platform_sha);
     // The derived id has the base's `config_hash` (ruling) — a
     // no-override derive would share the base id; this one
