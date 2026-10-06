@@ -1,7 +1,9 @@
 //! `used_by` walk (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.9).
 
 use crate::federation::contracts::model::EntryKind;
+use crate::federation::graph_backend::GraphBackend;
 use crate::graph::GraphDatabase;
+use crate::schema::{EdgeType, GraphNode};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -46,6 +48,42 @@ pub struct UsedByResult {
 ///     `truncated = true`.
 ///   - Results are sorted by `(kind, ref_id)` ascending.
 pub fn walk(graph: &GraphDatabase, start_id: &str, depth: u8) -> UsedByResult {
+    walk_impl(
+        start_id,
+        depth,
+        |id| graph.get_node(id).ok().flatten(),
+        |id| graph.incoming_calls(id),
+    )
+}
+
+/// Snapshot equivalent of [`walk`], operating on the immutable federated
+/// backend assembled from pinned per-repository cache entries.
+pub fn walk_backend(backend: &dyn GraphBackend, start_id: &str, depth: u8) -> UsedByResult {
+    let edges = backend.all_edges().unwrap_or_default();
+    walk_impl(
+        start_id,
+        depth,
+        |id| backend.get_node(id).ok().flatten(),
+        |id| {
+            edges
+                .iter()
+                .filter(|edge| edge.edge_type == EdgeType::Calls && edge.target_id == id)
+                .map(|edge| edge.source_id.clone())
+                .collect()
+        },
+    )
+}
+
+fn walk_impl<GetNode, Incoming>(
+    start_id: &str,
+    depth: u8,
+    mut get_node: GetNode,
+    mut incoming_calls: Incoming,
+) -> UsedByResult
+where
+    GetNode: FnMut(&str) -> Option<GraphNode>,
+    Incoming: FnMut(&str) -> Vec<String>,
+{
     let mut entries: Vec<Value> = Vec::new();
     let mut visited: BTreeSet<String> = BTreeSet::new();
     let mut truncated = false;
@@ -55,7 +93,7 @@ pub fn walk(graph: &GraphDatabase, start_id: &str, depth: u8) -> UsedByResult {
         if !visited.insert(id.clone()) {
             continue;
         }
-        let Some(node) = graph.get_node(&id).ok().flatten() else {
+        let Some(node) = get_node(&id) else {
             continue;
         };
         let name = node.name.clone();
@@ -77,7 +115,7 @@ pub fn walk(graph: &GraphDatabase, start_id: &str, depth: u8) -> UsedByResult {
             // Self with entry: fall through to expand.
         }
 
-        let parents = graph.incoming_calls(&id);
+        let parents = incoming_calls(&id);
         if parents.is_empty() {
             // No callers → §10.9 "unreferenced" when the node has
             // no entry (the entry-tagged case was already reported
@@ -135,13 +173,14 @@ pub fn walk(graph: &GraphDatabase, start_id: &str, depth: u8) -> UsedByResult {
 }
 
 fn evidence_ref(id: &str, path: &str, line: u32) -> Value {
+    let repo = id.split(':').next().unwrap_or("");
     json!({
         "id": id,
-        "repo": "",
+        "repo": repo,
         "commit": "",
         "path": path,
         "line": line,
-        "text": "",
+        "text": id,
     })
 }
 

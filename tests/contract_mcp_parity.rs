@@ -1,25 +1,33 @@
 //! MCP stdio/HTTP byte-parity test for contract-federation tools.
 //!
 //! §15.3 calls for byte-identical `structuredContent` (excluding
-//! `meta`) across stdio and HTTP transports for the same view and
-//! args. The handler in `dispatch_tool_call` is shared by both
-//! transports, so the parity is structural rather than network-
-//! layer dependent: this test exercises the handler the way both
-//! the stdio and HTTP `tools/call` arms do, and asserts the
-//! `data` payloads are byte-identical.
+//! non-deterministic fields like `elapsed_ms`) across stdio and HTTP
+//! transports for the same view and args.
+//!
+//! Spawns one stdio `ServerHandler` and one HTTP `ServerHandler`
+//! (backed by real TCP loopback listener) against the same fixture,
+//! asserting byte-identical results, `isError` parity, pagination parity,
+//! and error envelope parity.
 
 use std::collections::BTreeSet;
-
-use lain::federation::contracts::config::ContractFederationConfig;
-use lain::federation::contracts::model::ServiceName;
-use lain::federation::federated_index::FederatedIndex;
-use lain::federation::graph_backend::PetgraphBackend;
-use lain::server::mcp::contract_tools::services::{get_service_handle, list_services_handle};
-use lain::server::mcp::handler::McpContext;
-use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
+
+use lain::federation::contracts::config::ContractFederationConfig;
+use lain::federation::contracts::model::ServiceName;
+use lain::federation::contracts::snapshots::manager::SnapshotManager;
+use lain::federation::federated_index::FederatedIndex;
+use lain::federation::graph_backend::PetgraphBackend;
+use lain::graph::GraphDatabase;
+use lain::server::mcp::handler::LainMcpServer;
+use lain::server::tools::create_test_executor_with_graph;
+use serde_json::{json, Value};
+use tokio::net::TcpListener;
+
+#[path = "support/contracts_snapshot_harness.rs"]
+mod snap_harness;
 
 fn git_init_committed(dir: &Path) {
     let status = Command::new("git")
@@ -91,20 +99,6 @@ async fn build_min_federation(root: &Path) -> Arc<FederatedIndex> {
     fed
 }
 
-fn ctx_for(fed: &Arc<FederatedIndex>) -> McpContext<'_> {
-    use std::sync::OnceLock;
-    static STATUS: OnceLock<lain::server::mcp::handler::HandlerStatus> = OnceLock::new();
-    let status = STATUS.get_or_init(lain::server::mcp::handler::HandlerStatus::for_test);
-    McpContext {
-        server: None,
-        federation: Some(fed.as_ref()),
-        workspaces: None,
-        status,
-        reload_bus: None,
-        snapshots: None,
-    }
-}
-
 fn strip_meta(v: &Value) -> Value {
     let mut obj = v.as_object().cloned().unwrap_or_default();
     obj.remove("meta");
@@ -113,6 +107,13 @@ fn strip_meta(v: &Value) -> Value {
     obj.remove("snapshot");
     obj.remove("api_version");
     Value::Object(obj)
+}
+
+fn strip_elapsed(mut v: Value) -> Value {
+    if let Some(meta) = v.get_mut("meta").and_then(|m| m.as_object_mut()) {
+        meta.remove("elapsed_ms");
+    }
+    v
 }
 
 fn canonical_bytes(v: &Value) -> Vec<u8> {
@@ -138,25 +139,102 @@ fn normalize_for_parity(v: &Value, seen: &mut BTreeSet<String>) {
     }
 }
 
+/// Test harness comparing the dispatcher shared by stdio with a real
+/// hyper-backed HTTP listener on an ephemeral loopback port.
+struct ParityCluster {
+    port: u16,
+    embedded: LainMcpServer,
+}
+
+impl ParityCluster {
+    async fn new(
+        db_path: &Path,
+        fed: Arc<FederatedIndex>,
+        mgr: Option<Arc<SnapshotManager>>,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let graph = GraphDatabase::new(&db_path.join("parity_db")).expect("graph parity");
+        let exec = create_test_executor_with_graph(graph);
+        let mut embedded = LainMcpServer::with_federation(exec, Arc::clone(&fed))
+            .with_reindex_timeout(Some(Duration::from_millis(10)));
+        if let Some(m) = mgr.as_ref() {
+            embedded = embedded.with_snapshots(Arc::clone(m), None);
+        }
+
+        let http_handler = embedded.clone();
+
+        tokio::spawn(async move {
+            let _ = http_handler.run_http_listener(listener).await;
+        });
+
+        // Give listener a moment to initialize
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        Self { port, embedded }
+    }
+
+    async fn call_stdio(&self, tool: &str, args: Value) -> (Value, bool) {
+        let args_map = args.as_object().cloned().unwrap_or_default();
+        let (_, is_error, structured) = self.embedded.call_tool_embedded(tool, args_map).await;
+        (structured.unwrap_or(Value::Null), is_error)
+    }
+
+    async fn call_http(&self, tool: &str, args: Value) -> (Value, bool) {
+        let client = reqwest::Client::new();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": tool,
+                "arguments": args
+            }
+        });
+        let resp: Value = client
+            .post(format!("http://127.0.0.1:{}/mcp", self.port))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .expect("http request send failed")
+            .json()
+            .await
+            .expect("http response json parse failed");
+
+        let result = &resp["result"];
+        let is_error = result["isError"].as_bool().unwrap_or(false);
+        let structured = result["structuredContent"].clone();
+        (structured, is_error)
+    }
+}
+
 #[tokio::test]
 async fn stdio_and_http_yield_byte_identical_data_for_list_services() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_min_federation(root).await;
+    let cluster = ParityCluster::new(root, fed, None).await;
 
-    // Both transports go through `dispatch_tool_call`'s
-    // inventory arm. Calling the handler twice simulates
-    // stdio and HTTP requests with the same args; the
-    // `data` payload must be byte-identical.
     let args = json!({"snapshot": "live"});
-    let a = list_services_handle(&ctx_for(&fed), args.clone())
-        .await
-        .unwrap();
-    let b = list_services_handle(&ctx_for(&fed), args).await.unwrap();
-    assert_eq!(a.structured["data"], b.structured["data"]);
-    let a_bytes = canonical_bytes(&strip_meta(&a.structured));
-    let b_bytes = canonical_bytes(&strip_meta(&b.structured));
-    assert_eq!(a_bytes, b_bytes, "list_services byte-parity");
+    let (stdio_struct, stdio_err) = cluster.call_stdio("list_services", args.clone()).await;
+    let (http_struct, http_err) = cluster.call_http("list_services", args).await;
+
+    assert_eq!(stdio_err, false, "stdio isError should be false");
+    assert_eq!(http_err, false, "http isError should be false");
+    assert_eq!(stdio_struct["data"], http_struct["data"]);
+
+    let stdio_bytes = canonical_bytes(&strip_meta(&stdio_struct));
+    let http_bytes = canonical_bytes(&strip_meta(&http_struct));
+    assert_eq!(stdio_bytes, http_bytes, "list_services byte-parity");
+    assert_eq!(
+        strip_elapsed(stdio_struct),
+        strip_elapsed(http_struct),
+        "structuredContent equality"
+    );
 }
 
 #[tokio::test]
@@ -164,14 +242,24 @@ async fn stdio_and_http_yield_byte_identical_data_for_get_service() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_min_federation(root).await;
+    let cluster = ParityCluster::new(root, fed, None).await;
+
     let args = json!({"snapshot": "live", "service": "orders"});
-    let a = get_service_handle(&ctx_for(&fed), args.clone())
-        .await
-        .unwrap();
-    let b = get_service_handle(&ctx_for(&fed), args).await.unwrap();
-    let a_bytes = canonical_bytes(&strip_meta(&a.structured));
-    let b_bytes = canonical_bytes(&strip_meta(&b.structured));
-    assert_eq!(a_bytes, b_bytes, "get_service byte-parity");
+    let (stdio_struct, stdio_err) = cluster.call_stdio("get_service", args.clone()).await;
+    let (http_struct, http_err) = cluster.call_http("get_service", args).await;
+
+    assert_eq!(stdio_err, false, "stdio isError should be false");
+    assert_eq!(http_err, false, "http isError should be false");
+    assert_eq!(stdio_struct["data"], http_struct["data"]);
+
+    let stdio_bytes = canonical_bytes(&strip_meta(&stdio_struct));
+    let http_bytes = canonical_bytes(&strip_meta(&http_struct));
+    assert_eq!(stdio_bytes, http_bytes, "get_service byte-parity");
+    assert_eq!(
+        strip_elapsed(stdio_struct),
+        strip_elapsed(http_struct),
+        "structuredContent equality"
+    );
 }
 
 #[tokio::test]
@@ -179,58 +267,51 @@ async fn service_name_sort_is_stable_across_calls() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_min_federation(root).await;
-    let a = list_services_handle(&ctx_for(&fed), json!({"snapshot": "live"}))
-        .await
-        .unwrap();
-    let b = list_services_handle(&ctx_for(&fed), json!({"snapshot": "live"}))
-        .await
-        .unwrap();
-    let names_a: Vec<String> = a.structured["data"]["items"]
+    let cluster = ParityCluster::new(root, fed, None).await;
+
+    let (stdio_struct, _) = cluster
+        .call_stdio("list_services", json!({"snapshot": "live"}))
+        .await;
+    let (http_struct, _) = cluster
+        .call_http("list_services", json!({"snapshot": "live"}))
+        .await;
+
+    let names_stdio: Vec<String> = stdio_struct["data"]["items"]
         .as_array()
         .unwrap()
         .iter()
         .map(|it| it["service"].as_str().unwrap_or("").to_string())
         .collect();
-    let names_b: Vec<String> = b.structured["data"]["items"]
+    let names_http: Vec<String> = http_struct["data"]["items"]
         .as_array()
         .unwrap()
         .iter()
         .map(|it| it["service"].as_str().unwrap_or("").to_string())
         .collect();
-    assert_eq!(names_a, names_b);
-    // §12 sort: services by name → `billing` < `orders`.
-    assert_eq!(names_a, vec!["billing".to_string(), "orders".to_string()]);
+
+    assert_eq!(names_stdio, names_http);
+    assert_eq!(
+        names_stdio,
+        vec!["billing".to_string(), "orders".to_string()]
+    );
 }
 
 #[tokio::test]
 async fn service_name_display_matches_label() {
-    // ServiceName's `Display` produces the lowercase name; the
-    // wire shape uses the same string. This pins the parity.
     let s = ServiceName("orders".to_string());
     assert_eq!(format!("{s}"), "orders");
 }
 
-// ─── §15.3 byte-parity: `diff_contracts` over the same snapshot pair ───
-//
-// `diff_contracts` returns its `changes` array in the §12 sort
-// order — `(side, service, key, kind, direction, field)` — which
-// is the only stable order between two calls. Two back-to-back
-// invocations on the same snapshot pair must therefore produce
-// byte-identical `data` payloads (the `meta` block is stripped —
-// `elapsed_ms` legitimately differs between calls).
-
-#[path = "support/contracts_snapshot_harness.rs"]
-mod snap_harness;
-
 #[tokio::test]
 async fn stdio_and_http_yield_byte_identical_data_for_diff_contracts() {
-    use lain::server::mcp::contract_tools::analysis::diff_contracts_handle;
-
     let fix = snap_harness::build_fixture();
     let mgr = snap_harness::manager(&fix.root);
     let config = snap_harness::contract_config(&fix.root);
-    let status = lain::server::mcp::handler::HandlerStatus::for_test();
-    let ctx = snap_harness::snapshot_ctx(&mgr, &status);
+    let fed = Arc::new(FederatedIndex::new(Arc::new(
+        PetgraphBackend::new(&fix.root.join("parity-federation")).unwrap(),
+    )));
+
+    let cluster = ParityCluster::new(&fix.root, fed, Some(Arc::clone(&mgr))).await;
 
     // Base = orders at `base`; head = orders at `s1-remove-customer-id`.
     let base_repos = snap_harness::all_repos_at(&fix.root, "base");
@@ -245,13 +326,77 @@ async fn stdio_and_http_yield_byte_identical_data_for_diff_contracts() {
     .await;
 
     let args = json!({"base": base_id, "head": head_id, "cap": 100});
-    let a = diff_contracts_handle(&ctx, args.clone()).await.unwrap();
-    let b = diff_contracts_handle(&ctx, args).await.unwrap();
+    let (stdio_struct, stdio_err) = cluster.call_stdio("diff_contracts", args.clone()).await;
+    let (http_struct, http_err) = cluster.call_http("diff_contracts", args).await;
 
-    let a_bytes = canonical_bytes(&strip_meta(&a.structured));
-    let b_bytes = canonical_bytes(&strip_meta(&b.structured));
+    assert_eq!(stdio_err, false, "diff_contracts stdio error");
+    assert_eq!(http_err, false, "diff_contracts http error");
+    assert_eq!(stdio_struct["data"], http_struct["data"]);
+
+    let stdio_bytes = canonical_bytes(&strip_meta(&stdio_struct));
+    let http_bytes = canonical_bytes(&strip_meta(&http_struct));
     assert_eq!(
-        a_bytes, b_bytes,
+        stdio_bytes, http_bytes,
         "diff_contracts byte-parity on the same snapshot pair"
+    );
+    assert_eq!(
+        strip_elapsed(stdio_struct),
+        strip_elapsed(http_struct),
+        "structuredContent equality"
+    );
+}
+
+#[tokio::test]
+async fn stdio_and_http_parity_on_error_envelope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let fed = build_min_federation(root).await;
+    let cluster = ParityCluster::new(root, fed, None).await;
+
+    // Missing snapshot argument
+    let args = json!({"snapshot": "snap_nonexistent", "service": "orders"});
+    let (stdio_struct, stdio_err) = cluster.call_stdio("get_service", args.clone()).await;
+    let (http_struct, http_err) = cluster.call_http("get_service", args).await;
+
+    assert_eq!(stdio_err, true, "stdio should report isError: true");
+    assert_eq!(http_err, true, "http should report isError: true");
+
+    assert_eq!(stdio_struct["error"]["code"], http_struct["error"]["code"]);
+    assert_eq!(
+        stdio_struct["error"]["message"],
+        http_struct["error"]["message"]
+    );
+}
+
+#[tokio::test]
+async fn stdio_and_http_parity_on_pagination() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let fed = build_min_federation(root).await;
+    let cluster = ParityCluster::new(root, fed, None).await;
+
+    // Cap to 1 item to trigger pagination
+    let args = json!({"snapshot": "live", "limit": 1});
+    let (stdio_struct, stdio_err) = cluster.call_stdio("list_services", args.clone()).await;
+    let (http_struct, http_err) = cluster.call_http("list_services", args).await;
+
+    assert_eq!(stdio_err, false);
+    assert_eq!(http_err, false);
+    assert_eq!(
+        stdio_struct["data"]["items"].as_array().map(|a| a.len()),
+        Some(1)
+    );
+    assert_eq!(
+        http_struct["data"]["items"].as_array().map(|a| a.len()),
+        Some(1)
+    );
+    assert_eq!(
+        stdio_struct["data"]["cursor"],
+        http_struct["data"]["cursor"]
+    );
+    assert_eq!(
+        strip_elapsed(stdio_struct),
+        strip_elapsed(http_struct),
+        "paginated structuredContent parity"
     );
 }

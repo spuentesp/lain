@@ -3,10 +3,10 @@
 //! `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.1 / §10.2 / §10.5 / §10.9 / §12.
 //!
 //! The two tools read from the in-process `FederatedIndex::contract_index()`
-//! after calling `rejoin_contracts_if_dirty()` (§10.1 / §5.3). They
-//! are `live`-only for this PR — anything other than `"live"` returns
-//! `snapshot_not_found`. PR 11/13 surfaces the snapshot manager and
-//! replaces the `contract_index` lookup with a per-snapshot read.
+//! after calling `rejoin_contracts_if_dirty()` (§10.1 / §5.3), or from
+//! an immutable `SnapshotFederation` when the caller supplies a pinned
+//! snapshot id. Snapshot reads retain a residency hold until the response
+//! (including reverse `used_by` traversal) has been assembled.
 //!
 //! ## Sort orders (§12)
 //!
@@ -20,18 +20,22 @@
 //! - `cursor`: opaque base64url; `cursor_mismatch` on reuse with
 //!   different arguments.
 
-use super::contracts::unresolved_reason_label;
+use super::contracts::{snapshot_label, unresolved_reason_label};
 use super::envelope::{cap_2000, check_api_version, error_outcome, outcome, success_envelope};
 use super::paging::{apply_limit, decode_cursor, fingerprint};
-use super::scope::{live_scope, provider_is_reviewed};
-use super::used_by::walk as walk_used_by;
+use super::scope::provider_is_reviewed;
+use super::used_by::{walk as walk_used_by, walk_backend as walk_used_by_backend};
 use super::{ContractToolEntry, ToolOutcome, DEFAULT_DEPTH, DEFAULT_LIMIT, MAX_DEPTH, MAX_LIMIT};
 use crate::federation::contracts::config::RoutePrefix;
 use crate::federation::contracts::index::{
     BoundField, ConsumerTarget, ContractIndex, Endpoint, ServiceInfo, UnresolvedReason,
 };
 use crate::federation::contracts::model::{EntryKind, ProviderOrigin};
+use crate::federation::contracts::snapshots::manager::{HoldGuard, SnapshotFederation};
+use crate::federation::contracts::snapshots::record::SnapshotRecord;
+use crate::federation::contracts::snapshots::RepoSnapshotState;
 use crate::federation::federated_index::FederatedIndex;
+use crate::federation::graph_backend::GraphBackend;
 use crate::federation::health::RepoHealth;
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::EdgeType;
@@ -41,6 +45,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Type alias for the boxed-future return type of a contract tool
@@ -59,20 +64,20 @@ pub fn list_services_handle<'a>(
         Value::Object(m) => m,
         _ => Map::new(),
     };
-    let ctx_fed = ctx.federation;
     Box::pin(async move {
         let started = Instant::now();
+        let snap_label = snapshot_label(&args_map);
         if let Err(details) = check_api_version(&args_map) {
             let o = error_outcome(
                 "unsupported_api_version",
                 "api_version not served",
                 Some(details),
-                "live",
+                &snap_label,
                 started,
             );
             return Ok(o);
         }
-        match run_list_services(ctx_fed, args_map, started).await {
+        match run_list_services(ctx, args_map, started).await {
             Ok(o) => Ok(o),
             Err(o) => Ok(o),
         }
@@ -88,20 +93,20 @@ pub fn get_service_handle<'a>(
         Value::Object(m) => m,
         _ => Map::new(),
     };
-    let ctx_fed = ctx.federation;
     Box::pin(async move {
         let started = Instant::now();
+        let snap_label = snapshot_label(&args_map);
         if let Err(details) = check_api_version(&args_map) {
             let o = error_outcome(
                 "unsupported_api_version",
                 "api_version not served",
                 Some(details),
-                "live",
+                &snap_label,
                 started,
             );
             return Ok(o);
         }
-        match run_get_service(ctx_fed, args_map, started).await {
+        match run_get_service(ctx, args_map, started).await {
             Ok(o) => Ok(o),
             Err(o) => Ok(o),
         }
@@ -119,25 +124,139 @@ inventory::submit!(ContractToolEntry {
 
 // ─── helpers ──────────────────────────────────────────────────────────
 
-/// Validate the `snapshot` argument. PR 16 only supports `"live"`.
-fn require_live_snapshot(args: &Map<String, Value>, started: Instant) -> Result<(), ToolOutcome> {
-    let snapshot = args.get("snapshot").and_then(|v| v.as_str()).unwrap_or("");
-    if snapshot == "live" {
-        Ok(())
-    } else {
-        Err(error_outcome(
+enum ServiceViewHandle<'a> {
+    Empty(Value),
+    Ready {
+        index: Arc<ContractIndex>,
+        scope: Value,
+        fed: Option<&'a FederatedIndex>,
+        snapshot: Option<Arc<SnapshotFederation>>,
+        record: Option<Box<SnapshotRecord>>,
+        _hold: Option<HoldGuard>,
+    },
+}
+
+async fn resolve_service_view<'a>(
+    ctx: &'a McpContext<'a>,
+    args_map: &Map<String, Value>,
+    started: Instant,
+) -> Result<ServiceViewHandle<'a>, ToolOutcome> {
+    let snap_label = snapshot_label(args_map);
+    if snap_label == "live" {
+        let fed = ctx.federation.ok_or_else(|| {
+            error_outcome(
+                "federation_disabled",
+                "this server is not configured with a federation",
+                None,
+                &snap_label,
+                started,
+            )
+        })?;
+        if let Err(e) = fed.rejoin_contracts_if_dirty() {
+            return Err(error_outcome(
+                "invalid_argument",
+                format!("rejoin failed: {e}"),
+                None,
+                &snap_label,
+                started,
+            ));
+        }
+        let Some(idx) = fed.contract_index() else {
+            return Ok(ServiceViewHandle::Empty(super::scope::live_scope(fed)));
+        };
+        return Ok(ServiceViewHandle::Ready {
+            index: idx,
+            scope: super::scope::live_scope(fed),
+            fed: Some(fed),
+            snapshot: None,
+            record: None,
+            _hold: None,
+        });
+    }
+
+    if !snap_label.starts_with(crate::federation::contracts::snapshots::SNAPSHOT_ID_PREFIX) {
+        return Err(error_outcome(
+            "snapshot_not_found",
+            format!("snapshot {snap_label:?} not found"),
+            Some(json!({"snapshot": snap_label})),
+            &snap_label,
+            started,
+        ));
+    }
+
+    let mgr = ctx.snapshots.ok_or_else(|| {
+        error_outcome(
+            "snapshot_manager_unavailable",
+            "snapshot manager is not configured for this server",
+            None,
+            &snap_label,
+            started,
+        )
+    })?;
+
+    let outcome = mgr.get(&snap_label, 5_000).await.map_err(|e| match e {
+        crate::federation::contracts::snapshots::manager::PrepareError::SnapshotNotFound {
+            snapshot,
+        } => error_outcome(
             "snapshot_not_found",
             format!("snapshot {snapshot:?} not found"),
-            None,
-            snapshot,
+            Some(json!({"snapshot": snapshot})),
+            &snap_label,
             started,
-        ))
-    }
+        ),
+        crate::federation::contracts::snapshots::manager::PrepareError::Busy { retry_after_ms } => {
+            error_outcome(
+                "busy",
+                "snapshot residency busy",
+                Some(json!({"retry_after_ms": retry_after_ms})),
+                &snap_label,
+                started,
+            )
+        }
+        other => error_outcome(
+            "invalid_argument",
+            format!("{other:?}"),
+            None,
+            &snap_label,
+            started,
+        ),
+    })?;
+
+    let (snap_fed, _guard) = mgr
+        .from_snapshot_with_wait_ms(&outcome.record, 5_000)
+        .map_err(|e| {
+            error_outcome(
+                "invalid_argument",
+                format!("from_snapshot failed: {e}"),
+                None,
+                &snap_label,
+                started,
+            )
+        })?;
+
+    let scope = super::scope::snapshot_scope(&outcome.record);
+    let ci = snap_fed.contract_index.read().clone();
+    let Some(idx) = ci else {
+        return Ok(ServiceViewHandle::Empty(scope));
+    };
+
+    Ok(ServiceViewHandle::Ready {
+        index: idx,
+        scope,
+        fed: None,
+        snapshot: Some(snap_fed),
+        record: Some(Box::new(outcome.record)),
+        _hold: Some(_guard),
+    })
 }
 
 /// Decode the `limit` argument (`§10.5`). Returns `Err` with the
 /// `range_too_large` outcome when the value exceeds `MAX_LIMIT`.
-fn parse_limit(args: &Map<String, Value>, started: Instant) -> Result<usize, ToolOutcome> {
+fn parse_limit(
+    args: &Map<String, Value>,
+    snapshot: &str,
+    started: Instant,
+) -> Result<usize, ToolOutcome> {
     let raw = args.get("limit").and_then(|v| v.as_u64());
     match raw {
         None => Ok(DEFAULT_LIMIT),
@@ -145,14 +264,14 @@ fn parse_limit(args: &Map<String, Value>, started: Instant) -> Result<usize, Too
             "range_too_large",
             format!("limit {n} exceeds max {MAX_LIMIT}"),
             Some(json!({"limit": n, "max": MAX_LIMIT, "requested": n})),
-            "live",
+            snapshot,
             started,
         )),
         Some(0) => Err(error_outcome(
             "invalid_argument",
             "limit must be >= 1",
             Some(json!({"arg": "limit"})),
-            "live",
+            snapshot,
             started,
         )),
         Some(n) => Ok(n as usize),
@@ -160,7 +279,11 @@ fn parse_limit(args: &Map<String, Value>, started: Instant) -> Result<usize, Too
 }
 
 /// Decode the `depth` argument (`§10.5`).
-fn parse_depth(args: &Map<String, Value>, started: Instant) -> Result<u8, ToolOutcome> {
+fn parse_depth(
+    args: &Map<String, Value>,
+    snapshot: &str,
+    started: Instant,
+) -> Result<u8, ToolOutcome> {
     let raw = args.get("depth").and_then(|v| v.as_u64());
     match raw {
         None => Ok(DEFAULT_DEPTH),
@@ -168,14 +291,14 @@ fn parse_depth(args: &Map<String, Value>, started: Instant) -> Result<u8, ToolOu
             "range_too_large",
             format!("depth {n} exceeds max {MAX_DEPTH}"),
             Some(json!({"limit": n, "max": MAX_DEPTH, "requested": n})),
-            "live",
+            snapshot,
             started,
         )),
         Some(0) => Err(error_outcome(
             "invalid_argument",
             "depth must be >= 1",
             Some(json!({"arg": "depth"})),
-            "live",
+            snapshot,
             started,
         )),
         Some(n) => Ok(n as u8),
@@ -187,6 +310,7 @@ fn parse_depth(args: &Map<String, Value>, started: Instant) -> Result<u8, ToolOu
 /// outcome.
 fn parse_cursor(
     args: &Map<String, Value>,
+    snapshot: &str,
     started: Instant,
 ) -> Result<Option<super::paging::CursorPayload>, ToolOutcome> {
     let Some(token) = args.get("cursor").and_then(|v| v.as_str()) else {
@@ -199,7 +323,7 @@ fn parse_cursor(
                 "invalid_argument",
                 "malformed cursor",
                 Some(json!({"arg": "cursor", "reason": "malformed"})),
-                "live",
+                snapshot,
                 started,
             ));
         }
@@ -210,7 +334,7 @@ fn parse_cursor(
             "invalid_argument",
             "cursor does not match the current arguments",
             Some(json!({"arg": "cursor", "reason": "cursor_mismatch"})),
-            "live",
+            snapshot,
             started,
         ));
     }
@@ -220,38 +344,23 @@ fn parse_cursor(
 // ─── list_services implementation ─────────────────────────────────────
 
 async fn run_list_services(
-    fed: Option<&FederatedIndex>,
+    ctx: &McpContext<'_>,
     args_map: Map<String, Value>,
     started: Instant,
 ) -> Result<ToolOutcome, ToolOutcome> {
-    require_live_snapshot(&args_map, started)?;
-    let fed = fed.ok_or_else(|| {
-        error_outcome(
-            "federation_disabled",
-            "this server is not configured with a federation",
-            None,
-            "live",
-            started,
-        )
-    })?;
-    let limit = parse_limit(&args_map, started)?;
-    let cursor = parse_cursor(&args_map, started)?;
+    let snap_label = snapshot_label(&args_map);
+    let limit = parse_limit(&args_map, &snap_label, started)?;
+    let cursor = parse_cursor(&args_map, &snap_label, started)?;
     let repo_filter = args_map
         .get("repo")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    if let Err(e) = fed.rejoin_contracts_if_dirty() {
-        return Err(error_outcome(
-            "invalid_argument",
-            format!("rejoin failed: {e}"),
-            None,
-            "live",
-            started,
-        ));
-    }
-    let Some(idx) = fed.contract_index() else {
-        return Ok(list_services_empty(fed, started));
+    let (idx, scope) = match resolve_service_view(ctx, &args_map, started).await? {
+        ServiceViewHandle::Empty(scope) => {
+            return Ok(list_services_empty(scope, &snap_label, started));
+        }
+        ServiceViewHandle::Ready { index, scope, .. } => (index, scope),
     };
 
     let mut items: Vec<Value> = Vec::new();
@@ -284,19 +393,18 @@ async fn run_list_services(
     let mut data = json!({
         "items": page,
     });
-    let scope = live_scope(fed);
     data["scope"] = scope;
     if let Some(tok) = next_cursor {
         data["cursor"] = json!(tok);
     }
     let text = render_list_services(&data);
-    let envelope = success_envelope(data.clone(), "live", false, started);
+    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
     Ok(outcome(envelope, &data, text))
 }
 
-fn list_services_empty(fed: &FederatedIndex, started: Instant) -> ToolOutcome {
-    let data = json!({"items": [], "scope": live_scope(fed)});
-    let envelope = success_envelope(data.clone(), "live", false, started);
+fn list_services_empty(scope: Value, snapshot: &str, started: Instant) -> ToolOutcome {
+    let data = json!({"items": [], "scope": scope});
+    let envelope = success_envelope(data.clone(), snapshot, snapshot != "live", started);
     let text = render_list_services(&data);
     outcome(envelope, &data, text)
 }
@@ -310,9 +418,6 @@ fn count_distinct_consumer_services(idx: &ContractIndex, info: &ServiceInfo) -> 
     let mut consumers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for resolution in idx.consumers.values() {
         if let Some(ConsumerTarget::Binds { .. }) = &resolution.target {
-            // `bound_endpoints` lists the endpoints this call binds
-            // to. If any of those endpoints belong to this service,
-            // count the consumer service.
             let bound = resolution
                 .bound_endpoints
                 .iter()
@@ -343,23 +448,14 @@ fn count_unresolved_inbound(idx: &ContractIndex, info: &ServiceInfo) -> usize {
 // ─── get_service implementation ───────────────────────────────────────
 
 async fn run_get_service(
-    fed: Option<&FederatedIndex>,
+    ctx: &McpContext<'_>,
     args_map: Map<String, Value>,
     started: Instant,
 ) -> Result<ToolOutcome, ToolOutcome> {
-    require_live_snapshot(&args_map, started)?;
-    let fed = fed.ok_or_else(|| {
-        error_outcome(
-            "federation_disabled",
-            "this server is not configured with a federation",
-            None,
-            "live",
-            started,
-        )
-    })?;
-    let limit = parse_limit(&args_map, started)?;
-    let depth = parse_depth(&args_map, started)?;
-    let cursor = parse_cursor(&args_map, started)?;
+    let snap_label = snapshot_label(&args_map);
+    let limit = parse_limit(&args_map, &snap_label, started)?;
+    let depth = parse_depth(&args_map, &snap_label, started)?;
+    let cursor = parse_cursor(&args_map, &snap_label, started)?;
     let service_arg = args_map
         .get("service")
         .and_then(|v| v.as_str())
@@ -368,49 +464,97 @@ async fn run_get_service(
                 "invalid_argument",
                 "missing required argument: service",
                 Some(json!({"arg": "service"})),
-                "live",
+                &snap_label,
                 started,
             )
         })?
         .to_string();
 
-    if let Err(e) = fed.rejoin_contracts_if_dirty() {
-        return Err(error_outcome(
-            "invalid_argument",
-            format!("rejoin failed: {e}"),
-            None,
-            "live",
-            started,
-        ));
-    }
-    let Some(idx) = fed.contract_index() else {
-        return Ok(get_service_not_found(&service_arg, fed, started));
+    let view = resolve_service_view(ctx, &args_map, started).await?;
+    let (idx, scope, fed_opt, snapshot_opt, record_opt, _hold) = match view {
+        ServiceViewHandle::Empty(scope) => {
+            return Ok(get_service_not_found(
+                &service_arg,
+                scope,
+                &snap_label,
+                started,
+            ));
+        }
+        ServiceViewHandle::Ready {
+            index,
+            scope,
+            fed,
+            snapshot,
+            record,
+            _hold,
+        } => (index, scope, fed, snapshot, record, _hold),
     };
+
     let Some(info) = idx
         .services
         .get(&crate::federation::contracts::model::ServiceName(
             service_arg.clone(),
         ))
     else {
-        return Ok(get_service_not_found(&service_arg, fed, started));
+        return Ok(get_service_not_found(
+            &service_arg,
+            scope,
+            &snap_label,
+            started,
+        ));
     };
 
-    let health = fed
-        .list_repos()
-        .into_iter()
-        .find(|(rid, _)| rid == &info.repo)
-        .map(|(_, h)| h)
-        .unwrap_or(RepoHealth::Missing);
-    let provider_reviewed = provider_is_reviewed(health);
+    let provider_reviewed = if let Some(fed) = fed_opt {
+        let health = fed
+            .list_repos()
+            .into_iter()
+            .find(|(rid, _)| rid == &info.repo)
+            .map(|(_, h)| h)
+            .unwrap_or(RepoHealth::Missing);
+        provider_is_reviewed(health)
+    } else if let Some(ref rec) = record_opt {
+        rec.repo_states
+            .get(info.repo.as_str())
+            .map(|s| matches!(s, RepoSnapshotState::Cached { .. }))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    let mut commit_by_repo = BTreeMap::new();
+    if let Some(fed) = fed_opt {
+        for (id, _) in fed.list_repos() {
+            if let Some(c) = fed
+                .get_repo(&id)
+                .and_then(|r| r.db().get_last_commit().ok().flatten())
+            {
+                commit_by_repo.insert(id.as_str().to_string(), c);
+            }
+        }
+    } else if let Some(ref rec) = record_opt {
+        for (r, c) in &rec.repos {
+            commit_by_repo.insert(r.clone(), c.clone());
+        }
+    }
 
     let endpoints: Vec<String> = info
         .endpoint_ids
         .iter()
         .map(|(_, k)| k.to_string())
         .collect();
-    let consumers = build_consumer_rows(fed, &idx, info.clone(), depth);
+    let snapshot_backend = snapshot_opt
+        .as_ref()
+        .map(|snapshot| snapshot.backend.as_ref() as &dyn GraphBackend);
+    let consumers = build_consumer_rows(
+        fed_opt,
+        snapshot_backend,
+        &idx,
+        info.clone(),
+        depth,
+        &commit_by_repo,
+    );
 
-    let unresolved_candidates = build_unresolved_candidates(&idx, info);
+    let unresolved_candidates = build_unresolved_candidates(&idx, info, &commit_by_repo);
 
     let mut consumers_value: Vec<Value> = consumers
         .iter()
@@ -423,11 +567,6 @@ async fn run_get_service(
         })
         .collect();
 
-    // Cursor paging over consumer-service rows, sorted by
-    // `(service, caller GlobalId, site line)` per §12. We already
-    // build the rows in that order; the cursor only trims by
-    // `service` (the first key) — finer-grained paging is the §13
-    // backlog, listed below.
     let cursor_after = cursor.as_ref().map(|c| c.after.clone());
     if let Some(after) = cursor_after {
         consumers_value.retain(|c| c["service"].as_str().unwrap_or("") > after.as_str());
@@ -445,23 +584,28 @@ async fn run_get_service(
         "consumers": consumers_page,
         "unresolved_candidates": unresolved_candidates,
     });
-    data["scope"] = live_scope(fed);
+    data["scope"] = scope;
     if let Some(tok) = next_cursor {
         data["cursor"] = json!(tok);
     }
     let text = render_get_service(&data);
-    let envelope = success_envelope(data.clone(), "live", false, started);
+    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
     Ok(outcome(envelope, &data, text))
 }
 
-fn get_service_not_found(service: &str, fed: &FederatedIndex, started: Instant) -> ToolOutcome {
+fn get_service_not_found(
+    service: &str,
+    scope: Value,
+    snapshot: &str,
+    started: Instant,
+) -> ToolOutcome {
     let mut data = json!({});
-    data["scope"] = live_scope(fed);
+    data["scope"] = scope;
     error_outcome(
         "service_not_found",
         format!("service {service:?} not declared"),
         Some(json!({"service": service})),
-        "live",
+        snapshot,
         started,
     )
 }
@@ -474,10 +618,12 @@ struct ConsumerRow {
 }
 
 fn build_consumer_rows(
-    fed: &FederatedIndex,
+    fed: Option<&FederatedIndex>,
+    snapshot_backend: Option<&dyn GraphBackend>,
     idx: &ContractIndex,
     info: ServiceInfo,
     depth: u8,
+    commit_by_repo: &std::collections::BTreeMap<String, String>,
 ) -> Vec<ConsumerRow> {
     let provider_endpoints: std::collections::BTreeSet<String> = info
         .endpoint_ids
@@ -505,25 +651,65 @@ fn build_consumer_rows(
         };
 
         let consumer_service = resolution.service.0.clone();
-        let caller_node =
-            call_caller_node(fed, call_id).unwrap_or_else(|| default_caller_node(call_id));
-        let site = call_site_meta(call_id, &caller_node);
+        let caller_node = fed
+            .and_then(|f| call_caller_node(f, call_id))
+            .or_else(|| snapshot_backend.and_then(|b| call_caller_node_backend(b, call_id)))
+            .unwrap_or_else(|| default_caller_node(call_id));
+        let caller_repo = caller_node
+            .id
+            .split(':')
+            .next()
+            .unwrap_or_else(|| call_id.repo_id());
+        let commit = commit_by_repo
+            .get(caller_repo)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let site = call_site_meta(call_id, &caller_node, commit);
 
-        // `used_by`: walk from the caller with the requested depth.
-        // We need the caller's enclosing function's graph node id, not
-        // the call itself; the `SendsHttp` edge's source is the
-        // caller. For PR 16 we approximate by reading the caller via
-        // the federation's per-repo db when we can find one.
-        let used_by = match caller_graph(fed, call_id) {
-            Some((_, db)) => walk_used_by(&db, &caller_node.id, depth),
-            None => super::used_by::UsedByResult {
+        let used_by = if let Some((_, db)) = fed.and_then(|f| caller_graph(f, call_id)) {
+            walk_used_by(&db, &caller_node.id, depth)
+        } else if let Some(backend) = snapshot_backend {
+            walk_used_by_backend(backend, &caller_node.id, depth)
+        } else {
+            super::used_by::UsedByResult {
                 entries: Vec::new(),
                 truncated: false,
-            },
+            }
         };
         let used_by_truncated = used_by.truncated;
         let mut used_by_entries = used_by.entries.clone();
         enrich_used_by_with_owners(&mut used_by_entries);
+        for entry in &mut used_by_entries {
+            if let Some(ref_obj) = entry.get_mut("ref").and_then(|v| v.as_object_mut()) {
+                let id_str = ref_obj
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let repo = id_str.split(':').next().unwrap_or("").to_string();
+                let c = commit_by_repo
+                    .get(&repo)
+                    .map(|s| s.as_str())
+                    .unwrap_or(commit)
+                    .to_string();
+                let path = ref_obj
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let line = ref_obj.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                ref_obj.insert("repo".to_string(), json!(repo));
+                ref_obj.insert("commit".to_string(), json!(c));
+                if !c.is_empty() && !path.is_empty() {
+                    ref_obj.insert(
+                        "text".to_string(),
+                        json!(format!("{repo}@{c}:{path}:{line}")),
+                    );
+                } else if !id_str.is_empty() {
+                    ref_obj.insert("text".to_string(), json!(id_str));
+                }
+            }
+        }
 
         let fields = collect_fields(idx, endpoint);
         let reads_complete = resolution.reads_complete;
@@ -536,7 +722,7 @@ fn build_consumer_rows(
         let use_value = json!({
             "endpoint": {"service": endpoint.id.0.0.as_str(), "key": &endpoint.id.1.to_string()},
             "site": site,
-            "caller": caller_node_evidence(&caller_node),
+            "caller": caller_node_evidence(&caller_node, commit),
             "binding": provenance_to_json(provenance),
             "match": match_label,
             "fields": fields,
@@ -545,8 +731,6 @@ fn build_consumer_rows(
             "used_by_truncated": used_by_truncated,
         });
 
-        // Group: row per consumer service; multiple uses are appended
-        // in `(caller GlobalId, site line)` order.
         let row = by_consumer.entry(consumer_service.clone()).or_default();
         let caller_key = caller_node.id.clone();
         let line_key = site["line"].as_u64().unwrap_or(0);
@@ -554,13 +738,9 @@ fn build_consumer_rows(
         row.entry(key).or_insert(use_value);
         by_consumer_repo
             .entry(consumer_service.clone())
-            .or_insert_with(|| consumer_repo_for(fed, &caller_node));
-        let _ = used_by_truncated;
+            .or_insert_with(|| caller_repo.to_string());
     }
 
-    // §12 sort: (service, caller GlobalId, site line). The by_consumer
-    // map is already a BTreeMap by service; the inner BTreeMap keys
-    // are `caller_id|line`, which sorts on caller_id first then line.
     let mut rows: Vec<ConsumerRow> = by_consumer
         .into_iter()
         .map(|(service, uses_map)| {
@@ -577,16 +757,32 @@ fn build_consumer_rows(
     rows
 }
 
-fn build_unresolved_candidates(idx: &ContractIndex, _info: &ServiceInfo) -> Vec<Value> {
-    // §9.7: unresolved consumers in any reviewed repo whose target
-    // could match any endpoint of this service. The §9.7 rule is
-    // exact-match-by-service, not per-endpoint — so any unresolved
-    // consumer in this service's repo counts.
+fn build_unresolved_candidates(
+    idx: &ContractIndex,
+    _info: &ServiceInfo,
+    commit_by_repo: &std::collections::BTreeMap<String, String>,
+) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for r in idx.consumers.values() {
         if let Some(ConsumerTarget::Unresolved { reason, .. }) = &r.target {
+            let repo = r.call_id.repo_id();
+            let path = r.call_id.path().unwrap_or_default();
+            let line = r.call_id.line_start().unwrap_or(0);
+            let commit = commit_by_repo.get(repo).map(|s| s.as_str()).unwrap_or("");
+            let text = if !commit.is_empty() && !path.is_empty() {
+                format!("{repo}@{commit}:{path}:{line}")
+            } else {
+                r.call_id.as_str().to_string()
+            };
             out.push(json!({
-                "consumer": {"id": r.call_id.as_str(), "repo": "", "commit": "", "path": "", "line": 0, "text": ""},
+                "consumer": {
+                    "id": r.call_id.as_str(),
+                    "repo": repo,
+                    "commit": commit,
+                    "path": path,
+                    "line": line,
+                    "text": text,
+                },
                 "url_expr": "",
                 "method": "",
                 "reason": unresolved_reason_label(*reason),
@@ -616,10 +812,6 @@ fn caller_graph(
 
 fn call_caller_node(fed: &FederatedIndex, call_id: &GlobalId) -> Option<CallerNode> {
     let (_, db) = caller_graph(fed, call_id)?;
-    // The `HttpClientCall` node has a `SendsHttp` edge from its
-    // enclosing function — that's the caller the `used_by` walk
-    // needs to start from. Real sensors wire this edge; the
-    // federation_contracts_e2e tests do too.
     let sends_source_id = db
         .all_edges()
         .into_iter()
@@ -634,46 +826,73 @@ fn call_caller_node(fed: &FederatedIndex, call_id: &GlobalId) -> Option<CallerNo
     })
 }
 
-fn default_caller_node(call_id: &GlobalId) -> CallerNode {
-    CallerNode {
-        id: call_id.as_str().to_string(),
-        path: String::new(),
-        line: 0,
-        name: String::new(),
-    }
-}
-
-fn call_site_meta(call_id: &GlobalId, caller: &CallerNode) -> Value {
-    json!({
-        "id": call_id.as_str(),
-        "repo": call_id.repo_id(),
-        "commit": "",
-        "path": caller.path,
-        "line": caller.line,
-        "text": "",
+fn call_caller_node_backend(backend: &dyn GraphBackend, call_id: &GlobalId) -> Option<CallerNode> {
+    let sends_source_id = backend
+        .all_edges()
+        .ok()?
+        .into_iter()
+        .find(|e| e.edge_type == EdgeType::SendsHttp && e.target_id == call_id.as_str())?
+        .source_id;
+    let caller = backend.get_node(&sends_source_id).ok().flatten()?;
+    Some(CallerNode {
+        id: caller.id,
+        path: caller.path,
+        line: caller.line_start.unwrap_or(0),
+        name: caller.name,
     })
 }
 
-fn consumer_repo_for(_fed: &FederatedIndex, caller: &CallerNode) -> String {
-    // The consumer repo is the repo whose `HttpClientCall` we just
-    // bound — derived from the caller's GlobalId repo-id segment.
-    caller
-        .id
-        .split(':')
-        .next()
-        .map(|s| s.to_string())
-        .unwrap_or_default()
+fn default_caller_node(call_id: &GlobalId) -> CallerNode {
+    CallerNode {
+        id: call_id.as_str().to_string(),
+        path: call_id.path().unwrap_or_default(),
+        line: call_id.line_start().unwrap_or(0),
+        name: call_id.name().unwrap_or_default(),
+    }
 }
 
-fn caller_node_evidence(caller: &CallerNode) -> Value {
+fn call_site_meta(call_id: &GlobalId, caller: &CallerNode, commit: &str) -> Value {
+    let repo = call_id.repo_id();
+    let path = if !caller.path.is_empty() {
+        caller.path.clone()
+    } else {
+        call_id.path().unwrap_or_default()
+    };
+    let line = if caller.line > 0 {
+        caller.line
+    } else {
+        call_id.line_start().unwrap_or(0)
+    };
+    let text = if !commit.is_empty() && !path.is_empty() {
+        format!("{repo}@{commit}:{path}:{line}")
+    } else {
+        call_id.as_str().to_string()
+    };
+    json!({
+        "id": call_id.as_str(),
+        "repo": repo,
+        "commit": commit,
+        "path": path,
+        "line": line,
+        "text": text,
+    })
+}
+
+fn caller_node_evidence(caller: &CallerNode, commit: &str) -> Value {
+    let repo = caller.id.split(':').next().unwrap_or("");
+    let text = if !commit.is_empty() && !caller.path.is_empty() {
+        format!("{repo}@{commit}:{}:{}", caller.path, caller.line)
+    } else {
+        caller.id.clone()
+    };
     json!({
         "id": caller.id,
         "name": caller.name,
-        "repo": "",
-        "commit": "",
+        "repo": repo,
+        "commit": commit,
         "path": caller.path,
         "line": caller.line,
-        "text": "",
+        "text": text,
     })
 }
 
@@ -841,14 +1060,17 @@ mod tests {
     #[test]
     fn parse_limit_default_when_absent() {
         let m = Map::new();
-        assert_eq!(parse_limit(&m, Instant::now()).unwrap(), DEFAULT_LIMIT);
+        assert_eq!(
+            parse_limit(&m, "live", Instant::now()).unwrap(),
+            DEFAULT_LIMIT
+        );
     }
 
     #[test]
     fn parse_limit_rejects_over_max() {
         let mut m = Map::new();
         m.insert("limit".to_string(), json!(MAX_LIMIT + 1));
-        let o = parse_limit(&m, Instant::now()).unwrap_err();
+        let o = parse_limit(&m, "live", Instant::now()).unwrap_err();
         assert!(o.is_error);
         assert_eq!(o.structured["error"]["code"], json!("range_too_large"));
     }
@@ -857,7 +1079,7 @@ mod tests {
     fn parse_limit_rejects_zero() {
         let mut m = Map::new();
         m.insert("limit".to_string(), json!(0));
-        let o = parse_limit(&m, Instant::now()).unwrap_err();
+        let o = parse_limit(&m, "live", Instant::now()).unwrap_err();
         assert_eq!(o.structured["error"]["code"], json!("invalid_argument"));
     }
 
@@ -865,7 +1087,7 @@ mod tests {
     fn parse_depth_rejects_over_max() {
         let mut m = Map::new();
         m.insert("depth".to_string(), json!(MAX_DEPTH + 1));
-        let o = parse_depth(&m, Instant::now()).unwrap_err();
+        let o = parse_depth(&m, "live", Instant::now()).unwrap_err();
         assert!(o.is_error);
         assert_eq!(o.structured["error"]["code"], json!("range_too_large"));
     }
@@ -874,7 +1096,7 @@ mod tests {
     fn parse_cursor_rejects_malformed() {
         let mut m = Map::new();
         m.insert("cursor".to_string(), json!("@@@"));
-        let o = parse_cursor(&m, Instant::now()).unwrap_err();
+        let o = parse_cursor(&m, "live", Instant::now()).unwrap_err();
         assert!(o.is_error);
     }
 
@@ -887,7 +1109,7 @@ mod tests {
         m.insert("snapshot".to_string(), json!("live"));
         m.insert("service".to_string(), json!("orders"));
         m.insert("cursor".to_string(), json!(token));
-        let o = parse_cursor(&m, Instant::now()).unwrap_err();
+        let o = parse_cursor(&m, "live", Instant::now()).unwrap_err();
         assert_eq!(o.structured["error"]["code"], json!("invalid_argument"));
         assert_eq!(
             o.structured["error"]["details"]["reason"],
@@ -896,11 +1118,21 @@ mod tests {
     }
 
     #[test]
-    fn require_live_snapshot_rejects_other_values() {
-        let mut m = Map::new();
-        m.insert("snapshot".to_string(), json!("snap_abc"));
-        let o = require_live_snapshot(&m, Instant::now()).unwrap_err();
-        assert_eq!(o.structured["error"]["code"], json!("snapshot_not_found"));
+    fn call_site_meta_populates_complete_evidence() {
+        let cid = GlobalId::new(
+            &crate::federation::repo_id::RepoId::new("orders").unwrap(),
+            crate::schema::NodeType::HttpClientCall,
+            "src/client.rs",
+            "get_order",
+            Some(42),
+        );
+        let caller = default_caller_node(&cid);
+        let meta = call_site_meta(&cid, &caller, "c0ffee");
+        assert_eq!(meta["repo"], "orders");
+        assert_eq!(meta["commit"], "c0ffee");
+        assert_eq!(meta["path"], "src/client.rs");
+        assert_eq!(meta["line"], 42);
+        assert_eq!(meta["text"], "orders@c0ffee:src/client.rs:42");
     }
 
     #[test]

@@ -420,11 +420,16 @@ impl GraphBackend for PetgraphBackend {
         let mut by_target: std::collections::HashMap<String, Vec<(f32, String, GraphEdge)>> =
             std::collections::HashMap::new();
         for e in edges {
-            // Treat a missing `weight` as `Some(1.0)` (static / tree-sitter
-            // edges) — the brief says edges below `min_confidence` are
-            // not followed; absence shouldn't make an edge silently
-            // disappear when the caller set a positive floor.
-            let conf = e.weight.unwrap_or(1.0);
+            // Confidence must be evidence-backed. Explicit weights win;
+            // otherwise derive it from provenance. A legacy edge with
+            // neither is unknown (0.0), not implicitly verified static data.
+            let conf = e.weight.unwrap_or_else(|| match e.provenance.as_ref() {
+                Some(crate::schema::EdgeProvenance::Static { .. })
+                | Some(crate::schema::EdgeProvenance::Confirmed { .. }) => 1.0,
+                Some(crate::schema::EdgeProvenance::Heuristic { confidence, .. }) => *confidence,
+                Some(crate::schema::EdgeProvenance::Runtime { .. }) => 0.9,
+                None => 0.0,
+            });
             if conf < min_confidence {
                 continue;
             }

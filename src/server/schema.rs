@@ -151,18 +151,13 @@ impl NodeType {
             // them as known-but-unindexed so an agent following the
             // schema can tell "lain knows about HTTP client calls"
             // from "lain has no notion of HTTP client calls".
-            NodeType::HttpClientCall | NodeType::Field | NodeType::FieldRef => false,
-            NodeType::Topic | NodeType::Resource | NodeType::Schema => false,
-            // Phase D (spec §7): `sql_sensor` emits `Table` nodes for
-            // every literal SQL statement it can parse. The sensor
-            // ships in this phase and is wired into `sensors::run_all`,
-            // so `Table` is real indexed data on every supported
-            // language. Until an operator reindexes with the new
-            // build, an existing graph has zero `Table` nodes — the
-            // "no KnownImpact sound with respect to what was
-            // analyzed" predicate is unaffected because `Table` is a
-            // producer, not a coverage gap.
-            NodeType::Table => true,
+            NodeType::HttpClientCall
+            | NodeType::Field
+            | NodeType::FieldRef
+            | NodeType::Topic
+            | NodeType::Schema
+            | NodeType::Table => true,
+            NodeType::Resource => false,
         }
     }
 
@@ -405,26 +400,15 @@ impl EdgeType {
             EdgeType::SendsHttp
             | EdgeType::RequestSchema
             | EdgeType::ResponseSchema
-            | EdgeType::PayloadSchema
-            | EdgeType::HasField => false,
-            // `ReadsField` / `ReadsFrom` are produced by the wired
-            // `field_access_sensor` (§6.5); `Binds` is the joiner's
-            // cross-service edge (§5.3). All three are real
-            // indexed data on every contract-tool surface (`§10.1`).
-            EdgeType::ReadsField | EdgeType::ReadsFrom | EdgeType::Binds => true,
-            // Phase D (spec §7): `sql_sensor` emits `ReadsTable` and
-            // `WritesTable` from a function / method / file to the
-            // `Table` nodes it just minted. The sensor is wired in
-            // this phase so both edges are real indexed data on
-            // every supported language.
-            EdgeType::ReadsTable | EdgeType::WritesTable => true,
-            // No producer anywhere in the codebase. `Imports` in
-            // particular reads like a core relationship and has never
-            // been emitted by any indexer.
-            EdgeType::Imports
+            | EdgeType::HasField
+            | EdgeType::ReadsField
+            | EdgeType::ReadsFrom
+            | EdgeType::Binds
+            | EdgeType::ReadsTable
+            | EdgeType::WritesTable
             | EdgeType::Produces
-            | EdgeType::Consumes
-            | EdgeType::DeployedTo => false,
+            | EdgeType::Consumes => true,
+            EdgeType::PayloadSchema | EdgeType::Imports | EdgeType::DeployedTo => false,
         }
     }
 

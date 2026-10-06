@@ -101,8 +101,28 @@ impl FederationConfig {
         Self::load_from_str(&s)
     }
     pub fn load_from_str(s: &str) -> Result<Self, LainError> {
-        let cfg: FederationConfig =
+        let mut cfg: FederationConfig =
             serde_yaml::from_str(s).map_err(|e| LainError::Config(format!("yaml: {e}")))?;
+        let top_level_contract = ContractFederationConfig::load_from_str(s)?;
+        if is_contract_block_default(&cfg.contract) {
+            cfg.contract = top_level_contract;
+        } else if !is_contract_block_default(&top_level_contract) {
+            if cfg.contract.services.is_empty() {
+                cfg.contract.services = top_level_contract.services;
+            }
+            if cfg.contract.http_clients.is_empty() {
+                cfg.contract.http_clients = top_level_contract.http_clients;
+            }
+            if cfg.contract.generic_keys.is_empty() {
+                cfg.contract.generic_keys = top_level_contract.generic_keys;
+            }
+            if cfg.contract.schemas.is_empty() {
+                cfg.contract.schemas = top_level_contract.schemas;
+            }
+            if cfg.contract.bindings.is_empty() {
+                cfg.contract.bindings = top_level_contract.bindings;
+            }
+        }
         cfg.validate_unique_repo_ids()?;
         let repo_ids: Vec<String> = cfg.repos.iter().map(|r| r.id.clone()).collect();
         cfg.contract.validate(&repo_ids)?;
@@ -303,5 +323,30 @@ repos:
             err.to_string().contains("duplicate repo id 'same'"),
             "error should name the duplicate id: {err}"
         );
+    }
+
+    #[test]
+    fn load_from_str_loads_top_level_contract_fields() {
+        let yaml = r#"
+data_dir: /tmp
+repos:
+  - id: orders
+    source: { type: workspace_dir, path: /srv/orders }
+  - id: billing
+    source: { type: workspace_dir, path: /srv/billing }
+services:
+  - name: orders
+    repo: orders
+    paths: ["services/orders/"]
+    env: [ORDERS_URL]
+http_clients:
+  - call: "ordersClient.{method}"
+    service: orders
+"#;
+        let cfg = FederationConfig::load_from_str(yaml).unwrap();
+        assert_eq!(cfg.contract.services.len(), 1);
+        assert_eq!(cfg.contract.services[0].name, "orders");
+        assert_eq!(cfg.contract.services[0].paths, vec!["services/orders/"]);
+        assert_eq!(cfg.contract.http_clients.len(), 1);
     }
 }
