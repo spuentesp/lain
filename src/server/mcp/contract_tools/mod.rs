@@ -55,6 +55,7 @@ pub mod scope;
 pub mod services;
 pub mod snapshots;
 pub mod used_by;
+pub mod view;
 
 use crate::server::mcp::handler::McpContext;
 use serde_json::Value;

@@ -1311,6 +1311,159 @@ mod snap_harness;
 
 use snap_harness as harness;
 
+#[tokio::test]
+async fn snapshot_contract_tools_use_one_pinned_view() {
+    let fixture = harness::build_fixture();
+    let manager = harness::manager(&fixture.root);
+    let config = harness::contract_config(&fixture.root);
+    let commits = harness::all_repos_at(&fixture.root, "base");
+    let snapshot =
+        harness::prepare_ready(&manager, commits.clone(), None, Arc::clone(&config)).await;
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&manager, &status);
+
+    let listed = list_contracts_handle(&ctx, json!({"snapshot": snapshot}))
+        .await
+        .unwrap();
+    assert!(!listed.is_error, "list_contracts: {:#?}", listed.structured);
+    assert_eq!(listed.structured["view"]["kind"], json!("snapshot"));
+    assert_eq!(listed.structured["view"]["snapshot_id"], json!(snapshot));
+    assert_eq!(
+        listed.structured["view"]["git_commits"],
+        serde_json::to_value(&commits).unwrap()
+    );
+    let reviewed = listed.structured["data"]["scope"]["reviewed"]
+        .as_array()
+        .expect("snapshot reviewed scope");
+    assert_eq!(reviewed.len(), commits.len());
+
+    let contract = listed.structured["data"]["items"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item["providers"]
+                    .as_array()
+                    .is_some_and(|providers| !providers.is_empty())
+            })
+        })
+        .expect("snapshot contract with a provider");
+    let endpoint = contract["endpoint"].clone();
+    let provider_ids: std::collections::BTreeSet<String> = contract["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|provider| provider["id"].as_str().map(str::to_owned))
+        .collect();
+
+    // The context deliberately has no live federation. A snapshot
+    // trace must use the resident snapshot backend and start at one
+    // of the endpoint's provider nodes.
+    let traced = trace_impact_handle(
+        &ctx,
+        json!({
+            "snapshot": snapshot,
+            "from": {"endpoint": endpoint},
+            "depth": 4,
+            "cap": 20,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!traced.is_error, "trace_impact: {:#?}", traced.structured);
+    assert_eq!(
+        traced.structured["view"]["git_commits"],
+        serde_json::to_value(&commits).unwrap()
+    );
+    let paths = traced.structured["data"]["paths"]
+        .as_array()
+        .expect("trace paths");
+    assert!(!paths.is_empty(), "provider seed should yield a path");
+    assert!(paths.iter().all(|path| {
+        path["start"]
+            .as_str()
+            .is_some_and(|start| provider_ids.contains(start))
+    }));
+
+    let provider = provider_ids.iter().next().unwrap().clone();
+    let evidence = resolve_evidence_handle(&ctx, json!({"snapshot": snapshot, "refs": [provider]}))
+        .await
+        .unwrap();
+    assert!(
+        !evidence.is_error,
+        "resolve_evidence: {:#?}",
+        evidence.structured
+    );
+    assert_eq!(
+        evidence.structured["view"]["git_commits"],
+        serde_json::to_value(&commits).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn snapshot_view_retains_residency_hold_until_drop() {
+    let fixture = harness::build_fixture();
+    let manager = harness::manager_with_cap(&fixture.root, 1);
+    let config = harness::contract_config(&fixture.root);
+    let base = harness::prepare_ready(
+        &manager,
+        harness::all_repos_at(&fixture.root, "base"),
+        None,
+        Arc::clone(&config),
+    )
+    .await;
+    let head = harness::derive_head(
+        &manager,
+        config,
+        &fixture.root,
+        &base,
+        &[("orders", "s1-remove-customer-id")],
+    )
+    .await;
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&manager, &status);
+    let base_args = json!({"snapshot": base, "wait_ms": 1})
+        .as_object()
+        .unwrap()
+        .clone();
+    let head_args = json!({"snapshot": head, "wait_ms": 1})
+        .as_object()
+        .unwrap()
+        .clone();
+
+    let base_view = lain::server::mcp::contract_tools::view::resolve_view(
+        &ctx,
+        &base_args,
+        std::time::Instant::now(),
+    )
+    .await
+    .expect("resolve base snapshot view");
+    let while_held = lain::server::mcp::contract_tools::view::resolve_view(
+        &ctx,
+        &head_args,
+        std::time::Instant::now(),
+    )
+    .await;
+    let busy = match while_held {
+        Ok(_) => panic!("a second resident view must not evict a held snapshot"),
+        Err(outcome) => outcome,
+    };
+    assert_eq!(busy.structured["error"]["code"], json!("busy"));
+    assert_eq!(busy.structured["error"]["retryable"], json!(true));
+    assert_eq!(
+        busy.structured["error"]["details"]["retry_after_ms"],
+        json!(250)
+    );
+
+    drop(base_view);
+    lain::server::mcp::contract_tools::view::resolve_view(
+        &ctx,
+        &head_args,
+        std::time::Instant::now(),
+    )
+    .await
+    .expect("head view resolves after the base hold is released");
+}
+
 async fn run_diff(ctx: &McpContext<'_>, base: &str, head: &str) -> Value {
     let args = json!({"base": base, "head": head, "cap": 100});
     let outcome = diff_contracts_handle(ctx, args).await.unwrap();

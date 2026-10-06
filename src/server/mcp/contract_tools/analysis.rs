@@ -30,9 +30,10 @@
 //! `complete` field is computed with the
 //! `coverage_complete(coverage, endpoint, index)` gate.
 
-use super::contracts::{resolve_view, ViewHandle};
-use super::envelope::{check_api_version, error_outcome, outcome, success_envelope};
-use super::scope::live_scope;
+use super::envelope::{
+    check_api_version, error_outcome, outcome, success_envelope, success_envelope_with_view,
+};
+use super::view::resolve_view;
 use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
 use crate::federation::contracts::changed_files::{MirrorChangedFiles, MultiRepoChangedFiles};
 use crate::federation::contracts::diff::{
@@ -791,17 +792,24 @@ fn snapshot_contract_index(
             .unwrap_or(5_000),
         60_000,
     );
-    let (fed, guard) = mgr
-        .from_snapshot_with_wait_ms(record, wait_ms)
-        .map_err(|e| {
-            error_outcome(
-                "invalid_argument",
-                format!("from_snapshot: {e}"),
-                None,
-                &record.id,
-                started,
-            )
-        })?;
+    let (fed, guard) =
+        mgr.from_snapshot_with_wait_ms(record, wait_ms)
+            .map_err(|error| match error {
+                crate::error::LainError::SnapshotResidencyBusy { retry_after_ms } => error_outcome(
+                    "busy",
+                    "snapshot residency busy",
+                    Some(json!({"retry_after_ms": retry_after_ms})),
+                    &record.id,
+                    started,
+                ),
+                other => error_outcome(
+                    "invalid_argument",
+                    format!("from_snapshot: {other}"),
+                    None,
+                    &record.id,
+                    started,
+                ),
+            })?;
     let ci = fed.contract_index.read().clone();
     let index = ci.ok_or_else(|| {
         error_outcome(
@@ -1719,34 +1727,21 @@ async fn run_trace_impact(
         ));
     }
 
-    let view_index = match resolve_view(ctx, &args_map, started).await? {
-        ViewHandle::Empty(_) => {
-            return Err(error_outcome(
-                "contract_not_found",
-                "no contract index available for this snapshot",
-                Some(json!({"endpoint": null})),
-                &snap_label,
-                started,
-            ));
-        }
-        ViewHandle::Index { index, .. } => index,
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(view_index) = resolved.index().cloned() else {
+        return Err(error_outcome(
+            "contract_not_found",
+            "no contract index available for this snapshot",
+            Some(json!({"endpoint": null})),
+            &snap_label,
+            started,
+        ));
     };
 
     // The traversal backend doubles as the view the field arm
     // resolves `Field` node ids from (§9.5 traces field changes
     // from the changed `Field`).
-    let backend = match ctx.federation {
-        Some(fed) => fed.backend(),
-        None => {
-            return Err(error_outcome(
-                "federation_disabled",
-                "federation backend unavailable",
-                None,
-                &snap_label,
-                started,
-            ));
-        }
-    };
+    let backend = resolved.backend();
 
     // Find starting node ids.
     let mut starts: Vec<String> = Vec::new();
@@ -1762,8 +1757,27 @@ async fn run_trace_impact(
                 started,
             )
         })?;
-        let _eid: EndpointId = (ServiceName(endpoint.0.clone()), key);
-        starts.push(endpoint.0.clone());
+        let endpoint_id: EndpointId = (ServiceName(endpoint.0.clone()), key);
+        let endpoint = view_index.endpoints.get(&endpoint_id).ok_or_else(|| {
+            error_outcome(
+                "contract_not_found",
+                "endpoint is not present in the selected view",
+                Some(json!({
+                    "endpoint": {
+                        "service": endpoint_id.0 .0,
+                        "key": endpoint_id.1.to_string(),
+                    }
+                })),
+                &snap_label,
+                started,
+            )
+        })?;
+        starts.extend(
+            endpoint
+                .providers
+                .iter()
+                .map(|provider| provider.node_id.as_str().to_string()),
+        );
     } else if has_field {
         let field = from.get("field").cloned().unwrap_or(Value::Null);
         let endpoint = field.get("endpoint").cloned().unwrap_or(Value::Null);
@@ -1874,13 +1888,19 @@ async fn run_trace_impact(
     for p in &paths {
         paths_value.push(graph_path_to_value(p));
     }
-    let scope = scope_for_view(ctx, &args_map);
+    let scope = resolved.scope().clone();
     let data = json!({
         "paths": paths_value,
         "truncated": truncated,
         "scope": scope,
     });
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     let text = render_trace_impact(&data);
     Ok(outcome(envelope, &data, text))
 }
@@ -1900,7 +1920,19 @@ fn graph_path_to_value(p: &GraphImpactPath) -> Value {
             "provenance": provenance_label(h.edge.provenance.as_ref()),
         }));
     }
-    let start = p.hops.first().map(|h| h.node.id.as_str()).unwrap_or("");
+    let start = p
+        .hops
+        .first()
+        .map(|hop| {
+            if hop.edge.target_id == hop.node.id && hop.edge.source_id != hop.node.id {
+                hop.edge.source_id.as_str()
+            } else if hop.edge.source_id == hop.node.id && hop.edge.target_id != hop.node.id {
+                hop.edge.target_id.as_str()
+            } else {
+                hop.node.id.as_str()
+            }
+        })
+        .unwrap_or("");
     json!({
         "start": start,
         "min_confidence": p.min_confidence,
@@ -1975,18 +2007,18 @@ async fn run_get_coverage(
     started: Instant,
 ) -> Result<ToolOutcome, ToolOutcome> {
     let snap_label = snapshot_label(&args_map);
-    let view = match resolve_view(ctx, &args_map, started).await? {
-        ViewHandle::Empty(_) => {
-            let data =
-                json!({"complete": true, "scope": scope_for_view(ctx, &args_map), "repos": []});
-            let envelope =
-                success_envelope(data.clone(), &snap_label, snap_label != "live", started);
-            return Ok(outcome(envelope, &data, render_coverage(&data)));
-        }
-        ViewHandle::Index { index, .. } => index,
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(view) = resolved.index().cloned() else {
+        let data = json!({
+            "complete": true,
+            "scope": resolved.scope().clone(),
+            "repos": [],
+        });
+        let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+        return Ok(outcome(envelope, &data, render_coverage(&data)));
     };
     let endpoint_arg = args_map.get("endpoint").cloned();
-    let scope_value = scope_for_view(ctx, &args_map);
+    let scope_value = resolved.scope().clone();
     let scope = parse_scope(scope_value);
     let (coverage_repos, repo_coverages) = if snap_label != "live" {
         if let Some(mgr) = ctx.snapshots {
@@ -2081,7 +2113,13 @@ async fn run_get_coverage(
     coverage.complete = complete;
     let mut value = coverage_to_value(&coverage);
     value["complete"] = json!(complete);
-    let envelope = success_envelope(value.clone(), &snap_label, snap_label != "live", started);
+    let envelope = success_envelope_with_view(
+        value.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     let text = render_coverage(&value);
     Ok(outcome(envelope, &value, text))
 }
@@ -2094,14 +2132,6 @@ fn render_coverage(data: &Value) -> String {
         repos, data["complete"]
     ));
     out
-}
-
-fn empty_scope() -> Value {
-    json!({
-        "reviewed": [],
-        "unreviewed": [],
-        "configured_only": true,
-    })
 }
 
 fn parse_scope(v: Value) -> DiffScope {
@@ -2166,13 +2196,6 @@ fn snapshot_label(args_map: &Map<String, Value>) -> String {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "live".to_string())
-}
-
-fn scope_for_view(ctx: &McpContext<'_>, args_map: &Map<String, Value>) -> Value {
-    if snapshot_label(args_map) == "live" {
-        return ctx.federation.map(live_scope).unwrap_or_else(empty_scope);
-    }
-    empty_scope()
 }
 
 #[cfg(test)]

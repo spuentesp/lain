@@ -92,9 +92,18 @@ fn federation_config(root: &Path) -> FederationConfig {
 /// A snapshot manager wired to the fixture's data dir and the
 /// fixture repos' workspace paths.
 pub fn manager(root: &Path) -> Arc<SnapshotManager> {
+    manager_with_cap(
+        root,
+        lain::federation::contracts::snapshots::manager::DEFAULT_SNAPSHOT_RESIDENT,
+    )
+}
+
+/// Snapshot manager with an explicit residency cap for eviction and
+/// hold-lifetime tests.
+pub fn manager_with_cap(root: &Path, resident_cap: usize) -> Arc<SnapshotManager> {
     let cfg = federation_config(root);
     let cache = IndexCache::new(&cfg.data_dir);
-    let mgr = SnapshotManager::new(&cfg.data_dir, cache);
+    let mgr = SnapshotManager::with_cap(&cfg.data_dir, cache, resident_cap);
     let resolver = SnapshotManager::resolver_from_config(&cfg);
     mgr.set_repo_source_resolver(resolver);
     mgr

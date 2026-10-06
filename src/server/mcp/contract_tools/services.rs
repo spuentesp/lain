@@ -21,18 +21,20 @@
 //!   different arguments.
 
 use super::contracts::{snapshot_label, unresolved_reason_label};
-use super::envelope::{cap_2000, check_api_version, error_outcome, outcome, success_envelope};
+use super::envelope::{
+    cap_2000, check_api_version, error_outcome, outcome, success_envelope,
+    success_envelope_with_view,
+};
 use super::paging::{apply_limit, decode_cursor, fingerprint};
 use super::scope::provider_is_reviewed;
 use super::used_by::{walk as walk_used_by, walk_backend as walk_used_by_backend};
+use super::view::resolve_view;
 use super::{ContractToolEntry, ToolOutcome, DEFAULT_DEPTH, DEFAULT_LIMIT, MAX_DEPTH, MAX_LIMIT};
 use crate::federation::contracts::config::RoutePrefix;
 use crate::federation::contracts::index::{
     BoundField, ConsumerTarget, ContractIndex, Endpoint, ServiceInfo, UnresolvedReason,
 };
 use crate::federation::contracts::model::{EntryKind, ProviderOrigin};
-use crate::federation::contracts::snapshots::manager::{HoldGuard, SnapshotFederation};
-use crate::federation::contracts::snapshots::record::SnapshotRecord;
 use crate::federation::contracts::snapshots::RepoSnapshotState;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::GraphBackend;
@@ -45,7 +47,6 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// Type alias for the boxed-future return type of a contract tool
@@ -121,134 +122,6 @@ inventory::submit!(ContractToolEntry {
     name: "get_service",
     handler: get_service_handle,
 });
-
-// ─── helpers ──────────────────────────────────────────────────────────
-
-enum ServiceViewHandle<'a> {
-    Empty(Value),
-    Ready {
-        index: Arc<ContractIndex>,
-        scope: Value,
-        fed: Option<&'a FederatedIndex>,
-        snapshot: Option<Arc<SnapshotFederation>>,
-        record: Option<Box<SnapshotRecord>>,
-        _hold: Option<HoldGuard>,
-    },
-}
-
-async fn resolve_service_view<'a>(
-    ctx: &'a McpContext<'a>,
-    args_map: &Map<String, Value>,
-    started: Instant,
-) -> Result<ServiceViewHandle<'a>, ToolOutcome> {
-    let snap_label = snapshot_label(args_map);
-    if snap_label == "live" {
-        let fed = ctx.federation.ok_or_else(|| {
-            error_outcome(
-                "federation_disabled",
-                "this server is not configured with a federation",
-                None,
-                &snap_label,
-                started,
-            )
-        })?;
-        if let Err(e) = fed.rejoin_contracts_if_dirty() {
-            return Err(error_outcome(
-                "invalid_argument",
-                format!("rejoin failed: {e}"),
-                None,
-                &snap_label,
-                started,
-            ));
-        }
-        let Some(idx) = fed.contract_index() else {
-            return Ok(ServiceViewHandle::Empty(super::scope::live_scope(fed)));
-        };
-        return Ok(ServiceViewHandle::Ready {
-            index: idx,
-            scope: super::scope::live_scope(fed),
-            fed: Some(fed),
-            snapshot: None,
-            record: None,
-            _hold: None,
-        });
-    }
-
-    if !snap_label.starts_with(crate::federation::contracts::snapshots::SNAPSHOT_ID_PREFIX) {
-        return Err(error_outcome(
-            "snapshot_not_found",
-            format!("snapshot {snap_label:?} not found"),
-            Some(json!({"snapshot": snap_label})),
-            &snap_label,
-            started,
-        ));
-    }
-
-    let mgr = ctx.snapshots.ok_or_else(|| {
-        error_outcome(
-            "snapshot_manager_unavailable",
-            "snapshot manager is not configured for this server",
-            None,
-            &snap_label,
-            started,
-        )
-    })?;
-
-    let outcome = mgr.get(&snap_label, 5_000).await.map_err(|e| match e {
-        crate::federation::contracts::snapshots::manager::PrepareError::SnapshotNotFound {
-            snapshot,
-        } => error_outcome(
-            "snapshot_not_found",
-            format!("snapshot {snapshot:?} not found"),
-            Some(json!({"snapshot": snapshot})),
-            &snap_label,
-            started,
-        ),
-        crate::federation::contracts::snapshots::manager::PrepareError::Busy { retry_after_ms } => {
-            error_outcome(
-                "busy",
-                "snapshot residency busy",
-                Some(json!({"retry_after_ms": retry_after_ms})),
-                &snap_label,
-                started,
-            )
-        }
-        other => error_outcome(
-            "invalid_argument",
-            format!("{other:?}"),
-            None,
-            &snap_label,
-            started,
-        ),
-    })?;
-
-    let (snap_fed, _guard) = mgr
-        .from_snapshot_with_wait_ms(&outcome.record, 5_000)
-        .map_err(|e| {
-            error_outcome(
-                "invalid_argument",
-                format!("from_snapshot failed: {e}"),
-                None,
-                &snap_label,
-                started,
-            )
-        })?;
-
-    let scope = super::scope::snapshot_scope(&outcome.record);
-    let ci = snap_fed.contract_index.read().clone();
-    let Some(idx) = ci else {
-        return Ok(ServiceViewHandle::Empty(scope));
-    };
-
-    Ok(ServiceViewHandle::Ready {
-        index: idx,
-        scope,
-        fed: None,
-        snapshot: Some(snap_fed),
-        record: Some(Box::new(outcome.record)),
-        _hold: Some(_guard),
-    })
-}
 
 /// Decode the `limit` argument (`§10.5`). Returns `Err` with the
 /// `range_too_large` outcome when the value exceeds `MAX_LIMIT`.
@@ -356,11 +229,13 @@ async fn run_list_services(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let (idx, scope) = match resolve_service_view(ctx, &args_map, started).await? {
-        ServiceViewHandle::Empty(scope) => {
-            return Ok(list_services_empty(scope, &snap_label, started));
-        }
-        ServiceViewHandle::Ready { index, scope, .. } => (index, scope),
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(idx) = resolved.index().cloned() else {
+        return Ok(list_services_empty(
+            resolved.scope().clone(),
+            &snap_label,
+            started,
+        ));
     };
 
     let mut items: Vec<Value> = Vec::new();
@@ -393,12 +268,18 @@ async fn run_list_services(
     let mut data = json!({
         "items": page,
     });
-    data["scope"] = scope;
+    data["scope"] = resolved.scope().clone();
     if let Some(tok) = next_cursor {
         data["cursor"] = json!(tok);
     }
     let text = render_list_services(&data);
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     Ok(outcome(envelope, &data, text))
 }
 
@@ -470,25 +351,18 @@ async fn run_get_service(
         })?
         .to_string();
 
-    let view = resolve_service_view(ctx, &args_map, started).await?;
-    let (idx, scope, fed_opt, snapshot_opt, record_opt, _hold) = match view {
-        ServiceViewHandle::Empty(scope) => {
-            return Ok(get_service_not_found(
-                &service_arg,
-                scope,
-                &snap_label,
-                started,
-            ));
-        }
-        ServiceViewHandle::Ready {
-            index,
-            scope,
-            fed,
-            snapshot,
-            record,
-            _hold,
-        } => (index, scope, fed, snapshot, record, _hold),
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(idx) = resolved.index().cloned() else {
+        return Ok(get_service_not_found(
+            &service_arg,
+            resolved.scope().clone(),
+            &snap_label,
+            started,
+        ));
     };
+    let scope = resolved.scope().clone();
+    let fed_opt = resolved.live_federation();
+    let record_opt = resolved.snapshot_record();
 
     let Some(info) = idx
         .services
@@ -512,7 +386,7 @@ async fn run_get_service(
             .map(|(_, h)| h)
             .unwrap_or(RepoHealth::Missing);
         provider_is_reviewed(health)
-    } else if let Some(ref rec) = record_opt {
+    } else if let Some(rec) = record_opt {
         rec.repo_states
             .get(info.repo.as_str())
             .map(|s| matches!(s, RepoSnapshotState::Cached { .. }))
@@ -521,30 +395,15 @@ async fn run_get_service(
         false
     };
 
-    let mut commit_by_repo = BTreeMap::new();
-    if let Some(fed) = fed_opt {
-        for (id, _) in fed.list_repos() {
-            if let Some(c) = fed
-                .get_repo(&id)
-                .and_then(|r| r.db().get_last_commit().ok().flatten())
-            {
-                commit_by_repo.insert(id.as_str().to_string(), c);
-            }
-        }
-    } else if let Some(ref rec) = record_opt {
-        for (r, c) in &rec.repos {
-            commit_by_repo.insert(r.clone(), c.clone());
-        }
-    }
+    let commit_by_repo = resolved.commits();
 
     let endpoints: Vec<String> = info
         .endpoint_ids
         .iter()
         .map(|(_, k)| k.to_string())
         .collect();
-    let snapshot_backend = snapshot_opt
-        .as_ref()
-        .map(|snapshot| snapshot.backend.as_ref() as &dyn GraphBackend);
+    let backend = resolved.backend();
+    let snapshot_backend = (fed_opt.is_none()).then_some(backend.as_ref());
     let consumers = build_consumer_rows(
         fed_opt,
         snapshot_backend,
@@ -589,7 +448,13 @@ async fn run_get_service(
         data["cursor"] = json!(tok);
     }
     let text = render_get_service(&data);
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     Ok(outcome(envelope, &data, text))
 }
 

@@ -347,6 +347,73 @@ async fn stdio_and_http_yield_byte_identical_data_for_diff_contracts() {
 }
 
 #[tokio::test]
+async fn stdio_and_http_share_the_same_snapshot_query_view() {
+    let fixture = snap_harness::build_fixture();
+    let manager = snap_harness::manager(&fixture.root);
+    let config = snap_harness::contract_config(&fixture.root);
+    let federation = Arc::new(FederatedIndex::new(Arc::new(
+        PetgraphBackend::new(&fixture.root.join("snapshot-query-parity")).unwrap(),
+    )));
+    let cluster = ParityCluster::new(&fixture.root, federation, Some(Arc::clone(&manager))).await;
+    let commits = snap_harness::all_repos_at(&fixture.root, "base");
+    let snapshot = snap_harness::prepare_ready(&manager, commits.clone(), None, config).await;
+
+    let list_args = json!({"snapshot": snapshot});
+    let (stdio_list, stdio_error) = cluster
+        .call_stdio("list_contracts", list_args.clone())
+        .await;
+    let (http_list, http_error) = cluster.call_http("list_contracts", list_args).await;
+    assert!(!stdio_error && !http_error);
+    assert_eq!(strip_elapsed(stdio_list.clone()), strip_elapsed(http_list));
+    assert_eq!(
+        stdio_list["view"]["git_commits"],
+        serde_json::to_value(&commits).unwrap()
+    );
+
+    let contract = stdio_list["data"]["items"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item["providers"]
+                    .as_array()
+                    .is_some_and(|providers| !providers.is_empty())
+            })
+        })
+        .expect("contract with provider");
+    let endpoint = contract["endpoint"].clone();
+    let provider = contract["providers"][0]["id"]
+        .as_str()
+        .expect("provider id")
+        .to_string();
+
+    for (tool, args) in [
+        (
+            "trace_impact",
+            json!({
+                "snapshot": snapshot,
+                "from": {"endpoint": endpoint},
+                "depth": 4,
+                "cap": 20,
+            }),
+        ),
+        (
+            "resolve_evidence",
+            json!({"snapshot": snapshot, "refs": [provider]}),
+        ),
+    ] {
+        let (stdio, stdio_error) = cluster.call_stdio(tool, args.clone()).await;
+        let (http, http_error) = cluster.call_http(tool, args).await;
+        assert!(!stdio_error, "{tool} stdio error: {stdio:#?}");
+        assert!(!http_error, "{tool} HTTP error: {http:#?}");
+        assert_eq!(
+            strip_elapsed(stdio),
+            strip_elapsed(http),
+            "{tool} snapshot parity"
+        );
+    }
+}
+
+#[tokio::test]
 async fn stdio_and_http_parity_on_error_envelope() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

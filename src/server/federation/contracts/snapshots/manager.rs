@@ -1188,21 +1188,14 @@ impl SnapshotManager {
         };
         let outcome = if is_first {
             let build_result = self.build_snapshot_federation(record);
-            let install_result = match &build_result {
-                Ok(fed) => self
-                    .install_resident(Arc::clone(fed), wait_ms)
-                    .map_err(|b| {
-                        LainError::Other(format!(
-                            "snapshot residency busy (retry after {}ms)",
-                            b.retry_after_ms
-                        ))
-                    }),
-                Err(_) => Ok(()),
-            };
-            let outcome = match (build_result, install_result) {
-                (Ok(fed), Ok(())) => BuildOutcome::Ok(fed),
-                (Err(e), _) => BuildOutcome::Err(e.to_string()),
-                (Ok(_), Err(e)) => BuildOutcome::Err(e.to_string()),
+            let outcome = match build_result {
+                Ok(fed) => match self.install_resident(Arc::clone(&fed), wait_ms) {
+                    Ok(()) => BuildOutcome::Ok(fed),
+                    Err(busy) => BuildOutcome::Busy {
+                        retry_after_ms: busy.retry_after_ms,
+                    },
+                },
+                Err(error) => BuildOutcome::Err(error.to_string()),
             };
             // Publish the outcome AND remove the slot from the
             // map under one critical section (S2 fix —
@@ -1260,6 +1253,9 @@ impl SnapshotManager {
                 HoldGuard::new(fed, Arc::clone(&self.residency_notify)),
             )),
             BuildOutcome::Err(e) => Err(LainError::Other(e)),
+            BuildOutcome::Busy { retry_after_ms } => {
+                Err(LainError::SnapshotResidencyBusy { retry_after_ms })
+            }
         }
     }
 
@@ -1546,6 +1542,7 @@ impl Drop for HoldGuard {
 pub(crate) enum BuildOutcome {
     Ok(Arc<SnapshotFederation>),
     Err(String),
+    Busy { retry_after_ms: u64 },
 }
 
 /// The per-snapshot-id slot the manager registers while a build
