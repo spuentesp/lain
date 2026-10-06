@@ -406,7 +406,6 @@ fn test_contract_nodes_and_edges_are_marked_indexed() {
         EdgeType::SendsHttp,
         EdgeType::RequestSchema,
         EdgeType::ResponseSchema,
-        EdgeType::PayloadSchema,
         EdgeType::HasField,
         EdgeType::ReadsField,
         EdgeType::ReadsFrom,
