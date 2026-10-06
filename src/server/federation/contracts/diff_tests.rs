@@ -1106,6 +1106,51 @@ fn evaluate_unresolved_candidate_in_reviewed_repo_is_ni_unresolved_candidates() 
         .any(|a| a.reason == Reason::UnresolvedCandidates));
 }
 
+#[test]
+fn evaluate_optional_response_field_add_stays_compatible_with_unresolved_consumer() {
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let key = consumer_key_for_call(&call, endpoint.1.clone());
+    let consumer = ConsumerDef {
+        call,
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoRouteInService,
+            target_service: None,
+        },
+        reads: BTreeSet::new(),
+        reads_complete: false,
+    };
+    let mut surface = ContractSurface::default();
+    surface.consumers.insert(key.clone(), consumer);
+    let mut coverage = coverage_with_reviewed(vec!["orders"]);
+    coverage.repo_coverages.insert(
+        "orders".into(),
+        crate::federation::contracts::coverage::RepoCoverage {
+            cache_key: crate::federation::contracts::index_cache::CacheKey::new(
+                "orders",
+                "abc",
+                crate::federation::contracts::analyzer_version(),
+            ),
+            ..Default::default()
+        },
+    );
+    coverage.unresolved_consumers.push(key);
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldAdded {
+            endpoint,
+            direction: Direction::Response,
+            path: path(&["currency"]),
+            required: false,
+        },
+    };
+
+    let impact = evaluate(&change, &surface, &surface, &coverage);
+    assert_eq!(impact.class, Class::NoKnownImpact);
+    assert_eq!(impact.compatible_changes, 1);
+    assert!(impact.affected.is_empty());
+}
+
 // ─── consumer-side change ───────────────────────────────────────────
 
 #[test]

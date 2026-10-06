@@ -1245,6 +1245,25 @@ impl Compat {
     }
 }
 
+/// Schema-level changes classified as compatible do not depend on
+/// enumerating every consumer: the schema change itself cannot break
+/// existing callers. Keep endpoint-level additions/rebindings out of
+/// this set; those can still be relevant to unresolved callers.
+fn is_schema_compatible_change(kind: &ChangeKind, compat: Compat) -> bool {
+    if !matches!(compat, Compat::Compatible) {
+        return false;
+    }
+    matches!(
+        kind,
+        ChangeKind::FieldRemoved { .. }
+            | ChangeKind::FieldAdded { .. }
+            | ChangeKind::RequirednessChanged { .. }
+            | ChangeKind::NullabilityChanged { .. }
+            | ChangeKind::EnumValueAdded { .. }
+            | ChangeKind::EnumValueRemoved { .. }
+    )
+}
+
 /// Map a `ChangeKind` + `Direction` to its `Compat` (§9.4 table, every
 /// cell verbatim). The §9.4 table's "Response / payload" column
 /// groups `Direction::Response` and `Direction::Payload` together;
@@ -1653,9 +1672,12 @@ pub fn evaluate(
     if !any_affected {
         // No bound consumer is affected. The could-match rule
         // applies first (§9.5): an unresolved consumer in a reviewed
-        // repo that **could match** the change makes the verdict
-        // `NeedsInvestigation (unresolved_candidates)` regardless of
-        // the change's `Compat` classification.
+        // repo that could match a potentially breaking or review-
+        // required change makes the verdict `NeedsInvestigation`.
+        // Schema changes whose compatibility is guaranteed by §9.4
+        // (for example, an optional response-field addition) do not
+        // depend on consumer enumeration; coverage still exposes
+        // unresolved consumers.
         if let Some(target) = &target_endpoint {
             let candidates: Vec<ConsumerKey> = coverage
                 .unresolved_consumers
@@ -1663,7 +1685,7 @@ pub fn evaluate(
                 .filter(|u| could_match(u, target, head))
                 .cloned()
                 .collect();
-            if !candidates.is_empty() {
+            if !candidates.is_empty() && !is_schema_compatible_change(&change.kind, compat) {
                 class_overall = Class::NeedsInvestigation;
                 reason_overall = Some(Reason::UnresolvedCandidates);
                 for c in candidates {
@@ -1707,7 +1729,13 @@ pub fn evaluate(
     // (missing ledger entry, sensor error, unresolved could-match,
     // cache-version mismatch) or when coverage is unattached, downgrade
     // `NoKnownImpact` → `NeedsInvestigation` with `Reason::UnresolvedCandidates`.
-    if matches!(class_overall, Class::NoKnownImpact) {
+    // Compatibility is a property of the contract change itself, not
+    // an inference from the observed consumer set. An additive optional
+    // response field remains compatible even when some consumers are
+    // unresolved; coverage still reports that limitation separately.
+    if matches!(class_overall, Class::NoKnownImpact)
+        && !is_schema_compatible_change(&change.kind, compat)
+    {
         let current_analyzer_version = crate::federation::contracts::analyzer_version();
         let capable = crate::federation::contracts::coverage::consumer_capable_langs();
         let mut incomplete_repos: Vec<String> = Vec::new();

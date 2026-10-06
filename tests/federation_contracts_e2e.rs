@@ -592,7 +592,7 @@ async fn live_scope_maps_all_repohealth_values_per_section_8_7() {
 }
 
 #[tokio::test]
-async fn list_services_rejects_non_live_snapshot_with_snapshot_not_found() {
+async fn list_services_rejects_snapshot_when_snapshot_manager_is_unavailable() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let fed = build_three_repo_federation(root, RepoHealth::Ready).await;
@@ -611,7 +611,7 @@ async fn list_services_rejects_non_live_snapshot_with_snapshot_not_found() {
     assert!(outcome.is_error, "non-live snapshot must error");
     assert_eq!(
         outcome.structured["error"]["code"],
-        json!("snapshot_not_found")
+        json!("snapshot_manager_unavailable")
     );
 }
 
@@ -1360,12 +1360,7 @@ fn assert_reason(change: &Value, reason: &str) {
 }
 
 /// The base fixture reviews all four configured repos (§9.6 scope).
-fn assert_scope_complete(data: &Value) {
-    assert_eq!(
-        data["coverage"]["complete"],
-        json!(true),
-        "coverage: {data:#?}"
-    );
+fn assert_scope_reviews_all_configured_repositories(data: &Value) {
     let scope = &data["coverage"]["scope"];
     let mut reviewed: Vec<String> = scope["reviewed"]
         .as_array()
@@ -1457,7 +1452,12 @@ async fn pr13_diff_contracts_ground_truth_scenarios_over_t1_fixture() {
     );
     assert_affected(change, "billing", "Verified");
     assert_eq!(data["compatible_changes"], json!(0));
-    assert_scope_complete(&data);
+    assert_scope_reviews_all_configured_repositories(&data);
+    assert_eq!(
+        data["coverage"]["complete"],
+        json!(false),
+        "all repos were enumerated, but unresolved evidence must keep coverage incomplete"
+    );
     // §15.2: "a path reaches `reports`" (traced in the base view).
     path_reaches(&data, "FieldRemoved", "http:GET /api/orders/{}", "reports");
 
@@ -1471,14 +1471,10 @@ async fn pr13_diff_contracts_ground_truth_scenarios_over_t1_fixture() {
     )
     .await;
     let data = run_diff(&ctx, &base_id, &head).await;
-    // §15.2 row 2: the compatible optional-field add is *not
-    // reported*, and `compatible_changes = 1`. The ground-truth
-    // YAML spells this `changes: []`, but §9.2's file-level
-    // `ChangedWithoutSchema` rule also fires here: every orders
-    // scenario rewrites `src/main.rs`, which holds both the
-    // touched handlers and the schemaless `GET /api/orders/{}/label`
-    // route. Assert the row's actual claim — no field change is
-    // reported — rather than literal emptiness.
+    // §15.2 row 2: an optional response-field addition is compatible
+    // independent of unresolved callers. It is counted once for the
+    // shared schema and omitted from `changes`; repository coverage
+    // remains incomplete and is reported separately.
     assert!(
         changes_of(&data).iter().all(|c| {
             c["field"] != json!("currency")
@@ -1499,6 +1495,8 @@ async fn pr13_diff_contracts_ground_truth_scenarios_over_t1_fixture() {
         "scenario 2: the compatible field add must not be reported: {data:#?}"
     );
     assert_eq!(data["compatible_changes"], json!(1));
+    assert_scope_reviews_all_configured_repositories(&data);
+    assert_eq!(data["coverage"]["complete"], json!(false));
 
     // ── 5: orders adds enum value `refunded`; billing unread ───────
     let head = harness::derive_head(
@@ -1515,8 +1513,9 @@ async fn pr13_diff_contracts_ground_truth_scenarios_over_t1_fixture() {
     assert_eq!(change["direction"], json!("response"));
     assert_eq!(change["field"], json!("status"));
     assert_eq!(change["compat"], json!("NeedsReview"));
-    assert_eq!(change["impact"]["class"], json!("NoKnownImpact"));
-    // §9.6: every NoKnownImpact carries its scope.
+    assert_eq!(change["impact"]["class"], json!("NeedsInvestigation"));
+    assert_reason(change, "unresolved_candidates");
+    // Incomplete consumer coverage prevents a no-known-impact claim.
     assert!(
         change["impact"]["scope"]["reviewed"]
             .as_array()
