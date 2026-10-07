@@ -1222,3 +1222,241 @@ fn t9_byte_boundary_in_code_gql_tagged_template() {
     );
     assert!(!order.dynamic);
 }
+
+// ─── Task 9 — closing the brace-depth short-circuit survivors
+//
+//     Many of the consumer-sensor's mutations live on
+//     `while i < bytes.len() && <cond>` guards in brace-depth
+//     loops. A `&&`→`||` mutation on those guards means the
+//     loop continues whenever the depth is still > 0, even
+//     past the end of the buffer, which Rust catches as an
+//     out-of-bounds panic on `bytes[i]`. Any unterminated
+//     `{ ... }` therefore kills the mutation.
+
+/// Unterminated braces at the top level kill every
+/// `&&`→`||` mutation in the brace-depth loops. The parser
+/// must not abort the process on adversarial input.
+#[test]
+fn t9_short_circuit_unterminated_braces_do_not_overrun() {
+    let body = "orders { id";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "must still report `orders`, got {out:?}");
+    assert_eq!(out[0].0, "orders");
+}
+
+/// Unterminated brace at the second level exercises the
+/// *nested* brace-depth loop (line 693 of the recursive
+/// `top_level_fields_with_selections_at_depth`).
+#[test]
+fn t9_short_circuit_nested_unterminated_brace_does_not_overrun() {
+    let body = "orders { line { sku";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "must still report `orders`, got {out:?}");
+    assert_eq!(out[0].0, "orders");
+    let inner: Vec<String> = out[0].1.clone();
+    assert!(inner.contains(&"line".to_string()), "got {inner:?}");
+}
+
+/// A `query` keyword that is never followed by a `{` lands
+/// on the `i >= bytes.len()` bounds check at line 503 of
+/// `extract_top_level_fields_for_op`. With `>=` mutated to
+/// `>`, the check is never satisfied and the next access to
+/// `bytes[i]` is out of bounds. We exercise this through
+/// the public `parse_document` entry point, which calls
+/// `extract_top_level_fields_for_op` internally.
+#[test]
+fn t9_bounds_check_truncated_input_does_not_panic() {
+    let src = "query";
+    let consumers =
+        lain::server::sensors::graphql_consumer_sensor::parse_document(src, "doc.graphql");
+    let _ = consumers;
+}
+
+/// Truncated input on the `parse_operation_body` path —
+/// the bounds check at line 875 must hold. A `>=`→`>`
+/// mutation makes the check never fire, and the subsequent
+/// `bytes[i]` access on a non-`{` body overruns the
+/// buffer. We exercise this through `detect_in_code`, which
+/// calls `parse_operation_body` for tagged-template bodies.
+#[test]
+fn t9_bounds_check_parse_operation_body_truncated() {
+    let code = "const Q = gql`hello`;";
+    let _in_code = lain::server::sensors::graphql_consumer_sensor::detect_in_code(code, "src/q.ts");
+}
+
+/// Empty selection body — `{ }` is legal GraphQL but yields
+/// no fields. The braces must be balanced so neither the
+/// `&&` short-circuit mutation in the brace-depth loop nor
+/// the `==`→`!=` mutation on the opening/closing byte flips
+/// the result.
+#[test]
+fn t9_byte_boundary_empty_selection_set_has_no_fields() {
+    let body = "orders { }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "must still report `orders`, got {out:?}");
+    assert_eq!(out[0].0, "orders");
+    assert!(
+        out[0].1.is_empty(),
+        "empty selection set must yield no sub-fields, got {:?}",
+        out[0].1
+    );
+}
+
+/// A selection set with an *unattached* block (a leading
+/// `{ ... }` at the top level) is the byte boundary the
+/// parser hits at line 563 (`c == b'{'`). A `==`→`!=`
+/// mutation there would NOT enter the unattached-block
+/// branch (since `c == b'{'` would be false), and would
+/// instead read `orphan` as a field name.
+#[test]
+fn t9_byte_boundary_unattached_block_does_not_eat_real_field() {
+    let body = "{ orphan } orders { id }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert!(
+        out.iter().any(|(name, _)| name == "orders"),
+        "`orders` must survive a leading unattached block, got {out:?}"
+    );
+    assert!(
+        !out.iter().any(|(name, _)| name == "orphan"),
+        "unattached block must NOT be emitted as a field, got {out:?}"
+    );
+}
+
+/// A selection set terminated by an *unattached* `}` is
+/// the byte boundary the parser hits at line 559
+/// (`c == b'}'`). A `==`→`!=` mutation would skip the
+/// `}`-as-skip branch and the parser would either under-
+/// or over-consume the field.
+#[test]
+fn t9_byte_boundary_stray_close_brace_does_not_drop_field() {
+    let body = "orders }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert!(
+        out.iter().any(|(name, _)| name == "orders"),
+        "stray `}}` must not drop `orders`, got {out:?}"
+    );
+}
+
+/// Empty body — `""`. Drives the `i < bytes.len()` guard
+/// at line 553 to its terminator.
+#[test]
+fn t9_byte_boundary_empty_body_returns_no_fields() {
+    let out = lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections("");
+    assert!(
+        out.is_empty(),
+        "empty body must yield no fields, got {out:?}"
+    );
+}
+
+/// A `...` fragment spread that is the *only* top-level
+/// content: the `is_fragment_spread` check at line 581
+/// reads `rest[0] == b'.'`, `rest[1] == b'.'`, `rest[2] ==
+/// b'.'`. A `==`→`!=` mutation on any of those three
+/// bytes means the spread is not recognised, and the
+/// three `.`s are read as field-name characters.
+#[test]
+fn t9_byte_boundary_bare_dot_is_not_a_fragment_spread() {
+    let body = ".. { id }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert!(out.is_empty(), "two dots must not be a spread, got {out:?}");
+}
+
+/// The fragment-spread identifier rule: `...frag` is a
+/// *named* spread (no inline body), so `...x` followed by
+/// a real field must still surface the real field.
+#[test]
+fn t9_byte_boundary_named_spread_does_not_leak_into_field_list() {
+    let body = "...frag orders { id }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert!(
+        out.iter().any(|(name, _)| name == "orders"),
+        "`orders` must survive a leading named spread, got {out:?}"
+    );
+    assert!(
+        !out.iter().any(|(name, _)| name == "frag"),
+        "named spread must NOT leak as a field, got {out:?}"
+    );
+}
+
+/// A field name that ends at end-of-buffer — the
+/// `while i < bytes.len() && is_ident_continue(...)`
+/// loops at lines 601, 626, 661, 750, 759, 770 must
+/// all stop at the buffer boundary.
+#[test]
+fn t9_short_circuit_identifier_loop_respects_end_of_buffer() {
+    let body = "orders";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "must still report `orders`, got {out:?}");
+    assert_eq!(out[0].0, "orders");
+    assert!(
+        out[0].1.is_empty(),
+        "no selection set at end of input means no sub-fields, got {:?}",
+        out[0].1
+    );
+}
+
+/// A field name that is exactly one byte at the end of
+/// the buffer (e.g. `a`) — the most compressed
+/// identifier.
+#[test]
+fn t9_short_circuit_one_byte_identifier_at_end_of_buffer() {
+    let body = "a";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0, "a");
+    assert!(out[0].1.is_empty());
+}
+
+/// A paren block that runs to end of buffer
+/// (`(foo: ID`) — the `while i < bytes.len() && depth > 0`
+/// at line 645 must respect the buffer.
+#[test]
+fn t9_short_circuit_unterminated_paren_does_not_overrun() {
+    let body = "orders(id: ID";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "must still report `orders`, got {out:?}");
+    assert_eq!(out[0].0, "orders");
+}
+
+/// A field followed by a `:` but no target name —
+/// `alias:`.
+#[test]
+fn t9_short_circuit_alias_at_end_of_buffer() {
+    let body = "first:";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    let _ = out;
+}
+
+/// A directive at end of buffer without a selection set:
+/// `orders @include`. The directive identifier loop
+/// (line 661) must respect the buffer boundary.
+#[test]
+fn t9_short_circuit_directive_at_end_of_buffer() {
+    let body = "orders @include";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0, "orders");
+}
+
+/// A directive with an unterminated paren block:
+/// `orders @include(if: $cond`. The directive paren
+/// loop (line 670) must respect the buffer boundary.
+#[test]
+fn t9_short_circuit_directive_unterminated_paren() {
+    let body = "orders @include(if: $cond";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    let _ = out;
+}

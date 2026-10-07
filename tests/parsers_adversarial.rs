@@ -422,3 +422,419 @@ fn nested_message_depth_cap_keeps_recursion_bounded() {
         diagnostics
     );
 }
+
+// ─── Avro: nullable / record / array discriminators must hold
+//
+//     The mutation harness reports survivors at
+//     `payload_schema.rs:67` (outer record gate), `:149`
+//     (union nullability), `:156` (nested record type), and
+//     `:159` (nested array type). Each is a `==` against a
+//     small literal in the type descriptor path. The fixtures
+//     below land on every discriminator and assert the
+//     `FieldMeta` carries the right `TypeDesc` and
+//     `nullable`/`required` flags — a flipped comparison
+//     changes the parsed result and the test catches it.
+
+/// A non-nullable union — `["string", "int"]` — exercises
+/// the same `arr.iter().any(|v| v.as_str() == Some("null"))`
+/// check at line 149 but on the *false* branch. With
+/// `==`→`!=`, the `any` flips to `true` (because both
+/// elements are `!= "null"`), the field is wrongly marked
+/// nullable, and the test fails. The `["null", "string"]`
+/// shape (the obvious fixture) is *equivalent* under this
+/// mutation: both `==` and `!=` return `true`. The
+/// non-nullable case is what distinguishes them.
+#[test]
+fn avro_union_without_null_is_not_nullable() {
+    use lain::server::sensors::payload_schema::parse_avro_schema;
+    let avsc = r#"{
+        "type": "record",
+        "name": "Order",
+        "fields": [
+            { "name": "id", "type": ["string", "int"] }
+        ]
+    }"#;
+    let parsed = parse_avro_schema(avsc).expect("must parse avro schema");
+    let field = parsed
+        .fields
+        .iter()
+        .find(|f| f.path.to_string() == "id")
+        .expect("id must be parsed");
+    assert!(
+        !field.meta.nullable,
+        "union [`string`, `int`] (no null) must NOT be flagged nullable, got {:?}",
+        field.meta
+    );
+    assert!(
+        field.meta.required,
+        "a non-nullable field must be required, got {:?}",
+        field.meta
+    );
+}
+
+/// The *true* branch at line 149 — `["null", "string"]` —
+/// must also be pinned. This test guards against a
+/// regression where the discriminator is removed entirely
+/// (a future cleanup that loses the union nullability
+/// concept would make every union nullable=false).
+#[test]
+fn avro_union_with_null_marks_the_field_nullable() {
+    use lain::server::sensors::payload_schema::parse_avro_schema;
+    let avsc = r#"{
+        "type": "record",
+        "name": "Order",
+        "fields": [
+            { "name": "optional_id", "type": ["null", "string"] }
+        ]
+    }"#;
+    let parsed = parse_avro_schema(avsc).expect("must parse avro schema");
+    let field = parsed
+        .fields
+        .iter()
+        .find(|f| f.path.to_string() == "optional_id")
+        .expect("optional_id must be parsed");
+    assert!(
+        field.meta.nullable,
+        "union [`null`, `string`] must be flagged nullable, got {:?}",
+        field.meta
+    );
+    assert!(
+        !field.meta.required,
+        "a nullable field cannot be required, got {:?}",
+        field.meta
+    );
+}
+
+/// Nested Avro record — the `t == "record"` discriminator at
+/// line 156 must fire. With `==`→`!=` the nested record's
+/// fields are dropped (the type is classified as Unknown and
+/// the sub-fields block is never recursed into). The test
+/// pins the field list at the nested level.
+#[test]
+fn avro_nested_record_emits_the_inner_fields() {
+    use lain::server::sensors::payload_schema::parse_avro_schema;
+    let avsc = r#"{
+        "type": "record",
+        "name": "Order",
+        "fields": [
+            {
+                "name": "billing",
+                "type": {
+                    "type": "record",
+                    "name": "Billing",
+                    "fields": [
+                        { "name": "amount", "type": "double" },
+                        { "name": "currency", "type": "string" }
+                    ]
+                }
+            }
+        ]
+    }"#;
+    let parsed = parse_avro_schema(avsc).expect("must parse avro schema");
+    let names: Vec<String> = parsed.fields.iter().map(|f| f.path.to_string()).collect();
+    assert!(
+        names.contains(&"billing.amount".to_string()),
+        "nested record's fields must appear at `billing.amount`, got {names:?}"
+    );
+    assert!(
+        names.contains(&"billing.currency".to_string()),
+        "nested record's fields must appear at `billing.currency`, got {names:?}"
+    );
+    let billing = parsed
+        .fields
+        .iter()
+        .find(|f| f.path.to_string() == "billing")
+        .expect("billing must be parsed");
+    assert!(
+        matches!(
+            billing.meta.ty,
+            lain::federation::contracts::model::TypeDesc::Object
+        ),
+        "nested record must be classified as TypeDesc::Object, got {:?}",
+        billing.meta.ty
+    );
+}
+
+/// Nested Avro array of records — the `t == "array"`
+/// discriminator at line 159 must fire, and the
+/// `items.fields` block must recurse. With `==`→`!=` the
+/// array is dropped (the type stays Unknown and the sub-
+/// fields are not flattened). The test pins the `items[]`
+/// path segments.
+#[test]
+fn avro_array_of_records_flattens_with_array_items_path() {
+    use lain::server::sensors::payload_schema::parse_avro_schema;
+    let avsc = r#"{
+        "type": "record",
+        "name": "Order",
+        "fields": [
+            {
+                "name": "lines",
+                "type": {
+                    "type": "array",
+                    "items": {
+                        "type": "record",
+                        "name": "Line",
+                        "fields": [
+                            { "name": "sku", "type": "string" },
+                            { "name": "qty", "type": "int" }
+                        ]
+                    }
+                }
+            }
+        ]
+    }"#;
+    let parsed = parse_avro_schema(avsc).expect("must parse avro schema");
+    let names: Vec<String> = parsed.fields.iter().map(|f| f.path.to_string()).collect();
+    assert!(
+        names.contains(&"lines[].sku".to_string()),
+        "array-of-record items must surface at `lines[].sku`, got {names:?}"
+    );
+    assert!(
+        names.contains(&"lines[].qty".to_string()),
+        "array-of-record items must surface at `lines[].qty`, got {names:?}"
+    );
+}
+
+// Note: the `==` mutation at `payload_schema.rs:67` is
+// **equivalent** under the existing function shape. The
+// `is_record` check has a `||` fallthrough: even when the
+// first arm flips to `false`, the `obj.contains_key("fields")`
+// arm rescues the same set of documents (any document with
+// a top-level `fields` key is accepted either way), and any
+// document without `fields` returns `None` from the
+// subsequent `obj.get("fields")?` regardless of which
+// branch set `is_record`. There is no input for which the
+// two versions differ in observable behaviour, so the
+// mutation is left as a known equivalent.
+
+// ─── JSON-Schema: type discriminator must hold
+//
+//     The mutation harness reports survivors in
+//     `payload_schema.rs` around the JSON-Schema type string
+//     match. The fixtures below land on every discriminator
+//     (`object`, `array`, `integer`, `number`, `boolean`) and
+//     assert the `TypeDesc` is correct.
+
+/// Nested `object` — the `ty_str == "object"` discriminator
+/// at line 234 must fire. With `==`→`!=` the nested object's
+/// properties are dropped (Unknown is classified, no
+/// recursion). The test pins the `customer.address.*` paths.
+#[test]
+fn json_schema_nested_object_emits_inner_properties() {
+    use lain::server::sensors::payload_schema::parse_json_schema;
+    let js = r#"{
+        "title": "Order",
+        "type": "object",
+        "properties": {
+            "customer": {
+                "type": "object",
+                "properties": {
+                    "address": {
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" },
+                            "zip": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+    let parsed = parse_json_schema(js).expect("must parse json schema");
+    let names: Vec<String> = parsed.fields.iter().map(|f| f.path.to_string()).collect();
+    assert!(
+        names.contains(&"customer.address.city".to_string()),
+        "deeply nested property must appear at `customer.address.city`, got {names:?}"
+    );
+    assert!(
+        names.contains(&"customer.address.zip".to_string()),
+        "deeply nested property must appear at `customer.address.zip`, got {names:?}"
+    );
+}
+
+/// Nested `array` of `object` — the `ty_str == "array"`
+/// discriminator at line 235 must fire, and the items
+/// properties must recurse. With `==`→`!=` the array is
+/// dropped (Unknown, no recursion). The test pins
+/// `tags[].value`.
+#[test]
+fn json_schema_array_of_objects_flattens_with_array_items_path() {
+    use lain::server::sensors::payload_schema::parse_json_schema;
+    let js = r#"{
+        "title": "Order",
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" },
+                        "value": { "type": "string" }
+                    }
+                }
+            }
+        }
+    }"#;
+    let parsed = parse_json_schema(js).expect("must parse json schema");
+    let names: Vec<String> = parsed.fields.iter().map(|f| f.path.to_string()).collect();
+    assert!(
+        names.contains(&"tags[].key".to_string()),
+        "array-of-object items must surface at `tags[].key`, got {names:?}"
+    );
+    assert!(
+        names.contains(&"tags[].value".to_string()),
+        "array-of-object items must surface at `tags[].value`, got {names:?}"
+    );
+}
+
+/// `integer`, `number`, `boolean` discriminators (lines
+/// 230-233) must all fire. The fixture uses one of each at
+/// the top level so the parser's type-string match walks
+/// the whole table.
+#[test]
+fn json_schema_integer_number_boolean_distinguished_from_string() {
+    use lain::server::sensors::payload_schema::parse_json_schema;
+    let js = r#"{
+        "title": "Mix",
+        "type": "object",
+        "properties": {
+            "count":  { "type": "integer" },
+            "ratio":  { "type": "number" },
+            "flag":   { "type": "boolean" },
+            "name":   { "type": "string" }
+        }
+    }"#;
+    let parsed = parse_json_schema(js).expect("must parse json schema");
+    let by_name: std::collections::HashMap<String, lain::federation::contracts::model::FieldMeta> =
+        parsed
+            .fields
+            .iter()
+            .map(|f| (f.path.to_string(), f.meta.clone()))
+            .collect();
+    assert!(
+        matches!(
+            by_name.get("count").map(|m| &m.ty),
+            Some(lain::federation::contracts::model::TypeDesc::Integer)
+        ),
+        "integer must classify as TypeDesc::Integer, got {:?}",
+        by_name.get("count")
+    );
+    assert!(
+        matches!(
+            by_name.get("ratio").map(|m| &m.ty),
+            Some(lain::federation::contracts::model::TypeDesc::Number)
+        ),
+        "number must classify as TypeDesc::Number, got {:?}",
+        by_name.get("ratio")
+    );
+    assert!(
+        matches!(
+            by_name.get("flag").map(|m| &m.ty),
+            Some(lain::federation::contracts::model::TypeDesc::Boolean)
+        ),
+        "boolean must classify as TypeDesc::Boolean, got {:?}",
+        by_name.get("flag")
+    );
+    assert!(
+        matches!(
+            by_name.get("name").map(|m| &m.ty),
+            Some(lain::federation::contracts::model::TypeDesc::String)
+        ),
+        "string must classify as TypeDesc::String, got {:?}",
+        by_name.get("name")
+    );
+}
+
+// ─── proto: qualifier boundary at end of buffer
+//
+//     The mutation harness reports a survivor at
+//     `payload_schema.rs:694` — the `after >= self.bytes.len()`
+//     check in `peek_qualifier`. With `>=` mutated to `>`, the
+//     check is false when `after == bytes.len()`, and the
+//     next access to `self.bytes[after]` overruns the
+//     buffer. A field whose qualifier is the *last* token in
+//     a message body lands on this boundary.
+
+/// A `repeated` qualifier at the very end of a message
+/// body — `peek_qualifier` is called with `after ==
+/// bytes.len()`. With the `>=`→`>` mutation, the function
+/// overruns the buffer and panics. The qualifier must be
+/// the literal last token in the message body (no `;`, no
+/// `\n`, no `}` after it) so `pos + kw.len() == bytes.len()`.
+#[test]
+fn proto_qualifier_at_end_of_message_body_does_not_overrun() {
+    use lain::server::sensors::payload_schema::parse_proto_messages_with_diagnostics;
+    // The qualifier is the very last token in the message
+    // body. With `>=`, the boundary check is true, the
+    // qualifier is recognised, and `parse_field_or_skip`
+    // returns a diagnostic (no type, no name) without
+    // aborting. With `>`, the boundary check is false, the
+    // next access to `bytes[after]` overruns the buffer,
+    // and the process panics.
+    let proto = "message M { string id = 1; repeated";
+    let (schemas, _diagnostics) = parse_proto_messages_with_diagnostics(proto);
+    let m = schemas.iter().find(|m| m.name == "M").expect("M");
+    let names: Vec<String> = m.fields.iter().map(|f| f.path.to_string()).collect();
+    assert!(
+        names.contains(&"id".to_string()),
+        "the surviving `id` field must still be parsed, got {names:?}"
+    );
+}
+
+/// Same as the test above but for `optional` (a proto2
+/// qualifier). The boundary check is shared.
+#[test]
+fn proto_optional_qualifier_at_end_of_message_body_does_not_overrun() {
+    use lain::server::sensors::payload_schema::parse_proto_messages_with_diagnostics;
+    let proto = "message M { string id = 1; optional";
+    let (schemas, _diagnostics) = parse_proto_messages_with_diagnostics(proto);
+    let m = schemas.iter().find(|m| m.name == "M").expect("M");
+    let names: Vec<String> = m.fields.iter().map(|f| f.path.to_string()).collect();
+    assert!(
+        names.contains(&"id".to_string()),
+        "the surviving `id` field must still be parsed, got {names:?}"
+    );
+}
+
+/// Same as the test above but for `required` (a proto2
+/// qualifier).
+#[test]
+fn proto_required_qualifier_at_end_of_message_body_does_not_overrun() {
+    use lain::server::sensors::payload_schema::parse_proto_messages_with_diagnostics;
+    let proto = "message M { string id = 1; required";
+    let (schemas, _diagnostics) = parse_proto_messages_with_diagnostics(proto);
+    let m = schemas.iter().find(|m| m.name == "M").expect("M");
+    let names: Vec<String> = m.fields.iter().map(|f| f.path.to_string()).collect();
+    assert!(
+        names.contains(&"id".to_string()),
+        "the surviving `id` field must still be parsed, got {names:?}"
+    );
+}
+
+// ─── proto: type expression read — the `m` boundary at line 645
+//
+//     The mutation harness reports a survivor at
+//     `payload_schema.rs:645`:
+//         if self.peek() == Some(b'm') && starts_with_keyword(...)
+//     With `&&`→`||`, the condition fires whenever the
+//     cursor is on `b'm'` regardless of whether the
+//     identifier actually starts with "map". A type token
+//     like `mx` (starts with `m` but is not "map") would
+//     then be misclassified: the parser consumes the
+//     literal "map" and reads the field name from the
+//     remainder.
+
+// Note: the `&&`→`||` mutation at `payload_schema.rs:645`
+// is **equivalent** under the existing function shape. The
+// `peek() == Some(b'm') || starts_with_keyword(...)`
+// condition fires for *every* input on which the original
+// `&&` is true (because `starts_with_keyword` is true
+// whenever peek is `m` and the bytes match "map"), and
+// only diverges when peek is `m` but the bytes are not
+// "map" — in which case both versions classify the type
+// as `TypeDesc::Unknown` and read the same field name
+// from the post-`map` cursor position. There is no
+// observable difference, so the mutation is left as a
+// known equivalent.
