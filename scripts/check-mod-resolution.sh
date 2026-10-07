@@ -8,6 +8,16 @@
 
 set -e
 
+# ─────────────────────────────────────────────────────────────────────
+# Companion gates. This one finds untracked source files; the two below
+# cover the rest of the "the commit doesn't build" family. Run all three
+# before pushing:
+#   scripts/check-mod-resolution.sh   # untracked `mod` targets
+#   scripts/check-clean-build.sh      # tracked code referencing uncommitted
+#                                     # symbols (half-staged coupled change)
+#   scripts/check-no-duplicate-sensors.py
+# ─────────────────────────────────────────────────────────────────────
+
 # Find untracked .rs files via git status (mtime-based heuristics
 # lie after rebase / submodule updates).
 untracked=$(git status --porcelain -- src/ 2>/dev/null \

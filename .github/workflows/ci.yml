@@ -210,6 +210,16 @@ jobs:
         shell: bash
         run: bash scripts/check-mod-resolution.sh
 
+      # Belt-and-braces for the same failure family: `check-mod-resolution`
+      # sees untracked source files, this sees tracked code whose *symbols*
+      # are in an uncommitted file (a half-staged coupled change). Note a
+      # CI checkout is already a clean export, so `cargo test --workspace`
+      # covers most of this; the gate earns its place as the documented
+      # pre-push check and as insurance against a partially-cached build.
+      - name: HEAD builds from a clean export
+        shell: bash
+        run: bash scripts/check-clean-build.sh
+
       - name: Run JS tests
         shell: bash
         run: |
@@ -277,6 +287,10 @@ jobs:
       - name: Module declarations resolve to committed files
         shell: bash
         run: bash scripts/check-mod-resolution.sh
+
+      - name: HEAD builds from a clean export
+        shell: bash
+        run: bash scripts/check-clean-build.sh
 
   capability:
     name: Capability suite (demo.sh)
