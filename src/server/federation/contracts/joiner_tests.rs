@@ -2012,6 +2012,7 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
     field_ref.contract = Some(ContractFact::FieldRead(FieldReadFact {
         chain: "order_id".parse::<JsonPath>().unwrap(),
         exact: true,
+        origin: crate::federation::contracts::model::FieldReadOrigin::FieldAccess,
     }));
 
     let has_field_edge = GraphEdge::new(EdgeType::HasField, schema.id.clone(), field.id.clone());

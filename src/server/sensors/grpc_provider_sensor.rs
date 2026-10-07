@@ -203,7 +203,8 @@ pub fn scan_workspace_grpc(
         }
     }
     if !all_nodes.is_empty() {
-        let _ = graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &all_edges);
+        let _ =
+            graph.replace_sensor_output(SensorOwner::GrpcProviderSensor, &all_nodes, &all_edges);
     }
     Ok(total)
 }

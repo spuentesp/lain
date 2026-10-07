@@ -1067,6 +1067,7 @@ mod tests {
         node.contract = Some(ContractFact::FieldRead(FieldReadFact {
             chain: chain.parse().unwrap(),
             exact,
+            origin: crate::federation::contracts::model::FieldReadOrigin::FieldAccess,
         }));
         node
     }

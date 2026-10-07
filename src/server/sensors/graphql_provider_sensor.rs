@@ -190,7 +190,8 @@ pub fn scan_workspace_graphql_provider(
         }
     }
     if !all_nodes.is_empty() {
-        let _ = graph.replace_sensor_output(SensorOwner::GraphqlSensor, &all_nodes, &all_edges);
+        let _ =
+            graph.replace_sensor_output(SensorOwner::GraphqlProviderSensor, &all_nodes, &all_edges);
     }
     Ok(total)
 }

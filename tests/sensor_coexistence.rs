@@ -1,0 +1,350 @@
+//! Two sensors that share a node shape must both survive `run_all`.
+//!
+//! Ownership bugs are invisible in single-sensor tests and fatal in
+//! production: `replace_sensor_output(owner, …)` retracts *every* node
+//! with that owner, so an unrelated sensor running later silently
+//! deletes an earlier sensor's output. These tests drive the whole
+//! `run_all` pipeline over a workspace where two sensors collide, which
+//! is the only place the bug shows.
+//!
+//! Regressions these pin:
+//! - `graphql_consumer`'s `FieldRef` nodes were owned by
+//!   `SensorOwner::FieldAccessSensor`, so `field_access_sensor` (phase 2,
+//!   later) retracted them on every run.
+//! - `GraphqlProvider`/`GraphqlConsumer`/`GraphqlResolverLink` all mapped
+//!   to one `SensorOwner::GraphqlSensor`, so the consumer's rescan wiped
+//!   the provider's Schema/Field nodes and `HasField`/`ResponseSchema`
+//!   edges. Same for the gRPC family.
+//! - `WebSocketConsumer` rides on an `HttpClientCall` node, so the
+//!   node-type catch-all claimed it and `http_client_sensor` deleted it.
+//! - `.json` Schema/Field nodes were routed to `SensorOwner::EventSensor`,
+//!   so `event_sensor` retracted `openapi.json` schemas every scan.
+
+use lain::graph::{sensor_owner_of, GraphDatabase, SensorOwner};
+use lain::schema::{NodeType, RepoNamespace};
+use lain::server::federation::contracts::model::ContractFact;
+use lain::server::sensors::run_all;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// A fresh temp workspace directory, empty and uniquely named.
+fn workspace(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("sensor_coexistence_{}_{tag}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create workspace");
+    dir
+}
+
+fn write(dir: &Path, rel: &str, body: &str) {
+    let p = dir.join(rel);
+    if let Some(parent) = p.parent() {
+        fs::create_dir_all(parent).expect("create parent");
+    }
+    fs::write(p, body).expect("write fixture file");
+}
+
+fn scan(dir: &Path) -> GraphDatabase {
+    let graph = GraphDatabase::new(&dir.join("db.bin")).expect("open graph");
+    run_all(&graph, dir, &RepoNamespace::for_test(), "svc");
+    graph
+}
+
+fn nodes_of(graph: &GraphDatabase, ty: NodeType) -> Vec<lain::schema::GraphNode> {
+    graph.get_nodes_by_types(&[ty]).expect("list nodes")
+}
+
+// ─── 1. GraphQL provider + consumer in one workspace ─────────────────
+//
+// `schema.graphql` is the provider side; a `gql` template in TypeScript
+// is the consumer side; a resolver file links them. All three GraphQL
+// sensors fire, and the consumer runs after the provider.
+
+const GRAPHQL_SCHEMA: &str = r#"
+type Order {
+  id: ID!
+  customer_id: String!
+  total: Int!
+}
+
+type Query {
+  orders: [Order!]!
+}
+"#;
+
+const GRAPHQL_CONSUMER: &str = r#"
+import { gql } from "@apollo/client";
+
+export const ORDERS = gql`
+  query Orders {
+    orders {
+      id
+      customer_id
+    }
+  }
+`;
+"#;
+
+const GRAPHQL_RESOLVER: &str = r#"
+export const resolvers = {
+  Query: {
+    orders: () => [],
+  },
+};
+"#;
+
+#[test]
+fn graphql_provider_schemas_survive_a_full_run_all() {
+    let ws = workspace("graphql");
+    write(&ws, "schema.graphql", GRAPHQL_SCHEMA);
+    write(&ws, "src/queries.ts", GRAPHQL_CONSUMER);
+    write(&ws, "src/resolvers.ts", GRAPHQL_RESOLVER);
+
+    let graph = scan(&ws);
+
+    let schemas = nodes_of(&graph, NodeType::Schema);
+    assert!(
+        !schemas.is_empty(),
+        "graphql_provider's Schema nodes were retracted by a later sensor"
+    );
+    let fields = nodes_of(&graph, NodeType::Field);
+    assert!(
+        !fields.is_empty(),
+        "graphql_provider's Field nodes were retracted by a later sensor"
+    );
+
+    let refs = nodes_of(&graph, NodeType::FieldRef);
+    assert!(
+        !refs.is_empty(),
+        "graphql_consumer's FieldRef nodes were retracted by field_access"
+    );
+
+    // And the ownership must actually be per-sensor, or the next
+    // `run_all` will clobber again.
+    for n in nodes_of(&graph, NodeType::Schema) {
+        assert_eq!(
+            sensor_owner_of(&n),
+            Some(SensorOwner::GraphqlSensor),
+            "Schema node {} should be owned by the GraphQL sensor family",
+            n.id
+        );
+    }
+    let _ = fs::remove_dir_all(&ws);
+}
+
+// ─── 2. WebSocket consumer alongside the HTTP client sensor ──────────
+//
+// `WebSocketConsumer` rides on an `HttpClientCall` node. If the
+// node-type catch-all claims it, `http_client_sensor`'s
+// `replace_sensor_output(HttpClientSensor, …)` deletes it on every scan.
+
+const WS_CONSUMER: &str = r#"
+const socket = new WebSocket("wss://orders.internal/ws");
+socket.onmessage = (ev) => console.log(ev.data);
+"#;
+
+#[test]
+fn websocket_consumers_survive_http_client_rescan() {
+    let ws = workspace("websocket");
+    write(&ws, "src/socket.ts", WS_CONSUMER);
+    // A plain HTTP call too, so `http_client_sensor` definitely runs and
+    // performs its `replace_sensor_output`.
+    write(
+        &ws,
+        "src/api.ts",
+        r#"fetch("https://api.example.com/users").then(r => r.json());"#,
+    );
+
+    let graph = scan(&ws);
+
+    let ws_consumers: Vec<_> = graph
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| matches!(n.contract, Some(ContractFact::WebSocketConsumer(_))))
+        .collect();
+    assert!(
+        !ws_consumers.is_empty(),
+        "WebSocketConsumer nodes vanished after run_all"
+    );
+
+    for n in &ws_consumers {
+        assert_eq!(
+            sensor_owner_of(n),
+            Some(SensorOwner::WebSocketSensor),
+            "WebSocketConsumer node {} must be owned by the WebSocket sensor, \
+             not by the HTTP client sensor's catch-all",
+            n.id
+        );
+    }
+
+    // Re-scan: a second `run_all` must not retract them either.
+    run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+    let after: Vec<_> = graph
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| matches!(n.contract, Some(ContractFact::WebSocketConsumer(_))))
+        .collect();
+    assert_eq!(
+        after.len(),
+        ws_consumers.len(),
+        "a second run_all retracted WebSocketConsumer nodes"
+    );
+    let _ = fs::remove_dir_all(&ws);
+}
+
+// ─── 3. OpenAPI JSON spec must not be owned by the event sensor ──────
+
+const OPENAPI_JSON: &str = r#"{
+  "openapi": "3.0.0",
+  "info": { "title": "ping", "version": "1.0" },
+  "paths": {
+    "/ping": {
+      "get": {
+        "operationId": "ping",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "ok": { "type": "boolean" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+#[test]
+fn openapi_json_spec_schemas_survive_event_sensor() {
+    let ws = workspace("openapi_json");
+    write(&ws, "openapi.json", OPENAPI_JSON);
+    // Give the event sensor something to do so its
+    // `replace_sensor_output(EventSensor, …)` actually runs.
+    write(
+        &ws,
+        "src/pub.js",
+        r#"consumer.subscribe({ topics: ["orders.created"] });"#,
+    );
+
+    let graph = scan(&ws);
+
+    let schemas = nodes_of(&graph, NodeType::Schema);
+    assert!(
+        !schemas.is_empty(),
+        "openapi.json schemas were retracted by event_sensor"
+    );
+    for n in &schemas {
+        let owner = sensor_owner_of(n);
+        assert_ne!(
+            owner,
+            Some(SensorOwner::EventSensor),
+            "openapi.json Schema node {} must not be owned by the event sensor",
+            n.id
+        );
+    }
+    let _ = fs::remove_dir_all(&ws);
+}
+
+// ─── 4. gRPC provider + consumer in one workspace ────────────────────
+//
+// Same collision as GraphQL, different family: `grpc_provider` (phase 0)
+// mints Schema/Field nodes from the `.proto`; `grpc_consumer` (phase 1)
+// and `grpc_handler_link` (phase 1) run later and must not retract them.
+
+const PROTO: &str = r#"
+syntax = "proto3";
+
+package orders;
+
+message Order {
+  string id = 1;
+  string customer_id = 2;
+}
+
+service Orders {
+  rpc GetOrder (Order) returns (Order);
+}
+"#;
+
+#[test]
+fn grpc_provider_schemas_survive_a_full_run_all() {
+    let ws = workspace("grpc");
+    write(&ws, "proto/orders.proto", PROTO);
+    write(
+        &ws,
+        "src/client.py",
+        r#"
+import orders_pb2
+stub.GetOrder(orders_pb2.Order(id="1"))
+"#,
+    );
+
+    let graph = scan(&ws);
+
+    let schemas = nodes_of(&graph, NodeType::Schema);
+    assert!(
+        !schemas.is_empty(),
+        "grpc_provider's Schema nodes were retracted by a later sensor"
+    );
+    for n in &schemas {
+        assert_eq!(
+            sensor_owner_of(n),
+            Some(SensorOwner::ProtoSensor),
+            "proto Schema node {} must be owned by the gRPC sensor family",
+            n.id
+        );
+    }
+    let _ = fs::remove_dir_all(&ws);
+}
+
+// ─── 5. WebSocket providers must be retracted on rescan ──────────────
+//
+// `sensor_owner_of` returns `WebSocketSensor`, but no sensor passed that
+// owner to `replace_sensor_output`, so provider nodes were upserted and
+// never removed — stale routes persisted forever.
+
+#[test]
+fn stale_websocket_providers_are_retracted_on_rescan() {
+    let ws = workspace("ws_stale");
+    write(
+        &ws,
+        "src/server.js",
+        r#"app.ws("/ws/v1", (sock) => { sock.on("message", () => {}); });"#,
+    );
+
+    let graph = scan(&ws);
+    let before: Vec<_> = graph
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| matches!(n.contract, Some(ContractFact::WebSocketProvider(_))))
+        .collect();
+    assert!(!before.is_empty(), "expected a WebSocketProvider node");
+
+    // Rewrite the file with a different route, then rescan. The v1
+    // provider must be gone — not merely shadowed by v2.
+    write(
+        &ws,
+        "src/server.js",
+        r#"app.ws("/ws/v2", (sock) => { sock.on("message", () => {}); });"#,
+    );
+    run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+
+    let after: Vec<_> = graph
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| matches!(n.contract, Some(ContractFact::WebSocketProvider(_))))
+        .collect();
+    assert!(
+        !after
+            .iter()
+            .any(|n| n.name.contains("v1") || n.name.contains("/ws/v1")),
+        "stale WebSocketProvider survived the rescan: {:?}",
+        after.iter().map(|n| &n.name).collect::<Vec<_>>()
+    );
+    let _ = fs::remove_dir_all(&ws);
+}

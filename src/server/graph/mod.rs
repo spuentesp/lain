@@ -96,20 +96,29 @@ pub enum SensorOwner {
     /// `ReadsTable` / `WritesTable` edges. A rescan replaces only
     /// its own previous output.
     SqlSensor,
-    /// Phase E (spec §8.2): the gRPC provider, handler-link, and
-    /// consumer sensors all own `Module` / `Function` nodes that
-    /// carry `RpcProvider` / `RpcHandler` / `RpcConsumer` contract
-    /// facts. They share a single `SensorOwner` so a rescan
-    /// retracts all three groups together (the older `proto_sensor`
-    /// did not manage these; the new sensors replace it).
+    /// Phase E (spec §8.2): the legacy `proto_sensor` emits bare
+    /// `Module` nodes with no contract fact; those are owned here.
+    /// The three gRPC contract sensors each own their own output —
+    /// see `GrpcProviderSensor` / `GrpcConsumerSensor` /
+    /// `GrpcHandlerLinkSensor`. Sharing one owner made a later
+    /// sensor's `replace_sensor_output` retract an earlier one's
+    /// nodes on every scan.
     ProtoSensor,
-    /// Phase E (spec §8.3): the GraphQL provider, handler-link,
-    /// and consumer sensors all own `Module` / `Function` nodes
-    /// that carry `GraphqlProvider` / `GraphqlHandler` /
-    /// `GraphqlConsumer` contract facts. They share a single
-    /// `SensorOwner` so a rescan retracts all three groups
-    /// together.
+    /// Phase E (spec §8.3): legacy `graphql_sensor` output — bare
+    /// `Interface`/`Module` nodes with no contract fact. The three
+    /// GraphQL contract sensors each own their own output.
     GraphqlSensor,
+    /// Each protocol sensor owns exactly what it emits. Splitting
+    /// these out of the family owners is what makes coexistence
+    /// work: `replace_sensor_output` retracts every node with the
+    /// given owner, so a shared owner means the sensor that runs
+    /// last deletes its peers' Schema / Field / FieldRef nodes.
+    GrpcProviderSensor,
+    GrpcConsumerSensor,
+    GrpcHandlerLinkSensor,
+    GraphqlProviderSensor,
+    GraphqlConsumerSensor,
+    GraphqlResolverLinkSensor,
     /// Phase F (Gap 19): the WebSocket sensor family owns nodes
     /// carrying WebSocketProvider / WebSocketConsumer / WebSocketHandler facts.
     WebSocketSensor,
@@ -168,20 +177,25 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         // contract fact (or at scan time a `name`-only payload).
         // The sql sensor owns it.
         (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
-        // Phase E (spec §8.2): `RpcProvider` / `RpcHandler` /
-        // `RpcConsumer` ride on Module / Function nodes. All three
-        // are owned by the gRPC sensor family so a rescan
-        // retracts them together.
-        (_, Some(ContractFact::RpcProvider(_)))
-        | (_, Some(ContractFact::RpcHandler(_)))
-        | (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::ProtoSensor),
-        // Phase E (spec §8.3): `GraphqlProvider` / `GraphqlHandler` /
-        // `GraphqlConsumer` ride on Module / Function nodes. All
-        // three are owned by the GraphQL sensor family so a rescan
-        // retracts them together.
-        (_, Some(ContractFact::GraphqlProvider(_)))
-        | (_, Some(ContractFact::GraphqlHandler(_)))
-        | (_, Some(ContractFact::GraphqlConsumer(_))) => Some(SensorOwner::GraphqlSensor),
+        // Phase E (spec §8.2): each gRPC contract sensor owns its own
+        // output. Sharing one owner meant `grpc_consumer`'s rescan
+        // retracted `grpc_provider`'s Schema/Field nodes and
+        // RequestSchema/ResponseSchema edges on every run.
+        (_, Some(ContractFact::RpcProvider(_))) => Some(SensorOwner::GrpcProviderSensor),
+        (_, Some(ContractFact::RpcHandler(_))) => Some(SensorOwner::GrpcHandlerLinkSensor),
+        (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::GrpcConsumerSensor),
+        // Phase E (spec §8.3): same split for the GraphQL family.
+        (_, Some(ContractFact::GraphqlProvider(_))) => Some(SensorOwner::GraphqlProviderSensor),
+        (_, Some(ContractFact::GraphqlHandler(_))) => Some(SensorOwner::GraphqlResolverLinkSensor),
+        (_, Some(ContractFact::GraphqlConsumer(_))) => Some(SensorOwner::GraphqlConsumerSensor),
+        // A `FieldRef` minted by the GraphQL consumer must not be owned
+        // by `field_access`, or the latter's rescan deletes it.
+        (NodeType::FieldRef, Some(ContractFact::FieldRead(r)))
+            if r.origin
+                == crate::federation::contracts::model::FieldReadOrigin::GraphqlConsumer =>
+        {
+            Some(SensorOwner::GraphqlConsumerSensor)
+        }
         // Phase F (Gap 19): WebSocket facts are owned by WebSocketSensor.
         (_, Some(ContractFact::WebSocketProvider(_)))
         | (_, Some(ContractFact::WebSocketHandler(_)))

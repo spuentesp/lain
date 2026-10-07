@@ -46,7 +46,8 @@
 
 use crate::error::LainError;
 use crate::federation::contracts::model::{
-    ContractFact, FieldReadFact, GraphqlConsumerFact, GraphqlOp, JsonPath, PathSegment,
+    ContractFact, FieldReadFact, FieldReadOrigin, GraphqlConsumerFact, GraphqlOp, JsonPath,
+    PathSegment,
 };
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
@@ -163,6 +164,7 @@ pub fn scan_workspace_graphql_consumer(
                 ref_node.contract = Some(ContractFact::FieldRead(FieldReadFact {
                     chain: JsonPath(vec![PathSegment::Name(sel.clone())]),
                     exact: true,
+                    origin: FieldReadOrigin::GraphqlConsumer,
                 }));
                 all_nodes.push(ref_node);
                 all_edges.push(GraphEdge::new(
@@ -227,6 +229,7 @@ pub fn scan_workspace_graphql_consumer(
                 ref_node.contract = Some(ContractFact::FieldRead(FieldReadFact {
                     chain: JsonPath(vec![PathSegment::Name(sel.clone())]),
                     exact: true,
+                    origin: FieldReadOrigin::GraphqlConsumer,
                 }));
                 all_nodes.push(ref_node);
                 all_edges.push(GraphEdge::new(
@@ -239,7 +242,8 @@ pub fn scan_workspace_graphql_consumer(
         }
     }
     if !all_nodes.is_empty() {
-        let _ = graph.replace_sensor_output(SensorOwner::GraphqlSensor, &all_nodes, &all_edges);
+        let _ =
+            graph.replace_sensor_output(SensorOwner::GraphqlConsumerSensor, &all_nodes, &all_edges);
     }
     Ok(total)
 }

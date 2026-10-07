@@ -317,6 +317,7 @@ mod tests {
         let fr = ContractFact::FieldRead(FieldReadFact {
             chain: JsonPath(vec![PathSegment::Name("x".into())]),
             exact: true,
+            origin: crate::federation::contracts::model::FieldReadOrigin::FieldAccess,
         });
         assert_eq!(node_type_of(&fr), NodeType::FieldRef);
         // `repo` used to silence the unused warning.

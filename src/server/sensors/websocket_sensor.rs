@@ -9,7 +9,7 @@ use crate::error::LainError;
 use crate::federation::contracts::model::{
     ContractFact, HostPart, NormalizedUrl, SymbolKey, WebSocketConsumerFact, WebSocketProviderFact,
 };
-use crate::graph::GraphDatabase;
+use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::path::Path;
 
@@ -226,6 +226,18 @@ pub fn scan_workspace(
     namespace: &crate::schema::RepoNamespace,
 ) -> Result<usize, LainError> {
     let mut count = 0;
+
+    if graph.is_read_only() {
+        return Ok(count);
+    }
+    // Retract this sensor's previous output first, then upsert the
+    // current set below. Without this, nodes are only ever added: a
+    // route that moved or disappeared left its stale provider in the
+    // graph forever, because `sensor_owner_of` hands these nodes to
+    // `SensorOwner::WebSocketSensor` and nobody was calling
+    // `replace_sensor_output` with it. Same shape as
+    // `entry_point_sensor`, which also resets with empty slices.
+    graph.replace_sensor_output(SensorOwner::WebSocketSensor, &[], &[] as &[GraphEdge])?;
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();

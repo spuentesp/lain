@@ -46,7 +46,9 @@
 //! per-shape analysis lives here.
 
 use crate::error::LainError;
-use crate::federation::contracts::model::{ContractFact, FieldReadFact, JsonPath, PathSegment};
+use crate::federation::contracts::model::{
+    ContractFact, FieldReadFact, FieldReadOrigin, JsonPath, PathSegment,
+};
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
@@ -3972,6 +3974,7 @@ fn build_emission(
         node.contract = Some(ContractFact::FieldRead(FieldReadFact {
             chain: read.chain.clone(),
             exact: read.exact,
+            origin: FieldReadOrigin::FieldAccess,
         }));
         let mut e = GraphEdge::new(
             EdgeType::ReadsField,

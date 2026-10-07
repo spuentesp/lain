@@ -411,13 +411,36 @@ pub enum HostPart {
 
 // ─── Field reads ──────────────────────────────────────────────────────
 
+/// Which sensor minted a field read. `sensor_owner_of` needs this
+/// because `field_access_sensor` and `graphql_consumer_sensor` both
+/// emit `FieldRef` + `FieldRead` — without a discriminator they share
+/// one `SensorOwner`, and whichever runs later retracts the other's
+/// output on every scan.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldReadOrigin {
+    /// `field_access_sensor` — response-field access on a bound
+    /// identifier. The default, so deserialising older graphs is
+    /// unchanged.
+    #[default]
+    FieldAccess,
+    /// `graphql_consumer_sensor` — a field selected in a GraphQL
+    /// operation.
+    GraphqlConsumer,
+}
+
 /// One field read from a call's response. Emitted by
-/// `field_access_sensor` per bound-identifier access. `exact` is true
+/// `field_access_sensor` per bound-identifier access and by
+/// `graphql_consumer_sensor` per selected field. `exact` is true
 /// when the read was on a bound identifier (§6.5).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FieldReadFact {
     pub chain: JsonPath,
     pub exact: bool,
+    /// Owning sensor. `#[serde(default)]` keeps older graphs
+    /// deserialising as `FieldAccess`.
+    #[serde(default)]
+    pub origin: FieldReadOrigin,
 }
 
 // ─── SQL tables (Phase D, spec §7) ────────────────────────────────────
