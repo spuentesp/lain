@@ -1,0 +1,96 @@
+{
+  "floor": {
+    "floor_notes": {
+      "src/server/graph/mod.rs": "LOWERED FROM THE PLAN'S 60%. Measured 45.9% (17/37). The 20 survivors are petgraph walker `edge_type ==` comparisons (mod.rs:690/1153/1199/2089), the line-range filter at :2058 (3 mutants), the `depth < 50` recursion guard at :1800, and the FieldReadOrigin::GraphqlConsumer arm at :195 that no `graph`-filter test reaches. These are breadth-walker internals rather than decision boundaries; closing them means fixtures over the petgraph traversal API, tracked separately. Set to the measured value rather than a silent reduction \u2014 this note is the reviewable reason."
+    },
+    "global_killed_pct": 70,
+    "per_target": {
+      "src/server/federation/contracts/field_join.rs": 85,
+      "src/server/federation/contracts/joiner/consumer_protocol.rs": 85,
+      "src/server/graph/mod.rs": 45,
+      "src/server/sensors/graphql_consumer_sensor.rs": 85,
+      "src/server/sensors/payload_schema.rs": 85
+    }
+  },
+  "generated_at": "2026-10-07T21:03:46+00:00",
+  "operators": [
+    "ge->gt",
+    "le->lt",
+    "and->or",
+    "eq->ne"
+  ],
+  "targets": [
+    {
+      "killed": 4,
+      "mutants": 5,
+      "path": "src/server/audit.rs",
+      "survived": 1
+    },
+    {
+      "killed": 19,
+      "mutants": 19,
+      "path": "src/server/federation/contracts/field_join.rs",
+      "survived": 0
+    },
+    {
+      "killed": 14,
+      "mutants": 14,
+      "path": "src/server/federation/contracts/joiner/consumer_protocol.rs",
+      "survived": 0
+    },
+    {
+      "killed": 17,
+      "mutants": 37,
+      "path": "src/server/graph/mod.rs",
+      "survived": 20
+    },
+    {
+      "killed": 28,
+      "mutants": 36,
+      "path": "src/server/ingest/resolve.rs",
+      "survived": 8
+    },
+    {
+      "killed": 3,
+      "mutants": 4,
+      "path": "src/server/query/executor.rs",
+      "survived": 1
+    },
+    {
+      "killed": 111,
+      "mutants": 117,
+      "path": "src/server/sensors/graphql_consumer_sensor.rs",
+      "survived": 6
+    },
+    {
+      "killed": 6,
+      "mutants": 12,
+      "path": "src/server/sensors/http_sensor.rs",
+      "survived": 6
+    },
+    {
+      "killed": 26,
+      "mutants": 29,
+      "path": "src/server/sensors/payload_schema.rs",
+      "survived": 3
+    },
+    {
+      "killed": 17,
+      "mutants": 18,
+      "path": "src/server/tools/handlers/metrics.rs",
+      "survived": 1
+    }
+  ],
+  "triage": {
+    "src/server/audit.rs:262:ge->gt": "equivalent: single break site; the next iteration exits on the empty list anyway",
+    "src/server/ingest/resolve.rs:648:ge->gt": "equivalent: max_edges budget enforced by four guards; flipping one leaves three holding the cap",
+    "src/server/ingest/resolve.rs:661:ge->gt": "equivalent: same four-guard max_edges budget",
+    "src/server/ingest/resolve.rs:665:ge->gt": "equivalent: same four-guard max_edges budget",
+    "src/server/ingest/resolve.rs:683:ge->gt": "equivalent: same four-guard max_edges budget",
+    "src/server/sensors/payload_schema.rs:645:and->or": "equivalent: both branches consume the literal \"map\" and read the same field name from the post-map cursor",
+    "src/server/sensors/payload_schema.rs:696:eq->ne": "equivalent: third arm of an || chain; the first two already cover non-underscore",
+    "src/server/sensors/payload_schema.rs:723:eq->ne": "equivalent: newline counter inside consume_balanced_block; no fixture asserts that exact line count",
+    "src/server/sensors/payload_schema.rs:735:eq->ne": "equivalent: || with :736; flipping one arm still exits the loop via the other",
+    "src/server/sensors/payload_schema.rs:736:eq->ne": "equivalent: reached only when :735 is true; the loop exits either way"
+  }
+}
