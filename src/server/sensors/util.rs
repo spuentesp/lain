@@ -487,6 +487,244 @@ use crate::federation::contracts::model::{
     ContractFact, FieldReadFact, FieldReadOrigin, GraphqlOp, JsonPath, PathSegment,
 };
 
+// ─── Tier-1 line-idiom walker (Task 8) ──────────────────────────────
+//
+// Pre-Tier-1, the event_sensor and websocket_sensor each carried
+// ~150 lines of hardcoded per-framework detection logic (kafkajs /
+// aiokafka / rdkafka / kafka-go / Celery / NestJS /
+// `app.ws` / `new WebSocket` / `onopen = …`). The new walker is
+// the single line-idiom consumer: it takes a list of pre-compiled
+// regexes (built from `frameworks.yaml` entries) and a line of
+// source, and yields the captured value plus an opaque
+// `framework_id` so the caller can attribute the match back to
+// the YAML entry that produced it. Detection is a pure data
+// change; the per-kind projection (`Topic` node, `Produces` edge,
+// `HttpRoute` with `WebSocketProvider` fact, …) stays in Rust.
+//
+// The walker compiles each entry's `path_regex` exactly once (a
+// `Vec<CompiledIdiom>` the caller builds once per scan) so
+// repeated calls across files do not re-run the DFA minimisation.
+
+/// One pre-compiled framework entry, ready for the walker to apply.
+/// `kind` is the `FrameworkKind` discriminator (the walker uses
+/// it only to route the capture into the right field of the
+/// returned [`IdiomMatch`]; it does not filter on `kind`).
+pub struct CompiledIdiom {
+    pub kind: crate::server::sensors::patterns::FrameworkKind,
+    pub id: String,
+    regex: regex::Regex,
+}
+
+impl CompiledIdiom {
+    fn from_def(def: &crate::server::sensors::patterns::FrameworkDef) -> Option<Self> {
+        let path_re = def.path_regex.as_deref()?;
+        let regex = regex::Regex::new(path_re).ok()?;
+        Some(Self {
+            id: def.id.clone(),
+            kind: def.kind,
+            regex,
+        })
+    }
+}
+
+/// One match the walker yielded for a line. `literal` and
+/// `identifier` are the two named slots the YAML's regex
+/// captures. The walker tracks which group matched so the
+/// caller can decide how to interpret it: a literal slot
+/// captures a string-literal value (e.g. `'orders'`); an
+/// identifier slot captures a bare identifier (e.g. `TOPIC_NAME`)
+/// that may or may not resolve to a string via the same-file
+/// constant table.
+///
+/// A single YAML entry's regex can declare both slots
+/// `(?:["'](LITERAL)["']|IDENT)` so one entry covers both
+/// idiomatic shapes. The walker populates whichever matched;
+/// both `None` is impossible because the regex would not have
+/// matched at all.
+///
+/// For entries whose regex declares a single capture group
+/// (e.g. WebSocket client URLs), only one of the two slots is
+/// populated per match — the YAML author picks which one
+/// (the `compile_idioms` helper tags the slot based on the
+/// entry's `kind` and the `group_roles` table below).
+///
+/// `line` is the 1-based source line the caller stamped before
+/// invoking the walker; the per-line walker does not know it
+/// itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdiomMatch {
+    pub framework_id: String,
+    pub kind: crate::server::sensors::patterns::FrameworkKind,
+    /// String-literal capture (e.g. the contents of `"orders"`).
+    /// Populated when the matched regex's literal-form group
+    /// captured a non-empty value.
+    pub literal: Option<String>,
+    /// Bare-identifier capture (e.g. `TOPIC_NAME`). Populated
+    /// when the matched regex's identifier-form group captured
+    /// a non-empty value.
+    pub identifier: Option<String>,
+    /// 1-based source line the caller stamped before invoking
+    /// the walker. Carried on the match so the caller's emission
+    /// step does not have to thread `line_no` through every
+    /// helper.
+    pub line: u32,
+}
+
+impl IdiomMatch {
+    /// Convenience accessor: the literal slot if present,
+    /// otherwise the identifier slot. The two slots are
+    /// mutually exclusive (a single match can populate at most
+    /// one), so this is the "the value of this match" form
+    /// when the caller does not care whether the value was a
+    /// literal or an identifier (e.g. the WebSocket client URL
+    /// case — both are valid URLs).
+    pub fn value(&self) -> Option<&str> {
+        self.literal.as_deref().or(self.identifier.as_deref())
+    }
+}
+
+/// Per-entry mapping of capture-group index → slot. The walker
+/// reads this to populate `IdiomMatch::literal` vs
+/// `IdiomMatch::identifier` correctly. The convention encoded
+/// here is the one `frameworks.yaml` follows:
+///
+/// - `TopicProducer` / `TopicConsumer`: group 1 is the literal,
+///   group 2 is the identifier (when the regex has both).
+/// - `Scheduled`: group 1 is the spec literal. The Celery
+///   marker regex has no group; the walker tags the empty
+///   match as `literal: None, identifier: Some("")` so the
+///   caller's `schedule_value` falls back to the function-
+///   lookahead path.
+/// - `WebSocketClient` / `WebSocketServer`: group 1 is the
+///   literal (URL / route).
+/// - `WebSocketHandler`: group 1 is the event name (kept in
+///   the regex for the alternation), group 2 is the handler
+///   name. The walker tags group 1 as `literal` and group 2
+///   as `identifier`; the websocket caller reads
+///   `identifier` as the handler name.
+fn group_roles(kind: crate::server::sensors::patterns::FrameworkKind) -> &'static [(usize, Slot)] {
+    use crate::server::sensors::patterns::FrameworkKind as K;
+    match kind {
+        K::WebSocketHandler => &[(1, Slot::Literal), (2, Slot::Identifier)],
+        K::TopicProducer | K::TopicConsumer | K::Scheduled => {
+            &[(1, Slot::Literal), (2, Slot::Identifier)]
+        }
+        K::WebSocketClient | K::WebSocketServer => &[(1, Slot::Literal)],
+        // Not used by the Tier-1 walker.
+        K::Route | K::Outbound | K::EntryPoint => &[],
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Literal,
+    Identifier,
+}
+
+/// Generic Tier-1 line-idiom walker. Applies every compiled
+/// idiom to `line` and returns the captures, classified by
+/// slot (literal vs identifier). The walker is per-line (the
+/// per-line shape is the same in every Tier-1 consumer); the
+/// caller drives the line loop and the `strip_line_comment`
+/// step.
+///
+/// `idioms` is borrowed because the typical caller builds it
+/// once per scan (or once per process — the regex compilation
+/// is the only allocation) and reuses it across every line of
+/// every file.
+///
+/// A match is yielded whenever the regex matches, even if
+/// every capture group is empty. This is the Celery
+/// `@app.task` / `@shared_task` case: the regex has no
+/// capture group, and the caller's `schedule_value` falls
+/// through to the function-lookahead path. Without this
+/// "yield on regex match" rule, the walker would never
+/// surface a Celery match and the joiner would never see a
+/// `scheduled` Topic.
+pub fn walk_idioms(idioms: &[CompiledIdiom], line: &str, line_no: u32) -> Vec<IdiomMatch> {
+    let mut out: Vec<IdiomMatch> = Vec::new();
+    for idiom in idioms {
+        let roles = group_roles(idiom.kind);
+        for cap in idiom.regex.captures_iter(line) {
+            let mut literal: Option<String> = None;
+            let mut identifier: Option<String> = None;
+            for (group_idx, slot) in roles {
+                if let Some(m) = cap.get(*group_idx) {
+                    let s = m.as_str();
+                    if s.is_empty() {
+                        continue;
+                    }
+                    match slot {
+                        Slot::Literal => literal = Some(s.to_string()),
+                        Slot::Identifier => identifier = Some(s.to_string()),
+                    }
+                }
+            }
+            out.push(IdiomMatch {
+                framework_id: idiom.id.clone(),
+                kind: idiom.kind,
+                literal,
+                identifier,
+                line: line_no,
+            });
+        }
+    }
+    out
+}
+
+/// Build a `Vec<CompiledIdiom>` from a YAML-framework iterator.
+/// Entries whose `path_regex` is missing or fails to compile are
+/// silently dropped (the YAML schema says `path_regex` is the
+/// idioms' "the walker has something to match against" field —
+/// missing it is the same as the entry being a stub). Tests
+/// surface malformed entries via the `Patterns::framework` /
+/// `Patterns::route_patterns_map` paths.
+pub fn compile_idioms<'a, I>(iter: I) -> Vec<CompiledIdiom>
+where
+    I: IntoIterator<Item = &'a crate::server::sensors::patterns::FrameworkDef>,
+{
+    iter.into_iter()
+        .filter_map(CompiledIdiom::from_def)
+        .collect()
+}
+
+/// Build the full per-`Lang` idiom set in one shot: every
+/// Tier-1 entry in the registry, partitioned by the call site
+/// (the caller iterates lines and calls [`walk_idioms`] with
+/// each sub-list). The signature returns the four sub-lists
+/// `(producers, consumers, scheduled, …)` so the caller can
+/// decide which to dispatch in which language walker without
+/// re-querying `Patterns`.
+#[allow(clippy::type_complexity)]
+pub fn topic_idioms_for(
+    patterns: &Patterns,
+    lang: Lang,
+) -> (Vec<CompiledIdiom>, Vec<CompiledIdiom>, Vec<CompiledIdiom>) {
+    (
+        compile_idioms(patterns.topic_producer_patterns(lang)),
+        compile_idioms(patterns.topic_consumer_patterns(lang)),
+        compile_idioms(patterns.scheduled_patterns(lang)),
+    )
+}
+
+/// Build the WebSocket idiom set from a `Patterns` instance.
+/// The pre-Tier-1 `websocket_sensor.rs` applied the same four
+/// regexes to every source line regardless of `Lang`; the
+/// migration keeps the same shape — the walker consumes the
+/// `*_all` accessors and applies them to every file. A future
+/// refinement that splits WebSocket detection by `Lang` (so
+/// `wss?://…` in a Go file is filtered out, say) can swap
+/// `*_all` for `*(lang)` here without touching the walker.
+pub fn websocket_idioms_for(
+    patterns: &Patterns,
+) -> (Vec<CompiledIdiom>, Vec<CompiledIdiom>, Vec<CompiledIdiom>) {
+    (
+        compile_idioms(patterns.websocket_client_patterns_all()),
+        compile_idioms(patterns.websocket_server_patterns_all()),
+        compile_idioms(patterns.websocket_handler_patterns_all()),
+    )
+}
+
 /// Bundle the parameters for [`emit_graphql_field_refs`].
 pub struct GraphqlFieldRefs<'a> {
     pub consumer_id: &'a str,

@@ -116,6 +116,41 @@ pub enum FrameworkKind {
     /// Entry point: HTTP handlers, scheduled jobs, CLI commands,
     /// `fn main` (`entry_point_sensor`).
     EntryPoint,
+    /// Tier-1 protocol idiom: a publish / produce site
+    /// (`event_sensor` produces a `Topic` node + `Produces` edge).
+    /// `path_regex` capture group 1 is the topic name.
+    #[serde(rename = "topic_producer")]
+    TopicProducer,
+    /// Tier-1 protocol idiom: a subscribe / consume site
+    /// (`event_sensor` emits `Consumes` + `TopicConsumer`).
+    /// `path_regex` capture group 1 is the topic name.
+    #[serde(rename = "topic_consumer")]
+    TopicConsumer,
+    /// Tier-1 protocol idiom: a scheduled task site
+    /// (`@Cron` / `@app.task`). `path_regex` capture group 1 is the
+    /// spec / sentinel the walker emits as the topic name; the
+    /// walker also performs a same-file lookahead for the
+    /// decorated function's name (Task 8 acceptance test).
+    #[serde(rename = "scheduled")]
+    Scheduled,
+    /// Tier-1 protocol idiom: a WebSocket *client* dial site
+    /// (URL string literal, or `new WebSocket("…")` constructor).
+    /// `path_regex` capture group 1 is the URL.
+    #[serde(rename = "websocket_client")]
+    WebSocketClient,
+    /// Tier-1 protocol idiom: a WebSocket *server* route site
+    /// (`app.ws("/path", …)` / `router.ws("/path", …)` /
+    /// `WebSocketGateway("/path", …)`). `path_regex` capture
+    /// group 1 is the route path.
+    #[serde(rename = "websocket_server")]
+    WebSocketServer,
+    /// Tier-1 protocol idiom: a WebSocket event handler site
+    /// (`onopen = handler` / `onmessage = handler`). `path_regex`
+    /// capture group 2 is the handler name (group 1 is the event
+    /// name — kept in the regex so the per-line consumer can
+    /// distinguish a handler assignment from a non-handler match).
+    #[serde(rename = "websocket_handler")]
+    WebSocketHandler,
 }
 
 /// Top-level YAML document.
@@ -575,6 +610,135 @@ impl Patterns {
             .into_iter()
             .flatten()
             .filter(|f| f.kind == FrameworkKind::EntryPoint)
+    }
+
+    /// Tier-1 protocol idioms: a publish / produce site
+    /// (`producer.send({ topic: … })`,
+    /// `FutureRecord::to("…")`, `kafka-go SendMessage`,
+    /// `AIOKafkaProducer("…")`). `path_regex` capture group 1 is
+    /// the topic name; the walker in
+    /// `crate::server::sensors::util::walk_topic_idioms` consumes
+    /// these to produce a `Topic` node + `Produces` edge.
+    pub fn topic_producer_patterns(&self, lang: Lang) -> impl Iterator<Item = &FrameworkDef> {
+        let key = lang_key(lang);
+        self.yaml
+            .languages
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(|f| f.kind == FrameworkKind::TopicProducer)
+    }
+
+    /// Tier-1 protocol idioms: a subscribe / consume site
+    /// (`consumer.run({ topics: […] })`,
+    /// `KafkaConsumer("…")`, `StreamConsumer::subscribe(&[…])`,
+    /// `SubscribeTopics("…")`). `path_regex` capture group 1 is
+    /// the topic name.
+    pub fn topic_consumer_patterns(&self, lang: Lang) -> impl Iterator<Item = &FrameworkDef> {
+        let key = lang_key(lang);
+        self.yaml
+            .languages
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(|f| f.kind == FrameworkKind::TopicConsumer)
+    }
+
+    /// Tier-1 protocol idioms: a scheduled-task site
+    /// (`@Cron("…")`, `@app.task`, `@shared_task`). The walker's
+    /// generic line-idiom walker recognises the `@`-decorator
+    /// shape and (for Celery-style) follows the next non-blank,
+    /// non-decorator line to resolve the decorated function's
+    /// name. `path_regex` capture group 1 is the spec / sentinel
+    /// the walker emits as the topic name when one is present
+    /// (e.g. NestJS `@Cron('0 0 * * *')`); for Celery-style
+    /// entries the walker uses the function name as the topic
+    /// identifier and `path_regex` may be absent.
+    pub fn scheduled_patterns(&self, lang: Lang) -> impl Iterator<Item = &FrameworkDef> {
+        let key = lang_key(lang);
+        self.yaml
+            .languages
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(|f| f.kind == FrameworkKind::Scheduled)
+    }
+
+    /// Tier-1 protocol idioms: a WebSocket *client* dial site
+    /// (URL string literal, or `new WebSocket("…")` constructor).
+    /// `path_regex` capture group 1 is the URL.
+    pub fn websocket_client_patterns(&self, lang: Lang) -> impl Iterator<Item = &FrameworkDef> {
+        let key = lang_key(lang);
+        self.yaml
+            .languages
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(|f| f.kind == FrameworkKind::WebSocketClient)
+    }
+
+    /// Tier-1 protocol idioms: a WebSocket *server* route site
+    /// (`app.ws("/path", …)` / `router.ws("/path", …)` /
+    /// `WebSocketGateway("/path", …)`). `path_regex` capture
+    /// group 1 is the route path.
+    pub fn websocket_server_patterns(&self, lang: Lang) -> impl Iterator<Item = &FrameworkDef> {
+        let key = lang_key(lang);
+        self.yaml
+            .languages
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(|f| f.kind == FrameworkKind::WebSocketServer)
+    }
+
+    /// Tier-1 protocol idioms: a WebSocket event handler site
+    /// (`onopen = handler` / `onmessage = handler`). `path_regex`
+    /// capture group 2 is the handler name.
+    pub fn websocket_handler_patterns(&self, lang: Lang) -> impl Iterator<Item = &FrameworkDef> {
+        let key = lang_key(lang);
+        self.yaml
+            .languages
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(|f| f.kind == FrameworkKind::WebSocketHandler)
+    }
+
+    /// Iterate WebSocket *client* idioms across every language
+    /// bucket. The pre-Tier-1 `websocket_sensor.rs` applied its
+    /// URL regexes to every line of every source file (it had no
+    /// language dispatch), and the migration keeps the same
+    /// behaviour: a `wss?://…` literal can appear in a `.js` or
+    /// `.py` or `.go` file with the same shape, so the
+    /// language-bucketed accessor would have hidden valid matches.
+    /// The walker still filters by `lang` at the call site if it
+    /// needs to — the language-agnostic accessor is the union.
+    pub fn websocket_client_patterns_all(&self) -> impl Iterator<Item = &FrameworkDef> {
+        self.yaml
+            .languages
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|f| f.kind == FrameworkKind::WebSocketClient)
+    }
+
+    /// See [`Self::websocket_client_patterns_all`] — same
+    /// language-agnostic rationale.
+    pub fn websocket_server_patterns_all(&self) -> impl Iterator<Item = &FrameworkDef> {
+        self.yaml
+            .languages
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|f| f.kind == FrameworkKind::WebSocketServer)
+    }
+
+    /// See [`Self::websocket_client_patterns_all`] — same
+    /// language-agnostic rationale.
+    pub fn websocket_handler_patterns_all(&self) -> impl Iterator<Item = &FrameworkDef> {
+        self.yaml
+            .languages
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|f| f.kind == FrameworkKind::WebSocketHandler)
     }
 
     /// Return the union of `deny_methods` across every outbound

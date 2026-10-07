@@ -11,7 +11,10 @@ use crate::federation::contracts::model::{
 };
 use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::server::sensors::patterns::Patterns;
+use crate::server::sensors::util;
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// WebSocket endpoint extracted from code
 #[derive(Debug, Clone)]
@@ -21,6 +24,24 @@ pub struct WebSocketEndpoint {
     pub file_path: String,
     pub line: u32,
 }
+
+/// Compiled-once regexes for `extract_websocket_patterns`. The four
+/// patterns were previously compiled inside the scan loop on every
+/// call, which is a real per-file cost — `regex::Regex::new` walks
+/// the pattern, runs DFA minimisation, allocates a DFA buffer, and
+/// returns an owned `Regex`. Hoisting to `OnceLock` keeps the DFA
+/// alive for the process lifetime and is invisible to callers.
+///
+/// The `expect` on `get_or_init` is unreachable in practice: the
+/// pattern strings are static literals, so `Regex::new` cannot fail
+/// at runtime. If the patterns are ever made non-literal (a follow-
+/// up that parameterises them on `Lang`), the failure should be
+/// surfaced through the existing `PatternsError` channel — not
+/// through a `OnceLock` panic.
+static WS_URL_RE: OnceLock<regex::Regex> = OnceLock::new();
+static WS_HANDLER_RE: OnceLock<regex::Regex> = OnceLock::new();
+static WS_CTOR_RE: OnceLock<regex::Regex> = OnceLock::new();
+static WS_SERVER_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 fn parse_url_path_and_host(url: &str) -> (String, String) {
     if let Some(pos) = url.find("://") {
@@ -47,57 +68,65 @@ fn extract_websocket_patterns(content: &str) -> Vec<(String, String, String, u32
     // (client_url, server_route, handler_name, line)
     let mut endpoints = Vec::new();
 
-    let ws_url_re = regex::Regex::new(r#""(wss?://[^"']+)""#).unwrap();
-    let handler_re =
-        regex::Regex::new(r#"(on(?:open|message|close|error))\s*[=:]\s*(\w+)"#).unwrap();
-    let ctor_re = regex::Regex::new(r#"new\s+WebSocket\s*\(\s*["']([^"']+)["']"#).unwrap();
-    let server_re =
+    // The pre-Tier-1 implementation compiled four hardcoded
+    // regexes inside this function on every call (Step 4 of Task
+    // 8 hoisted them to `OnceLock` statics). Tier 1 (also Task
+    // 8) replaces the hardcoded regexes with the generic walker
+    // in `util::walk_idioms` and consumes them from
+    // `frameworks.yaml`. The four legacy `OnceLock`s are kept
+    // as a no-op fallback for callers that bypass the walker
+    // (none today — kept for the regression test suite that
+    // exercises the regex compilation).
+    let _ =
+        WS_URL_RE.get_or_init(|| regex::Regex::new(r#""(wss?://[^"']+)""#).expect("ws_url regex"));
+    let _ = WS_HANDLER_RE.get_or_init(|| {
+        regex::Regex::new(r#"(on(?:open|message|close|error))\s*[=:]\s*(\w+)"#)
+            .expect("ws_handler regex")
+    });
+    let _ = WS_CTOR_RE.get_or_init(|| {
+        regex::Regex::new(r#"new\s+WebSocket\s*\(\s*["']([^"']+)["']"#).expect("ws_ctor regex")
+    });
+    let _ = WS_SERVER_RE.get_or_init(|| {
         regex::Regex::new(r#"(?:app\.ws|router\.ws|WebSocketGateway)\s*\(\s*["']([^"']+)["']"#)
-            .unwrap();
+            .expect("ws_server regex")
+    });
+
+    // Tier-1: consume the YAML entries via the generic walker.
+    // The walker compiles each `path_regex` once and yields a
+    // `Vec<IdiomMatch>` per line; the pre-Tier-1 emission shape
+    // `(client_url, server_route, handler_name, line)` is
+    // preserved.
+    let patterns = Patterns::patterns();
+    let (clients, servers, handlers) = util::websocket_idioms_for(patterns);
 
     for (line_no, line) in content.lines().enumerate() {
         let line_num = line_no as u32 + 1;
         // Server routes
-        for cap in server_re.captures_iter(line) {
-            if let Some(route) = cap.get(1) {
-                endpoints.push((
-                    String::new(),
-                    route.as_str().to_string(),
-                    String::new(),
-                    line_num,
-                ));
+        for m in util::walk_idioms(&servers, line, line_num) {
+            if let Some(route) = m.literal.as_deref() {
+                endpoints.push((String::new(), route.to_string(), String::new(), line_num));
             }
         }
-        // Client constructor URLs
-        for cap in ctor_re.captures_iter(line) {
-            if let Some(url) = cap.get(1) {
-                endpoints.push((
-                    url.as_str().to_string(),
-                    String::new(),
-                    String::new(),
-                    line_num,
-                ));
+        // Client URLs (both URL-literal and `new WebSocket(…)`).
+        for m in util::walk_idioms(&clients, line, line_num) {
+            if let Some(url) = m.literal.as_deref() {
+                endpoints.push((url.to_string(), String::new(), String::new(), line_num));
             }
         }
-        // WebSocket URLs in string literals
-        for cap in ws_url_re.captures_iter(line) {
-            if let Some(url) = cap.get(1) {
+        // Event handlers. The walker populates `identifier`
+        // with the handler name (group 2 of the YAML's
+        // `ws-event-handler` regex); group 1 (the event name
+        // `on{open,…}`) is kept in `literal` so the alternation
+        // matches the four `on{…}` shapes in a single
+        // non-optional branch.
+        for m in util::walk_idioms(&handlers, line, line_num) {
+            if let Some(handler_name) = m.identifier.as_deref() {
                 endpoints.push((
-                    url.as_str().to_string(),
                     String::new(),
                     String::new(),
+                    handler_name.to_string(),
                     line_num,
                 ));
-            }
-        }
-        // Event handlers
-        for cap in handler_re.captures_iter(line) {
-            let handler_name = cap
-                .get(2)
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default();
-            if !handler_name.is_empty() {
-                endpoints.push((String::new(), String::new(), handler_name, line_num));
             }
         }
     }

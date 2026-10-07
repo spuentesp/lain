@@ -32,6 +32,8 @@ use crate::error::LainError;
 use crate::federation::contracts::model::SourceSite;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::patterns::Patterns;
+use crate::server::sensors::util::{self, Lang};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -249,432 +251,206 @@ fn detect_sites(
     constants: &BTreeMap<String, String>,
 ) -> Vec<DetectedSite> {
     let mut out: Vec<DetectedSite> = Vec::new();
-    match ext {
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
-            detect_ts_sites(&mut out, content, constants);
-        }
-        "py" => {
-            detect_py_sites(&mut out, content, constants);
-        }
-        "rs" => {
-            detect_rust_sites(&mut out, content, constants);
-        }
-        "go" => {
-            detect_go_sites(&mut out, content, constants);
-        }
-        _ => {}
-    }
-    out
-}
-
-fn detect_ts_sites(
-    out: &mut Vec<DetectedSite>,
-    content: &str,
-    constants: &BTreeMap<String, String>,
-) {
-    // kafkajs / confluent-kafka: `producer.send({ topic: 'foo' })` and
-    // `consumer.run({ topics: ['foo'] })`.
-    for (idx, line) in content.lines().enumerate() {
+    let lang = match ext_to_lang(ext) {
+        Some(l) => l,
+        None => return out,
+    };
+    let patterns = Patterns::patterns();
+    let (producers, consumers, scheduled) = util::topic_idioms_for(patterns, lang);
+    let lines: Vec<&str> = content.lines().collect();
+    for (idx, raw) in lines.iter().enumerate() {
         let line_num = idx as u32 + 1;
         // Strip line comments. Without this, a commented-out
         // `producer.send({ topic: 'foo' })` would still match the
         // regex and emit a phantom Topic.
-        let line = strip_line_comment(line);
+        let line = strip_line_comment(raw);
         let trimmed = line.trim();
-
-        // Producer pattern.
-        if trimmed.contains(".send(") || trimmed.contains(".send (") {
-            if let Some(topic) = extract_object_property(line, "topic") {
+        if trimmed.is_empty() {
+            continue;
+        }
+        for m in util::walk_idioms(&producers, line, line_num) {
+            if let Some(value) = resolve_idiom_capture(&m, constants) {
                 out.push(DetectedSite {
                     kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_object_property_identifier(line, "topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
+                    topic: Some(value),
                     broker: DEFAULT_BROKER.into(),
                     line: line_num,
                     owner_name: None,
                 });
             }
         }
-
-        // Consumer pattern: `consumer.run({ topics: ['foo'] })` or
-        // `consumer.subscribe({ topics: [...] })`.
-        if trimmed.contains(".run(") || trimmed.contains(".subscribe(") {
-            if let Some(topic) = extract_array_string_member(line) {
+        for m in util::walk_idioms(&consumers, line, line_num) {
+            if let Some(value) = resolve_idiom_capture(&m, constants) {
                 out.push(DetectedSite {
                     kind: SiteKind::Consumes,
-                    topic: Some(topic),
+                    topic: Some(value),
                     broker: DEFAULT_BROKER.into(),
                     line: line_num,
                     owner_name: None,
                 });
             }
         }
+        for m in util::walk_idioms(&scheduled, line, line_num) {
+            // The walker returns the spec (or a Celery-marker
+            // match with no spec). Project to `(topic, owner_name,
+            // broker)` based on the framework id.
+            let (topic, owner_name, broker) = schedule_value(&m, &lines, idx, ext, constants);
+            out.push(DetectedSite {
+                kind: SiteKind::Scheduled,
+                topic,
+                broker,
+                line: line_num,
+                owner_name,
+            });
+        }
+    }
+    out
+}
 
-        // Celery-style scheduled task: `@Cron('...')` decorator on
-        // a function — the next non-empty line is the function it
-        // decorates.
-        if let Some(spec) = extract_decorator_arg(trimmed, "Cron") {
-            let mut owner_name: Option<String> = None;
-            for ahead in content.lines().skip(idx + 1).take(5) {
-                let ahead = ahead.trim();
-                if ahead.is_empty() || ahead.starts_with("//") {
-                    continue;
+/// Map a file extension to the Tier-1 `Lang` the walker uses for
+/// per-language idiom selection. Returns `None` for extensions no
+/// event-sensor walker handles (the caller skips them).
+fn ext_to_lang(ext: &str) -> Option<Lang> {
+    match ext {
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
+        "py" => Some(Lang::Python),
+        "rs" => Some(Lang::Rust),
+        "go" => Some(Lang::Go),
+        _ => None,
+    }
+}
+
+/// Resolve the walker's capture to a topic name. The walker
+/// tracks which slot (`literal` vs `identifier`) matched; the
+/// caller (event_sensor) interprets them per the pre-Tier-1
+/// rules:
+/// - `literal` set: the source had a quoted string, the value
+///   is the literal contents. Use as-is.
+/// - `identifier` set: the source had a bare identifier (e.g.
+///   `topic: TOPIC_NAME`); try to resolve it against the
+///   same-file constants table. If the constant is missing,
+///   return `None` (a dynamic topic — the emitter drops it
+///   and the joiner surfaces it in `coverage.unnormalized`).
+fn resolve_idiom_capture(
+    m: &util::IdiomMatch,
+    constants: &BTreeMap<String, String>,
+) -> Option<String> {
+    if let Some(lit) = m.literal.as_deref() {
+        return Some(lit.to_string());
+    }
+    if let Some(ident) = m.identifier.as_deref() {
+        if let Some(resolved) = constants.get(ident) {
+            return Some(resolved.clone());
+        }
+        // Bare identifier that doesn't resolve to a constant:
+        // a dynamic topic. The original Rust detector's
+        // `extract_object_property_identifier` + `resolve_topic_name`
+        // chain returned `None` here too, and the emitter's
+        // `site.topic.clone() → match None → continue` filtered
+        // it out. Tier 1 preserves that behaviour: a
+        // `producer.send({ topic: <bare> })` where `<bare>` is
+        // not a same-file constant emits no Topic node.
+        return None;
+    }
+    None
+}
+
+/// Project a `Scheduled` walker match into the `(topic, owner_name,
+/// broker)` triple the emitter expects. The exact behaviour depends
+/// on the framework:
+/// - NestJS `@Cron('spec')` — the spec is the topic; the function
+///   name is the owner. The walker captured the spec; the
+///   lookahead finds the function name.
+/// - Celery `@app.task` / `@shared_task` — no spec; the topic is
+///   the function name. The walker captured `None` for the spec;
+///   the lookahead finds the function name.
+///
+/// The Celery case is the one with no spec — when the walker
+/// yields a match with no `literal` slot, we fall back to the
+/// function-lookahead populating the topic.
+fn schedule_value(
+    m: &util::IdiomMatch,
+    lines: &[&str],
+    idx: usize,
+    ext: &str,
+    _constants: &BTreeMap<String, String>,
+) -> (Option<String>, Option<String>, String) {
+    let spec = m.literal.clone();
+    // Lookahead for the decorated function (5 lines, stop at the
+    // next decorator / function-decl / blank-line skip). The
+    // shape of the function declaration varies by language.
+    let owner_name = lookahead_for_function(lines, idx + 1, ext);
+    let (broker, topic) = match m.framework_id.as_str() {
+        "celery-task" => ("celery".to_string(), owner_name.clone().or(spec)),
+        // NestJS `@Cron` and any other `Scheduled` entry the YAML
+        // grows in the future.
+        _ => (
+            "schedule".to_string(),
+            spec.clone().or_else(|| owner_name.clone()),
+        ),
+    };
+    (topic, owner_name, broker)
+}
+
+/// Look at the next few lines after a `@decorator` and return
+/// the name of the function the decorator decorates. Stops at a
+/// blank line, a non-blank non-decorator non-function line, or
+/// the next decorator. Returns `None` if the lookahead cannot
+/// resolve a function name.
+fn lookahead_for_function(lines: &[&str], start: usize, ext: &str) -> Option<String> {
+    for ahead in lines.iter().skip(start).take(5) {
+        let ahead = ahead.trim();
+        if ahead.is_empty() {
+            continue;
+        }
+        // The comment marker depends on the language. Mirrors
+        // the per-language dispatch in `detect_sites`.
+        if (ext == "py" && ahead.starts_with('#')) || (ext != "py" && ahead.starts_with("//")) {
+            continue;
+        }
+        // Stop at the next decorator — it's not the function.
+        if ahead.starts_with('@') {
+            return None;
+        }
+        let name = match ext {
+            "py" => {
+                if ahead.starts_with("def ") || ahead.starts_with("async def ") {
+                    parse_def_name(ahead)
+                } else {
+                    return None;
                 }
+            }
+            _ => {
                 if ahead.starts_with("function ")
                     || ahead.starts_with("async function ")
                     || ahead.starts_with("export ")
                 {
-                    owner_name = parse_function_name(ahead);
-                    break;
-                }
-                if ahead.starts_with("@") {
-                    break;
+                    parse_function_name(ahead)
+                } else {
+                    return None;
                 }
             }
-            out.push(DetectedSite {
-                kind: SiteKind::Scheduled,
-                topic: Some(spec),
-                broker: "schedule".into(),
-                line: line_num,
-                owner_name,
-            });
-        }
+        };
+        return name;
     }
-}
-
-fn detect_py_sites(
-    out: &mut Vec<DetectedSite>,
-    content: &str,
-    constants: &BTreeMap<String, String>,
-) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_num = idx as u32 + 1;
-        let line = strip_line_comment(line);
-        let trimmed = line.trim();
-
-        // aiokafka: `KafkaConsumer(topic)` constructor or
-        // `producer.send_and_wait(topic, ...)`.
-        if trimmed.contains("AIOKafkaProducer(") || trimmed.contains("KafkaProducer(") {
-            if let Some(topic) = extract_positional_string_arg(trimmed, "AIOKafkaProducer")
-                .or_else(|| extract_positional_string_arg(trimmed, "KafkaProducer"))
-            {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-        if trimmed.contains("AIOKafkaConsumer(") || trimmed.contains("KafkaConsumer(") {
-            if let Some(topic) = extract_positional_string_arg(trimmed, "AIOKafkaConsumer")
-                .or_else(|| extract_positional_string_arg(trimmed, "KafkaConsumer"))
-            {
-                out.push(DetectedSite {
-                    kind: SiteKind::Consumes,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-        // `.send_and_wait("topic", ...)` or `.send(topic="foo", ...)`.
-        if trimmed.contains(".send_and_wait(") || trimmed.contains(".send(") {
-            if let Some(topic) = extract_first_string_arg(trimmed) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_kwarg_identifier(trimmed, "topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-
-        // Celery `@app.task` and `@shared_task` decorators.
-        if let Some(spec) = extract_py_decorator_task(trimmed) {
-            let mut owner_name: Option<String> = None;
-            for ahead in content.lines().skip(idx + 1).take(5) {
-                let ahead = ahead.trim();
-                if ahead.is_empty() || ahead.starts_with("#") {
-                    continue;
-                }
-                if ahead.starts_with("def ") || ahead.starts_with("async def ") {
-                    owner_name = parse_def_name(ahead);
-                    break;
-                }
-                if ahead.starts_with("@") {
-                    break;
-                }
-            }
-            // For Celery the broker is `celery` and the topic is the
-            // module path / task name. We use the function name as a
-            // stable identifier when present.
-            out.push(DetectedSite {
-                kind: SiteKind::Scheduled,
-                topic: owner_name.clone().or(Some(spec)),
-                broker: "celery".into(),
-                line: line_num,
-                owner_name,
-            });
-        }
-    }
-}
-
-fn detect_rust_sites(
-    out: &mut Vec<DetectedSite>,
-    content: &str,
-    constants: &BTreeMap<String, String>,
-) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_num = idx as u32 + 1;
-        let line = strip_line_comment(line);
-        let trimmed = line.trim();
-
-        // rdkafka producer: `FutureRecord::to("topic")` is the
-        // canonical publish shape — the topic name is the first
-        // argument. Detect before the `::send(` shape so a single-line
-        // `let record = FutureRecord::to("...")` form is also covered.
-        if trimmed.contains("FutureRecord::to(") {
-            if let Some(topic) = extract_first_string_arg(trimmed) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_first_ident_arg(trimmed) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-
-        // rdkafka: `FutureProducer::send(record, ...)` where the
-        // record's topic is a string literal in
-        // `FutureRecord { topic: ... }`.
-        if trimmed.contains("::send(") || trimmed.contains(".send(") {
-            // The topic name appears as a string literal in the
-            // `FutureRecord` struct's `topic` field.
-            if let Some(topic) = extract_object_property(line, "topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_object_property_identifier(line, "topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-
-        // StreamConsumer::subscribe(&["foo", "bar"]) — single-element
-        // arrays only, to keep the regex simple.
-        if trimmed.contains("::subscribe(") || trimmed.contains(".subscribe(") {
-            if let Some(topic) = extract_array_string_member(line) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Consumes,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-    }
-}
-
-fn detect_go_sites(
-    out: &mut Vec<DetectedSite>,
-    content: &str,
-    constants: &BTreeMap<String, String>,
-) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_num = idx as u32 + 1;
-        let line = strip_line_comment(line);
-        let trimmed = line.trim();
-
-        // kafka-go: `producer.SendMessage(&kafka.Message{Topic: "foo"})`
-        // or `writer.WriteMessages(ctx, kafka.Message{Topic: "foo"})`.
-        // Match `SendMessage` as a prefix so `SendMessages(` (the
-        // segmentio/kafka-go WriteMessages sibling) is also covered.
-        if trimmed.contains("SendMessage") || trimmed.contains("WriteMessages(") {
-            if let Some(topic) = extract_struct_field(line, "Topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_struct_field_identifier(line, "Topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-        // `consumer.SubscribeTopics("foo")`.
-        if trimmed.contains("SubscribeTopics(") {
-            if let Some(topic) = extract_first_string_arg(trimmed) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Consumes,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-    }
+    None
 }
 
 // ─── Per-language string extractors ───────────────────────────────────
+//
+// The pre-Tier-1 `event_sensor` carried ~200 lines of bespoke
+// per-language extractors (kafkajs / aiokafka / rdkafka / kafka-go /
+// Celery / NestJS). Tier 1 collapsed all of them into
+// `frameworks.yaml` regexes consumed by the generic walker in
+// `crate::server::sensors::util::walk_idioms`. The only
+// per-language helper still needed is the function-lookahead
+// (the language's "function declaration" shape), which lives in
+// `lookahead_for_function` and the two `parse_function_name` /
+// `parse_def_name` helpers below.
 
-/// Look for `{ key: "<value>" }` patterns. Returns the literal value.
-fn extract_object_property(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}:");
-    let idx = line.find(&needle)?;
-    let rest = &line[idx + needle.len()..];
-    let rhs = rest.trim_start();
-    extract_string_literal(rhs)
-}
-
-fn extract_object_property_identifier(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}:");
-    let idx = line.find(&needle)?;
-    let rest = &line[idx + needle.len()..];
-    let rhs = rest.trim_start();
-    let ident: String = rhs
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect();
-    if ident.is_empty() {
-        None
-    } else {
-        Some(ident)
-    }
-}
-
-fn extract_struct_field(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}:");
-    let idx = line.find(&needle)?;
-    let rest = &line[idx + needle.len()..];
-    let rhs = rest.trim_start();
-    extract_string_literal(rhs)
-}
-
-fn extract_struct_field_identifier(line: &str, key: &str) -> Option<String> {
-    extract_object_property_identifier(line, key)
-}
-
-/// Look for the first quoted string in the line that appears inside
-/// `[ ... ]`. Returns it.
-fn extract_array_string_member(line: &str) -> Option<String> {
-    let lbracket = line.find('[')?;
-    let rbracket = line.rfind(']')?;
-    let inside = &line[lbracket..=rbracket];
-    extract_string_literal(inside.trim_matches(|c: char| c == '[' || c == ']').trim())
-}
-
-fn extract_first_string_arg(line: &str) -> Option<String> {
-    let open = line.find('(')?;
-    let close = line.rfind(')').unwrap_or(line.len());
-    let inside = &line[open + 1..close];
-    extract_string_literal(inside.trim())
-}
-
-/// Like `extract_first_string_arg` but for a bare identifier arg
-/// (e.g. `FutureRecord::to(TOPIC)` where `TOPIC` is a constant).
-fn extract_first_ident_arg(line: &str) -> Option<String> {
-    let open = line.find('(')?;
-    let close = line.rfind(')').unwrap_or(line.len());
-    let inside = &line[open + 1..close];
-    let ident: String = inside
-        .trim()
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect();
-    if ident.is_empty() || !is_ident(&ident) {
-        None
-    } else {
-        Some(ident)
-    }
-}
-
-fn extract_positional_string_arg(line: &str, ctor: &str) -> Option<String> {
-    let needle = format!("{ctor}(");
-    let idx = line.find(&needle)?;
-    let after = &line[idx + needle.len()..];
-    extract_string_literal(after.trim())
-}
-
-fn extract_kwarg_identifier(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}=");
-    let idx = line.find(&needle)?;
-    let after = &line[idx + needle.len()..];
-    let ident: String = after
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect();
-    if ident.is_empty() {
-        None
-    } else {
-        Some(ident)
-    }
-}
-
-fn extract_decorator_arg(line: &str, name: &str) -> Option<String> {
-    let needle = format!("@{name}(");
-    let idx = line.find(&needle)?;
-    let after = &line[idx + needle.len()..];
-    extract_string_literal(after.trim())
-}
-
-fn extract_py_decorator_task(line: &str) -> Option<String> {
-    // `@app.task` or `@shared_task` decorators. The function name
-    // comes from the next line; the "topic" here is just a sentinel
-    // string (`"celery:<name>"`) so it sorts deterministically. The
-    // joiner uses the `owner_name` to look up the actual function.
-    if line.starts_with("@app.task") || line.starts_with("@shared_task") {
-        Some("celery:task".into())
-    } else {
-        None
-    }
-}
-
+/// Parse `function foo(…)` / `async function foo(…)` /
+/// `export function foo(…)` / `export const foo = …` /
+/// `function $foo(…)` to extract the name.
 fn parse_function_name(line: &str) -> Option<String> {
     let after = line
         .trim_start_matches("export ")
@@ -692,6 +468,7 @@ fn parse_function_name(line: &str) -> Option<String> {
     }
 }
 
+/// Parse `def foo(…)` / `async def foo(…)` to extract the name.
 fn parse_def_name(line: &str) -> Option<String> {
     let after = line
         .trim_start_matches("async def")
@@ -706,10 +483,6 @@ fn parse_def_name(line: &str) -> Option<String> {
     } else {
         Some(name)
     }
-}
-
-fn resolve_topic_name(ident: &str, constants: &BTreeMap<String, String>) -> Option<String> {
-    constants.get(ident).cloned()
 }
 
 // ─── Emission ────────────────────────────────────────────────────────

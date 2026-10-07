@@ -60,6 +60,34 @@ languages:
       verbs: [get, post, put, delete, patch, head, options]
       path_regex: '\b(?:path|re_path)\s*\(\s*r?["'']([^"'']+)["'']'
       handler_regex: '\b(?:path|re_path)\s*\(\s*r?["''][^"'']+["'']\s*,\s*(\w+)'
+    # Tier 1 (Task 8): kafkajs / aiokafka / Celery idioms. The
+    # walker consumes these via `topic_producer_patterns` /
+    # `topic_consumer_patterns` / `scheduled_patterns`. Capture
+    # group 1 is the topic name (or `celery:task` sentinel for
+    # `@app.task` / `@shared_task`).
+    - id: aiokafka-producer
+      kind: topic_producer
+      path_regex: '\b(?:AIOKafkaProducer|KafkaProducer)\s*\(\s*["'']([^"'']+)["'']'
+    - id: aiokafka-consumer
+      kind: topic_consumer
+      path_regex: '\b(?:AIOKafkaConsumer|KafkaConsumer)\s*\(\s*["'']([^"'']+)["'']'
+    - id: aiohttp-send
+      kind: topic_producer
+      # `.send_and_wait(...)` / `.send(...)` with first string
+      # arg. Group 1: string literal. Group 2: bare identifier
+      # (resolved against same-file constants).
+      path_regex: '(?:\.send_and_wait|\.send)\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: aiohttp-send-kwarg
+      kind: topic_producer
+      # `.send(topic="…", …)` / `.send_and_wait(topic="…", …)`.
+      # Group 1: literal. Group 2: bare identifier.
+      path_regex: '(?:\.send_and_wait|\.send)\s*\(\s*[^)]*?topic\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: celery-task
+      kind: scheduled
+      # `@app.task` / `@shared_task` — the walker performs a
+      # same-file lookahead for the next `def` line; the spec is a
+      # stable sentinel because Celery doesn't pass a spec string.
+      path_regex: '^@(?:\w+\.)?task\b|^@shared_task\b'
 
   # ── TypeScript / JavaScript ─────────────────────────────────────
   tsjs:
@@ -84,6 +112,45 @@ languages:
     - id: got-outbound
       kind: outbound
       lib_match: '^(got|ky)$'
+    # Tier 1 (Task 8): kafkajs / confluent-kafka produce /
+    # consume / NestJS `@Cron` scheduled sites. The walker
+    # consumes these via `topic_producer_patterns` /
+    # `topic_consumer_patterns` / `scheduled_patterns`. Capture
+    # group 1 is the topic name (or the cron spec).
+    - id: kafkajs-producer
+      kind: topic_producer
+      # Group 1: string-literal topic name. Group 2: bare
+      # identifier (resolved against same-file constants by the
+      # event_sensor). Either form yields a match.
+      path_regex: '\.send\s*\(\s*\{[^}]*?topic\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kafkajs-consumer
+      kind: topic_consumer
+      # Group 1: string-literal topic name in the topics array.
+      path_regex: '\.(?:run|subscribe)\s*\(\s*\{[^}]*?topics?\s*:\s*\[\s*["'']([^"'']+)["'']'
+    - id: nestjs-cron
+      kind: scheduled
+      path_regex: '@Cron\s*\(\s*["'']([^"'']+)["'']'
+    # Tier 1 (Task 8): WebSocket idioms. The walker in
+    # `src/server/sensors/util.rs::walk_websocket_idioms` consumes
+    # these through the `*_all` accessors (the pre-Tier-1
+    # websocket_sensor applied the same URL regexes to every
+    # line of every source file regardless of language).
+    - id: ws-url-literal
+      kind: websocket_client
+      path_regex: '["''](wss?://[^"'']+)["'']'
+    - id: ws-ctor
+      kind: websocket_client
+      path_regex: 'new\s+WebSocket\s*\(\s*["'']([^"'']+)["'']'
+    - id: ws-server-route
+      kind: websocket_server
+      path_regex: '(?:app\.ws|router\.ws|WebSocketGateway)\s*\(\s*["'']([^"'']+)["'']'
+    - id: ws-event-handler
+      kind: websocket_handler
+      # Group 1 is the event name; group 2 is the handler. The
+      # walker captures group 2 — keeping group 1 in the regex
+      # lets the alternation match the four `on{…}` shapes in a
+      # single non-optional branch.
+      path_regex: '(on(?:open|message|close|error))\s*[=:]\s*(\w+)'
 
   # ── Rust ─────────────────────────────────────────────────────────
   rust:
@@ -108,6 +175,22 @@ languages:
     - id: awc-outbound
       kind: outbound
       lib_match: '^awc$'
+    # Tier 1 (Task 8): rdkafka produce / consume idioms. Capture
+    # group 1 is the topic name.
+    - id: rdkafka-producer
+      kind: topic_producer
+      # Group 1: string literal. Group 2: bare identifier.
+      path_regex: 'FutureRecord::to\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: rdkafka-send
+      kind: topic_producer
+      # rdkafka `producer.send(record, …)` — the topic name
+      # appears as a string literal (or bare identifier) in the
+      # `FutureRecord` struct's `topic` field. Group 1: literal.
+      # Group 2: identifier.
+      path_regex: '(?:::|\.)send\s*\(\s*[^)]*?topic\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: rdkafka-consumer
+      kind: topic_consumer
+      path_regex: '(?:::|\.)subscribe\s*\(\s*&\[\s*["'']([^"'']+)["'']'
 
   # ── Go ───────────────────────────────────────────────────────────
   go:
@@ -125,6 +208,22 @@ languages:
       kind: outbound
       lib_match: '^http$'
       deny_methods: [decode, Decode, Close, Body, StatusCode, Status, Header, Proto, Request, TLS, Trailer, ContentLength]
+    # Tier 1 (Task 8): kafka-go produce / consume idioms. Capture
+    # group 1 is the topic name.
+    - id: kafka-go-producer
+      kind: topic_producer
+      # Group 1: string literal. Group 2: bare identifier.
+      # The `[\s\S]*?` non-greedy "any character including newlines
+      # and parens" handles the `&kafka.Message{Topic: "...",
+      # Value: []byte("x")}` shape — the `Topic:` field is not
+      # guaranteed to be the first `{…}` block, and the `)`
+      # from `[]byte(...)` would close a `[^)]*` class too early.
+      # The `s?` after `SendMessage` matches the segmentio/kafka-go
+      # `SendMessages` (plural) sibling.
+      path_regex: '(?:SendMessages?|WriteMessages)\s*\([\s\S]*?Topic\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kafka-go-consumer
+      kind: topic_consumer
+      path_regex: 'SubscribeTopics\s*\(\s*["'']([^"'']+)["'']'
 
   # ── Java ─────────────────────────────────────────────────────────
   java:
