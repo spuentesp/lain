@@ -339,16 +339,15 @@ fn extract_root_type_blocks(content: &str) -> Vec<RootTypeBlock> {
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            // Skip whitespace.
-            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
-                if bytes[i] == b'\n' {
-                    line_no += 1;
-                }
-                i += 1;
-            }
-            if i >= bytes.len() || bytes[i] != b'{' {
+            // Federation SDL allows one or more directives
+            // (`@key(...)`, `@shareable`, …) and an optional
+            // `implements A & B` clause between the type name
+            // and the `{`. Consume them before requiring the
+            // opening brace.
+            let Some(brace_pos) = skip_type_modifiers(bytes, i, &mut line_no) else {
                 continue;
-            }
+            };
+            i = brace_pos;
             // Only the three root types emit providers.
             let op = match name.as_str() {
                 "Query" => Some(GraphqlOp::Query),
@@ -444,9 +443,12 @@ pub fn extract_object_type_blocks(content: &str) -> Vec<ObjectTypeBlock> {
                 }
                 i += 1;
             }
-            if i >= bytes.len() || bytes[i] != b'{' {
+            // Federation SDL allows `@directive(...)` and
+            // `implements A & B` between the name and the `{`.
+            let Some(brace_pos) = skip_type_modifiers(bytes, i, &mut line_no) else {
                 continue;
-            }
+            };
+            i = brace_pos;
             let is_root = matches!(name.as_str(), "Query" | "Mutation" | "Subscription");
             let block_start_line = line_no;
             let body_start = i + 1;
@@ -505,6 +507,101 @@ fn starts_with_keyword(bytes: &[u8], at: usize, kw: &str) -> bool {
 
 fn is_ident_continue(b: u8) -> bool {
     (b as char).is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Consume everything between a type name and its `{` body:
+/// zero or more `@directive(args)` invocations and an optional
+/// `implements A & B` clause. Federation SDL is nearly always
+/// `type User @key(fields: "id") implements Node { … }`, so
+/// the type-name reader must allow it. Returns the position of
+/// the `{` on success, or `None` when the next non-space byte
+/// is neither a directive, an `implements` clause, nor `{`.
+fn skip_type_modifiers(bytes: &[u8], at: usize, line_no: &mut u32) -> Option<usize> {
+    let mut i = at;
+    let mut consumed = false;
+    loop {
+        // Skip whitespace, tracking newlines so the opening
+        // brace's line number is reported correctly.
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            if bytes[i] == b'\n' {
+                *line_no += 1;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return None;
+        }
+        if bytes[i] == b'{' {
+            return Some(i);
+        }
+        if bytes[i] == b'@' {
+            // Directive: `@name(args)?`.
+            i += 1;
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                if bytes[i] == b'\n' {
+                    *line_no += 1;
+                }
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'(' {
+                let mut depth: u32 = 1;
+                i += 1;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i] == b'(' {
+                        depth += 1;
+                    } else if bytes[i] == b')' {
+                        depth -= 1;
+                    }
+                    i += 1;
+                }
+            }
+            consumed = true;
+            continue;
+        }
+        if starts_with_keyword(bytes, i, "implements") {
+            i += "implements".len();
+            loop {
+                while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                    if bytes[i] == b'\n' {
+                        *line_no += 1;
+                    }
+                    i += 1;
+                }
+                if i >= bytes.len() || !is_ident_continue(bytes[i]) {
+                    break;
+                }
+                while i < bytes.len() && is_ident_continue(bytes[i]) {
+                    i += 1;
+                }
+                while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                    if bytes[i] == b'\n' {
+                        *line_no += 1;
+                    }
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b'&' {
+                    i += 1;
+                    continue;
+                }
+                break;
+            }
+            consumed = true;
+            continue;
+        }
+        if !consumed {
+            // Nothing recognised and we have not yet eaten
+            // any modifier — the type name has no `{` follow
+            // at all, e.g. `type Foo` as a forward
+            // declaration. Bail so the caller can `continue`.
+            return None;
+        }
+        // We consumed something earlier but now hit a byte we
+        // do not recognise (e.g. an unexpected keyword).
+        return None;
+    }
 }
 
 /// Walk every `fieldName(args): ReturnType` declaration inside

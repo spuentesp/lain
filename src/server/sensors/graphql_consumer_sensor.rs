@@ -558,7 +558,28 @@ fn extract_top_level_fields_for_op(
     Vec::new()
 }
 
+/// Maximum recursion depth for nested selection sets.
+/// Adversarial `a{a{a{…` input without a bound blows the
+/// default Rust stack (abort, not unwind). Real GraphQL
+/// queries nest at most a handful of layers; 256 is generous.
+const MAX_SELECTION_DEPTH: usize = 256;
+
 pub fn top_level_fields_with_selections(body: &str) -> Vec<(String, Vec<String>)> {
+    top_level_fields_with_selections_at_depth(body, 0)
+}
+
+fn top_level_fields_with_selections_at_depth(
+    body: &str,
+    depth: usize,
+) -> Vec<(String, Vec<String>)> {
+    if depth > MAX_SELECTION_DEPTH {
+        // Bound the recursion so adversarial nesting cannot
+        // abort the process. The bound is well above any
+        // realistic GraphQL document; reaching it is a sign
+        // the input is malformed, and we silently truncate
+        // the field list at this depth.
+        return Vec::new();
+    }
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
     let bytes = body.as_bytes();
     let mut i = 0usize;
@@ -575,19 +596,36 @@ pub fn top_level_fields_with_selections(body: &str) -> Vec<(String, Vec<String>)
         }
         if c == b'{' {
             // Unattached block, skip
-            let mut depth: u32 = 1;
+            let mut brace_depth: u32 = 1;
             i += 1;
-            while i < bytes.len() && depth > 0 {
+            while i < bytes.len() && brace_depth > 0 {
                 if bytes[i] == b'{' {
-                    depth += 1;
+                    brace_depth += 1;
                 } else if bytes[i] == b'}' {
-                    depth -= 1;
-                    if depth == 0 {
+                    brace_depth -= 1;
+                    if brace_depth == 0 {
                         i += 1;
                         break;
                     }
                 }
                 i += 1;
+            }
+            continue;
+        }
+        if is_fragment_spread(bytes, i) {
+            let (new_i, inline_body) = scan_fragment_spread(body, bytes, i);
+            i = new_i;
+            if let Some(inline_body) = inline_body {
+                // Inline fragments (`... on Type { ... }` or
+                // `... { ... }`) contribute their fields at
+                // the current level — the parent object already
+                // declares the fields the inline condition
+                // applies to. Recurse with the depth bound so
+                // the same cap protects the call.
+                out.extend(top_level_fields_with_selections_at_depth(
+                    inline_body,
+                    depth + 1,
+                ));
             }
             continue;
         }
@@ -636,13 +674,13 @@ pub fn top_level_fields_with_selections(body: &str) -> Vec<(String, Vec<String>)
             i += 1;
         }
         if i < bytes.len() && bytes[i] == b'(' {
-            let mut depth: u32 = 1;
+            let mut brace_depth: u32 = 1;
             i += 1;
-            while i < bytes.len() && depth > 0 {
+            while i < bytes.len() && brace_depth > 0 {
                 if bytes[i] == b'(' {
-                    depth += 1;
+                    brace_depth += 1;
                 } else if bytes[i] == b')' {
-                    depth -= 1;
+                    brace_depth -= 1;
                 }
                 i += 1;
             }
@@ -661,13 +699,13 @@ pub fn top_level_fields_with_selections(body: &str) -> Vec<(String, Vec<String>)
                 i += 1;
             }
             if i < bytes.len() && bytes[i] == b'(' {
-                let mut depth: u32 = 1;
+                let mut brace_depth: u32 = 1;
                 i += 1;
-                while i < bytes.len() && depth > 0 {
+                while i < bytes.len() && brace_depth > 0 {
                     if bytes[i] == b'(' {
-                        depth += 1;
+                        brace_depth += 1;
                     } else if bytes[i] == b')' {
-                        depth -= 1;
+                        brace_depth -= 1;
                     }
                     i += 1;
                 }
@@ -684,14 +722,14 @@ pub fn top_level_fields_with_selections(body: &str) -> Vec<(String, Vec<String>)
         }
         if i < bytes.len() && bytes[i] == b'{' {
             let sel_start = i + 1;
-            let mut depth: u32 = 1;
+            let mut brace_depth: u32 = 1;
             i += 1;
-            while i < bytes.len() && depth > 0 {
+            while i < bytes.len() && brace_depth > 0 {
                 if bytes[i] == b'{' {
-                    depth += 1;
+                    brace_depth += 1;
                 } else if bytes[i] == b'}' {
-                    depth -= 1;
-                    if depth == 0 {
+                    brace_depth -= 1;
+                    if brace_depth == 0 {
                         break;
                     }
                 }
@@ -701,7 +739,7 @@ pub fn top_level_fields_with_selections(body: &str) -> Vec<(String, Vec<String>)
             if i < bytes.len() && bytes[i] == b'}' {
                 i += 1;
             }
-            selections = top_level_fields_in(sel_body);
+            selections = top_level_fields_in_at_depth(sel_body, depth + 1);
         }
 
         if field_name != "__typename" {
@@ -711,8 +749,113 @@ pub fn top_level_fields_with_selections(body: &str) -> Vec<(String, Vec<String>)
     out
 }
 
+fn is_fragment_spread(bytes: &[u8], at: usize) -> bool {
+    // `...` at a non-identifier position is a fragment spread.
+    // The preceding byte (if any) must not be part of an
+    // identifier — `1..3` is a numeric range, not a spread.
+    let prev_ok =
+        at == 0 || !(bytes[at - 1] as char).is_ascii_alphanumeric() && bytes[at - 1] != b'_';
+    let rest = &bytes[at..];
+    prev_ok && rest.len() >= 3 && rest[0] == b'.' && rest[1] == b'.' && rest[2] == b'.'
+}
+
+/// Consume a fragment spread (`...Name?`, `... on Type?`,
+/// inline selection set, optional directives) starting at the
+/// `...` token at position `at`. Returns `(new_cursor,
+/// optional_inline_body)`. The inline body is the slice
+/// between the `{` and matching `}` of an inline fragment —
+/// `None` for `...fragName` (named spread). Named spreads have
+/// no fields to add at the current level; inline fragments
+/// contribute their fields, so the caller recurses into the
+/// returned slice with the depth bound applied.
+fn scan_fragment_spread<'a>(body: &'a str, bytes: &[u8], at: usize) -> (usize, Option<&'a str>) {
+    let mut i = at + 3; // past the `...`
+                        // Optional spread name (named spread) OR
+                        // `on TypeName` (inline fragment with a
+                        // type condition). We accept one
+                        // identifier; if the next token is `on`
+                        // the user wrote `... on Paid { ... }`,
+                        // otherwise they wrote `...fragName`.
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] != b'{' && bytes[i] != b'@' {
+        let ident_start = i;
+        while i < bytes.len() && is_ident_continue(bytes[i]) {
+            i += 1;
+        }
+        let ident = std::str::from_utf8(&bytes[ident_start..i]).unwrap_or("");
+        if ident == "on" {
+            // `... on Type` — also skip the type name.
+            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                i += 1;
+            }
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+        }
+    }
+    // Optional directives `@name(args)`.
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    while i < bytes.len() && bytes[i] == b'@' {
+        i += 1;
+        while i < bytes.len() && is_ident_continue(bytes[i]) {
+            i += 1;
+        }
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'(' {
+            let mut brace_depth: u32 = 1;
+            i += 1;
+            while i < bytes.len() && brace_depth > 0 {
+                if bytes[i] == b'(' {
+                    brace_depth += 1;
+                } else if bytes[i] == b')' {
+                    brace_depth -= 1;
+                }
+                i += 1;
+            }
+        }
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+    }
+    // Optional selection set `{ ... }`. Named spreads have none;
+    // inline fragments do. If present, return the slice so the
+    // caller can recurse into it.
+    if i < bytes.len() && bytes[i] == b'{' {
+        let sel_start = i + 1;
+        let mut brace_depth: u32 = 1;
+        i += 1;
+        while i < bytes.len() && brace_depth > 0 {
+            if bytes[i] == b'{' {
+                brace_depth += 1;
+            } else if bytes[i] == b'}' {
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    break;
+                }
+            }
+            i += 1;
+        }
+        let sel_body = &body[sel_start..i];
+        if i < bytes.len() && bytes[i] == b'}' {
+            i += 1;
+        }
+        return (i, Some(sel_body));
+    }
+    (i, None)
+}
+
 pub fn top_level_fields_in(body: &str) -> Vec<String> {
-    top_level_fields_with_selections(body)
+    top_level_fields_in_at_depth(body, 0)
+}
+
+fn top_level_fields_in_at_depth(body: &str, depth: usize) -> Vec<String> {
+    top_level_fields_with_selections_at_depth(body, depth)
         .into_iter()
         .map(|(f, _)| f)
         .collect()

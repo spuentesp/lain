@@ -761,3 +761,211 @@ const query = gql`
     );
     assert_eq!(field_res.bound_fields[0].field_path.to_string(), "status");
 }
+
+// ─── Task 6 — Fragment spreads, inline fragments, SDL implements/@key
+//
+// These cases are the parser defects called out in
+// `docs/superpowers/plans/2026-10-07-remaining-work.md` Task 6:
+// fragments must not become selected fields, and SDL with
+// `implements` / `@key` directives must still emit Schema/Field
+// nodes. Each test below pins one shape and is expected to be
+// RED until the parser learns to recognise `...` and the
+// directive/implements header.
+
+/// Task 6 case (a): a query with a fragment spread
+/// (`query { orders { id ...orderFields } }`) must NOT emit
+/// `orderFields` as a selected field. Today the scanner walks
+/// past the `.` byte, then reads `orderFields` as a field name
+/// and yields a `FieldRef` named `orderFields` for it. The
+/// acceptance criterion is that `id` is selected and no field
+/// named `orderFields` leaks into either the `field` list or
+/// any `selected_fields` list.
+#[test]
+fn t6_fragment_spread_is_not_a_selected_field() {
+    let src = "\
+query {
+  orders {
+    id
+    ...orderFields
+  }
+}
+";
+    let consumers = parse_document(src, "doc.graphql");
+    assert_eq!(consumers.len(), 1, "exactly one consumer for `orders`");
+    let orders = consumers[0].field.as_str();
+    assert_eq!(orders, "orders", "the top-level field must remain `orders`");
+    let selected = &consumers[0].selected_fields;
+    assert!(
+        selected.iter().any(|f| f == "id"),
+        "id must remain selected, got {selected:?}"
+    );
+    assert!(
+        !selected.iter().any(|f| f == "orderFields"),
+        "fragment spread name must NOT be a selected field, got {selected:?}"
+    );
+    let code = r"const Q = gql`query { orders { id ...orderFields } }`;";
+    let in_code = lain::server::sensors::graphql_consumer_sensor::detect_in_code(code, "orders.ts");
+    let orders_consumer = in_code
+        .iter()
+        .find(|c| c.field == "orders")
+        .expect("orders consumer must be detected in the tagged template");
+    assert!(
+        !orders_consumer
+            .selected_fields
+            .iter()
+            .any(|f| f == "orderFields"),
+        "fragment spread name must NOT leak into selected_fields in TS, got {:?}",
+        orders_consumer.selected_fields
+    );
+}
+
+/// Task 6 case (b): an inline fragment (`... on Paid { total }`)
+/// must NOT yield fields named `on` and `Paid`. The scanner
+/// currently reads `..` as two empty identifiers, then `on` as a
+/// field, then `Paid` as a field.
+#[test]
+fn t6_inline_fragment_does_not_yield_on_or_paid() {
+    let src = "\
+query {
+  orders {
+    id
+    ... on Paid {
+      total
+    }
+  }
+}
+";
+    let consumers = parse_document(src, "doc.graphql");
+    let orders = consumers
+        .iter()
+        .find(|c| c.field == "orders")
+        .expect("orders consumer must be present");
+    let selected = &orders.selected_fields;
+    assert!(
+        !selected.iter().any(|f| f == "on"),
+        "inline fragment must NOT leak `on` as a selected field, got {selected:?}"
+    );
+    assert!(
+        !selected.iter().any(|f| f == "Paid"),
+        "inline fragment must NOT leak `Paid` as a selected field, got {selected:?}"
+    );
+    assert!(
+        selected.iter().any(|f| f == "id"),
+        "id must remain selected, got {selected:?}"
+    );
+    assert!(
+        selected.iter().any(|f| f == "total"),
+        "total (inside the inline fragment) must remain selected, got {selected:?}"
+    );
+}
+
+/// Task 6 case (c): a top-level fragment spread
+/// (`...frag`) must NOT create a `graphql-call:query:frag`
+/// consumer. Today the consumer sensor reads `frag` as the only
+/// top-level field of an (effectively anonymous) query block
+/// and mints a `graphql-call:query:frag` record.
+#[test]
+fn t6_top_level_fragment_spread_does_not_become_a_consumer() {
+    let src = "\
+query {
+  ...frag
+  orders {
+    id
+  }
+}
+";
+    let consumers = parse_document(src, "doc.graphql");
+    assert!(
+        !consumers.iter().any(|c| c.field == "frag"),
+        "a top-level `...frag` must NOT mint a consumer named `frag`"
+    );
+    let orders = consumers
+        .iter()
+        .find(|c| c.field == "orders")
+        .expect("orders consumer must still be detected");
+    assert!(
+        orders.selected_fields.iter().any(|f| f == "id"),
+        "id must remain selected, got {:?}",
+        orders.selected_fields
+    );
+    let code = r"const Q = gql`query { ...frag orders { id } }`;";
+    let in_code = lain::server::sensors::graphql_consumer_sensor::detect_in_code(code, "q.ts");
+    assert!(
+        !in_code.iter().any(|c| c.field == "frag"),
+        "in-code top-level `...frag` must NOT become a consumer"
+    );
+}
+
+/// Task 6 case (d): an SDL with
+/// `type User @key(fields: "id") implements Node { ... }` must
+/// still produce a `Schema` node and its `Field` nodes. Today
+/// the parser requires the very next non-space byte after the
+/// type name to be `{`, so the entire block is silently
+/// dropped, leaving the lineage empty for federation SDL —
+/// which is exactly the case where field lineage matters most.
+#[test]
+fn t6_sdl_with_implements_and_directive_emits_schema_and_fields() {
+    let src = "\
+type User @key(fields: \"id\") implements Node {
+  id: ID!
+  email: String!
+}
+";
+    let blocks = lain::server::sensors::graphql_provider_sensor::extract_object_type_blocks(src);
+    let user = blocks
+        .iter()
+        .find(|b| b.name == "User")
+        .expect("User object type block must be parsed despite @key/implements");
+    let field_names: Vec<&str> = user.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(field_names, vec!["id", "email"]);
+}
+
+/// Task 6 case (e): `type Order implements Node { ... }` with no
+/// directives must still produce Schema/Field nodes. Same root
+/// cause, narrower shape.
+#[test]
+fn t6_sdl_with_implements_only_emits_schema_and_fields() {
+    let src = "\
+type Order implements Node {
+  id: ID!
+  total: Float!
+}
+";
+    let blocks = lain::server::sensors::graphql_provider_sensor::extract_object_type_blocks(src);
+    let order = blocks
+        .iter()
+        .find(|b| b.name == "Order")
+        .expect("Order object type block must be parsed despite implements");
+    let field_names: Vec<&str> = order.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(field_names, vec!["id", "total"]);
+}
+
+/// Task 6 case (f): deeply nested selection sets must not abort
+/// the process. Today `top_level_fields_with_selections`
+/// recurses without a depth cap, so adversarial input like
+/// `a{a{a{…` blows the stack. The acceptance criterion is that
+/// the parse call returns (success or a bounded subset — but
+/// never aborts). The depth is chosen so the unfixed parser
+/// overflows its 8 MiB stack on a CI runner. The body has a
+/// top-level `a` field so the recursion happens via the selection
+/// path (a leading `{` would be eaten as an "unattached block"
+/// and the recursion would never trigger).
+#[test]
+fn t6_deeply_nested_selections_do_not_abort() {
+    let levels = 50_000usize;
+    let mut body = String::with_capacity(levels * 2 + 8);
+    body.push('a');
+    for _ in 0..levels {
+        body.push_str("{a");
+    }
+    body.push_str("{x}");
+    for _ in 0..levels {
+        body.push('}');
+    }
+    // The recursive descent parses `x` once and then unwinds.
+    // Whether the depth cap truncates output or not, the call
+    // MUST return without aborting the process.
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(&body);
+    let _ = out;
+}
