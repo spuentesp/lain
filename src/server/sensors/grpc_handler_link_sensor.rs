@@ -76,7 +76,7 @@ pub fn scan_workspace_handler_link(
         return Ok(0);
     }
     let repo_id = RepoId::new(root.to_string_lossy().as_ref())
-        .unwrap_or_else(|_| RepoId::new("unknown").expect("valid repo id"));
+        .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
     let code_ext = |p: &Path| {
         p.extension()
             .and_then(|e| e.to_str())

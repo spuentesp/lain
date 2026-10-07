@@ -89,7 +89,7 @@ crate::server::sensors::register_sensor!(
     1,
     |graph, root, namespace| {
         let repo_id = RepoId::new(root.to_string_lossy().as_ref())
-            .unwrap_or_else(|_| RepoId::new("http-client-sensor").unwrap());
+            .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
         scan_workspace_clients(graph, root, namespace, &repo_id)
     }
 );

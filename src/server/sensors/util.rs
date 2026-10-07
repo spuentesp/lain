@@ -13,6 +13,21 @@ use tree_sitter::{Language, Parser, Tree};
 // every sensor to re-import `crate::server::sensors::patterns`.
 use crate::server::sensors::patterns::Patterns;
 
+// ─── Repo identity ─────────────────────────────────────────────
+
+/// Fallback `RepoId` for a sensor whose caller could not supply one.
+///
+/// Deliberately a single neutral token. A `RepoId` must never be a
+/// sensor name: `SymbolKey.repo` is rendered as an evidence field
+/// (`diff_contracts`' `handlers[].repo`) and an external client
+/// resolves it as a repository. Note that `RepoId::new` rejects any
+/// value containing `/`, so `RepoId::new(root.to_string_lossy())`
+/// fails for every real workspace path and this fallback is the
+/// common case, not an edge case.
+pub fn fallback_repo_id() -> crate::federation::repo_id::RepoId {
+    crate::federation::repo_id::RepoId::new("unknown").expect("'unknown' is a valid RepoId")
+}
+
 // ─── Language classification ────────────────────────────────────
 
 /// Source-file language for sensors that walk code. PR 14 added Rust +

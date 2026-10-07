@@ -1110,7 +1110,14 @@ fn impact_to_value(
                 .filter_map(|p| {
                     p.handler.as_ref().map(|h| {
                         json!({
-                            "repo": h.repo.as_str(),
+                            // The provider node's repo, not `h.repo`:
+                            // `RepoId::new` rejects paths containing
+                            // `/`, so every sensor's `unwrap_or_else`
+                            // fallback ran and minted the sensor name
+                            // into `SymbolKey.repo`. Evidence must name
+                            // a repository an external client can
+                            // resolve.
+                            "repo": p.node_id.repo_id(),
                             "file": h.path,
                             "symbol": h.name,
                         })
@@ -1181,6 +1188,8 @@ fn endpoint_from_change(
                                 ContractKey::Topic { .. } => continue,
                                 ContractKey::Rpc { .. } => continue,
                                 ContractKey::Graphql { .. } => continue,
+                                ContractKey::WebSocket { .. } => continue,
+                                ContractKey::Table { .. } => continue,
                             };
                             if !method_compatible(&m, &id_method) {
                                 continue;
@@ -2318,6 +2327,79 @@ mod tests {
         assert_eq!(value["side"], "consumer");
         assert_eq!(value["compat"], "Breaking");
         assert_eq!(value["impact"]["class"], "NeedsInvestigation");
+    }
+
+    /// `handlers[].repo` must be the repo that owns the provider node,
+    /// never the sensor name that leaked into `SymbolKey.repo`.
+    ///
+    /// `RepoId::new` rejects any value containing `/`, and every real
+    /// sensor call passes `root.to_string_lossy()` (a filesystem path),
+    /// so the `unwrap_or_else` fallback always ran and minted
+    /// `RepoId::new("http-sensor")`. That value is rendered as evidence
+    /// and an external client cannot resolve it as a repository.
+    #[test]
+    fn handler_repo_is_the_provider_repo_not_a_sensor_name() {
+        let provider_id =
+            GlobalId::parse("orders:HttpRoute:src/orders/label.rs:GET /api/orders/%3Aid/label:8")
+                .expect("valid global id");
+        let ep_id: crate::federation::contracts::index::EndpointId = (
+            ServiceName("orders".into()),
+            ContractKey::Http {
+                method: MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Get),
+                template: "/api/orders/{}/label".into(),
+            },
+        );
+        let endpoint = crate::federation::contracts::index::Endpoint {
+            id: ep_id.clone(),
+            method: crate::federation::contracts::model::HttpMethod::Get,
+            template: "/api/orders/{}/label".into(),
+            providers: vec![crate::federation::contracts::index::EndpointProvider {
+                node_id: provider_id,
+                origin: crate::federation::contracts::model::ProviderOrigin::Code,
+                handler: Some(SymbolKey {
+                    repo: RepoId::new("http-sensor").unwrap(),
+                    path: "src/orders/label.rs".into(),
+                    container: None,
+                    name: "get_order_label".into(),
+                }),
+                operation_id: None,
+            }],
+            schemas: Default::default(),
+        };
+        let mut head_index = ContractIndex::default();
+        head_index.endpoints.insert(ep_id.clone(), endpoint);
+
+        let kind = ChangeKind::ChangedWithoutSchema {
+            endpoint: ep_id.clone(),
+        };
+        let impact = Impact {
+            service: ServiceName("orders".into()),
+            kind: kind.clone(),
+            class: Class::NeedsInvestigation,
+            reason: Some(DiffReason::NeedsReview),
+            affected: vec![],
+            scope: DiffScope::default(),
+            coverage: DiffCoverage::default(),
+            compatible_changes: 0,
+        };
+        let value = impact_to_value(
+            &impact,
+            &kind,
+            &ServiceName("orders".into()),
+            Compat::NeedsReview,
+            50,
+            &head_index,
+            None,
+        );
+
+        let handlers = value["handlers"].as_array().expect("handlers present");
+        assert_eq!(handlers[0]["symbol"], "get_order_label");
+        assert_eq!(handlers[0]["file"], "src/orders/label.rs");
+        assert_eq!(
+            handlers[0]["repo"], "orders",
+            "handlers[].repo must be the provider's repo, not the sensor name"
+        );
+        assert_ne!(handlers[0]["repo"], "http-sensor");
     }
 
     #[test]
