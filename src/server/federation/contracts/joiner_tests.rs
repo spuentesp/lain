@@ -2247,3 +2247,292 @@ fn ws_consumer_with_single_matching_provider_binds() {
         res.target
     );
 }
+
+// ─── Task 4: field_join schema keying must match build_endpoints ──────
+//
+// `repos.yaml#schemas` validates, appears in `config_hash`, and today
+// silently does nothing because the field_join step 4b builds
+// `EndpointId`s the joiner never created: raw template, repo id used
+// as service name, hardcoded broker. These tests pin each mismatch so
+// the fix cannot regress.
+
+fn payload_schema_node(
+    repo: &str,
+    path: &str,
+    name: &str,
+    line: u32,
+    field_name: &str,
+) -> (GraphNode, GraphNode, GraphEdge) {
+    let mut schema = GraphNode::new(NodeType::Schema, name.to_string(), path.to_string());
+    schema.repo_id = Some(repo.into());
+    schema.id = make_id(repo, NodeType::Schema, path, name, line);
+    schema.line_start = Some(line);
+    schema.contract = Some(ContractFact::Schema {
+        direction: Direction::Payload,
+    });
+
+    let mut field = GraphNode::new(NodeType::Field, field_name.to_string(), path.to_string());
+    field.repo_id = Some(repo.into());
+    field.id = make_id(repo, NodeType::Field, path, field_name, line + 1);
+    field.line_start = Some(line + 1);
+    field.contract = Some(ContractFact::Field(FieldMeta {
+        ty: TypeDesc::String,
+        required: true,
+        nullable: false,
+        enum_values: None,
+    }));
+
+    let edge = GraphEdge::new(EdgeType::HasField, schema.id.clone(), field.id.clone());
+    (schema, field, edge)
+}
+
+/// Topic provider at a non-kafka broker. Mirrors `topic_provider_node`
+/// but with an explicit broker prefix so the joiner sees
+/// `rabbitmq/<name>` and `default_broker_for` returns `"rabbitmq"`.
+fn topic_provider_at_broker(
+    repo: &str,
+    path: &str,
+    line: u32,
+    broker: &str,
+    topic_name: &str,
+) -> GraphNode {
+    let mut n = GraphNode::new_in(
+        NodeType::Topic,
+        format!("{broker}/{topic_name}"),
+        path.to_string(),
+        &repo_ns(),
+    );
+    n.repo_id = Some(repo.to_string());
+    n.id = make_id(
+        repo,
+        NodeType::Topic,
+        path,
+        &format!("{broker}/{topic_name}"),
+        line,
+    );
+    n.line_start = Some(line);
+    n.contract = Some(ContractFact::Provider(ProviderFact {
+        method: HttpMethod::Any,
+        template: topic_name.to_string(),
+        handler: None,
+        operation_id: None,
+        origin: ProviderOrigin::Code,
+    }));
+    n
+}
+
+#[test]
+fn topic_payload_schema_binds_through_service_base_path() {
+    // Task 4 (a): service with `base_path: "/api"`. The topic
+    // provider's `p.template` is `orders.events`. `build_endpoints`
+    // prepends `base_path`, so the endpoint key is
+    // `(orders, Topic{ kafka, "/api/orders.events" })`. The current
+    // field_join step 4b uses `p.template` raw, so it would
+    // attach the schema to `(orders, Topic{ kafka, "orders.events" })`
+    // — a key that does not exist.
+    let topic = topic_provider_node("orders", "src/events.py", "publish", 10, "orders.events");
+    let (schema, field, has_field) =
+        payload_schema_node("orders", "schemas/orders.avsc", "OrderEvent", 1, "order_id");
+    let payload_edge = GraphEdge::new(EdgeType::PayloadSchema, topic.id.clone(), schema.id.clone());
+
+    let mut cfg = two_service_topic_config();
+    cfg.services[0].base_path = Some("/api".into());
+    cfg.schemas.push(SchemaDecl {
+        topic: "orders.events".into(),
+        repo: "orders".into(),
+        file: "schemas/orders.avsc".into(),
+    });
+
+    let nodes = vec![topic, schema, field];
+    let edges = vec![has_field, payload_edge];
+    let out = ContractJoiner::run(&nodes, &edges, &cfg);
+
+    // The endpoint that build_endpoints produced must now carry the
+    // payload schema. The pre-fix code attached it to a non-existent
+    // endpoint, so this lookup would return None. The expected name
+    // is the raw concatenation of `base_path` and `provider.template`
+    // — the existing `endpoint_template_for` does not insert a
+    // separator, so the operator must include a trailing `/` in
+    // `base_path` (the schema validation only checks the prefix is
+    // non-empty).
+    let ep_key = (
+        crate::federation::contracts::model::ServiceName("orders".into()),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "/apiorders.events".into(),
+        },
+    );
+    let endpoint = out
+        .index
+        .endpoints
+        .get(&ep_key)
+        .expect("endpoint with base_path-prepended topic key must exist");
+    let payload_schema = endpoint
+        .schemas
+        .get(&Direction::Payload)
+        .expect("base_path endpoint must carry the payload schema");
+    assert!(
+        payload_schema
+            .fields
+            .contains_key(&"order_id".parse::<JsonPath>().unwrap()),
+        "base_path endpoint must carry order_id field: {payload_schema:?}"
+    );
+}
+
+#[test]
+fn topic_payload_schema_binds_when_schema_repo_differs_from_service_name() {
+    // Task 4 (b): service `payments-api` for repo `revisions`.
+    // `SchemaDecl.repo = "revisions"`; the joiner must look up
+    // the service whose repo matches, not treat `decl.repo` as a
+    // service name. Pre-fix: `ServiceName("revisions")` produces
+    // a key no endpoint has. Drop the PayloadSchema edge so step
+    // 4b is the only mechanism — otherwise the schemas_by_route
+    // loop at field_join.rs:156 masks the bug.
+    let topic = topic_provider_node(
+        "payments-api",
+        "src/events.py",
+        "publish",
+        10,
+        "revisions.created",
+    );
+    let (schema, field, has_field) = payload_schema_node(
+        "payments-api",
+        "schemas/revisions.avsc",
+        "Revision",
+        1,
+        "revision_id",
+    );
+
+    let cfg = ContractFederationConfig {
+        services: vec![ServiceDecl {
+            name: "payments-api".into(),
+            repo: "revisions".into(),
+            paths: vec![],
+            hosts: vec![],
+            env: vec![],
+            base_path: None,
+            route_prefixes: vec![],
+        }],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![SchemaDecl {
+            topic: "revisions.created".into(),
+            repo: "revisions".into(),
+            file: "schemas/revisions.avsc".into(),
+        }],
+        bindings: vec![],
+        databases: vec![],
+    };
+
+    let nodes = vec![topic, schema, field];
+    let edges = vec![has_field];
+    let out = ContractJoiner::run(&nodes, &edges, &cfg);
+
+    let ep_key = (
+        crate::federation::contracts::model::ServiceName("payments-api".into()),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "revisions.created".into(),
+        },
+    );
+    let endpoint = out
+        .index
+        .endpoints
+        .get(&ep_key)
+        .expect("endpoint keyed on payments-api must carry the payload schema");
+    assert!(
+        endpoint.schemas.contains_key(&Direction::Payload),
+        "schema repo differs from service name — schema must still bind to payments-api endpoint: {endpoint:?}"
+    );
+}
+
+#[test]
+fn topic_payload_schema_binds_for_non_kafka_broker() {
+    // Task 4 (c): the topic lives at `rabbitmq/orders.events`.
+    // Pre-fix the broker is hardcoded `"kafka"`, so the schema
+    // attaches to a kafka endpoint that does not exist. Drop the
+    // PayloadSchema edge so step 4b is the only mechanism — without
+    // that, the edge would mask the bug by attaching the schema
+    // through the `schemas_by_route` loop at field_join.rs:156.
+    let topic =
+        topic_provider_at_broker("orders", "src/events.py", 10, "rabbitmq", "orders.events");
+    let (schema, field, has_field) =
+        payload_schema_node("orders", "schemas/orders.avsc", "OrderEvent", 1, "order_id");
+
+    let mut cfg = two_service_topic_config();
+    cfg.schemas.push(SchemaDecl {
+        topic: "orders.events".into(),
+        repo: "orders".into(),
+        file: "schemas/orders.avsc".into(),
+    });
+
+    let nodes = vec![topic, schema, field];
+    let edges = vec![has_field];
+    let out = ContractJoiner::run(&nodes, &edges, &cfg);
+
+    let ep_key = (
+        crate::federation::contracts::model::ServiceName("orders".into()),
+        ContractKey::Topic {
+            broker: "rabbitmq".into(),
+            name: "orders.events".into(),
+        },
+    );
+    let endpoint = out
+        .index
+        .endpoints
+        .get(&ep_key)
+        .expect("rabbitmq endpoint must exist and carry the payload schema");
+    assert!(
+        endpoint.schemas.contains_key(&Direction::Payload),
+        "non-kafka broker endpoint must carry the payload schema: {endpoint:?}"
+    );
+}
+
+#[test]
+fn topic_payload_schema_with_no_matching_service_is_unbound_not_silent() {
+    // Task 4 (d) negative case: a SchemaDecl naming a repo no
+    // configured service references must NOT silently attach a
+    // schema to a wrong endpoint. The chosen rule (Ruling in the
+    // handoff) is rejection at `validate()`. The runtime path
+    // here is "no matching_schema found", which must surface as
+    // an unbound payload — never a silent bind to a wrong
+    // endpoint.
+    let topic = topic_provider_node("orders", "src/events.py", "publish", 10, "orders.events");
+    let (schema, field, has_field) =
+        payload_schema_node("orders", "schemas/orders.avsc", "OrderEvent", 1, "order_id");
+
+    // The SchemaDecl's `repo` is `nonexistent` — no service in
+    // `two_service_topic_config()` references it, and the
+    // matching_schema lookup will not find a node whose file
+    // matches.
+    let mut cfg = two_service_topic_config();
+    cfg.schemas.push(SchemaDecl {
+        topic: "orders.events".into(),
+        repo: "nonexistent".into(),
+        file: "schemas/orders.avsc".into(),
+    });
+
+    let nodes = vec![topic.clone(), schema.clone(), field];
+    let edges = vec![has_field];
+    let out = ContractJoiner::run(&nodes, &edges, &cfg);
+
+    // The real kafka endpoint must NOT carry a payload schema
+    // that belongs to a different repo. If it does, the field_join
+    // step 4b silently attached the schema to the wrong endpoint.
+    let ep_key = (
+        crate::federation::contracts::model::ServiceName("orders".into()),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "orders.events".into(),
+        },
+    );
+    let endpoint = out
+        .index
+        .endpoints
+        .get(&ep_key)
+        .expect("kafka endpoint must exist");
+    assert!(
+        !endpoint.schemas.contains_key(&Direction::Payload),
+        "an unbound SchemaDecl must not silently attach to the kafka endpoint: {endpoint:?}"
+    );
+}

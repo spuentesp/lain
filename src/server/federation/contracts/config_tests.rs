@@ -2,7 +2,7 @@
 //! are not part of the in-file `#[cfg(test)]` block.
 
 use crate::federation::contracts::config::{
-    ContractFederationConfig, BUILTIN_GENERIC_KEYS, MAX_PATH_ARG,
+    ContractFederationConfig, SchemaDecl, ServiceDecl, BUILTIN_GENERIC_KEYS, MAX_PATH_ARG,
 };
 
 #[test]
@@ -45,4 +45,55 @@ fn default_config_is_empty() {
     assert!(cfg.bindings.is_empty());
     // validate is a no-op on the default config.
     cfg.validate(&[]).unwrap();
+}
+
+#[test]
+fn rejects_schema_decl_for_repo_with_no_configured_service() {
+    // Task 4 negative case: a SchemaDecl whose `repo` does not
+    // match any configured service's `repo` is rejected at
+    // validate(). An implicit service (repo id with no entry in
+    // services[]) cannot own a payload schema — the field_join
+    // step 4b has no service_decl to read base_path from, and the
+    // payload would silently attach to a wrong endpoint. The rule
+    // is "configured service with matching repo" — see the
+    // handoff ruling.
+    let yaml = r#"
+services:
+  - name: orders
+    repo: alpha
+schemas:
+  - topic: orders.events
+    repo: beta
+    file: schemas/orders.avsc
+"#;
+    let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+    let repo_ids = vec!["alpha".to_string(), "beta".to_string()];
+    let err = cfg.validate(&repo_ids).unwrap_err();
+    assert!(
+        err.to_string().contains(
+            "schemas entry 'orders.events' references repo 'beta' with no configured service"
+        ),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn allows_schema_decl_when_a_service_in_the_same_repo_exists() {
+    let mut cfg = ContractFederationConfig::default();
+    cfg.services.push(ServiceDecl {
+        name: "payments-api".into(),
+        repo: "payments".into(),
+        paths: vec![],
+        hosts: vec![],
+        env: vec![],
+        base_path: None,
+        route_prefixes: vec![],
+    });
+    cfg.schemas.push(SchemaDecl {
+        topic: "payments.charged".into(),
+        repo: "payments".into(),
+        file: "schemas/payments.avsc".into(),
+    });
+    let repo_ids = vec!["payments".to_string()];
+    cfg.validate(&repo_ids).unwrap();
 }

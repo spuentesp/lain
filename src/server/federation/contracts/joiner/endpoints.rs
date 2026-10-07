@@ -181,7 +181,12 @@ pub(crate) fn build_endpoints(
 /// service-level `base_path` / `route_prefixes`. Empty `base_path` is
 /// a no-op; `route_prefixes` only prepends when the provider's
 /// `path` matches the prefix entry's `path`.
-fn endpoint_template_for(
+///
+/// `pub(crate)` so `field_join` (Task 4) can reuse the exact same
+/// template derivation the endpoint table uses; the two used to
+/// diverge whenever a service declared `base_path` or
+/// `route_prefixes`.
+pub(crate) fn endpoint_template_for(
     provider: &ProviderFact,
     node_path: &str,
     service: &ServiceDecl,
@@ -200,7 +205,7 @@ fn endpoint_template_for(
 }
 
 /// §7.7: a topic without a declared broker is `kafka`.
-fn default_broker_for(node: &GraphNode) -> String {
+pub(crate) fn default_broker_for(node: &GraphNode) -> String {
     let name = &node.name;
     if let Some((broker, _)) = name.split_once('/') {
         if !broker.is_empty() {
@@ -208,6 +213,111 @@ fn default_broker_for(node: &GraphNode) -> String {
         }
     }
     "kafka".to_string()
+}
+
+/// Resolve the `ServiceDecl` for a given service name. Falls back to
+/// a synthetic decl derived from the name when none is configured —
+/// implicit services (repo ids without a `services[]` entry) still
+/// produce a valid empty prefix chain.
+pub(crate) fn resolve_service_decl(
+    svc: &ServiceName,
+    config: &ContractFederationConfig,
+) -> ServiceDecl {
+    config
+        .services
+        .iter()
+        .find(|s| s.name == svc.0)
+        .cloned()
+        .unwrap_or_else(|| ServiceDecl {
+            name: svc.0.clone(),
+            repo: svc.0.clone(),
+            paths: Vec::new(),
+            hosts: Vec::new(),
+            env: Vec::new(),
+            base_path: None,
+            route_prefixes: Vec::new(),
+        })
+}
+
+/// Single source of truth for the `(EndpointId, template)` derived
+/// from a provider node. Used by [`build_endpoints`] and by
+/// [`super::super::field_join::collect_endpoint_schemas`] so the
+/// keys the joiner builds for endpoint grouping are byte-equal to
+/// the keys it builds when attaching response / request / payload
+/// schemas (Task 4).
+///
+/// Returns `None` when the node carries no provider contract. The
+/// returned service is `svc` for non-`Table` providers; for
+/// `Table` it is the database owner when one is declared.
+/// `template` is the full template after `base_path` /
+/// `route_prefixes` are applied (for HTTP / Topic) or the
+/// protocol-native identifier otherwise.
+pub(crate) fn contract_key_for_provider(
+    node: &GraphNode,
+    svc: &ServiceName,
+    config: &ContractFederationConfig,
+) -> Option<(crate::federation::contracts::index::EndpointId, String)> {
+    let service_decl = resolve_service_decl(svc, config);
+    let fact = node.contract.as_ref()?;
+    match fact {
+        ContractFact::Provider(provider) => {
+            let full_template = endpoint_template_for(provider, &node.path, &service_decl);
+            let method = match &provider.method {
+                HttpMethod::Any => HttpMethod::Any,
+                other => *other,
+            };
+            if matches!(node.node_type, crate::schema::NodeType::Topic) {
+                let broker = default_broker_for(node);
+                let key = ContractKey::Topic {
+                    broker,
+                    name: full_template.clone(),
+                };
+                Some(((svc.clone(), key), full_template))
+            } else {
+                let key = ContractKey::Http {
+                    method: MethodSpec::Known(method),
+                    template: full_template.clone(),
+                };
+                Some(((svc.clone(), key), full_template))
+            }
+        }
+        ContractFact::RpcProvider(rpc) => {
+            let key = ContractKey::Rpc {
+                system: rpc.system,
+                service: rpc.service.clone(),
+                method: rpc.method.clone(),
+            };
+            Some(((svc.clone(), key), rpc.method.clone()))
+        }
+        ContractFact::GraphqlProvider(g) => {
+            let key = ContractKey::Graphql {
+                op: g.op,
+                field: g.field.clone(),
+            };
+            Some(((svc.clone(), key), g.field.clone()))
+        }
+        ContractFact::WebSocketProvider(ws) => {
+            let key = ContractKey::WebSocket {
+                route: ws.route.clone(),
+            };
+            Some(((svc.clone(), key), ws.route.clone()))
+        }
+        ContractFact::Table(tbl) => {
+            // Table ownership follows the `databases[]` config
+            // (Task 7); for now, fall back to the assigned service.
+            let owner_svc = config
+                .databases
+                .iter()
+                .find(|d| d.tables.iter().any(|t| t == &tbl.name))
+                .map(|d| ServiceName(d.service.clone()))
+                .unwrap_or_else(|| svc.clone());
+            let key = ContractKey::Table {
+                name: tbl.name.clone(),
+            };
+            Some(((owner_svc, key), tbl.name.clone()))
+        }
+        _ => None,
+    }
 }
 
 /// Compact human-readable sort key for an `EndpointId`. Used to

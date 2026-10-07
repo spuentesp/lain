@@ -433,6 +433,21 @@ impl ContractFederationConfig {
                     repo = s.repo
                 )));
             }
+            // Task 4: also require a *configured* service whose
+            // `repo` matches. An implicit service (a repo id with
+            // no `services[]` entry) cannot own a payload schema
+            // — `field_join` has no `service_decl` to read
+            // `base_path` from, and the payload would silently
+            // attach to a wrong endpoint. Reject at validate() so
+            // the operator sees the misconfig rather than
+            // discovering it via a missing `FieldRemoved` verdict.
+            if !self.services.iter().any(|svc| svc.repo == s.repo) {
+                return Err(LainError::Config(format!(
+                    "schemas entry '{topic}' references repo '{repo}' with no configured service",
+                    topic = s.topic,
+                    repo = s.repo
+                )));
+            }
         }
 
         // Database declarations validation (Gap 23).

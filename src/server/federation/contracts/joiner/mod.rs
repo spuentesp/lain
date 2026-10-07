@@ -75,7 +75,7 @@ use crate::server::sensors::env_sensor::EnvBindingIndex;
 mod confirmed;
 mod consumer_http;
 mod consumer_protocol;
-mod endpoints;
+pub(super) mod endpoints;
 
 pub use consumer_http::resolve_consumer_to_service;
 pub use consumer_protocol::{

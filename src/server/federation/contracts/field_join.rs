@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::federation::contracts::index::{BoundField, EndpointId, FieldRefResolution};
 use crate::federation::contracts::model::{
-    ContractFact, ContractKey, Direction, FieldMeta, JsonPath, ServiceName,
+    ContractFact, Direction, FieldMeta, JsonPath, ServiceName,
 };
 use crate::federation::repo_id::GlobalId;
 use crate::schema::{EdgeProvenance, GraphEdge, GraphNode};
@@ -160,52 +160,14 @@ pub(crate) fn collect_endpoint_schemas(
         let Some(route_node) = nodes.iter().find(|n| n.id == route_id) else {
             continue;
         };
-        let key = if matches!(route_node.node_type, crate::schema::NodeType::Topic) {
-            let broker = if route_node.name.contains('/') {
-                route_node
-                    .name
-                    .split('/')
-                    .next()
-                    .unwrap_or("kafka")
-                    .to_string()
-            } else {
-                "kafka".to_string()
-            };
-            let template = match route_node.contract.as_ref() {
-                Some(ContractFact::Provider(p)) => p.template.clone(),
-                _ => route_node
-                    .name
-                    .split('/')
-                    .nth(1)
-                    .unwrap_or(&route_node.name)
-                    .to_string(),
-            };
-            ContractKey::Topic {
-                broker,
-                name: template,
-            }
-        } else {
-            match route_node.contract.as_ref() {
-                Some(ContractFact::Provider(p)) => ContractKey::Http {
-                    method: crate::federation::contracts::model::MethodSpec::Known(p.method),
-                    template: p.template.clone(),
-                },
-                Some(ContractFact::RpcProvider(rpc)) => ContractKey::Rpc {
-                    system: rpc.system,
-                    service: rpc.service.clone(),
-                    method: rpc.method.clone(),
-                },
-                Some(ContractFact::GraphqlProvider(g)) => ContractKey::Graphql {
-                    op: g.op,
-                    field: g.field.clone(),
-                },
-                Some(ContractFact::WebSocketProvider(ws)) => ContractKey::WebSocket {
-                    route: ws.route.clone(),
-                },
-                _ => continue,
-            }
+        // Task 4: derive the key via the same function the endpoint
+        // table uses, so a `base_path` / `route_prefixes` on the
+        // service produces the same key in both places.
+        let Some((endpoint_id, _template)) =
+            super::joiner::endpoints::contract_key_for_provider(route_node, svc, config)
+        else {
+            continue;
         };
-        let endpoint_id: EndpointId = (svc.clone(), key);
         let bucket = by_endpoint.entry(endpoint_id.clone()).or_default();
         let mut node_map: BTreeMap<Direction, GlobalId> = BTreeMap::new();
         for (dir, schema_id) in schemas {
@@ -225,16 +187,21 @@ pub(crate) fn collect_endpoint_schemas(
     }
 
     // Step 4b: Schemas explicitly declared in repos.yaml via `schemas` (Gap 20).
+    //
+    // Task 4: the pre-fix code built the endpoint id from
+    // `decl.repo` (treated as a service name) and `"kafka"`
+    // (hardcoded broker), so any service whose configured name
+    // differed from its repo id (e.g. `payments-api` over repo
+    // `payments`) or whose topic sat on a non-kafka broker never
+    // reached the endpoint the joiner built. Fix: look up the
+    // topic provider that actually emits `decl.topic` and reuse
+    // `contract_key_for_provider` for the broker + full template,
+    // so the key byte-matches the one `build_endpoints` produced.
     for decl in &config.schemas {
-        let matching_schema = nodes.iter().find(|n| {
+        let Some(schema_node_rec) = nodes.iter().find(|n| {
             n.node_type == crate::schema::NodeType::Schema
                 && (n.path == decl.file || n.path.ends_with(&format!("/{}", decl.file)))
-                && assignments
-                    .get(&n.id)
-                    .map(|s| s.0 == decl.repo)
-                    .unwrap_or(true)
-        });
-        let Some(schema_node_rec) = matching_schema else {
+        }) else {
             continue;
         };
         let Some(fields) = fields_by_schema.get(&schema_node_rec.id) else {
@@ -243,13 +210,54 @@ pub(crate) fn collect_endpoint_schemas(
         let Ok(schema_gid) = GlobalId::parse(&schema_node_rec.id) else {
             continue;
         };
-
-        let svc = ServiceName(decl.repo.clone());
-        let key = ContractKey::Topic {
-            broker: "kafka".to_string(),
-            name: decl.topic.clone(),
+        let Some(svc) = assignments.get(&schema_node_rec.id).cloned() else {
+            continue;
         };
-        let endpoint_id: EndpointId = (svc, key);
+
+        // Verify the matched schema node belongs to a service
+        // whose configured repo is `decl.repo`. `validate()` is
+        // the strict gate that catches the misconfig, but the
+        // joiner can be invoked without it (e.g. from tests
+        // that hand-build the inputs). Without this check the
+        // schema would silently attach to the wrong endpoint
+        // whenever the operator typoed the repo.
+        let svc_repo_matches = config
+            .services
+            .iter()
+            .find(|s| s.name == svc.0)
+            .map(|s| s.repo == decl.repo)
+            .unwrap_or(false);
+        if !svc_repo_matches {
+            continue;
+        }
+
+        // Find the topic provider that emits `decl.topic` from
+        // the same service. `validate()` already guarantees a
+        // service exists for `decl.repo`, but a deployment may
+        // publish the topic from a sibling service inside the
+        // same repo — fall back to any matching topic provider
+        // so the schema reaches the right endpoint.
+        let topic_node = nodes
+            .iter()
+            .find(|n| {
+                n.node_type == crate::schema::NodeType::Topic
+                    && matches!(n.contract.as_ref(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
+                    && assignments.get(&n.id) == Some(&svc)
+            })
+            .or_else(|| {
+                nodes.iter().find(|n| {
+                    n.node_type == crate::schema::NodeType::Topic
+                        && matches!(n.contract.as_ref(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
+                })
+            });
+        let Some(topic_node) = topic_node else {
+            continue;
+        };
+        let Some((endpoint_id, _template)) =
+            super::joiner::endpoints::contract_key_for_provider(topic_node, &svc, config)
+        else {
+            continue;
+        };
         let bucket = by_endpoint.entry(endpoint_id.clone()).or_default();
         bucket
             .entry(Direction::Payload)
@@ -655,7 +663,7 @@ fn endpoint_service(endpoints: &BTreeMap<EndpointId, EndpointBindInfo>) -> Servi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::federation::contracts::model::{HttpMethod, MethodSpec, TypeDesc};
+    use crate::federation::contracts::model::{ContractKey, HttpMethod, MethodSpec, TypeDesc};
 
     fn http_key(method: HttpMethod, template: &str) -> ContractKey {
         ContractKey::Http {
