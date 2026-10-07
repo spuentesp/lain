@@ -1956,6 +1956,11 @@ fn graph_path_to_value(p: &GraphImpactPath) -> Value {
 
 fn provenance_label(p: Option<&EdgeProvenance>) -> Value {
     let Some(p) = p else {
+        // A legacy edge with no recorded provenance. Treated as 0.0
+        // here and in `traverse_impact`, because confidence must be
+        // evidence-backed. Sensors now emit `Static` by default
+        // (`GraphEdge::new`), so this arm only fires for edges
+        // deserialized from an older store.
         return json!({"kind": "unknown", "confidence": 0.0});
     };
     let kind = match p {
@@ -2433,7 +2438,10 @@ mod tests {
         // a UUID-based id).
         assert!(v["start"].is_string());
         assert_eq!(v["min_confidence"], 1.0);
-        assert_eq!(v["hops"][0]["provenance"]["kind"], "unknown");
-        assert_eq!(v["hops"][0]["provenance"]["confidence"], 0.0);
+        // A sensor-emitted edge with no finer attribution is still a
+        // static fact — never `unknown`/0.0, which would make
+        // `min_confidence` useless as a filter.
+        assert_eq!(v["hops"][0]["provenance"]["kind"], "static");
+        assert_eq!(v["hops"][0]["provenance"]["confidence"], 1.0);
     }
 }

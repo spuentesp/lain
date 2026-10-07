@@ -314,3 +314,49 @@ async fn handlers_repo_names_a_real_repository() {
     );
     assert_ne!(h["repo"], json!("http-sensor"));
 }
+
+/// Impact-path hops must carry real edge provenance, so
+/// `min_confidence` is meaningful and the documented
+/// `min_confidence` filter can actually filter.
+#[tokio::test]
+async fn impact_path_hops_carry_real_provenance() {
+    use lain::server::mcp::contract_tools::analysis::trace_impact_handle;
+
+    let fix = harness::build_fixture();
+    let mgr = harness::manager(&fix.root);
+    let config = harness::contract_config(&fix.root);
+    let base = snapshot_at(&mgr, &config, &fix.root, "base").await;
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&mgr, &status);
+
+    let outcome = trace_impact_handle(
+        &ctx,
+        json!({
+            "snapshot": base,
+            "from": {"endpoint": {"service": "orders", "key": "http:GET /api/orders/{}"}},
+            "depth": 3
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!outcome.is_error, "{:#?}", outcome.structured);
+    let paths = outcome.structured["data"]["paths"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(!paths.is_empty(), "expected at least one impact path");
+    for p in &paths {
+        for h in p["hops"].as_array().cloned().unwrap_or_default() {
+            assert_ne!(
+                h["provenance"]["kind"], json!("unknown"),
+                "hop {} carries no provenance: {h:?}",
+                h["node"]
+            );
+            assert!(
+                h["provenance"]["confidence"].as_f64().unwrap_or(0.0) > 0.0,
+                "hop {} has zero confidence: {h:?}",
+                h["node"]
+            );
+        }
+    }
+}

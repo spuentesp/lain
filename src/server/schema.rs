@@ -407,8 +407,9 @@ impl EdgeType {
             | EdgeType::ReadsTable
             | EdgeType::WritesTable
             | EdgeType::Produces
-            | EdgeType::Consumes => true,
-            EdgeType::PayloadSchema | EdgeType::Imports | EdgeType::DeployedTo => false,
+            | EdgeType::Consumes
+            | EdgeType::PayloadSchema => true,
+            EdgeType::Imports | EdgeType::DeployedTo => false,
         }
     }
 
@@ -533,7 +534,7 @@ impl EdgeType {
             ],
             // Schema / field / payload edges all originate from a
             // schema-bearing node.
-            EdgeType::RequestSchema | EdgeType::ResponseSchema => &[NodeType::HttpRoute],
+            EdgeType::RequestSchema | EdgeType::ResponseSchema => &[NodeType::HttpRoute, NodeType::Module],
             EdgeType::PayloadSchema => &[NodeType::Topic],
             EdgeType::HasField => &[NodeType::Schema],
             EdgeType::ReadsField => &[NodeType::Function, NodeType::Method],
@@ -603,7 +604,7 @@ impl EdgeType {
             EdgeType::PayloadSchema => &[NodeType::Schema],
             EdgeType::HasField => &[NodeType::Field],
             EdgeType::ReadsField => &[NodeType::FieldRef],
-            EdgeType::ReadsFrom => &[NodeType::HttpClientCall],
+            EdgeType::ReadsFrom => &[NodeType::HttpClientCall, NodeType::Function, NodeType::Method],
             // `Binds` targets: the provider side. HttpClientCall →
             // HttpRoute, FieldRef → Field, consumer Topic → producer
             // Topic.
@@ -1058,6 +1059,16 @@ pub struct GraphEdge {
 }
 
 impl GraphEdge {
+    /// Build a static-analysis edge.
+    ///
+    /// Every edge a sensor emits is a static fact, so it carries
+    /// `Static{TreeSitter}` provenance by default. Leaving it `None`
+    /// made impact-path hops report `{"kind":"unknown","confidence":0.0}`
+    /// and drove `min_confidence` to 0.0 on every multi-hop path, so
+    /// the documented `min_confidence` filter could only ever drop
+    /// everything. Deserialized legacy edges that carry no provenance
+    /// still read as `None` and are still treated as 0.0 by
+    /// `traverse_impact` — confidence remains evidence-backed.
     pub fn new(edge_type: EdgeType, source_id: String, target_id: String) -> Self {
         Self {
             edge_type,
@@ -1065,7 +1076,9 @@ impl GraphEdge {
             target_id,
             weight: None,
             cross_repo: false,
-            provenance: None,
+            provenance: Some(EdgeProvenance::Static {
+                source: StaticSource::TreeSitter,
+            }),
             site: None,
             detail: None,
         }
