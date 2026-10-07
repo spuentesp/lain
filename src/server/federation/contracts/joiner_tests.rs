@@ -13,9 +13,10 @@ use crate::federation::contracts::index::{
 use crate::federation::contracts::joiner::{ContractJoiner, JoinOutput};
 use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, FieldMeta, FieldReadFact,
-    HostPart, HttpMethod, JsonPath, MethodSpec, NormalizedUrl, ProviderFact, ProviderOrigin,
-    ServiceName, Table, TopicConsumerFact, TopicConsumerKind, TypeDesc, WebSocketConsumerFact,
-    WebSocketProviderFact,
+    GraphqlConsumerFact, GraphqlOp, GraphqlProviderFact, HostPart, HttpMethod, JsonPath,
+    MethodSpec, NormalizedUrl, ProviderFact, ProviderOrigin, RpcConsumerFact, RpcProviderFact,
+    RpcSystem, ServiceName, Table, TopicConsumerFact, TopicConsumerKind, TypeDesc,
+    WebSocketConsumerFact, WebSocketProviderFact,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{
@@ -2997,5 +2998,426 @@ fn topic_payload_schema_with_no_matching_service_is_unbound_not_silent() {
     assert!(
         !endpoint.schemas.contains_key(&Direction::Payload),
         "an unbound SchemaDecl must not silently attach to the kafka endpoint: {endpoint:?}"
+    );
+}
+
+// ─── Task 6 (mutation-credibility plan): decision-boundary fixtures ──
+//
+// `consumer_protocol.rs`'s survivors were decision-boundary mutants:
+// the fixtures only ever drove the *true* branch of each comparison
+// (a `/graphql` template, a POST method, exactly one route owner, an
+// equal candidate key). The cases below reach the *false* branch —
+// a non-`/graphql` route, a GET method, two route owners, a
+// different `(op, field)`, a foreign channel service, a different
+// RPC method — and pin the rejected side of the predicate.
+
+fn graphql_provider_node(
+    repo: &str,
+    path: &str,
+    op: GraphqlOp,
+    field: &str,
+    line: u32,
+) -> GraphNode {
+    let id_name = format!("{op}:{field}");
+    let mut n = GraphNode::new_in(
+        NodeType::Module,
+        id_name.clone(),
+        path.to_string(),
+        &repo_ns(),
+    );
+    n.repo_id = Some(repo.to_string());
+    n.id = make_id(repo, NodeType::Module, path, &id_name, line);
+    n.line_start = Some(line);
+    n.contract = Some(ContractFact::GraphqlProvider(GraphqlProviderFact {
+        op,
+        field: field.to_string(),
+        return_type: "[Order!]!".into(),
+    }));
+    n
+}
+
+fn graphql_consumer_node(
+    repo: &str,
+    path: &str,
+    op: GraphqlOp,
+    field: &str,
+    line: u32,
+) -> GraphNode {
+    let id_name = format!("graphql-call:{op}:{field}");
+    let mut n = GraphNode::new_in(
+        NodeType::Function,
+        id_name.clone(),
+        path.to_string(),
+        &repo_ns(),
+    );
+    n.repo_id = Some(repo.to_string());
+    n.id = make_id(repo, NodeType::Function, path, &id_name, line);
+    n.line_start = Some(line);
+    n.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
+        op,
+        field: field.to_string(),
+    }));
+    n
+}
+
+fn rpc_provider_node(repo: &str, service: &str, method: &str, line: u32) -> GraphNode {
+    let id_name = format!("rpc:{service}:{method}");
+    let mut n = GraphNode::new_in(
+        NodeType::Function,
+        id_name.clone(),
+        "gen/service.py".into(),
+        &repo_ns(),
+    );
+    n.repo_id = Some(repo.to_string());
+    n.id = make_id(repo, NodeType::Function, "gen/service.py", &id_name, line);
+    n.line_start = Some(line);
+    n.contract = Some(ContractFact::RpcProvider(RpcProviderFact {
+        system: RpcSystem::Grpc,
+        service: service.to_string(),
+        method: method.to_string(),
+        request_type: "HelloRequest".into(),
+        response_type: "HelloReply".into(),
+        handler: None,
+    }));
+    n
+}
+
+fn rpc_consumer_node(
+    repo: &str,
+    service: &str,
+    method: &str,
+    channel_host: &str,
+    line: u32,
+) -> GraphNode {
+    let id_name = format!("rpc-call:{service}:{method}");
+    let mut n = GraphNode::new_in(
+        NodeType::Function,
+        id_name.clone(),
+        "gen/client.py".into(),
+        &repo_ns(),
+    );
+    n.repo_id = Some(repo.to_string());
+    n.id = make_id(repo, NodeType::Function, "gen/client.py", &id_name, line);
+    n.line_start = Some(line);
+    n.contract = Some(ContractFact::RpcConsumer(RpcConsumerFact {
+        system: RpcSystem::Grpc,
+        service: service.to_string(),
+        method: method.to_string(),
+        channel_target: None,
+        channel_host_part: HostPart::Literal(channel_host.to_string()),
+    }));
+    n
+}
+
+/// Config whose services all share the repo name (the implicit
+/// service mapping) with optional `hosts` for channel resolution.
+fn multi_service_config(services: &[(&str, &[&str])]) -> ContractFederationConfig {
+    ContractFederationConfig {
+        services: services
+            .iter()
+            .map(|(name, hosts)| ServiceDecl {
+                name: (*name).into(),
+                repo: (*name).into(),
+                paths: vec![],
+                hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            })
+            .collect(),
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+        databases: vec![],
+    }
+}
+
+fn assert_graphql_target(
+    out: &JoinOutput,
+    consumer: &GraphNode,
+) -> Option<crate::federation::contracts::model::ServiceName> {
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    match &res.target {
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::GraphqlNoOp,
+            target_service,
+        }) => target_service.clone(),
+        other => panic!("expected Unresolved{{GraphqlNoOp, ..}}, got {other:?}"),
+    }
+}
+
+#[test]
+fn graphql_route_owner_surfaces_for_a_single_post_route() {
+    // Positive control: exactly one POST `/graphql` route exists, so
+    // an unresolved GraphQL consumer must name its owner as
+    // `target_service` (spec §8.3 — the operator sees the expected
+    // join target).
+    let route = provider_node(
+        "orders",
+        "src/server.ts",
+        "graphqlRoute",
+        10,
+        HttpMethod::Post,
+        "/graphql",
+    );
+    let consumer = graphql_consumer_node("billing", "src/gql.ts", GraphqlOp::Query, "orders", 20);
+    let cfg = multi_service_config(&[("orders", &[]), ("billing", &[])]);
+
+    let out = ContractJoiner::run(&[route, consumer.clone()], &[], &cfg);
+    let owner = assert_graphql_target(&out, &consumer);
+    assert_eq!(
+        owner.map(|s| s.0),
+        Some("orders".to_string()),
+        "the single POST /graphql route owner must surface"
+    );
+}
+
+#[test]
+fn graphql_route_owner_ignores_a_non_graphql_route() {
+    // `template == "/graphql"` false branch: a POST `/orders` route
+    // is not the GraphQL route, so no owner may surface on the
+    // unresolved record.
+    let route = provider_node(
+        "orders",
+        "src/server.ts",
+        "listOrders",
+        10,
+        HttpMethod::Post,
+        "/orders",
+    );
+    let consumer = graphql_consumer_node("billing", "src/gql.ts", GraphqlOp::Query, "orders", 20);
+    let cfg = multi_service_config(&[("orders", &[]), ("billing", &[])]);
+
+    let out = ContractJoiner::run(&[route, consumer.clone()], &[], &cfg);
+    let owner = assert_graphql_target(&out, &consumer);
+    assert!(
+        owner.is_none(),
+        "a non-/graphql route must not look like a GraphQL route owner: {owner:?}"
+    );
+}
+
+#[test]
+fn graphql_route_owner_requires_a_post_or_unknown_method() {
+    // `&& matches!(method, POST | Unknown)` false branch: a GET
+    // provider on `/graphql` must not satisfy the route-owner rule.
+    let route = provider_node(
+        "orders",
+        "src/server.ts",
+        "graphqlGet",
+        10,
+        HttpMethod::Get,
+        "/graphql",
+    );
+    let consumer = graphql_consumer_node("billing", "src/gql.ts", GraphqlOp::Query, "orders", 20);
+    let cfg = multi_service_config(&[("orders", &[]), ("billing", &[])]);
+
+    let out = ContractJoiner::run(&[route, consumer.clone()], &[], &cfg);
+    let owner = assert_graphql_target(&out, &consumer);
+    assert!(
+        owner.is_none(),
+        "a GET /graphql route must not satisfy the route-owner rule: {owner:?}"
+    );
+}
+
+#[test]
+fn graphql_two_route_owners_surface_no_target() {
+    // `total_owners == 1` false branch: two services own a
+    // POST `/graphql` route, so there is no single target to
+    // surface (spec §8.3 ambiguity).
+    let r1 = provider_node(
+        "orders",
+        "src/server.ts",
+        "graphqlRoute",
+        10,
+        HttpMethod::Post,
+        "/graphql",
+    );
+    let r2 = provider_node(
+        "billing",
+        "src/server.ts",
+        "graphqlRoute",
+        30,
+        HttpMethod::Post,
+        "/graphql",
+    );
+    let consumer = graphql_consumer_node("gateway", "src/gql.ts", GraphqlOp::Query, "orders", 20);
+    let cfg = multi_service_config(&[("orders", &[]), ("billing", &[]), ("gateway", &[])]);
+
+    let out = ContractJoiner::run(&[r1, r2, consumer.clone()], &[], &cfg);
+    let owner = assert_graphql_target(&out, &consumer);
+    assert!(
+        owner.is_none(),
+        "two /graphql route owners must surface no single target: {owner:?}"
+    );
+}
+
+#[test]
+fn graphql_consumer_does_not_bind_across_different_fields() {
+    // `key == target_key_ref` false branch: a provider exposing a
+    // *different* root field must be rejected by the candidate
+    // filter — a different key reaching the filter never binds.
+    let provider =
+        graphql_provider_node("orders", "schema.graphql", GraphqlOp::Query, "orders", 10);
+    let consumer =
+        graphql_consumer_node("billing", "src/gql.ts", GraphqlOp::Query, "customers", 20);
+    let cfg = multi_service_config(&[("orders", &[]), ("billing", &[])]);
+
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "a different (op, field) must not bind: {:?}",
+        res.target
+    );
+    assert!(
+        out.binds.is_empty(),
+        "no Binds edge expected for a rejected key: {:?}",
+        out.binds
+    );
+}
+
+// ─── RPC candidate filters (consumer_protocol first/second pass) ──────
+
+#[test]
+fn rpc_channel_scope_rejects_a_provider_outside_the_channel_service() {
+    // First pass `&&` false branch: the channel resolves only to
+    // `orders`, so a provider living in `greeter` with the exact
+    // target key must still be rejected — the service scope may not
+    // be short-circuited away.
+    let provider = rpc_provider_node("greeter", "Greeter", "SayHi", 10);
+    let consumer = rpc_consumer_node("billing", "Greeter", "SayHi", "grpc.orders.internal", 20);
+    let cfg = multi_service_config(&[
+        ("orders", &["grpc.orders.internal"]),
+        ("billing", &[]),
+        ("greeter", &[]),
+    ]);
+
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(
+        matches!(
+            res.target,
+            Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::RpcStubUnknown,
+                ..
+            })
+        ),
+        "a provider outside the channel's services must not bind: {:?}",
+        res.target
+    );
+    assert!(out.binds.is_empty(), "no Binds expected: {:?}", out.binds);
+}
+
+#[test]
+fn rpc_first_pass_rejects_a_different_method() {
+    // First pass `==` false branch: the provider sits in the
+    // channel's service but exposes a *different* method. A
+    // different key reaching the filter must be rejected.
+    let provider = rpc_provider_node("orders", "Greeter", "Delete", 10);
+    let consumer = rpc_consumer_node("billing", "Greeter", "SayHi", "grpc.orders.internal", 20);
+    let cfg = multi_service_config(&[("orders", &["grpc.orders.internal"]), ("billing", &[])]);
+
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(
+        matches!(
+            res.target,
+            Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::RpcStubUnknown,
+                ..
+            })
+        ),
+        "a different RPC method must not bind: {:?}",
+        res.target
+    );
+    assert!(out.binds.is_empty(), "no Binds expected: {:?}", out.binds);
+}
+
+#[test]
+fn rpc_second_pass_rejects_a_different_method() {
+    // Second pass (package-qualified) `==` false branch: the
+    // provider's service ends with `.Greeter` and sits in the
+    // channel's service, but its method differs — the method
+    // equality must reject it.
+    let provider = rpc_provider_node("orders", "pkg.Greeter", "Delete", 10);
+    let consumer = rpc_consumer_node("billing", "Greeter", "SayHi", "grpc.orders.internal", 20);
+    let cfg = multi_service_config(&[("orders", &["grpc.orders.internal"]), ("billing", &[])]);
+
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(
+        matches!(
+            res.target,
+            Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::RpcStubUnknown,
+                ..
+            })
+        ),
+        "a package-qualified provider with a different method must not bind: {:?}",
+        res.target
+    );
+    assert!(out.binds.is_empty(), "no Binds expected: {:?}", out.binds);
+}
+
+#[test]
+fn rpc_second_pass_rejects_a_provider_outside_the_channel_service() {
+    // Second pass `&&` false branch: the provider matches the
+    // package-qualified service and method, but lives outside the
+    // channel's services. The service scope must still reject it.
+    let provider = rpc_provider_node("greeter", "pkg.Greeter", "SayHi", 10);
+    let consumer = rpc_consumer_node("billing", "Greeter", "SayHi", "grpc.orders.internal", 20);
+    let cfg = multi_service_config(&[
+        ("orders", &["grpc.orders.internal"]),
+        ("billing", &[]),
+        ("greeter", &[]),
+    ]);
+
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(
+        matches!(
+            res.target,
+            Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::RpcStubUnknown,
+                ..
+            })
+        ),
+        "a package-qualified provider outside the channel's services must not bind: {:?}",
+        res.target
+    );
+    assert!(out.binds.is_empty(), "no Binds expected: {:?}", out.binds);
+}
+
+// ─── WebSocket route filter (consumer_protocol resolve_websocket) ─────
+
+#[test]
+fn ws_consumer_with_route_mismatch_does_not_bind() {
+    // `k == &key` / `&&` false branch: the dial's host resolves to
+    // `orders`, but the provider exposes a *different* route. The
+    // key equality and the service scope must both hold — neither
+    // may be short-circuited into a bind.
+    let provider = ws_provider_node("orders", "/feed", 10);
+    let consumer = ws_consumer_node("billing", "orders.internal", "/ws", 20);
+    let cfg = ws_config("orders", "orders.internal");
+
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "a route mismatch must not bind: {:?}",
+        res.target
+    );
+    assert!(
+        out.binds.is_empty(),
+        "no Binds edge expected for a route mismatch: {:?}",
+        out.binds
     );
 }
