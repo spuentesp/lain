@@ -102,6 +102,53 @@ async fn get_service_attributes_each_consumer_to_its_real_endpoint() {
     }
 }
 
+/// `list_contracts(kind=…)` must reject an unknown kind rather than
+/// returning an empty page. An empty page reads as "no such contract
+/// here", which is exactly the `absent` vs `not analysed` conflation
+/// the coverage ledger exists to prevent.
+#[tokio::test]
+async fn list_contracts_rejects_unknown_kind_instead_of_returning_empty() {
+    use lain::server::mcp::contract_tools::contracts::list_contracts_handle;
+
+    let fix = harness::build_fixture();
+    let mgr = harness::manager(&fix.root);
+    let config = harness::contract_config(&fix.root);
+    let base = snapshot_at(&mgr, &config, &fix.root, "base").await;
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&mgr, &status);
+
+    let outcome = list_contracts_handle(&ctx, json!({"snapshot": base, "kind": "bogus", "limit": 50}))
+        .await
+        .unwrap();
+    assert!(
+        outcome.is_error,
+        "an unknown kind must be an error, not an empty page: {:#?}",
+        outcome.structured
+    );
+    assert_eq!(
+        outcome.structured["error"]["code"], json!("invalid_argument"),
+        "unexpected error envelope: {:#?}",
+        outcome.structured
+    );
+
+    // Every advertised kind must be accepted. Zero items is fine when
+    // the fixture holds no such contract — that is data, not a filter
+    // failure.
+    for kind in ["http", "topic", "rpc", "graphql", "websocket", "table"] {
+        let ok = list_contracts_handle(
+            &ctx,
+            json!({"snapshot": base, "kind": kind, "limit": 50}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !ok.is_error,
+            "advertised kind {kind} must be accepted: {:#?}",
+            ok.structured
+        );
+    }
+}
+
 /// `owners` must always be present on a `used_by` entry — `[]` means
 /// "CODEOWNERS declares no owner for this path", whereas a missing key
 /// means "owners could not be loaded", which a client must not silently

@@ -187,6 +187,28 @@ async fn run_list_contracts(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // Reject an unknown kind instead of returning an empty page. An
+    // empty page reads as "no such contract here", which is the
+    // `absent` vs `not analysed` conflation the coverage ledger exists
+    // to prevent. Keep this list in step with `ContractKey::kind()`
+    // and the `kind` enum in `schemas/list_contracts.in.json`.
+    const VALID_KINDS: &[&str] = &["http", "topic", "rpc", "graphql", "websocket", "table"];
+    if let Some(ref k) = kind_filter {
+        if !VALID_KINDS.contains(&k.as_str()) {
+            return Err(error_outcome(
+                "invalid_argument",
+                format!("unknown kind {k:?}"),
+                Some(json!({
+                    "arg": "kind",
+                    "reason": "unknown",
+                    "allowed": VALID_KINDS,
+                })),
+                &view_snapshot_label(&args_map),
+                started,
+            ));
+        }
+    }
+
     let mut items: Vec<Value> = Vec::new();
     for (endpoint_id, endpoint) in &view.endpoints {
         if let Some(ref svc) = service_filter {
@@ -928,6 +950,7 @@ pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         DynamicTopic => "dynamic_topic",
         ExternalRef => "external_ref",
         DynamicSql => "dynamic_sql",
+        OrmDynamicQuery => "orm_dynamic_query",
     }
 }
 

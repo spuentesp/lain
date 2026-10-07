@@ -1116,6 +1116,12 @@
             "name": {
               "type": "string"
             },
+            "owners": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "ref": {
               "$ref": "#/$defs/EvidenceRef"
             }
@@ -1668,10 +1674,14 @@
           "type": "string"
         },
         "kind": {
-          "description": "Filter by contract kind.",
+          "description": "Filter by contract kind. Unknown values are rejected with `invalid_argument` rather than returning an empty page.",
           "enum": [
             "http",
-            "topic"
+            "topic",
+            "rpc",
+            "graphql",
+            "websocket",
+            "table"
           ],
           "type": "string"
         },

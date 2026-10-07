@@ -19,8 +19,8 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["http", "topic"],
-      "description": "Filter by contract kind."
+      "enum": ["http", "topic", "rpc", "graphql", "websocket", "table"],
+      "description": "Filter by contract kind. Unknown values are rejected with `invalid_argument` rather than returning an empty page."
     },
     "cursor": {
       "type": "string",
