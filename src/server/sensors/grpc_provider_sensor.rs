@@ -38,6 +38,7 @@ use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::payload_schema::{
     parse_proto_messages_with_diagnostics, ProtoParseDiagnostic,
 };
+use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -91,7 +92,7 @@ impl crate::server::sensors::Sensor for GrpcProviderSensor {
         scan_workspace_grpc_with_report(graph, root, namespace)
     }
 }
-inventory::submit!(crate::server::sensors::SensorEntry(&GrpcProviderSensor));
+inventory::submit!(SensorEntry(&GrpcProviderSensor));
 
 // ─── Workspace scan ───────────────────────────────────────────────────
 
