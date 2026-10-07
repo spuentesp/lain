@@ -1460,3 +1460,412 @@ fn t9_short_circuit_directive_unterminated_paren() {
         lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
     let _ = out;
 }
+
+// ─── Task 5 — closing the measured survivor classes ──────────────────
+//
+//     The scoped mutation run (`scripts/task9-mutation-check.py`,
+//     146 mutants over the two parser targets) reports 51 survivors
+//     in `graphql_consumer_sensor.rs`. Each fixture below is pinned
+//     to the exact `path:line` it kills: the mutation is applied by
+//     hand, the fixture is watched FAIL, the line is reverted by
+//     hand. A fixture that merely exercises the line is worthless —
+//     the criterion is "would this fail if that comparison flipped".
+
+/// `graphql_consumer_sensor.rs:510` (`&&`→`||` on the operation-body
+/// brace-depth loop): the body `query { orders { id ` reaches
+/// end-of-buffer with `depth > 0`. Under the mutation the loop
+/// re-evaluates `bytes[i]` past the end and panics; unmutated, the
+/// body is extracted truncated and `orders` still parses.
+#[test]
+fn t9_short_circuit_selection_loop_stops_at_end_of_buffer() {
+    let consumers = parse_document("query { orders { id ", "doc.graphql");
+    assert_eq!(
+        consumers.len(),
+        1,
+        "one consumer expected, got {consumers:?}"
+    );
+    assert_eq!(consumers[0].field, "orders");
+    assert!(
+        !consumers[0].dynamic,
+        "unterminated body still yields the parsed field, got {consumers:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:411` (`&&`→`||` on find's paren-depth
+/// loop): `query GetOrder(id: ID!` runs out of buffer inside the
+/// argument list with `depth > 0`. The mutation overruns; unmutated,
+/// the document has no body and lands in the dynamic bucket.
+#[test]
+fn t9_short_circuit_operation_argument_list_runs_to_end_of_buffer() {
+    let consumers = parse_document("query GetOrder(id: ID!", "doc.graphql");
+    assert_eq!(
+        consumers.len(),
+        1,
+        "one dynamic marker expected, got {consumers:?}"
+    );
+    assert!(
+        consumers[0].dynamic,
+        "no body means no fields; the record must be dynamic, got {consumers:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:567` (`&&`→`||` on the unattached-block
+/// skip): `{ orphan` never sees its closing brace, so the mutation
+/// overruns the buffer. Unmutated, the block is skipped and no field
+/// is emitted.
+#[test]
+fn t9_short_circuit_unattached_block_runs_to_end_of_buffer() {
+    let out = lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(
+        "{ orphan",
+    );
+    assert!(
+        out.is_empty(),
+        "an unattached block must emit no fields, got {out:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:436` (`&&`→`||` in `operation_keyword`'s
+/// after-boundary): the keyword must not match as a prefix of a longer
+/// identifier. Under the mutation `queryOrders` parses as `query` and
+/// mints a real consumer; unmutated, the document is fragment-only
+/// (dynamic).
+#[test]
+fn t9_keyword_boundary_query_prefix_is_not_an_operation() {
+    let consumers = parse_document("queryOrders { orders { id } }", "doc.graphql");
+    assert_eq!(
+        consumers.len(),
+        1,
+        "no operation may be detected, got {consumers:?}"
+    );
+    assert!(
+        consumers[0].dynamic,
+        "`queryOrders` must not parse as `query`, got {consumers:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:439` (`&&`→`||` in `operation_keyword`'s
+/// before-boundary): the keyword must not match in the middle of an
+/// identifier. Under the mutation `myquery` parses as `query`.
+#[test]
+fn t9_keyword_boundary_ident_prefix_is_not_an_operation() {
+    let consumers = parse_document("myquery { orders { id } }", "doc.graphql");
+    assert_eq!(
+        consumers.len(),
+        1,
+        "no operation may be detected, got {consumers:?}"
+    );
+    assert!(
+        consumers[0].dynamic,
+        "`myquery` must not parse as `query`, got {consumers:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:723` (`&&`→`||` in `is_fragment_spread`'s
+/// prev-byte check): a `...` directly after an identifier is not a
+/// spread (the byte before is part of an identifier). Under the
+/// mutation `id...bar` swallows `bar` as the spread name; unmutated,
+/// both identifiers are fields.
+#[test]
+fn t9_spread_directly_after_identifier_is_not_a_fragment_spread() {
+    let out = lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(
+        "id...bar",
+    );
+    let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["id", "bar"],
+        "dots after an identifier must not become a fragment spread, got {out:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:748` (`&&`→`||` on the spread-name
+/// gate): a spread token sitting at end-of-buffer (`orders ...`) must
+/// not make the parser look at `bytes[len]`. Unmutated, the spread
+/// consumes to the end and `orders` survives.
+#[test]
+fn t9_short_circuit_spread_token_at_end_of_buffer() {
+    let out = lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(
+        "orders ...",
+    );
+    assert_eq!(out.len(), 1, "must still report `orders`, got {out:?}");
+    assert_eq!(out[0].0, "orders");
+}
+
+/// `graphql_consumer_sensor.rs:770, 773, 779, 780, 782, 788` and the
+/// `==`→`!=` flip of `:776` — every byte-boundary branch inside
+/// `scan_fragment_spread`'s directive handling that is reachable with
+/// a mid-buffer argument list. One fixture: an inline fragment
+/// carrying a directive with an argument list and a selection set.
+/// Unmutated the only field at this level is `total`; each mutation
+/// either panics at end-of-buffer, skips the argument list (leaking
+/// `true` as a field), or swallows the whole remainder of the body.
+#[test]
+fn t9_inline_fragment_with_directive_parses_only_the_fragment_fields() {
+    let body = "... on Paid @include(if: true) { total }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["total"],
+        "directive arguments must not leak and the inline selection must be read, got {out:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:776` (`&&`→`||` on the directive-args
+/// gate): `... on Paid @include` reaches the `(`-gate at
+/// end-of-buffer. Under the mutation the parser reads `bytes[len]`;
+/// unmutated, the spread consumes to the end and emits no fields.
+#[test]
+fn t9_short_circuit_spread_directive_gate_at_end_of_buffer() {
+    let body = "... on Paid @include";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert!(
+        out.is_empty(),
+        "a named-spread-shaped directive with no selection emits no fields, got {out:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:799` + `:811` (`&&`→`||`): an inline
+/// fragment whose selection set never closes reaches end-of-buffer
+/// with `brace_depth > 0`. Both mutated loops read past the end.
+#[test]
+fn t9_short_circuit_inline_fragment_unterminated_selection() {
+    let body = "... on Paid { total";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "must still report `total`, got {out:?}");
+    assert_eq!(out[0].0, "total");
+}
+
+/// Line-number assertions (class 5): `graphql_consumer_sensor.rs:230`
+/// and `:246` count newlines before the tag to compute `site_line`.
+/// `==`→`!=` counts *non*-newline characters instead, producing a
+/// wildly wrong line. No existing test asserted an exact line.
+#[test]
+fn t9_line_number_tagged_template_call_sites() {
+    let content = "const a = 1;\nconst Q = gql`query { orders { id } }`;\nconst p = gql(\"query { users { id } }\");\n";
+    let found = lain::server::sensors::graphql_consumer_sensor::detect_in_code(content, "src/q.ts");
+    let orders = found
+        .iter()
+        .find(|c| c.field == "orders")
+        .expect("`orders` consumer must be detected");
+    assert_eq!(
+        orders.site_line, 2,
+        "`gql\\`` on source line 2 must report site_line 2, got {found:?}"
+    );
+    let users = found
+        .iter()
+        .find(|c| c.field == "users")
+        .expect("`users` consumer must be detected");
+    assert_eq!(
+        users.site_line, 3,
+        "`gql(\"` on source line 3 must report site_line 3, got {found:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:398` (`==`→`!=` on the newline count
+/// inside the keyword→name whitespace skip): the spaces after `query`
+/// must not be counted as lines. Under the mutation the second
+/// operation's `site_line` drifts; unmutated it is exactly 4.
+#[test]
+fn t9_line_number_after_keyword_whitespace_gap() {
+    let src = "query  B {\n  x\n}\nmutation C {\n  y\n}\n";
+    let consumers = parse_document(src, "doc.graphql");
+    assert_eq!(
+        consumers.len(),
+        2,
+        "two operations expected, got {consumers:?}"
+    );
+    assert_eq!(consumers[0].field, "x");
+    assert_eq!(
+        consumers[0].site_line, 1,
+        "`query` on line 1 must report site_line 1, got {consumers:?}"
+    );
+    assert_eq!(consumers[1].field, "y");
+    assert_eq!(
+        consumers[1].site_line, 4,
+        "`mutation` on line 4 must report site_line 4, got {consumers:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:412` (`==`→`!=` in find's paren-depth
+/// loop): with the mutation the depth never returns to zero, the loop
+/// eats the rest of the buffer, and the `mutation` operation on the
+/// next line is never discovered. Unmutated, both operations parse.
+#[test]
+fn t9_paren_block_before_newline_keeps_both_operations() {
+    let consumers = parse_document("query Q(id: ID)\nmutation M { y }\n", "doc.graphql");
+    assert_eq!(
+        consumers.len(),
+        2,
+        "both operations must be detected, got {consumers:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:408` / `:414` (`==`→`!=` in find's
+/// paren-skip): `{mutation}` inside the argument list must be
+/// swallowed by the balanced-paren skip, not discovered as a second
+/// operation. Under either mutation the inner token mints a duplicate
+/// consumer.
+#[test]
+fn t9_keyword_inside_argument_list_is_not_a_second_operation() {
+    let consumers = parse_document("query Q(id: {mutation}) { orders }", "doc.graphql");
+    assert_eq!(
+        consumers.len(),
+        1,
+        "the argument list must not contribute an operation, got {consumers:?}"
+    );
+    assert_eq!(consumers[0].field, "orders");
+}
+
+/// `graphql_consumer_sensor.rs:494` (`==`→`!=` in extract's
+/// paren-depth loop): an argument list spanning a newline must still
+/// be skipped so the parser reaches the operation body. Under the
+/// mutation the loop exits on the first byte, the name-skip hits the
+/// newline, and the document falls into the dynamic bucket.
+#[test]
+fn t9_extract_paren_block_across_newlines_finds_the_body() {
+    let consumers = parse_document(
+        "query GetOrder(\n  id: ID!\n) { order { id } }",
+        "doc.graphql",
+    );
+    let order = consumers
+        .iter()
+        .find(|c| c.field == "order")
+        .expect("`order` must be parsed despite the multi-line argument list");
+    assert_eq!(
+        order.selected_fields,
+        vec!["id".to_string()],
+        "got {consumers:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:511` (`==`→`!=` in extract's body
+/// brace-depth loop): the mutation increments depth on every byte, so
+/// the body never closes and the trailing junk `extra` leaks into the
+/// field list. Unmutated, the body closes at `}`.
+#[test]
+fn t9_operation_body_closes_before_trailing_junk() {
+    let consumers = parse_document("query { orders } extra", "doc.graphql");
+    assert_eq!(
+        consumers.len(),
+        1,
+        "content after the operation's `}}` is not part of the field list, got {consumers:?}"
+    );
+    assert_eq!(consumers[0].field, "orders");
+}
+
+/// `graphql_consumer_sensor.rs:515` (`==`→`!=` on `depth == 0` in
+/// extract's body loop): the mutation breaks at the *first* closing
+/// brace, truncating the body and dropping `status`. Unmutated, the
+/// body closes at the brace that matches the opening one.
+#[test]
+fn t9_nested_operation_body_keeps_trailing_field() {
+    let consumers = parse_document("query { order { id } status }", "doc.graphql");
+    let names: Vec<&str> = consumers.iter().map(|c| c.field.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["order", "status"],
+        "fields between the nested close and the body close must survive, got {consumers:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:572` (`==`→`!=` on `brace_depth == 0`
+/// in the unattached-block skip): the mutation breaks at the first
+/// inner close, leaking `c` from the nested block. Unmutated, the whole
+/// unattached block is skipped.
+#[test]
+fn t9_unattached_nested_block_does_not_leak_inner_field() {
+    let body = "{ a { b } c } orders { id }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "only `orders` may survive, got {out:?}");
+    assert_eq!(out[0].0, "orders");
+    assert_eq!(out[0].1, vec!["id".to_string()], "got {out:?}");
+}
+
+/// `graphql_consumer_sensor.rs:694` (`==`→`!=` in the selection-set
+/// brace-depth loop): the mutation makes every byte increment depth,
+/// the loop never closes, and `total` is absorbed into `orders`'
+/// selection instead of staying a sibling. Unmutated, both are
+/// top-level fields.
+#[test]
+fn t9_selection_close_brace_keeps_sibling_top_level() {
+    let body = "orders { id } total";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(
+        out.len(),
+        2,
+        "sibling field must stay top-level, got {out:?}"
+    );
+    assert_eq!(out[0].0, "orders");
+    assert_eq!(out[0].1, vec!["id".to_string()], "got {out:?}");
+    assert_eq!(out[1].0, "total");
+}
+
+/// `graphql_consumer_sensor.rs:698` (`==`→`!=` on `brace_depth == 0`
+/// in the selection-set loop): the mutation breaks at the first inner
+/// close, pushing `total` out of `orders`' selection. Unmutated, the
+/// selection closes at the matching brace.
+#[test]
+fn t9_selection_close_depth_keeps_sibling_in_selection() {
+    let body = "orders { item { x } total }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "got {out:?}");
+    assert_eq!(
+        out[0].1,
+        vec!["item".to_string(), "total".to_string()],
+        "selection must close at the matching brace, got {out:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:882` (`==`→`!=` in parse_operation_body's
+/// brace-depth loop): the mutation never closes the body, so trailing
+/// content after the operation's `}` (`extra { x }`) is parsed as more
+/// fields. Unmutated, the body closes at the matching brace.
+#[test]
+fn t9_detect_in_code_body_closes_before_trailing_content() {
+    let code = "const Q = gql`query { orders { id } } extra { x }`;";
+    let found = lain::server::sensors::graphql_consumer_sensor::detect_in_code(code, "src/q.ts");
+    assert_eq!(
+        found.len(),
+        1,
+        "content after the operation's `}}` must not mint consumers, got {found:?}"
+    );
+    assert_eq!(found[0].field, "orders");
+}
+
+/// `graphql_consumer_sensor.rs:886` (`==`→`!=` on `depth == 0` in
+/// parse_operation_body): the mutation breaks at the first closing
+/// brace and drops `b`. Unmutated, the body closes at the brace that
+/// matches the opening one.
+#[test]
+fn t9_detect_in_code_nested_body_keeps_later_field() {
+    let code = "const Q = gql`query { a { x } b }`;";
+    let found = lain::server::sensors::graphql_consumer_sensor::detect_in_code(code, "src/q.ts");
+    let names: Vec<&str> = found.iter().map(|c| c.field.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["a", "b"],
+        "fields between the nested close and the body close must survive, got {found:?}"
+    );
+}
+
+/// `graphql_consumer_sensor.rs:881` (`&&`→`||` in parse_operation_body's
+/// brace-depth loop): a tagged template whose body never closes
+/// reaches end-of-buffer with `depth > 0`; the mutation reads past the
+/// end. Unmutated, the truncated body still yields `orders`.
+#[test]
+fn t9_detect_in_code_unterminated_body_does_not_overrun() {
+    let code = "const Q = gql`query { orders { id`;";
+    let found = lain::server::sensors::graphql_consumer_sensor::detect_in_code(code, "src/q.ts");
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert!(
+        !found[0].dynamic,
+        "an unterminated body still parses what it has, got {found:?}"
+    );
+}

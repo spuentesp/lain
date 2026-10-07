@@ -838,3 +838,245 @@ fn proto_required_qualifier_at_end_of_message_body_does_not_overrun() {
 // from the post-`map` cursor position. There is no
 // observable difference, so the mutation is left as a
 // known equivalent.
+
+// ─── Task 5 — measured survivor classes (scoped run: 51 survivors) ──
+//
+//     Each fixture below names the `path:line` it kills and was
+//     verified by applying the mutation at that exact line, watching
+//     the fixture FAIL, and reverting the line by hand.
+
+/// `payload_schema.rs:645` (`&&`→`||` on the `map`-keyword gate): a
+/// type token that starts with `m` but is not `map` must fall through
+/// to the bare-identifier path. Under the mutation `mapx` enters the
+/// map branch, the cursor lands mid-token, and the field named `f` is
+/// dropped with a diagnostic. Unmutated, `mapx` is a plain type name.
+#[test]
+fn proto_type_token_starting_with_m_but_not_map_is_a_plain_identifier() {
+    let parsed = parse_proto_messages("message M { mapx f = 1; }\n");
+    let m = parsed
+        .iter()
+        .find(|msg| msg.name == "M")
+        .expect("M message");
+    let names: Vec<String> = m.fields.iter().map(|f| f.path.to_string()).collect();
+    assert_eq!(
+        names,
+        vec!["f".to_string()],
+        "`mapx` must be read as a plain type identifier so `f` survives, got {names:?}"
+    );
+}
+
+/// `payload_schema.rs:604` (`==`→`!=` on the `]` of the field-options
+/// skip): the bracket loop must stop at `]`. Under the mutation it
+/// never breaks and consumes the rest of the file, dropping field `b`.
+#[test]
+fn proto_field_options_block_does_not_swallow_following_field() {
+    let parsed =
+        parse_proto_messages("message M { string a = 1 [deprecated = true]; string b = 2; }\n");
+    let m = parsed
+        .iter()
+        .find(|msg| msg.name == "M")
+        .expect("M message");
+    let names: Vec<String> = m.fields.iter().map(|f| f.path.to_string()).collect();
+    assert_eq!(
+        names,
+        vec!["a".to_string(), "b".to_string()],
+        "field options must not swallow the next field, got {names:?}"
+    );
+}
+
+/// `payload_schema.rs:612` (`==`→`!=` on the `;` after a field): the
+/// mutation consumes the *next* byte whenever it isn't `;`, eating the
+/// message's closing `}`. The outer message then stays open past the
+/// inner one and messages drain in reverse order. Unmutated, messages
+/// come back in file order.
+#[test]
+fn proto_missing_semicolon_does_not_reorder_messages() {
+    let parsed = parse_proto_messages("message M { string a = 1 } message N { string b = 2; }\n");
+    assert_eq!(parsed.len(), 2, "both messages must parse, got {parsed:?}");
+    assert_eq!(
+        parsed[0].name,
+        "M",
+        "messages must be emitted in file order, got {:?}",
+        parsed.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    assert_eq!(parsed[1].name, "N");
+}
+
+/// `payload_schema.rs:735` (first `==`, the `;` arm of
+/// `skip_to_semicolon_or_newline`): a junk line ending in `;` must
+/// stop the skip right there. Under the mutation the scan runs to the
+/// newline and eats `string id = 1;` with it.
+///
+/// `payload_schema.rs:736` (the inner `==`): when the stop byte is
+/// `;` the line counter must NOT advance — same source line. Under the
+/// mutation the field after the junk line reports line 3 instead of 2.
+#[test]
+fn proto_junk_line_stops_at_semicolon_and_keeps_following_field() {
+    let parsed = parse_proto_messages("message M {\n  garbage here; string id = 1;\n}\n");
+    let m = parsed
+        .iter()
+        .find(|msg| msg.name == "M")
+        .expect("M message");
+    let id = m
+        .fields
+        .iter()
+        .find(|f| f.path.to_string() == "id")
+        .unwrap_or_else(|| panic!("`id` must survive the junk line, got {:?}", m.fields));
+    assert_eq!(
+        id.line, 2,
+        "`id` is declared on line 2 (same line as the junk), got {}",
+        id.line
+    );
+}
+
+/// `payload_schema.rs:735` (second `==`, the `\n` arm of
+/// `skip_to_semicolon_or_newline`): junk with no `;` must stop at the
+/// newline. Under the mutation the skip crosses the line and eats
+/// `string id = 1;`.
+///
+/// `payload_schema.rs:736`: when the stop byte is `\n` the line
+/// counter must advance. Under the mutation `id` reports line 2
+/// instead of 3.
+#[test]
+fn proto_junk_line_stops_at_newline_and_keeps_following_field() {
+    let parsed = parse_proto_messages("message M {\n  = nope\n  string id = 1;\n}\n");
+    let m = parsed
+        .iter()
+        .find(|msg| msg.name == "M")
+        .expect("M message");
+    let id = m
+        .fields
+        .iter()
+        .find(|f| f.path.to_string() == "id")
+        .unwrap_or_else(|| panic!("`id` must survive the junk line, got {:?}", m.fields));
+    assert_eq!(id.line, 3, "`id` is declared on line 3, got {}", id.line);
+}
+
+/// `payload_schema.rs:723` (`==`→`!=` in `skip_ws`'s newline count):
+/// a declaration split across lines (`string` / `id`) must still
+/// report exact line numbers for the fields that follow. Under the
+/// mutation newlines are missed and spaces counted, drifting every
+/// subsequent line.
+#[test]
+fn proto_line_numbers_survive_newlines_inside_a_declaration() {
+    let src = "message M {\n  string\n  id = 1;\n  string name = 2;\n}\n";
+    let parsed = parse_proto_messages(src);
+    let m = parsed
+        .iter()
+        .find(|msg| msg.name == "M")
+        .expect("M message");
+    let names: Vec<String> = m.fields.iter().map(|f| f.path.to_string()).collect();
+    assert_eq!(
+        names,
+        vec!["id".to_string(), "name".to_string()],
+        "{names:?}"
+    );
+    let id = &m.fields[0];
+    let name = &m.fields[1];
+    assert_eq!(id.line, 2, "`id` is declared on line 2, got {}", id.line);
+    assert_eq!(
+        name.line, 4,
+        "`name` is declared on line 4, got {}",
+        name.line
+    );
+}
+
+/// `payload_schema.rs:754` (`==`→`!=` in `consume_balanced_block`'s
+/// newline count): a bare `{ ... }` block inside a message must be
+/// skipped while counting only its newlines. Under the mutation every
+/// byte counts as a line, so the field after the block reports a
+/// wildly wrong line.
+#[test]
+fn proto_braced_block_line_counting_stays_exact_for_following_field() {
+    let src = "message M {\n{ inner }\n  string id = 1;\n}\n";
+    let parsed = parse_proto_messages(src);
+    let m = parsed
+        .iter()
+        .find(|msg| msg.name == "M")
+        .expect("M message");
+    let id = m
+        .fields
+        .iter()
+        .find(|f| f.path.to_string() == "id")
+        .unwrap_or_else(|| panic!("`id` must be parsed, got {:?}", m.fields));
+    assert_eq!(id.line, 3, "`id` is declared on line 3, got {}", id.line);
+}
+
+/// `payload_schema.rs:771` (`==`→`!=` on the open-brace guard of
+/// `consume_balanced_block_from_open_brace`): at the depth cap the
+/// block after the capped header must be skipped. Under the mutation
+/// the guard fires and the skip is abandoned, so `string leaf = 1;`
+/// is parsed as a field of the deepest admitted message.
+///
+/// `payload_schema.rs:776` (`==`→`!=` in the same function's newline
+/// count): the skip must count only newlines. Under the mutation every
+/// byte of the capped block counts as a line and every line number
+/// after it drifts — pinned by the exact line of `Tail.t`.
+#[test]
+fn proto_depth_cap_skips_capped_block_without_leaking_or_skewing_lines() {
+    use lain::server::sensors::payload_schema::{
+        parse_proto_messages_with_diagnostics, MAX_PROTO_MESSAGE_DEPTH,
+    };
+
+    let levels = MAX_PROTO_MESSAGE_DEPTH as usize + 1;
+    let mut src = String::with_capacity(levels * 32 + 128);
+    for i in 0..levels {
+        src.push_str(&format!("message L{i} {{\n"));
+    }
+    src.push_str("string leaf = 1;\n");
+    for _ in 0..levels {
+        src.push_str("}\n");
+    }
+    src.push_str("message Tail {\n  string t = 1;\n}\n");
+
+    let (messages, diagnostics) = parse_proto_messages_with_diagnostics(&src);
+
+    // The cap still fires for the overflowing level.
+    assert!(
+        diagnostics.iter().any(|d| matches!(
+            d.kind,
+            lain::server::sensors::payload_schema::ProtoParseDiagnosticKind::NestingDepth
+        )),
+        "NestingDepth diagnostic must fire, got: {diagnostics:?}"
+    );
+    // Every level at or below the cap still produces a message.
+    let capped: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.name.starts_with('L'))
+        .map(|m| m.name.as_str())
+        .collect();
+    assert_eq!(
+        capped.len() as u32,
+        MAX_PROTO_MESSAGE_DEPTH,
+        "depth cap must hold, got {capped:?}"
+    );
+    // The capped block's body must NOT leak into the admitted messages.
+    assert!(
+        messages
+            .iter()
+            .all(|m| !m.fields.iter().any(|f| f.path.to_string() == "leaf")),
+        "`leaf` lives past the depth cap and must not appear in any message, got {:?}",
+        messages
+            .iter()
+            .map(|m| (&m.name, &m.fields))
+            .collect::<Vec<_>>()
+    );
+    // Line numbers after the skipped block stay exact:
+    // `levels` open lines + 1 leaf line + `levels` close lines = the
+    // `message Tail {` header line; `t` is the line after it.
+    let tail = messages
+        .iter()
+        .find(|m| m.name == "Tail")
+        .expect("`Tail` must parse after the capped block");
+    let t = tail
+        .fields
+        .iter()
+        .find(|f| f.path.to_string() == "t")
+        .expect("`t` must be parsed");
+    let expected_line = (levels * 2 + 3) as u32;
+    assert_eq!(
+        t.line, expected_line,
+        "`t` is declared on line {expected_line}, got {}",
+        t.line
+    );
+}
