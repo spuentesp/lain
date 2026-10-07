@@ -152,24 +152,40 @@ pub(crate) fn build_endpoints(
                     });
             }
             Some(ContractFact::Table(tbl)) => {
-                let owner_svc = config
+                // Table ownership follows the `databases[]` config
+                // (Task 7). The declaring database is unique —
+                // `validate()` rejects the same table in two
+                // databases and duplicate `name`s — so this lookup
+                // is unambiguous. `shared_with` widens ownership:
+                // a table declared in database `D` is owned by
+                // `D.service` AND every service in `D.shared_with`.
+                // A Table fact whose name matches no database
+                // falls back to the assigned service (the repo's
+                // implicit service).
+                let owners: Vec<ServiceName> = match config
                     .databases
                     .iter()
                     .find(|d| d.tables.iter().any(|t| t == &tbl.name))
-                    .map(|d| ServiceName(d.service.clone()))
-                    .unwrap_or_else(|| svc.clone());
-                let key = ContractKey::Table {
-                    name: tbl.name.clone(),
+                {
+                    Some(db) => std::iter::once(ServiceName(db.service.clone()))
+                        .chain(db.shared_with.iter().cloned().map(ServiceName))
+                        .collect(),
+                    None => vec![svc.clone()],
                 };
-                table
-                    .entry((owner_svc, key))
-                    .or_default()
-                    .push(EndpointProviderRecord {
-                        id: gid,
-                        fact: Some(ContractFact::Table(tbl.clone())),
-                        template: tbl.name.clone(),
-                        method: HttpMethod::Any,
-                    });
+                for owner_svc in owners {
+                    let key = ContractKey::Table {
+                        name: tbl.name.clone(),
+                    };
+                    table
+                        .entry((owner_svc, key))
+                        .or_default()
+                        .push(EndpointProviderRecord {
+                            id: gid.clone(),
+                            fact: Some(ContractFact::Table(tbl.clone())),
+                            template: tbl.name.clone(),
+                            method: HttpMethod::Any,
+                        });
+                }
             }
             _ => continue,
         }
@@ -304,7 +320,14 @@ pub(crate) fn contract_key_for_provider(
         }
         ContractFact::Table(tbl) => {
             // Table ownership follows the `databases[]` config
-            // (Task 7); for now, fall back to the assigned service.
+            // (Task 7). The declaring database is unique after
+            // validation, but `contract_key_for_provider` only
+            // returns one `(service, key)` pair per call — the
+            // caller is the schema / field-join path, which
+            // re-keys on the joiner's `EndpointTable` anyway, so
+            // returning the owning service is sufficient. Pick
+            // the owner here; `shared_with` is handled in
+            // `build_endpoints`.
             let owner_svc = config
                 .databases
                 .iter()

@@ -450,24 +450,75 @@ impl ContractFederationConfig {
             }
         }
 
-        // Database declarations validation (Gap 23).
+        // Database declarations validation (Gap 23 + Task 7).
+        //
+        // Reject two databases with the same `name`, the same
+        // table listed twice in one database, and the same table
+        // listed by two databases. The joiner keys table ownership
+        // on `db.name` (with `shared_with` widening); ambiguity
+        // here would silently attribute facts to the wrong
+        // service.
+        //
+        // `db.service` and each `shared_with` entry are validated
+        // against `known_services` (configured + implicit repo
+        // ids), aligning with `http_clients.service` and
+        // `bindings.provider.service` so a repo-backed service
+        // without an explicit `services[]` entry is accepted
+        // consistently.
+        let mut db_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for db in &self.databases {
             if db.name.is_empty() {
                 return Err(LainError::Config(
                     "database declaration name cannot be empty".to_string(),
                 ));
             }
-            if !self.services.iter().any(|s| s.name == db.service) {
+            if !db_names.insert(db.name.as_str()) {
+                return Err(LainError::Config(format!(
+                    "duplicate database name '{name}'",
+                    name = db.name
+                )));
+            }
+            if !known_services.contains(db.service.as_str()) {
                 return Err(LainError::Config(format!(
                     "database '{}' references unknown service '{}'",
                     db.name, db.service
                 )));
             }
             for shared in &db.shared_with {
-                if !self.services.iter().any(|s| &s.name == shared) {
+                if !known_services.contains(shared.as_str()) {
                     return Err(LainError::Config(format!(
                         "database '{}' shared_with references unknown service '{}'",
                         db.name, shared
+                    )));
+                }
+            }
+            // Reject the same table name twice in one database —
+            // the joiner cannot dedup without changing the
+            // observable mapping.
+            let mut seen_tables: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for t in &db.tables {
+                if !seen_tables.insert(t.as_str()) {
+                    return Err(LainError::Config(format!(
+                        "table '{t}' is listed more than once in database '{db}'",
+                        t = t,
+                        db = db.name
+                    )));
+                }
+            }
+        }
+        // Reject the same table name listed by two different
+        // databases. The joiner cannot pick one without inventing
+        // a tie-break rule; the operator must disambiguate.
+        let mut table_owners: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for db in &self.databases {
+            for t in &db.tables {
+                if let Some(prev) = table_owners.insert(t.as_str(), db.name.as_str()) {
+                    return Err(LainError::Config(format!(
+                        "table '{t}' is listed by both database '{prev}' and '{cur}'",
+                        t = t,
+                        prev = prev,
+                        cur = db.name
                     )));
                 }
             }

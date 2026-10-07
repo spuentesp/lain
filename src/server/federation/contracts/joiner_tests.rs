@@ -14,7 +14,8 @@ use crate::federation::contracts::joiner::{ContractJoiner, JoinOutput};
 use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, FieldMeta, FieldReadFact,
     HostPart, HttpMethod, JsonPath, MethodSpec, NormalizedUrl, ProviderFact, ProviderOrigin,
-    TopicConsumerFact, TopicConsumerKind, TypeDesc, WebSocketConsumerFact, WebSocketProviderFact,
+    ServiceName, Table, TopicConsumerFact, TopicConsumerKind, TypeDesc, WebSocketConsumerFact,
+    WebSocketProviderFact,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{
@@ -2245,6 +2246,178 @@ fn ws_consumer_with_single_matching_provider_binds() {
         matches!(res.target, Some(ConsumerTarget::Binds { .. })),
         "a single host+route match must bind: {:?}",
         res.target
+    );
+}
+
+// ─── Task 7: `databases` config — consume or reject ───────────────────
+//
+// `DatabaseDecl.shared_with` was previously declared, validated,
+// and hashed into `config_hash`, but never consumed — the joiner
+// picked the first `databases[]` entry whose `tables` list
+// contained the table name and attributed the fact to that db's
+// service. Two tests pin the consumed behaviour: shared_with
+// widens ownership, and table ownership follows the declaring
+// database, not the first matching table-name hit (so a
+// `reports`-repo Table fact that names `orders` is attributed to
+// `orders_db` if that db declared `orders` — not to whichever
+// db happened to be first in the YAML).
+
+fn table_node(repo: &str, path: &str, name: &str, line: u32) -> GraphNode {
+    let mut n = GraphNode::new_in(
+        NodeType::Table,
+        name.to_string(),
+        path.to_string(),
+        &repo_ns(),
+    );
+    n.repo_id = Some(repo.to_string());
+    n.id = make_id(repo, NodeType::Table, path, name, line);
+    n.line_start = Some(line);
+    n.contract = Some(ContractFact::Table(Table {
+        service: String::new(),
+        name: name.to_string(),
+    }));
+    n
+}
+
+fn table_endpoint_id(service: &str, table: &str) -> (ServiceName, ContractKey) {
+    (
+        ServiceName(service.to_string()),
+        ContractKey::Table {
+            name: table.to_string(),
+        },
+    )
+}
+
+#[test]
+fn table_shared_with_widens_ownership_to_named_service() {
+    // `orders_db` is owned by `orders` and shared with
+    // `analytics`. The Table fact for `orders` must surface in
+    // BOTH services' endpoint tables — not just the owner.
+    // Pre-fix: only `orders` saw the endpoint.
+    let t = table_node("orders", "src/orders.sql", "orders", 1);
+    let cfg = ContractFederationConfig {
+        services: vec![
+            ServiceDecl {
+                name: "orders".into(),
+                repo: "orders".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+            ServiceDecl {
+                name: "analytics".into(),
+                repo: "analytics".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+        ],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+        databases: vec![crate::federation::contracts::config::DatabaseDecl {
+            name: "orders_db".into(),
+            service: "orders".into(),
+            tables: vec!["orders".into()],
+            shared_with: vec!["analytics".into()],
+        }],
+    };
+    let out = ContractJoiner::run(&[t], &[], &cfg);
+    let orders_ep = out
+        .index
+        .endpoints
+        .get(&table_endpoint_id("orders", "orders"))
+        .expect("owner service must have a Table endpoint for `orders`");
+    assert_eq!(orders_ep.providers.len(), 1);
+    let analytics_ep = out
+        .index
+        .endpoints
+        .get(&table_endpoint_id("analytics", "orders"))
+        .expect("shared_with service must also have a Table endpoint for `orders`");
+    assert_eq!(
+        analytics_ep.providers.len(),
+        1,
+        "shared_with widens ownership: analytics sees the same `orders` table"
+    );
+}
+
+#[test]
+fn table_ownership_keys_on_db_name_not_just_table_name() {
+    // Two databases with disjoint table lists. A `Table` fact
+    // for `analytics_metrics` originates from repo `reports` and
+    // must be attributed to `analytics_db`'s service
+    // (`analytics`), not to `orders_db`'s service (`orders`).
+    //
+    // Pre-fix: the joiner used the *first* database whose
+    // `tables` list contained the name. With disjoint lists the
+    // name is unambiguous, but the attribution must still follow
+    // the *declaring* database — not the assigned service (which
+    // would be `reports`, an implicit service with no entry in
+    // the `services[]` list).
+    let t = table_node("reports", "src/etl.sql", "analytics_metrics", 1);
+    let cfg = ContractFederationConfig {
+        services: vec![
+            ServiceDecl {
+                name: "orders".into(),
+                repo: "orders".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+            ServiceDecl {
+                name: "analytics".into(),
+                repo: "analytics".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+        ],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+        databases: vec![
+            crate::federation::contracts::config::DatabaseDecl {
+                name: "orders_db".into(),
+                service: "orders".into(),
+                tables: vec!["orders".into()],
+                shared_with: vec![],
+            },
+            crate::federation::contracts::config::DatabaseDecl {
+                name: "analytics_db".into(),
+                service: "analytics".into(),
+                tables: vec!["analytics_metrics".into()],
+                shared_with: vec![],
+            },
+        ],
+    };
+    let out = ContractJoiner::run(&[t], &[], &cfg);
+    let analytics_ep = out
+        .index
+        .endpoints
+        .get(&table_endpoint_id("analytics", "analytics_metrics"))
+        .expect("analytics must own `analytics_metrics`");
+    assert_eq!(analytics_ep.providers.len(), 1);
+    assert!(
+        !out.index
+            .endpoints
+            .contains_key(&table_endpoint_id("orders", "analytics_metrics")),
+        "orders must NOT see `analytics_metrics`; the table belongs to analytics_db"
+    );
+    assert!(
+        !out.index
+            .endpoints
+            .contains_key(&table_endpoint_id("reports", "analytics_metrics")),
+        "the scanning repo (reports) is not the table's owner; analytics_db declared it"
     );
 }
 
