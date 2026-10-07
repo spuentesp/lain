@@ -29,12 +29,15 @@
 //! not get emitted as a method.
 
 use crate::error::LainError;
+use crate::federation::contracts::coverage::UnresolvedRecord;
 use crate::federation::contracts::model::{
-    ContractFact, Direction, RpcProviderFact, RpcSystem, SourceSite,
+    ContractFact, Direction, RpcProviderFact, RpcSystem, SourceSite, UnresolvedReason,
 };
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
-use crate::server::sensors::payload_schema::parse_proto_messages;
+use crate::server::sensors::payload_schema::{
+    parse_proto_messages_with_diagnostics, ProtoParseDiagnostic,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -57,12 +60,38 @@ pub struct GrpcProvider {
 /// below; no central registry to edit.
 pub struct GrpcProviderSensor;
 
-crate::server::sensors::register_sensor!(
-    GrpcProviderSensor,
-    "grpc_provider",
-    Proto,
-    scan_workspace_grpc
-);
+impl crate::server::sensors::Sensor for GrpcProviderSensor {
+    fn name(&self) -> &'static str {
+        "grpc_provider"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::Proto
+    }
+    fn phase(&self) -> u8 {
+        0
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError> {
+        // The richer entry point is `scan_workspace_grpc_with_report`;
+        // the legacy `scan` ignores the diagnostics and returns the
+        // count so existing callers / coverage paths that key on the
+        // integer keep working.
+        Ok(scan_workspace_grpc_with_report(graph, root, namespace)?.emitted)
+    }
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<crate::server::sensors::ScanReport, LainError> {
+        scan_workspace_grpc_with_report(graph, root, namespace)
+    }
+}
+inventory::submit!(crate::server::sensors::SensorEntry(&GrpcProviderSensor));
 
 // ─── Workspace scan ───────────────────────────────────────────────────
 
@@ -76,8 +105,31 @@ pub fn scan_workspace_grpc(
     root: &Path,
     namespace: &RepoNamespace,
 ) -> Result<usize, LainError> {
+    // Delegate to the richer entry point so the legacy count
+    // matches the new report's `emitted` field exactly. The
+    // diagnostic side-band is ignored by `scan()`; the coverage
+    // ledger reads it via `scan_with_report`.
+    Ok(scan_workspace_grpc_with_report(graph, root, namespace)?.emitted)
+}
+
+/// Walk `root`, parse every `.proto` file, and return a
+/// [`ScanReport`] carrying the per-file diagnostics the message
+/// parser surfaced. The diagnostics are recorded against
+/// [`UnresolvedReason::BaseUnknown`] (the closest semantic match —
+/// "the extractor did not recognise the form") so the coverage
+/// ledger can mark the repo as incomplete instead of silently
+/// serving `NoKnownImpact` for an unparseable `.proto` file.
+///
+/// One `UnresolvedRecord` is emitted per reason-bucket with the
+/// file path as a sample id (up to 5 samples per bucket, the
+/// same cap the sql sensor and the coverage ledger use).
+pub fn scan_workspace_grpc_with_report(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+) -> Result<crate::server::sensors::ScanReport, LainError> {
     if graph.is_read_only() {
-        return Ok(0);
+        return Ok(crate::server::sensors::ScanReport::default());
     }
     let proto_ext = |p: &Path| {
         if p.extension().and_then(|e| e.to_str()) == Some("proto") {
@@ -89,13 +141,24 @@ pub fn scan_workspace_grpc(
     let mut total = 0usize;
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
+    // Per-reason bucket of (count, sample_paths). The coverage
+    // ledger collapses these to one `UnresolvedRecord` per
+    // reason; we cap `sample_ids` at 5 to match `sql_sensor`'s
+    // behaviour and the §4.1 `sample_paths(≤5)` contract.
+    let mut unresolved_by_reason: BTreeMap<UnresolvedReason, (usize, Vec<String>)> =
+        BTreeMap::new();
     for (path, content, _tag) in crate::server::sensors::util::scan_files(root, proto_ext) {
         let graph_path_str = graph_path(root, &path);
         let providers = parse_proto_providers(&content, &graph_path_str);
 
-        // Parse protobuf message schemas and fields
+        // Parse protobuf message schemas and fields, *and* the
+        // diagnostics the parser surfaced for shapes it could
+        // not classify. The rich entry point replaces the
+        // line-based `parse_proto_messages` so the sensor sees
+        // every malformed input instead of silently swallowing
+        // it.
         let mut schemas_in_file: BTreeMap<String, String> = BTreeMap::new();
-        let parsed_messages = parse_proto_messages(&content);
+        let (parsed_messages, diagnostics) = parse_proto_messages_with_diagnostics(&content);
         for msg in parsed_messages {
             let line = msg.fields.first().map_or(1, |f| f.line);
             let schema_id = GraphNode::generate_id(
@@ -201,12 +264,53 @@ pub fn scan_workspace_grpc(
                 ));
             }
         }
+
+        // Surface every parser diagnostic. The message parser
+        // records (line, kind, message) for each shape it could
+        // not classify; we roll those up by reason so the
+        // coverage ledger can flag the repo. `BaseUnknown` is
+        // the closest semantic match for "the extractor did not
+        // recognise the form" — adding a per-protocol reason
+        // variant would force a federation-graph schema bump
+        // (see AGENTS.md) so we reuse what is there.
+        record_diagnostics(&diagnostics, &graph_path_str, &mut unresolved_by_reason);
     }
     if !all_nodes.is_empty() {
         let _ =
             graph.replace_sensor_output(SensorOwner::GrpcProviderSensor, &all_nodes, &all_edges);
     }
-    Ok(total)
+    let unresolved_records: Vec<UnresolvedRecord> = unresolved_by_reason
+        .into_iter()
+        .map(|(reason, (count, sample_ids))| UnresolvedRecord {
+            reason,
+            count,
+            sample_ids,
+        })
+        .collect();
+    Ok(crate::server::sensors::ScanReport {
+        emitted: total,
+        error: None,
+        unresolved: unresolved_records,
+    })
+}
+
+fn record_diagnostics(
+    diagnostics: &[ProtoParseDiagnostic],
+    graph_path: &str,
+    bucket: &mut BTreeMap<UnresolvedReason, (usize, Vec<String>)>,
+) {
+    if diagnostics.is_empty() {
+        return;
+    }
+    let entry = bucket
+        .entry(UnresolvedReason::BaseUnknown)
+        .or_insert((0, Vec::new()));
+    // Count each diagnostic separately so a single file with N
+    // unparseable shapes contributes N to the bucket, not 1.
+    entry.0 += diagnostics.len();
+    if entry.1.len() < 5 {
+        entry.1.push(graph_path.to_string());
+    }
 }
 
 // ─── Detection (hand-rolled tokenizer) ────────────────────────────────
@@ -274,20 +378,11 @@ fn strip_comments(input: &str) -> String {
 }
 
 /// Join continued lines: a single `\` at end of line is a proto
-/// line continuation. The newlines inside `option { ... }` are
-/// preserved so braces stay balanced.
+/// line continuation. Shared via `util_tokenize::join_continued_lines`
+/// so `payload_schema::parse_proto_messages` reuses the same lexer
+/// rather than re-implementing it.
 fn join_continued_lines(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut prev_ended_with_continuation = false;
-    for ch in input.chars() {
-        if prev_ended_with_continuation && ch == '\n' {
-            prev_ended_with_continuation = false;
-            continue;
-        }
-        prev_ended_with_continuation = ch == '\\';
-        out.push(ch);
-    }
-    out
+    crate::server::sensors::util_tokenize::join_continued_lines(input)
 }
 
 /// Extract the value of the single `package NAME;` declaration.

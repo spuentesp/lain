@@ -9,6 +9,9 @@
 //! with JSON paths and [`FieldMeta`] type descriptors.
 
 use crate::federation::contracts::model::{FieldMeta, JsonPath, PathSegment, TypeDesc};
+use crate::server::sensors::util_tokenize::{
+    find_matching_close, join_continued_lines, starts_with_keyword, strip_comments, CommentSyntax,
+};
 use std::collections::BTreeSet;
 
 /// A parsed payload schema extracted from a schema file.
@@ -25,6 +28,35 @@ pub struct ParsedField {
     pub path: JsonPath,
     pub meta: FieldMeta,
     pub line: u32,
+}
+
+/// What went wrong parsing a `.proto` file. The sensor turns these
+/// into `UnresolvedRecord`s so the coverage ledger can see the gap
+/// instead of silently passing on a file the parser could not
+/// analyse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtoParseDiagnostic {
+    pub line: u32,
+    pub kind: ProtoParseDiagnosticKind,
+    pub message: String,
+}
+
+/// Diagnostic categories. The sensor can group / count by kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtoParseDiagnosticKind {
+    /// A `message` line was not followed by `{` (e.g. truncated
+    /// file, garbage between `message Name` and the body).
+    MessageHeader,
+    /// A `oneof` line was not followed by `{`.
+    OneofHeader,
+    /// The field's type expression could not be classified.
+    UnparseableField,
+    /// A line inside a message body that looked like a field
+    /// declaration but did not match the `qualifier? type name = tag;`
+    /// shape. The line was dropped.
+    Skipped,
+    /// Nested `message` depth exceeded the safety cap.
+    NestingDepth,
 }
 
 /// Parse an Avro schema JSON string.
@@ -239,103 +271,541 @@ fn flatten_json_schema_properties(
 }
 
 /// Parse Protobuf messages in `.proto` files into payload schemas.
+///
+/// The previous implementation was a single-pass line walker that
+/// silently mis-parsed ordinary proto shapes: `optional string id`
+/// became a field named `"string"`, `string id = 1; // the id` was
+/// dropped, `oneof { … }` truncated the enclosing message, and an
+/// empty `message Foo { }` was not emitted at all. The replacement
+/// routes the file through the same comment-strip + line-continuation
+/// join the gRPC provider parser already uses, then walks the bytes
+/// with a small state machine that tracks `message` and `oneof` block
+/// nesting, a per-message field buffer, and a depth cap. Diagnostics
+/// for unparseable shapes are exposed via
+/// [`parse_proto_messages_with_diagnostics`] so the sensor can
+/// surface them through `ScanReport::unresolved`.
 pub fn parse_proto_messages(content: &str) -> Vec<ParsedPayloadSchema> {
-    let mut schemas = Vec::new();
-    let mut in_message = false;
-    let mut current_name = String::new();
-    let mut current_fields = Vec::new();
+    parse_proto_messages_with_diagnostics(content).0
+}
 
-    for (line_idx, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("//") {
-            continue;
+/// Maximum nested `message` depth the parser will descend into. The
+/// parser pushes a frame per nested message; an adversarial file
+/// that nests thousands of messages would otherwise blow the stack
+/// and (worse) the recursion is unnecessary — proto disallows
+/// non-trivial nesting in practice. 64 is a generous cap (a 64-level
+/// deep `message` is unidiomatic proto, not real code) and matches
+/// the depth most tree-sitter walkers use.
+pub const MAX_PROTO_MESSAGE_DEPTH: u32 = 64;
+
+/// Parse proto messages and return diagnostics for every shape the
+/// parser could not classify. See [`parse_proto_messages`] for the
+/// design notes; the diagnostics list is the extra output the
+/// previous parser swallowed.
+pub fn parse_proto_messages_with_diagnostics(
+    content: &str,
+) -> (Vec<ParsedPayloadSchema>, Vec<ProtoParseDiagnostic>) {
+    let stripped = strip_comments(content, CommentSyntax::CStyle);
+    let joined = join_continued_lines(&stripped);
+
+    let mut parser = ProtoMessageParser::new(&joined);
+    parser.run();
+    (parser.messages, parser.diagnostics)
+}
+
+struct ProtoMessageParser<'a> {
+    src: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
+    line: u32,
+    messages: Vec<ParsedPayloadSchema>,
+    diagnostics: Vec<ProtoParseDiagnostic>,
+    /// Stack of open message frames plus marker frames for blocks
+    /// that must be skipped past (`option { … }`, `extensions { … }`,
+    /// anonymous `oneof` blocks). The innermost message is the
+    /// field-collecting target.
+    frames: Vec<Frame>,
+    /// How many `Message` frames are currently open. Bounded by
+    /// [`MAX_PROTO_MESSAGE_DEPTH`].
+    message_depth: u32,
+}
+
+#[allow(dead_code)]
+enum Frame {
+    /// An open `message Foo { … }` whose fields we are collecting.
+    Message {
+        name: String,
+        fields: Vec<ParsedField>,
+        line: u32,
+    },
+    /// An `oneof Foo { … }` block — its inner fields are added to
+    /// the enclosing `Message` frame, the closing `}` only pops
+    /// this frame.
+    Oneof,
+    /// A brace-balanced block we don't otherwise care about
+    /// (`option { … }`, `extensions 100 to 200 { … }`). Parser
+    /// state does not change inside.
+    Skip,
+}
+
+impl<'a> ProtoMessageParser<'a> {
+    fn new(src: &'a str) -> Self {
+        Self {
+            src,
+            bytes: src.as_bytes(),
+            pos: 0,
+            line: 1,
+            messages: Vec::new(),
+            diagnostics: Vec::new(),
+            frames: Vec::new(),
+            message_depth: 0,
         }
-        if trimmed.starts_with("message ") {
-            if in_message && !current_fields.is_empty() {
-                schemas.push(ParsedPayloadSchema {
-                    name: current_name.clone(),
-                    topic: None,
-                    fields: current_fields,
-                });
-                current_fields = Vec::new();
-            }
-            in_message = true;
-            current_name = trimmed
-                .trim_start_matches("message")
-                .trim()
-                .trim_end_matches('{')
-                .trim()
-                .to_string();
-            continue;
-        }
-        if in_message {
-            if trimmed == "}" {
-                in_message = false;
-                if !current_fields.is_empty() {
-                    schemas.push(ParsedPayloadSchema {
-                        name: current_name.clone(),
-                        topic: None,
-                        fields: current_fields,
-                    });
-                    current_fields = Vec::new();
-                }
+    }
+
+    fn run(&mut self) {
+        while self.pos < self.bytes.len() {
+            let b = self.bytes[self.pos];
+            // Track newlines for line-number math.
+            if b == b'\n' {
+                self.line += 1;
+                self.pos += 1;
                 continue;
             }
-            // Parse field: `[repeated] <type> <name> = <tag>;`
-            let without_semicolon = trimmed.trim_end_matches(';').trim();
-            let parts: Vec<&str> = without_semicolon.split_whitespace().collect();
-            if parts.len() >= 4 && parts[parts.len() - 2] == "=" {
-                let is_repeated = parts[0] == "repeated";
-                let type_idx = if is_repeated { 1 } else { 0 };
-                let type_name = parts[type_idx];
-                let field_name = parts[type_idx + 1];
-
-                let inner_ty = match type_name {
-                    "string" => TypeDesc::String,
-                    "int32" | "int64" | "uint32" | "uint64" | "sint32" | "sint64" => {
-                        TypeDesc::Integer
-                    }
-                    "float" | "double" => TypeDesc::Number,
-                    "bool" => TypeDesc::Boolean,
-                    "bytes" => TypeDesc::String,
-                    _ => TypeDesc::Unknown,
-                };
-
-                let ty = if is_repeated {
-                    TypeDesc::Array(Box::new(inner_ty))
-                } else {
-                    inner_ty
-                };
-
-                let mut path = JsonPath(Vec::new());
-                path.0.push(PathSegment::Name(field_name.to_string()));
-                if is_repeated {
-                    path.0.push(PathSegment::ArrayItems);
-                }
-
-                current_fields.push(ParsedField {
-                    path,
-                    meta: FieldMeta {
-                        ty,
-                        required: !is_repeated,
-                        nullable: false,
-                        enum_values: None,
-                    },
-                    line: line_idx as u32 + 1,
+            if (b as char).is_ascii_whitespace() {
+                self.pos += 1;
+                continue;
+            }
+            // Top-level / outer keyword handling. These are
+            // recognised at any nesting depth, not just the
+            // outermost level, so an `option` inside a `message`
+            // also matches.
+            if starts_with_keyword(self.src, self.pos, "message") {
+                self.parse_message_header();
+                continue;
+            }
+            if starts_with_keyword(self.src, self.pos, "oneof") {
+                self.parse_oneof_header();
+                continue;
+            }
+            if b == b'}' {
+                self.close_brace();
+                continue;
+            }
+            if b == b';' {
+                self.pos += 1;
+                continue;
+            }
+            if b == b'{' {
+                // Unbraced `{` (e.g. inside `option foo = { … };`).
+                // Consume the balanced block, counting newlines.
+                self.consume_balanced_block();
+                continue;
+            }
+            // Inside a `Message` frame, try to parse a field
+            // declaration. Outside a message, anything else is
+            // top-level (service, rpc, syntax, package, …) which
+            // `parse_proto_providers` already handles; here we just
+            // skip the line.
+            if self.in_message() {
+                self.parse_field_or_skip();
+            } else {
+                self.skip_to_semicolon_or_newline();
+            }
+        }
+        // Drain any frames that were never closed (truncated file).
+        while let Some(frame) = self.frames.pop() {
+            if let Frame::Message { name, fields, .. } = frame {
+                self.messages.push(ParsedPayloadSchema {
+                    name,
+                    topic: None,
+                    fields,
                 });
             }
         }
     }
 
-    if in_message && !current_fields.is_empty() {
-        schemas.push(ParsedPayloadSchema {
-            name: current_name,
-            topic: None,
-            fields: current_fields,
+    fn in_message(&self) -> bool {
+        // The innermost message frame is the field-collecting
+        // target. A `oneof` block nested inside a message still
+        // belongs to that message (the field-collecting frame is
+        // the message two levels down), so look for a `Message`
+        // frame in the stack, ignoring `Oneof` and `Skip` frames.
+        self.frames
+            .iter()
+            .any(|f| matches!(f, Frame::Message { .. }))
+    }
+
+    fn innermost_message_mut(&mut self) -> Option<&mut Frame> {
+        // Walk the stack top-down so a nested `message` inside an
+        // outer `message` collects its fields into the inner one,
+        // not the outer. The `Oneof` and `Skip` frames in between
+        // are ignored.
+        self.frames
+            .iter_mut()
+            .rev()
+            .find(|f| matches!(f, Frame::Message { .. }))
+    }
+
+    fn parse_message_header(&mut self) {
+        let start_line = self.line;
+        self.pos += "message".len();
+        self.skip_ws();
+        let name = self.read_identifier();
+        self.skip_ws();
+        if self.peek() != Some(b'{') {
+            self.diagnostics.push(ProtoParseDiagnostic {
+                line: start_line,
+                kind: ProtoParseDiagnosticKind::MessageHeader,
+                message: format!("`message {}` not followed by `{{`", name),
+            });
+            // Skip to the next `;` or newline so the rest of the
+            // file is still parseable.
+            self.skip_to_semicolon_or_newline();
+            return;
+        }
+        self.pos += 1; // consume `{`
+        if self.message_depth >= MAX_PROTO_MESSAGE_DEPTH {
+            self.diagnostics.push(ProtoParseDiagnostic {
+                line: start_line,
+                kind: ProtoParseDiagnosticKind::NestingDepth,
+                message: format!(
+                    "nested `message {}` exceeds depth cap {}",
+                    name, MAX_PROTO_MESSAGE_DEPTH
+                ),
+            });
+            // Skip the balanced block.
+            self.consume_balanced_block_from_open_brace();
+            return;
+        }
+        self.message_depth += 1;
+        self.frames.push(Frame::Message {
+            name,
+            fields: Vec::new(),
+            line: start_line,
         });
     }
 
-    schemas
+    fn parse_oneof_header(&mut self) {
+        let start_line = self.line;
+        self.pos += "oneof".len();
+        self.skip_ws();
+        let _name = self.read_identifier();
+        self.skip_ws();
+        if self.peek() != Some(b'{') {
+            self.diagnostics.push(ProtoParseDiagnostic {
+                line: start_line,
+                kind: ProtoParseDiagnosticKind::OneofHeader,
+                message: format!("`oneof {}` not followed by `{{`", _name),
+            });
+            self.skip_to_semicolon_or_newline();
+            return;
+        }
+        self.pos += 1; // consume `{`
+        self.frames.push(Frame::Oneof);
+    }
+
+    fn close_brace(&mut self) {
+        self.pos += 1;
+        if let Some(frame) = self.frames.pop() {
+            match frame {
+                Frame::Message { name, fields, .. } => {
+                    self.message_depth = self.message_depth.saturating_sub(1);
+                    self.messages.push(ParsedPayloadSchema {
+                        name,
+                        topic: None,
+                        fields,
+                    });
+                }
+                Frame::Oneof | Frame::Skip => {}
+            }
+        }
+    }
+
+    /// Read `[qualifier] type-expr name = tag;` if the cursor is at
+    /// a field declaration; otherwise skip the line and (best-effort)
+    /// record a diagnostic.
+    fn parse_field_or_skip(&mut self) {
+        let start_line = self.line;
+        // Skip qualifiers. `repeated` and (proto2) `optional` /
+        // `required` are the canonical ones.
+        let mut repeated = false;
+        while let Some(kw) = self.peek_qualifier() {
+            self.pos += kw.len();
+            self.skip_ws();
+            if kw == "repeated" {
+                repeated = true;
+            }
+        }
+        // Type expression: either `map<K, V>` (everything up to the
+        // matching `>`) or a single identifier. The previous parser
+        // only saw `split_whitespace` chunks, so a `map<string,
+        // string>` token was opaque and the type-name field-name
+        // split silently misfired.
+        let type_desc = self.read_type_expression();
+        if type_desc.is_none() {
+            self.diagnostics.push(ProtoParseDiagnostic {
+                line: start_line,
+                kind: ProtoParseDiagnosticKind::UnparseableField,
+                message: "field has no type expression".into(),
+            });
+            self.skip_to_semicolon_or_newline();
+            return;
+        }
+        let inner_ty = type_desc.unwrap();
+        self.skip_ws();
+        let name = self.read_identifier();
+        if name.is_empty() {
+            self.diagnostics.push(ProtoParseDiagnostic {
+                line: start_line,
+                kind: ProtoParseDiagnosticKind::UnparseableField,
+                message: "field is missing a name".into(),
+            });
+            self.skip_to_semicolon_or_newline();
+            return;
+        }
+        self.skip_ws();
+        // Expect `= <tag>`.
+        if self.peek() != Some(b'=') {
+            self.diagnostics.push(ProtoParseDiagnostic {
+                line: start_line,
+                kind: ProtoParseDiagnosticKind::UnparseableField,
+                message: format!("field `{}` is missing `= <tag>`", name),
+            });
+            self.skip_to_semicolon_or_newline();
+            return;
+        }
+        self.pos += 1; // consume `=`
+        self.skip_ws();
+        // Consume the tag (digits).
+        let tag_start = self.pos;
+        while let Some(b) = self.peek() {
+            if (b as char).is_ascii_digit() {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if self.pos == tag_start {
+            self.diagnostics.push(ProtoParseDiagnostic {
+                line: start_line,
+                kind: ProtoParseDiagnosticKind::UnparseableField,
+                message: format!("field `{}` is missing a numeric tag", name),
+            });
+            self.skip_to_semicolon_or_newline();
+            return;
+        }
+        self.skip_ws();
+        // Options like `[deprecated = true]` may follow before `;`.
+        // Skip them by consuming any `[ ... ]` block and continuing.
+        if self.peek() == Some(b'[') {
+            self.pos += 1;
+            // Find the matching `]` (no nested brackets in proto
+            // field options).
+            while let Some(b) = self.peek() {
+                if b == b']' {
+                    self.pos += 1;
+                    break;
+                }
+                self.pos += 1;
+            }
+            self.skip_ws();
+        }
+        if self.peek() == Some(b';') {
+            self.pos += 1;
+        }
+        // Synthesise the field record. Repeated fields are wrapped
+        // in `TypeDesc::Array` so the path carries `[]`.
+        let ty = if repeated {
+            TypeDesc::Array(Box::new(inner_ty))
+        } else {
+            inner_ty
+        };
+        let mut path = JsonPath(Vec::new());
+        path.0.push(PathSegment::Name(name.clone()));
+        if repeated {
+            path.0.push(PathSegment::ArrayItems);
+        }
+        let field = ParsedField {
+            path,
+            meta: FieldMeta {
+                ty,
+                required: !repeated,
+                nullable: false,
+                enum_values: None,
+            },
+            line: start_line,
+        };
+        if let Some(Frame::Message { fields, .. }) = self.innermost_message_mut() {
+            fields.push(field);
+        }
+    }
+
+    /// Read a type expression: `map<K, V>` or a bare identifier.
+    /// Returns `None` when the cursor is not at a type token.
+    fn read_type_expression(&mut self) -> Option<TypeDesc> {
+        if self.peek() == Some(b'm') && starts_with_keyword(self.src, self.pos, "map") {
+            self.pos += "map".len();
+            self.skip_ws();
+            if self.peek() != Some(b'<') {
+                // `map` without `<...>` is malformed; treat as the
+                // bare type. The caller will see a `None` next round
+                // (no name) and produce a diagnostic.
+                return Some(TypeDesc::Unknown);
+            }
+            self.pos += 1; // consume `<`
+                           // Read K (identifier).
+            self.skip_ws();
+            let _key = self.read_identifier();
+            self.skip_ws();
+            // Expect `,`.
+            if self.peek() == Some(b',') {
+                self.pos += 1;
+            }
+            self.skip_ws();
+            let value = self.read_identifier();
+            self.skip_ws();
+            // Expect `>`.
+            if self.peek() == Some(b'>') {
+                self.pos += 1;
+            }
+            // `TypeDesc` has no `Map` variant, so the value type is
+            // the best we can carry. The plan accepts Unknown here.
+            return Some(classify_proto_type(&value));
+        }
+        // Bare identifier.
+        let name = self.read_identifier();
+        if name.is_empty() {
+            None
+        } else {
+            Some(classify_proto_type(&name))
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn peek_qualifier(&self) -> Option<&'static str> {
+        for kw in ["repeated", "optional", "required"] {
+            if starts_with_keyword(self.src, self.pos, kw) {
+                // The qualifier must be followed by whitespace /
+                // `;` / `}` to count — otherwise the word is part of
+                // a longer identifier (e.g. a field name `repeated_id`).
+                let after = self.pos + kw.len();
+                let is_boundary = after >= self.bytes.len()
+                    || !(self.bytes[after] as char).is_ascii_alphanumeric()
+                    || self.bytes[after] == b'_';
+                if is_boundary {
+                    return Some(kw);
+                }
+            }
+        }
+        None
+    }
+
+    fn read_identifier(&mut self) -> String {
+        let start = self.pos;
+        while let Some(b) = self.peek() {
+            let c = b as char;
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        std::str::from_utf8(&self.bytes[start..self.pos])
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(b) = self.peek() {
+            if (b as char).is_ascii_whitespace() {
+                if b == b'\n' {
+                    self.line += 1;
+                }
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn skip_to_semicolon_or_newline(&mut self) {
+        while let Some(b) = self.peek() {
+            if b == b';' || b == b'\n' {
+                if b == b';' {
+                    self.pos += 1;
+                } else {
+                    self.line += 1;
+                    self.pos += 1;
+                }
+                return;
+            }
+            self.pos += 1;
+        }
+    }
+
+    fn consume_balanced_block(&mut self) {
+        // Caller has not yet consumed the `{`. Walk forward to the
+        // matching `}` using the shared brace balancer, counting
+        // newlines so line numbers stay correct.
+        if let Some(end) = find_matching_close(self.src, self.pos) {
+            for j in self.pos..=end {
+                if self.bytes[j] == b'\n' {
+                    self.line += 1;
+                }
+            }
+            self.pos = end + 1;
+        } else {
+            // Unbalanced — consume to EOF. Lines are counted in the
+            // main loop.
+            self.pos = self.bytes.len();
+        }
+    }
+
+    fn consume_balanced_block_from_open_brace(&mut self) {
+        // Used after a `message` / `oneof` header that has already
+        // consumed its opening `{`. We need to skip the matching
+        // close — the helper above takes the `{` position, so back
+        // up one.
+        if self.pos == 0 || self.bytes[self.pos - 1] != b'{' {
+            return;
+        }
+        if let Some(end) = find_matching_close(self.src, self.pos - 1) {
+            for j in self.pos..=end {
+                if self.bytes[j] == b'\n' {
+                    self.line += 1;
+                }
+            }
+            self.pos = end + 1;
+        } else {
+            self.pos = self.bytes.len();
+        }
+    }
+}
+
+fn classify_proto_type(name: &str) -> TypeDesc {
+    // Strip the leading dot of `.foo.Bar` and trailing dot
+    // artifacts so `com.acme.orders.GetReq` falls back to Unknown
+    // (a real reference, but the joiner is what resolves it).
+    let bare = name.trim_start_matches('.').trim_end_matches('.');
+    if bare.is_empty() {
+        return TypeDesc::Unknown;
+    }
+    // If the type has a `.` in it, it is a package-qualified
+    // reference to another message. The parser can only carry a
+    // primitive `TypeDesc`, so Unknown is honest.
+    if bare.contains('.') {
+        return TypeDesc::Unknown;
+    }
+    match bare {
+        "string" | "bytes" => TypeDesc::String,
+        "bool" => TypeDesc::Boolean,
+        "int32" | "int64" | "uint32" | "uint64" | "sint32" | "sint64" | "fixed32" | "fixed64"
+        | "sfixed32" | "sfixed64" => TypeDesc::Integer,
+        "float" | "double" => TypeDesc::Number,
+        _ => TypeDesc::Unknown,
+    }
 }
 
 /// Parse any supported schema file into payload schemas.
