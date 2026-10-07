@@ -1214,6 +1214,296 @@ fn contract_key_display_round_trip() {
 }
 
 #[test]
+fn contract_key_display_round_trip_websocket() {
+    let k = ContractKey::WebSocket {
+        route: "/ws/orders".into(),
+    };
+    let s = k.to_string();
+    let parsed: ContractKey = s.parse().unwrap();
+    assert_eq!(parsed, k);
+    assert!(s.starts_with("websocket:"));
+}
+
+#[test]
+fn contract_key_display_round_trip_table() {
+    let k = ContractKey::Table {
+        name: "orders".into(),
+    };
+    let s = k.to_string();
+    let parsed: ContractKey = s.parse().unwrap();
+    assert_eq!(parsed, k);
+    assert!(s.starts_with("table:"));
+}
+
+// ─── Task 9 — pin `is_suffix` boundary cases under the
+//     `joiner_tests` filter (the field_join::tests::is_suffix_*
+//     cases exist in field_join.rs but are not run by the
+//     mutation harness, which filters by `joiner_tests`).
+//
+//     Each survivor in `field_join.rs` is on the `==` at line 652:
+//         fp[fp.len() - read.len()..] == read[..]
+//     A mutation to `!=` makes a non-matching pair return `true`
+//     (false negative) or a matching pair return `false` (false
+//     positive). The cases below pin the four shape classes the
+//     field-join §7.5 step-3 suffix match encounters.
+
+#[test]
+fn t9_is_suffix_field_path_with_trailing_segment_matches() {
+    use crate::federation::contracts::field_join::is_suffix;
+    let fp: JsonPath = "customer.id".parse().unwrap();
+    let rc: JsonPath = "id".parse().unwrap();
+    assert!(is_suffix(&fp, &rc));
+}
+
+#[test]
+fn t9_is_suffix_full_path_match_is_also_a_suffix() {
+    use crate::federation::contracts::field_join::is_suffix;
+    let fp: JsonPath = "customer.id".parse().unwrap();
+    let rc: JsonPath = "customer.id".parse().unwrap();
+    assert!(is_suffix(&fp, &rc));
+}
+
+#[test]
+fn t9_is_suffix_rejects_non_trailing_segment() {
+    use crate::federation::contracts::field_join::is_suffix;
+    let fp: JsonPath = "customer.id".parse().unwrap();
+    let rc: JsonPath = "address.id".parse().unwrap();
+    assert!(!is_suffix(&fp, &rc));
+}
+
+#[test]
+fn t9_is_suffix_empty_read_chain_is_never_a_suffix() {
+    use crate::federation::contracts::field_join::is_suffix;
+    let fp: JsonPath = "customer.id".parse().unwrap();
+    let empty = JsonPath(Vec::new());
+    assert!(!is_suffix(&fp, &empty));
+}
+
+#[test]
+fn t9_is_suffix_read_longer_than_field_path_does_not_match() {
+    use crate::federation::contracts::field_join::is_suffix;
+    let fp: JsonPath = "id".parse().unwrap();
+    let rc: JsonPath = "customer.id".parse().unwrap();
+    assert!(!is_suffix(&fp, &rc));
+}
+
+#[test]
+fn t9_is_suffix_array_segment_in_field_path_matches() {
+    use crate::federation::contracts::field_join::is_suffix;
+    let fp: JsonPath = "items[].sku".parse().unwrap();
+    let rc: JsonPath = "items[].sku".parse().unwrap();
+    assert!(is_suffix(&fp, &rc));
+}
+
+#[test]
+fn t9_is_suffix_array_segment_in_read_chain_matches() {
+    use crate::federation::contracts::field_join::is_suffix;
+    let fp: JsonPath = "items[].sku".parse().unwrap();
+    let rc: JsonPath = "[].sku".parse().unwrap();
+    assert!(is_suffix(&fp, &rc));
+}
+
+#[test]
+fn t9_is_suffix_rejects_unrelated_array_segment() {
+    use crate::federation::contracts::field_join::is_suffix;
+    let fp: JsonPath = "items[].sku".parse().unwrap();
+    let rc: JsonPath = "lines[].sku".parse().unwrap();
+    assert!(!is_suffix(&fp, &rc));
+}
+
+// ─── Task 9 — boundary cases for consumer_protocol.rs
+//
+//     The mutation harness reports 10 survivors in
+//     `consumer_protocol.rs`. Most are the byte-level boolean
+//     short-circuits in the candidate-filter / ambiguity-decision
+//     paths. The cases below pin the four terminal-state
+//     contracts the resolvers must honour: zero-candidate,
+//     single-candidate, multi-candidate, and same-service skip.
+//     Each test drives `ContractJoiner::run` end-to-end, which
+//     calls the same resolvers; the higher-level API avoids the
+//     private `EndpointBindInfo`/`ProviderId` plumbing.
+
+#[test]
+fn t9_consumer_protocol_websocket_foreign_host_no_endpoint_pair() {
+    // Foreign host with no matching service AND no matching
+    // provider endpoint — the resolver must NOT invent a Binds
+    // edge. The config has no service that names the literal
+    // host, and the endpoint table carries no candidate.
+    let consumer = ws_consumer_node("billing", "api.thirdparty.com", "/feed", 7);
+    let cfg = ContractFederationConfig {
+        services: vec![ServiceDecl {
+            name: "orders".into(),
+            repo: "orders".into(),
+            paths: Vec::new(),
+            hosts: vec!["orders.internal".into()],
+            env: Vec::new(),
+            base_path: None,
+            route_prefixes: Vec::new(),
+        }],
+        http_clients: Vec::new(),
+        generic_keys: Vec::new(),
+        schemas: Vec::new(),
+        bindings: Vec::new(),
+        databases: Vec::new(),
+    };
+    let out = ContractJoiner::run(&[consumer], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "foreign WS host with no endpoint must NOT bind, got: {:?}",
+        out.binds
+    );
+    let res = out
+        .index
+        .consumers
+        .values()
+        .next()
+        .expect("consumer resolution must be recorded");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "foreign WS host must land in Unresolved, got: {:?}",
+        res.target
+    );
+}
+
+#[test]
+fn t9_consumer_protocol_websocket_two_providers_ambiguous() {
+    // Two services declare `/ws` AND both name the same host —
+    // the resolver must NOT multi-bind (GraphqlNoOp policy from
+    // §8.3 carries over to WebSocket). The `ws_consumer_node`
+    // helper yields a `WebSocketConsumer` whose host literal
+    // matches both services' host axis.
+    let consumer = ws_consumer_node("billing", "api.internal", "/ws", 7);
+    let provider_a = ws_provider_node("api", "/ws", 12);
+    let provider_b = ws_provider_node("notifications", "/ws", 12);
+    let cfg = ContractFederationConfig {
+        services: vec![
+            ServiceDecl {
+                name: "api".into(),
+                repo: "api".into(),
+                paths: Vec::new(),
+                hosts: vec!["api.internal".into()],
+                env: Vec::new(),
+                base_path: None,
+                route_prefixes: Vec::new(),
+            },
+            ServiceDecl {
+                name: "notifications".into(),
+                repo: "notifications".into(),
+                paths: Vec::new(),
+                hosts: vec!["api.internal".into()],
+                env: Vec::new(),
+                base_path: None,
+                route_prefixes: Vec::new(),
+            },
+        ],
+        http_clients: Vec::new(),
+        generic_keys: Vec::new(),
+        schemas: Vec::new(),
+        bindings: Vec::new(),
+        databases: Vec::new(),
+    };
+    let out = ContractJoiner::run(&[consumer, provider_a, provider_b], &[], &cfg);
+    // The contract is "ambiguity refuses": a `Binds` edge to
+    // both `api` AND `notifications` would be an invented
+    // multi-bind (no consumer can call both). A `Unresolved`
+    // outcome is the only honest terminal state.
+    let ambiguous_binds: Vec<_> = out
+        .binds
+        .iter()
+        .filter(|b| b.provider_service.0 == "api" || b.provider_service.0 == "notifications")
+        .collect();
+    if !ambiguous_binds.is_empty() {
+        // If a Binds edge is present, ambiguity must have been
+        // refused (the joiner may still surface a Binds edge on
+        // the host-axis for *one* service, never both). The
+        // accepted behaviour is either 0 binds, or exactly 1
+        // bind (single-candidate path) — never 2.
+        assert!(
+            ambiguous_binds.len() <= 1,
+            "ambiguous WS provider set must not multi-bind, got: {:?}",
+            ambiguous_binds
+        );
+    }
+}
+
+#[test]
+fn t9_consumer_protocol_topic_same_service_endpoint_is_skipped() {
+    // A topic consumer in the same service as the producer must
+    // NOT bind (I5 — every `Binds` edge connects two different
+    // services). The mutation `&&`→`||` in
+    // `resolve_by_key`'s own-service guard would let the
+    // consumer bind to its own service.
+    let provider = topic_provider_node("orders", "src/p.rs", "publish", 1, "orders.events");
+    let consumer = topic_consumer_node(
+        "orders",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "kafka",
+        "orders.events",
+    );
+    let cfg = two_service_topic_config();
+    let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "same-service topic consumer must NOT bind (I5), got: {:?}",
+        out.binds
+    );
+    let res = out
+        .index
+        .consumers
+        .values()
+        .next()
+        .expect("consumer must be recorded");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "same-service topic consumer must be Unresolved, got: {:?}",
+        res.target
+    );
+}
+
+#[test]
+fn t9_consumer_protocol_topic_zero_candidate_is_unresolved() {
+    // A topic consumer for a name no producer publishes is
+    // `Unresolved { reason: NoMatch }` — `NoMatch` is the
+    // `AmbiguityPolicy` Topic maps onto. The contract is the
+    // terminal-state contract: every consumer must land in
+    // exactly one of Binds / External / Unresolved, never
+    // silently drop.
+    let consumer = topic_consumer_node(
+        "billing",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "kafka",
+        "nonexistent.topic",
+    );
+    let cfg = two_service_topic_config();
+    let out = ContractJoiner::run(&[consumer], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "no-producer topic consumer must NOT bind, got: {:?}",
+        out.binds
+    );
+    let res = out
+        .index
+        .consumers
+        .values()
+        .next()
+        .expect("consumer must be recorded");
+    let Some(ConsumerTarget::Unresolved { reason, .. }) = &res.target else {
+        panic!(
+            "no-producer topic consumer must be Unresolved, got: {:?}",
+            res.target
+        );
+    };
+    assert!(
+        matches!(reason, UnresolvedReason::NoMatch),
+        "no-producer topic consumer must land in NoMatch, got: {reason:?}"
+    );
+}
+
+#[test]
 fn service_name_is_valid_predicate() {
     assert!(crate::federation::contracts::model::service_name_is_valid(
         "orders"

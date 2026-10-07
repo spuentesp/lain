@@ -3434,3 +3434,236 @@ mod load_from_disk_name_index_tests {
         );
     }
 }
+
+// ─── Task 9 — BFS depth-gate regression tests
+//
+//     The mutation harness reports 4 survivors in
+//     `src/server/graph/mod.rs`, all on the same class:
+//     `if current_depth >= max_depth { continue; }` (and the
+//     `if next_depth >= min_depth` variant in `traverse`).
+//     A mutation `>=` → `>` walks one extra hop. The cases
+//     below pin a chain of length 3 and assert each BFS
+//     returns exactly the nodes the depth window allows —
+//     one more node would be a regression. The four BFS
+//     variants covered: `traverse`, `subgraph_around`,
+//     `bfs_from`, and the inner-`next_depth` check in
+//     `traverse`.
+
+#[cfg(test)]
+mod bfs_depth_gate_tests {
+    use super::*;
+    use crate::schema::{GraphNode, NodeType};
+    use std::collections::HashSet;
+
+    /// Build a fresh graph with a linear chain
+    ///   start -> a -> b -> c
+    /// of `Module` nodes connected by `EdgeType::Calls`. Returns
+    /// the `GraphDatabase` and the node ids in hop order. A
+    /// 4-hop chain lets the `>=` vs `>` distinction on a
+    /// `max_depth=2` cap actually matter (with a 3-hop chain
+    /// the cap never fires).
+    fn build_four_hop_chain(tag: &str) -> (GraphDatabase, [String; 4]) {
+        let dir = std::env::temp_dir().join(format!("lain_bfs_depth_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = GraphDatabase::new(&dir).expect("graph");
+        let mk = |name: &str, path: &str| {
+            let mut n = GraphNode::new(NodeType::Module, name.into(), path.into());
+            n.id = GraphNode::generate_id(
+                &NodeType::Module,
+                path,
+                name,
+                Some(1),
+                &RepoNamespace::for_test(),
+            );
+            n
+        };
+        let start = mk("start", "src/start.rs");
+        let a = mk("a", "src/a.rs");
+        let b = mk("b", "src/b.rs");
+        let c = mk("c", "src/c.rs");
+        let ids = [start.id.clone(), a.id.clone(), b.id.clone(), c.id.clone()];
+        g.insert_nodes_batch(&[start, a, b, c]).unwrap();
+        let state = g.build_state();
+        let s = state.index_map[&ids[0]];
+        let ai = state.index_map[&ids[1]];
+        let bi = state.index_map[&ids[2]];
+        let ci = state.index_map[&ids[3]];
+        let mut state = state;
+        state.graph.add_edge(
+            s,
+            ai,
+            GraphEdge::new(EdgeType::Calls, ids[0].clone(), ids[1].clone()),
+        );
+        state.graph.add_edge(
+            ai,
+            bi,
+            GraphEdge::new(EdgeType::Calls, ids[1].clone(), ids[2].clone()),
+        );
+        state.graph.add_edge(
+            bi,
+            ci,
+            GraphEdge::new(EdgeType::Calls, ids[2].clone(), ids[3].clone()),
+        );
+        std::fs::write(&g.persistence_path, persist::encode_state(&state).unwrap()).unwrap();
+        g.load_from_disk().unwrap();
+        (g, ids)
+    }
+
+    /// Shorter 3-hop chain for cases where the depth cap does
+    /// not need to fire — used by the success-side assertions
+    /// that pin the inclusion contract.
+    fn build_three_hop_chain(tag: &str) -> (GraphDatabase, [String; 3]) {
+        let dir = std::env::temp_dir().join(format!("lain_bfs_depth3_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = GraphDatabase::new(&dir).expect("graph");
+        let mk = |name: &str, path: &str| {
+            let mut n = GraphNode::new(NodeType::Module, name.into(), path.into());
+            n.id = GraphNode::generate_id(
+                &NodeType::Module,
+                path,
+                name,
+                Some(1),
+                &RepoNamespace::for_test(),
+            );
+            n
+        };
+        let start = mk("start", "src/start.rs");
+        let a = mk("a", "src/a.rs");
+        let b = mk("b", "src/b.rs");
+        let ids = [start.id.clone(), a.id.clone(), b.id.clone()];
+        g.insert_nodes_batch(&[start, a, b]).unwrap();
+        let state = g.build_state();
+        let s = state.index_map[&ids[0]];
+        let ai = state.index_map[&ids[1]];
+        let bi = state.index_map[&ids[2]];
+        let mut state = state;
+        state.graph.add_edge(
+            s,
+            ai,
+            GraphEdge::new(EdgeType::Calls, ids[0].clone(), ids[1].clone()),
+        );
+        state.graph.add_edge(
+            ai,
+            bi,
+            GraphEdge::new(EdgeType::Calls, ids[1].clone(), ids[2].clone()),
+        );
+        std::fs::write(&g.persistence_path, persist::encode_state(&state).unwrap()).unwrap();
+        g.load_from_disk().unwrap();
+        (g, ids)
+    }
+
+    #[test]
+    fn bfs_from_max_depth_one_returns_one_neighbor_not_two() {
+        // `bfs_from(start, 1)` should visit exactly the start's
+        // direct neighbor (depth 1). The 3-hop chain's `b` is at
+        // depth 2 and must NOT appear. A mutation `>=`→`>` would
+        // walk one extra hop and return both `a` and `b`.
+        let (g, ids) = build_three_hop_chain("bfs_from");
+        let results = g.bfs_from(&ids[0], 1);
+        let names: HashSet<String> = results.into_iter().map(|(n, _, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string()]),
+            "max_depth=1 must return exactly one neighbor, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn bfs_from_max_depth_two_returns_both_neighbors() {
+        // The positive counterpart: at max_depth=2 the BFS
+        // returns both `a` (depth 1) and `b` (depth 2). This
+        // pins the contract on the success side, so a future
+        // mutation that breaks the depth cap from the other
+        // direction (e.g. early termination) trips the test.
+        let (g, ids) = build_three_hop_chain("bfs_from_pos");
+        let results = g.bfs_from(&ids[0], 2);
+        let names: HashSet<String> = results.into_iter().map(|(n, _, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            "max_depth=2 must return both neighbors, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn traverse_with_range_one_two_does_not_walk_depth_three() {
+        // `traverse(start, Calls, 1..2, Outgoing)` returns the
+        // depth-1 and depth-2 nodes reachable from `start` —
+        // `a` and `b` in a 4-hop chain. The depth-3 node
+        // (`c`) must NOT appear. The relevant gate is line
+        // 1258 (`current_depth >= max_depth`); mutated to
+        // `>`, the BFS walks into `c` as well, and the
+        // result is {a, b, c} instead of {a, b}.
+        // (The start itself is never in the result because
+        // the BFS only adds nodes reached via an edge.)
+        let (g, ids) = build_four_hop_chain("traverse");
+        let nodes = g
+            .traverse(&ids[0], EdgeType::Calls, 1..2, Direction::Outgoing)
+            .expect("traverse");
+        let names: HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            "traverse 1..2 must yield depth-1 and depth-2 only, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn traverse_with_range_one_four_includes_depth_three_node() {
+        // Success side: range `1..4` returns all three
+        // reachable nodes from `start` (a, b, c). With a
+        // 4-hop chain, the depth cap (`max_depth = 4`)
+        // does not fire — `c` is at depth 3 and 3 < 4.
+        // This pins the inclusion contract so a
+        // regression that drops the depth-3 node is caught.
+        let (g, ids) = build_four_hop_chain("traverse_pos");
+        let nodes = g
+            .traverse(&ids[0], EdgeType::Calls, 1..4, Direction::Outgoing)
+            .expect("traverse");
+        let names: HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]),
+            "traverse 1..4 must yield all three reachable nodes, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn subgraph_around_radius_one_includes_only_one_hop() {
+        // `subgraph_around(start, 1)` should include the center
+        // plus 1-hop neighbors (2 nodes total). The relevant
+        // gate is line 1343 (`current_depth >= radius`); mutated
+        // to `>`, the BFS walks into the 2-hop node and
+        // returns 3 nodes.
+        let (g, ids) = build_three_hop_chain("subgraph");
+        let sub = g.subgraph_around(&ids[0], 1).expect("subgraph");
+        let names: HashSet<String> = sub.into_iter().map(|(n, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["start".to_string(), "a".to_string()]),
+            "radius=1 must include center + 1-hop only, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn subgraph_around_radius_two_includes_two_hops() {
+        // Success side: radius=2 includes all 3 nodes. This
+        // pins the success contract so a regression that
+        // short-circuits early (e.g. on a different gate) is
+        // caught.
+        let (g, ids) = build_three_hop_chain("subgraph_pos");
+        let sub = g.subgraph_around(&ids[0], 2).expect("subgraph");
+        let names: HashSet<String> = sub.into_iter().map(|(n, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["start".to_string(), "a".to_string(), "b".to_string()]),
+            "radius=2 must include center + 2 hops, got: {:?}",
+            names
+        );
+    }
+}

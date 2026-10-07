@@ -367,3 +367,58 @@ fn unparseable_proto_file_surfaces_through_scan_with_report() {
     let schemas = report.emitted;
     let _ = schemas;
 }
+
+// ─── Task 9 — depth cap must hold under adversarial nesting
+//
+//     The mutation harness reports a survivor at
+//     `payload_schema.rs:466`:
+//         if self.message_depth >= MAX_PROTO_MESSAGE_DEPTH { ... }
+//     The depth cap exists to keep the recursion bounded — a
+//     file that nests more than the cap would otherwise blow
+//     the stack. The test below generates a fixture that nests
+//     `MAX_PROTO_MESSAGE_DEPTH + 1` levels and asserts:
+//       1. The parser returns without aborting.
+//       2. The number of messages parsed equals the cap
+//          (every level at-or-below the cap produces a message;
+//          the level past the cap is skipped with a
+//          `NestingDepth` diagnostic).
+//     With the `>=` mutated to `>`, the cap would fire one
+//     level later, yielding one extra parsed message.
+
+#[test]
+fn nested_message_depth_cap_keeps_recursion_bounded() {
+    use lain::server::sensors::payload_schema::{
+        parse_proto_messages_with_diagnostics, MAX_PROTO_MESSAGE_DEPTH,
+    };
+
+    let levels = MAX_PROTO_MESSAGE_DEPTH as usize + 1;
+    let mut src = String::with_capacity(levels * 16);
+    for i in 0..levels {
+        src.push_str(&format!("message L{i} {{\n"));
+    }
+    src.push_str("string leaf = 1;\n");
+    for _ in 0..levels {
+        src.push_str("}\n");
+    }
+
+    let (messages, diagnostics) = parse_proto_messages_with_diagnostics(&src);
+    // The cap allows `MAX_PROTO_MESSAGE_DEPTH` frames. With the
+    // mutated `>` the parser would admit one extra message.
+    assert_eq!(
+        messages.len() as u32,
+        MAX_PROTO_MESSAGE_DEPTH,
+        "depth cap must hold at MAX_PROTO_MESSAGE_DEPTH = {}; got {} messages",
+        MAX_PROTO_MESSAGE_DEPTH,
+        messages.len()
+    );
+    // The level past the cap MUST surface as a NestingDepth
+    // diagnostic, not silently disappear.
+    assert!(
+        diagnostics.iter().any(|d| matches!(
+            d.kind,
+            lain::server::sensors::payload_schema::ProtoParseDiagnosticKind::NestingDepth
+        )),
+        "depth-cap diagnostic must fire for the overflowing level, got: {:?}",
+        diagnostics
+    );
+}

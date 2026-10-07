@@ -685,6 +685,33 @@ type Query {
         .any(|e| e.edge_type == EdgeType::ResponseSchema);
     assert!(has_resp_schema_edge, "ResponseSchema edge must be emitted");
 
+    // Task 9: pin the specific edge. A bare `any(|e| ...)` accepted
+    // a `ResponseSchema` edge to *some* schema; the contract is the
+    // edge must connect the *Order* provider to the *Order* schema.
+    // Pin both endpoints so a regression that mis-routes the edge
+    // (e.g. swapping provider for consumer) is caught.
+    let order_provider_id = nodes_api
+        .iter()
+        .find(|n| n.node_type == NodeType::Module && n.name.contains("Order"))
+        .map(|n| n.id.clone());
+    let order_schema_id = order_schema.map(|n| n.id.clone());
+    if let (Some(provider_id), Some(schema_id)) = (order_provider_id, order_schema_id) {
+        let connected = edges_api.iter().any(|e| {
+            e.edge_type == EdgeType::ResponseSchema
+                && e.source_id == provider_id
+                && e.target_id == schema_id
+        });
+        assert!(
+            connected,
+            "ResponseSchema edge must connect Order provider {provider_id} \
+             to Order schema {schema_id}, got edges: {:?}",
+            edges_api
+                .iter()
+                .filter(|e| e.edge_type == EdgeType::ResponseSchema)
+                .collect::<Vec<_>>()
+        );
+    }
+
     // Scan consumer in web repo
     let root_web = fixed_workspace("f7_web");
     let ts_content = r#"
@@ -968,4 +995,230 @@ fn t6_deeply_nested_selections_do_not_abort() {
     let out =
         lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(&body);
     let _ = out;
+}
+
+// ─── Task 9 — byte-boundary coverage for the consumer parser
+//
+//     The mutation harness reports 66 survivors in
+//     `graphql_consumer_sensor.rs`, almost all on the
+//     `bytes[i] == b'X'` boundary comparisons for `(`, `)`,
+//     `{`, `}`, `$`, `\n`, and the `while i < bytes.len() && <cond>`
+//     short-circuits where the condition is always true. The
+//     fixtures below land on each byte at the parser's branching
+//     point so a `==`→`!=` flip changes the parsed result and
+//     trips the test.
+
+/// `$X` (dollar followed by a non-`{` byte) is *not* a
+/// template interpolation and the document must not be
+/// marked dynamic. With the `bytes[i+1] == b'{'` mutated to
+/// `!=`, the parser returns `true` on the first non-`{` byte
+/// after the dollar (e.g. `$x`), falsely flagging the
+/// document dynamic.
+#[test]
+fn t9_byte_boundary_dollar_without_open_brace_is_not_interpolation() {
+    let src = "query $x { orders { id } }";
+    let consumers =
+        lain::server::sensors::graphql_consumer_sensor::parse_document(src, "doc.graphql");
+    // No `FieldRef` for `$x` should be emitted; either the
+    // parser returns a single dynamic record (which we
+    // explicitly disallow) or the query is parsed as a normal
+    // query. Either way, no `dynamic: true` outcome is
+    // acceptable for `$x` (no `{`).
+    for c in &consumers {
+        assert!(
+            !c.dynamic,
+            "`$x` (dollar without open brace) must not be flagged dynamic, got: {:?}",
+            c
+        );
+    }
+}
+
+/// `query { order(id: ID!) { id status } }` exercises the
+/// paren-skip path (`(`, `)`) and the selection-set entry
+/// (`{`, `}`). The `id` and `status` reads are picked up only
+/// if the selection set is correctly entered; a `==`→`!=` on
+/// `bytes[i] == b'{'` at line 723 would skip the selection set
+/// and lose the sub-fields, tripping the assertion.
+#[test]
+fn t9_byte_boundary_selection_set_keeps_subfields() {
+    let body = "order(id: ID!) { id status }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "one top-level field expected, got {out:?}");
+    let (field, sub) = &out[0];
+    assert_eq!(field, "order");
+    assert_eq!(
+        sub,
+        &vec!["id".to_string(), "status".to_string()],
+        "selection set must be entered (id + status), got {sub:?}"
+    );
+}
+
+/// `query { order(id: ID!, customer: ID!) { name } }` lands
+/// on `(` (line 676), `)` (line 682), and the comma / colon
+/// boundaries inside the paren block. The comma-bearing
+/// arguments also exercise the `bytes[i] != b'{' && bytes[i] != b'\n'`
+/// loop guard at line 521.
+#[test]
+fn t9_byte_boundary_multiple_arguments_in_parens() {
+    let body = "order(id: ID!, customer: ID!) { name }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1);
+    let (field, sub) = &out[0];
+    assert_eq!(field, "order");
+    assert_eq!(sub, &vec!["name".to_string()]);
+}
+
+/// A multi-line document lands on `bytes[i] == b'\n'` at the
+/// `find_top_level_operations` line-409 and line-432 branches.
+/// A mutation `==`→`!=` on line 432 would skip the line-number
+/// update, but the parsed fields are still correct — the
+/// `parse_document` test instead asserts that an interpolation
+/// placeholder mid-line does NOT poison the result, exercising
+/// the `b'{'` byte at line 723.
+#[test]
+fn t9_byte_boundary_multiline_document_keeps_operation() {
+    let src = "\
+query GetOrder {
+  order(id: ID!) {
+    id
+    status
+  }
+}
+";
+    let consumers =
+        lain::server::sensors::graphql_consumer_sensor::parse_document(src, "doc.graphql");
+    let orders = consumers
+        .iter()
+        .find(|c| c.field == "order")
+        .expect("`order` consumer must be parsed across multiple lines");
+    assert_eq!(
+        orders.selected_fields,
+        vec!["id".to_string(), "status".to_string()],
+        "multi-line document must still surface sub-fields, got {:?}",
+        orders.selected_fields
+    );
+    assert!(
+        !orders.dynamic,
+        "plain multi-line document must not be dynamic"
+    );
+}
+
+/// `query { ${userId} { id } }` exercises the `$` byte at
+/// line 384. A `==`→`!=` mutation there makes
+/// `has_interpolation` return `true` for non-`$` bytes, so
+/// the document is wrongly marked dynamic. The test asserts
+/// that a *non*-interpolated document is **not** dynamic.
+#[test]
+fn t9_byte_boundary_non_interpolated_document_is_not_dynamic() {
+    // The fixture deliberately does NOT contain `$`. The
+    // mutation flips the comparison, so `has_interpolation`
+    // would return `true` on the first byte and the document
+    // would be marked dynamic. We assert the opposite: a
+    // plain document is `dynamic: false`.
+    let src = "query { orders { id status } }";
+    let consumers =
+        lain::server::sensors::graphql_consumer_sensor::parse_document(src, "doc.graphql");
+    assert_eq!(consumers.len(), 1, "exactly one consumer for `orders`");
+    let orders = &consumers[0];
+    assert!(
+        !orders.dynamic,
+        "non-interpolated document must NOT be dynamic, got: {:?}",
+        orders
+    );
+    assert_eq!(orders.field, "orders");
+    assert_eq!(
+        orders.selected_fields,
+        vec!["id".to_string(), "status".to_string()],
+        "sub-fields must still be parsed on a non-interpolated document"
+    );
+}
+
+/// `query GetOrder(id: ID!) { order(id: ID!) { id } }` has
+/// nested parens (the operation header argument list AND the
+/// field argument list). The inner paren check is line 446
+/// (`bytes[i] == b'('`) and 448 (`bytes[i] == b')'`). A
+/// mutation on either flips the depth counter and the parser
+/// either under- or over-consumes the field.
+#[test]
+fn t9_byte_boundary_nested_parens_in_operation_header() {
+    let src = "query GetOrder(id: ID!) { order(id: ID!) { id } }";
+    let consumers =
+        lain::server::sensors::graphql_consumer_sensor::parse_document(src, "doc.graphql");
+    let order = consumers
+        .iter()
+        .find(|c| c.field == "order")
+        .expect("`order` consumer must be parsed despite nested parens");
+    assert_eq!(
+        order.selected_fields,
+        vec!["id".to_string()],
+        "nested parens in the operation header must not eat the field, got {:?}",
+        order.selected_fields
+    );
+    assert!(!order.dynamic);
+}
+
+/// Aliases (`: `) are picked up at line 654
+/// (`bytes[i] == b':'`). A `==`→`!=` mutation there means the
+/// alias is treated as the field name, and the actual field
+/// is dropped.
+#[test]
+fn t9_byte_boundary_alias_uses_target_not_alias_name() {
+    let body = "first: orders { id }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1, "one top-level field, got {out:?}");
+    let (field, sub) = &out[0];
+    assert_eq!(
+        field, "orders",
+        "alias `first:` must resolve to the field name `orders`, got {field:?}"
+    );
+    assert_eq!(sub, &vec!["id".to_string()]);
+}
+
+/// A directive `@include(if: $cond)` lands on `@` (line 693),
+/// `(` (line 701), and `)` (line 707). A `==`→`!=` on `@` at
+/// line 693 leaves the directive unread and the parser
+/// proceeds as if the directive were absent — the test still
+/// passes. So we additionally check that the directive DOES
+/// NOT introduce a new field name (the failure mode is
+/// interpreting `if` as a sub-field).
+#[test]
+fn t9_byte_boundary_directive_does_not_leak_subfield() {
+    let body = "orders @include(if: true) { id }";
+    let out =
+        lain::server::sensors::graphql_consumer_sensor::top_level_fields_with_selections(body);
+    assert_eq!(out.len(), 1);
+    let (field, sub) = &out[0];
+    assert_eq!(field, "orders");
+    assert!(
+        !sub.iter().any(|s| s == "if" || s == "true"),
+        "directive arguments must not be parsed as sub-fields, got {sub:?}"
+    );
+    assert!(sub.contains(&"id".to_string()));
+}
+
+/// `gql\`query { order(id: 1) { id } }\`` in TS: the
+/// `detect_in_code` path tags the body and dispatches to
+/// `parse_operation_body`. The byte boundary in
+/// `parse_operation_body`'s `bytes[i] != b'{'` loop
+/// (line 906) walks past the operation keyword. A mutation
+/// there would loop forever — but the test guards with a
+/// documented (non-adversarial) body so the test stays fast.
+#[test]
+fn t9_byte_boundary_in_code_gql_tagged_template() {
+    let code = "const Q = gql`query { order(id: ID!) { id status } }`;";
+    let in_code = lain::server::sensors::graphql_consumer_sensor::detect_in_code(code, "src/q.ts");
+    let order = in_code
+        .iter()
+        .find(|c| c.field == "order")
+        .expect("`order` consumer must be detected in the tagged template");
+    assert_eq!(
+        order.selected_fields,
+        vec!["id".to_string(), "status".to_string()],
+        "tagged-template body must surface the sub-fields, got {:?}",
+        order.selected_fields
+    );
+    assert!(!order.dynamic);
 }

@@ -348,3 +348,189 @@ fn stale_websocket_providers_are_retracted_on_rescan() {
     );
     let _ = fs::remove_dir_all(&ws);
 }
+
+// ─── Task 9 — BFS depth-gate regression tests
+//
+//     The mutation harness reports 4 survivors in
+//     `src/server/graph/mod.rs`, all on the same class:
+//     `if current_depth >= max_depth { continue; }` (and the
+//     `if next_depth >= min_depth` variant in `traverse`).
+//     A mutation `>=` → `>` walks one extra hop. The cases
+//     below pin a chain of length 4 and assert each BFS
+//     returns exactly the nodes the depth window allows —
+//     one more node would be a regression. The four BFS
+//     variants covered: `traverse` (line 1258 and line 1281),
+//     `subgraph_around` (line 1343), and `bfs_from` (line
+//     1574). The harness filters by `--test sensor_coexistence`,
+//     so the assertions live here rather than in the
+//     `cfg(test)` block in `graph/mod.rs`.
+//
+//     Each builder is kept self-contained (no shared
+//     `tempfile::tempdir` so the `#[test]` instances don't
+//     race on disk).
+
+fn build_four_hop_chain(tag: &str) -> (lain::graph::GraphDatabase, [String; 4]) {
+    let dir = std::env::temp_dir().join(format!("lain_coex_bfs4_{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let g = lain::graph::GraphDatabase::new(&dir).expect("graph");
+    let ns = lain::schema::RepoNamespace::for_test();
+    let mk = |name: &str, path: &str| -> lain::schema::GraphNode {
+        let mut n =
+            lain::schema::GraphNode::new(lain::schema::NodeType::Module, name.into(), path.into());
+        n.id = lain::schema::GraphNode::generate_id(
+            &lain::schema::NodeType::Module,
+            path,
+            name,
+            Some(1),
+            &ns,
+        );
+        n
+    };
+    let start = mk("start", "src/start.rs");
+    let a = mk("a", "src/a.rs");
+    let b = mk("b", "src/b.rs");
+    let c = mk("c", "src/c.rs");
+    let ids = [start.id.clone(), a.id.clone(), b.id.clone(), c.id.clone()];
+    g.insert_nodes_batch(&[start, a, b, c]).unwrap();
+    g.insert_edges_batch(&[
+        lain::schema::GraphEdge::new(
+            lain::schema::EdgeType::Calls,
+            ids[0].clone(),
+            ids[1].clone(),
+        ),
+        lain::schema::GraphEdge::new(
+            lain::schema::EdgeType::Calls,
+            ids[1].clone(),
+            ids[2].clone(),
+        ),
+        lain::schema::GraphEdge::new(
+            lain::schema::EdgeType::Calls,
+            ids[2].clone(),
+            ids[3].clone(),
+        ),
+    ])
+    .expect("insert edges");
+    (g, ids)
+}
+
+fn build_three_hop_chain(tag: &str) -> (lain::graph::GraphDatabase, [String; 3]) {
+    let dir = std::env::temp_dir().join(format!("lain_coex_bfs3_{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let g = lain::graph::GraphDatabase::new(&dir).expect("graph");
+    let ns = lain::schema::RepoNamespace::for_test();
+    let mk = |name: &str, path: &str| -> lain::schema::GraphNode {
+        let mut n =
+            lain::schema::GraphNode::new(lain::schema::NodeType::Module, name.into(), path.into());
+        n.id = lain::schema::GraphNode::generate_id(
+            &lain::schema::NodeType::Module,
+            path,
+            name,
+            Some(1),
+            &ns,
+        );
+        n
+    };
+    let start = mk("start", "src/start.rs");
+    let a = mk("a", "src/a.rs");
+    let b = mk("b", "src/b.rs");
+    let ids = [start.id.clone(), a.id.clone(), b.id.clone()];
+    g.insert_nodes_batch(&[start, a, b]).unwrap();
+    g.insert_edges_batch(&[
+        lain::schema::GraphEdge::new(
+            lain::schema::EdgeType::Calls,
+            ids[0].clone(),
+            ids[1].clone(),
+        ),
+        lain::schema::GraphEdge::new(
+            lain::schema::EdgeType::Calls,
+            ids[1].clone(),
+            ids[2].clone(),
+        ),
+    ])
+    .expect("insert edges");
+    (g, ids)
+}
+
+#[test]
+fn t9_bfs_from_max_depth_one_returns_one_neighbor() {
+    // Mutation harness target: `bfs_from` line 1574
+    // `if depth >= max_depth { continue; }` → `>` walks one
+    // extra hop. The 3-hop chain has `b` at depth 2; with
+    // `max_depth=1` the BFS must not see `b`.
+    let (g, ids) = build_three_hop_chain("bfs_from");
+    let results = g.bfs_from(&ids[0], 1);
+    let names: std::collections::HashSet<String> =
+        results.into_iter().map(|(n, _, _)| n.name).collect();
+    assert_eq!(
+        names,
+        std::collections::HashSet::from(["a".to_string()]),
+        "max_depth=1 must return exactly one neighbor, got: {:?}",
+        names
+    );
+}
+
+#[test]
+fn t9_traverse_with_range_one_two_does_not_walk_depth_three() {
+    // Mutation harness target: `traverse` line 1258
+    // `if current_depth >= max_depth { continue; }` → `>` walks
+    // one extra hop. With a 4-hop chain and `1..2`, the
+    // depth-3 node (`c`) must NOT appear; mutated, it does.
+    let (g, ids) = build_four_hop_chain("traverse");
+    let nodes = g
+        .traverse(
+            &ids[0],
+            lain::schema::EdgeType::Calls,
+            1..2,
+            petgraph::Direction::Outgoing,
+        )
+        .expect("traverse");
+    let names: std::collections::HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+    assert_eq!(
+        names,
+        std::collections::HashSet::from(["a".to_string(), "b".to_string()]),
+        "traverse 1..2 must yield depth-1 and depth-2 only, got: {:?}",
+        names
+    );
+}
+
+#[test]
+fn t9_traverse_inner_next_depth_at_least_min_depth() {
+    // Mutation harness target: `traverse` line 1281
+    // `if next_depth >= min_depth { result.push(node); }` → `>`
+    // drops the boundary node. With a 4-hop chain and `2..3`,
+    // the depth-2 node (`b`) MUST appear (mutated: dropped,
+    // so the result is just `{c}` instead of `{b, c}`).
+    let (g, ids) = build_four_hop_chain("traverse_inner");
+    let nodes = g
+        .traverse(
+            &ids[0],
+            lain::schema::EdgeType::Calls,
+            2..3,
+            petgraph::Direction::Outgoing,
+        )
+        .expect("traverse");
+    let names: std::collections::HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+    assert_eq!(
+        names,
+        std::collections::HashSet::from(["b".to_string(), "c".to_string()]),
+        "traverse 2..3 must yield depth-2 and depth-3, got: {:?}",
+        names
+    );
+}
+
+#[test]
+fn t9_subgraph_around_radius_one_includes_only_one_hop() {
+    // Mutation harness target: `subgraph_around` line 1343
+    // `if current_depth >= radius { continue; }` → `>` walks
+    // one extra hop. The 3-hop chain has `b` at depth 2; with
+    // `radius=1` the BFS must not see `b`.
+    let (g, ids) = build_three_hop_chain("subgraph");
+    let sub = g.subgraph_around(&ids[0], 1).expect("subgraph");
+    let names: std::collections::HashSet<String> = sub.into_iter().map(|(n, _)| n.name).collect();
+    assert_eq!(
+        names,
+        std::collections::HashSet::from(["start".to_string(), "a".to_string()]),
+        "radius=1 must include center + 1-hop only, got: {:?}",
+        names
+    );
+}

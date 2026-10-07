@@ -498,7 +498,34 @@ def find_users():
         "report unresolved contains OrmDynamicQuery record"
     );
     let orm = orm_rec.unwrap();
-    assert!(orm.count >= 1, "at least one ORM query recorded");
+    // The fixture has TWO ORM call sites:
+    //   1. `session.query(Order).filter_by(status='pending').all()` in `find_orders`
+    //   2. `User.objects.filter(active=True)` in `find_users`
+    // Pin the exact count so a regression that under-counts (e.g. a
+    // broken dedup) or over-counts (e.g. a duplicate scan) trips the
+    // test instead of getting hidden behind `>= 1`.
+    assert_eq!(
+        orm.count, 2,
+        "exactly two ORM queries must be recorded, got count={}, sample_ids={:?}",
+        orm.count, orm.sample_ids
+    );
+    // The sample_ids are formatted as `path:line`; both must point
+    // back at `src/orm_queries.py` (the file the scanner visited).
+    // Pin two distinct entries so a regression that emits a phantom
+    // `OrmDynamicQuery` for an empty scan, or that collapses both
+    // call sites into one record, is caught.
+    let sample_set: std::collections::BTreeSet<&str> =
+        orm.sample_ids.iter().map(String::as_str).collect();
+    let from_orm_file: Vec<&&str> = sample_set
+        .iter()
+        .filter(|s| s.starts_with("src/orm_queries.py:"))
+        .collect();
+    assert_eq!(
+        from_orm_file.len(),
+        2,
+        "two distinct ORM sample_ids must come from src/orm_queries.py, got {:?}",
+        from_orm_file
+    );
 
     // 2. Database topology mapping in EndpointTable.
     let mut orders_node = GraphNode::new_in(

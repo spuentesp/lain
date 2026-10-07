@@ -31,6 +31,7 @@ use lain::federation::contracts::joiner::{resolve_consumer_to_service, Resolutio
 use lain::federation::contracts::model::{
     CallVia, ConsumerFact, HttpMethod, MethodSpec, NormalizedUrl, ServiceName,
 };
+use lain::schema::{NodeType, RepoNamespace};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -172,6 +173,297 @@ proptest! {
             "every call must land in exactly one terminal state"
         );
     }
+}
+
+// ─── I2-WS / I2-Topic — protocol-specific partition coverage
+//
+//     The I2 proptest only exercises the HTTP ladder via
+//     `resolve_consumer_to_service`. The WebSocket and Topic
+//     resolvers live on a different code path
+//     (`resolve_by_key` in `consumer_protocol.rs`); the partition
+//     invariant must hold for them too. The cases below drive
+//     each protocol end-to-end through `ContractJoiner::run` —
+//     the public surface that calls the per-protocol resolvers
+//     — with representative inputs and assert the same
+//     terminal-state contract.
+//
+//     The inputs are deliberately small (a handful of cases
+//     per protocol) so the test stays fast; coverage is over
+//     *protocol shape* (zero / one / two candidates,
+//     same-service skip), not over all possible URL/host
+//     values.
+
+fn ws_node(service: &str, host: &str, route: &str, line: u32) -> lain::schema::GraphNode {
+    use lain::federation::contracts::model::{
+        ContractFact, HostPart, NormalizedUrl, WebSocketConsumerFact, WebSocketProviderFact,
+    };
+    let is_provider = host.is_empty();
+    let id_name = if is_provider {
+        format!("ws:server:{route}")
+    } else {
+        format!("ws:client:{service}:{host}:{route}")
+    };
+    let path = if is_provider {
+        "src/server.js"
+    } else {
+        "src/socket.js"
+    };
+    let node_type = if is_provider {
+        NodeType::HttpRoute
+    } else {
+        NodeType::HttpClientCall
+    };
+    let mut n = lain::schema::GraphNode::new_in(
+        node_type.clone(),
+        id_name.clone(),
+        path.to_string(),
+        &RepoNamespace::for_test(),
+    );
+    n.repo_id = Some(service.to_string());
+    n.id = lain::federation::repo_id::GlobalId::new(
+        &lain::federation::repo_id::RepoId::new(service).unwrap(),
+        node_type.clone(),
+        path,
+        &id_name,
+        Some(line),
+    )
+    .as_str()
+    .to_string();
+    n.line_start = Some(line);
+    if is_provider {
+        n.contract = Some(ContractFact::WebSocketProvider(WebSocketProviderFact {
+            route: route.to_string(),
+            handler: None,
+        }));
+    } else {
+        n.contract = Some(ContractFact::WebSocketConsumer(WebSocketConsumerFact {
+            url: NormalizedUrl {
+                host: HostPart::Literal(host.to_string()),
+                template: Some(route.to_string()),
+            },
+            route: route.to_string(),
+        }));
+    }
+    n
+}
+
+fn ws_config(svc: &str, host: &str) -> ContractFederationConfig {
+    ContractFederationConfig {
+        services: vec![ServiceDecl {
+            name: svc.into(),
+            repo: svc.into(),
+            paths: vec![],
+            hosts: vec![host.into()],
+            env: vec![],
+            base_path: None,
+            route_prefixes: vec![],
+        }],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+        databases: vec![],
+    }
+}
+
+fn topic_node(
+    service: &str,
+    kind: &str,
+    broker: &str,
+    topic: &str,
+    line: u32,
+) -> lain::schema::GraphNode {
+    use lain::federation::contracts::model::{
+        ContractFact, HttpMethod, ProviderFact, ProviderOrigin, TopicConsumerFact,
+        TopicConsumerKind,
+    };
+    let is_producer = kind == "producer";
+    let id_name = format!("{broker}/{topic}");
+    let path = if is_producer {
+        "src/events.py"
+    } else {
+        "src/handlers/orders.py"
+    };
+    let node_type = if is_producer {
+        NodeType::Topic
+    } else {
+        NodeType::Function
+    };
+    let mut n = lain::schema::GraphNode::new_in(
+        node_type.clone(),
+        id_name.clone(),
+        path.to_string(),
+        &RepoNamespace::for_test(),
+    );
+    n.repo_id = Some(service.to_string());
+    n.id = lain::federation::repo_id::GlobalId::new(
+        &lain::federation::repo_id::RepoId::new(service).unwrap(),
+        node_type.clone(),
+        path,
+        &id_name,
+        Some(line),
+    )
+    .as_str()
+    .to_string();
+    n.line_start = Some(line);
+    if is_producer {
+        n.contract = Some(ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Any,
+            template: topic.to_string(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        }));
+    } else {
+        n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+            broker: broker.to_string(),
+            name: topic.to_string(),
+            kind: TopicConsumerKind::Subscription,
+        }));
+    }
+    n
+}
+
+#[test]
+fn every_websocket_call_lands_in_exactly_one_terminal_state() {
+    use lain::federation::contracts::joiner::ContractJoiner;
+
+    // (a) zero matching candidates — Unresolved.
+    let provider = ws_node("orders", "", "/feed", 10);
+    let consumer = ws_node("billing", "thirdparty.com", "/feed", 1);
+    let cfg = ws_config("orders", "orders.internal");
+    let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
+    let res = out
+        .index
+        .consumers
+        .values()
+        .next()
+        .expect("consumer must be recorded");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "(a) zero WS candidates must be Unresolved, got: {:?}",
+        res.target
+    );
+
+    // (b) single matching candidate — Binds.
+    let provider = ws_node("orders", "", "/feed", 10);
+    let consumer = ws_node("billing", "orders.internal", "/feed", 1);
+    let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
+    let res = out
+        .index
+        .consumers
+        .values()
+        .next()
+        .expect("consumer must be recorded");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Binds { .. })),
+        "(b) one matching WS candidate must Binds, got: {:?}",
+        res.target
+    );
+    assert_eq!(out.binds.len(), 1, "exactly one Binds edge expected");
+
+    // (c) same-service skip — Unresolved (I5).
+    let provider = ws_node("orders", "", "/feed", 10);
+    let consumer = ws_node("orders", "orders.internal", "/feed", 1);
+    let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
+    let res = out
+        .index
+        .consumers
+        .values()
+        .next()
+        .expect("consumer must be recorded");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "(c) same-service WS consumer must be Unresolved (I5), got: {:?}",
+        res.target
+    );
+    assert!(
+        out.binds.is_empty(),
+        "no Binds edge may be emitted for same-service, got: {:?}",
+        out.binds
+    );
+}
+
+#[test]
+fn every_topic_call_lands_in_exactly_one_terminal_state() {
+    use lain::federation::contracts::joiner::ContractJoiner;
+
+    let cfg = ContractFederationConfig {
+        services: vec![
+            ServiceDecl {
+                name: "orders".into(),
+                repo: "orders".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+            ServiceDecl {
+                name: "billing".into(),
+                repo: "billing".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+        ],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+        databases: vec![],
+    };
+
+    // (a) zero candidates — Unresolved.
+    let consumer = topic_node("billing", "consumer", "kafka", "missing.topic", 1);
+    let out = ContractJoiner::run(&[consumer], &[], &cfg);
+    let res = out
+        .index
+        .consumers
+        .values()
+        .next()
+        .expect("consumer must be recorded");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "(a) zero topic candidates must be Unresolved, got: {:?}",
+        res.target
+    );
+
+    // (b) one matching candidate — Binds.
+    let producer = topic_node("orders", "producer", "kafka", "orders.events", 10);
+    let consumer = topic_node("billing", "consumer", "kafka", "orders.events", 1);
+    let out = ContractJoiner::run(&[producer, consumer], &[], &cfg);
+    let res = out
+        .index
+        .consumers
+        .values()
+        .next()
+        .expect("consumer must be recorded");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Binds { .. })),
+        "(b) one matching topic candidate must Binds, got: {:?}",
+        res.target
+    );
+    assert_eq!(out.binds.len(), 1);
+
+    // (c) same-service skip — Unresolved (I5).
+    let producer = topic_node("orders", "producer", "kafka", "orders.events", 10);
+    let consumer = topic_node("orders", "consumer", "kafka", "orders.events", 1);
+    let out = ContractJoiner::run(&[producer, consumer], &[], &cfg);
+    let res = out
+        .index
+        .consumers
+        .values()
+        .next()
+        .expect("consumer must be recorded");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "(c) same-service topic consumer must be Unresolved (I5), got: {:?}",
+        res.target
+    );
+    assert!(out.binds.is_empty());
 }
 
 // ─── I5 — no same-service bind ────────────────────────────────────────

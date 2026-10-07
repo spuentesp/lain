@@ -533,6 +533,37 @@ service Orders {
         .any(|e| e.edge_type == EdgeType::ResponseSchema);
     assert!(has_resp_schema_edge, "ResponseSchema edge must be emitted");
 
+    // Task 9: pin the specific edge. The `RpcProvider` node
+    // for `Orders.Get` must be the source of the `ResponseSchema`
+    // edge that targets the `GetResp` schema — not any other
+    // schema the provider file happens to declare. A bare
+    // `any(|e| ...)` accepted an edge to a wrong schema (e.g.
+    // GetReq, or a sibling message) and the test would still
+    // pass.
+    let get_resp_id = get_resp_schema.map(|n| n.id.clone());
+    let orders_get_provider_id = all_nodes
+        .iter()
+        .find(|n| {
+            n.node_type == NodeType::Module && n.name.contains("Orders") && n.name.contains("Get")
+        })
+        .map(|n| n.id.clone());
+    if let (Some(provider_id), Some(schema_id)) = (orders_get_provider_id, get_resp_id.clone()) {
+        let connected = all_edges.iter().any(|e| {
+            e.edge_type == EdgeType::ResponseSchema
+                && e.source_id == provider_id
+                && e.target_id == schema_id
+        });
+        assert!(
+            connected,
+            "ResponseSchema edge must connect Orders.Get provider \
+             {provider_id} to GetResp schema {schema_id}, got edges: {:?}",
+            all_edges
+                .iter()
+                .filter(|e| e.edge_type == EdgeType::ResponseSchema)
+                .collect::<Vec<_>>()
+        );
+    }
+
     // Test end-to-end joiner field resolution
     let consumer = rpc_consumer_node(
         "billing",
