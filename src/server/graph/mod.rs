@@ -3688,3 +3688,393 @@ mod bfs_depth_gate_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod survivor_pin_tests {
+    //! Fixtures for the mutation survivors measured in
+    //! `scripts/mutation-baseline.json` — each test pins one
+    //! comparison so flipping its operator fails a test.
+
+    use super::*;
+    use crate::federation::contracts::model::{ContractFact, FieldReadFact, FieldReadOrigin};
+
+    fn db(tag: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(format!("lain_survivor_{tag}"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    /// Line-range lookup: both boundaries of a symbol's span are
+    /// inclusive, and a line outside the span matches nothing.
+    #[test]
+    fn location_range_boundaries_are_inclusive() {
+        let g = db("loc_range");
+        let mut span = GraphNode::new(NodeType::Function, "span".into(), "src/lines.rs".into());
+        span.line_start = Some(1);
+        span.line_end = Some(10);
+        g.insert_nodes_batch(std::slice::from_ref(&span)).unwrap();
+
+        assert!(
+            g.get_node_at_location("src/lines.rs", 1).is_some(),
+            "line_start == line must be inside the symbol"
+        );
+        assert!(
+            g.get_node_at_location("src/lines.rs", 10).is_some(),
+            "line_end == line must be inside the symbol"
+        );
+        assert!(
+            g.get_node_at_location("src/lines.rs", 50).is_none(),
+            "a symbol spanning 1..=10 must not match line 50"
+        );
+    }
+
+    /// Linear Contains chain of `hops` edges out of `main`.
+    /// Returns the database and the node ids in hop order.
+    fn build_deep_chain(tag: &str, hops: usize) -> (GraphDatabase, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("lain_survivor_chain_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = GraphDatabase::new(&dir).expect("graph");
+        let mut ids = Vec::with_capacity(hops + 1);
+        let mut nodes = Vec::with_capacity(hops + 1);
+        for i in 0..=hops {
+            let name = if i == 0 {
+                "main".to_string()
+            } else {
+                format!("h{i}")
+            };
+            let n = GraphNode::new(NodeType::Function, name, format!("src/h{i}.rs"));
+            ids.push(n.id.clone());
+            nodes.push(n);
+        }
+        g.insert_nodes_batch(&nodes).unwrap();
+        let edges: Vec<GraphEdge> = (0..hops)
+            .map(|i| GraphEdge::new(EdgeType::Contains, ids[i].clone(), ids[i + 1].clone()))
+            .collect();
+        g.insert_edges_batch(&edges).unwrap();
+        (g, ids)
+    }
+
+    /// The BFS walks `Contains` children from `main`/`App`, stops at
+    /// the depth-50 cap, and leaves anything past the cap unassigned.
+    #[test]
+    fn calculate_depths_caps_at_fifty_and_walks_contains_only() {
+        let (g, ids) = build_deep_chain("cap", 50);
+        g.calculate_depths().unwrap();
+        let depth = |i: usize| g.get_node(&ids[i]).unwrap().unwrap().depth_from_main;
+
+        assert_eq!(depth(0), Some(0), "the entry point seeds at depth 0");
+        assert_eq!(
+            depth(1),
+            Some(1),
+            "only Contains children are walked: the first hop is depth 1"
+        );
+        assert_eq!(depth(49), Some(49), "the chain walks up to the cap");
+        assert_eq!(
+            depth(50),
+            None,
+            "a node past the depth-50 cap stays unassigned"
+        );
+    }
+
+    /// `find_entry_points` returns exactly the nodes named `main`
+    /// or `App` — nothing else, neither name dropped.
+    #[test]
+    fn find_entry_points_is_exactly_main_and_app() {
+        let g = db("entry_points");
+        let nodes = ["main", "App", "other"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                GraphNode::new(NodeType::Function, (*name).into(), format!("src/f{i}.rs"))
+            })
+            .collect::<Vec<_>>();
+        g.insert_nodes_batch(&nodes).unwrap();
+
+        let mut found: Vec<String> = g
+            .find_entry_points()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec!["App".to_string(), "main".to_string()],
+            "only main and App are entry points"
+        );
+    }
+
+    /// A `FieldRef` whose `FieldRead` was minted by the GraphQL
+    /// consumer belongs to `GraphqlConsumerSensor`, not the
+    /// `FieldAccessSensor` catch-all (and vice versa).
+    #[test]
+    fn field_read_origin_decides_field_ref_ownership() {
+        let mk = |origin: FieldReadOrigin| {
+            let mut n = GraphNode::new(
+                NodeType::FieldRef,
+                "customer_id".into(),
+                "src/api.ts".into(),
+            );
+            n.contract = Some(ContractFact::FieldRead(FieldReadFact {
+                chain: "customer_id".parse().unwrap(),
+                exact: true,
+                origin,
+            }));
+            n
+        };
+
+        assert_eq!(
+            sensor_owner_of(&mk(FieldReadOrigin::GraphqlConsumer)),
+            Some(SensorOwner::GraphqlConsumerSensor),
+            "graphql_consumer's FieldRef must not fall through to field_access"
+        );
+        assert_eq!(
+            sensor_owner_of(&mk(FieldReadOrigin::FieldAccess)),
+            Some(SensorOwner::FieldAccessSensor),
+            "field_access's FieldRef keeps the catch-all owner"
+        );
+    }
+
+    /// Re-scanning a file must restore every incoming edge captured
+    /// from untouched files — one per edge type, not just the first.
+    #[test]
+    fn replace_restores_each_preserved_incoming_edge_type() {
+        let g = db("replace_incoming");
+        let caller = GraphNode::new(NodeType::Function, "caller".into(), "src/other.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "callee".into(), "src/probe.rs".into());
+        let (caller_id, callee_id) = (caller.id.clone(), callee.id.clone());
+        g.insert_nodes_batch(&[caller, callee.clone()]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::Calls, caller_id.clone(), callee_id.clone()),
+            GraphEdge::new(EdgeType::Uses, caller_id, callee_id.clone()),
+        ])
+        .unwrap();
+
+        g.replace_nodes_for_paths(&["src/probe.rs".to_string()], &[callee])
+            .unwrap();
+
+        let incoming = g.get_edges_to(&callee_id).unwrap();
+        assert_eq!(
+            incoming.len(),
+            2,
+            "both preserved incoming edge types must come back: {incoming:?}"
+        );
+        assert!(
+            incoming.iter().any(|e| e.edge_type == EdgeType::Calls),
+            "the Calls edge was not restored: {incoming:?}"
+        );
+        assert!(
+            incoming.iter().any(|e| e.edge_type == EdgeType::Uses),
+            "the Uses edge was not restored: {incoming:?}"
+        );
+    }
+
+    /// One edge per (source, target, type): re-inserting the same
+    /// triple is a no-op, a different type on the same pair is added.
+    #[test]
+    fn insert_edges_batch_dedups_by_edge_type_only() {
+        let g = db("batch_dedup");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/b.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone())])
+            .unwrap();
+        assert_eq!(g.edge_count(), 1);
+
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone())])
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            1,
+            "re-inserting the same (pair, type) must not duplicate"
+        );
+
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Contains, a_id, b_id)])
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "a different edge type on the same pair must be added"
+        );
+    }
+
+    /// `upsert_edge` is idempotent per (pair, type) and still admits
+    /// a different type between the same two nodes.
+    #[test]
+    fn upsert_edge_is_idempotent_per_type_and_admits_other_types() {
+        let g = db("upsert_types");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/b.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone()))
+            .unwrap();
+        assert_eq!(g.edge_count(), 1);
+
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone()))
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            1,
+            "the same upsert twice must stay one edge"
+        );
+
+        g.upsert_edge(GraphEdge::new(EdgeType::Contains, a_id, b_id))
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "a different edge type must not be treated as a duplicate"
+        );
+    }
+
+    /// `find_path` reports the path it actually walked.
+    #[test]
+    fn find_path_returns_the_route_it_walked() {
+        let g = db("find_path");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/b.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone())])
+            .unwrap();
+
+        let path = g.find_path(&a_id, &b_id).unwrap();
+        assert_eq!(path.len(), 2, "a direct call is a two-node path");
+        assert_eq!(path[0].id, a_id, "the path starts at `from`");
+        assert_eq!(path[1].id, b_id, "the path ends at `to`");
+    }
+
+    /// `calls_in` / `calls_out` count `Calls` edges only; the
+    /// parallel `Uses` / `Imports` / `Contains` edges on the same
+    /// nodes must not be counted.
+    #[test]
+    fn anchor_calls_counters_count_only_calls_edges() {
+        let g = db("anchor_calls");
+        let f = GraphNode::new(NodeType::Function, "f".into(), "src/f.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "g".into(), "src/g.rs".into());
+        let x = GraphNode::new(NodeType::Function, "x".into(), "src/x.rs".into());
+        let file = GraphNode::new(NodeType::File, "g.rs".into(), "src/g.rs".into());
+        let (f_id, g_id) = (f.id.clone(), callee.id.clone());
+        let (x_id, file_id) = (x.id.clone(), file.id.clone());
+        g.insert_nodes_batch(&[f, callee, x, file]).unwrap();
+        g.insert_edges_batch(&[
+            // g: one Calls incoming, two wrong-type incoming.
+            GraphEdge::new(EdgeType::Calls, f_id.clone(), g_id.clone()),
+            GraphEdge::new(EdgeType::Uses, x_id.clone(), g_id.clone()),
+            GraphEdge::new(EdgeType::Contains, file_id.clone(), g_id.clone()),
+            // f: one Calls outgoing, two wrong-type outgoing.
+            GraphEdge::new(EdgeType::Uses, f_id.clone(), x_id),
+            GraphEdge::new(EdgeType::Imports, f_id.clone(), file_id),
+        ])
+        .unwrap();
+
+        g.calculate_anchor_scores().unwrap();
+
+        let f_node = g.get_node(&f_id).unwrap().unwrap();
+        let g_node = g.get_node(&g_id).unwrap().unwrap();
+        assert_eq!(f_node.calls_out, Some(1), "f calls exactly one callee");
+        assert_eq!(g_node.calls_in, Some(1), "g has exactly one caller");
+        assert_eq!(
+            f_node.fan_out,
+            Some(3),
+            "fan_out counts every outgoing edge"
+        );
+        assert_eq!(g_node.fan_in, Some(3), "fan_in counts every incoming edge");
+    }
+
+    /// `incoming_calls` answers "who Calls this" — a non-Calls edge
+    /// into the same node must be ignored.
+    #[test]
+    fn incoming_calls_lists_only_calls_callers() {
+        let g = db("incoming_calls");
+        let caller = GraphNode::new(NodeType::Function, "caller".into(), "src/caller.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "callee".into(), "src/callee.rs".into());
+        let file = GraphNode::new(NodeType::File, "callee.rs".into(), "src/callee.rs".into());
+        let (caller_id, callee_id) = (caller.id.clone(), callee.id.clone());
+        let file_id = file.id.clone();
+        g.insert_nodes_batch(&[caller, callee, file]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::Calls, caller_id.clone(), callee_id.clone()),
+            GraphEdge::new(EdgeType::Contains, file_id, callee_id.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            g.incoming_calls(&callee_id),
+            vec![caller_id.clone()],
+            "only the Calls source counts as a caller (Contains must be ignored)"
+        );
+    }
+
+    /// `calls_http_pairs` reports `CallsHttp` edges only.
+    #[test]
+    fn calls_http_pairs_lists_only_callshttp_edges() {
+        let g = db("calls_http");
+        let route = GraphNode::new(NodeType::HttpRoute, "/users".into(), "src/r.rs".into());
+        let handler = GraphNode::new(NodeType::Function, "list".into(), "src/h.rs".into());
+        let (route_id, handler_id) = (route.id.clone(), handler.id.clone());
+        g.insert_nodes_batch(&[route, handler]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::CallsHttp, route_id.clone(), handler_id.clone()),
+            GraphEdge::new(EdgeType::Calls, handler_id.clone(), route_id.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            g.calls_http_pairs(),
+            vec![(route_id, handler_id)],
+            "the plain Calls edge must not leak into the CallsHttp pair list"
+        );
+    }
+
+    /// `get_file_node` finds the `File` node even when other node
+    /// types share the path index entry.
+    #[test]
+    fn get_file_node_returns_the_file_node_among_siblings() {
+        let g = db("file_node");
+        let file = GraphNode::new(NodeType::File, "a.rs".into(), "src/a.rs".into());
+        let symbol = GraphNode::new(NodeType::Function, "thing".into(), "src/a.rs".into());
+        g.insert_nodes_batch(&[file, symbol]).unwrap();
+
+        let found = g
+            .get_file_node("src/a.rs")
+            .expect("the path has a File node");
+        assert_eq!(found.node_type, NodeType::File, "must be the File node");
+        assert_eq!(found.name, "a.rs");
+    }
+
+    /// `has_references_from` needs an outgoing `Calls` or `Uses`
+    /// edge — any other edge type is not a reference.
+    #[test]
+    fn has_references_from_requires_an_outgoing_calls_or_uses_edge() {
+        let g = db("has_refs");
+        let x = GraphNode::new(NodeType::Function, "x".into(), "src/x.rs".into());
+        let z = GraphNode::new(NodeType::Function, "z".into(), "src/z.rs".into());
+        let y = GraphNode::new(NodeType::Function, "y".into(), "src/y.rs".into());
+        let w = GraphNode::new(NodeType::Function, "w".into(), "src/w.rs".into());
+        let (x_id, z_id, y_id, w_id) = (x.id.clone(), z.id.clone(), y.id.clone(), w.id.clone());
+        g.insert_nodes_batch(&[x, z, y, w]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::Calls, x_id.clone(), y_id.clone()),
+            GraphEdge::new(EdgeType::Uses, z_id.clone(), y_id.clone()),
+        ])
+        .unwrap();
+
+        assert!(
+            g.has_references_from(&x_id),
+            "an outgoing Calls edge is a reference"
+        );
+        assert!(
+            g.has_references_from(&z_id),
+            "an outgoing Uses edge is a reference"
+        );
+        assert!(
+            !g.has_references_from(&w_id),
+            "a node with no outgoing edges has no references"
+        );
+    }
+}
