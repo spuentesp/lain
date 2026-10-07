@@ -802,8 +802,14 @@ fn snapshot_blob_window(
 ) -> Option<String> {
     let text = snapshot_blob_at(fed, repo, commit, path)?;
     let lines: Vec<&str> = text.lines().collect();
-    let cited = line as usize;
-    if cited == 0 || cited > lines.len() {
+    if lines.is_empty() {
+        return None;
+    }
+    // `line_start == 0` marks a node with no line anchor (OpenAPI
+    // operations, schema nodes). Clamp to line 1 so the reference
+    // still resolves to real source instead of `null`.
+    let cited = if line == 0 { 1 } else { line as usize };
+    if cited > lines.len() {
         return None;
     }
     let start = cited.saturating_sub(context_lines as usize + 1);

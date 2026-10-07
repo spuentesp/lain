@@ -102,6 +102,85 @@ async fn get_service_attributes_each_consumer_to_its_real_endpoint() {
     }
 }
 
+/// Every evidence reference must carry the commit it was taken at, so
+/// an external client can resolve it without hand-joining
+/// `view.git_commits`. `text` must be the `repo@sha:path:line` form
+/// `resolve_evidence` already accepts.
+#[tokio::test]
+async fn evidence_refs_carry_a_commit() {
+    use lain::server::mcp::contract_tools::contracts::list_contracts_handle;
+
+    let fix = harness::build_fixture();
+    let mgr = harness::manager(&fix.root);
+    let config = harness::contract_config(&fix.root);
+    let base = snapshot_at(&mgr, &config, &fix.root, "base").await;
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&mgr, &status);
+
+    let outcome =
+        list_contracts_handle(&ctx, json!({"snapshot": base, "limit": 100}))
+            .await
+            .unwrap();
+    assert!(!outcome.is_error, "{:#?}", outcome.structured);
+    let items = outcome.structured["data"]["items"]
+        .as_array()
+        .expect("items array");
+    assert!(!items.is_empty());
+    for item in items {
+        for p in item["providers"].as_array().cloned().unwrap_or_default() {
+            let commit = p["commit"].as_str().unwrap_or("");
+            assert!(
+                !commit.is_empty(),
+                "provider ref {} has an empty commit: {p:?}",
+                p["id"]
+            );
+            assert_eq!(commit.len(), 40, "commit must be a full SHA: {p:?}");
+            let text = p["text"].as_str().unwrap_or("");
+            assert!(
+                text.contains(commit),
+                "text must be the repo@sha:path:line form: {p:?}"
+            );
+        }
+    }
+}
+
+/// A reference to a node with no line anchor (an OpenAPI operation is
+/// minted at `line_start == 0`) must still resolve to real source
+/// instead of `exists: true, snippet: null`.
+#[tokio::test]
+async fn openapi_line_zero_refs_resolve_to_a_snippet() {
+    use lain::server::mcp::contract_tools::evidence::resolve_evidence_handle;
+
+    let fix = harness::build_fixture();
+    let mgr = harness::manager(&fix.root);
+    let config = harness::contract_config(&fix.root);
+    let base = snapshot_at(&mgr, &config, &fix.root, "base").await;
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&mgr, &status);
+
+    let outcome = resolve_evidence_handle(
+        &ctx,
+        json!({
+            "snapshot": base,
+            "refs": ["orders:HttpRoute:openapi.yaml:GET /api/orders/me:0"],
+            "context_lines": 3
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!outcome.is_error, "{:#?}", outcome.structured);
+    let item = &outcome.structured["data"]["items"][0];
+    assert_eq!(item["exists"], json!(true), "ref must resolve: {item:?}");
+    assert!(
+        item["snippet"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "line-0 ref must still yield a snippet, got {:?}",
+        item["snippet"]
+    );
+}
+
 /// `list_contracts(kind=…)` must reject an unknown kind rather than
 /// returning an empty page. An empty page reads as "no such contract
 /// here", which is exactly the `absent` vs `not analysed` conflation
