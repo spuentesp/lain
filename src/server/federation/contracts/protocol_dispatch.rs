@@ -205,13 +205,13 @@ impl ProtocolDispatch for WebSocketDispatch {
             ),
             Vec<EndpointProviderRecord>,
         >,
-        _config: &ContractFederationConfig,
+        config: &ContractFederationConfig,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution {
         let ContractFact::WebSocketConsumer(ws_consumer) = fact else {
             unreachable!("WebSocketDispatch::dispatch called with non-WebSocketConsumer fact")
         };
-        resolve_websocket_consumer(call_id, ws_consumer, own_service, endpoints, binds)
+        resolve_websocket_consumer(call_id, ws_consumer, own_service, endpoints, config, binds)
     }
 }
 

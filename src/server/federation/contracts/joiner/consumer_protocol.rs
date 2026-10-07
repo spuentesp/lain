@@ -367,17 +367,63 @@ pub fn resolve_websocket_consumer(
     consumer: &crate::federation::contracts::model::WebSocketConsumerFact,
     own_service: &ServiceName,
     endpoints: &EndpointTable,
+    config: &crate::federation::contracts::config::ContractFederationConfig,
     binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
 ) -> ConsumerResolution {
+    // Host evidence first, exactly as `resolve_rpc_consumer` does it.
+    // Without this the resolver bound on `route` alone, so
+    // `wss://api.thirdparty.com/feed` invented a Binds edge to whatever
+    // internal service happened to declare `/feed`.
+    let candidate_services: Vec<ServiceName> = match &consumer.url.host {
+        HostPart::None => Vec::new(),
+        HostPart::Literal(host) => {
+            let mut svcs: Vec<ServiceName> = config
+                .services
+                .iter()
+                .filter(|s| s.hosts.iter().any(|pat| host_matches_pattern(pat, host)))
+                .map(|s| ServiceName(s.name.clone()))
+                .collect();
+            svcs.sort();
+            svcs
+        }
+        HostPart::Env(_) | HostPart::Expr(_) => Vec::new(),
+    };
+
+    // A literal host that names no configured service means the dial
+    // left the federation. There is no provider we may name, so this is
+    // `Unresolved` rather than a guessed bind. (An `External` terminal
+    // state would be nicer; the `external` map is only populated by the
+    // HTTP ladder today, so we stay conservative and say "unknown".)
+    if matches!(consumer.url.host, HostPart::Literal(_)) && candidate_services.is_empty() {
+        return ConsumerResolution {
+            call_id: call_id.clone(),
+            service: own_service.clone(),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: None,
+            }),
+            bound_endpoints: Vec::new(),
+            reads_complete: true,
+        };
+    }
+
     let key = ContractKey::WebSocket {
         route: consumer.route.clone(),
     };
+    // Ambiguity must refuse. `NoMatch` bound on *any* candidate count
+    // at confidence 1.0, so two services exposing `/ws` multi-bound;
+    // GraphQL has refused that since §8.3 and WebSocket must too.
+    let allowed = candidate_services.clone();
     resolve_by_key(
         call_id,
         &key,
         endpoints,
-        |(_, k)| k == &key,
-        AmbiguityPolicy::NoMatch,
+        |(svc, k): &(ServiceName, ContractKey)| {
+            k == &key && (allowed.is_empty() || allowed.contains(svc))
+        },
+        AmbiguityPolicy::GraphqlNoOp {
+            route_owner: Some(own_service.clone()),
+        },
         own_service,
         binds,
     )

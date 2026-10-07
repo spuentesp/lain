@@ -1878,7 +1878,7 @@ fn websocket_cross_service_join_produces_binds_edge() {
         route: "/feed".into(),
     }));
 
-    let cfg = two_service_topic_config();
+    let cfg = ws_config("orders", "orders");
     let out = ContractJoiner::run(&[provider.clone(), consumer.clone()], &[], &cfg);
     assert!(
         !out.binds.is_empty(),
@@ -2094,3 +2094,156 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
 // Silence unused-imports from churn.
 #[allow(dead_code)]
 fn _silence(_: &RepoId, _: &GlobalId, _: &BTreeSet<FieldRefResolution>) {}
+
+// ─── WebSocket consumers need host evidence and ambiguity refusal ────
+//
+// `resolve_websocket_consumer` used to build its key from `route` only
+// and bind on *any* candidate count at confidence 1.0 Exact, without
+// ever reading `WebSocketConsumerFact.url`. So `wss://api.thirdparty.com`
+// invented a Binds edge to whatever internal service declared the same
+// path, and two providers for `/ws` multi-bound instead of refusing.
+
+fn ws_provider_node(service: &str, route: &str, line: u32) -> GraphNode {
+    let mut provider = GraphNode::new(
+        NodeType::HttpRoute,
+        format!("ws:server:{route}"),
+        "src/server.js".into(),
+    );
+    provider.repo_id = Some(service.into());
+    provider.id = make_id(service, NodeType::HttpRoute, "src/server.js", route, line);
+    provider.line_start = Some(line);
+    provider.contract = Some(ContractFact::WebSocketProvider(WebSocketProviderFact {
+        route: route.into(),
+        handler: None,
+    }));
+    provider
+}
+
+fn ws_consumer_node(service: &str, host: &str, route: &str, line: u32) -> GraphNode {
+    let mut consumer = GraphNode::new(
+        NodeType::HttpClientCall,
+        format!("ws:client:{host}:{route}"),
+        "src/client.js".into(),
+    );
+    consumer.repo_id = Some(service.into());
+    consumer.id = make_id(
+        service,
+        NodeType::HttpClientCall,
+        "src/client.js",
+        route,
+        line,
+    );
+    consumer.line_start = Some(line);
+    consumer.contract = Some(ContractFact::WebSocketConsumer(WebSocketConsumerFact {
+        url: NormalizedUrl {
+            host: HostPart::Literal(host.into()),
+            template: Some(route.into()),
+        },
+        route: route.into(),
+    }));
+    consumer
+}
+
+fn ws_config(service: &str, host: &str) -> ContractFederationConfig {
+    ContractFederationConfig {
+        services: vec![ServiceDecl {
+            name: service.into(),
+            repo: service.into(),
+            paths: vec![],
+            hosts: vec![host.into()],
+            env: vec![],
+            base_path: None,
+            route_prefixes: vec![],
+        }],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+        databases: vec![],
+    }
+}
+
+#[test]
+fn ws_consumer_with_foreign_host_does_not_bind() {
+    // The dial goes to `api.thirdparty.com`, but the only `/feed`
+    // endpoint lives in `orders`. A Binds edge here would be invented.
+    let provider = ws_provider_node("orders", "/feed", 10);
+    let consumer = ws_consumer_node("billing", "api.thirdparty.com", "/feed", 20);
+    let cfg = ws_config("orders", "orders.internal");
+
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "an external WS host must not invent a Binds edge, got {:?}",
+        res.target
+    );
+    assert!(
+        out.binds.is_empty(),
+        "no Binds edge expected: {:?}",
+        out.binds
+    );
+}
+
+#[test]
+fn ws_consumer_with_two_matching_providers_stays_unresolved() {
+    // Two services expose `/ws`. Ambiguity must refuse, not bind both
+    // at confidence 1.0.
+    let p1 = ws_provider_node("orders", "/ws", 10);
+    let p2 = ws_provider_node("billing", "/ws", 30);
+    let consumer = ws_consumer_node("reports", "orders.internal", "/ws", 20);
+    let cfg = ContractFederationConfig {
+        services: vec![
+            ServiceDecl {
+                name: "orders".into(),
+                repo: "orders".into(),
+                paths: vec![],
+                hosts: vec!["orders.internal".into()],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+            ServiceDecl {
+                name: "billing".into(),
+                repo: "billing".into(),
+                paths: vec![],
+                hosts: vec!["orders.internal".into()],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+        ],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+        databases: vec![],
+    };
+
+    let out = ContractJoiner::run(&[p1, p2, consumer.clone()], &[], &cfg);
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "ambiguity must refuse, not bind to both: {:?}",
+        res.target
+    );
+}
+
+#[test]
+fn ws_consumer_with_single_matching_provider_binds() {
+    // Positive control: one provider, host matches, route matches.
+    let provider = ws_provider_node("orders", "/ws", 10);
+    let consumer = ws_consumer_node("billing", "orders.internal", "/ws", 20);
+    let cfg = ws_config("orders", "orders.internal");
+
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Binds { .. })),
+        "a single host+route match must bind: {:?}",
+        res.target
+    );
+}
