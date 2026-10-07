@@ -38,7 +38,7 @@ use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::payload_schema::{
     parse_proto_messages_with_diagnostics, ProtoParseDiagnostic,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -151,6 +151,24 @@ pub fn scan_workspace_grpc_with_report(
         let graph_path_str = graph_path(root, &path);
         let providers = parse_proto_providers(&content, &graph_path_str);
 
+        // Collect the bare names of every type used as a request
+        // argument before emitting them as Schema nodes, so the
+        // Schema node's `Direction` reflects how the message is
+        // actually consumed (`Request` vs `Response`). A type that
+        // appears on both sides of any RPC falls back to `Request`
+        // — the consumer-facing view is the one joiner dispatch
+        // uses to derive the schema lineage.
+        let mut request_types: BTreeSet<String> = BTreeSet::new();
+        for provider in &providers {
+            let bare = provider
+                .request_type
+                .rsplit('.')
+                .next()
+                .unwrap_or(&provider.request_type);
+            request_types.insert(bare.to_string());
+            request_types.insert(provider.request_type.clone());
+        }
+
         // Parse protobuf message schemas and fields, *and* the
         // diagnostics the parser surfaced for shapes it could
         // not classify. The rich entry point replaces the
@@ -168,14 +186,17 @@ pub fn scan_workspace_grpc_with_report(
                 Some(line),
                 namespace,
             );
+            let direction = if request_types.contains(&msg.name) {
+                Direction::Request
+            } else {
+                Direction::Response
+            };
             let mut schema_node =
                 GraphNode::new(NodeType::Schema, msg.name.clone(), graph_path_str.clone());
             schema_node.id = schema_id.clone();
             schema_node.line_start = Some(line);
             schema_node.line_end = Some(line);
-            schema_node.contract = Some(ContractFact::Schema {
-                direction: Direction::Response,
-            });
+            schema_node.contract = Some(ContractFact::Schema { direction });
             all_nodes.push(schema_node);
             schemas_in_file.insert(msg.name.clone(), schema_id.clone());
 
@@ -275,10 +296,7 @@ pub fn scan_workspace_grpc_with_report(
         // (see AGENTS.md) so we reuse what is there.
         record_diagnostics(&diagnostics, &graph_path_str, &mut unresolved_by_reason);
     }
-    if !all_nodes.is_empty() {
-        let _ =
-            graph.replace_sensor_output(SensorOwner::GrpcProviderSensor, &all_nodes, &all_edges);
-    }
+    graph.replace_sensor_output(SensorOwner::GrpcProviderSensor, &all_nodes, &all_edges)?;
     let unresolved_records: Vec<UnresolvedRecord> = unresolved_by_reason
         .into_iter()
         .map(|(reason, (count, sample_ids))| UnresolvedRecord {

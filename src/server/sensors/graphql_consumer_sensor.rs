@@ -45,12 +45,9 @@
 //! parsing.
 
 use crate::error::LainError;
-use crate::federation::contracts::model::{
-    ContractFact, FieldReadFact, FieldReadOrigin, GraphqlConsumerFact, GraphqlOp, JsonPath,
-    PathSegment,
-};
+use crate::federation::contracts::model::{ContractFact, GraphqlConsumerFact, GraphqlOp};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -147,33 +144,19 @@ pub fn scan_workspace_graphql_consumer(
             all_nodes.push(node);
             total += 1;
 
-            for (idx, sel) in c.selected_fields.iter().enumerate() {
-                let ref_id_name = format!("graphql-read:{}:{}:{}", c.op, c.field, sel);
-                let ref_id = GraphNode::generate_id(
-                    &NodeType::FieldRef,
-                    &c.site_path,
-                    &ref_id_name,
-                    Some(c.site_line + idx as u32),
+            crate::server::sensors::util::emit_graphql_field_refs(
+                crate::server::sensors::util::GraphqlFieldRefs {
+                    consumer_id: &id,
+                    op: c.op,
+                    field: &c.field,
+                    site_path: &c.site_path,
+                    site_line: c.site_line,
+                    selected_fields: &c.selected_fields,
                     namespace,
-                );
-                let mut ref_node =
-                    GraphNode::new(NodeType::FieldRef, sel.clone(), c.site_path.clone());
-                ref_node.id = ref_id.clone();
-                ref_node.line_start = Some(c.site_line + idx as u32);
-                ref_node.line_end = Some(c.site_line + idx as u32);
-                ref_node.contract = Some(ContractFact::FieldRead(FieldReadFact {
-                    chain: JsonPath(vec![PathSegment::Name(sel.clone())]),
-                    exact: true,
-                    origin: FieldReadOrigin::GraphqlConsumer,
-                }));
-                all_nodes.push(ref_node);
-                all_edges.push(GraphEdge::new(
-                    EdgeType::ReadsFrom,
-                    ref_id.clone(),
-                    id.clone(),
-                ));
-                all_edges.push(GraphEdge::new(EdgeType::ReadsField, id.clone(), ref_id));
-            }
+                },
+                &mut all_nodes,
+                &mut all_edges,
+            );
         }
     }
     let code_ext = |p: &Path| {
@@ -212,39 +195,22 @@ pub fn scan_workspace_graphql_consumer(
             all_nodes.push(node);
             total += 1;
 
-            for (idx, sel) in c.selected_fields.iter().enumerate() {
-                let ref_id_name = format!("graphql-read:{}:{}:{}", c.op, c.field, sel);
-                let ref_id = GraphNode::generate_id(
-                    &NodeType::FieldRef,
-                    &c.site_path,
-                    &ref_id_name,
-                    Some(c.site_line + idx as u32),
+            crate::server::sensors::util::emit_graphql_field_refs(
+                crate::server::sensors::util::GraphqlFieldRefs {
+                    consumer_id: &id,
+                    op: c.op,
+                    field: &c.field,
+                    site_path: &c.site_path,
+                    site_line: c.site_line,
+                    selected_fields: &c.selected_fields,
                     namespace,
-                );
-                let mut ref_node =
-                    GraphNode::new(NodeType::FieldRef, sel.clone(), c.site_path.clone());
-                ref_node.id = ref_id.clone();
-                ref_node.line_start = Some(c.site_line + idx as u32);
-                ref_node.line_end = Some(c.site_line + idx as u32);
-                ref_node.contract = Some(ContractFact::FieldRead(FieldReadFact {
-                    chain: JsonPath(vec![PathSegment::Name(sel.clone())]),
-                    exact: true,
-                    origin: FieldReadOrigin::GraphqlConsumer,
-                }));
-                all_nodes.push(ref_node);
-                all_edges.push(GraphEdge::new(
-                    EdgeType::ReadsFrom,
-                    ref_id.clone(),
-                    id.clone(),
-                ));
-                all_edges.push(GraphEdge::new(EdgeType::ReadsField, id.clone(), ref_id));
-            }
+                },
+                &mut all_nodes,
+                &mut all_edges,
+            );
         }
     }
-    if !all_nodes.is_empty() {
-        let _ =
-            graph.replace_sensor_output(SensorOwner::GraphqlConsumerSensor, &all_nodes, &all_edges);
-    }
+    graph.replace_sensor_output(SensorOwner::GraphqlConsumerSensor, &all_nodes, &all_edges)?;
     Ok(total)
 }
 

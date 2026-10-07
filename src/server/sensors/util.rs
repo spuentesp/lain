@@ -4,7 +4,7 @@
 //! here is imported, never re-implemented per sensor.
 
 use crate::graph::GraphDatabase;
-use crate::schema::GraphNode;
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use std::path::Path;
 use tree_sitter::{Language, Parser, Tree};
 
@@ -473,6 +473,81 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
                 .then_with(|| b.0.line_start.cmp(&a.0.line_start))
         })
         .map(|(n, _)| n)
+}
+
+// ─── Shared emitters for the protocol sensors ──────────────────────
+//
+// The graphql consumer sensor used to duplicate this 25-line block
+// at two call sites (SDL-derived consumers, then code-derived
+// consumers); the two copies drifted only in the data they
+// received, never in the emission shape. This helper is the single
+// source of truth so the two call sites cannot diverge again.
+
+use crate::federation::contracts::model::{
+    ContractFact, FieldReadFact, FieldReadOrigin, GraphqlOp, JsonPath, PathSegment,
+};
+
+/// Bundle the parameters for [`emit_graphql_field_refs`].
+pub struct GraphqlFieldRefs<'a> {
+    pub consumer_id: &'a str,
+    pub op: GraphqlOp,
+    pub field: &'a str,
+    pub site_path: &'a str,
+    pub site_line: u32,
+    pub selected_fields: &'a [String],
+    pub namespace: &'a RepoNamespace,
+}
+
+/// Emit one `FieldRef` node per selected GraphQL field, plus
+/// `ReadsFrom` and `ReadsField` edges linking it to the consumer
+/// node. The id naming scheme (`graphql-read:<op>:<field>:<sel>`)
+/// and the `FieldReadOrigin::GraphqlConsumer` origin are part of the
+/// graph contract — joiner dispatch and `tests/graphql_resolution.rs`
+/// match on them.
+pub fn emit_graphql_field_refs(
+    spec: GraphqlFieldRefs<'_>,
+    all_nodes: &mut Vec<GraphNode>,
+    all_edges: &mut Vec<GraphEdge>,
+) {
+    let GraphqlFieldRefs {
+        consumer_id,
+        op,
+        field,
+        site_path,
+        site_line,
+        selected_fields,
+        namespace,
+    } = spec;
+    for (idx, sel) in selected_fields.iter().enumerate() {
+        let ref_id_name = format!("graphql-read:{}:{}:{}", op, field, sel);
+        let ref_id = GraphNode::generate_id(
+            &NodeType::FieldRef,
+            site_path,
+            &ref_id_name,
+            Some(site_line + idx as u32),
+            namespace,
+        );
+        let mut ref_node = GraphNode::new(NodeType::FieldRef, sel.clone(), site_path.to_string());
+        ref_node.id = ref_id.clone();
+        ref_node.line_start = Some(site_line + idx as u32);
+        ref_node.line_end = Some(site_line + idx as u32);
+        ref_node.contract = Some(ContractFact::FieldRead(FieldReadFact {
+            chain: JsonPath(vec![PathSegment::Name(sel.clone())]),
+            exact: true,
+            origin: FieldReadOrigin::GraphqlConsumer,
+        }));
+        all_nodes.push(ref_node);
+        all_edges.push(GraphEdge::new(
+            EdgeType::ReadsFrom,
+            ref_id.clone(),
+            consumer_id.to_string(),
+        ));
+        all_edges.push(GraphEdge::new(
+            EdgeType::ReadsField,
+            consumer_id.to_string(),
+            ref_id,
+        ));
+    }
 }
 
 #[cfg(test)]

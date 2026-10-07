@@ -787,11 +787,13 @@ fn enrich_used_by_with_owners(entries: &mut [Value]) {
         };
         let repo = id.split(':').next().unwrap_or("");
         let path = ref_obj.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        // Always present. `[]` means "CODEOWNERS declares no owner for
-        // this path"; omitting the key would mean "owners could not be
-        // loaded", which an external client must not silently read as
-        // "no owner". The lookup is repo-keyed, so a wrong key here
-        // shows up as a silent `[]` — see `scan_workspace_codeowners_for_repo`.
+        // Only emitted when the entry has a `ref` with an `id` (the
+        // `continue`s above skip it otherwise — `get_service.out.json`
+        // marks `owners` as optional, not required). When emitted,
+        // `[]` means "CODEOWNERS declares no owner for this path";
+        // omitting the key entirely means "no ref id was available".
+        // The lookup is repo-keyed, so a wrong key here shows up as a
+        // silent `[]` — see `scan_workspace_codeowners_for_repo`.
         entry["owners"] = json!(codeowners_for(repo, path));
     }
 }

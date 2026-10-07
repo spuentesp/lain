@@ -1525,29 +1525,6 @@ impl LainMcpServer {
         Self::new(executor)
     }
 
-    /// Execute a tool call programmatically against the server handler,
-    /// matching the stdio MCP dispatch path.
-    pub async fn call_tool(
-        &self,
-        params: CallToolRequestParams,
-    ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError>
-    {
-        let handler = LainHandler {
-            executor: Arc::new(self.executor.clone()),
-            federation: self.federation.clone(),
-            workspaces: self.workspaces.clone(),
-            snapshots: self.snapshots.clone(),
-            status_transport: self.status_transport,
-            status_port: self.status_port,
-            status_started_at: self.status_started_at,
-            status_last_sync_at: self.status_last_sync_at.clone(),
-            status_last_error: self.status_last_error.clone(),
-            reload_bus: self.reload_bus.clone(),
-            server: self.server.clone(),
-        };
-        handler.call_tool_inner(params).await
-    }
-
     // `from_read_only_graph` was a convenience wrapper over `new_read_only`
     // with no caller and no test; `new_read_only` remains the sidecar entry.
 
