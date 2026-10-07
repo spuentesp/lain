@@ -339,25 +339,80 @@ None of it surfaces through `ScanReport`, so the coverage ledger cannot see the 
 
 ## P2 — Quality and the registry migration
 
-### Task 8: Move library idioms into `patterns/frameworks.yaml`
+### Task 8: Make the protocol sensors templated — three tiers, not "rewrite them"
 
-**Origin.** Reviewer question: *"didn't we make a template format for these sensors? why are they implemented as .rs?"* Answer: yes — `src/server/sensors/patterns/frameworks.yaml` + per-lang `.scm`, whose header says *"Adding a new framework is a data change."* But `FrameworkKind` is only `route | outbound | entrypoint`, and the new protocol sensors touch `Patterns::` **zero** times.
+**Origin.** Reviewer question: *"didn't we make a template format for these sensors? why are they implemented as .rs?"*
 
-The protocol *parsers* (proto tokenizer, GraphQL SDL, SQL literal extraction, `payload_schema`) legitimately belong in Rust. The **library-call idioms** do not:
+The first answer to this was wrong in a useful way: it framed the split as "parsers belong in Rust, idioms belong in data." That is a false dichotomy. **Rust + template is exactly what `patterns/` already is** — a Rust engine consuming data. The shipped registry is not regex tables:
 
-| file | hardcoded idioms |
-|---|---|
-| `event_sensor.rs` | `.run(` `.subscribe(` `KafkaConsumer(` `@app.task` `@shared_task` `@Cron`, kafkajs / aiokafka / rdkafka / kafka-go |
-| `websocket_sensor.rs` | 4 regexes **compiled per scan call**: `wss?://…`, `on( open\|message\|close\|error)`, `new WebSocket(…)`, `app.ws\|router.ws\|WebSocketGateway` |
+- `frameworks.yaml` — 218 lines, **35 framework entries**
+- **38 `.scm` files** across **11 language dirs** (python, rust, go, java, kotlin, csharp, ruby, tsjs)
+- `<repo>/.lain/patterns/*.yaml` overrides, via `Patterns::with_overrides`
 
-- [ ] **Step 1:** extend `FrameworkKind` with `TopicProducer`, `TopicConsumer`, `Scheduled`, `WebSocket` (or add a sibling `idioms:` document — prefer extending, so `with_overrides` and `<repo>/.lain/patterns/*.yaml` keep working).
-- [ ] **Step 2:** move the `event_sensor` needles into `frameworks.yaml` entries with `lib_match` / `annotation_regex`, and the `websocket_sensor` regexes into entries with `path_regex`. Add `kotlin`/`scala`-style `.scm` only where tree-sitter already parses the language.
-- [ ] **Step 3:** hoist any remaining `Regex::new` out of scan functions into `OnceLock`/`LazyLock` statics regardless of the migration — per-file recompilation is a real cost.
-- [ ] **Step 4:** add `tests/sensors/patterns_protocol_idioms.rs` proving a new idiom can be added by editing YAML only (the `django-route` test at `tests/sensors/patterns_new_framework.rs` is the template).
-- [ ] **Step 5:** `cargo test --quiet --lib sensors && cargo test --test patterns_new_framework`
-- [ ] **Step 6:** `git commit -m "refactor(sensors): library idioms become data in patterns/frameworks.yaml"`
+And a `.scm` file *is* structured parsing as data — `patterns/rust/axum-route.scm` declares named captures (`@path`, `@verb`, `@handler`) over a tree-sitter grammar. `tests/sensors/patterns_new_framework.rs` already asserts the design goal: *"No production code in `src/server/sensors/*.rs` was touched."*
 
-**Acceptance:** adding a Kafka client library or a WebSocket framework is a YAML diff, not a Rust diff.
+So the real question is **what is the unit of templating**. A sensor does three distinct jobs:
+
+| Layer | Job | Belongs in | Why |
+|---|---|---|---|
+| **Recognise** | "this call site is a Kafka publish" | **data** | many instances, one shape |
+| **Extract** | "what fields does this proto / SDL / SQL declare?" | **data where a grammar exists** (`.scm`), else one shared lexer | tree-sitter grammars exist for proto, GraphQL and SQL |
+| **Project** | mint `ContractFact`, normalize `/api/orders/:id` → `/api/orders/{}`, derive `ContractKey`, resolve `import "common.proto"`, apply ambiguity policy | **Rust** — but *one shared emitter* | semantic, cross-file, policy-laden |
+
+Only the third layer must be Rust. What the current code got wrong is not "it is in Rust" but **all three layers are in Rust, once per sensor**.
+
+**Evidence of the cost** (measured):
+
+| | lines | covers |
+|---|---|---|
+| Shared pattern engine (`http_sensor` + `http_client` + `entry_point` + `field_access`) | ~7,600 | 11 languages × 35 frameworks |
+| 7 hand-written protocol sensors | ~5,700 | 5 protocols, with internal duplication |
+
+Duplication is verbatim. `grpc_provider_sensor.rs:100` and `graphql_provider_sensor.rs:102` mint `Schema` nodes with the identical `generate_id` / `GraphNode::new` / `contract = Schema{direction}` sequence; the ~25-line `FieldRef` emission block is copy-pasted inside `graphql_consumer_sensor.rs` at `:149` and `:213`; `parse_proto_messages` re-lexes from scratch instead of reusing `util_tokenize` and the comment-strip / continuation-join that `parse_proto_providers` already has.
+
+**Where the line actually is** (stated honestly — there is a real trade-off):
+
+- **Same shape, many instances → data.** kafkajs vs aiokafka vs rdkafka vs kafka-go vs `@app.task` vs `@Cron` are six idioms, one shape. `new WebSocket(…)` vs `app.ws(…)` vs `WebSocketGateway` likewise. A seventh must not require a Rust diff.
+- **Structurally unique artifacts → code, but *shared* code.** A hand-rolled `.proto` tokenizer (~150 lines, zero deps) is a defensible choice for one format — just not one lexer per protocol. Where a tree-sitter grammar exists, prefer `.scm`.
+- **Semantic projection → always Rust, always shared.**
+
+Rough residual that genuinely must stay Rust: cross-file type resolution, `ContractKey` derivation, ambiguity policy — about 20% of the 5,700 lines.
+
+**Files:** `src/server/sensors/patterns/{mod.rs,frameworks.yaml}`, `src/server/sensors/util.rs`, the 7 protocol sensors
+
+- [ ] **Step 1: Tier 1 — recognition as data.** Add an `idioms:` section (or extend `FrameworkKind` with `TopicProducer`, `TopicConsumer`, `Scheduled`, `WebSocket` — prefer extending so `with_overrides` and `<repo>/.lain/patterns/*.yaml` keep working). Entries carry `lib_match` / `annotation_regex` / `path_regex` and name the capture they yield (topic, url, handler). Move these out of Rust:
+
+  | file | hardcoded idioms |
+  |---|---|
+  | `event_sensor.rs` | `.run(` `.subscribe(` `KafkaConsumer(` `@app.task` `@shared_task` `@Cron`, kafkajs / aiokafka / rdkafka / kafka-go |
+  | `websocket_sensor.rs` | `wss?://…`, `on( open\|message\|close\|error)`, `new WebSocket(…)`, `app.ws\|router.ws\|WebSocketGateway` |
+
+  Consume them from one generic line-idiom walker in `util.rs`, not per sensor.
+
+- [ ] **Step 2: Tier 2 — extraction as data.** Where a tree-sitter grammar exists (proto, GraphQL, SQL), replace the hand-rolled lexers with `.scm` queries declaring named captures. Where it does not (`payload_schema.rs` Avro / JSON-Schema), keep a small parser but route it through the shared tokenizer. Always reuse `util_tokenize` + the existing comment-strip / continuation-join rather than re-lexing.
+
+- [ ] **Step 3: Tier 3 — one shared emitter.** Extract `emit_schema_with_fields`, `emit_field_ref`, `emit_table` into `util.rs` and collapse the duplicated blocks above. Every sensor then reports parse failure the same way (`ScanReport::{error, unresolved}`) — see Task 5.
+
+- [ ] **Step 4:** hoist any remaining `Regex::new` out of scan functions into `OnceLock`/`LazyLock` statics **regardless** of the migration — `websocket_sensor.rs` compiles four regexes per scan call today, which is a real per-file cost.
+
+- [ ] **Step 5: the acceptance test.** `tests/sensors/patterns_protocol_idioms.rs`, modelled on `tests/sensors/patterns_new_framework.rs` (`django-route` is the proof case):
+
+  ```rust
+  //! Adding support for a new Kafka client or WebSocket framework must
+  //! be a YAML/`.scm` diff. If this test needs a change under
+  //! `src/server/sensors/*.rs`, the templating has regressed.
+  #[test]
+  fn a_new_idiom_is_a_data_change() {
+      // 1. append one entry to frameworks.yaml (or drop a .scm in)
+      // 2. assert the walker emits the expected topic / url / handler
+      // 3. assert `git diff -- src/server/sensors/*.rs` is empty
+  }
+  ```
+
+- [ ] **Step 6:** `cargo test --quiet --lib sensors && cargo test --test patterns_new_framework --test patterns_protocol_idioms`
+- [ ] **Step 7:** `git commit -m "refactor(sensors): three-tier templating — idioms and extraction as data, one shared emitter"`
+
+**Acceptance:** adding `kafka-python` or `socket.io` support is a YAML/`.scm` diff with **zero** `src/server/sensors/*.rs` changes. That is the only test that proves the template is real.
 
 ---
 
