@@ -376,6 +376,13 @@ pub enum ChangeKind {
     /// only when `ChangedFilesSource` reports a file in
     /// `source_files` differs between base and head.
     ChangedWithoutSchema { endpoint: EndpointId },
+    /// Sibling of `ChangedWithoutSchema` for endpoints that DO carry
+    /// a schema on both sides. The schema is byte-identical so
+    /// `diff_fields` reports nothing, but a handler source file
+    /// changed — the behaviour behind the endpoint may have moved.
+    /// Without this rule a pure behaviour change is invisible to
+    /// `diff_contracts`.
+    HandlerChanged { endpoint: EndpointId },
     /// §9.3: consumer in head but not in base, unresolved in head.
     ConsumerEndpointUnmatched { consumer: ConsumerKey },
     /// §9.3: head consumer bound to an endpoint with a schema reads
@@ -545,6 +552,29 @@ pub fn diff_contracts(
         });
     }
 
+    // Which endpoints claim each handler file (union of base and
+    // head). `HandlerChanged` only fires for a file claimed by exactly
+    // one endpoint: an edit to a shared file (a routing table holding
+    // three handlers) cannot be attributed to any one of them, and
+    // reporting it as a per-endpoint lead is noise. Single-handler
+    // files stay fully attributed. Keyed by `EndpointId` so an
+    // endpoint present in both surfaces is counted once.
+    let mut handler_file_owners: BTreeMap<String, BTreeSet<EndpointId>> = BTreeMap::new();
+    for (eid, def) in base.endpoints.iter().chain(head.endpoints.iter()) {
+        let mut claimed: BTreeSet<&String> = BTreeSet::new();
+        for p in &def.providers {
+            if let Some(h) = p.handler.as_ref() {
+                claimed.insert(&h.path);
+            }
+        }
+        for f in claimed {
+            handler_file_owners
+                .entry(f.clone())
+                .or_default()
+                .insert(eid.clone());
+        }
+    }
+
     // Stage 3 — field-level diffs for paired endpoints.
     for (base_id, head_id) in &pairings {
         let base_def = &base.endpoints[base_id];
@@ -572,6 +602,7 @@ pub fn diff_contracts(
             });
         }
         // Field-level diff (per direction).
+        let schema_changes_before = changes.len();
         for direction in [Direction::Request, Direction::Response, Direction::Payload] {
             diff_fields(
                 &mut changes,
@@ -581,27 +612,56 @@ pub fn diff_contracts(
                 head_def.schemas.get(&direction),
             );
         }
-        // ChangedWithoutSchema rule (§9.2, Gaps P1.6, P1.7, P1.8) —
-        // both sides have no schema and handler/provider source file
-        // differs in the provider repository.
-        // File-level change is classified conservatively as PossibleBehaviorChange
-        // (Compat::NeedsReview, Class::NeedsInvestigation).
-        if !base_def.has_schema && !head_def.has_schema {
-            let base_sha = "";
-            let head_sha = "";
-            let provider_repos = endpoint_provider_repos(base_def, head_def);
+        // Did the schema itself change? If so the field-level diff
+        // above already reported it and no handler-change rule is
+        // needed — `HandlerChanged` is for "schema byte-identical,
+        // handler moved", the case nothing else would report.
+        let schema_reported = changes.len() > schema_changes_before;
+        // §9.2 ChangedWithoutSchema + its schema-bearing sibling
+        // HandlerChanged. Both ask whether a handler / provider
+        // source file changed in the provider repository, and differ
+        // in whether the endpoint carries a schema.
+        //
+        // `HandlerChanged` looks at handler files ONLY. `source_files`
+        // also contains the schema node's path (where field metadata
+        // lives), which would make an edit to `openapi.yaml` for one
+        // endpoint trip the rule on every other endpoint in that file.
+        let handler_files: BTreeSet<&String> = base_def
+            .providers
+            .iter()
+            .chain(head_def.providers.iter())
+            .filter_map(|p| p.handler.as_ref().map(|h| &h.path))
+            .collect();
+        let base_sha = "";
+        let head_sha = "";
+        let provider_repos = endpoint_provider_repos(base_def, head_def);
 
-            let mut fired = false;
-            if provider_repos.is_empty() {
-                let changed = changed_files.changed_files(base_sha, head_sha);
+        let mut source_changed = false;
+        let mut handler_changed = false;
+        {
+            let mut note = |changed: &std::collections::BTreeSet<String>| {
                 if base_def
                     .source_files
                     .iter()
                     .chain(head_def.source_files.iter())
                     .any(|f| changed.contains(f))
                 {
-                    fired = true;
+                    source_changed = true;
                 }
+                if handler_files.iter().any(|f| {
+                    // Attribution: only a file this endpoint alone
+                    // claims can be blamed on this endpoint.
+                    changed.contains(*f)
+                        && handler_file_owners
+                            .get(f.as_str())
+                            .map(|owners| owners.len() == 1)
+                            .unwrap_or(false)
+                }) {
+                    handler_changed = true;
+                }
+            };
+            if provider_repos.is_empty() {
+                note(&changed_files.changed_files(base_sha, head_sha));
             } else {
                 for repo in &provider_repos {
                     match changed_files.changed_files_for_repo(repo, base_sha, head_sha) {
@@ -610,31 +670,33 @@ pub fn diff_contracts(
                         // repository as unreviewed and prevents a
                         // NoKnownImpact conclusion.
                         RepoDiffResult::Unavailable(_) => {}
-                        RepoDiffResult::Changed(ref changed) => {
-                            if base_def
-                                .source_files
-                                .iter()
-                                .chain(head_def.source_files.iter())
-                                .any(|f| changed.contains(f))
-                            {
-                                fired = true;
-                                break;
-                            }
-                        }
+                        RepoDiffResult::Changed(ref changed) => note(changed),
                         RepoDiffResult::Unchanged => {}
                     }
                 }
             }
-
-            if fired {
-                changes.push(Change {
-                    service: head_id.0.clone(),
-                    kind: ChangeKind::ChangedWithoutSchema {
-                        endpoint: head_id.clone(),
-                    },
-                });
-            }
         }
+
+        if source_changed && !base_def.has_schema && !head_def.has_schema {
+            changes.push(Change {
+                service: head_id.0.clone(),
+                kind: ChangeKind::ChangedWithoutSchema {
+                    endpoint: head_id.clone(),
+                },
+            });
+        } else if handler_changed && base_def.has_schema && head_def.has_schema && !schema_reported
+        {
+            // Identical schema, changed handler: the behaviour may
+            // have moved and nothing else would report it.
+            changes.push(Change {
+                service: head_id.0.clone(),
+                kind: ChangeKind::HandlerChanged {
+                    endpoint: head_id.clone(),
+                },
+            });
+        }
+        // A schema appeared or disappeared, or the schema changed:
+        // `diff_fields` above already reports that, so no extra rule.
     }
 
     changes.sort_by(|a, b| {
@@ -768,6 +830,9 @@ fn kind_label(kind: &ChangeKind) -> String {
         ChangeKind::ChangedWithoutSchema { endpoint } => {
             format!("changed-no-schema:{}", endpoint.1)
         }
+        ChangeKind::HandlerChanged { endpoint } => {
+            format!("handler-changed:{}", endpoint.1)
+        }
         ChangeKind::ConsumerEndpointUnmatched { consumer } => {
             format!("consumer-unmatched:{}", consumer_label(consumer))
         }
@@ -806,7 +871,11 @@ fn method_of(id: &EndpointId) -> Option<crate::federation::contracts::model::Htt
             MethodSpec::Known(m) => Some(*m),
             MethodSpec::Unknown => None,
         },
-        ContractKey::Topic { .. } | ContractKey::Rpc { .. } | ContractKey::Graphql { .. } => None,
+        ContractKey::Topic { .. }
+        | ContractKey::Rpc { .. }
+        | ContractKey::Graphql { .. }
+        | ContractKey::WebSocket { .. }
+        | ContractKey::Table { .. } => None,
     }
 }
 
@@ -1359,7 +1428,7 @@ pub fn classify(kind: &ChangeKind, direction: Direction) -> Compat {
         },
         EndpointRemoved { .. } | PathChanged { .. } | MethodChanged { .. } => Compat::Breaking,
         EndpointAdded { .. } => Compat::Compatible,
-        ChangedWithoutSchema { .. } => Compat::NeedsReview,
+        ChangedWithoutSchema { .. } | HandlerChanged { .. } => Compat::NeedsReview,
         ConsumerEndpointUnmatched { .. } | ConsumerFieldUnmatched { .. } => Compat::Breaking,
         ConsumerRebound { .. } => Compat::Compatible,
     }
@@ -1861,7 +1930,8 @@ fn provider_target_endpoint(change: &Change) -> Option<EndpointId> {
         | ChangeKind::NullabilityChanged { endpoint, .. }
         | ChangeKind::EnumValueRemoved { endpoint, .. }
         | ChangeKind::EnumValueAdded { endpoint, .. }
-        | ChangeKind::ChangedWithoutSchema { endpoint } => Some(endpoint.clone()),
+        | ChangeKind::ChangedWithoutSchema { endpoint }
+        | ChangeKind::HandlerChanged { endpoint } => Some(endpoint.clone()),
         // EndpointRemoved carries the removed key on its `service`;
         // the endpoint was live in base, so we project it as the
         // target so the could-match rule (and the per-base-consumer
@@ -2120,6 +2190,10 @@ pub fn could_match(
         ConsumerTargetKey::Contract(ContractKey::Topic { .. }) => return false,
         ConsumerTargetKey::Contract(ContractKey::Rpc { .. }) => return false,
         ConsumerTargetKey::Contract(ContractKey::Graphql { .. }) => return false,
+        ConsumerTargetKey::Contract(ContractKey::WebSocket { route }) => {
+            (MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any), Some(route.clone()))
+        }
+        ConsumerTargetKey::Contract(ContractKey::Table { .. }) => return false,
         ConsumerTargetKey::UrlExpr(_) => (MethodSpec::Unknown, None),
     };
     let endpoint_method = match &endpoint.1 {
@@ -2127,6 +2201,10 @@ pub fn could_match(
         ContractKey::Topic { .. } => return false,
         ContractKey::Rpc { .. } => return false,
         ContractKey::Graphql { .. } => return false,
+        ContractKey::WebSocket { .. } => {
+            MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any)
+        }
+        ContractKey::Table { .. } => return false,
     };
     match (consumer_method, endpoint_method) {
         (MethodSpec::Known(cm), MethodSpec::Known(em)) => {

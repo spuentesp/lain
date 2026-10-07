@@ -2890,3 +2890,287 @@ fn unavailable_diff_does_not_invent_a_handler_change() {
         "an unavailable git diff is not proof that provider source changed"
     );
 }
+
+#[test]
+fn topic_payload_schema_removal_reports_breaking_change() {
+    let mut base_index = ContractIndex::default();
+    let topic_ep = (
+        svc("orders"),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "orders.events".into(),
+        },
+    );
+    let mut fields = BTreeMap::new();
+    fields.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    fields.insert(path(&["amount"]), field(TypeDesc::Number, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Payload, EndpointSchema {
+        node_id: id("orders", "Schema", "schemas/orders.avsc", "OrderEvent", 1),
+        fields,
+    });
+    base_index.endpoints.insert(
+        topic_ep.clone(),
+        Endpoint {
+            id: topic_ep.clone(),
+            method: HttpMethod::Any,
+            template: "orders.events".into(),
+            providers: vec![],
+            schemas,
+        },
+    );
+
+    let mut head_index = base_index.clone();
+    head_index
+        .endpoints
+        .get_mut(&topic_ep)
+        .unwrap()
+        .schemas
+        .get_mut(&Direction::Payload)
+        .unwrap()
+        .fields
+        .remove(&path(&["amount"]));
+
+    let base = ContractSurface::from_index(&base_index);
+    let head = ContractSurface::from_index(&head_index);
+    let changes = diff_contracts(&base, &head, &*changed_set());
+
+    let removed = changes.iter().find(|c| {
+        matches!(&c.kind, ChangeKind::FieldRemoved { path: p, direction: d, .. } if p == &path(&["amount"]) && *d == Direction::Payload)
+    });
+    assert!(removed.is_some(), "must detect FieldRemoved in Direction::Payload");
+}
+
+// ─── HandlerChanged: schema-bearing endpoints ────────────────────────
+//
+// `ChangedWithoutSchema` fires only when BOTH sides have no schema.
+// A behaviour change behind an endpoint that DOES have a schema
+// therefore produced no `ChangeKind` at all — `diff_fields` saw an
+// identical schema and said nothing — so a pure behaviour change was
+// invisible to `diff_contracts`. These tests pin the sibling rule.
+
+/// An endpoint that HAS a response schema and a bound handler.
+fn schema_bearing_endpoint() -> (ContractIndex, EndpointId) {
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/orders/handlers.rs".into(),
+        container: None,
+        name: "get_order".into(),
+    };
+    let node_id = id("orders", "HttpRoute", "src/orders/routes.rs", "GET /api/orders/:id", 12);
+    let mut fields = BTreeMap::new();
+    fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(
+        Direction::Response,
+        EndpointSchema {
+            node_id: id("orders", "Schema", "openapi.yaml", "OrderResponse", 7),
+            fields,
+        },
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/{}".into(),
+            providers: vec![EndpointProvider {
+                node_id,
+                origin: ProviderOrigin::Code,
+                handler: Some(handler),
+                operation_id: None,
+            }],
+            schemas,
+        },
+    );
+    (index, endpoint)
+}
+
+#[test]
+fn handler_change_on_a_schema_bearing_endpoint_is_reported() {
+    let (index, _ep) = schema_bearing_endpoint();
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    // The handler file changed; the schema is byte-identical.
+    let src = StaticChangedFiles(BTreeSet::from(["src/orders/handlers.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. })),
+        "a schema-bearing endpoint whose handler file changed must not vanish: {changes:?}"
+    );
+    // The schema is unchanged, so no field-level change may appear.
+    assert!(
+        changes.iter().all(|c| !matches!(
+            c.kind,
+            ChangeKind::FieldAdded { .. } | ChangeKind::FieldRemoved { .. }
+        )),
+        "identical schemas must not produce field changes: {changes:?}"
+    );
+    // And it must not be mislabelled as the schema-less rule.
+    assert!(
+        changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. })),
+        "schema-bearing endpoints must not use ChangedWithoutSchema: {changes:?}"
+    );
+}
+
+#[test]
+fn schema_bearing_endpoint_unchanged_handler_emits_nothing() {
+    let (index, _ep) = schema_bearing_endpoint();
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    let src = StaticChangedFiles(BTreeSet::new());
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes.is_empty(),
+        "no file changed -> no change, got {changes:?}"
+    );
+}
+
+#[test]
+fn schema_less_endpoint_still_reports_changed_without_schema() {
+    // Regression guard: widening detection must not swallow the old
+    // rule or repurpose its label.
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/orders/label.rs".into(),
+        container: None,
+        name: "get_order_label".into(),
+    };
+    let node_id = id("orders", "HttpRoute", "src/orders/label.rs", "GET /api/orders/:id/label", 8);
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/{}/label".into(),
+            providers: vec![EndpointProvider {
+                node_id,
+                origin: ProviderOrigin::Code,
+                handler: Some(handler),
+                operation_id: None,
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    let src = StaticChangedFiles(BTreeSet::from(["src/orders/label.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. })),
+        "schema-less endpoint must keep ChangedWithoutSchema: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::HandlerChanged { .. })),
+        "schema-less endpoints must not use HandlerChanged: {changes:?}"
+    );
+}
+
+#[test]
+fn handler_change_in_a_shared_file_is_not_attributed_to_one_endpoint() {
+    // Two schema-bearing endpoints whose handler symbols both live in
+    // `src/main.rs` (a routing table). An edit to that file cannot be
+    // blamed on either endpoint, so no `HandlerChanged` may fire —
+    // reporting it three times was the precision regression this rule
+    // caused on the T1 fixture's `s6-rename-path` scenario.
+    let mut index = ContractIndex::default();
+    for (template, route_name, handler_name, line) in [
+        ("/api/orders/{}", "GET /api/orders/:id", "get_order", 12),
+        ("/api/orders/me", "GET /api/orders/me", "get_me", 13),
+    ] {
+        let endpoint = endpoint_id("orders", HttpMethod::Get, template);
+        let mut fields = BTreeMap::new();
+        fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            Direction::Response,
+            EndpointSchema {
+                node_id: id("orders", "Schema", "openapi.yaml", route_name, 7),
+                fields,
+            },
+        );
+        index.endpoints.insert(
+            endpoint.clone(),
+            Endpoint {
+                id: endpoint.clone(),
+                method: HttpMethod::Get,
+                template: template.into(),
+                providers: vec![EndpointProvider {
+                    node_id: id("orders", "HttpRoute", "src/main.rs", route_name, line),
+                    origin: ProviderOrigin::Code,
+                    handler: Some(SymbolKey {
+                        repo: repo("orders"),
+                        path: "src/main.rs".into(),
+                        container: None,
+                        name: handler_name.into(),
+                    }),
+                    operation_id: None,
+                }],
+                schemas,
+            },
+        );
+    }
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    let src = StaticChangedFiles(BTreeSet::from(["src/main.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::HandlerChanged { .. })),
+        "an edit to a file shared by two endpoints must not be attributed \
+         to either: {changes:?}"
+    );
+}
+
+#[test]
+fn handler_change_alongside_a_schema_change_is_not_double_reported() {
+    // The endpoint's own schema changed AND its handler file changed.
+    // `diff_fields` already reports the schema change; `HandlerChanged`
+    // is only for "schema byte-identical", so it must stay silent.
+    let (mut index, ep) = schema_bearing_endpoint();
+    let mut head_index = index.clone();
+    head_index
+        .endpoints
+        .get_mut(&ep)
+        .unwrap()
+        .schemas
+        .get_mut(&Direction::Response)
+        .unwrap()
+        .fields
+        .insert(path(&["total"]), field(TypeDesc::Number, true, false));
+
+    let base = ContractSurface::from_index(&index);
+    let head = ContractSurface::from_index(&head_index);
+    let src = StaticChangedFiles(BTreeSet::from(["src/orders/handlers.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes.iter().any(|c| matches!(c.kind, ChangeKind::FieldAdded { .. })),
+        "the schema change must still be reported: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::HandlerChanged { .. })),
+        "a schema change already explains the diff; HandlerChanged must \
+         not double-report it: {changes:?}"
+    );
+    let _ = &mut index;
+}

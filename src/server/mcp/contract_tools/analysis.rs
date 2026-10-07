@@ -541,7 +541,8 @@ fn change_endpoint_id(kind: &ChangeKind, service: &ServiceName) -> Option<Endpoi
         | ChangeKind::NullabilityChanged { endpoint, .. }
         | ChangeKind::EnumValueRemoved { endpoint, .. }
         | ChangeKind::EnumValueAdded { endpoint, .. }
-        | ChangeKind::ChangedWithoutSchema { endpoint } => Some(endpoint.clone()),
+        | ChangeKind::ChangedWithoutSchema { endpoint }
+        | ChangeKind::HandlerChanged { endpoint } => Some(endpoint.clone()),
         ChangeKind::EndpointRemoved { key } | ChangeKind::EndpointAdded { key } => {
             Some((service.clone(), key.clone()))
         }
@@ -1102,7 +1103,9 @@ fn impact_to_value(
         value["from"] = json!(from.to_string());
         value["to"] = json!(to.to_string());
     }
-    if let ChangeKind::ChangedWithoutSchema { endpoint } = kind {
+    if let ChangeKind::ChangedWithoutSchema { endpoint }
+    | ChangeKind::HandlerChanged { endpoint } = kind
+    {
         if let Some(ep) = head_index.endpoints.get(endpoint) {
             let handlers: Vec<Value> = ep
                 .providers
@@ -1152,7 +1155,8 @@ fn endpoint_from_change(
         | ChangeKind::NullabilityChanged { endpoint, .. }
         | ChangeKind::EnumValueRemoved { endpoint, .. }
         | ChangeKind::EnumValueAdded { endpoint, .. }
-        | ChangeKind::ChangedWithoutSchema { endpoint } => (endpoint.0.clone(), endpoint.1.clone()),
+        | ChangeKind::ChangedWithoutSchema { endpoint }
+        | ChangeKind::HandlerChanged { endpoint } => (endpoint.0.clone(), endpoint.1.clone()),
         ChangeKind::ConsumerEndpointUnmatched { consumer }
         | ChangeKind::ConsumerFieldUnmatched { consumer, .. }
         | ChangeKind::ConsumerRebound { consumer, .. } => {
@@ -1558,6 +1562,7 @@ fn kind_label(kind: &ChangeKind) -> &'static str {
         ChangeKind::EnumValueRemoved { .. } => "EnumValueRemoved",
         ChangeKind::EnumValueAdded { .. } => "EnumValueAdded",
         ChangeKind::ChangedWithoutSchema { .. } => "ChangedWithoutSchema",
+        ChangeKind::HandlerChanged { .. } => "HandlerChanged",
         ChangeKind::ConsumerEndpointUnmatched { .. } => "ConsumerEndpointUnmatched",
         ChangeKind::ConsumerFieldUnmatched { .. } => "ConsumerFieldUnmatched",
         ChangeKind::ConsumerRebound { .. } => "ConsumerRebound",
