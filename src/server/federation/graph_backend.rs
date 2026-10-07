@@ -423,7 +423,7 @@ impl GraphBackend for PetgraphBackend {
             // Confidence must be evidence-backed. Explicit weights win;
             // otherwise derive it from provenance. A legacy edge with
             // neither is unknown (0.0), not implicitly verified static data.
-            let conf = e.weight.unwrap_or_else(|| match e.provenance.as_ref() {
+            let conf = e.weight.unwrap_or(match e.provenance.as_ref() {
                 Some(crate::schema::EdgeProvenance::Static { .. })
                 | Some(crate::schema::EdgeProvenance::Confirmed { .. }) => 1.0,
                 Some(crate::schema::EdgeProvenance::Heuristic { confidence, .. }) => *confidence,

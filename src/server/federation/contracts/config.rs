@@ -37,6 +37,21 @@ pub struct ContractFederationConfig {
     pub schemas: Vec<SchemaDecl>,
     #[serde(default)]
     pub bindings: Vec<ConfirmedBinding>,
+    #[serde(default)]
+    pub databases: Vec<DatabaseDecl>,
+}
+
+/// One database declaration in `repos.yaml#databases` (Gap 23).
+/// Maps a named database to its owning service, associated tables,
+/// and services it is shared with.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseDecl {
+    pub name: String,
+    pub service: String,
+    #[serde(default)]
+    pub tables: Vec<String>,
+    #[serde(default)]
+    pub shared_with: Vec<String>,
 }
 
 /// One declared service. `repo` is a configured repo id; `paths` are
@@ -79,9 +94,8 @@ pub struct HttpClientDecl {
     pub path_arg: Option<u8>,
 }
 
-/// One schema declaration (PR 15 stretch). Stored today so the
-/// `ContractFederationConfig::load` round-trip is total, but the
-/// joiner does not yet consult it.
+/// One schema declaration. Consulted by the joiner to attach
+/// event topic payload schemas to endpoints (§6.7, Gap 20).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SchemaDecl {
     pub topic: String,
@@ -193,6 +207,10 @@ impl ContractFederationConfig {
                     out.bindings = serde_yaml::from_value(v.clone())
                         .map_err(|e| LainError::Config(format!("bindings: {e}")))?
                 }
+                "databases" => {
+                    out.databases = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("databases: {e}")))?
+                }
                 "contract" => {
                     let nested: ContractFederationConfig = serde_yaml::from_value(v.clone())
                         .map_err(|e| LainError::Config(format!("contract: {e}")))?;
@@ -210,6 +228,9 @@ impl ContractFederationConfig {
                     }
                     if out.bindings.is_empty() {
                         out.bindings = nested.bindings;
+                    }
+                    if out.databases.is_empty() {
+                        out.databases = nested.databases;
                     }
                 }
                 // Other top-level keys are the existing
@@ -414,6 +435,29 @@ impl ContractFederationConfig {
             }
         }
 
+        // Database declarations validation (Gap 23).
+        for db in &self.databases {
+            if db.name.is_empty() {
+                return Err(LainError::Config(
+                    "database declaration name cannot be empty".to_string(),
+                ));
+            }
+            if !self.services.iter().any(|s| s.name == db.service) {
+                return Err(LainError::Config(format!(
+                    "database '{}' references unknown service '{}'",
+                    db.name, db.service
+                )));
+            }
+            for shared in &db.shared_with {
+                if !self.services.iter().any(|s| &s.name == shared) {
+                    return Err(LainError::Config(format!(
+                        "database '{}' shared_with references unknown service '{}'",
+                        db.name, shared
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -441,6 +485,7 @@ impl ContractFederationConfig {
             "generic_keys": self.generic_keys,
             "schemas": self.schemas,
             "bindings": self.bindings,
+            "databases": self.databases,
         });
         let s = canonical.to_string();
         blake3::hash(s.as_bytes()).to_hex().to_string()

@@ -2905,10 +2905,13 @@ fn topic_payload_schema_removal_reports_breaking_change() {
     fields.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
     fields.insert(path(&["amount"]), field(TypeDesc::Number, true, false));
     let mut schemas = BTreeMap::new();
-    schemas.insert(Direction::Payload, EndpointSchema {
-        node_id: id("orders", "Schema", "schemas/orders.avsc", "OrderEvent", 1),
-        fields,
-    });
+    schemas.insert(
+        Direction::Payload,
+        EndpointSchema {
+            node_id: id("orders", "Schema", "schemas/orders.avsc", "OrderEvent", 1),
+            fields,
+        },
+    );
     base_index.endpoints.insert(
         topic_ep.clone(),
         Endpoint {
@@ -2938,7 +2941,10 @@ fn topic_payload_schema_removal_reports_breaking_change() {
     let removed = changes.iter().find(|c| {
         matches!(&c.kind, ChangeKind::FieldRemoved { path: p, direction: d, .. } if p == &path(&["amount"]) && *d == Direction::Payload)
     });
-    assert!(removed.is_some(), "must detect FieldRemoved in Direction::Payload");
+    assert!(
+        removed.is_some(),
+        "must detect FieldRemoved in Direction::Payload"
+    );
 }
 
 // ─── HandlerChanged: schema-bearing endpoints ────────────────────────
@@ -2959,7 +2965,13 @@ fn schema_bearing_endpoint() -> (ContractIndex, EndpointId) {
         container: None,
         name: "get_order".into(),
     };
-    let node_id = id("orders", "HttpRoute", "src/orders/routes.rs", "GET /api/orders/:id", 12);
+    let node_id = id(
+        "orders",
+        "HttpRoute",
+        "src/orders/routes.rs",
+        "GET /api/orders/:id",
+        12,
+    );
     let mut fields = BTreeMap::new();
     fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
     let mut schemas = BTreeMap::new();
@@ -3046,7 +3058,13 @@ fn schema_less_endpoint_still_reports_changed_without_schema() {
         container: None,
         name: "get_order_label".into(),
     };
-    let node_id = id("orders", "HttpRoute", "src/orders/label.rs", "GET /api/orders/:id/label", 8);
+    let node_id = id(
+        "orders",
+        "HttpRoute",
+        "src/orders/label.rs",
+        "GET /api/orders/:id/label",
+        8,
+    );
     index.endpoints.insert(
         endpoint.clone(),
         Endpoint {
@@ -3162,7 +3180,9 @@ fn handler_change_alongside_a_schema_change_is_not_double_reported() {
 
     let changes = diff_contracts(&base, &head, &src);
     assert!(
-        changes.iter().any(|c| matches!(c.kind, ChangeKind::FieldAdded { .. })),
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::FieldAdded { .. })),
         "the schema change must still be reported: {changes:?}"
     );
     assert!(

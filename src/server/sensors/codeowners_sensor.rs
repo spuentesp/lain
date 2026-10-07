@@ -36,6 +36,7 @@
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::schema::RepoNamespace;
+use crate::server::sensors::SensorEntry;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -374,7 +375,7 @@ impl crate::server::sensors::Sensor for CodeownersSensor {
 
 // Codeowners contributes attribution, not graph nodes, so it rides on the
 // `EntryPoints` bucket.
-inventory::submit!(crate::server::sensors::SensorEntry(&CodeownersSensor));
+inventory::submit!(SensorEntry(&CodeownersSensor));
 
 // ─── Tests ────────────────────────────────────────────────────────────
 

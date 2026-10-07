@@ -125,6 +125,7 @@ fn arb_config(services: Vec<ServiceDecl>) -> ContractFederationConfig {
         generic_keys: Vec::new(),
         schemas: Vec::new(),
         bindings: Vec::new(),
+        databases: Vec::new(),
     }
 }
 

@@ -85,6 +85,7 @@ async fn build_two_repo_federation() -> (
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
 
     let backend: Arc<dyn lain::federation::graph_backend::GraphBackend> =
@@ -305,6 +306,7 @@ async fn contract_config_round_trip() {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
     let h1 = cfg.config_hash();
     let h2 = cfg.config_hash();
@@ -458,6 +460,7 @@ async fn unnormalized_consumers_are_recorded() {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
     let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
     assert_eq!(

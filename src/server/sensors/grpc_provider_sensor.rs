@@ -29,9 +29,13 @@
 //! not get emitted as a method.
 
 use crate::error::LainError;
-use crate::federation::contracts::model::{ContractFact, RpcProviderFact, RpcSystem, SourceSite};
+use crate::federation::contracts::model::{
+    ContractFact, Direction, RpcProviderFact, RpcSystem, SourceSite,
+};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::payload_schema::parse_proto_messages;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -64,8 +68,9 @@ crate::server::sensors::register_sensor!(
 
 /// Walk `root`, find every `.proto` file, parse the service
 /// surface, and emit one `RpcProvider` `Module` node per
-/// `(package, service, method)` triple. Returns the count of
-/// `RpcProvider` nodes minted.
+/// `(package, service, method)` triple, along with message `Schema`
+/// and `Field` nodes linked via `RequestSchema`, `ResponseSchema`,
+/// and `HasField` edges. Returns the count of `RpcProvider` nodes minted.
 pub fn scan_workspace_grpc(
     graph: &GraphDatabase,
     root: &Path,
@@ -83,9 +88,58 @@ pub fn scan_workspace_grpc(
     };
     let mut total = 0usize;
     let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
     for (path, content, _tag) in crate::server::sensors::util::scan_files(root, proto_ext) {
         let graph_path_str = graph_path(root, &path);
         let providers = parse_proto_providers(&content, &graph_path_str);
+
+        // Parse protobuf message schemas and fields
+        let mut schemas_in_file: BTreeMap<String, String> = BTreeMap::new();
+        let parsed_messages = parse_proto_messages(&content);
+        for msg in parsed_messages {
+            let line = msg.fields.first().map_or(1, |f| f.line);
+            let schema_id = GraphNode::generate_id(
+                &NodeType::Schema,
+                &graph_path_str,
+                &msg.name,
+                Some(line),
+                namespace,
+            );
+            let mut schema_node =
+                GraphNode::new(NodeType::Schema, msg.name.clone(), graph_path_str.clone());
+            schema_node.id = schema_id.clone();
+            schema_node.line_start = Some(line);
+            schema_node.line_end = Some(line);
+            schema_node.contract = Some(ContractFact::Schema {
+                direction: Direction::Response,
+            });
+            all_nodes.push(schema_node);
+            schemas_in_file.insert(msg.name.clone(), schema_id.clone());
+
+            for field in msg.fields {
+                let field_name = field.path.to_string();
+                let field_id = GraphNode::generate_id(
+                    &NodeType::Field,
+                    &graph_path_str,
+                    &field_name,
+                    Some(field.line),
+                    namespace,
+                );
+                let mut field_node =
+                    GraphNode::new(NodeType::Field, field_name, graph_path_str.clone());
+                field_node.id = field_id.clone();
+                field_node.line_start = Some(field.line);
+                field_node.line_end = Some(field.line);
+                field_node.contract = Some(ContractFact::Field(field.meta));
+                all_nodes.push(field_node);
+                all_edges.push(GraphEdge::new(
+                    EdgeType::HasField,
+                    schema_id.clone(),
+                    field_id,
+                ));
+            }
+        }
+
         for provider in providers {
             let full_service = compose_service_name(&provider.package, &provider.service);
             let id_name = format!("{}/{}", full_service, provider.method);
@@ -114,18 +168,42 @@ pub fn scan_workspace_grpc(
             }));
             all_nodes.push(node);
             total += 1;
+
+            let req_type_bare = provider
+                .request_type
+                .rsplit('.')
+                .next()
+                .unwrap_or(&provider.request_type);
+            if let Some(req_schema_id) = schemas_in_file
+                .get(req_type_bare)
+                .or_else(|| schemas_in_file.get(&provider.request_type))
+            {
+                all_edges.push(GraphEdge::new(
+                    EdgeType::RequestSchema,
+                    id.clone(),
+                    req_schema_id.clone(),
+                ));
+            }
+
+            let resp_type_bare = provider
+                .response_type
+                .rsplit('.')
+                .next()
+                .unwrap_or(&provider.response_type);
+            if let Some(resp_schema_id) = schemas_in_file
+                .get(resp_type_bare)
+                .or_else(|| schemas_in_file.get(&provider.response_type))
+            {
+                all_edges.push(GraphEdge::new(
+                    EdgeType::ResponseSchema,
+                    id.clone(),
+                    resp_schema_id.clone(),
+                ));
+            }
         }
     }
     if !all_nodes.is_empty() {
-        // The grpc provider sensor owns its own nodes; a rescan
-        // retracts the previous output before inserting the new
-        // one. Using the same `SensorOwner::ProtoSensor` owner
-        // keeps the contract with the existing proto_sensor
-        // (which also writes Module nodes keyed off the proto
-        // path) — the E1 acceptance test confirms the two
-        // sensors coexist without overwriting each other.
-        let _ =
-            graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &[] as &[GraphEdge]);
+        let _ = graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &all_edges);
     }
     Ok(total)
 }

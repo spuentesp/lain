@@ -26,7 +26,8 @@ use std::collections::BTreeMap;
 use crate::federation::contracts::config::ContractFederationConfig;
 use crate::federation::contracts::index::ConsumerResolution;
 use crate::federation::contracts::joiner::{
-    resolve_graphql_consumer, resolve_rpc_consumer, resolve_topic_consumer, EndpointProviderRecord,
+    resolve_graphql_consumer, resolve_rpc_consumer, resolve_topic_consumer,
+    resolve_websocket_consumer, EndpointProviderRecord,
 };
 use crate::federation::contracts::model::{ContractFact, ServiceName};
 use crate::federation::repo_id::GlobalId;
@@ -179,6 +180,41 @@ impl ProtocolDispatch for GraphqlDispatch {
     }
 }
 
+// ─── WebSocketDispatch ────────────────────────────────────────────────
+
+/// Phase F (Gap 19): resolves a `WebSocketConsumer` to a provider's
+/// `ContractKey::WebSocket` exact route match.
+pub struct WebSocketDispatch;
+
+impl sealed::Sealed for WebSocketDispatch {}
+
+impl ProtocolDispatch for WebSocketDispatch {
+    fn matches(&self, fact: &ContractFact) -> bool {
+        matches!(fact, ContractFact::WebSocketConsumer(_))
+    }
+
+    fn dispatch(
+        &self,
+        call_id: &GlobalId,
+        own_service: &ServiceName,
+        fact: &ContractFact,
+        endpoints: &BTreeMap<
+            (
+                ServiceName,
+                crate::federation::contracts::model::ContractKey,
+            ),
+            Vec<EndpointProviderRecord>,
+        >,
+        _config: &ContractFederationConfig,
+        binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
+    ) -> ConsumerResolution {
+        let ContractFact::WebSocketConsumer(ws_consumer) = fact else {
+            unreachable!("WebSocketDispatch::dispatch called with non-WebSocketConsumer fact")
+        };
+        resolve_websocket_consumer(call_id, ws_consumer, own_service, endpoints, binds)
+    }
+}
+
 /// The default dispatch chain. The orchestrator iterates this
 /// Vec in order — the first dispatch whose `matches` returns
 /// true handles the node. Adding a new protocol is one Vec
@@ -188,5 +224,6 @@ pub fn default_dispatch_chain() -> Vec<Box<dyn ProtocolDispatch>> {
         Box::new(TopicDispatch),
         Box::new(RpcDispatch),
         Box::new(GraphqlDispatch),
+        Box::new(WebSocketDispatch),
     ]
 }

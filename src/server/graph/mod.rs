@@ -65,7 +65,13 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
 ///
 /// - `HttpRoute` with `ProviderOrigin::Code` → [`SensorOwner::HttpSensor`]
 /// - `HttpRoute` with `ProviderOrigin::OpenApi` → [`SensorOwner::OpenApiSensor`]
-/// - `Schema`, `Field` → [`SensorOwner::OpenApiSensor`]
+/// - `Schema`, `Field` → [`SensorOwner::ProtoSensor`] for `.proto`,
+///   [`SensorOwner::GraphqlSensor`] for `.graphql`/`.gql`,
+///   [`SensorOwner::EventSensor`] for `.avsc`, else
+///   [`SensorOwner::OpenApiSensor`] (which owns `openapi.json` too —
+///   never route `.json` to the event sensor)
+/// - Contract facts win over node-type catch-alls: `WebSocketConsumer`
+///   rides on `HttpClientCall`, `TopicConsumer` on `Function`
 /// - `HttpClientCall` → [`SensorOwner::HttpClientSensor`] (PR 6)
 /// - `FieldRef` → [`SensorOwner::FieldAccessSensor`] (PR 9)
 /// - `EntryPointSensor` is special: it clears every node's `entry`
@@ -104,6 +110,9 @@ pub enum SensorOwner {
     /// `SensorOwner` so a rescan retracts all three groups
     /// together.
     GraphqlSensor,
+    /// Phase F (Gap 19): the WebSocket sensor family owns nodes
+    /// carrying WebSocketProvider / WebSocketConsumer / WebSocketHandler facts.
+    WebSocketSensor,
 }
 
 /// Map a node to its sensor owner (§6.1 derivation rules). Returns
@@ -117,11 +126,41 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
             ProviderOrigin::Code => Some(SensorOwner::HttpSensor),
             ProviderOrigin::OpenApi => Some(SensorOwner::OpenApiSensor),
         },
-        (NodeType::Schema, Some(ContractFact::Schema { .. })) => Some(SensorOwner::OpenApiSensor),
-        (NodeType::Field, Some(ContractFact::Field(_))) => Some(SensorOwner::OpenApiSensor),
-        (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
-        (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
-        (NodeType::Topic, _) => Some(SensorOwner::EventSensor),
+        (NodeType::Schema, Some(ContractFact::Schema { .. })) => {
+            if node.path.ends_with(".proto") {
+                Some(SensorOwner::ProtoSensor)
+            } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
+                Some(SensorOwner::GraphqlSensor)
+            } else if node.path.ends_with(".avsc") {
+                // Avro payload schemas belong to the event/topic
+                // sensor. NOTE: `.json` is deliberately NOT here —
+                // `openapi_sensor` emits Schema/Field nodes for
+                // `openapi.json` / `swagger.json`, and routing those to
+                // EventSensor makes `event_sensor`'s
+                // `replace_sensor_output` retract them on every scan.
+                Some(SensorOwner::EventSensor)
+            } else {
+                Some(SensorOwner::OpenApiSensor)
+            }
+        }
+        (NodeType::Field, Some(ContractFact::Field(_))) => {
+            if node.path.ends_with(".proto") {
+                Some(SensorOwner::ProtoSensor)
+            } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
+                Some(SensorOwner::GraphqlSensor)
+            } else if node.path.ends_with(".avsc") {
+                Some(SensorOwner::EventSensor)
+            } else {
+                Some(SensorOwner::OpenApiSensor)
+            }
+        }
+        // Contract-fact ownership must win over the node-type
+        // catch-alls below: several facts RIDE on a shared node type
+        // (`WebSocketConsumer` on `HttpClientCall`, `TopicConsumer` on
+        // `Function`). A catch-all listed first would claim those
+        // nodes, and the catch-all's sensor would then retract them on
+        // every rescan.
+        //
         // §6.7 (stretch): the consumer-side function node carries a
         // `TopicConsumer` contract fact; the event sensor owns it.
         (_, Some(ContractFact::TopicConsumer(_))) => Some(SensorOwner::EventSensor),
@@ -143,6 +182,14 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         (_, Some(ContractFact::GraphqlProvider(_)))
         | (_, Some(ContractFact::GraphqlHandler(_)))
         | (_, Some(ContractFact::GraphqlConsumer(_))) => Some(SensorOwner::GraphqlSensor),
+        // Phase F (Gap 19): WebSocket facts are owned by WebSocketSensor.
+        (_, Some(ContractFact::WebSocketProvider(_)))
+        | (_, Some(ContractFact::WebSocketHandler(_)))
+        | (_, Some(ContractFact::WebSocketConsumer(_))) => Some(SensorOwner::WebSocketSensor),
+        // Node-type catch-alls last.
+        (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
+        (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
+        (NodeType::Topic, _) => Some(SensorOwner::EventSensor),
         _ => None,
     }
 }

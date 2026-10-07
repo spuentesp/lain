@@ -126,6 +126,7 @@ fn orders_config() -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 

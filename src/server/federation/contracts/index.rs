@@ -243,6 +243,11 @@ pub fn node_type_of(fact: &ContractFact) -> NodeType {
         // to the enclosing function). Function is the primary
         // shape.
         ContractFact::GraphqlConsumer(_) => NodeType::Function,
+        // Phase F (Gap 19): WebSocket endpoints and handlers ride on HttpRoute / HttpClientCall.
+        ContractFact::WebSocketProvider(_) | ContractFact::WebSocketHandler(_) => {
+            NodeType::HttpRoute
+        }
+        ContractFact::WebSocketConsumer(_) => NodeType::HttpClientCall,
     }
 }
 

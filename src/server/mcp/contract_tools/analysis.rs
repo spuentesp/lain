@@ -1103,8 +1103,8 @@ fn impact_to_value(
         value["from"] = json!(from.to_string());
         value["to"] = json!(to.to_string());
     }
-    if let ChangeKind::ChangedWithoutSchema { endpoint }
-    | ChangeKind::HandlerChanged { endpoint } = kind
+    if let ChangeKind::ChangedWithoutSchema { endpoint } | ChangeKind::HandlerChanged { endpoint } =
+        kind
     {
         if let Some(ep) = head_index.endpoints.get(endpoint) {
             let handlers: Vec<Value> = ep

@@ -407,9 +407,14 @@ impl EdgeType {
             | EdgeType::ReadsTable
             | EdgeType::WritesTable
             | EdgeType::Produces
-            | EdgeType::Consumes
-            | EdgeType::PayloadSchema => true,
-            EdgeType::Imports | EdgeType::DeployedTo => false,
+            | EdgeType::Consumes => true,
+            // Known-but-unindexed: nothing emits a `PayloadSchema` edge
+            // yet. `payload_schema.rs` parses Avro/JSON-Schema/protobuf
+            // payloads, but no sensor mints the Topic→Schema edge, so
+            // advertising it would make `describe_schema` lie to clients.
+            EdgeType::PayloadSchema
+            | EdgeType::Imports
+            | EdgeType::DeployedTo => false,
         }
     }
 
@@ -534,7 +539,9 @@ impl EdgeType {
             ],
             // Schema / field / payload edges all originate from a
             // schema-bearing node.
-            EdgeType::RequestSchema | EdgeType::ResponseSchema => &[NodeType::HttpRoute, NodeType::Module],
+            EdgeType::RequestSchema | EdgeType::ResponseSchema => {
+                &[NodeType::HttpRoute, NodeType::Module]
+            }
             EdgeType::PayloadSchema => &[NodeType::Topic],
             EdgeType::HasField => &[NodeType::Schema],
             EdgeType::ReadsField => &[NodeType::Function, NodeType::Method],
@@ -604,7 +611,11 @@ impl EdgeType {
             EdgeType::PayloadSchema => &[NodeType::Schema],
             EdgeType::HasField => &[NodeType::Field],
             EdgeType::ReadsField => &[NodeType::FieldRef],
-            EdgeType::ReadsFrom => &[NodeType::HttpClientCall, NodeType::Function, NodeType::Method],
+            EdgeType::ReadsFrom => &[
+                NodeType::HttpClientCall,
+                NodeType::Function,
+                NodeType::Method,
+            ],
             // `Binds` targets: the provider side. HttpClientCall →
             // HttpRoute, FieldRef → Field, consumer Topic → producer
             // Topic.

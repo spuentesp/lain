@@ -80,6 +80,7 @@ mod endpoints;
 pub use consumer_http::resolve_consumer_to_service;
 pub use consumer_protocol::{
     resolve_graphql_consumer, resolve_rpc_consumer, resolve_topic_consumer,
+    resolve_websocket_consumer,
 };
 pub use endpoints::EndpointProviderRecord;
 
@@ -420,7 +421,7 @@ impl ContractJoiner {
             .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsFrom)
             .cloned()
             .collect();
-        let schemas: EndpointSchemas = collect_endpoint_schemas(nodes, edges, &assignments);
+        let schemas: EndpointSchemas = collect_endpoint_schemas(nodes, edges, &assignments, config);
         let (field_refs, _schemaless, _unknown, field_binds) =
             resolve_field_refs(&field_ref_nodes_owned, &reads_from_edges, &binds, &schemas);
         binds.extend(field_binds);
@@ -500,6 +501,8 @@ impl ContractJoiner {
                 ContractKey::Topic { .. } => HttpMethod::Any,
                 ContractKey::Rpc { .. } => HttpMethod::Any,
                 ContractKey::Graphql { .. } => HttpMethod::Any,
+                ContractKey::WebSocket { .. } => HttpMethod::Any,
+                ContractKey::Table { .. } => HttpMethod::Any,
             };
             let template = key.leaf().to_string();
             let provider_records: Vec<EndpointProvider> = providers

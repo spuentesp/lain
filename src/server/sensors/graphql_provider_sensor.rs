@@ -31,10 +31,10 @@
 
 use crate::error::LainError;
 use crate::federation::contracts::model::{
-    ContractFact, GraphqlOp, GraphqlProviderFact, SourceSite,
+    ContractFact, Direction, GraphqlOp, GraphqlProviderFact, SourceSite,
 };
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -65,8 +65,9 @@ crate::server::sensors::register_sensor!(
 
 /// Walk `root`, find every `.graphql` / `.gql` SDL file, parse
 /// the root types, and emit one `GraphqlProvider` `Module` node
-/// per `(op, field)` declaration. Returns the count of
-/// `GraphqlProvider` nodes minted.
+/// per `(op, field)` declaration, plus object type `Schema` and
+/// `Field` nodes linked via `ResponseSchema` and `HasField` edges.
+/// Returns the count of `GraphqlProvider` nodes minted.
 pub fn scan_workspace_graphql_provider(
     graph: &GraphDatabase,
     root: &Path,
@@ -88,9 +89,64 @@ pub fn scan_workspace_graphql_provider(
     };
     let mut total = 0usize;
     let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
     for (path, content, _tag) in crate::server::sensors::util::scan_files(root, sdl_ext) {
         let graph_path_str = graph_path(root, &path);
         let providers = parse_sdl_providers(&content, &graph_path_str);
+        let object_types = extract_object_type_blocks(&content);
+
+        let mut schemas_in_file: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for obj in object_types {
+            let schema_id = GraphNode::generate_id(
+                &NodeType::Schema,
+                &graph_path_str,
+                &obj.name,
+                Some(obj.line),
+                namespace,
+            );
+            let mut schema_node =
+                GraphNode::new(NodeType::Schema, obj.name.clone(), graph_path_str.clone());
+            schema_node.id = schema_id.clone();
+            schema_node.line_start = Some(obj.line);
+            schema_node.line_end = Some(obj.line);
+            schema_node.contract = Some(ContractFact::Schema {
+                direction: Direction::Response,
+            });
+            all_nodes.push(schema_node);
+            schemas_in_file.insert(obj.name.clone(), schema_id.clone());
+
+            for field in obj.fields {
+                let field_id = GraphNode::generate_id(
+                    &NodeType::Field,
+                    &graph_path_str,
+                    &field.name,
+                    Some(obj.line + field.line_offset),
+                    namespace,
+                );
+                let mut field_node =
+                    GraphNode::new(NodeType::Field, field.name.clone(), graph_path_str.clone());
+                field_node.id = field_id.clone();
+                field_node.line_start = Some(obj.line + field.line_offset);
+                field_node.line_end = Some(obj.line + field.line_offset);
+                let required = field.return_type.ends_with('!');
+                field_node.contract = Some(ContractFact::Field(
+                    crate::federation::contracts::model::FieldMeta {
+                        ty: graphql_type_to_typedesc(&field.return_type),
+                        required,
+                        nullable: !required,
+                        enum_values: None,
+                    },
+                ));
+                all_nodes.push(field_node);
+                all_edges.push(GraphEdge::new(
+                    EdgeType::HasField,
+                    schema_id.clone(),
+                    field_id,
+                ));
+            }
+        }
+
         for provider in providers {
             let id_name = format!("{}:{}", provider.op, provider.field);
             let id = GraphNode::generate_id(
@@ -105,7 +161,7 @@ pub fn scan_workspace_graphql_provider(
                 id_name.clone(),
                 provider.site.path.clone(),
             );
-            node.id = id;
+            node.id = id.clone();
             node.line_start = Some(provider.site.line);
             node.line_end = Some(provider.site.line);
             node.contract = Some(ContractFact::GraphqlProvider(GraphqlProviderFact {
@@ -115,20 +171,26 @@ pub fn scan_workspace_graphql_provider(
             }));
             all_nodes.push(node);
             total += 1;
+
+            let bare_ret = provider
+                .return_type
+                .trim()
+                .trim_end_matches('!')
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .trim_end_matches('!');
+            if let Some(resp_schema_id) = schemas_in_file.get(bare_ret) {
+                all_edges.push(GraphEdge::new(
+                    EdgeType::ResponseSchema,
+                    id,
+                    resp_schema_id.clone(),
+                ));
+            }
         }
     }
     if !all_nodes.is_empty() {
-        // The graphql provider sensor owns its own nodes; a rescan
-        // retracts the previous output before inserting the new
-        // one. The shared `SensorOwner::GraphqlSensor` covers the
-        // three Phase E-GraphQL sensors (provider, handler-link,
-        // consumer) so a rescan retracts all three groups
-        // together.
-        let _ = graph.replace_sensor_output(
-            SensorOwner::GraphqlSensor,
-            &all_nodes,
-            &[] as &[GraphEdge],
-        );
+        let _ = graph.replace_sensor_output(SensorOwner::GraphqlSensor, &all_nodes, &all_edges);
     }
     Ok(total)
 }
@@ -169,10 +231,40 @@ struct RootTypeBlock {
     fields: Vec<FieldDecl>,
 }
 
-struct FieldDecl {
-    name: String,
-    return_type: String,
-    line_offset: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectTypeBlock {
+    pub name: String,
+    pub line: u32,
+    pub fields: Vec<FieldDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDecl {
+    pub name: String,
+    pub return_type: String,
+    pub line_offset: u32,
+}
+
+fn graphql_type_to_typedesc(sdl_type: &str) -> crate::federation::contracts::model::TypeDesc {
+    use crate::federation::contracts::model::TypeDesc;
+    let trimmed = sdl_type.trim().trim_end_matches('!');
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let inner = trimmed[1..trimmed.len() - 1].trim().trim_end_matches('!');
+        let inner_desc = graphql_scalar_to_typedesc(inner);
+        return TypeDesc::Array(Box::new(inner_desc));
+    }
+    graphql_scalar_to_typedesc(trimmed)
+}
+
+fn graphql_scalar_to_typedesc(name: &str) -> crate::federation::contracts::model::TypeDesc {
+    use crate::federation::contracts::model::TypeDesc;
+    match name {
+        "Int" => TypeDesc::Integer,
+        "Float" => TypeDesc::Number,
+        "String" | "ID" => TypeDesc::String,
+        "Boolean" => TypeDesc::Boolean,
+        _ => TypeDesc::Unknown,
+    }
 }
 
 /// Strip `#` line comments and `""" ... """` block comments.
@@ -296,6 +388,88 @@ fn extract_root_type_blocks(content: &str) -> Vec<RootTypeBlock> {
                 let fields = parse_field_decls(&content[body_start..i]);
                 out.push(RootTypeBlock {
                     op,
+                    line: block_start_line,
+                    fields,
+                });
+            }
+            if i < bytes.len() && bytes[i] == b'}' {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Extract object type blocks (`type <Name> { ... }`) from an SDL file,
+/// where `<Name>` is not a root operation type (`Query`, `Mutation`, `Subscription`).
+pub fn extract_object_type_blocks(content: &str) -> Vec<ObjectTypeBlock> {
+    let stripped = strip_comments(content);
+    let joined = join_continued_lines(&stripped);
+    let mut out: Vec<ObjectTypeBlock> = Vec::new();
+    let bytes = joined.as_bytes();
+    let mut i = 0usize;
+    let mut line_no: u32 = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            line_no += 1;
+            i += 1;
+            continue;
+        }
+        if (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if starts_with_keyword(bytes, i, "type") {
+            i += "type".len();
+            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                if bytes[i] == b'\n' {
+                    line_no += 1;
+                }
+                i += 1;
+            }
+            let name_start = i;
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            let name = std::str::from_utf8(&bytes[name_start..i])
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                if bytes[i] == b'\n' {
+                    line_no += 1;
+                }
+                i += 1;
+            }
+            if i >= bytes.len() || bytes[i] != b'{' {
+                continue;
+            }
+            let is_root = matches!(name.as_str(), "Query" | "Mutation" | "Subscription");
+            let block_start_line = line_no;
+            let body_start = i + 1;
+            i += 1;
+            let mut depth: u32 = 1;
+            while i < bytes.len() && depth > 0 {
+                let c = bytes[i];
+                if c == b'\n' {
+                    line_no += 1;
+                }
+                if c == b'{' {
+                    depth += 1;
+                } else if c == b'}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            if !is_root && !name.is_empty() {
+                let fields = parse_field_decls(&joined[body_start..i]);
+                out.push(ObjectTypeBlock {
+                    name,
                     line: block_start_line,
                     fields,
                 });

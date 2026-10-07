@@ -39,6 +39,7 @@ use crate::federation::contracts::coverage::UnresolvedRecord;
 use crate::federation::contracts::model::{ContractFact, SourceSite, Table, UnresolvedReason};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -51,6 +52,7 @@ use std::path::Path;
 pub struct SqlSite {
     pub stmt: SqlStatement,
     pub line: u32,
+    pub unresolved_reason: Option<UnresolvedReason>,
 }
 
 /// What we did with the SQL — `Reads` (SELECT) or `Writes`
@@ -76,31 +78,62 @@ pub struct SqlStatement {
 /// below; no central registry to edit.
 pub struct SqlSensor;
 
-// Phase 1 (spec §6.1): runs after the protocol sensors and after
-// `http_client_sensor`. The sql sensor reads the indexed Function /
-// Method nodes via `enclosing_symbol`, so any phase that resolves
-// symbols first is fine.
-crate::server::sensors::register_sensor!(SqlSensor, "sql", SqlTables, 1, scan_workspace_sql);
+impl crate::server::sensors::Sensor for SqlSensor {
+    fn name(&self) -> &'static str {
+        "sql"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::SqlTables
+    }
+    fn phase(&self) -> u8 {
+        1
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace_sql(graph, root, namespace)
+    }
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<crate::server::sensors::ScanReport, LainError> {
+        scan_workspace_sql_with_report(graph, root, namespace)
+    }
+}
+inventory::submit!(SensorEntry(&SqlSensor));
 
 // ─── Workspace scan ───────────────────────────────────────────────────
 
 /// Walk `root`, find every literal SQL call shape, parse the
 /// statement, and emit `Table` nodes + `ReadsTable` / `WritesTable`
-/// edges. Returns the count of `Table` nodes minted (deduped
-/// across all statements in the workspace, so a multi-call file
-/// contributes one node per distinct table name + path).
+/// edges. Returns the count of `Table` nodes minted.
 pub fn scan_workspace_sql(
     graph: &GraphDatabase,
     root: &Path,
     namespace: &RepoNamespace,
 ) -> Result<usize, LainError> {
+    scan_workspace_sql_with_report(graph, root, namespace).map(|r| r.emitted)
+}
+
+/// Walk `root` and produce both the emitted count and the unresolved records
+/// (DynamicSql / OrmDynamicQuery) for coverage ledger integration.
+pub fn scan_workspace_sql_with_report(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+) -> Result<crate::server::sensors::ScanReport, LainError> {
     if graph.is_read_only() {
-        return Ok(0);
+        return Ok(crate::server::sensors::ScanReport::default());
     }
 
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
-    let mut unresolved: BTreeMap<String, UnresolvedRecord> = BTreeMap::new();
+    let mut unresolved: BTreeMap<UnresolvedReason, (usize, Vec<String>)> = BTreeMap::new();
 
     let any_ext = |p: &Path| {
         p.extension()
@@ -116,16 +149,12 @@ pub fn scan_workspace_sql(
         all_edges.extend(edges);
         for rec in file_unresolved {
             let entry = unresolved
-                .entry(format!("{:?}", rec.reason))
-                .or_insert_with(|| UnresolvedRecord {
-                    reason: rec.reason,
-                    count: 0,
-                    sample_ids: Vec::new(),
-                });
-            entry.count += rec.count;
+                .entry(rec.reason)
+                .or_insert_with(|| (0, Vec::new()));
+            entry.0 += rec.count;
             for id in &rec.sample_ids {
-                if entry.sample_ids.len() < 5 {
-                    entry.sample_ids.push(id.clone());
+                if entry.1.len() < 5 {
+                    entry.1.push(id.clone());
                 }
             }
         }
@@ -135,12 +164,21 @@ pub fn scan_workspace_sql(
     if removed > 0 {
         tracing::debug!("sql_sensor: replaced {removed} stale table edge(s) for {root:?}");
     }
-    // The ledger bucket for `unresolved` lives in the per-sensor
-    // coverage report; here we just count the deduped `Table` nodes
-    // (the spec wants per-repo emission counts; `sensor_counts` is
-    // a flat `Vec<Table>` count).
-    let _ = unresolved; // reserved for the run_all_with_coverage path
-    Ok(all_nodes.len())
+
+    let unresolved_records: Vec<UnresolvedRecord> = unresolved
+        .into_iter()
+        .map(|(reason, (count, sample_ids))| UnresolvedRecord {
+            reason,
+            count,
+            sample_ids,
+        })
+        .collect();
+
+    Ok(crate::server::sensors::ScanReport {
+        emitted: all_nodes.len(),
+        error: None,
+        unresolved: unresolved_records,
+    })
 }
 
 // ─── Detection (regex-first, language-dispatched) ────────────────────
@@ -194,6 +232,7 @@ fn detect_in_file(content: &str, ext: &str) -> Vec<SqlSite> {
                 Some(stmt) => sites.push(SqlSite {
                     stmt,
                     line: line_num,
+                    unresolved_reason: None,
                 }),
                 None => sites.push(SqlSite {
                     stmt: SqlStatement {
@@ -201,16 +240,26 @@ fn detect_in_file(content: &str, ext: &str) -> Vec<SqlSite> {
                         tables: Vec::new(),
                     },
                     line: line_num,
+                    unresolved_reason: Some(if shape.is_orm {
+                        UnresolvedReason::OrmDynamicQuery
+                    } else {
+                        UnresolvedReason::DynamicSql
+                    }),
                 }),
             },
             None => {
-                // Non-literal first arg → dynamic SQL.
+                // Non-literal first arg → dynamic SQL / ORM query.
                 sites.push(SqlSite {
                     stmt: SqlStatement {
                         access: SqlAccess::Reads,
                         tables: Vec::new(),
                     },
                     line: line_num,
+                    unresolved_reason: Some(if shape.is_orm {
+                        UnresolvedReason::OrmDynamicQuery
+                    } else {
+                        UnresolvedReason::DynamicSql
+                    }),
                 });
             }
         }
@@ -253,29 +302,32 @@ fn first_string_arg_across_lines(lines: &[&str], start: usize, shape: &SqlShape)
 
 /// One recognized call shape. Each language has a small list of
 /// shapes (sqlx::query, rusqlite::prepare, cursor.execute, JDBC
-/// prepareStatement, …). The matcher is intentionally lenient —
-/// it looks for a receiver keyword / function name + a `(` on
-/// the same line — so a chained `.execute(...)` or
-/// `.execute(&pool)` still matches.
+/// prepareStatement, ORM queries, …).
 struct SqlShape {
     /// A substring that must appear in the trimmed line.
     needle: &'static str,
+    is_orm: bool,
 }
 
 impl SqlShape {
     const fn new(needle: &'static str) -> Self {
-        Self { needle }
+        Self {
+            needle,
+            is_orm: false,
+        }
+    }
+    const fn orm(needle: &'static str) -> Self {
+        Self {
+            needle,
+            is_orm: true,
+        }
     }
     fn matches(&self, trimmed: &str) -> bool {
         trimmed.contains(self.needle)
     }
 }
 
-/// Per-language list of recognized call shapes. Each shape is the
-/// receiver's name + `(`. The sensor fires for every match; the
-/// first match wins per call (the regex does not overlap in
-/// practice because shapes are by family — sqlx vs rusqlite vs
-/// Python).
+/// Per-language list of recognized call shapes.
 fn shapes_for_ext(ext: &str) -> Vec<SqlShape> {
     match ext {
         "rs" => vec![
@@ -295,6 +347,9 @@ fn shapes_for_ext(ext: &str) -> Vec<SqlShape> {
             SqlShape::new(".execute("),
             SqlShape::new(".query_row("),
             SqlShape::new(".query_map("),
+            // ORM / query builder
+            SqlShape::orm("::find("),
+            SqlShape::orm("::filter("),
         ],
         "py" | "pyx" => vec![
             // PEP 249 cursor / connection APIs
@@ -311,6 +366,13 @@ fn shapes_for_ext(ext: &str) -> Vec<SqlShape> {
             SqlShape::new("connection.execute("),
             SqlShape::new("session.execute("),
             SqlShape::new(".scalar("),
+            // ORM shapes (SQLAlchemy, Django)
+            SqlShape::orm("session.query("),
+            SqlShape::orm(".objects.filter("),
+            SqlShape::orm(".objects.all("),
+            SqlShape::orm(".objects.get("),
+            SqlShape::orm(".filter("),
+            SqlShape::orm(".filter_by("),
         ],
         "java" => vec![
             // JDBC: `PreparedStatement ps = conn.prepareStatement("...");`
@@ -322,6 +384,9 @@ fn shapes_for_ext(ext: &str) -> Vec<SqlShape> {
             SqlShape::new(".executeQuery("),
             SqlShape::new(".executeUpdate("),
             SqlShape::new(".execute("),
+            // ORM shapes (Hibernate, JPA, Spring Data)
+            SqlShape::orm(".createNamedQuery("),
+            SqlShape::orm("repository.find"),
         ],
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => vec![
             // node-postgres / mysql2 / sqlite3 / better-sqlite3 / knex / prisma raw
@@ -331,6 +396,11 @@ fn shapes_for_ext(ext: &str) -> Vec<SqlShape> {
             SqlShape::new(".prepare("),
             SqlShape::new("$queryRaw("),
             SqlShape::new("$executeRaw("),
+            // ORM shapes (Prisma, TypeORM)
+            SqlShape::orm(".findMany("),
+            SqlShape::orm(".findUnique("),
+            SqlShape::orm(".findFirst("),
+            SqlShape::orm("getRepository("),
         ],
         _ => Vec::new(),
     }
@@ -895,19 +965,25 @@ fn build_graph(
     let mut edges: Vec<GraphEdge> = Vec::new();
     let mut unresolved: Vec<UnresolvedRecord> = Vec::new();
     let mut emitted_table_ids: BTreeMap<String, String> = BTreeMap::new();
-    let mut per_table_dynamic_count: BTreeMap<String, u32> = BTreeMap::new();
+    let mut per_reason_dynamic: BTreeMap<UnresolvedReason, (usize, Vec<String>)> = BTreeMap::new();
 
     for site in sites {
         if site.stmt.tables.is_empty() {
             // Either the parser could not classify the literal
             // (DDL/PRAGMA/etc.) or the call's first arg was not a
             // literal. Both land on the unresolved ledger with
-            // reason `DynamicSql`.
+            // reason `DynamicSql` or `OrmDynamicQuery`.
+            let reason = site
+                .unresolved_reason
+                .unwrap_or(UnresolvedReason::DynamicSql);
             let sample_id = format!("{graph_path_str}:{}", site.line);
-            let count = per_table_dynamic_count
-                .entry(sample_id.clone())
-                .or_insert(0);
-            *count += 1;
+            let entry = per_reason_dynamic
+                .entry(reason)
+                .or_insert_with(|| (0, Vec::new()));
+            entry.0 += 1;
+            if entry.1.len() < 5 {
+                entry.1.push(sample_id);
+            }
             continue;
         }
         let edge_kind = match site.stmt.access {
@@ -959,11 +1035,11 @@ fn build_graph(
         }
     }
 
-    for (_id, count) in per_table_dynamic_count {
+    for (reason, (count, sample_ids)) in per_reason_dynamic {
         unresolved.push(UnresolvedRecord {
-            reason: UnresolvedReason::DynamicSql,
-            count: count as usize,
-            sample_ids: vec![_id],
+            reason,
+            count,
+            sample_ids,
         });
     }
 
@@ -1150,13 +1226,17 @@ mod tests {
     }
 
     #[test]
-    fn detect_orm_call_ignores_no_sql_literal() {
+    fn detect_orm_call_records_orm_dynamic_query() {
         // SQLAlchemy ORM: `session.query(Order)` has no literal SQL.
-        // The sensor should NOT match — there's no recognized shape
-        // that takes a string SQL arg.
+        // The sensor matches the ORM call shape and emits an unresolved site with OrmDynamicQuery.
         let src = r#"session.query(Order).all()"#;
         let sites = detect_in_file(src, "py");
-        assert_eq!(sites.len(), 0, "ORM call has no SQL literal");
+        assert_eq!(sites.len(), 1);
+        assert_eq!(
+            sites[0].unresolved_reason,
+            Some(UnresolvedReason::OrmDynamicQuery)
+        );
+        assert!(sites[0].stmt.tables.is_empty());
     }
 
     #[test]
@@ -1190,6 +1270,7 @@ mod tests {
                 tables: vec!["orders".to_string()],
             },
             line: 5,
+            unresolved_reason: None,
         };
         let (nodes, edges, unresolved) = build_graph(&graph, &[site], "src/orders.py", &ns);
         assert!(unresolved.is_empty());

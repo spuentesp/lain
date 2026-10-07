@@ -112,6 +112,12 @@ pub enum ContractFact {
     /// sensor detected (Apollo resolver map / graphql-java
     /// `DataFetcher` / gqlgen / Strawberry).
     GraphqlHandler(GraphqlHandlerFact),
+    /// Phase F (Gap 19): WebSocket server endpoint declaration.
+    WebSocketProvider(WebSocketProviderFact),
+    /// Phase F (Gap 19): WebSocket client dial/connection site.
+    WebSocketConsumer(WebSocketConsumerFact),
+    /// Phase F (Gap 19): WebSocket route to handler link.
+    WebSocketHandler(WebSocketHandlerFact),
 }
 
 // ─── HTTP provider ────────────────────────────────────────────────────
@@ -258,6 +264,29 @@ pub enum GraphqlHandlerOrigin {
     GraphqlJava,
     Gqlgen,
     Strawberry,
+}
+
+// ─── WebSocket provider / consumer / handler (Phase F, Gap 19) ─────────
+
+/// One WebSocket endpoint declaration on the server/provider side.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSocketProviderFact {
+    pub route: String,
+    pub handler: Option<SymbolKey>,
+}
+
+/// One WebSocket client dial/connection site on the consumer side.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSocketConsumerFact {
+    pub url: NormalizedUrl,
+    pub route: String,
+}
+
+/// Link from WebSocket route to implementing handler.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSocketHandlerFact {
+    pub route: String,
+    pub handler: SymbolKey,
 }
 
 // ─── HTTP consumer ────────────────────────────────────────────────────
@@ -548,6 +577,14 @@ pub enum ContractKey {
         op: GraphqlOp,
         field: String,
     },
+    /// Phase F (Gap 19): WebSocket endpoint identified by normalized route.
+    WebSocket {
+        route: String,
+    },
+    /// Phase D (Gap 23): Database table contract.
+    Table {
+        name: String,
+    },
 }
 
 /// Phase E (spec §8.3): the GraphQL operation kind for a
@@ -607,6 +644,12 @@ impl std::fmt::Display for ContractKey {
             ContractKey::Graphql { op, field } => {
                 write!(f, "graphql:{}:{}", op, field)
             }
+            ContractKey::WebSocket { route } => {
+                write!(f, "websocket:{}", route)
+            }
+            ContractKey::Table { name } => {
+                write!(f, "table:{}", name)
+            }
         }
     }
 }
@@ -614,9 +657,7 @@ impl std::fmt::Display for ContractKey {
 impl ContractKey {
     /// Wire-form of the key (the `Display` round-trip). One per
     /// variant: `http:<METHOD> <template>`, `topic:<broker>/<name>`,
-    /// `rpc:<service>/<method>`, `graphql:<op>:<field>`. The §4.4
-    /// `Display` / `FromStr` grammar is shared with this method —
-    /// any change to one must propagate to the other.
+    /// `rpc:<service>/<method>`, `graphql:<op>:<field>`, `websocket:<route>`, `table:<name>`.
     pub fn wire_form(&self) -> String {
         self.to_string()
     }
@@ -625,50 +666,43 @@ impl ContractKey {
     /// * `Http` — the route template (e.g. `/api/orders/{id}`);
     /// * `Topic` — the topic name;
     /// * `Rpc` — the method name;
-    /// * `Graphql` — the field name.
-    ///
-    /// Used by the joiner's `Endpoint { method, template }`
-    /// projection (§7.3 step 2) and by §9.4 specificity scoring;
-    /// consolidated here so the Phase E follow-up (Thrift /
-    /// Connect-RPC per spec §8.1) only adds the new variant's
-    /// arm, not four call-site matches.
+    /// * `Graphql` — the field name;
+    /// * `WebSocket` — the route;
+    /// * `Table` — the table name.
     pub fn leaf(&self) -> &str {
         match self {
             ContractKey::Http { template, .. } => template,
             ContractKey::Topic { name, .. } => name,
             ContractKey::Rpc { method, .. } => method,
             ContractKey::Graphql { field, .. } => field,
+            ContractKey::WebSocket { route } => route,
+            ContractKey::Table { name } => name,
         }
     }
 
     /// Short variant tag (`"http"` / `"topic"` / `"rpc"` /
-    /// `"graphql"`). Used by tool envelopes that filter by
-    /// protocol kind — `mcp::contracts::list_contracts`'s
-    /// `kind_filter` parameter, for one.
+    /// `"graphql"` / `"websocket"` / `"table"`).
     pub fn kind(&self) -> &'static str {
         match self {
             ContractKey::Http { .. } => "http",
             ContractKey::Topic { .. } => "topic",
             ContractKey::Rpc { .. } => "rpc",
             ContractKey::Graphql { .. } => "graphql",
+            ContractKey::WebSocket { .. } => "websocket",
+            ContractKey::Table { .. } => "table",
         }
     }
 
     /// True iff this key carries an embedded service name equal
-    /// to `caller_service`. Only `Rpc` keys embed a service in the
-    /// key shape (per spec §8.2 — package-qualified
-    /// `package.Service`); the other variants are protocol-scoped
-    /// and rely on the joiner's `(service, key)` pair for I5
-    /// same-service filtering, so this method returns `false`
-    /// for them. Used by I5 ("no same-service Binds") checks
-    /// inside `resolve_rpc_consumer` and the topic / GraphQL
-    /// resolvers' candidate filtering.
+    /// to `caller_service`.
     pub fn is_self_service(&self, caller_service: &str) -> bool {
         match self {
             ContractKey::Rpc { service, .. } => service == caller_service,
-            ContractKey::Http { .. } | ContractKey::Topic { .. } | ContractKey::Graphql { .. } => {
-                false
-            }
+            ContractKey::Http { .. }
+            | ContractKey::Topic { .. }
+            | ContractKey::Graphql { .. }
+            | ContractKey::WebSocket { .. }
+            | ContractKey::Table { .. } => false,
         }
     }
 }
@@ -723,6 +757,16 @@ impl std::str::FromStr for ContractKey {
             return Ok(ContractKey::Graphql {
                 op,
                 field: field.to_string(),
+            });
+        }
+        if let Some(route) = s.strip_prefix("websocket:") {
+            return Ok(ContractKey::WebSocket {
+                route: route.to_string(),
+            });
+        }
+        if let Some(name) = s.strip_prefix("table:") {
+            return Ok(ContractKey::Table {
+                name: name.to_string(),
             });
         }
         Err(format!("unknown contract key kind: {s:?}"))
@@ -849,6 +893,9 @@ pub enum UnresolvedReason {
     /// statement (DDL, PRAGMA, …). Either way, no `Table` edge
     /// can be emitted.
     DynamicSql,
+    /// Phase D (Gap 23): ORM or query-builder call where the table reference
+    /// is dynamic or unresolved statically.
+    OrmDynamicQuery,
 }
 
 /// A JSON pointer (or, here, JSON path) into a payload. Segments are

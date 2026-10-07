@@ -23,13 +23,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use lain::federation::contracts::config::{ContractFederationConfig, DatabaseDecl, ServiceDecl};
 use lain::federation::contracts::coverage::{
     CoverageLedger, SensorLedger, SkipReason, UnresolvedReason, UnresolvedRecord,
 };
-use lain::federation::contracts::model::{ContractFact, Table};
+use lain::federation::contracts::joiner::ContractJoiner;
+use lain::federation::contracts::model::{ContractFact, ContractKey, ServiceName, Table};
 use lain::schema::{EdgeType, GraphNode, NodeType, RepoNamespace};
 use lain::server::sensors::sql_sensor::{
-    parse_sql, scan_workspace_sql, SqlAccess, SqlSite, SqlStatement,
+    parse_sql, scan_workspace_sql, scan_workspace_sql_with_report, SqlAccess, SqlSite, SqlStatement,
 };
 
 // ─── Builders ────────────────────────────────────────────────────────
@@ -460,6 +462,130 @@ def save(session, obj):
     assert!(collect_sql_edges(&graph).is_empty());
 }
 
+// ─── D7 — Database Topology & ORM Unresolved Ledger ──────────────────
+
+/// **D7** (spec §7 & Gap 23):
+/// 1. ORM usage patterns are reported in the unresolved ledger with reason `OrmDynamicQuery`.
+/// 2. Database topology in `repos.yaml#databases` maps table endpoints to their declaring
+///    database service rather than the scanning repo's default service.
+#[test]
+fn d7_database_topology_and_orm_unresolved_ledger() {
+    let _g = test_lock();
+    let root = fixed_workspace("d7");
+    write_file(
+        &root,
+        "src/orm_queries.py",
+        r#"
+def find_orders(session):
+    return session.query(Order).filter_by(status='pending').all()
+
+def find_users():
+    return User.objects.filter(active=True)
+"#,
+    );
+
+    let graph = lain::graph::GraphDatabase::new(&root.join("graph.bin")).unwrap();
+    let ns = RepoNamespace::for_test();
+    let report = scan_workspace_sql_with_report(&graph, &root, &ns).unwrap();
+    assert_eq!(report.emitted, 0);
+
+    let orm_rec = report
+        .unresolved
+        .iter()
+        .find(|u| matches!(u.reason, UnresolvedReason::OrmDynamicQuery));
+    assert!(
+        orm_rec.is_some(),
+        "report unresolved contains OrmDynamicQuery record"
+    );
+    let orm = orm_rec.unwrap();
+    assert!(orm.count >= 1, "at least one ORM query recorded");
+
+    // 2. Database topology mapping in EndpointTable.
+    let mut orders_node = GraphNode::new_in(
+        NodeType::Table,
+        "orders".into(),
+        "src/tables.sql".into(),
+        &ns,
+    );
+    orders_node.repo_id = Some("inventory_repo".into());
+    orders_node.id = "inventory_repo:Table:src/tables.sql:orders:1".into();
+    orders_node.contract = Some(ContractFact::Table(Table {
+        service: "".into(),
+        name: "orders".into(),
+    }));
+
+    let mut customers_node = GraphNode::new_in(
+        NodeType::Table,
+        "customers".into(),
+        "src/tables.sql".into(),
+        &ns,
+    );
+    customers_node.repo_id = Some("inventory_repo".into());
+    customers_node.id = "inventory_repo:Table:src/tables.sql:customers:2".into();
+    customers_node.contract = Some(ContractFact::Table(Table {
+        service: "".into(),
+        name: "customers".into(),
+    }));
+
+    let cfg = ContractFederationConfig {
+        services: vec![
+            ServiceDecl {
+                name: "orders_svc".into(),
+                repo: "orders_repo".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+            ServiceDecl {
+                name: "inventory_svc".into(),
+                repo: "inventory_repo".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+            },
+        ],
+        databases: vec![DatabaseDecl {
+            name: "orders_db".into(),
+            service: "orders_svc".into(),
+            tables: vec!["orders".into()],
+            shared_with: vec!["inventory_svc".into()],
+        }],
+        ..Default::default()
+    };
+
+    let out = ContractJoiner::run(&[orders_node, customers_node], &[], &cfg);
+
+    // `orders` is in `orders_db` -> assigned to `orders_svc`
+    let orders_ep = out
+        .index
+        .endpoints
+        .get(&(
+            ServiceName("orders_svc".into()),
+            ContractKey::Table {
+                name: "orders".into(),
+            },
+        ))
+        .expect("orders mapped to orders_svc via database topology");
+    assert_eq!(orders_ep.providers.len(), 1);
+
+    // `customers` is unlisted in `databases` -> falls back to repo's service `inventory_svc`
+    let customers_ep = out
+        .index
+        .endpoints
+        .get(&(
+            ServiceName("inventory_svc".into()),
+            ContractKey::Table {
+                name: "customers".into(),
+            },
+        ))
+        .expect("customers mapped to inventory_svc via fallback");
+    assert_eq!(customers_ep.providers.len(), 1);
+}
+
 // ─── SQL parser unit checks (re-asserted here for the D4 fixture) ────
 
 /// `parse_sql` is the production parser; the D4 acceptance
@@ -510,6 +636,7 @@ fn _pin_public_surface() -> SqlSite {
             tables: Vec::new(),
         },
         line: 0,
+        unresolved_reason: None,
     }
 }
 

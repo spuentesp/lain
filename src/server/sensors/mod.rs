@@ -412,7 +412,12 @@ mod run_all_tests {
             ))
             .unwrap();
 
-        let counts = run_all(&graph, &dir, &crate::schema::RepoNamespace::for_test(), "test");
+        let counts = run_all(
+            &graph,
+            &dir,
+            &crate::schema::RepoNamespace::for_test(),
+            "test",
+        );
         assert_eq!(counts.http_routes, 1, "the Go route must be picked up");
 
         let routes = graph
@@ -443,7 +448,13 @@ mod run_all_tests {
         let graph = GraphDatabase::new(&db).unwrap();
 
         assert_eq!(
-            run_all(&graph, &dir, &crate::schema::RepoNamespace::for_test(), "test").total(),
+            run_all(
+                &graph,
+                &dir,
+                &crate::schema::RepoNamespace::for_test(),
+                "test"
+            )
+            .total(),
             0
         );
     }

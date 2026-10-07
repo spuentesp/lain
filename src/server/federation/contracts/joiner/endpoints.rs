@@ -137,6 +137,40 @@ pub(crate) fn build_endpoints(
                         method: HttpMethod::Any,
                     });
             }
+            Some(ContractFact::WebSocketProvider(ws)) => {
+                let key = ContractKey::WebSocket {
+                    route: ws.route.clone(),
+                };
+                table
+                    .entry((svc.clone(), key))
+                    .or_default()
+                    .push(EndpointProviderRecord {
+                        id: gid,
+                        fact: Some(ContractFact::WebSocketProvider(ws.clone())),
+                        template: ws.route.clone(),
+                        method: HttpMethod::Any,
+                    });
+            }
+            Some(ContractFact::Table(tbl)) => {
+                let owner_svc = config
+                    .databases
+                    .iter()
+                    .find(|d| d.tables.iter().any(|t| t == &tbl.name))
+                    .map(|d| ServiceName(d.service.clone()))
+                    .unwrap_or_else(|| svc.clone());
+                let key = ContractKey::Table {
+                    name: tbl.name.clone(),
+                };
+                table
+                    .entry((owner_svc, key))
+                    .or_default()
+                    .push(EndpointProviderRecord {
+                        id: gid,
+                        fact: Some(ContractFact::Table(tbl.clone())),
+                        template: tbl.name.clone(),
+                        method: HttpMethod::Any,
+                    });
+            }
             _ => continue,
         }
     }

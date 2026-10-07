@@ -161,6 +161,7 @@ fn config_with_service(name: &str) -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -190,6 +191,7 @@ fn config_with_two_services(a: &str, b: &str) -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -635,4 +637,127 @@ fn graphql_handler_symbol_key_projects_to_function() {
     map.insert(symbol.clone(), "handler");
     assert_eq!(map.get(&symbol), Some(&"handler"));
     assert_eq!(fact.origin, GraphqlHandlerOrigin::Gqlgen);
+}
+
+// ─── F7 — GraphQL Field Lineage and Field Binds ──────────────────────
+
+#[test]
+fn f7_graphql_field_lineage_and_field_binds() {
+    use lain::graph::GraphDatabase;
+    use lain::schema::EdgeType;
+    use lain::server::sensors::graphql_consumer_sensor::scan_workspace_graphql_consumer;
+    use lain::server::sensors::graphql_provider_sensor::scan_workspace_graphql_provider;
+
+    let root_api = fixed_workspace("f7_api");
+    let sdl_content = r#"
+type Order {
+  id: ID!
+  status: String!
+  total: Float
+}
+
+type Query {
+  orders: [Order!]!
+}
+"#;
+    write_file(&root_api, "schema.graphql", sdl_content);
+    let graph_api = GraphDatabase::new(&root_api.join("graph.bin")).unwrap();
+    let n = RepoNamespace::for_test();
+    let count_api = scan_workspace_graphql_provider(&graph_api, &root_api, &n).unwrap();
+    assert_eq!(count_api, 1, "emitted 1 GraphqlProvider");
+
+    let (nodes_api, edges_api) =
+        lain::federation::contracts::snapshots::manager::project_graph_shared(&graph_api, "api")
+            .unwrap();
+
+    // Verify Schema and Field nodes exist
+    let order_schema = nodes_api
+        .iter()
+        .find(|n| n.node_type == NodeType::Schema && n.name == "Order");
+    assert!(order_schema.is_some(), "Order Schema node must be emitted");
+    let status_field = nodes_api
+        .iter()
+        .find(|n| n.node_type == NodeType::Field && n.name == "status");
+    assert!(status_field.is_some(), "status Field node must be emitted");
+
+    let has_resp_schema_edge = edges_api
+        .iter()
+        .any(|e| e.edge_type == EdgeType::ResponseSchema);
+    assert!(has_resp_schema_edge, "ResponseSchema edge must be emitted");
+
+    // Scan consumer in web repo
+    let root_web = fixed_workspace("f7_web");
+    let ts_content = r#"
+const query = gql`
+  query GetOrders {
+    orders {
+      id
+      status
+    }
+  }
+`;
+"#;
+    write_file(&root_web, "src/orders.ts", ts_content);
+    let graph_web = GraphDatabase::new(&root_web.join("graph.bin")).unwrap();
+    let count_web = scan_workspace_graphql_consumer(&graph_web, &root_web, &n).unwrap();
+    assert_eq!(count_web, 1, "emitted 1 GraphqlConsumer");
+
+    let (nodes_web, edges_web) =
+        lain::federation::contracts::snapshots::manager::project_graph_shared(&graph_web, "web")
+            .unwrap();
+
+    // In web repo, verify Function and FieldRef nodes exist
+    let orders_consumer = nodes_web
+        .iter()
+        .find(|n| n.node_type == NodeType::Function && n.name == "graphql-call:query:orders");
+    assert!(
+        orders_consumer.is_some(),
+        "graphql-call Function node must be emitted"
+    );
+    let orders_consumer_id = orders_consumer.unwrap().id.clone();
+
+    let status_ref = nodes_web
+        .iter()
+        .find(|n| n.node_type == NodeType::FieldRef && n.name == "status");
+    assert!(status_ref.is_some(), "status FieldRef node must be emitted");
+    let status_ref_id = status_ref.unwrap().id.clone();
+
+    // Route in api repo for /graphql POST endpoint
+    let route = http_route_node("api", "src/server.ts", "/graphql", 10);
+
+    let mut all_nodes = nodes_api;
+    all_nodes.extend(nodes_web);
+    all_nodes.push(route);
+
+    let mut all_edges = edges_api;
+    all_edges.extend(edges_web);
+
+    let config = config_with_two_services("api", "web");
+    let out =
+        ContractJoiner::run_with_registry(&all_nodes, &all_edges, &config, &ClientRegistry::new());
+
+    let consumer_gid = GlobalId::parse(&orders_consumer_id).unwrap();
+    let resolution = out
+        .index
+        .consumers
+        .get(&consumer_gid)
+        .expect("consumer must be resolved");
+    assert!(
+        !resolution.bound_endpoints.is_empty(),
+        "consumer must bind to api endpoint"
+    );
+
+    let status_ref_gid = GlobalId::parse(&status_ref_id).unwrap();
+    let field_res = out
+        .index
+        .field_refs
+        .get(&status_ref_gid)
+        .expect("field_ref for status must be recorded");
+    assert!(!field_res.unknown, "status field read must not be unknown");
+    assert_eq!(
+        field_res.bound_fields.len(),
+        1,
+        "status field read must bind to Order.status field"
+    );
+    assert_eq!(field_res.bound_fields[0].field_path.to_string(), "status");
 }

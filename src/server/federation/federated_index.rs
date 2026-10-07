@@ -1208,6 +1208,7 @@ impl FederatedIndex {
                     EdgeType::HasField
                         | EdgeType::RequestSchema
                         | EdgeType::ResponseSchema
+                        | EdgeType::PayloadSchema
                         | EdgeType::ReadsFrom
                 )
             })

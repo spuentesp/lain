@@ -552,7 +552,10 @@ pub(crate) fn coverage_from_reports(
 
     for (lang_str, file_paths) in files_by_lang {
         let has_analyzed = ledger.ledger.values().any(|sensor_map| {
-            sensor_map.get(&lang_str).map(|s| s.files_analyzed > 0).unwrap_or(false)
+            sensor_map
+                .get(&lang_str)
+                .map(|s| s.files_analyzed > 0)
+                .unwrap_or(false)
         });
         if !has_analyzed {
             let sample_paths: Vec<String> = file_paths.iter().take(5).cloned().collect();
@@ -1060,7 +1063,8 @@ mod tests {
     fn coverage_from_reports_records_unsupported_language() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let key = crate::federation::contracts::index_cache::CacheKey::new("test_repo", "head", "0.9.0");
+        let key =
+            crate::federation::contracts::index_cache::CacheKey::new("test_repo", "head", "0.9.0");
         let counts = SensorCounts::default();
         let reports = vec![];
         let cover = coverage_from_reports(dir.path(), &key, &counts, &reports);

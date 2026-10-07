@@ -121,6 +121,7 @@ fn orders_config() -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -358,6 +359,7 @@ fn scenario_16_shipping_to_inventory_one_binds_cross_repo_false() {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
     let out = ContractJoiner::run(&[p_inv, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1, "exactly one Binds");

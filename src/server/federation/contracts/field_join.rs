@@ -79,6 +79,7 @@ pub(crate) fn collect_endpoint_schemas(
     nodes: &[GraphNode],
     edges: &[GraphEdge],
     assignments: &BTreeMap<String, ServiceName>,
+    config: &crate::federation::contracts::config::ContractFederationConfig,
 ) -> EndpointSchemas {
     // 1. Index every Schema + Field node by global id so we can
     //    resolve their contract payloads in O(1).
@@ -130,13 +131,14 @@ pub(crate) fn collect_endpoint_schemas(
     }
 
     // 3. Route id → list of `(direction, schema_id)`. The route id
-    //    is the `HttpRoute` node's global id; we resolve the service
+    //    is the route or topic node's global id; we resolve the service
     //    from the assignments map.
     let mut schemas_by_route: BTreeMap<String, Vec<(Direction, String)>> = BTreeMap::new();
     for edge in edges {
         let dir = match edge.edge_type {
             crate::schema::EdgeType::RequestSchema => Some(Direction::Request),
             crate::schema::EdgeType::ResponseSchema => Some(Direction::Response),
+            crate::schema::EdgeType::PayloadSchema => Some(Direction::Payload),
             _ => None,
         };
         let Some(dir) = dir else { continue };
@@ -147,10 +149,7 @@ pub(crate) fn collect_endpoint_schemas(
     }
 
     // 4. For every route that has at least one schema, resolve its
-    //    service and `(method, template)` so we can index by
-    //    `EndpointId`. Routes without a service assignment are
-    //    dropped — they live in the per-repo graph but the
-    //    federation can't route them.
+    //    service and ContractKey so we can index by `EndpointId`.
     let mut by_endpoint: BTreeMap<EndpointId, BTreeMap<Direction, Vec<ResponseField>>> =
         BTreeMap::new();
     let mut schema_node: BTreeMap<EndpointId, BTreeMap<Direction, GlobalId>> = BTreeMap::new();
@@ -158,17 +157,53 @@ pub(crate) fn collect_endpoint_schemas(
         let Some(svc) = assignments.get(&route_id) else {
             continue;
         };
-        // The route's `ContractKey` is `(method, template)` — recover
-        // both from the route's `ProviderFact`.
         let Some(route_node) = nodes.iter().find(|n| n.id == route_id) else {
             continue;
         };
-        let Some(ContractFact::Provider(p)) = route_node.contract.as_ref() else {
-            continue;
-        };
-        let key = ContractKey::Http {
-            method: crate::federation::contracts::model::MethodSpec::Known(p.method),
-            template: p.template.clone(),
+        let key = if matches!(route_node.node_type, crate::schema::NodeType::Topic) {
+            let broker = if route_node.name.contains('/') {
+                route_node
+                    .name
+                    .split('/')
+                    .next()
+                    .unwrap_or("kafka")
+                    .to_string()
+            } else {
+                "kafka".to_string()
+            };
+            let template = match route_node.contract.as_ref() {
+                Some(ContractFact::Provider(p)) => p.template.clone(),
+                _ => route_node
+                    .name
+                    .split('/')
+                    .nth(1)
+                    .unwrap_or(&route_node.name)
+                    .to_string(),
+            };
+            ContractKey::Topic {
+                broker,
+                name: template,
+            }
+        } else {
+            match route_node.contract.as_ref() {
+                Some(ContractFact::Provider(p)) => ContractKey::Http {
+                    method: crate::federation::contracts::model::MethodSpec::Known(p.method),
+                    template: p.template.clone(),
+                },
+                Some(ContractFact::RpcProvider(rpc)) => ContractKey::Rpc {
+                    system: rpc.system,
+                    service: rpc.service.clone(),
+                    method: rpc.method.clone(),
+                },
+                Some(ContractFact::GraphqlProvider(g)) => ContractKey::Graphql {
+                    op: g.op,
+                    field: g.field.clone(),
+                },
+                Some(ContractFact::WebSocketProvider(ws)) => ContractKey::WebSocket {
+                    route: ws.route.clone(),
+                },
+                _ => continue,
+            }
         };
         let endpoint_id: EndpointId = (svc.clone(), key);
         let bucket = by_endpoint.entry(endpoint_id.clone()).or_default();
@@ -187,6 +222,43 @@ pub(crate) fn collect_endpoint_schemas(
         if !node_map.is_empty() {
             schema_node.insert(endpoint_id, node_map);
         }
+    }
+
+    // Step 4b: Schemas explicitly declared in repos.yaml via `schemas` (Gap 20).
+    for decl in &config.schemas {
+        let matching_schema = nodes.iter().find(|n| {
+            n.node_type == crate::schema::NodeType::Schema
+                && (n.path == decl.file || n.path.ends_with(&format!("/{}", decl.file)))
+                && assignments
+                    .get(&n.id)
+                    .map(|s| s.0 == decl.repo)
+                    .unwrap_or(true)
+        });
+        let Some(schema_node_rec) = matching_schema else {
+            continue;
+        };
+        let Some(fields) = fields_by_schema.get(&schema_node_rec.id) else {
+            continue;
+        };
+        let Ok(schema_gid) = GlobalId::parse(&schema_node_rec.id) else {
+            continue;
+        };
+
+        let svc = ServiceName(decl.repo.clone());
+        let key = ContractKey::Topic {
+            broker: "kafka".to_string(),
+            name: decl.topic.clone(),
+        };
+        let endpoint_id: EndpointId = (svc, key);
+        let bucket = by_endpoint.entry(endpoint_id.clone()).or_default();
+        bucket
+            .entry(Direction::Payload)
+            .or_default()
+            .extend(fields.iter().cloned());
+        schema_node
+            .entry(endpoint_id)
+            .or_default()
+            .insert(Direction::Payload, schema_gid);
     }
 
     EndpointSchemas {
@@ -326,7 +398,9 @@ pub(crate) fn resolve_field_refs(
         let mut bound_fields: Vec<BoundField> = Vec::new();
         for (endpoint, ep_bind) in endpoints {
             let response_fields = match schemas.by_endpoint.get(endpoint) {
-                Some(dirs) => dirs.get(&Direction::Response),
+                Some(dirs) => dirs
+                    .get(&Direction::Response)
+                    .or_else(|| dirs.get(&Direction::Payload)),
                 None => None,
             };
             let Some(response_fields) = response_fields else {

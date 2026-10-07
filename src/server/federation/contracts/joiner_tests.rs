@@ -5,18 +5,21 @@
 
 use crate::federation::contracts::config::{
     ConfirmedBinding, ConfirmedBindingConsumer, ConfirmedBindingProvider, ContractFederationConfig,
-    HttpClientDecl, ServiceDecl,
+    HttpClientDecl, SchemaDecl, ServiceDecl,
 };
 use crate::federation::contracts::index::{
     ConsumerTarget, EndpointId, FieldRefResolution, StaleReason, UnresolvedReason,
 };
 use crate::federation::contracts::joiner::{ContractJoiner, JoinOutput};
 use crate::federation::contracts::model::{
-    CallVia, ConsumerFact, ContractFact, ContractKey, HostPart, HttpMethod, MethodSpec,
-    NormalizedUrl, ProviderFact, ProviderOrigin,
+    CallVia, ConsumerFact, ContractFact, ContractKey, Direction, FieldMeta, FieldReadFact,
+    HostPart, HttpMethod, JsonPath, MethodSpec, NormalizedUrl, ProviderFact, ProviderOrigin,
+    TopicConsumerFact, TopicConsumerKind, TypeDesc, WebSocketConsumerFact, WebSocketProviderFact,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
-use crate::schema::{EdgeProvenance, GraphNode, NodeType, RepoNamespace, RouteMatch};
+use crate::schema::{
+    EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, RouteMatch,
+};
 use std::collections::BTreeSet;
 
 // ─── Builders ─────────────────────────────────────────────────────────
@@ -102,6 +105,7 @@ fn default_config() -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -408,6 +412,7 @@ fn rule_3_target_service_via_http_clients_binds_with_static_confidence() {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
     let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1);
@@ -958,6 +963,7 @@ fn confirmed_binding_matches_consumer_and_records_provenance() {
                 key: "POST /api/orders".into(),
             },
         }],
+        databases: vec![],
     };
     let out = ContractJoiner::run(&[p, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1);
@@ -985,6 +991,7 @@ fn confirmed_binding_no_endpoint_marks_stale() {
                 key: "POST /api/orders".into(),
             },
         }],
+        databases: vec![],
     };
     let out = ContractJoiner::run(&[], &[], &cfg);
     assert_eq!(out.binds.len(), 0);
@@ -1022,6 +1029,7 @@ fn confirmed_binding_no_consumer_marks_stale() {
                 key: "POST /api/orders".into(),
             },
         }],
+        databases: vec![],
     };
     let out = ContractJoiner::run(&[p], &[], &cfg);
     assert!(out.binds.is_empty());
@@ -1261,6 +1269,7 @@ fn sdk_wrapper_config() -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -1607,6 +1616,7 @@ fn two_service_topic_config() -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -1814,6 +1824,7 @@ fn topic_join_skips_own_service_endpoint() {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
     let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
     // §7.8: every Binds edge connects two different services; an
@@ -1821,6 +1832,261 @@ fn topic_join_skips_own_service_endpoint() {
     assert!(
         out.binds.is_empty(),
         "intra-service topic consumption must not bind"
+    );
+}
+
+#[test]
+fn websocket_cross_service_join_produces_binds_edge() {
+    let mut provider = GraphNode::new(
+        NodeType::HttpRoute,
+        "ws:server:/feed".into(),
+        "src/server.js".into(),
+    );
+    provider.repo_id = Some("orders".into());
+    provider.id = make_id(
+        "orders",
+        NodeType::HttpRoute,
+        "src/server.js",
+        "ws_server",
+        10,
+    );
+    provider.line_start = Some(10);
+    provider.contract = Some(ContractFact::WebSocketProvider(WebSocketProviderFact {
+        route: "/feed".into(),
+        handler: None,
+    }));
+
+    let mut consumer = GraphNode::new(
+        NodeType::HttpClientCall,
+        "ws:client:orders:/feed".into(),
+        "src/client.js".into(),
+    );
+    consumer.repo_id = Some("billing".into());
+    consumer.id = make_id(
+        "billing",
+        NodeType::HttpClientCall,
+        "src/client.js",
+        "ws_client",
+        20,
+    );
+    consumer.line_start = Some(20);
+    consumer.contract = Some(ContractFact::WebSocketConsumer(WebSocketConsumerFact {
+        url: NormalizedUrl {
+            host: HostPart::Literal("orders".into()),
+            template: Some("/feed".into()),
+        },
+        route: "/feed".into(),
+    }));
+
+    let cfg = two_service_topic_config();
+    let out = ContractJoiner::run(&[provider.clone(), consumer.clone()], &[], &cfg);
+    assert!(
+        !out.binds.is_empty(),
+        "websocket cross-service join must produce a Binds edge"
+    );
+    let bind = &out.binds[0];
+    assert_eq!(bind.consumer_service.0, "billing");
+    assert_eq!(bind.provider_service.0, "orders");
+    assert_eq!(bind.confidence, 1.0);
+    let (svc, key) = &bind.target_endpoint;
+    assert_eq!(svc.0, "orders");
+    assert_eq!(
+        key,
+        &ContractKey::WebSocket {
+            route: "/feed".into()
+        }
+    );
+
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    match &res.target {
+        Some(ConsumerTarget::Binds {
+            confidence,
+            route_match,
+            ..
+        }) => {
+            assert_eq!(*confidence, 1.0);
+            assert!(matches!(route_match, RouteMatch::Exact));
+        }
+        other => panic!("expected Binds, got {other:?}"),
+    }
+}
+
+#[test]
+fn topic_payload_schema_and_consumer_field_read_binds() {
+    let mut topic = GraphNode::new(
+        NodeType::Topic,
+        "kafka/orders.events".into(),
+        "src/events.py".into(),
+    );
+    topic.repo_id = Some("orders".into());
+    topic.id = make_id(
+        "orders",
+        NodeType::Topic,
+        "src/events.py",
+        "orders_events",
+        10,
+    );
+    topic.line_start = Some(10);
+    topic.contract = Some(ContractFact::Provider(ProviderFact {
+        method: HttpMethod::Any,
+        template: "orders.events".into(),
+        handler: None,
+        operation_id: None,
+        origin: ProviderOrigin::Code,
+    }));
+
+    let mut schema = GraphNode::new(
+        NodeType::Schema,
+        "OrderEvent".into(),
+        "schemas/orders.avsc".into(),
+    );
+    schema.repo_id = Some("orders".into());
+    schema.id = make_id(
+        "orders",
+        NodeType::Schema,
+        "schemas/orders.avsc",
+        "OrderEvent",
+        1,
+    );
+    schema.line_start = Some(1);
+    schema.contract = Some(ContractFact::Schema {
+        direction: Direction::Payload,
+    });
+
+    let mut field = GraphNode::new(
+        NodeType::Field,
+        "order_id".into(),
+        "schemas/orders.avsc".into(),
+    );
+    field.repo_id = Some("orders".into());
+    field.id = make_id(
+        "orders",
+        NodeType::Field,
+        "schemas/orders.avsc",
+        "order_id",
+        3,
+    );
+    field.line_start = Some(3);
+    field.contract = Some(ContractFact::Field(FieldMeta {
+        ty: TypeDesc::String,
+        required: true,
+        nullable: false,
+        enum_values: None,
+    }));
+
+    let mut consumer = GraphNode::new(
+        NodeType::Function,
+        "on_order_event".into(),
+        "src/subscriber.py".into(),
+    );
+    consumer.repo_id = Some("billing".into());
+    consumer.id = make_id(
+        "billing",
+        NodeType::Function,
+        "src/subscriber.py",
+        "on_order_event",
+        25,
+    );
+    consumer.line_start = Some(25);
+    consumer.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+        broker: "kafka".into(),
+        name: "orders.events".into(),
+        kind: TopicConsumerKind::Subscription,
+    }));
+
+    let mut field_ref = GraphNode::new(
+        NodeType::FieldRef,
+        "order_id".into(),
+        "src/subscriber.py".into(),
+    );
+    field_ref.repo_id = Some("billing".into());
+    field_ref.id = make_id(
+        "billing",
+        NodeType::FieldRef,
+        "src/subscriber.py",
+        "order_id_ref",
+        30,
+    );
+    field_ref.line_start = Some(30);
+    field_ref.contract = Some(ContractFact::FieldRead(FieldReadFact {
+        chain: "order_id".parse::<JsonPath>().unwrap(),
+        exact: true,
+    }));
+
+    let has_field_edge = GraphEdge::new(EdgeType::HasField, schema.id.clone(), field.id.clone());
+    let payload_schema_edge =
+        GraphEdge::new(EdgeType::PayloadSchema, topic.id.clone(), schema.id.clone());
+    let reads_from_edge = GraphEdge::new(
+        EdgeType::ReadsFrom,
+        field_ref.id.clone(),
+        consumer.id.clone(),
+    );
+
+    let mut cfg = two_service_topic_config();
+    cfg.schemas.push(SchemaDecl {
+        topic: "orders.events".into(),
+        repo: "orders".into(),
+        file: "schemas/orders.avsc".into(),
+    });
+
+    let nodes = vec![
+        topic,
+        schema,
+        field.clone(),
+        consumer.clone(),
+        field_ref.clone(),
+    ];
+    let edges = vec![has_field_edge, payload_schema_edge, reads_from_edge];
+
+    let out = ContractJoiner::run(&nodes, &edges, &cfg);
+
+    // 1. Topic consumer binds to orders endpoint
+    let ep_key = (
+        crate::federation::contracts::model::ServiceName("orders".into()),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "orders.events".into(),
+        },
+    );
+    let endpoint = out
+        .index
+        .endpoints
+        .get(&ep_key)
+        .expect("topic endpoint must exist");
+    assert!(
+        endpoint.schemas.contains_key(&Direction::Payload),
+        "endpoint must contain Direction::Payload schema"
+    );
+    let payload_schema = &endpoint.schemas[&Direction::Payload];
+    assert!(
+        payload_schema
+            .fields
+            .contains_key(&"order_id".parse::<JsonPath>().unwrap()),
+        "payload schema must contain order_id field"
+    );
+
+    // 2. FieldRef binds to field
+    let fid = GlobalId::parse(&field_ref.id).unwrap();
+    let res = out
+        .index
+        .field_refs
+        .get(&fid)
+        .expect("field_ref must resolve");
+    assert!(!res.unknown, "field_ref must not be unknown");
+    assert_eq!(
+        res.bound_fields.len(),
+        1,
+        "field_ref must bind to exactly 1 field"
+    );
+    assert_eq!(res.bound_fields[0].field.as_str(), field.id);
+
+    // 3. Field Binds edge is emitted
+    assert!(
+        out.binds
+            .iter()
+            .any(|b| b.consumer.as_str() == field_ref.id && b.provider.as_str() == field.id),
+        "out.binds must contain Binds(field_ref -> field)"
     );
 }
 

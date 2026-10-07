@@ -38,9 +38,12 @@ async fn get_service(
 ) -> Value {
     let status = lain::server::mcp::handler::HandlerStatus::for_test();
     let ctx = harness::snapshot_ctx(mgr, &status);
-    let outcome = get_service_handle(&ctx, json!({"snapshot": snapshot, "service": service, "limit": 50}))
-        .await
-        .unwrap();
+    let outcome = get_service_handle(
+        &ctx,
+        json!({"snapshot": snapshot, "service": service, "limit": 50}),
+    )
+    .await
+    .unwrap();
     assert!(
         !outcome.is_error,
         "get_service({service}) errored: {:#?}",
@@ -55,8 +58,14 @@ fn use_endpoints(data: &Value) -> Vec<(String, String)> {
     for c in data["consumers"].as_array().cloned().unwrap_or_default() {
         for u in c["uses"].as_array().cloned().unwrap_or_default() {
             let site = u["site"]["id"].as_str().unwrap_or_default().to_string();
-            let key = u["endpoint"]["key"].as_str().unwrap_or_default().to_string();
-            let svc = u["endpoint"]["service"].as_str().unwrap_or_default().to_string();
+            let key = u["endpoint"]["key"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let svc = u["endpoint"]["service"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             out.push((site, format!("{svc}/{key}")));
         }
     }
@@ -117,10 +126,9 @@ async fn evidence_refs_carry_a_commit() {
     let status = lain::server::mcp::handler::HandlerStatus::for_test();
     let ctx = harness::snapshot_ctx(&mgr, &status);
 
-    let outcome =
-        list_contracts_handle(&ctx, json!({"snapshot": base, "limit": 100}))
-            .await
-            .unwrap();
+    let outcome = list_contracts_handle(&ctx, json!({"snapshot": base, "limit": 100}))
+        .await
+        .unwrap();
     assert!(!outcome.is_error, "{:#?}", outcome.structured);
     let items = outcome.structured["data"]["items"]
         .as_array()
@@ -196,16 +204,20 @@ async fn list_contracts_rejects_unknown_kind_instead_of_returning_empty() {
     let status = lain::server::mcp::handler::HandlerStatus::for_test();
     let ctx = harness::snapshot_ctx(&mgr, &status);
 
-    let outcome = list_contracts_handle(&ctx, json!({"snapshot": base, "kind": "bogus", "limit": 50}))
-        .await
-        .unwrap();
+    let outcome = list_contracts_handle(
+        &ctx,
+        json!({"snapshot": base, "kind": "bogus", "limit": 50}),
+    )
+    .await
+    .unwrap();
     assert!(
         outcome.is_error,
         "an unknown kind must be an error, not an empty page: {:#?}",
         outcome.structured
     );
     assert_eq!(
-        outcome.structured["error"]["code"], json!("invalid_argument"),
+        outcome.structured["error"]["code"],
+        json!("invalid_argument"),
         "unexpected error envelope: {:#?}",
         outcome.structured
     );
@@ -214,12 +226,9 @@ async fn list_contracts_rejects_unknown_kind_instead_of_returning_empty() {
     // the fixture holds no such contract — that is data, not a filter
     // failure.
     for kind in ["http", "topic", "rpc", "graphql", "websocket", "table"] {
-        let ok = list_contracts_handle(
-            &ctx,
-            json!({"snapshot": base, "kind": kind, "limit": 50}),
-        )
-        .await
-        .unwrap();
+        let ok = list_contracts_handle(&ctx, json!({"snapshot": base, "kind": kind, "limit": 50}))
+            .await
+            .unwrap();
         assert!(
             !ok.is_error,
             "advertised kind {kind} must be accepted: {:#?}",
@@ -254,7 +263,10 @@ async fn owners_are_always_present_and_resolve_by_repo_id() {
             }
         }
     }
-    assert!(!owner_values.is_empty(), "expected at least one used_by entry");
+    assert!(
+        !owner_values.is_empty(),
+        "expected at least one used_by entry"
+    );
 
     // billing ships a CODEOWNERS in the T1 fixture; at least one entry
     // must resolve to a real owner.
@@ -309,7 +321,8 @@ async fn handlers_repo_names_a_real_repository() {
     assert_eq!(h["file"], json!("src/orders/label.rs"));
     assert_eq!(h["symbol"], json!("get_order_label"));
     assert_eq!(
-        h["repo"], json!("orders"),
+        h["repo"],
+        json!("orders"),
         "handlers[].repo must name the provider's repository"
     );
     assert_ne!(h["repo"], json!("http-sensor"));
@@ -348,7 +361,8 @@ async fn impact_path_hops_carry_real_provenance() {
     for p in &paths {
         for h in p["hops"].as_array().cloned().unwrap_or_default() {
             assert_ne!(
-                h["provenance"]["kind"], json!("unknown"),
+                h["provenance"]["kind"],
+                json!("unknown"),
                 "hop {} carries no provenance: {h:?}",
                 h["node"]
             );

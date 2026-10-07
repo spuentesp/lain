@@ -175,6 +175,7 @@ fn config_with_orders_host(host: &str) -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -185,6 +186,7 @@ fn config_empty() -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -471,4 +473,152 @@ fn e5_same_service_call_does_not_bind() {
         out.binds.is_empty(),
         "no Binds edges may be emitted for same-service calls"
     );
+}
+
+// ─── E6 — gRPC message-field lineage and field binds ──────────────────
+
+#[test]
+fn e6_grpc_message_field_lineage_and_field_binds() {
+    use lain::federation::contracts::model::{FieldReadFact, JsonPath, PathSegment};
+    use lain::graph::GraphDatabase;
+    use lain::schema::{EdgeType, GraphEdge};
+    use lain::server::sensors::grpc_provider_sensor::scan_workspace_grpc;
+
+    let root = fixed_workspace("e6");
+    let proto_content = r#"
+syntax = "proto3";
+
+package com.acme.orders;
+
+message GetReq {
+  string order_id = 1;
+}
+
+message GetResp {
+  string id = 1;
+  string status = 2;
+  double total = 3;
+}
+
+service Orders {
+  rpc Get (GetReq) returns (GetResp);
+}
+"#;
+    write_file(&root, "orders.proto", proto_content);
+    let graph = GraphDatabase::new(&root.join("graph.bin")).unwrap();
+    let n = RepoNamespace::for_test();
+    let count = scan_workspace_grpc(&graph, &root, &n).unwrap();
+    assert_eq!(count, 1, "emitted 1 RpcProvider");
+
+    let (all_nodes, all_edges) =
+        lain::federation::contracts::snapshots::manager::project_graph_shared(&graph, "orders")
+            .unwrap();
+
+    // Verify Schema and Field nodes exist
+    let get_resp_schema = all_nodes
+        .iter()
+        .find(|n| n.node_type == NodeType::Schema && n.name == "GetResp");
+    assert!(
+        get_resp_schema.is_some(),
+        "GetResp Schema node must be emitted"
+    );
+    let status_field = all_nodes
+        .iter()
+        .find(|n| n.node_type == NodeType::Field && n.name == "status");
+    assert!(status_field.is_some(), "status Field node must be emitted");
+
+    // Verify RequestSchema and ResponseSchema edges
+    let has_resp_schema_edge = all_edges
+        .iter()
+        .any(|e| e.edge_type == EdgeType::ResponseSchema);
+    assert!(has_resp_schema_edge, "ResponseSchema edge must be emitted");
+
+    // Test end-to-end joiner field resolution
+    let consumer = rpc_consumer_node(
+        "billing",
+        "pkg/billing/client.go",
+        "Get",
+        15,
+        "com.acme.orders.Orders",
+        Some("orders:50051"),
+        HostPart::Literal("orders:50051".to_string()),
+    );
+    let consumer_gid = gid(
+        "billing",
+        NodeType::Function,
+        "pkg/billing/client.go",
+        "rpc-call:com.acme.orders.Orders:Get",
+        15,
+    );
+
+    // Create a FieldRef node reading 'status'
+    let field_ref_id = make_id(
+        "billing",
+        NodeType::FieldRef,
+        "pkg/billing/client.go",
+        "field-read:status",
+        16,
+    );
+    let mut field_ref_node = GraphNode::new_in(
+        NodeType::FieldRef,
+        "status".to_string(),
+        "pkg/billing/client.go".to_string(),
+        &n,
+    );
+    field_ref_node.id = field_ref_id.clone();
+    field_ref_node.repo_id = Some("billing".to_string());
+    field_ref_node.line_start = Some(16);
+    field_ref_node.contract = Some(ContractFact::FieldRead(FieldReadFact {
+        chain: JsonPath(vec![PathSegment::Name("status".to_string())]),
+        exact: true,
+    }));
+
+    let reads_from_edge = GraphEdge::new(EdgeType::ReadsFrom, field_ref_id, consumer.id.clone());
+
+    let mut nodes_for_join = all_nodes;
+    nodes_for_join.push(consumer);
+    nodes_for_join.push(field_ref_node);
+
+    let mut edges_for_join = all_edges;
+    edges_for_join.push(reads_from_edge);
+
+    let config = config_with_orders_host("orders:50051");
+    let out = ContractJoiner::run_with_registry(
+        &nodes_for_join,
+        &edges_for_join,
+        &config,
+        &ClientRegistry::new(),
+    );
+
+    // Verify consumer bound to provider
+    let resolution = out
+        .index
+        .consumers
+        .get(&consumer_gid)
+        .expect("consumer must be resolved");
+    assert!(
+        !resolution.bound_endpoints.is_empty(),
+        "consumer must bind to orders endpoint"
+    );
+
+    // Verify field ref bound to status Field
+    let field_ref_gid = gid(
+        "billing",
+        NodeType::FieldRef,
+        "pkg/billing/client.go",
+        "field-read:status",
+        16,
+    );
+    let field_res = out
+        .index
+        .field_refs
+        .get(&field_ref_gid)
+        .expect("field_ref must be recorded");
+    assert!(!field_res.unknown, "field read must not be unknown");
+    assert_eq!(
+        field_res.bound_fields.len(),
+        1,
+        "field read must bind to status field"
+    );
+    assert_eq!(field_res.bound_fields[0].field_path.to_string(), "status");
 }

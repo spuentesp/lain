@@ -484,9 +484,8 @@ pub mod sync {
         // worktree directory name, which on a snapshot index is a
         // commit SHA and never matches the `GlobalId` repo that
         // `get_service` looks up with.
-        let source_repo =
-            crate::federation::repo_id::RepoId::new(repo_id)
-                .map_err(|e| LainError::InvalidRepoId(e.to_string()))?;
+        let source_repo = crate::federation::repo_id::RepoId::new(repo_id)
+            .map_err(|e| LainError::InvalidRepoId(e.to_string()))?;
         let namespace = RepoNamespace::from_repo_id(&source_repo);
         let cancel = tokio_util::sync::CancellationToken::new();
 

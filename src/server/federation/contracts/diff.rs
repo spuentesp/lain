@@ -2190,9 +2190,10 @@ pub fn could_match(
         ConsumerTargetKey::Contract(ContractKey::Topic { .. }) => return false,
         ConsumerTargetKey::Contract(ContractKey::Rpc { .. }) => return false,
         ConsumerTargetKey::Contract(ContractKey::Graphql { .. }) => return false,
-        ConsumerTargetKey::Contract(ContractKey::WebSocket { route }) => {
-            (MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any), Some(route.clone()))
-        }
+        ConsumerTargetKey::Contract(ContractKey::WebSocket { route }) => (
+            MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any),
+            Some(route.clone()),
+        ),
         ConsumerTargetKey::Contract(ContractKey::Table { .. }) => return false,
         ConsumerTargetKey::UrlExpr(_) => (MethodSpec::Unknown, None),
     };

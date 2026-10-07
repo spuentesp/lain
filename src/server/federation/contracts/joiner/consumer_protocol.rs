@@ -360,3 +360,25 @@ fn rpc_stub_unknown(call_id: &GlobalId, own_service: &ServiceName) -> ConsumerRe
         reads_complete: true,
     }
 }
+
+/// Phase F (Gap 19): resolve a WebSocket consumer against the endpoint table.
+pub fn resolve_websocket_consumer(
+    call_id: &GlobalId,
+    consumer: &crate::federation::contracts::model::WebSocketConsumerFact,
+    own_service: &ServiceName,
+    endpoints: &EndpointTable,
+    binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
+) -> ConsumerResolution {
+    let key = ContractKey::WebSocket {
+        route: consumer.route.clone(),
+    };
+    resolve_by_key(
+        call_id,
+        &key,
+        endpoints,
+        |(_, k)| k == &key,
+        AmbiguityPolicy::NoMatch,
+        own_service,
+        binds,
+    )
+}

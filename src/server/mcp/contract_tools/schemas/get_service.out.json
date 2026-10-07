@@ -109,7 +109,11 @@
       "properties": {
         "kind": { "type": "string", "enum": ["http_handler", "scheduled", "cli", "main", "unreferenced"] },
         "name": { "type": "string" },
-        "ref":  { "$ref": "#/$defs/EvidenceRef" }
+        "ref":  { "$ref": "#/$defs/EvidenceRef" },
+        "owners": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
       },
       "required": ["kind", "name"]
     },

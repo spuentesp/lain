@@ -1720,6 +1720,7 @@ pub fn project_graph_shared(
         local_to_global.insert(n.id.clone(), gid.as_str().to_string());
         let mut rewritten = n.clone();
         rewritten.id = gid.as_str().to_string();
+        rewritten.repo_id = Some(repo.to_string());
         batch_nodes.push(rewritten);
     }
     let mut batch_edges: Vec<crate::schema::GraphEdge> = Vec::new();
@@ -1787,6 +1788,7 @@ pub fn build_snapshot_contract_index(
                 crate::schema::EdgeType::HasField
                     | crate::schema::EdgeType::RequestSchema
                     | crate::schema::EdgeType::ResponseSchema
+                    | crate::schema::EdgeType::PayloadSchema
                     | crate::schema::EdgeType::ReadsFrom
             )
         })

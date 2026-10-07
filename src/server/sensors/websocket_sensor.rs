@@ -166,13 +166,8 @@ pub fn enrich_with_websocket(
                 continue;
             }
 
-            let node_id = GraphNode::generate_id(
-                &NodeType::HttpRoute,
-                &node_path,
-                &key,
-                None,
-                namespace,
-            );
+            let node_id =
+                GraphNode::generate_id(&NodeType::HttpRoute, &node_path, &key, None, namespace);
             let mut node = GraphNode::new(NodeType::HttpRoute, key, node_path.clone());
             node.id = node_id.clone();
             node.line_start = Some(line);
@@ -190,21 +185,14 @@ pub fn enrich_with_websocket(
                 continue;
             }
 
-            let node_id = GraphNode::generate_id(
-                &NodeType::HttpRoute,
-                &node_path,
-                &key,
-                None,
-                namespace,
-            );
+            let node_id =
+                GraphNode::generate_id(&NodeType::HttpRoute, &node_path, &key, None, namespace);
             let mut node = GraphNode::new(NodeType::HttpRoute, key, node_path.clone());
             node.id = node_id.clone();
             node.line_start = Some(line);
             node.signature = Some(handler_name.clone());
             let repo_id = crate::federation::repo_id::RepoId::new(
-                root.file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or("repo"),
+                root.file_name().and_then(|f| f.to_str()).unwrap_or("repo"),
             )
             .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
             node.contract = Some(ContractFact::WebSocketProvider(WebSocketProviderFact {
