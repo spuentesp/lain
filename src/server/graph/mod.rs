@@ -3633,6 +3633,27 @@ mod bfs_depth_gate_tests {
     }
 
     #[test]
+    fn traverse_with_range_two_three_returns_exactly_the_window() {
+        // Min side of the window: `if next_depth >= min_depth`
+        // (line 1281). Window [2,3] on the 4-node chain
+        // start -> a -> b -> c must return exactly {b, c}.
+        // Mutated to `>`, the node at exactly min_depth is
+        // dropped and the walk returns one hop too few:
+        // {c} instead of {b, c}.
+        let (g, ids) = build_four_hop_chain("traverse_min");
+        let nodes = g
+            .traverse(&ids[0], EdgeType::Calls, 2..3, Direction::Outgoing)
+            .expect("traverse");
+        let names: HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["b".to_string(), "c".to_string()]),
+            "traverse 2..3 must yield exactly the depth-2 and depth-3 nodes, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
     fn subgraph_around_radius_one_includes_only_one_hop() {
         // `subgraph_around(start, 1)` should include the center
         // plus 1-hop neighbors (2 nodes total). The relevant
