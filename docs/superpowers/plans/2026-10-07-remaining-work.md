@@ -1,0 +1,408 @@
+# Remaining Work — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Close the correctness and quality gaps left after the command-center contract fixes and the protocol-sensor batch, so LAIN's read-only contract surface is safe to build an external architecture command center against.
+
+**Architecture:** No new transports or tools. The work is (a) making the sensor→graph→joiner pipeline *sound* — every node a sensor mints survives the next scan, and every consumer reaches a terminal join state, (b) making the hand-written protocol parsers honest about what they could not parse, and (c) moving library-idiom tables out of Rust and into the existing data-driven registry.
+
+**Tech Stack:** Rust 2021, `inventory`, tree-sitter, `git2`, `serde_json`. Gates: `cargo test --workspace`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `scripts/check-*.py`, `scripts/check-mod-resolution.sh`, `make schema` (no drift).
+
+**Spec:** This plan. It was produced from three parallel pre-commit reviews of the uncommitted protocol-sensor batch plus the earlier command-center integration review (see `docs/superpowers/plans/2026-10-06-command-center-contract-fixes.md` for the completed work).
+
+## Global Constraints
+
+- PRs target **`dev`** — never `main` (`AGENTS.md`). Do not bump versions in feature PRs.
+- `describe_schema` must not advertise a node/edge type unless a registered sensor actually emits it. `src/server/query/schema.rs::the_known_fictions_stay_marked_unavailable` is the enforcement point.
+- **Never claim absent when unanalyzed.** Anything a sensor cannot parse must surface through `ScanReport::{error, unresolved}` so `RepoCoverage::is_complete` goes false and `NoKnownImpact` is downgraded.
+- A sensor's output must survive a rescan: `replace_sensor_output(owner, …)` must be called with an owner that matches *only* that sensor's own nodes.
+- Every new protocol needs **negative** tests (no match, ambiguous, unparseable), not just positive ones.
+- Fixture precision is not production precision. A green 4-repo fixture proves nothing about gRPC/GraphQL/WS/SQL end-to-end.
+
+## Review Focus
+
+1. **Node ownership is invisible until it's wrong.** A node claimed by the wrong `SensorOwner` is silently retracted by an unrelated sensor's rescan — the graph looks fine in a single-sensor test and is empty in production. Every ownership change needs a `run_all`-level test over a workspace where two sensors touch the same node shape.
+2. **`is_indexed` is a promise to clients.** A `true` for an unpopulated type makes `describe_schema` lie, and the command center will draw an edge nobody can produce. Prefer `false` + a test over `true` + a TODO.
+3. **A config section that validates and does nothing is worse than no section.** `repos.yaml` sections must either be consumed or rejected. Silent no-ops erode the operator's ability to reason about coverage.
+4. **Parsers over user files must be total.** Empty, truncated, deeply nested, and proto2/commented input are normal, not adversarial. Silence on those is a soundness bug, not a nicety.
+5. **Ambiguity must refuse, not guess.** A resolver that binds on "any candidate" invents cross-repo edges. Every dispatch branch needs an exact-match-or-`Unresolved` terminal state.
+
+---
+
+## File Structure
+
+| File | Responsibility after this plan |
+|---|---|
+| `src/server/graph/mod.rs` | `sensor_owner_of` — single source of truth for node ownership |
+| `src/server/sensors/payload_schema.rs` | Payload schema parsers (Avro / JSON-Schema / protobuf) — must return errors, not silently drop |
+| `src/server/sensors/{grpc,graphql}_*_sensor.rs`, `sql_sensor.rs`, `event_sensor.rs` | Protocol detectors — report unparseable input via `scan_with_report` |
+| `src/server/sensors/patterns/frameworks.yaml` | Data-driven registry — gains library-idiom entries |
+| `src/server/federation/contracts/joiner/consumer_protocol.rs` | Per-protocol consumer resolution (host evidence + ambiguity refusal) |
+| `src/server/federation/contracts/field_join.rs` | Schema→endpoint keying — must reuse `build_endpoints`' key derivation |
+| `src/server/federation/contracts/config.rs` | `repos.yaml` validation — every section consumed or rejected |
+| `tests/sensor_coexistence.rs` | NEW — `run_all`-level tests where two sensors share a node shape |
+| `tests/parsers_adversarial.rs` | NEW — malformed / truncated / deeply-nested input per parser |
+
+---
+
+## P0 — Blockers (do these first)
+
+### Task 1: Track `payload_schema.rs` and make HEAD compile again
+
+**Status: DONE in the protocol-sensor commit.** Recorded here because it was a real incident: `pub mod payload_schema;` was committed at `673afb37` while the file was untracked, and `diff.rs` was committed at `543291dc` referencing `ContractKey::WebSocket`/`Table` that only exist in the uncommitted `model.rs`. **HEAD did not compile and was bisect-broken.**
+
+- [x] `git add src/server/sensors/payload_schema.rs`
+- [x] Land `model.rs` in the same commit as the `diff.rs` that references its variants
+
+**Guard so it cannot recur:** every commit must pass a clean-checkout build.
+
+- [ ] **Step 1:** add `scripts/check-clean-build.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Build from a pristine export of HEAD, so a commit that stages half
+# of a coupled change cannot land. Catches untracked `mod` files and
+# cross-file references committed without their definitions.
+set -euo pipefail
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+git archive HEAD | tar -x -C "$tmp"
+(cd "$tmp" && cargo check --all-targets --quiet)
+echo "clean HEAD builds"
+```
+
+- [ ] **Step 2:** wire it into `.github/workflows/ci.yml` next to `check-mod-resolution.sh`, and add it to `scripts/check-mod-resolution.sh`'s doc so agents know the gate exists.
+
+---
+
+### Task 2: Sensor coexistence — shared owners retract each other's output
+
+**Problem.** `sensor_owner_of` maps several sensors to one owner, and `replace_sensor_output(owner, …)` retracts *every* node with that owner. So a later sensor wipes an earlier one's output on every scan. Three concrete cases, all currently live:
+
+- `FieldRef` catch-all → `FieldAccessSensor`. `graphql_consumer` mints `FieldRef` nodes at `src/server/sensors/graphql_consumer_sensor.rs:149-171` and `:213-235`; `field_access_sensor.rs:223` then retracts all of them on every run. The GraphQL field-lineage feature is dead in production and its test (`tests/graphql_resolution.rs:641+`) never runs `field_access`, so it stays green.
+- `GraphqlProvider`/`GraphqlHandler`/`GraphqlConsumer` all → `GraphqlSensor`. Run order is `(phase, name)`: `graphql_provider` (p0) then `graphql_consumer` (p1) then `graphql_resolver_link` (p1). `graphql_consumer_sensor.rs:242` retracts the provider's `Module` **and its new Schema/Field nodes + `HasField`/`ResponseSchema` edges**. Same for the gRPC family (`grpc_consumer_sensor.rs:132`, `grpc_handler_link_sensor.rs:121` vs `grpc_provider_sensor.rs:206`).
+- `SensorOwner::WebSocketSensor` is returned by `sensor_owner_of` but **no sensor ever passes it to `replace_sensor_output`**, so WebSocket provider nodes are never retracted (stale routes persist forever).
+
+**Files:** `src/server/graph/mod.rs:118-175`, `src/server/sensors/{graphql_consumer,graphql_provider,graphql_resolver_link,grpc_consumer,grpc_handler_link,grpc_provider,websocket}_sensor.rs`
+
+- [ ] **Step 1: write the failing coexistence test** — `tests/sensor_coexistence.rs`:
+
+```rust
+//! Two sensors that share a node shape must both survive `run_all`.
+//! Ownership bugs are invisible in single-sensor tests and fatal in
+//! production: an unrelated sensor's rescan silently retracts the
+//! other's output.
+
+mod support;
+#[path = "support/contracts_snapshot_harness.rs"]
+mod harness;
+
+#[test]
+fn graphql_provider_schemas_survive_a_full_run_all() {
+    // Workspace with BOTH schema.graphql (provider) and gql`` queries
+    // (consumer) plus a resolver — the shape where the two sensors
+    // collide.
+    let ws = write_graphql_workspace();
+    let graph = GraphDatabase::new(&ws.join("db.bin")).unwrap();
+    let ns = RepoNamespace::for_test();
+    crate::server::sensors::run_all(&graph, &ws, &ns, "svc");
+
+    let schemas = graph.get_nodes_by_types(&[NodeType::Schema]).unwrap();
+    assert!(
+        !schemas.is_empty(),
+        "graphql_provider's Schema nodes were retracted by a later sensor"
+    );
+    let refs = graph.get_nodes_by_types(&[NodeType::FieldRef]).unwrap();
+    assert!(
+        !refs.is_empty(),
+        "graphql_consumer's FieldRef nodes were retracted by field_access"
+    );
+}
+
+#[test]
+fn websocket_consumers_survive_http_client_rescan() {
+    // `WebSocketConsumer` rides on an `HttpClientCall` node. If the
+    // node-type catch-all claims it, `http_client_sensor`'s
+    // `replace_sensor_output` deletes it on every scan.
+    let ws = write_websocket_workspace();
+    let graph = GraphDatabase::new(&ws.join("db.bin")).unwrap();
+    crate::server::sensors::run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+
+    let ws_consumers: Vec<_> = graph
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| matches!(n.contract, Some(ContractFact::WebSocketConsumer(_))))
+        .collect();
+    assert!(!ws_consumers.is_empty(), "WebSocketConsumer nodes vanished after run_all");
+}
+
+#[test]
+fn openapi_json_spec_schemas_survive_event_sensor() {
+    // `openapi.json` Schema/Field nodes must not be owned by EventSensor.
+    let ws = write_openapi_json_workspace();
+    let graph = GraphDatabase::new(&ws.join("db.bin")).unwrap();
+    crate::server::sensors::run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+    let schemas = graph.get_nodes_by_types(&[NodeType::Schema]).unwrap();
+    assert!(!schemas.is_empty(), "openapi.json schemas were retracted by event_sensor");
+}
+```
+
+- [ ] **Step 2: run it and confirm all three fail**
+
+Run: `cargo test --test sensor_coexistence -- --nocapture`
+Expected: all three FAIL (the `.json` case now passes — it was fixed in the protocol-sensor commit; the other two should still fail).
+
+- [ ] **Step 3: give each protocol sensor its own owner**
+
+In `src/server/graph/mod.rs`, replace the family-wide arms with per-sensor owners keyed on the `ContractFact` variant (which is already unique per emitting sensor):
+
+```rust
+        (_, Some(ContractFact::GraphqlProvider(_))) => Some(SensorOwner::GraphqlProviderSensor),
+        (_, Some(ContractFact::GraphqlHandler(_))) => Some(SensorOwner::GraphqlResolverLinkSensor),
+        (_, Some(ContractFact::GraphqlConsumer(_))) => Some(SensorOwner::GraphqlConsumerSensor),
+        (_, Some(ContractFact::RpcProvider(_))) => Some(SensorOwner::GrpcProviderSensor),
+        (_, Some(ContractFact::RpcHandler(_))) => Some(SensorOwner::GrpcHandlerLinkSensor),
+        (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::GrpcConsumerSensor),
+        // A `FieldRef` from the GraphQL consumer must not be owned by
+        // `field_access`, or the latter's rescan deletes it. Key on the
+        // read fact's origin id.
+        (NodeType::FieldRef, Some(ContractFact::FieldRead(r))) if r.id.starts_with("graphql-read:") => {
+            Some(SensorOwner::GraphqlConsumerSensor)
+        }
+        (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
+```
+
+(Add the matching `SensorOwner` variants; update `websocket_sensor.rs` to call `replace_sensor_output(SensorOwner::WebSocketSensor, …)` rather than upsert-only.)
+
+- [ ] **Step 4: run the tests to verify they pass**
+
+Run: `cargo test --test sensor_coexistence && cargo test --quiet --lib 'graph' && cargo test --quiet --lib 'sensors'`
+Expected: all PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/server/graph/mod.rs src/server/sensors/ tests/sensor_coexistence.rs
+git commit -m "fix(sensors): per-sensor node owners so a rescan stops deleting peer output"
+```
+
+---
+
+### Task 3: Ambiguity refusal and host evidence for WebSocket consumers
+
+**Problem.** `resolve_websocket_consumer` (`src/server/federation/contracts/joiner/consumer_protocol.rs:365-384`) builds its key from `consumer.route` only and uses `AmbiguityPolicy::NoMatch`, which binds on *any* candidate count at confidence 1.0 `Exact`. `WebSocketConsumerFact.url` is never read. Consequences:
+
+- `wss://api.thirdparty.com/feed` binds to whatever internal service declares `/feed` — an invented `Binds` edge, with no `External` terminal state.
+- Two services declaring `/ws` → the consumer multi-binds to both at 1.0 instead of `Unresolved{reason}`.
+
+**Files:** `src/server/federation/contracts/joiner/consumer_protocol.rs`, `src/server/federation/contracts/model.rs` (`WebSocketConsumerFact`)
+
+- [ ] **Step 1: write the failing tests** in `src/server/federation/contracts/joiner_tests.rs`, mirroring the existing `resolve_rpc_consumer` cases:
+
+```rust
+#[test]
+fn ws_consumer_with_foreign_host_does_not_bind() {
+    // url host is a literal that matches no configured service.
+    let out = run_joiner_with_ws_consumer("wss://api.thirdparty.com/feed", "/feed");
+    let res = &out.index.consumers[&call_id];
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "an external WS host must not invent a Binds edge: {:?}",
+        res.target
+    );
+}
+
+#[test]
+fn ws_consumer_with_two_matching_providers_stays_unresolved() {
+    let out = run_joiner_with_two_ws_providers("/ws");
+    let res = &out.index.consumers[&call_id];
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
+        "ambiguity must refuse, not bind to both: {:?}",
+        res.target
+    );
+}
+
+#[test]
+fn ws_consumer_with_single_matching_provider_binds() {
+    let out = run_joiner_with_ws_consumer("wss://orders.internal/ws", "/ws");
+    let res = &out.index.consumers[&call_id];
+    assert!(matches!(res.target, Some(ConsumerTarget::Binds { .. })));
+}
+```
+
+- [ ] **Step 2: run and confirm they fail**
+
+Run: `cargo test --lib joiner_tests::ws_consumer -- --nocapture`
+Expected: first two FAIL (they currently bind).
+
+- [ ] **Step 3: implement** — mirror `resolve_rpc_consumer`:
+
+```rust
+fn resolve_websocket_consumer(...) -> ... {
+    // 1. If the URL has a literal host, restrict candidates to services
+    //    whose hosts/env match it. No match -> Unresolved (or External
+    //    when the host is outside every configured service).
+    // 2. Only fall back to route-only matching when HostPart::None.
+    // 3. Use the GraphQL-style exact-one policy: n != 1 -> Unresolved.
+}
+```
+
+- [ ] **Step 4: verify**
+
+Run: `cargo test --lib joiner_tests && cargo test --quiet --test federation_contracts_e2e`
+Expected: all PASS, T1 precision/recall still 1.0.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/server/federation/contracts/
+git commit -m "fix(joiner): WebSocket consumers require host evidence and refuse ambiguity"
+```
+
+---
+
+## P1 — Soundness
+
+### Task 4: `field_join` schema keying must match `build_endpoints`
+
+**Problem.** Two branches build `EndpointId`s that never match the endpoints the joiner actually created, so `repos.yaml#schemas` validates, appears in `config_hash`, and does nothing:
+
+- `field_join.rs:163-196` uses `p.template` raw for Topic keys; `joiner/endpoints.rs:67,180` applies `endpoint_template_for` (prepends `base_path` / `route_prefixes`). Any service with `base_path` configured → schema attaches to a nonexistent endpoint. Broker fallback also diverges (`split('/').next()` → `""` vs `default_broker_for` → `"kafka"`).
+- `field_join.rs:247-250` treats `SchemaDecl.repo` as a **service name** while `config.rs:428-436` validates it as a **repo id**. Works only when they coincide. Broker hardcoded `"kafka"`.
+
+**Files:** `src/server/federation/contracts/field_join.rs`, `joiner/endpoints.rs`
+
+- [ ] **Step 1: failing test** — a service with `base_path: /api` and a `schemas:` entry; assert the payload schema binds to the endpoint `build_endpoints` produced.
+- [ ] **Step 2:** extract the key derivation into one shared function used by both `build_endpoints` and `field_join` (including `endpoint_template_for` and `default_broker_for`).
+- [ ] **Step 3:** make `SchemaDecl` carry an explicit `service:` (falling back to repo→service assignment), and validate it against `services`.
+- [ ] **Step 4:** `cargo test --lib joiner_tests && cargo test --test federation_contracts_e2e`
+- [ ] **Step 5:** `git commit -m "fix(contracts): field_join keys match build_endpoints so schemas: actually binds"`
+
+---
+
+### Task 5: `payload_schema` parsers must be total and report failure
+
+**Problem.** `parse_proto_messages` (`src/server/sensors/payload_schema.rs:242-339`) emits wrong or missing facts on ordinary proto:
+
+| input | current behavior |
+|---|---|
+| `optional string id = 1;` | field named `"string"`, type Unknown |
+| `string id = 1; // the id` | field silently dropped |
+| `oneof { … }` | closing `}` ends the message; rest lost |
+| nested `message` | outer message flushed early, remainder dropped |
+| empty message | dropped entirely |
+
+None of it surfaces through `ScanReport`, so the coverage ledger cannot see the gap. The parser also ignores the comment-strip / continuation-join pipeline that `parse_proto_providers` already uses.
+
+**Files:** `src/server/sensors/payload_schema.rs`, `src/server/sensors/grpc_provider_sensor.rs:98`
+
+- [ ] **Step 1: adversarial test file** — `tests/parsers_adversarial.rs`, one case per row above plus empty file and 10k-line file, asserting either correct facts or a recorded `ScanReport::unresolved`.
+- [ ] **Step 2:** reuse `util_tokenize` + the grpc provider's `strip_comments` / `join_continued_lines` instead of re-lexing.
+- [ ] **Step 3:** handle `optional`/`required`/`repeated`/`map<…>`/`oneof`/nesting; keep a depth cap.
+- [ ] **Step 4:** override `scan_with_report` on the grpc/graphql/sql sensors so unparseable files produce `UnresolvedRecord` (never silent).
+- [ ] **Step 5:** `cargo test --test parsers_adversarial && cargo test --test grpc_resolution && cargo test --quiet --lib payload_schema`
+- [ ] **Step 6:** `git commit -m "fix(sensors): proto payload parser is total and reports what it could not parse"`
+
+---
+
+### Task 6: GraphQL parser — fragments and `implements`/`@key`
+
+**Problem.**
+- Fragment spreads are parsed as top-level fields: `query { orders { id ...orderFields } }` yields a selected field `"orderFields"`; `... on Paid { total }` yields fields `"on"` and `"Paid"` (`graphql_consumer_sensor.rs:592-605`, push at `:703-704`). Invented consumer facts and `FieldRef`s → over-claiming.
+- `type X implements Node @key(fields: "id") { … }` is silently skipped because the parser requires `{` immediately after the name (`graphql_provider_sensor.rs:446-448`). That is *exactly* the federation SDL LAIN targets, so schema lineage is missing where it matters most.
+
+**Files:** `src/server/sensors/graphql_consumer_sensor.rs`, `graphql_provider_sensor.rs`
+
+- [ ] **Step 1: failing tests** — a query with `...spread`, `... on Type`, and a top-level `...frag`; and an SDL with `implements` + `@key`. Assert no field named `"on"`/`"Paid"` and that the directive-bearing type still yields Schema/Field nodes.
+- [ ] **Step 2:** explicitly detect `...` and skip the spread name + optional `on Type` + its selection set.
+- [ ] **Step 3:** after the type name, skip an `implements …` clause and `@directive(…)` argument list (balanced parens) before expecting `{`.
+- [ ] **Step 4:** bound the recursion in `top_level_fields_with_selections` (`:700`) with a depth cap — adversarial `a{a{a{…` currently blows the stack.
+- [ ] **Step 5:** `cargo test --test graphql_resolution --test parsers_adversarial`
+- [ ] **Step 6:** `git commit -m "fix(sensors): GraphQL fragments and directive-bearing SDL parse correctly"`
+
+---
+
+### Task 7: `databases` config — consume or reject
+
+**Problem.** `DatabaseDecl.shared_with` and `db.name` are declared, validated (`config.rs:438-461`) and hashed into `config_hash`, but **consumed nowhere**. Table→service ownership is `config.databases.iter().find(|d| d.tables.iter().any(|t| t == &tbl.name))` — first declaration wins, matching **table name only**. Two databases listing the same table name silently attribute all such `Table` facts to the first one's service.
+
+**Files:** `src/server/federation/contracts/config.rs`, `joiner/endpoints.rs:154-163`
+
+- [ ] **Step 1: failing tests** in `config_tests.rs` — duplicate `databases[].name`, a table listed in two databases, and a `shared_with` entry that must actually widen ownership.
+- [ ] **Step 2:** reject duplicates at `validate()`; key table ownership on `(db.name, table)`; implement `shared_with` (a table shared with service B is owned by both) or delete the field.
+- [ ] **Step 3:** align `databases[].service` validation with `http_clients.service` (which uses `known_services`, including implicit repo ids).
+- [ ] **Step 4:** `cargo test --lib config_tests && cargo test --test sql_tables`
+- [ ] **Step 5:** `git commit -m "fix(config): databases.shared_with is consumed, and duplicate table names are rejected"`
+
+---
+
+## P2 — Quality and the registry migration
+
+### Task 8: Move library idioms into `patterns/frameworks.yaml`
+
+**Origin.** Reviewer question: *"didn't we make a template format for these sensors? why are they implemented as .rs?"* Answer: yes — `src/server/sensors/patterns/frameworks.yaml` + per-lang `.scm`, whose header says *"Adding a new framework is a data change."* But `FrameworkKind` is only `route | outbound | entrypoint`, and the new protocol sensors touch `Patterns::` **zero** times.
+
+The protocol *parsers* (proto tokenizer, GraphQL SDL, SQL literal extraction, `payload_schema`) legitimately belong in Rust. The **library-call idioms** do not:
+
+| file | hardcoded idioms |
+|---|---|
+| `event_sensor.rs` | `.run(` `.subscribe(` `KafkaConsumer(` `@app.task` `@shared_task` `@Cron`, kafkajs / aiokafka / rdkafka / kafka-go |
+| `websocket_sensor.rs` | 4 regexes **compiled per scan call**: `wss?://…`, `on( open\|message\|close\|error)`, `new WebSocket(…)`, `app.ws\|router.ws\|WebSocketGateway` |
+
+- [ ] **Step 1:** extend `FrameworkKind` with `TopicProducer`, `TopicConsumer`, `Scheduled`, `WebSocket` (or add a sibling `idioms:` document — prefer extending, so `with_overrides` and `<repo>/.lain/patterns/*.yaml` keep working).
+- [ ] **Step 2:** move the `event_sensor` needles into `frameworks.yaml` entries with `lib_match` / `annotation_regex`, and the `websocket_sensor` regexes into entries with `path_regex`. Add `kotlin`/`scala`-style `.scm` only where tree-sitter already parses the language.
+- [ ] **Step 3:** hoist any remaining `Regex::new` out of scan functions into `OnceLock`/`LazyLock` statics regardless of the migration — per-file recompilation is a real cost.
+- [ ] **Step 4:** add `tests/sensors/patterns_protocol_idioms.rs` proving a new idiom can be added by editing YAML only (the `django-route` test at `tests/sensors/patterns_new_framework.rs` is the template).
+- [ ] **Step 5:** `cargo test --quiet --lib sensors && cargo test --test patterns_new_framework`
+- [ ] **Step 6:** `git commit -m "refactor(sensors): library idioms become data in patterns/frameworks.yaml"`
+
+**Acceptance:** adding a Kafka client library or a WebSocket framework is a YAML diff, not a Rust diff.
+
+---
+
+### Task 9: Test-quality debt in the protocol batch
+
+All flagged by review; each is a small test, not a redesign.
+
+- [ ] `tests/grpc_resolution.rs:544-566` hand-builds the consumer `FieldRef` + `ReadsFrom` edge — no gRPC sensor emits those in production. Replace with a fixture that runs the real sensors.
+- [ ] `tests/graphql_resolution.rs:641+` (F7) and `tests/grpc_resolution.rs:479+` (E6) assert only `edges.any(|e| e.edge_type == ResponseSchema)`. Assert the edge connects the *specific* provider to the *specific* schema.
+- [ ] `tests/sql_tables.rs:501` asserts `orm.count >= 1` where the fixture produces exactly 2. Assert the exact count and the sample ids.
+- [ ] `tests/property_join_pipeline.rs` gained only `databases: vec![]`. Extend `arb_call` to generate WebSocket / Topic / Table consumers so I2/I5/I6 cover the new branches generatively.
+- [ ] `joiner_tests.rs::contract_key_display_round_trip` is HTTP-only. Add `websocket:` and `table:` round-trips (`model.rs:711-775`).
+- [ ] `field_join.rs:228` step 4b picks the first matching Schema node with `find` — input-order dependent. Tie-break by node id.
+
+- [ ] **Commit:** `test: adversarial and negative coverage for the protocol sensors`
+
+---
+
+### Task 10: Small cleanups
+
+- [ ] `src/server/mcp/handler.rs:1530-1549` — new `LainMcpServer::call_tool` has zero callers and duplicates `call_tool_embedded` (`:1273`). Delete it, or make `call_tool_embedded` delegate so there is one path.
+- [ ] `src/server/sensors/{grpc_provider,graphql_provider,graphql_consumer}.rs` — `let _ = graph.replace_sensor_output(...)` swallows write errors; propagate with `?` like `sql`/`http`/`event`.
+- [ ] Same three files — the empty-output guard (`if !all_nodes.is_empty()`) defeats retraction when a rescan finds zero files (all deleted). Replace unconditionally, as `sql_sensor.rs:162` does.
+- [ ] `grpc_provider_sensor.rs:114` hardcodes `Direction::Response` on request-side messages. Use `Direction::Request` from the `RequestSchema` lookup.
+- [ ] `sql_sensor.rs:273-300` — the ORM 4-line lookahead attributes a later `cursor.execute` literal to the ORM call's line and then reports no `OrmDynamicQuery`. Skip the lookahead when `shape.is_orm`. Also narrow `.filter(` (`:373`), which matches pandas and keeps `RepoCoverage::is_complete` false for ordinary Python repos.
+- [ ] `services.rs:788-794` comment says `owners` is "Always present" but the code `continue`s when `ref.id` is missing; `get_service.out.json` correctly marks it optional. Align the comment.
+- [ ] DRY: the ~25-line `FieldRef` emission block is duplicated at `graphql_consumer_sensor.rs:149-171` and `:213-235`; the Schema+Field+HasField emission is identical in `grpc_provider_sensor.rs:99-141` and `graphql_provider_sensor.rs:95-150`. Share one helper.
+
+---
+
+## P3 — Carried over from the command-center review
+
+These were identified in the integration review and are still open.
+
+- [ ] **`tests/real_federation/*` is red.** `ground_truth.sh` / `soundness.sh` / `metrics.rs` pass `serde` to `prepare_snapshot` but `scripts/demo-federation-fixture.sh` clones only `bytes` + `tokio` → `repo_not_registered`. `tools_smoke.sh` has 4 stale argument shapes (`trace_impact` `from` form, `check_binding` `"GET /x"` vs `http:GET /x`). Fix the scripts or the fixture, then assert *verdicts* (currently only joiner precision is asserted — never "this change breaks X").
+- [ ] **Defect K — ownership / entry points / env bindings write no graph nodes.** CODEOWNERS, `entry_point_sensor` and `env_sensor` feed side tables only. A graph UI cannot show "who owns this". Needs a `FEDERATION_GRAPH_VERSION` bump (`src/server/federation/graph_backend.rs:24`) plus a `lain reindex` recovery path and a CHANGELOG entry (`AGENTS.md` federation-schema-bumps section).
+- [ ] **gRPC / GraphQL / WebSocket / SQL end-to-end through the contract tools is unproven.** Sensors and joiner dispatch exist and unit tests pass, but no run drives `get_contract` / `trace_impact` over a fixture containing those protocols. Build a 4-repo fixture with one of each and assert provider + consumer + `Binds` per protocol.
+- [ ] **`ChangedWithoutSchema` on a schema-less endpoint with zero bound consumers** can fall through to `NoKnownImpact` under complete coverage (`diff.rs` final `else`). Untested. Add the fixture tag and assert it is *not* `NoKnownImpact`.
+- [ ] **`could_match` returns `false` for every unresolved consumer against a `Topic`/`Rpc`/`Graphql`/`Table` endpoint** (`diff.rs:2190-2208`) — an unresolved topic consumer never blocks `NoKnownImpact` when its producer changes. Pre-existing I3 gap in the committed baseline; a soundness hole for every non-HTTP protocol.
+- [ ] **Known limit from the command-center fixes, by design:** a real behaviour change in a *shared* handler file is still unreported (`HandlerChanged` requires single-endpoint attribution). Closing it needs line- or hunk-level attribution.
+
+---
+
+## Out of scope
+
+- New transports, new MCP tools, or new HTTP routes. Everything here is reachable through the existing 13 contract tools.
+- Org-wide safety claims. `scope.configured_only` stays `true` and `caveats.unconfigured_scope` must remain rendered on every response — no code change is "a fix" for that; it is the contract.
+- Version bumps and releases (`AGENTS.md`: release PRs only).
