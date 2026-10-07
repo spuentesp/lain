@@ -131,6 +131,13 @@ def run_mutations(targets=None):
     `try/finally` restores the file even on Ctrl-C. A killed worker can
     still leave a mutation behind (SIGKILL skips finally), so callers
     must `git diff --stat src/` before committing.
+
+    Two score-preserving speedups:
+      * mutants already classified `equivalent` in the triage are not
+        re-measured — the oracle cannot kill them by definition, and
+        re-running them is pure wall-clock;
+      * targets run concurrently (see `run_all`), each mutating its own
+        file, so there is no shared-file contention.
     """
     triage = load_triage()
     results = []
@@ -151,18 +158,31 @@ def run_mutations(targets=None):
                     mutated = prod[:m.start()] + rep + prod[m.end():]
                     if mutated == prod:
                         continue
+
+                    line_no = prod[:m.start()].count('\n') + 1
+                    key = f"{relpath}:{line_no}:{label}"
+                    verdict = triage.get(key)
+                    if (verdict or "").startswith("equivalent"):
+                        # No oracle run: a mutant we have already judged
+                        # unkillable. Recorded as SURVIVED+equivalent so
+                        # the ceiling stays visible in the report.
+                        results.append({
+                            "status": "SURVIVED", "path": relpath, "line": line_no,
+                            "op": label, "snippet": "", "verdict": verdict,
+                            "skipped": True,
+                        })
+                        print(f"  SURVIVED  {key}  [equivalent, not re-measured]", flush=True)
+                        continue
+
                     open(path, 'w').write(mutated + tests)
                     try:
                         built_and_passed = run_tests(filt, kind)
                     except subprocess.TimeoutExpired:
                         built_and_passed = False
 
-                    line_no = prod[:m.start()].count('\n') + 1
                     lines = prod.splitlines()
                     snippet = lines[line_no - 1].strip()[:80] if line_no - 1 < len(lines) else ''
                     status = "SURVIVED" if built_and_passed else "caught"
-                    key = f"{relpath}:{line_no}:{label}"
-                    verdict = triage.get(key)
                     results.append({
                         "status": status, "path": relpath, "line": line_no,
                         "op": label, "snippet": snippet, "verdict": verdict,
@@ -172,6 +192,41 @@ def run_mutations(targets=None):
         finally:
             open(path, 'w').write(original)
     return results
+
+
+def run_all(workers=1):
+    """Run every target. `workers > 1` runs targets concurrently.
+
+    Parallelism is across TARGETS, never across mutants within one
+    target — mutants of a target rewrite the same file and cannot be
+    applied concurrently. Each worker gets its own `CARGO_TARGET_DIR`
+    so `cargo`'s build lock does not serialise them; the score is
+    identical either way, which `--self-test` asserts.
+    """
+    targets = TARGETS
+    if workers <= 1:
+        return run_mutations(targets)
+
+    from concurrent.futures import ThreadPoolExecutor
+    import tempfile
+
+    def one(i_and_target):
+        i, t = i_and_target
+        td = tempfile.mkdtemp(prefix=f"mut-target-{i}-")
+        old = os.environ.get("CARGO_TARGET_DIR")
+        os.environ["CARGO_TARGET_DIR"] = td
+        try:
+            return run_mutations([t])
+        finally:
+            if old is None:
+                os.environ.pop("CARGO_TARGET_DIR", None)
+            else:
+                os.environ["CARGO_TARGET_DIR"] = old
+            shutil.rmtree(td, ignore_errors=True)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        chunks = list(ex.map(one, enumerate(targets)))
+    return [r for chunk in chunks for r in chunk]
 
 
 def summarise(results):
@@ -279,7 +334,15 @@ def check_floor():
 
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "--run"
+    args = [a for a in sys.argv[1:]]
+    mode = "--run"
+    workers = 1
+    if args and args[0].startswith("--"):
+        mode = args[0]
+        args = args[1:]
+    for a in args:
+        if a.startswith("--workers="):
+            workers = int(a.split("=", 1)[1])
 
     if mode == "--check-filters":
         probs = check_filters()
@@ -298,7 +361,28 @@ if __name__ == "__main__":
         print("floor check:", "PASS" if not bad else f"{len(bad)} violation(s)")
         sys.exit(1 if bad else 0)
 
+    if mode == "--self-test":
+        # Parallelism must not change which mutants die. Compare the
+        # (path, line, op, status) tuples only — order differs because
+        # chunks complete out of order.
+        serial = sorted((r["path"], r["line"], r["op"], r["status"]) for r in run_mutations())
+        par = sorted((r["path"], r["line"], r["op"], r["status"]) for r in run_all(workers=4))
+        if serial == par:
+            print(f"self-test: PASS — {len(serial)} mutants, identical verdicts serial vs parallel")
+            sys.exit(0)
+        only_s = [x for x in serial if x not in par]
+        only_p = [x for x in par if x not in serial]
+        print("self-test: FAIL — parallel run disagrees with serial")
+        for x in only_s:
+            print("  serial only:", x)
+        for x in only_p:
+            print("  parallel only:", x)
+        sys.exit(1)
+
     # default: run the full measurement
-    results = run_mutations()
+    import time
+    t0 = time.time()
+    results = run_all(workers)
     summarise(results)
     write_baseline(results)
+    print(f"MUTATION_WALLCLOCK {time.time() - t0:.0f}s (workers={workers})")
