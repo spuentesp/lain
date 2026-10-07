@@ -478,10 +478,16 @@ pub mod sync {
         let db = GraphDatabase::new(graph_path)?;
         let git = AnyGitSensor::new(workspace, GitSensorMode::InProcess)
             .map_err(|e| LainError::Git(format!("AnyGitSensor: {e}")))?;
-        let namespace = RepoNamespace::from_repo_id(
-            &crate::federation::repo_id::RepoId::new(repo_id)
-                .map_err(|e| LainError::InvalidRepoId(e.to_string()))?,
-        );
+        // The repo id is known here — do not leave `source_repo` as
+        // `None`. Sensors whose output is keyed by repo (CODEOWNERS)
+        // use it to key their index; without it they fall back to the
+        // worktree directory name, which on a snapshot index is a
+        // commit SHA and never matches the `GlobalId` repo that
+        // `get_service` looks up with.
+        let source_repo =
+            crate::federation::repo_id::RepoId::new(repo_id)
+                .map_err(|e| LainError::InvalidRepoId(e.to_string()))?;
+        let namespace = RepoNamespace::from_repo_id(&source_repo);
         let cancel = tokio_util::sync::CancellationToken::new();
 
         // Block on the async pass via a single-threaded runtime.
@@ -502,7 +508,7 @@ pub mod sync {
                 git: &git,
                 overlay: None,
                 resolver: None,
-                source_repo: None,
+                source_repo: Some(&source_repo),
                 namespace: &namespace,
                 force: true,
                 cancel: &cancel,

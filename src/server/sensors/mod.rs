@@ -29,6 +29,7 @@ pub mod openapi_line_index;
 pub mod openapi_schema;
 pub mod openapi_sensor;
 pub mod patterns;
+pub mod payload_schema;
 pub mod proto_sensor;
 pub mod sql_sensor;
 pub mod util;
@@ -177,6 +178,7 @@ pub enum SensorCountField {
 pub struct ScanReport {
     pub emitted: usize,
     pub error: Option<String>,
+    pub unresolved: Vec<crate::federation::contracts::coverage::UnresolvedRecord>,
 }
 
 impl ScanReport {
@@ -229,7 +231,41 @@ pub trait Sensor: Send + Sync {
         Ok(ScanReport {
             emitted: n,
             error: None,
+            unresolved: Vec::new(),
         })
+    }
+
+    /// Like [`Self::scan`], but with the repository id the caller
+    /// already knows.
+    ///
+    /// `root` is a filesystem path and is therefore not a stable repo
+    /// identity: on a re-indexed federation it is a worktree directory
+    /// named after a commit SHA. Sensors whose output is *keyed by
+    /// repo* and read back by repo (the CODEOWNERS index) must
+    /// override this. The default ignores `repo_id` and delegates.
+    fn scan_for_repo(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+        _repo_id: &str,
+    ) -> Result<usize, LainError> {
+        self.scan(graph, root, namespace)
+    }
+
+    /// Report variant of [`Self::scan_for_repo`]. Defaults to
+    /// [`Self::scan_with_report`] so sensors that already override the
+    /// rich report keep their behaviour; sensors that override
+    /// [`Self::scan_for_repo`] must override this too or the repo id
+    /// is dropped.
+    fn scan_with_report_for_repo(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+        _repo_id: &str,
+    ) -> Result<ScanReport, LainError> {
+        self.scan_with_report(graph, root, namespace)
     }
 }
 
@@ -291,16 +327,26 @@ pub(crate) use register_sensor;
 /// call so two federation repos with identical `(type, path, name)`
 /// route entries (e.g. `GET /health`) mint distinct ids and don't
 /// silently overwrite each other on merge.
-pub fn run_all(graph: &GraphDatabase, root: &Path, namespace: &RepoNamespace) -> SensorCounts {
-    let (counts, _reports) = run_all_with_reports(graph, root, namespace);
+///
+/// `repo_id` is the repository identity the caller already knows. It
+/// is forwarded to [`Sensor::scan_with_report_for_repo`] so sensors
+/// whose output is keyed by repo (CODEOWNERS) do not have to guess it
+/// from `root`, which is a worktree path on a re-indexed federation.
+pub fn run_all(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+    repo_id: &str,
+) -> SensorCounts {
+    let (counts, _reports) = run_all_with_reports(graph, root, namespace, repo_id);
     counts
 }
 
 /// Shared inventory iteration behind [`run_all`] and the coverage
 /// ledger's `run_all_with_coverage`. Walks every registered
 /// [`Sensor`], sorts by `(phase, name)`, and asks each one for a
-/// [`ScanReport`] via [`Sensor::scan_with_report`]. Returns the
-/// aggregated [`SensorCounts`] and one `(name, report)` pair per
+/// [`ScanReport`] via [`Sensor::scan_with_report_for_repo`]. Returns
+/// the aggregated [`SensorCounts`] and one `(name, report)` pair per
 /// sensor (the coverage ledger consumes the latter).
 ///
 /// A failing sensor contributes a `ScanReport { error: Some(...) }`
@@ -311,6 +357,7 @@ pub(crate) fn run_all_with_reports(
     graph: &GraphDatabase,
     root: &Path,
     namespace: &RepoNamespace,
+    repo_id: &str,
 ) -> (SensorCounts, Vec<(&'static str, ScanReport)>) {
     let mut counts = SensorCounts::default();
     let mut reports = Vec::new();
@@ -322,13 +369,14 @@ pub(crate) fn run_all_with_reports(
     });
     for entry in entries {
         let sensor = entry.0;
-        let report = match sensor.scan_with_report(graph, root, namespace) {
+        let report = match sensor.scan_with_report_for_repo(graph, root, namespace, repo_id) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("{} sensor failed for {:?}: {e}", sensor.name(), root);
                 ScanReport {
                     emitted: 0,
                     error: Some(e.to_string()),
+                    unresolved: Vec::new(),
                 }
             }
         };
@@ -364,7 +412,7 @@ mod run_all_tests {
             ))
             .unwrap();
 
-        let counts = run_all(&graph, &dir, &crate::schema::RepoNamespace::for_test());
+        let counts = run_all(&graph, &dir, &crate::schema::RepoNamespace::for_test(), "test");
         assert_eq!(counts.http_routes, 1, "the Go route must be picked up");
 
         let routes = graph
@@ -395,7 +443,7 @@ mod run_all_tests {
         let graph = GraphDatabase::new(&db).unwrap();
 
         assert_eq!(
-            run_all(&graph, &dir, &crate::schema::RepoNamespace::for_test()).total(),
+            run_all(&graph, &dir, &crate::schema::RepoNamespace::for_test(), "test").total(),
             0
         );
     }

@@ -91,6 +91,69 @@ pub fn codeowners_for(repo: &str, path: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// Look up all distinct owners declared across all rules in `repo`.
+pub fn owners_for_repo(repo: &str) -> Vec<String> {
+    let Some(idx) = INDEX.get() else {
+        return Vec::new();
+    };
+    let map = match idx.lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    };
+    let Some(rules) = map.get(repo) else {
+        return Vec::new();
+    };
+    let mut owners = std::collections::BTreeSet::new();
+    for rule in &rules.rules {
+        for o in &rule.owners {
+            owners.insert(o.clone());
+        }
+    }
+    owners.into_iter().collect()
+}
+
+/// Reverse query: find all patterns associated with `owner` in `repo`.
+pub fn patterns_for_owner(repo: &str, owner: &str) -> Vec<String> {
+    let Some(idx) = INDEX.get() else {
+        return Vec::new();
+    };
+    let map = match idx.lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    };
+    let Some(rules) = map.get(repo) else {
+        return Vec::new();
+    };
+    rules
+        .rules
+        .iter()
+        .filter(|r| r.owners.iter().any(|o| o == owner))
+        .map(|r| r.pattern.clone())
+        .collect()
+}
+
+/// Explicitly configure parsed rules for `repo` in the global index.
+pub fn set_repo_rules(repo: &str, rules: Vec<Rule>) {
+    let mut map = match global().lock() {
+        Ok(m) => m,
+        Err(p) => p.into_inner(),
+    };
+    if rules.is_empty() {
+        map.remove(repo);
+    } else {
+        map.insert(repo.to_string(), RepoRules { rules });
+    }
+}
+
+/// Clear all entries from the global index.
+pub fn clear_index() {
+    if let Some(idx) = INDEX.get() {
+        if let Ok(mut m) = idx.lock() {
+            m.clear();
+        }
+    }
+}
+
 /// Parse a single CODEOWNERS file's text into rules. `pub` so the
 /// integration tests in `tests/federation_contracts_e2e.rs` can
 /// exercise the parser without going through the global index.
@@ -199,19 +262,20 @@ fn glob_rec(p: &[u8], s: &[u8]) -> bool {
 }
 
 /// Walk the workspace, read any `CODEOWNERS` files at conventional
-/// locations, and update the global index for this repo. Returns 0 —
+/// locations, and update the global index under `repo`. Returns 0 —
 /// the sensor contributes attribution, not graph nodes, so the count
 /// is intentionally zero.
-pub fn scan_workspace_codeowners(
+///
+/// `repo` is the repository identity from the caller. Do **not** key
+/// this by `root`: on a re-indexed federation `root` is a worktree
+/// directory named after a commit SHA, so a `root.file_name()` key
+/// never matches the `GlobalId` repo that `get_service` looks up with.
+pub fn scan_workspace_codeowners_for_repo(
     _graph: &GraphDatabase,
     root: &Path,
     _namespace: &RepoNamespace,
+    repo: &str,
 ) -> Result<usize, LainError> {
-    let repo = root
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
     let mut rules: Vec<Rule> = Vec::new();
     for cand in CANDIDATE_PATHS {
         let p = root.join(cand);
@@ -225,29 +289,92 @@ pub fn scan_workspace_codeowners(
         Ok(m) => m,
         Err(p) => p.into_inner(),
     };
-    if rules.is_empty() {
-        map.remove(&repo);
+    // An empty `repo` means the caller could not name the repository;
+    // fall back to the directory name rather than keying under "".
+    let key = if repo.is_empty() {
+        root.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
     } else {
-        map.insert(repo, RepoRules { rules });
+        repo.to_string()
+    };
+    if rules.is_empty() {
+        map.remove(&key);
+    } else {
+        map.insert(key, RepoRules { rules });
     }
     Ok(0)
 }
 
-/// The `codeowners` sensor. Submits itself via `inventory::submit!`
-/// below; the shared walker in `sensors/util.rs` is not used because
-/// the sensor reads specific files, not a workspace walk.
+/// Back-compat entry point for callers that cannot name the repo:
+/// keys the index by the directory name so existing tests keep
+/// working. New code must use [`scan_workspace_codeowners_for_repo`].
+pub fn scan_workspace_codeowners(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+) -> Result<usize, LainError> {
+    let repo = root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    scan_workspace_codeowners_for_repo(graph, root, namespace, &repo)
+}
+
+/// The `codeowners` sensor. Registered by hand (not via
+/// `register_sensor!`) because it must override
+/// [`Sensor::scan_for_repo`] to key its index by the real repo id.
 pub struct CodeownersSensor;
 
+impl crate::server::sensors::Sensor for CodeownersSensor {
+    fn name(&self) -> &'static str {
+        "codeowners"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::EntryPoints
+    }
+    /// Phase 1: after the http sensors, alongside `entry_point_sensor`.
+    fn phase(&self) -> u8 {
+        1
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace_codeowners(graph, root, namespace)
+    }
+    fn scan_for_repo(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+        repo_id: &str,
+    ) -> Result<usize, LainError> {
+        scan_workspace_codeowners_for_repo(graph, root, namespace, repo_id)
+    }
+    fn scan_with_report_for_repo(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+        repo_id: &str,
+    ) -> Result<crate::server::sensors::ScanReport, LainError> {
+        let n = self.scan_for_repo(graph, root, namespace, repo_id)?;
+        Ok(crate::server::sensors::ScanReport {
+            emitted: n,
+            error: None,
+            unresolved: Vec::new(),
+        })
+    }
+}
+
 // Codeowners contributes attribution, not graph nodes, so it rides on the
-// `EntryPoints` bucket. Phase 1: after the http sensors, alongside
-// `entry_point_sensor`.
-crate::server::sensors::register_sensor!(
-    CodeownersSensor,
-    "codeowners",
-    EntryPoints,
-    1,
-    scan_workspace_codeowners
-);
+// `EntryPoints` bucket.
+inventory::submit!(crate::server::sensors::SensorEntry(&CodeownersSensor));
 
 // ─── Tests ────────────────────────────────────────────────────────────
 
@@ -289,6 +416,37 @@ mod tests {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string()
+    }
+
+    /// Regression: the index used to be keyed by `root.file_name()`,
+    /// which on a re-indexed federation is the worktree's commit-SHA
+    /// directory. `get_service` looks owners up by the `GlobalId` repo,
+    /// so the two never matched and `owners` was silently omitted.
+    #[test]
+    fn owners_resolve_when_root_is_a_worktree_sha_directory() {
+        let _guard = test_lock();
+        let dir = fixed_workspace("worktree_sha");
+        // SHA-shaped directory name, exactly what
+        // `<data_dir>/worktrees/<repo>/<sha>/` produces.
+        let worktree = dir.join("b5bf29ad1d5d6b84ef9655ee7a035a4a5c8523cf");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join("CODEOWNERS"), "* @billing-team\n").unwrap();
+
+        let g = GraphDatabase::new(&dir.join("db.bin")).unwrap();
+        scan_workspace_codeowners_for_repo(&g, &worktree, &RepoNamespace::for_test(), "billing")
+            .unwrap();
+
+        assert_eq!(
+            codeowners_for("billing", "/src/main.py"),
+            vec!["@billing-team".to_string()],
+            "owners must resolve via the repo id, not the worktree directory name"
+        );
+        // The old key must NOT be how it is found.
+        assert!(
+            codeowners_for(&repo_of(&worktree), "/src/main.py").is_empty(),
+            "a SHA-named directory must not become the index key"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -457,5 +615,43 @@ mod tests {
         // Asking for an unknown repo yields nothing — the sensor
         // populates only the repo basename it scanned.
         assert!(codeowners_for("does-not-exist", "/src/x.py").is_empty());
+    }
+
+    #[test]
+    fn reverse_queries_and_set_repo_rules() {
+        let _g = test_lock();
+        let rules = vec![
+            Rule {
+                pattern: "/src/orders/".to_string(),
+                owners: vec!["@orders-team".to_string(), "@infra-team".to_string()],
+            },
+            Rule {
+                pattern: "/src/billing/".to_string(),
+                owners: vec!["@billing-team".to_string(), "@infra-team".to_string()],
+            },
+        ];
+        set_repo_rules("test_repo", rules);
+
+        let owners = owners_for_repo("test_repo");
+        assert_eq!(
+            owners,
+            vec![
+                "@billing-team".to_string(),
+                "@infra-team".to_string(),
+                "@orders-team".to_string()
+            ]
+        );
+
+        let infra_patterns = patterns_for_owner("test_repo", "@infra-team");
+        assert_eq!(
+            infra_patterns,
+            vec!["/src/orders/".to_string(), "/src/billing/".to_string()]
+        );
+
+        let billing_patterns = patterns_for_owner("test_repo", "@billing-team");
+        assert_eq!(billing_patterns, vec!["/src/billing/".to_string()]);
+
+        clear_index();
+        assert!(owners_for_repo("test_repo").is_empty());
     }
 }

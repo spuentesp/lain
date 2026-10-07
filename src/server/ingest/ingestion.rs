@@ -700,6 +700,17 @@ impl LainServer {
             self.ingest().graph(),
             &self.ingest().config().workspace,
             self.ingest().id_namespace(),
+            // Single workspace: there is no federation repo id, so the
+            // workspace directory name is the identity that `get_service`
+            // will later look up with.
+            &self
+                .ingest()
+                .config()
+                .workspace
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string(),
         );
         if sensor_counts.total() > 0 {
             info!("Protocol sensors contributed {:?}", sensor_counts);
@@ -1836,8 +1847,12 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     // explicit that sensors are part of the snapshot-indexing
     // surface ("tree-sitter symbols + static resolve + sensors
     // only").
-    let (sensor_counts, sensor_reports) =
-        crate::server::sensors::run_all_with_reports(graph, path, namespace);
+    let (sensor_counts, sensor_reports) = crate::server::sensors::run_all_with_reports(
+        graph,
+        path,
+        namespace,
+        source_repo.as_ref().map(|r| r.as_str()).unwrap_or(""),
+    );
     if sensor_counts.total() > 0 {
         info!(
             "[federation] {:?}: protocol sensors contributed {:?}",

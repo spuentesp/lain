@@ -102,6 +102,44 @@ async fn get_service_attributes_each_consumer_to_its_real_endpoint() {
     }
 }
 
+/// `owners` must always be present on a `used_by` entry — `[]` means
+/// "CODEOWNERS declares no owner for this path", whereas a missing key
+/// means "owners could not be loaded", which a client must not silently
+/// read as "no owner". And it must resolve for the repo that owns the
+/// entry even when the sensor scanned a worktree directory named after
+/// a commit SHA.
+#[tokio::test]
+async fn owners_are_always_present_and_resolve_by_repo_id() {
+    let fix = harness::build_fixture();
+    let mgr = harness::manager(&fix.root);
+    let config = harness::contract_config(&fix.root);
+    let base = snapshot_at(&mgr, &config, &fix.root, "base").await;
+
+    let data = get_service(&mgr, &base, "orders").await;
+    let mut owner_values: Vec<Value> = Vec::new();
+    for c in data["consumers"].as_array().cloned().unwrap_or_default() {
+        for u in c["uses"].as_array().cloned().unwrap_or_default() {
+            for e in u["used_by"].as_array().cloned().unwrap_or_default() {
+                let owners = e
+                    .get("owners")
+                    .unwrap_or_else(|| panic!("used_by entry is missing 'owners': {e:#?}"));
+                assert!(owners.is_array(), "owners must be an array: {e:#?}");
+                owner_values.push(owners.clone());
+            }
+        }
+    }
+    assert!(!owner_values.is_empty(), "expected at least one used_by entry");
+
+    // billing ships a CODEOWNERS in the T1 fixture; at least one entry
+    // must resolve to a real owner.
+    assert!(
+        owner_values
+            .iter()
+            .any(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false)),
+        "billing has CODEOWNERS but no used_by entry carried an owner: {owner_values:?}"
+    );
+}
+
 /// `handlers[].repo` must be the repository that owns the provider,
 /// never a sensor name. (Covered at unit level in
 /// `analysis::tests::handler_repo_is_the_provider_repo_not_a_sensor_name`;
