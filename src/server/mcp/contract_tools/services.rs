@@ -490,11 +490,6 @@ fn build_consumer_rows(
     depth: u8,
     commit_by_repo: &std::collections::BTreeMap<String, String>,
 ) -> Vec<ConsumerRow> {
-    let provider_endpoints: std::collections::BTreeSet<String> = info
-        .endpoint_ids
-        .iter()
-        .map(|(_, k)| k.to_string())
-        .collect();
     let mut by_consumer: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
     let mut by_consumer_repo: BTreeMap<String, String> = BTreeMap::new();
 
@@ -507,11 +502,20 @@ fn build_consumer_rows(
         else {
             continue;
         };
-        let Some(endpoint) = idx
-            .endpoints
-            .values()
-            .find(|e| provider_endpoints.contains(&e.id.1.to_string()))
-        else {
+        // The endpoints THIS call is bound to, restricted to the
+        // service being queried — not the first entry in the table
+        // whose ContractKey *string* collides with the provider's key
+        // set. That `.find()` returned the alphabetically-first
+        // matching service, so every consumer of `orders` was
+        // attributed to `billing`'s `topic:kafka/orders.created`
+        // (both services own that key).
+        let bound: Vec<&crate::federation::contracts::index::Endpoint> = resolution
+            .bound_endpoints
+            .iter()
+            .filter(|eid| info.endpoint_ids.contains(eid))
+            .filter_map(|eid| idx.endpoints.get(eid))
+            .collect();
+        if bound.is_empty() {
             continue;
         };
 
@@ -576,7 +580,6 @@ fn build_consumer_rows(
             }
         }
 
-        let fields = collect_fields(idx, endpoint);
         let reads_complete = resolution.reads_complete;
         let match_label = match route_match {
             crate::schema::RouteMatch::Exact => "exact",
@@ -584,23 +587,30 @@ fn build_consumer_rows(
             crate::schema::RouteMatch::PrefixStripped => "prefix_stripped",
         };
 
-        let use_value = json!({
-            "endpoint": {"service": endpoint.id.0.0.as_str(), "key": &endpoint.id.1.to_string()},
-            "site": site,
-            "caller": caller_node_evidence(&caller_node, commit),
-            "binding": provenance_to_json(provenance),
-            "match": match_label,
-            "fields": fields,
-            "reads_complete": reads_complete,
-            "used_by": used_by_entries,
-            "used_by_truncated": used_by_truncated,
-        });
+        // One `use` per bound endpoint: a single call site may be
+        // resolved to several endpoints (e.g. the same route declared
+        // in code and in OpenAPI), and each carries its own fields.
+        for endpoint in bound {
+            let use_value = json!({
+                "endpoint": {"service": endpoint.id.0.0.as_str(), "key": &endpoint.id.1.to_string()},
+                "site": site,
+                "caller": caller_node_evidence(&caller_node, commit),
+                "binding": provenance_to_json(provenance),
+                "match": match_label,
+                "fields": collect_fields(idx, endpoint),
+                "reads_complete": reads_complete,
+                "used_by": used_by_entries,
+                "used_by_truncated": used_by_truncated,
+            });
 
-        let row = by_consumer.entry(consumer_service.clone()).or_default();
-        let caller_key = caller_node.id.clone();
-        let line_key = site["line"].as_u64().unwrap_or(0);
-        let key = format!("{caller_key}|{line_key}");
-        row.entry(key).or_insert(use_value);
+            let row = by_consumer.entry(consumer_service.clone()).or_default();
+            let caller_key = caller_node.id.clone();
+            let line_key = site["line"].as_u64().unwrap_or(0);
+            // Keyed by endpoint too, so one site bound to several
+            // endpoints yields one row each instead of being collapsed.
+            let key = format!("{caller_key}|{line_key}|{}", endpoint.id.1);
+            row.entry(key).or_insert(use_value);
+        }
         by_consumer_repo
             .entry(consumer_service.clone())
             .or_insert_with(|| caller_repo.to_string());

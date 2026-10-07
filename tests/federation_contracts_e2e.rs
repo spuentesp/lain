@@ -131,6 +131,7 @@ async fn build_three_repo_federation(
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
     fed.set_contract_config(cfg);
 
@@ -491,6 +492,22 @@ async fn scenario_17_get_service_billing_lists_reports_with_both_used_by() {
         u["caller"]["name"].as_str(),
         Some("buildMonthlyReport"),
         "use.caller.name mismatch: {u:?}"
+    );
+    // The consumer must be attributed to the endpoint it actually
+    // calls. Regression: `build_consumer_rows` resolved the endpoint
+    // with a `.find()` over the whole Endpoint table matching on
+    // ContractKey *string*, so every consumer of a service was
+    // attributed to the alphabetically-first endpoint whose key
+    // collided with that service's key set.
+    assert_eq!(
+        u["endpoint"]["service"].as_str(),
+        Some("billing"),
+        "use.endpoint.service mismatch: {u:?}"
+    );
+    assert_eq!(
+        u["endpoint"]["key"].as_str(),
+        Some("http:GET /invoices/{}"),
+        "use.endpoint.key must be the endpoint the caller really invokes: {u:?}"
     );
     let used_by = u["used_by"].as_array().expect("used_by array");
     let mut found_http_handler = false;
@@ -2520,6 +2537,7 @@ mod pr15_event {
             generic_keys: vec![],
             schemas: vec![],
             bindings: vec![],
+            databases: vec![],
         };
         fed.set_contract_config(cfg);
 
@@ -2797,6 +2815,7 @@ mod pr18_operation_id {
             generic_keys: vec![],
             schemas: vec![],
             bindings: vec![],
+            databases: vec![],
         }
     }
 
