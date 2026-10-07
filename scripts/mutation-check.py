@@ -49,7 +49,7 @@ Applies one small semantic mutation at a time to a production file, runs a
 scoped test subset, and records whether the suite noticed. A mutation that
 SURVIVES means that behaviour is not pinned by any test.
 """
-import re, subprocess, sys, os, shutil
+import json, re, subprocess, sys, os, shutil
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CARGO = shutil.which("cargo") or os.path.expanduser("~/.cargo/bin/cargo")
@@ -69,10 +69,17 @@ TARGETS = [
     ("src/server/sensors/payload_schema.rs", "parsers_adversarial", "test"),
     # Task 3: WebSocket consumer joiner (host evidence + ambiguity refusal)
     ("src/server/federation/contracts/joiner/consumer_protocol.rs", "joiner_tests", "lib"),
-    # Task 4: field_join schema keying must match build_endpoints
-    ("src/server/federation/contracts/field_join.rs", "joiner_tests", "lib"),
-    # Task 2: sensor_owner_of — coexistence with other sensors
-    ("src/server/graph/mod.rs", "sensor_coexistence", "test"),
+    # Task 4: field_join schema keying must match build_endpoints.
+    # The filter MUST be `field_join::tests`, not `joiner_tests`: the
+    # tests that pin `is_suffix` and the decl-loop branches live in
+    # `field_join::tests`, which `joiner_tests` never runs. Under the
+    # old filter 13 of 19 killed mutants read as survivors.
+    ("src/server/federation/contracts/field_join.rs", "field_join::tests", "lib"),
+    # Task 2: sensor_owner_of — coexistence with other sensors.
+    # `graph/mod.rs` is 3.6k lines; `sensor_coexistence` only reaches
+    # `sensor_owner_of`, so every BFS/entry-point mutant survived and
+    # the 5% read as "no coverage" when it meant "wrong filter".
+    ("src/server/graph/mod.rs", "graph", "lib"),
     # Task 6: GraphQL fragment / directive / deep-selection parsing
     ("src/server/sensors/graphql_consumer_sensor.rs", "graphql_resolution", "test"),
 ]
@@ -102,39 +109,196 @@ def run_tests(filt, kind):
     r = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=900)
     return r.returncode == 0
 
-results = []
-for relpath, filt, kind in TARGETS:
-    path = os.path.join(ROOT, relpath)
-    original = open(path).read()
-    prod, tests = strip_tests(original)
+BASELINE_PATH = os.path.join(ROOT, "scripts", "mutation-baseline.json")
+TRIAGE_PATH = BASELINE_PATH  # triage lives inside the baseline document
 
+
+def load_triage():
+    """Previously-classified survivors. `equivalent: <reason>` entries are
+    reported separately and do not count toward the gap rate; without
+    this record every run re-opens the same questions and the achievable
+    ceiling stays invisible."""
     try:
-        for pat, rep, label in MUTATIONS:
-            hits = list(re.finditer(pat, prod))
-            for idx, m in enumerate(hits):
-                line_start = prod.rfind('\n', 0, m.start()) + 1
-                line_text = prod[line_start:prod.find('\n', m.start())]
-                if line_text.strip().startswith('//'):
-                    continue  # comments are not behaviour
-                mutated = prod[:m.start()] + rep + prod[m.end():]
-                if mutated == prod:
-                    continue
-                open(path, 'w').write(mutated + tests)
-                try:
-                    built_and_passed = run_tests(filt, kind)
-                except subprocess.TimeoutExpired:
-                    built_and_passed = False
+        with open(TRIAGE_PATH) as f:
+            return json.load(f).get("triage", {})
+    except (OSError, ValueError):
+        return {}
 
-                line_no = prod[:m.start()].count('\n') + 1
-                snippet = prod.splitlines()[line_no-1].strip()[:80] if line_no-1 < len(prod.splitlines()) else ''
-                status = "SURVIVED" if built_and_passed else "caught"
-                results.append((status, relpath, line_no, label, snippet))
-                print(f"  {status:9} {relpath}:{line_no} [{label}]  {snippet}", flush=True)
-    finally:
-        # Always restore the production file, even on Ctrl-C or kill -9.
-        open(path, 'w').write(original)
 
-survived = [r for r in results if r[0] == "SURVIVED"]
-print(f"\n=== {len(results)} mutations applied, {len(survived)} SURVIVED ===")
-for s in survived:
-    print(f"  {s[1]}:{s[2]} [{s[3]}]  {s[4]}")
+def run_mutations(targets=None):
+    """Apply one mutation at a time, run the scoped oracle, restore.
+
+    `try/finally` restores the file even on Ctrl-C. A killed worker can
+    still leave a mutation behind (SIGKILL skips finally), so callers
+    must `git diff --stat src/` before committing.
+    """
+    triage = load_triage()
+    results = []
+    for relpath, filt, kind in (targets or TARGETS):
+        path = os.path.join(ROOT, relpath)
+        original = open(path).read()
+        prod, tests = strip_tests(original)
+
+        try:
+            for pat, rep, label in MUTATIONS:
+                hits = list(re.finditer(pat, prod))
+                for m in hits:
+                    line_start = prod.rfind('\n', 0, m.start()) + 1
+                    line_end = prod.find('\n', m.start())
+                    line_text = prod[line_start:line_end if line_end != -1 else len(prod)]
+                    if line_text.strip().startswith('//'):
+                        continue  # comments are not behaviour
+                    mutated = prod[:m.start()] + rep + prod[m.end():]
+                    if mutated == prod:
+                        continue
+                    open(path, 'w').write(mutated + tests)
+                    try:
+                        built_and_passed = run_tests(filt, kind)
+                    except subprocess.TimeoutExpired:
+                        built_and_passed = False
+
+                    line_no = prod[:m.start()].count('\n') + 1
+                    lines = prod.splitlines()
+                    snippet = lines[line_no - 1].strip()[:80] if line_no - 1 < len(lines) else ''
+                    status = "SURVIVED" if built_and_passed else "caught"
+                    key = f"{relpath}:{line_no}:{label}"
+                    verdict = triage.get(key)
+                    results.append({
+                        "status": status, "path": relpath, "line": line_no,
+                        "op": label, "snippet": snippet, "verdict": verdict,
+                    })
+                    tag = "" if verdict is None else f"  [{verdict.split(':')[0]}]"
+                    print(f"  {status:9} {key}{tag}  {snippet}", flush=True)
+        finally:
+            open(path, 'w').write(original)
+    return results
+
+
+def summarise(results):
+    survived = [r for r in results if r["status"] == "SURVIVED"]
+    equiv = [r for r in survived if (r.get("verdict") or "").startswith("equivalent")]
+    gaps = [r for r in survived if not (r.get("verdict") or "").startswith("equivalent")]
+    print(f"\n=== {len(results)} mutations applied, {len(survived)} SURVIVED "
+          f"({len(equiv)} equivalent, {len(gaps)} gap) ===")
+    for s in gaps:
+        print(f"  gap       {s['path']}:{s['line']} [{s['op']}]  {s['snippet']}")
+    for s in equiv:
+        print(f"  equiv     {s['path']}:{s['line']} [{s['op']}]  {s.get('verdict')}")
+    return survived, equiv, gaps
+
+
+def write_baseline(results):
+    import datetime
+    per_target = {}
+    for r in results:
+        t = per_target.setdefault(r["path"], {"path": r["path"], "mutants": 0, "killed": 0, "survived": 0})
+        t["mutants"] += 1
+        if r["status"] == "SURVIVED":
+            t["survived"] += 1
+        else:
+            t["killed"] += 1
+    doc = {
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "operators": [label for _, _, label in MUTATIONS],
+        "targets": sorted(per_target.values(), key=lambda t: t["path"]),
+        "triage": load_triage(),
+    }
+    with open(BASELINE_PATH, "w") as f:
+        json.dump(doc, f, indent=2, sort_keys=True)
+    killed = sum(t["killed"] for t in doc["targets"])
+    total = sum(t["mutants"] for t in doc["targets"])
+    print(f"MUTATION_SUMMARY {killed}/{total} killed, {total - killed} survived")
+
+
+def check_filters():
+    """A filter that runs no test touching the target file makes every
+    mutant survive, which reads as 'no coverage' when it means 'wrong
+    filter'. Fail loudly instead."""
+    problems = []
+    for relpath, filt, kind in TARGETS:
+        args = [CARGO, "test", "--lib" if kind == "lib" else "--test", filt, "--", "--list"]
+        try:
+            r = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            problems.append(f"{relpath}: filter '{filt}' timed out listing tests")
+            continue
+        listed = [l for l in r.stdout.splitlines() if ": test" in l]
+        if not listed:
+            problems.append(f"{relpath}: filter '{filt}' lists zero tests")
+            continue
+        # For `lib` targets the filter selects by module path, so the
+        # test names should mention the file's stem. For `test` targets
+        # the filter names the test FILE itself — `parsers_adversarial`
+        # is the suite for `payload_schema.rs` even though no test in it
+        # carries that name — so a non-trivial count is the honest check.
+        if kind == "test":
+            if len(listed) < 3:
+                problems.append(
+                    f"{relpath}: filter '{filt}' lists only {len(listed)} test(s); "
+                    f"too few to exercise a whole parser"
+                )
+            continue
+        stem = os.path.basename(relpath).rsplit(".", 1)[0]
+        if not any(stem in l or "tests::" in l for l in listed):
+            problems.append(
+                f"{relpath}: filter '{filt}' lists {len(listed)} tests but none "
+                f"appear to target '{stem}' — mutants will all survive"
+            )
+    return problems
+
+
+def check_floor():
+    """Gate: the gap rate must not rise, and the risk-critical modules
+    must clear their floor. Floors live in the baseline so a reduction
+    is a reviewable diff, not a silent edit."""
+    with open(BASELINE_PATH) as f:
+        doc = json.load(f)
+    floor = doc.get("floor", {
+        "global_killed_pct": 70,
+        "per_target": {
+            "src/server/sensors/graphql_consumer_sensor.rs": 85,
+            "src/server/sensors/payload_schema.rs": 85,
+            "src/server/federation/contracts/joiner/consumer_protocol.rs": 85,
+            "src/server/federation/contracts/field_join.rs": 85,
+        },
+    })
+    bad = []
+    if "targets" not in doc:
+        return ["no measured targets in mutation-baseline.json — run a measurement first"]
+    for t in doc["targets"]:
+        pct = 100.0 * t["killed"] / max(t["mutants"], 1)
+        want = floor["per_target"].get(t["path"])
+        if want is not None and pct < want:
+            bad.append(f"{t['path']}: {pct:.1f}% < required {want}%")
+    total_killed = sum(t["killed"] for t in doc["targets"])
+    total = sum(t["mutants"] for t in doc["targets"])
+    pct = 100.0 * total_killed / max(total, 1)
+    if pct < floor["global_killed_pct"]:
+        bad.append(f"global {pct:.1f}% < required {floor['global_killed_pct']}%")
+    return bad
+
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "--run"
+
+    if mode == "--check-filters":
+        probs = check_filters()
+        for p in probs:
+            print("FAIL:", p)
+        print("filter check:", "PASS" if not probs else f"{len(probs)} problem(s)")
+        sys.exit(1 if probs else 0)
+
+    if mode == "--check-floor":
+        if not os.path.exists(BASELINE_PATH):
+            print("FAIL: scripts/mutation-baseline.json missing — run a measurement first")
+            sys.exit(1)
+        bad = check_floor()
+        for b in bad:
+            print("FAIL:", b)
+        print("floor check:", "PASS" if not bad else f"{len(bad)} violation(s)")
+        sys.exit(1 if bad else 0)
+
+    # default: run the full measurement
+    results = run_mutations()
+    summarise(results)
+    write_baseline(results)
