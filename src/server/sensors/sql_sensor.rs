@@ -1017,7 +1017,11 @@ fn build_graph(
         // `ContractIndex.consumers` on every scan. Emission is
         // unconditional (like `rpc-call:`) — the joiner keys on the
         // fact plus this node's path/line, not on an enclosing symbol.
-        let id_name = format!("sql-read:{graph_path_str}:{}", site.line);
+        let id_name = format!(
+            "{}{graph_path_str}:{}",
+            crate::server::sensors::util::SQL_READ_PREFIX,
+            site.line
+        );
         let id = GraphNode::generate_id(
             &NodeType::Function,
             graph_path_str,

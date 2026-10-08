@@ -173,7 +173,18 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         //
         // §6.7 (stretch): the consumer-side function node carries a
         // `TopicConsumer` contract fact; the event sensor owns it.
-        (_, Some(ContractFact::TopicConsumer(_))) => Some(SensorOwner::EventSensor),
+        // The event sensor owns its synthetic `topic-read:` consumer
+        // nodes. The name guard is the migration arm: pre-fix graphs
+        // carry `TopicConsumer` on the real symbol node, and retracting
+        // those would delete real function nodes (and their edges) from
+        // an operator's graph.
+        (_, Some(ContractFact::TopicConsumer(_)))
+            if node
+                .name
+                .starts_with(crate::server::sensors::util::TOPIC_READ_PREFIX) =>
+        {
+            Some(SensorOwner::EventSensor)
+        }
         // Phase D (spec §7): a `Table` node carries a `Table`
         // contract fact (or at scan time a `name`-only payload).
         // The sql sensor owns it — and its synthetic `sql-read:`
@@ -183,7 +194,11 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         // facts ride real symbol nodes, which this sensor no longer
         // re-emits — retracting those would delete the symbol.
         (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
-        (_, Some(ContractFact::TableConsumer(_))) if node.name.starts_with("sql-read:") => {
+        (_, Some(ContractFact::TableConsumer(_)))
+            if node
+                .name
+                .starts_with(crate::server::sensors::util::SQL_READ_PREFIX) =>
+        {
             Some(SensorOwner::SqlSensor)
         }
         // Phase E (spec §8.2): each gRPC contract sensor owns its own

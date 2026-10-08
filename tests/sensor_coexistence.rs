@@ -670,7 +670,8 @@ fn a_rescan_keeps_reads_table_on_the_enclosing_function() {
 fn a_topic_consumer_on_a_symbol_node_makes_it_sensor_retractable() {
     use lain::graph::sensor_owner_of;
     use lain::server::federation::contracts::model::{TopicConsumerFact, TopicConsumerKind};
-    let mut n = lain::schema::GraphNode::new(NodeType::Function, "job".into(), "src/jobs.py".into());
+    let mut n =
+        lain::schema::GraphNode::new(NodeType::Function, "job".into(), "src/jobs.py".into());
     n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
         broker: "kafka".into(),
         name: "orders.created".into(),
@@ -678,10 +679,10 @@ fn a_topic_consumer_on_a_symbol_node_makes_it_sensor_retractable() {
     }));
     assert_eq!(
         sensor_owner_of(&n),
-        Some(SensorOwner::EventSensor),
-        "BUG: today the symbol is EventSensor-owned and gets deleted with \
-         its edges. After Task 2 this must be None (or a synthetic-node \
-         owner) — this test is the mechanism half of the reproduction."
+        None,
+        "a symbol node carrying TopicConsumer must not be sensor-retractable: \
+         retraction would delete a real function node and every edge attached \
+         to it. Only the synthetic `topic-read:` node is owned by EventSensor."
     );
 }
 

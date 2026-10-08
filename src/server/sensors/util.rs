@@ -476,6 +476,18 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
 }
 
 // ─── Shared emitters for the protocol sensors ──────────────────────
+
+/// Prefix for synthetic nodes carrying a per-site consumer fact.
+///
+/// A sensor must never put its `ContractFact` on a node another sensor
+/// owns — `replace_sensor_output` step 2 deletes an owner's nodes *and
+/// their incident edges* (`graph/mod.rs:896`), so a shared symbol node
+/// means one sensor's rescan silently destroys another's edges. Each
+/// protocol that annotates a source site gets its own synthetic node
+/// named `<prefix><path>:<line>`.
+pub const SQL_READ_PREFIX: &str = "sql-read:";
+/// See [`SQL_READ_PREFIX`]. Carries `TopicConsumerFact`.
+pub const TOPIC_READ_PREFIX: &str = "topic-read:";
 //
 // The graphql consumer sensor used to duplicate this 25-line block
 // at two call sites (SDL-derived consumers, then code-derived

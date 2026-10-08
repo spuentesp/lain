@@ -574,17 +574,31 @@ fn emit_sites(
         // The fact is what `ContractJoiner::run` matches against
         // producer-side `Topic` nodes.
         if emitted_consumer_facts.insert(source_id.clone()) {
-            let mut consumer_node = GraphNode::new(
-                NodeType::Function,
-                if owner_hint.is_empty() {
-                    topic_label.clone()
-                } else {
-                    owner_hint.clone()
-                },
-                graph_path.to_string(),
+            // Synthetic node — NOT `source_id`. `replace_sensor_output`
+            // step 2 deletes an owner's nodes and their incident edges;
+            // putting `TopicConsumer` on the enclosing symbol made that
+            // symbol `EventSensor`-owned and cost every peer sensor its
+            // edges on the next scan (see `util::SQL_READ_PREFIX`).
+            let id_name = format!(
+                "{}{graph_path}:{}",
+                crate::server::sensors::util::TOPIC_READ_PREFIX,
+                site.line
             );
-            consumer_node.id = source_id.clone();
+            let id = GraphNode::generate_id(
+                &NodeType::Function,
+                graph_path,
+                &id_name,
+                Some(site.line),
+                namespace,
+            );
+            let mut consumer_node =
+                GraphNode::new(NodeType::Function, id_name, graph_path.to_string());
+            consumer_node.id = id;
             consumer_node.line_start = Some(site.line);
+            // `line_end` stays `None` deliberately: `util::enclosing_symbol`
+            // requires both bounds, so no later scan can resolve *this*
+            // node as an enclosing symbol and re-create a shared-id
+            // collision. Same rule as `sql-read:`.
             let kind = match site.kind {
                 SiteKind::Scheduled => TopicConsumerKind::Scheduled,
                 _ => TopicConsumerKind::Subscription,
