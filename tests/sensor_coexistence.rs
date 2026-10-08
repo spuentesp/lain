@@ -663,25 +663,48 @@ fn a_rescan_keeps_reads_table_on_the_enclosing_function() {
     assert!(!facts(&graph, |c| matches!(c, ContractFact::TopicConsumer(_))).is_empty());
 }
 
-/// The SECOND-scan form of the invariant above is currently blocked by
-/// a **pre-existing** defect outside this change: `event_sensor`'s
-/// consumer-node upsert rebuilds the symbol record with only
-/// `line_start` (no `line_end`) and `id` minted from the *site* line,
-/// so it does not match — and does not preserve — the enclosing
-/// symbol's record. After the first `run_all`, `util::enclosing_symbol`
-/// can no longer resolve the function and `ReadsTable` edges stop
-/// appearing entirely.
+/// The other half of the same bug: a symbol node carrying `TopicConsumer`
+/// is owned by `EventSensor`, so `event_sensor`'s rescan is entitled to
+/// delete it — symbol record and every incident edge with it.
+#[test]
+fn a_topic_consumer_on_a_symbol_node_makes_it_sensor_retractable() {
+    use lain::graph::sensor_owner_of;
+    use lain::server::federation::contracts::model::{TopicConsumerFact, TopicConsumerKind};
+    let mut n = lain::schema::GraphNode::new(NodeType::Function, "job".into(), "src/jobs.py".into());
+    n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+        broker: "kafka".into(),
+        name: "orders.created".into(),
+        kind: TopicConsumerKind::Subscription,
+    }));
+    assert_eq!(
+        sensor_owner_of(&n),
+        Some(SensorOwner::EventSensor),
+        "BUG: today the symbol is EventSensor-owned and gets deleted with \
+         its edges. After Task 2 this must be None (or a synthetic-node \
+         owner) — this test is the mechanism half of the reproduction."
+    );
+}
+
+/// The SECOND-scan form is currently blocked by a real defect:
+/// `replace_sensor_output` step 2 removes an owner's nodes **and their
+/// incident edges** (`graph/mod.rs:896`, `remove_node`). `event_sensor`
+/// upserts `TopicConsumer` onto the enclosing symbol node
+/// (`event_sensor.rs:586`), which makes that symbol
+/// `SensorOwner::EventSensor`. On the next `run_all`, event's rescan
+/// retracts the symbol and with it every edge another sensor attached
+/// to it — `sql_sensor`'s `ReadsTable` included. The fact comes back
+/// (event re-inserts it); the edges do not, because they are not in
+/// event's `edges` slice.
 ///
-/// That is the same clobber class `680b6264` fixed for `TableConsumer`,
-/// one level deeper: it is not the *fact* being overwritten but the
-/// symbol's line bounds. The prior review listed it under "Declined to
-/// judge" as pre-existing `event_sensor`/`GraphDatabase` behaviour.
+/// Not a `line_end` problem: `resolve_function_id`
+/// (`event_sensor.rs:125`) returns the existing symbol's id, and
+/// `upsert_node`'s hydration guard (`graph/mod.rs:416`) skips the
+/// replace for an unhydrated node onto a hydrated one. The destroy path
+/// is the delete-then-insert of `replace_sensor_output`, which
+/// `upsert_node` alone never exercises.
 ///
-/// This test is `#[ignore]` rather than deleted, so the gap is visible
-/// and the day someone fixes `event_sensor`'s symbol handling it flips
-/// to green. Removing the attribute is the acceptance criterion for
-/// that fix.
-#[ignore = "pre-existing: event_sensor's TopicConsumer upsert destroys the enclosing symbol's line_end and mints a mismatched id, so ReadsTable edges vanish on the second scan. Out of scope for the sql-read fix."]
+/// Un-ignored: this is now the reproduction, and turning it green is the
+/// acceptance criterion for the fix.
 #[test]
 fn a_rescan_keeps_reads_table_on_the_enclosing_function_second_scan() {
     let ws = workspace("same_line_two_scans");
