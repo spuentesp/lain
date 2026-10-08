@@ -41,20 +41,40 @@ fn fixture_script() -> PathBuf {
         .join("contracts-fixture.sh")
 }
 
+fn fixture_t4_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("contracts-fixture-t4.sh")
+}
+
+fn run_fixture_script(script: PathBuf) -> Fixture {
+    let tmp = tempfile::tempdir().expect("fixture tempdir");
+    let root = tmp.path().to_path_buf();
+    let status = Command::new(&script)
+        .arg(&root)
+        .status()
+        .unwrap_or_else(|e| panic!("spawn {}: {e}", script.display()));
+    assert!(
+        status.success(),
+        "{} failed: exit {status:?}",
+        script.display()
+    );
+    Fixture { _tmp: tmp, root }
+}
+
 /// Run `scripts/contracts-fixture.sh <tmpdir>` and keep the result
 /// alive for the test.
 pub fn build_fixture() -> Fixture {
-    let tmp = tempfile::tempdir().expect("fixture tempdir");
-    let root = tmp.path().to_path_buf();
-    let status = Command::new(fixture_script())
-        .arg(&root)
-        .status()
-        .expect("spawn contracts-fixture.sh");
-    assert!(
-        status.success(),
-        "contracts-fixture.sh failed: exit {status:?}"
-    );
-    Fixture { _tmp: tmp, root }
+    run_fixture_script(fixture_script())
+}
+
+/// Run `scripts/contracts-fixture-t4.sh <tmpdir>` — the T1 fixture
+/// plus the Task 2 non-HTTP protocol services (gRPC / GraphQL /
+/// WebSocket / SQL), whose commits are tagged `t4` on top of the
+/// untouched `base` + scenario tags. Snapshot a t4 fixture at
+/// `all_repos_at(root, "t4")`.
+pub fn build_fixture_t4() -> Fixture {
+    run_fixture_script(fixture_t4_script())
 }
 
 /// The contract config exactly as the fixture's `repos.yaml`
