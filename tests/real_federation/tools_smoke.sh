@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Phase 2 tool-surface regression test.
 #
-# Boots the server, prepares a snapshot over all repos, then calls
-# every one of the 13 contract tools and asserts isError=false on
-# each. This is the "no silent regression" check for the MCP
-# surface — if a future refactor wires a tool to a removed
-# subsystem, this test catches it before it ships.
+# Boots the server, prepares a snapshot over all fixture repos (the two
+# real libraries plus the synthetic `probe` repo, whose axum route gives
+# the snapshot one real endpoint), then calls every one of the 13
+# contract tools and asserts isError=false on each. This is the "no
+# silent regression" check for the MCP surface — if a future refactor
+# wires a tool to a removed subsystem, this test catches it before it
+# ships.
 #
 # Prereqs:
 #   - fixture built via `scripts/demo-federation-fixture.sh`
@@ -36,7 +38,7 @@ trap cleanup EXIT
 
 cd "$FIXTURE_DIR"
 XDG_STATE_HOME="$FIXTURE_DIR/state" LAIN_TOOL_PROFILE=full \
-  "$LAIN_BIN" server --config repos.yaml --workspace tokio-stack \
+  "$LAIN_BIN" server --config repos.yaml --workspace contract-suite \
   --transport http --port "$PORT" --log-level info >/tmp/smoke_server.log 2>&1 &
 SERVER_PID=$!
 cd - >/dev/null
@@ -56,22 +58,39 @@ curl -s -X POST "$HOST" -H "Content-Type: application/json" -H "Accept: applicat
 curl -s -X POST "$HOST" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -H "Mcp-Session-Id: $SESSION" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
 
-# Read the list of repos from the fixture so the test works with
-# any fixture shape.
+# Read the list of repos (and their pinned refs) from the fixture so
+# the test works with any fixture shape.
 REPOS_JSON=$(python3 -c "
 import yaml
 with open('$FIXTURE_DIR/repos.yaml') as f:
   cfg = yaml.safe_load(f)
-print(','.join(f'\"{r[\"id\"]}\":\"master\"' for r in cfg['repos']))
+def ref(r):
+  return r.get('source', {}).get('ref', 'master')
+print(','.join(f'\"{r[\"id\"]}\":\"{ref(r)}\"' for r in cfg['repos']))
 ")
 
-# Prepare a snapshot over all repos
-SNAP_RAW=$(curl -s -X POST "$HOST" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -H "Mcp-Session-Id: $SESSION" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"prepare_snapshot\",\"arguments\":{\"repos\":{$REPOS_JSON},\"wait_ms\":180000}}}")
-SNAP=$(echo "$SNAP_RAW" | python3 -c "import json,sys; t=json.loads(sys.stdin.read())['result']['content'][0]['text']; print(json.loads(t)['data']['snapshot'])")
-SNAP_STATE=$(echo "$SNAP_RAW" | python3 -c "import json,sys; t=json.loads(sys.stdin.read())['result']['content'][0]['text']; print(json.loads(t)['data']['state'])")
+# Prepare a snapshot over all repos. The per-call wait is capped at
+# 60s while a cold index takes longer; re-call until ready.
+SNAP=""
+SNAP_STATE=""
+for round in 1 2 3 4 5 6 7 8; do
+  SNAP_RAW=$(curl -s -X POST "$HOST" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -H "Mcp-Session-Id: $SESSION" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"prepare_snapshot\",\"arguments\":{\"repos\":{$REPOS_JSON},\"wait_ms\":60000}}}")
+  SNAP=$(echo "$SNAP_RAW" | python3 -c "import json,sys; t=json.loads(sys.stdin.read())['result']['content'][0]['text']; d=json.loads(t); print(d.get('data',{}).get('snapshot','') or d.get('error',{}).get('code','?'))")
+  SNAP_STATE=$(echo "$SNAP_RAW" | python3 -c "import json,sys; t=json.loads(sys.stdin.read())['result']['content'][0]['text']; d=json.loads(t); print(d.get('data',{}).get('state','') or 'error:'+d.get('error',{}).get('code','?'))")
+  case "$SNAP_STATE" in
+    ready) break ;;
+    pending|indexing)
+      echo "  waiting for snapshot (state=$SNAP_STATE, round $round)…"
+      ;;
+    *)
+      echo "FAIL: prepare_snapshot state=$SNAP_STATE (expected ready)"
+      exit 1
+      ;;
+  esac
+done
 if [ "$SNAP_STATE" != "ready" ]; then
-  echo "FAIL: prepare_snapshot state=$SNAP_STATE (expected ready)"
+  echo "FAIL: snapshot did not reach ready (state=$SNAP_STATE)"
   exit 1
 fi
 echo "snapshot: $SNAP"
@@ -95,13 +114,13 @@ check() {
 echo "=== 13 contract tools (fixture: $FIXTURE_DIR) ==="
 check "get_snapshot"     "{\"snapshot\":\"$SNAP\",\"wait_ms\":500}"   "1. get_snapshot"
 check "list_services"    "{\"snapshot\":\"live\",\"limit\":3}"       "2. list_services (live)"
-check "get_service"      "{\"snapshot\":\"live\",\"service\":\"bytes::Bytes::new\",\"depth\":1}" "3. get_service (live)"
+check "get_service"      "{\"snapshot\":\"live\",\"service\":\"bytes\",\"depth\":1}" "3. get_service (live)"
 check "list_contracts"   "{\"snapshot\":\"$SNAP\",\"limit\":5}"       "4. list_contracts"
-check "get_contract"     "{\"snapshot\":\"$SNAP\",\"key\":\"bytes::Bytes::new::field_0\"}" "5. get_contract (synthetic key)"
+check "get_contract"     "{\"snapshot\":\"$SNAP\",\"key\":\"http:GET /probe\"}" "5. get_contract (probe endpoint)"
 check "list_unresolved"  "{\"snapshot\":\"$SNAP\",\"limit\":5}"       "6. list_unresolved"
-check "check_binding"    "{\"snapshot\":\"$SNAP\",\"consumer\":\"bytes\",\"endpoint\":\"GET /x\"}" "7. check_binding (synthetic)"
+check "check_binding"    "{\"snapshot\":\"$SNAP\",\"consumer\":\"bytes:HttpClientCall:src/lib.rs:probe:1\",\"endpoint\":{\"service\":\"bytes\",\"key\":\"http:GET /x\"}}" "7. check_binding (synthetic)"
 check "diff_contracts"   "{\"snapshot\":\"$SNAP\",\"base\":\"$SNAP\",\"head\":\"$SNAP\"}" "8. diff_contracts"
-check "trace_impact"     "{\"snapshot\":\"$SNAP\",\"from\":[\"bytes::Bytes::new::field_0\"],\"depth\":2}" "9. trace_impact (synthetic)"
+check "trace_impact"     "{\"snapshot\":\"$SNAP\",\"from\":{\"endpoint\":{\"service\":\"probe\",\"key\":\"http:GET /probe\"}},\"depth\":2}" "9. trace_impact (probe endpoint)"
 check "get_coverage"     "{\"snapshot\":\"$SNAP\"}"                  "10. get_coverage"
 check "resolve_evidence" "{\"snapshot\":\"$SNAP\",\"refs\":[\"bytes::src/lib.rs:42\"]}" "11. resolve_evidence (synthetic)"
 check "read_source"      "{\"snapshot\":\"$SNAP\",\"repo\":\"bytes\",\"path\":\"src/lib.rs\",\"start\":0,\"end\":5}" "12. read_source"
