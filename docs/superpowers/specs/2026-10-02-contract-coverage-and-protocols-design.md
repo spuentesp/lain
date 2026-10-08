@@ -48,6 +48,10 @@ I5 **No same-service Binds** (extends §7.8 to RPC and GraphQL).
 I6 **Resolution precedence is a total order**; adding evidence never lowers a bind's rank.
 I7 **Index generation consistency.** A tool call reads one generation of `ContractIndex`, never a
    mix across live rejoin / snapshot swap.
+I8 **Scan ownership / no peer retraction.** `replace_sensor_output(s)` retracts only the nodes
+   `sensor_owner_of` assigns to `s`, then inserts `s`'s current scan output — a scan never removes
+   a peer sensor's nodes. Modeled in `docs/formal/ScanRetract.tla`; enforced by
+   `src/server/graph/mod.rs::replace_sensor_output` / `sensor_owner_of`.
 
 I3 and I7 get TLA+ models (§9). I2, I4–I6 get property tests.
 

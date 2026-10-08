@@ -1,5 +1,17 @@
 {
   "generated_at": "2026-10-08T00:10:28+00:00",
+  "floor": {
+    "global_killed_pct": 70,
+    "per_target": {
+      "src/server/federation/contracts/field_join.rs": 85,
+      "src/server/federation/contracts/joiner/consumer_protocol.rs": 85,
+      "src/server/graph/mod.rs": 60,
+      "src/server/ingest/resolve.rs": 75,
+      "src/server/sensors/graphql_consumer_sensor.rs": 85,
+      "src/server/sensors/http_sensor.rs": 100,
+      "src/server/sensors/payload_schema.rs": 85
+    }
+  },
   "operators": [
     "ge->gt",
     "le->lt",
