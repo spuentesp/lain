@@ -23,8 +23,8 @@ use crate::federation::contracts::index::{
     EndpointSchema, UnresolvedReason,
 };
 use crate::federation::contracts::model::{
-    ContractKey, Direction, FieldMeta, HttpMethod, JsonPath, MethodSpec, PathSegment,
-    ProviderOrigin, ServiceName, SymbolKey, TypeDesc,
+    ContractKey, Direction, FieldMeta, GraphqlOp, HttpMethod, JsonPath, MethodSpec, PathSegment,
+    ProviderOrigin, RpcSystem, ServiceName, SymbolKey, TypeDesc,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::EdgeProvenance;
@@ -1631,6 +1631,356 @@ fn could_match_rejects_operation_id_mismatch() {
         !could_match(&key, &target, &head),
         "no URL match + no operationId match (consumer name != provider operationId) → not a candidate"
     );
+}
+
+// ─── Task 1 — non-HTTP could-match (I3 verdict soundness) ────────────
+//
+// `could_match` must be conservative for every protocol family
+// (§9.7): returning `true` costs a `NeedsInvestigation` (a lead),
+// returning `false` wrongly permits `NoKnownImpact` (a wrong answer
+// to a user). These tests pin that an unresolved non-HTTP consumer
+// blocks `NoKnownImpact` on its protocol's endpoint, that an
+// unknown-key (`UrlExpr`) consumer cannot be ruled out against a
+// non-HTTP endpoint, and — the over-reporting guard — that a clean
+// non-HTTP scope with nothing unresolved keeps `NoKnownImpact`.
+
+/// Complete coverage for one in-scope repo: reviewed scope plus a
+/// valid ledger entry, so the `evaluate` coverage gate stays quiet
+/// and any `NeedsInvestigation` in these tests can only come from
+/// the could-match rule.
+fn complete_coverage_for(service: &str) -> Coverage {
+    let mut coverage = coverage_with_reviewed(vec![service]);
+    coverage.repo_coverages.insert(
+        service.into(),
+        crate::federation::contracts::coverage::RepoCoverage {
+            cache_key: crate::federation::contracts::index_cache::CacheKey::new(
+                service,
+                "abc",
+                crate::federation::contracts::analyzer_version(),
+            ),
+            ..Default::default()
+        },
+    );
+    coverage
+}
+
+#[test]
+fn an_unresolved_topic_consumer_blocks_no_known_impact() {
+    let call = id(
+        "billing",
+        "TopicConsumer",
+        "src/b.py",
+        "subscribe_orders",
+        1,
+    );
+    let topic = ContractKey::Topic {
+        broker: "kafka".into(),
+        name: "orders.created".into(),
+    };
+    let endpoint = (svc("orders"), topic.clone());
+
+    let mut head = ContractSurface::default();
+    let mut payload = BTreeMap::new();
+    payload.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Payload, payload);
+    head.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let consumer_key = consumer_key_for_call(&call, topic.clone());
+    head.consumers.insert(
+        consumer_key.clone(),
+        ConsumerDef {
+            call: call.clone(),
+            resolution: SurfaceResolution::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: Some(svc("orders")),
+            },
+            reads: BTreeSet::new(),
+            reads_complete: true,
+        },
+    );
+
+    let mut coverage = complete_coverage_for("orders");
+    coverage.unresolved_consumers.push(consumer_key);
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Payload,
+            path: path(&["order_id"]),
+        },
+    };
+    let impact = evaluate(&change, &head, &head, &coverage);
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "an unresolved topic consumer must block NoKnownImpact: {impact:?}"
+    );
+}
+
+#[test]
+fn an_unresolved_rpc_consumer_blocks_no_known_impact() {
+    let call = id("billing", "RpcConsumer", "src/b.py", "get_order", 1);
+    let rpc = ContractKey::Rpc {
+        system: RpcSystem::Grpc,
+        service: "orders.Orders".into(),
+        method: "GetOrder".into(),
+    };
+    let endpoint = (svc("orders"), rpc.clone());
+
+    let mut head = ContractSurface::default();
+    let mut response = BTreeMap::new();
+    response.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Response, response);
+    head.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let consumer_key = consumer_key_for_call(&call, rpc.clone());
+    head.consumers.insert(
+        consumer_key.clone(),
+        ConsumerDef {
+            call: call.clone(),
+            resolution: SurfaceResolution::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: Some(svc("orders")),
+            },
+            reads: BTreeSet::new(),
+            reads_complete: true,
+        },
+    );
+
+    let mut coverage = complete_coverage_for("orders");
+    coverage.unresolved_consumers.push(consumer_key);
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Response,
+            path: path(&["order_id"]),
+        },
+    };
+    let impact = evaluate(&change, &head, &head, &coverage);
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "an unresolved rpc consumer must block NoKnownImpact: {impact:?}"
+    );
+}
+
+#[test]
+fn an_unresolved_graphql_consumer_blocks_no_known_impact() {
+    let call = id("billing", "GraphqlConsumer", "src/b.ts", "queryOrders", 1);
+    let gql = ContractKey::Graphql {
+        op: GraphqlOp::Query,
+        field: "orders".into(),
+    };
+    let endpoint = (svc("orders"), gql.clone());
+
+    let mut head = ContractSurface::default();
+    let mut response = BTreeMap::new();
+    response.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Response, response);
+    head.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let consumer_key = consumer_key_for_call(&call, gql.clone());
+    head.consumers.insert(
+        consumer_key.clone(),
+        ConsumerDef {
+            call: call.clone(),
+            resolution: SurfaceResolution::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: Some(svc("orders")),
+            },
+            reads: BTreeSet::new(),
+            reads_complete: true,
+        },
+    );
+
+    let mut coverage = complete_coverage_for("orders");
+    coverage.unresolved_consumers.push(consumer_key);
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Response,
+            path: path(&["customer_id"]),
+        },
+    };
+    let impact = evaluate(&change, &head, &head, &coverage);
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "an unresolved graphql consumer must block NoKnownImpact: {impact:?}"
+    );
+}
+
+#[test]
+fn an_unresolved_table_consumer_blocks_no_known_impact() {
+    let call = id("billing", "TableConsumer", "src/b.py", "read_shipments", 1);
+    let table = ContractKey::Table {
+        name: "shipments".into(),
+    };
+    let endpoint = (svc("orders"), table.clone());
+
+    let mut head = ContractSurface::default();
+    let mut payload = BTreeMap::new();
+    payload.insert(path(&["shipment_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Payload, payload);
+    head.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let consumer_key = consumer_key_for_call(&call, table.clone());
+    head.consumers.insert(
+        consumer_key.clone(),
+        ConsumerDef {
+            call: call.clone(),
+            resolution: SurfaceResolution::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: Some(svc("orders")),
+            },
+            reads: BTreeSet::new(),
+            reads_complete: true,
+        },
+    );
+
+    let mut coverage = complete_coverage_for("orders");
+    coverage.unresolved_consumers.push(consumer_key);
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Payload,
+            path: path(&["shipment_id"]),
+        },
+    };
+    let impact = evaluate(&change, &head, &head, &coverage);
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "an unresolved table consumer must block NoKnownImpact: {impact:?}"
+    );
+}
+
+#[test]
+fn could_match_is_conservative_when_the_consumer_key_is_unknown() {
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let mut head = ContractSurface::default();
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoMatch,
+            target_service: None,
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    // A `UrlExpr` consumer: the call yielded no `ContractKey`, so
+    // we cannot rule it out from the URL alone.
+    let key = ConsumerKey {
+        caller: SymbolKey {
+            repo: repo("billing"),
+            path: "src/b.py".into(),
+            container: None,
+            name: "fetch".into(),
+        },
+        target: ConsumerTargetKey::UrlExpr("fetch".into()),
+    };
+    head.consumers.insert(key.clone(), consumer_def);
+    let target = (
+        svc("orders"),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "orders.created".into(),
+        },
+    );
+    assert!(
+        could_match(&key, &target, &head),
+        "a UrlExpr consumer against a Topic endpoint cannot be ruled out \
+         and must could-match"
+    );
+}
+
+#[test]
+fn a_non_http_endpoint_still_allows_no_known_impact_when_nothing_is_unresolved() {
+    // The fix must not over-report: a clean scope with no unresolved
+    // consumers keeps `NoKnownImpact`, before and after the change.
+    let topic = ContractKey::Topic {
+        broker: "kafka".into(),
+        name: "orders.created".into(),
+    };
+    let endpoint = (svc("orders"), topic);
+
+    let mut payload = BTreeMap::new();
+    payload.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Payload, payload);
+    let mut base = ContractSurface::default();
+    base.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let head = base.clone();
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Payload,
+            path: path(&["order_id"]),
+        },
+    };
+    let impact = evaluate(&change, &base, &head, &complete_coverage_for("orders"));
+    assert_eq!(
+        impact.class,
+        Class::NoKnownImpact,
+        "a non-HTTP change with nothing unresolved must keep \
+         NoKnownImpact: {impact:?}"
+    );
+}
+
+/// The `evaluate` coverage gate (`NoKnownImpactSound`, TLA+
+/// CoverageClaim.tla) is protocol-agnostic: a topic change under an
+/// incomplete ledger must still downgrade `NoKnownImpact` →
+/// `NeedsInvestigation` even when no unresolved consumer exists to
+/// could-match. Today this gate was only exercised for HTTP.
+#[test]
+fn incomplete_coverage_still_downgrades_a_topic_change() {
+    let topic = ContractKey::Topic {
+        broker: "kafka".into(),
+        name: "orders.created".into(),
+    };
+    let endpoint = (svc("orders"), topic);
+
+    let mut payload = BTreeMap::new();
+    payload.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Payload, payload);
+    let mut base = ContractSurface::default();
+    base.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let head = base.clone();
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Payload,
+            path: path(&["order_id"]),
+        },
+    };
+    // Reviewed scope but NO ledger entry — the coverage gate must
+    // downgrade; nothing else in this test can produce a lead.
+    let coverage = coverage_with_reviewed(vec!["orders"]);
+    let impact = evaluate(&change, &base, &head, &coverage);
+    assert_eq!(
+        impact.class,
+        Class::NeedsInvestigation,
+        "an incomplete coverage ledger must downgrade a topic change: {impact:?}"
+    );
+    assert_eq!(impact.reason, Some(Reason::UnresolvedCandidates));
 }
 
 // ─── Property: diff(a, a) is empty ──────────────────────────────────

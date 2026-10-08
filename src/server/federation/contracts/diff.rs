@@ -2145,11 +2145,16 @@ fn strongest(affected: &[Affected]) -> Class {
 
 // ─── could-match rule (§9.7) ─────────────────────────────────────────
 
-/// An unresolved HTTP consumer `u` in a reviewed repo **could match**
+/// An unresolved consumer `u` in a reviewed repo **could match**
 /// a change on endpoint `(s, K)` iff `u` is not external, `u`'s
-/// target service is `s` or unknown, `u`'s method equals K's or one
-/// of them is `Unknown` or `ANY`, and `u`'s template is `None` or
-/// matches K by §7.4 (prefix tolerance included).
+/// target service is `s` or unknown, the protocol families are not
+/// positively ruled out, and — for HTTP/WebSocket — `u`'s method
+/// equals K's or one of them is `Unknown` or `ANY` and `u`'s
+/// template is `None` or matches K by §7.4 (prefix tolerance
+/// included). Non-HTTP consumers are matched on their own key by
+/// [`non_http_could_match`]; whenever a match cannot be ruled out
+/// this returns `true` — conservative by direction (I3): a wrong
+/// `false` would permit `NoKnownImpact`.
 pub fn could_match(
     consumer_key: &ConsumerKey,
     endpoint: &EndpointId,
@@ -2182,30 +2187,47 @@ pub fn could_match(
     if !target_service_ok {
         return false;
     }
-    // Method check.
+    // Method + template check (HTTP / WebSocket only).
     let (consumer_method, consumer_template) = match &consumer_key.target {
         ConsumerTargetKey::Contract(ContractKey::Http { method, template }) => {
             (method.clone(), Some(template.clone()))
         }
-        ConsumerTargetKey::Contract(ContractKey::Topic { .. }) => return false,
-        ConsumerTargetKey::Contract(ContractKey::Rpc { .. }) => return false,
-        ConsumerTargetKey::Contract(ContractKey::Graphql { .. }) => return false,
         ConsumerTargetKey::Contract(ContractKey::WebSocket { route }) => (
             MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any),
             Some(route.clone()),
         ),
-        ConsumerTargetKey::Contract(ContractKey::Table { .. }) => return false,
+        // Non-HTTP protocols have no method/template axis. They are
+        // matched on their own key below; do NOT `return false` here,
+        // which is what let `NoKnownImpact` through while an
+        // unresolved topic/RPC/GraphQL/Table consumer existed (I3).
+        ConsumerTargetKey::Contract(
+            ContractKey::Topic { .. }
+            | ContractKey::Rpc { .. }
+            | ContractKey::Graphql { .. }
+            | ContractKey::Table { .. },
+        ) => {
+            return non_http_could_match(&consumer_key.target, &endpoint.1);
+        }
         ConsumerTargetKey::UrlExpr(_) => (MethodSpec::Unknown, None),
     };
     let endpoint_method = match &endpoint.1 {
         ContractKey::Http { method, .. } => method.clone(),
-        ContractKey::Topic { .. } => return false,
-        ContractKey::Rpc { .. } => return false,
-        ContractKey::Graphql { .. } => return false,
         ContractKey::WebSocket { .. } => {
             MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any)
         }
-        ContractKey::Table { .. } => return false,
+        // A non-HTTP endpoint has no HTTP method axis, and only an
+        // HTTP-keyed or `UrlExpr` consumer gets this far (non-HTTP
+        // consumers returned above). Delegate to the shared helper:
+        // an `UrlExpr` consumer cannot be ruled out (`true`); a
+        // cross-family HTTP key can (`false`). Never `return false`
+        // unconditionally — that is what let `NoKnownImpact` through
+        // for an unresolved consumer of any protocol (I3).
+        ContractKey::Topic { .. }
+        | ContractKey::Rpc { .. }
+        | ContractKey::Graphql { .. }
+        | ContractKey::Table { .. } => {
+            return non_http_could_match(&consumer_key.target, &endpoint.1);
+        }
     };
     match (consumer_method, endpoint_method) {
         (MethodSpec::Known(cm), MethodSpec::Known(em)) => {
@@ -2217,12 +2239,13 @@ pub fn could_match(
     }
     // Template check.
     if let Some(template) = consumer_template.as_deref() {
-        let endpoint_template = match &endpoint.1 {
-            ContractKey::Http { template, .. } => template.clone(),
-            _ => return false,
-        };
-        if !template_matches(template, &endpoint_template) {
-            return false;
+        // WebSocket routes and other non-HTTP families: there is no
+        // HTTP template axis to compare — cannot rule the match out,
+        // so do NOT `return false` (conservative).
+        if let ContractKey::Http { template: et, .. } = &endpoint.1 {
+            if !template_matches(template, et) {
+                return false;
+            }
         }
     }
     // PR 18 — operationId candidate. The URL did not match any
@@ -2245,6 +2268,58 @@ pub fn could_match(
         }
     }
     true
+}
+
+/// §9.7 for the non-HTTP protocols. Conservative by construction:
+/// we return `true` unless a match can be positively ruled out.
+/// Returning `true` costs a `NeedsInvestigation`; returning `false`
+/// wrongly permits `NoKnownImpact` (I3).
+fn non_http_could_match(target: &ConsumerTargetKey, endpoint_key: &ContractKey) -> bool {
+    use ContractKey::*;
+    let ConsumerTargetKey::Contract(tc) = target else {
+        // A URL-shaped consumer against a non-HTTP endpoint cannot be
+        // ruled out from the URL alone.
+        return true;
+    };
+    match (tc, endpoint_key) {
+        (
+            Topic {
+                broker: cb,
+                name: cn,
+            },
+            Topic {
+                broker: eb,
+                name: en,
+            },
+        ) => {
+            // Same topic name; brokers are interchangeable when either
+            // side defaulted. Unknown in either direction -> true.
+            cn == en && (cb == eb || cb.is_empty() || eb.is_empty())
+        }
+        (
+            Rpc {
+                service: cs,
+                method: cm,
+                ..
+            },
+            Rpc {
+                service: es,
+                method: em,
+                ..
+            },
+        ) => {
+            // Method must agree; a package-qualified service may differ
+            // by suffix, so only a hard mismatch rules it out.
+            cm == em && (cs == es || cs.ends_with(es.as_str()) || es.ends_with(cs.as_str()))
+        }
+        (Graphql { field: cf, .. }, Graphql { field: ef, .. }) => cf == ef,
+        (Table { .. }, Table { .. }) => {
+            // Table identity is not carried on the key; cannot rule out.
+            true
+        }
+        // Different protocol families can be ruled out.
+        _ => false,
+    }
 }
 
 /// Local template-match that mirrors §7.4. Returns true on direct
