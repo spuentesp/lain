@@ -3946,16 +3946,24 @@ fn build_emission(
         // a genuinely module-level read (no function covers the
         // line) falls back to the File node — the same convention
         // `enclosing_sends_http_edge` uses for module-level calls.
+        //
+        // When neither exists, skip the edge (the `sql_sensor`
+        // `enclosing_or_file` rule): `insert_edges_batch` drops an
+        // edge whose endpoints aren't in the graph
+        // (`graph/mod.rs:1156`) without failing, so a minted phantom
+        // source would make the link vanish silently. The `FieldRef`
+        // node below still records the read — the source *site* is
+        // known even when the reading function is not. That is the
+        // graph saying "I cannot name the reader", not losing the read.
         let reads_field_source =
             crate::server::sensors::util::enclosing_symbol(graph, &read_path, read.line)
                 .map(|n| n.id)
-                .unwrap_or_else(|| {
+                .or_else(|| {
                     graph
                         .get_all_nodes()
                         .into_iter()
                         .find(|n| n.node_type == NodeType::File && n.path == read_path)
                         .map(|n| n.id)
-                        .unwrap_or_else(|| "self".to_string())
                 });
         let mut node = GraphNode::new_in(
             NodeType::FieldRef,
@@ -3976,24 +3984,25 @@ fn build_emission(
             exact: read.exact,
             origin: FieldReadOrigin::FieldAccess,
         }));
-        let mut e = GraphEdge::new(
-            EdgeType::ReadsField,
-            reads_field_source.clone(),
-            node.id.clone(),
-        );
-        e.site = Some(crate::federation::contracts::model::SourceSite {
-            path: read_path,
-            line: read.line,
-        });
-        e.provenance = Some(EdgeProvenance::Static {
-            source: crate::schema::StaticSource::TreeSitter,
-        });
+        // Only link `ReadsField` when the reader is known; an
+        // unattributed read keeps its `FieldRef` node and `ReadsFrom`
+        // edge but no reader link.
+        if let Some(reader_id) = reads_field_source {
+            let mut e = GraphEdge::new(EdgeType::ReadsField, reader_id, node.id.clone());
+            e.site = Some(crate::federation::contracts::model::SourceSite {
+                path: read_path,
+                line: read.line,
+            });
+            e.provenance = Some(EdgeProvenance::Static {
+                source: crate::schema::StaticSource::TreeSitter,
+            });
+            edges.push(e);
+        }
         // `ReadsFrom`: FieldRef → the HttpClientCall.
         let mut rf = GraphEdge::new(EdgeType::ReadsFrom, node.id.clone(), call_id.clone());
         rf.provenance = Some(EdgeProvenance::Static {
             source: crate::schema::StaticSource::TreeSitter,
         });
-        edges.push(e);
         edges.push(rf);
         nodes.push(node);
     }
@@ -5096,6 +5105,11 @@ mod tests {
     use super::*;
     use crate::schema::{NodeType, RepoNamespace};
 
+    fn empty_db() -> GraphDatabase {
+        let dir = tempfile::tempdir().expect("tempdir");
+        GraphDatabase::new(&dir.path().join("graph.bin")).unwrap()
+    }
+
     fn field_ref_chain(name: &str) -> JsonPath {
         // For convenience, build a path from a dotted chain.
         let segments: Vec<PathSegment> = name
@@ -5136,6 +5150,50 @@ mod tests {
         };
         assert_eq!(r.chain.to_string(), "customer.id");
         assert!(r.exact);
+    }
+
+    /// `build_emission` must never hand back an edge whose endpoints
+    /// are not materialized. `insert_edges_batch` drops such an edge
+    /// silently (`graph/mod.rs:1156`), so a phantom source looks like
+    /// a successful emit while the `ReadsField` link simply vanishes —
+    /// "which function reads this field" becomes unanswerable.
+    ///
+    /// The old fallback minted the literal `"self"` when there was no
+    /// enclosing symbol and no File node.
+    #[test]
+    fn every_emitted_edge_has_a_materialized_source() {
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        let emission = FieldAccessEmission {
+            path: "src/x.py".into(),
+            call_id: "call-node-id".into(),
+            sender_id: String::new(),
+            reads: vec![FieldRead {
+                chain: field_ref_chain("customer.id"),
+                exact: true,
+                path: "src/x.py".into(),
+                line: 5,
+                reader_id: "self".into(),
+            }],
+            escapes: BTreeSet::new(),
+            reads_complete: true,
+        };
+
+        let (nodes, edges) = build_emission(&graph, &emission, &ns);
+
+        let known: std::collections::BTreeSet<String> = nodes
+            .iter()
+            .map(|n| n.id.clone())
+            .chain(graph.get_all_nodes().into_iter().map(|n| n.id))
+            .collect();
+        for e in &edges {
+            assert!(
+                known.contains(&e.source_id),
+                "ReadsField source {:?} is not a materialized node — \
+                 insert_edges_batch will silently drop this edge",
+                e.source_id
+            );
+        }
     }
 
     #[test]
