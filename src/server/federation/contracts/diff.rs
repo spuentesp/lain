@@ -1775,15 +1775,23 @@ pub fn evaluate(
                 //0.9 cannot model what callers send.
                 class_overall = Class::NeedsInvestigation;
                 reason_overall = Some(Reason::SendsNotModeled);
-            } else if matches!(change.kind, ChangeKind::ChangedWithoutSchema { .. }) {
-                // A handler changed on an endpoint that carries no
-                // schema: with no bound consumer to trace, the zero-
-                // consumer verdict must be the same one the
-                // per-consumer table gives (§9.5 NoSchema), never
-                // NoKnownImpact — we cannot reason about this
-                // endpoint's behaviour at all.
+            } else if matches!(
+                change.kind,
+                ChangeKind::ChangedWithoutSchema { .. } | ChangeKind::HandlerChanged { .. }
+            ) {
+                // A handler changed on an endpoint we cannot reason
+                // about: with no bound consumer to trace, the
+                // zero-consumer verdict must be the same one the
+                // per-consumer table gives, never `NoKnownImpact`.
+                // `ChangedWithoutSchema` carries `NoSchema` (§9.5);
+                // its schema-bearing sibling `HandlerChanged` carries
+                // `NeedsReview`, matching `per_consumer_verdict`.
+                let reason = match change.kind {
+                    ChangeKind::ChangedWithoutSchema { .. } => Reason::NoSchema,
+                    _ => Reason::NeedsReview,
+                };
                 class_overall = Class::NeedsInvestigation;
-                reason_overall = Some(Reason::NoSchema);
+                reason_overall = Some(reason);
             } else {
                 class_overall = Class::NoKnownImpact;
                 reason_overall = None;

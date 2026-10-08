@@ -3624,3 +3624,34 @@ fn handler_change_alongside_a_schema_change_is_not_double_reported() {
     );
     let _ = &mut index;
 }
+
+// `HandlerChanged` has the same zero-consumer hazard as
+// `ChangedWithoutSchema`: a schema-bearing endpoint whose handler
+// changed, with no bound consumer and no could-match candidates, must
+// not be reported as "no known impact". The schema is byte-identical,
+// so nothing else in the diff explains the change — it is an
+// unanalysed behaviour change.
+
+#[test]
+fn handler_changed_with_no_consumers_is_never_no_known_impact() {
+    let (index, _ep) = schema_bearing_endpoint();
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    // The handler file changed; the schema is byte-identical; the
+    // endpoint has one provider and zero bound consumers.
+    let src = StaticChangedFiles(BTreeSet::from(["src/orders/handlers.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    let hc = changes
+        .iter()
+        .find(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .expect("HandlerChanged must fire for a schema-bearing endpoint whose handler moved");
+    let impact = evaluate(hc, &base, &head, &complete_coverage_for("orders"));
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "a changed handler on a schema-bearing endpoint with no consumers is \
+         an unanalysed behaviour change, not 'no impact'"
+    );
+    assert_eq!(impact.class, Class::NeedsInvestigation);
+}
