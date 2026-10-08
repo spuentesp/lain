@@ -3020,6 +3020,86 @@ fn changed_without_schema_fires_on_handler_file_edit() {
     );
 }
 
+// ─── Task 3 — ChangedWithoutSchema must not reach NoKnownImpact ─────
+
+#[test]
+fn a_schemaless_endpoint_with_no_consumers_is_never_no_known_impact() {
+    // Handler file changed, endpoint has no schema, no bound consumer,
+    // no unresolved candidates, coverage complete.
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/handlers/label.py".into(),
+        container: None,
+        name: "print_label".into(),
+    };
+    let node_id = id(
+        "orders",
+        "HttpRoute",
+        "src/routes.py",
+        "GET /api/orders/{}/label",
+        5,
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/{}/label".into(),
+            providers: vec![EndpointProvider {
+                node_id: node_id.clone(),
+                origin: ProviderOrigin::Code,
+                handler: Some(handler.clone()),
+                operation_id: None,
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+    let surface = ContractSurface::from_index(&index);
+    let base = surface.clone();
+    let head = surface;
+    let changed = BTreeSet::from(["src/handlers/label.py".to_string()]);
+    let src = StaticChangedFiles(changed);
+    let changes = diff_contracts(&base, &head, &src);
+    let cw = changes
+        .iter()
+        .find(|c| matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. }))
+        .expect("ChangedWithoutSchema must fire");
+    let impact = evaluate(cw, &base, &head, &complete_coverage_for("orders"));
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "a changed handler on a schemaless endpoint with no consumers is \
+         an unanalysed behaviour change, not 'no impact'"
+    );
+}
+
+#[test]
+fn a_compatible_change_with_no_consumers_stays_no_known_impact() {
+    // The Task 3 fix must not swallow the `Compatible` arm: an
+    // additive endpoint change with no consumers is genuinely
+    // NoKnownImpact under complete coverage.
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::EndpointAdded {
+            key: http_key(HttpMethod::Get, "/api/orders/lookup"),
+        },
+    };
+    let impact = evaluate(
+        &change,
+        &ContractSurface::default(),
+        &ContractSurface::default(),
+        &complete_coverage_for("orders"),
+    );
+    assert_eq!(
+        impact.class,
+        Class::NoKnownImpact,
+        "a compatible change with no consumers must stay NoKnownImpact: \
+         {impact:?}"
+    );
+}
+
 // Edge case from Bug A's spec Review Focus: when neither
 // `handler: SymbolKey` nor a spec node resolves to a path,
 // `source_files` ends up empty. The `ChangedWithoutSchema` rule must
