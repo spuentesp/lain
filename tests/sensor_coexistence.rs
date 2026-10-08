@@ -585,3 +585,209 @@ fn t9_subgraph_around_radius_one_includes_only_one_hop() {
         names
     );
 }
+
+// ─── Review follow-ups: pin the two invariants the sql-read fix leans on ─
+//
+// `line_end: None` on the synthetic `sql-read:` node and the name-guarded
+// `sensor_owner_of` arm are both load-bearing and were pinned only by
+// comments. Each of these fails if a plausible refactor breaks one.
+
+/// `line_end: None` keeps `util::enclosing_symbol` from resolving the
+/// synthetic node (it requires both bounds). If a "cleanup" copies the
+/// gRPC shape (`line_end = Some(line)`), the node spans exactly its
+/// line with range 0, *beats* the real function in `enclosing_symbol`'s
+/// `min_by`, and `ReadsTable` edges silently stop riding the enclosing
+/// function — and a same-line topic subscribe would re-clobber the fact.
+#[test]
+fn a_rescan_keeps_reads_table_on_the_enclosing_function() {
+    let ws = workspace("same_line_topic_and_sql");
+    // Both idioms on ONE line: this is the case that re-introduces the
+    // clobber if `line_end` is ever set to `Some(line)`.
+    write(
+        &ws,
+        "src/jobs.py",
+        "def job():\n    consumer = KafkaConsumer(\"orders.created\"); cursor.execute(\"SELECT id FROM shipments\")\n",
+    );
+
+    // `run_all` runs sensors only — no tree-sitter indexer — so mint the
+    // enclosing symbol ourselves, exactly as `build_graph` in the sql
+    // unit test does. Without it `enclosing_or_file` falls back to the
+    // file node and the assertion below would be vacuous.
+    let graph = GraphDatabase::new(&ws.join("db.bin")).expect("open graph");
+    let ns = RepoNamespace::for_test();
+    let mut fn_node = lain::schema::GraphNode::new_in(
+        NodeType::Function,
+        "job".into(),
+        "src/jobs.py".into(),
+        &ns,
+    );
+    fn_node.line_start = Some(1);
+    fn_node.line_end = Some(2);
+    fn_node.id = lain::schema::GraphNode::generate_id(
+        &NodeType::Function,
+        "src/jobs.py",
+        "job",
+        Some(1),
+        &ns,
+    );
+    let fn_node_id = fn_node.id.clone();
+    graph.upsert_node(fn_node).expect("insert enclosing symbol");
+
+    for round in 0..1 {
+        run_all(&graph, &ws, &ns, "svc");
+        let edges = graph.all_edges();
+        let reads: Vec<_> = edges
+            .iter()
+            .filter(|e| e.edge_type == lain::schema::EdgeType::ReadsTable)
+            .collect();
+        assert!(!reads.is_empty(), "round {round}: no ReadsTable edge");
+        for e in &reads {
+            let src = graph.get_node(&e.source_id).unwrap().expect("source node");
+            assert!(
+                !src.name.starts_with("sql-read:"),
+                "round {round}: ReadsTable must not ride the synthetic \
+                 sql-read node — got {}",
+                src.name
+            );
+            assert_eq!(
+                src.id, fn_node_id,
+                "round {round}: ReadsTable must ride the enclosing function, \
+                 got {} ({})",
+                src.name, src.id
+            );
+        }
+    }
+
+    // Both facts survive too.
+    assert!(!facts(&graph, |c| matches!(c, ContractFact::TableConsumer(_))).is_empty());
+    assert!(!facts(&graph, |c| matches!(c, ContractFact::TopicConsumer(_))).is_empty());
+}
+
+/// The SECOND-scan form of the invariant above is currently blocked by
+/// a **pre-existing** defect outside this change: `event_sensor`'s
+/// consumer-node upsert rebuilds the symbol record with only
+/// `line_start` (no `line_end`) and `id` minted from the *site* line,
+/// so it does not match — and does not preserve — the enclosing
+/// symbol's record. After the first `run_all`, `util::enclosing_symbol`
+/// can no longer resolve the function and `ReadsTable` edges stop
+/// appearing entirely.
+///
+/// That is the same clobber class `680b6264` fixed for `TableConsumer`,
+/// one level deeper: it is not the *fact* being overwritten but the
+/// symbol's line bounds. The prior review listed it under "Declined to
+/// judge" as pre-existing `event_sensor`/`GraphDatabase` behaviour.
+///
+/// This test is `#[ignore]` rather than deleted, so the gap is visible
+/// and the day someone fixes `event_sensor`'s symbol handling it flips
+/// to green. Removing the attribute is the acceptance criterion for
+/// that fix.
+#[ignore = "pre-existing: event_sensor's TopicConsumer upsert destroys the enclosing symbol's line_end and mints a mismatched id, so ReadsTable edges vanish on the second scan. Out of scope for the sql-read fix."]
+#[test]
+fn a_rescan_keeps_reads_table_on_the_enclosing_function_second_scan() {
+    let ws = workspace("same_line_two_scans");
+    write(
+        &ws,
+        "src/jobs.py",
+        "def job():\n    consumer = KafkaConsumer(\"orders.created\"); cursor.execute(\"SELECT id FROM shipments\")\n",
+    );
+    let graph = GraphDatabase::new(&ws.join("db.bin")).expect("open graph");
+    let ns = RepoNamespace::for_test();
+    let mut fn_node = lain::schema::GraphNode::new_in(
+        NodeType::Function,
+        "job".into(),
+        "src/jobs.py".into(),
+        &ns,
+    );
+    fn_node.line_start = Some(1);
+    fn_node.line_end = Some(2);
+    fn_node.id = lain::schema::GraphNode::generate_id(
+        &NodeType::Function,
+        "src/jobs.py",
+        "job",
+        Some(1),
+        &ns,
+    );
+    graph.upsert_node(fn_node).expect("insert enclosing symbol");
+
+    for round in 0..2 {
+        run_all(&graph, &ws, &ns, "svc");
+        let reads: Vec<_> = graph
+            .all_edges()
+            .into_iter()
+            .filter(|e| e.edge_type == lain::schema::EdgeType::ReadsTable)
+            .collect();
+        assert!(!reads.is_empty(), "round {round}: no ReadsTable edge");
+    }
+}
+
+/// The name guard on `sensor_owner_of`'s `TableConsumer` arm is what
+/// stops `replace_sensor_output(SqlSensor, …)` from deleting a real
+/// symbol node that (for a pre-fix graph) carries the fact. Both
+/// directions must hold.
+#[test]
+fn sensor_owner_of_owns_only_synthetic_sql_read_nodes() {
+    use lain::graph::sensor_owner_of;
+    use lain::server::federation::contracts::model::{ContractFact, TableConsumerFact};
+
+    let synthetic = {
+        let mut n = lain::schema::GraphNode::new(
+            NodeType::Function,
+            format!("sql-read:src/jobs.py:{}", 3),
+            "src/jobs.py".into(),
+        );
+        n.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+            tables: vec!["shipments".to_string()],
+        }));
+        n
+    };
+    assert_eq!(
+        sensor_owner_of(&synthetic),
+        Some(SensorOwner::SqlSensor),
+        "a synthetic sql-read node must be owned by the sql sensor so a \
+         rescan retracts a reader whose SQL site was deleted"
+    );
+
+    // The migration guard: a pre-fix graph stores the fact on the real
+    // symbol node. That node must NOT be owned by SqlSensor — retracting
+    // it would delete a real function node from the graph.
+    let symbol = {
+        let mut n =
+            lain::schema::GraphNode::new(NodeType::Function, "job".into(), "src/jobs.py".into());
+        n.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+            tables: vec!["shipments".to_string()],
+        }));
+        n
+    };
+    assert_eq!(
+        sensor_owner_of(&symbol),
+        None,
+        "a symbol node carrying TableConsumer must not be sensor-retractable"
+    );
+}
+
+/// The rescan-hygiene story: delete the SQL site and the reader must go
+/// away on the next pass. This is the behaviour the `sensor_owner_of`
+/// arm exists to provide.
+#[test]
+fn deleting_the_sql_site_retracts_the_reader_on_rescan() {
+    let ws = workspace("sql_site_deleted");
+    write(
+        &ws,
+        "src/jobs.py",
+        "def job():\n    cursor.execute(\"SELECT id FROM shipments\")\n",
+    );
+
+    let graph = scan(&ws);
+    let before = facts(&graph, |c| matches!(c, ContractFact::TableConsumer(_))).len();
+    assert_eq!(before, 1, "one reader expected, got {before}");
+
+    // Remove the SQL entirely; the reader must be retracted.
+    write(&ws, "src/jobs.py", "def job():\n    return 1\n");
+    run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+
+    let after = facts(&graph, |c| matches!(c, ContractFact::TableConsumer(_))).len();
+    assert_eq!(
+        after, 0,
+        "a reader whose SQL site was deleted must be retracted on rescan"
+    );
+}

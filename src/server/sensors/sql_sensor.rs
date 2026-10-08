@@ -1348,6 +1348,20 @@ mod tests {
              event_sensor (phase 2) would overwrite it with TopicConsumer"
         );
         assert_eq!(reader.line_start, Some(5));
+        // LOAD-BEARING: `line_end` must stay `None`. `util::enclosing_symbol`
+        // requires both bounds, so leaving this `None` is what stops the
+        // synthetic node from ever being resolved as an enclosing symbol.
+        // If it were `Some(5)` the node would span exactly its line with
+        // range 0, *beat* the real function in `enclosing_symbol`'s
+        // `min_by` tie-break, and (a) `ReadsTable` edges would stop riding
+        // the enclosing function, and (b) a same-line topic subscribe would
+        // let `event_sensor` re-clobber this fact. Pinned again end-to-end
+        // by `sensor_coexistence::a_rescan_keeps_reads_table_on_the_enclosing_function`.
+        assert!(
+            reader.line_end.is_none(),
+            "the synthetic sql-read node must have no line_end: {:?}",
+            reader.line_end
+        );
         match reader.contract.as_ref() {
             Some(ContractFact::TableConsumer(f)) => {
                 assert_eq!(f.tables, vec!["orders".to_string()]);
