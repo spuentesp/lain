@@ -198,10 +198,7 @@ pub(crate) fn collect_endpoint_schemas(
     // `contract_key_for_provider` for the broker + full template,
     // so the key byte-matches the one `build_endpoints` produced.
     for decl in &config.schemas {
-        let Some(schema_node_rec) = nodes.iter().find(|n| {
-            n.node_type == crate::schema::NodeType::Schema
-                && (n.path == decl.file || n.path.ends_with(&format!("/{}", decl.file)))
-        }) else {
+        let Some(schema_node_rec) = pick_schema_node(nodes, &decl.repo, &decl.file, None) else {
             continue;
         };
         let Some(fields) = fields_by_schema.get(&schema_node_rec.id) else {
@@ -273,6 +270,46 @@ pub(crate) fn collect_endpoint_schemas(
         by_endpoint,
         schema_node,
     }
+}
+
+/// Step 4b's Schema-node lookup: among the `Schema` nodes whose path
+/// is `file` (or ends in `/file`), pick the one a `repos.yaml`
+/// `schemas:` entry refers to — deterministically (I4). Several
+/// types can share one file (a multi-type SDL), and `nodes` order
+/// comes from a DashMap iteration, so "first match" would make the
+/// output depend on insertion order. The pick is a total order on
+/// the node itself, never on iteration order: an exact `name` match
+/// first (when the caller knows the declared type), then a node from
+/// the declared `repo`, then the lowest `line_start` (`None` counts
+/// as `u32::MAX` — an unpositioned node cannot outrank a positioned
+/// one), then the lexicographically smallest `GlobalId`.
+fn pick_schema_node<'a>(
+    nodes: &'a [GraphNode],
+    repo: &str,
+    file: &str,
+    name: Option<&str>,
+) -> Option<&'a GraphNode> {
+    nodes
+        .iter()
+        .filter(|n| {
+            n.node_type == crate::schema::NodeType::Schema
+                && (n.path == file || n.path.ends_with(&format!("/{file}")))
+        })
+        .min_by(|a, b| {
+            let a_name = name.is_some_and(|w| a.name == w);
+            let b_name = name.is_some_and(|w| b.name == w);
+            let a_repo = a.repo_id.as_deref() == Some(repo);
+            let b_repo = b.repo_id.as_deref() == Some(repo);
+            b_name
+                .cmp(&a_name)
+                .then_with(|| b_repo.cmp(&a_repo))
+                .then_with(|| {
+                    a.line_start
+                        .unwrap_or(u32::MAX)
+                        .cmp(&b.line_start.unwrap_or(u32::MAX))
+                })
+                .then_with(|| a.id.cmp(&b.id))
+        })
 }
 
 /// Resolve every `FieldRef` against the bound endpoints of its
@@ -1618,5 +1655,46 @@ mod tests {
             !has_payload(&out, &topic_key("orders", "kafka", "decoy.events")),
             "a same-service decoy topic must not receive the schema"
         );
+    }
+
+    #[test]
+    fn schema_lookup_is_order_independent_when_two_types_share_a_file() {
+        // Two Schema nodes, same path, same repo, different names —
+        // the multi-type-SDL collision (`schema.graphql` declaring
+        // both `Order` and `Customer`). The pick must give the same
+        // answer in either insertion order.
+        let a = schema_graph_node("orders", "schema.graphql", "Order", 1);
+        let b = schema_graph_node("orders", "schema.graphql", "Customer", 20);
+
+        let nodes = vec![b.clone(), a.clone()];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", Some("Order"))
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Order");
+
+        let nodes = vec![a.clone(), b.clone()];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", Some("Order"))
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Order");
+
+        // Production calls the picker with no name hint (`SchemaDecl`
+        // carries only topic/repo/file); the tie-break must still be
+        // order-independent — lowest `line_start` wins.
+        let nodes = vec![b.clone(), a.clone()];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", None)
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Order");
+
+        // Same line, different names, no name hint: the
+        // lexicographically smallest `GlobalId` wins.
+        let x = schema_graph_node("orders", "schema.graphql", "Alpha", 5);
+        let z = schema_graph_node("orders", "schema.graphql", "Zeta", 5);
+        let nodes = vec![z.clone(), x.clone()];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", None)
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Alpha");
+        let nodes = vec![x, z];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", None)
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Alpha");
     }
 }
