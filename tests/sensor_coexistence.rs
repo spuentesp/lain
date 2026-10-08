@@ -815,3 +815,112 @@ fn deleting_the_sql_site_retracts_the_reader_on_rescan() {
         "a reader whose SQL site was deleted must be retracted on rescan"
     );
 }
+
+// ─── Task 3 audit: no sensor shares a symbol node with another ───────
+//
+// The bug class is "a sensor sets a `ContractFact` on a node whose id
+// comes from `util::enclosing_symbol`", which makes that symbol the
+// sensor's own and therefore deletable — along with every edge a peer
+// attached to it. Audited every `.contract = Some(ContractFact::…)`
+// site in `src/server/sensors/`:
+//
+//   sensor                      id shape                          verdict
+//   grpc_handler_link_sensor    `rpc-handler:{name}`              synthetic, safe
+//   grpc_consumer_sensor        `rpc-call:{svc}:{method}`         synthetic, safe
+//   graphql_consumer_sensor     `graphql-call:{op}:{field}`       synthetic, safe
+//   graphql_resolver_link       `graphql-handler:{op}:{field}`    synthetic, safe
+//   util::emit_graphql_field_refs `graphql-read:{op}:{f}:{sel}`   synthetic, safe
+//   sql_sensor                  `sql-read:{path}:{line}`          synthetic, safe (Task 2)
+//   event_sensor                `topic-read:{path}:{line}`        synthetic, safe (Task 2)
+//   grpc_provider_sensor        `Schema`/`Field` + `{svc}/{m}`    own node types, safe
+//   graphql_provider_sensor     `Schema`/`Field` + `{op}:{f}`     own node types, safe
+//   openapi_sensor / openapi_schema  route/schema/field           own node types, safe
+//   sql_sensor                  `Table`                           own node type, safe
+//   websocket_sensor            `ws:client:{host}:{route}` /      prefixed names on
+//                               `ws:server:{route}`               HttpClientCall/HttpRoute
+//   field_access_sensor         `FieldRef` id from the field chain, NOT `enclosing_symbol`
+//                               (the symbol rides only the `ReadsField` *edge* source)
+//
+// No writer sets a fact on an `enclosing_symbol` id. The closest pair is
+// `websocket_sensor` and `http_client_sensor`, which share the
+// `HttpClientCall` **node type** — that is safe only because their names
+// differ (`ws:client:…` vs the URL template) so the ids differ. That is
+// a load-bearing coincidence, so it is pinned below as a regression
+// guard: it is not proving a bug exists, it is proving the pair keeps
+// not colliding.
+
+#[test]
+fn websocket_and_http_client_keep_separate_nodes_and_edges() {
+    let ws = workspace("ws_and_http_client");
+    // Each call sits inside a function so the sensor emits its
+    // `SendsHttp` edge from an enclosing symbol — a module-level call
+    // produces no edge at all, which made the edge assertion vacuous.
+    write(
+        &ws,
+        "src/api.ts",
+        "export function load() {\n  return fetch(\"https://x.test/a\").then(r => r.json());\n}\n",
+    );
+    write(
+        &ws,
+        "src/feed.ts",
+        "export function watch() {\n  const s = new WebSocket(\"ws://x.test/feed\");\n  return s;\n}\n",
+    );
+
+    let graph = scan(&ws);
+
+    let ws_facts = facts(&graph, |c| matches!(c, ContractFact::WebSocketConsumer(_))).len();
+    assert!(ws_facts > 0, "the WebSocketConsumer fact was never emitted");
+
+    let http_calls = nodes_of(&graph, NodeType::HttpClientCall);
+    assert!(
+        http_calls.len() >= 2,
+        "the plain HTTP call must survive alongside the WS dial — got {} \
+         HttpClientCall nodes, which means the two sensors collided on a node id",
+        http_calls.len()
+    );
+
+    // The lossy half of the bug class is the *edges* attached to a shared
+    // symbol — that property is pinned by
+    // `a_rescan_keeps_reads_table_on_the_enclosing_function_second_scan`,
+    // which mints the enclosing symbol explicitly. This fixture has no
+    // symbol nodes (`scan()` runs `run_all` only, no tree-sitter
+    // indexer), so `SendsHttp`/`ReadsTable` edges cannot be sourced here
+    // and counting them would be vacuous. What this fixture *can* pin is
+    // node survival and the invariant below.
+    for n in graph.get_all_nodes() {
+        if n.contract.is_none() {
+            continue;
+        }
+        let synthetic = [
+            "sql-read:",
+            "topic-read:",
+            "rpc-call:",
+            "rpc-handler:",
+            "graphql-call:",
+            "graphql-handler:",
+            "graphql-read:",
+            "ws:client:",
+            "ws:server:",
+        ]
+        .iter()
+        .any(|p| n.name.starts_with(p));
+        // The collision surface is exactly "a node `util::enclosing_symbol`
+        // can return" — it filters `Function` and `Method` (`util.rs:458`).
+        // A fact on any *other* node type cannot collide with a symbol id,
+        // so the rule is "not a symbol type, or synthetic". Expressed this
+        // way rather than as an allowlist of contract-only types: an
+        // allowlist silently omits `HttpClientCall`/`Module` and reports
+        // safe nodes as violations.
+        let is_symbol_type = matches!(n.node_type, NodeType::Function | NodeType::Method);
+        assert!(
+            synthetic || !is_symbol_type,
+            "fact-bearing node {} ({:?}, name {:?}) is a symbol-type node whose \
+             name is not a known synthetic prefix — `enclosing_symbol` can \
+             return it, so a peer sensor may attach edges to it and one of the \
+             two rescan owners will delete them",
+            n.id,
+            n.node_type,
+            n.name
+        );
+    }
+}
