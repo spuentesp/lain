@@ -5,10 +5,12 @@
 //! statement with a focused hand-rolled parser, and emits one
 //! `Table { service: "", name }` per distinct name plus a `ReadsTable`
 //! / `WritesTable` edge from the enclosing function (or `File` for
-//! module-level calls) to the table. Every source node that reads a
-//! table also gets a `TableConsumer` contract fact listing the tables
-//! it touches — the consumer-side counterpart of those edges, without
-//! which a SQL reader can never enter `ContractIndex.consumers`
+//! module-level calls) to the table. Every SQL site also gets a
+//! `TableConsumer` contract fact on a synthetic `sql-read:<path>:<line>`
+//! Function node — never the enclosing symbol, whose single `contract`
+//! slot `event_sensor` (phase 2) overwrites with `TopicConsumer`. The
+//! fact is the consumer-side counterpart of those edges, without which
+//! a SQL reader can never enter `ContractIndex.consumers`
 //! (`joiner::resolve_table_consumer` resolves it against the
 //! `ContractKey::Table` endpoints).
 //!
@@ -183,8 +185,8 @@ pub fn scan_workspace_sql_with_report(
 
     // `emitted` feeds `SensorCountField::SqlTables` and is pinned by
     // tests/sql_tables.rs as the number of `Table` nodes minted —
-    // the `TableConsumer` facts riding on enclosing source nodes are
-    // not tables and are not counted here.
+    // the synthetic `sql-read:` consumer nodes are not tables and
+    // are not counted here.
     let table_count = all_nodes
         .iter()
         .filter(|n| n.node_type == NodeType::Table)
@@ -981,11 +983,6 @@ fn build_graph(
     let mut unresolved: Vec<UnresolvedRecord> = Vec::new();
     let mut emitted_table_ids: BTreeMap<String, String> = BTreeMap::new();
     let mut per_reason_dynamic: BTreeMap<UnresolvedReason, (usize, Vec<String>)> = BTreeMap::new();
-    // Source node id → every distinct table that source's parsed
-    // statements touch. Fed into one `TableConsumer` fact per source
-    // after the site loop (one fact covers all tables because
-    // `GraphNode.contract` holds a single fact per node).
-    let mut consumer_tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for site in sites {
         if site.stmt.tables.is_empty() {
@@ -1010,6 +1007,39 @@ fn build_graph(
             SqlAccess::Reads => EdgeType::ReadsTable,
             SqlAccess::Writes => EdgeType::WritesTable,
         };
+        // Phase D (spec §7): one `TableConsumer` fact per site, on a
+        // synthetic `sql-read:<path>:<line>` Function node — the same
+        // shape `grpc_consumer` / `graphql_consumer` mint for
+        // `rpc-call:` / `graphql-call:`. The fact must NOT ride the
+        // enclosing symbol: `GraphNode.contract` holds a single fact,
+        // and `event_sensor` (phase 2) writes `TopicConsumer` onto
+        // that same symbol id, silently deleting the SQL reader from
+        // `ContractIndex.consumers` on every scan. Emission is
+        // unconditional (like `rpc-call:`) — the joiner keys on the
+        // fact plus this node's path/line, not on an enclosing symbol.
+        let id_name = format!("sql-read:{graph_path_str}:{}", site.line);
+        let id = GraphNode::generate_id(
+            &NodeType::Function,
+            graph_path_str,
+            &id_name,
+            Some(site.line),
+            namespace,
+        );
+        let mut reader = GraphNode::new(NodeType::Function, id_name, graph_path_str.to_string());
+        reader.id = id;
+        reader.line_start = Some(site.line);
+        // `line_end` stays `None` deliberately (event_sensor's
+        // consumer nodes do the same): `enclosing_symbol` requires
+        // both bounds, so no later scan can resolve *this* node as an
+        // enclosing symbol and re-create the shared-id collision.
+        let mut fact_tables = site.stmt.tables.clone();
+        fact_tables.sort();
+        fact_tables.dedup();
+        reader.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+            tables: fact_tables,
+        }));
+        nodes.push(reader);
+
         for table_name in &site.stmt.tables {
             let table_key = format!("{graph_path_str}::{table_name}");
             let table_id = if let Some(id) = emitted_table_ids.get(&table_key) {
@@ -1043,10 +1073,6 @@ fn build_graph(
                 // the edge so we don't mint a phantom source.
                 continue;
             };
-            consumer_tables
-                .entry(source_id.clone())
-                .or_default()
-                .insert(table_name.clone());
             let mut edge = GraphEdge::new(edge_kind.clone(), source_id, table_id);
             edge.provenance = Some(EdgeProvenance::Static {
                 source: crate::schema::StaticSource::Regex,
@@ -1057,21 +1083,6 @@ fn build_graph(
             });
             edges.push(edge);
         }
-    }
-
-    // Phase D (spec §7): one `TableConsumer` fact per source node,
-    // cloned from the node already in the graph so the upsert
-    // preserves its fields. This is what lets the joiner resolve the
-    // reader as a consumer of `table:<name>` endpoints; the fact
-    // mirrors the `ReadsTable` / `WritesTable` edges emitted above.
-    for (source_id, tables) in &consumer_tables {
-        let Ok(Some(mut source_node)) = graph.get_node(source_id) else {
-            continue;
-        };
-        source_node.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
-            tables: tables.iter().cloned().collect(),
-        }));
-        nodes.push(source_node);
     }
 
     for (reason, (count, sample_ids)) in per_reason_dynamic {
@@ -1314,8 +1325,8 @@ mod tests {
         };
         let (nodes, edges, unresolved) = build_graph(&graph, &[site], "src/orders.py", &ns);
         assert!(unresolved.is_empty());
-        // The `Table` node plus the reader's `TableConsumer` fact
-        // (cloned onto the enclosing function node).
+        // The `Table` node plus the reader's synthetic `sql-read:`
+        // node carrying the `TableConsumer` fact.
         assert_eq!(nodes.len(), 2);
         let table = nodes
             .iter()
@@ -1325,15 +1336,39 @@ mod tests {
         let reader = nodes
             .iter()
             .find(|n| n.node_type == NodeType::Function)
-            .expect("TableConsumer node emitted for the enclosing function");
-        assert_eq!(reader.id, fn_node_id);
+            .expect("synthetic sql-read node emitted");
+        assert!(
+            reader.name.starts_with("sql-read:"),
+            "the reader is a synthetic node, got {:?}",
+            reader.name
+        );
+        assert_ne!(
+            reader.id, fn_node_id,
+            "the TableConsumer fact must not ride the enclosing symbol — \
+             event_sensor (phase 2) would overwrite it with TopicConsumer"
+        );
+        assert_eq!(reader.line_start, Some(5));
         match reader.contract.as_ref() {
             Some(ContractFact::TableConsumer(f)) => {
                 assert_eq!(f.tables, vec!["orders".to_string()]);
             }
             other => panic!("expected TableConsumer fact, got {other:?}"),
         }
+        // The enclosing symbol is left untouched — no write-through.
+        assert!(
+            graph
+                .get_node(&fn_node_id)
+                .unwrap()
+                .expect("enclosing symbol still present")
+                .contract
+                .is_none(),
+            "build_graph must not set a contract on the enclosing symbol"
+        );
         assert_eq!(edges.len(), 1);
         assert!(matches!(edges[0].edge_type, EdgeType::ReadsTable));
+        assert_eq!(
+            edges[0].source_id, fn_node_id,
+            "the ReadsTable edge still rides the enclosing symbol"
+        );
     }
 }

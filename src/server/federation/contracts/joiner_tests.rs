@@ -2721,9 +2721,10 @@ fn table_ownership_keys_on_db_name_not_just_table_name() {
 // no unresolved table consumer either — which made Task 1's `Table`
 // arm in `could_match` unreachable in production.
 
-/// A SQL-reading source node as `sql_sensor` emits it: the enclosing
-/// function (or file) carrying a `TableConsumer` fact listing every
-/// distinct literal table the source's parsed statements touch.
+/// A SQL reader as `sql_sensor` emits it: a synthetic
+/// `sql-read:<path>:<line>` Function node carrying a
+/// `TableConsumer` fact listing every distinct literal table the
+/// site's statement touches.
 fn sql_reader_node(repo: &str, path: &str, name: &str, line: u32, tables: &[&str]) -> GraphNode {
     let mut n = GraphNode::new_in(
         NodeType::Function,

@@ -248,9 +248,12 @@ pub fn node_type_of(fact: &ContractFact) -> NodeType {
             NodeType::HttpRoute
         }
         ContractFact::WebSocketConsumer(_) => NodeType::HttpClientCall,
-        // Phase D (spec §7): the SQL reader rides on the enclosing
-        // function (or file for module-level SQL) — same shape as
-        // `TopicConsumer` / `RpcConsumer` / `GraphqlConsumer`.
+        // Phase D (spec §7): the SQL reader rides on sql_sensor's
+        // synthetic `sql-read:<path>:<line>` Function node — never
+        // the enclosing symbol (`event_sensor` would overwrite the
+        // symbol's single `contract` slot with `TopicConsumer`).
+        // Module-level SQL gets the same synthetic Function shape,
+        // so this mapping is exact for every `TableConsumer`.
         ContractFact::TableConsumer(_) => NodeType::Function,
     }
 }

@@ -478,15 +478,14 @@ pub struct Table {
     pub name: String,
 }
 
-/// Phase D (spec §7): the tables one SQL-reading source node
-/// touches. Emitted by `sql_sensor` on the enclosing function (or
-/// file, for module-level SQL) alongside the `ReadsTable` /
-/// `WritesTable` edges, so the joiner can resolve the reader as a
+/// Phase D (spec §7): the tables one SQL site's parsed statement
+/// touches. Emitted by `sql_sensor` on a synthetic
+/// `sql-read:<path>:<line>` Function node alongside the `ReadsTable`
+/// / `WritesTable` edges, so the joiner can resolve the reader as a
 /// consumer of `ContractKey::Table { name }` endpoints. The list
-/// carries every distinct literal table the source's parsed
-/// statements reference, sorted for determinism (I4); one fact
-/// covers all of them because `GraphNode.contract` holds a single
-/// fact per node.
+/// carries every distinct literal table the statement references,
+/// sorted for determinism (I4); one fact covers all of them because
+/// `GraphNode.contract` holds a single fact per node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TableConsumerFact {
     pub tables: Vec<String>,

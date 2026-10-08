@@ -432,8 +432,9 @@ pub fn resolve_websocket_consumer(
     )
 }
 
-/// Phase D (spec §7): resolve a `TableConsumer` — a source node
-/// whose body contains literal SQL — against the endpoint table.
+/// Phase D (spec §7): resolve a `TableConsumer` — a synthetic
+/// `sql-read:<path>:<line>` node whose fact lists the literal tables
+/// a SQL site reads — against the endpoint table.
 /// Tables are identified by name alone; ownership (which service's
 /// endpoint table a `Table` node lands in) was already applied by
 /// [`build_endpoints`](super::endpoints::build_endpoints) via the

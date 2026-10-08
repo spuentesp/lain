@@ -19,6 +19,9 @@
 //!   node-type catch-all claimed it and `http_client_sensor` deleted it.
 //! - `.json` Schema/Field nodes were routed to `SensorOwner::EventSensor`,
 //!   so `event_sensor` retracted `openapi.json` schemas every scan.
+//! - `sql_sensor` wrote `TableConsumer` onto the enclosing symbol node
+//!   while `event_sensor` wrote `TopicConsumer` onto the same node id —
+//!   one `Option<ContractFact>` per node, event runs later, SQL reader lost.
 
 use lain::graph::{sensor_owner_of, GraphDatabase, SensorOwner};
 use lain::schema::{NodeType, RepoNamespace};
@@ -51,6 +54,16 @@ fn scan(dir: &Path) -> GraphDatabase {
 
 fn nodes_of(graph: &GraphDatabase, ty: NodeType) -> Vec<lain::schema::GraphNode> {
     graph.get_nodes_by_types(&[ty]).expect("list nodes")
+}
+
+/// Every contract fact in the graph satisfying `pred`.
+fn facts(graph: &GraphDatabase, pred: impl Fn(&ContractFact) -> bool) -> Vec<ContractFact> {
+    graph
+        .get_all_nodes()
+        .into_iter()
+        .filter_map(|n| n.contract)
+        .filter(|c| pred(c))
+        .collect()
 }
 
 // ─── 1. GraphQL provider + consumer in one workspace ─────────────────
@@ -346,6 +359,44 @@ fn stale_websocket_providers_are_retracted_on_rescan() {
         "stale WebSocketProvider survived the rescan: {:?}",
         after.iter().map(|n| &n.name).collect::<Vec<_>>()
     );
+    let _ = fs::remove_dir_all(&ws);
+}
+
+// ─── 6. sql × event: one function that both subscribes and reads SQL ──
+//
+// `sql_sensor` (phase 1) used to write `TableConsumer` onto the
+// enclosing symbol node; `event_sensor` (phase 2) writes
+// `TopicConsumer` onto the **same** symbol node id (both resolve
+// through `util::enclosing_symbol`). `GraphNode.contract` is a
+// single `Option<ContractFact>`, so event always ran last and
+// won — the SQL reader vanished from `ContractIndex.consumers`
+// after every scan (the I3 hole this branch exists to close).
+// `sql_sensor` now emits `TableConsumer` on a synthetic
+// `sql-read:<site>` Function node, mirroring `rpc-call:` /
+// `graphql-call:`.
+
+const BOTH_TOPIC_AND_SQL: &str = r#"
+def sync_shipments():
+    consumer = KafkaConsumer("orders.created")
+    cursor.execute("SELECT id FROM shipments")
+    return consumer
+"#;
+
+#[test]
+fn a_topic_and_sql_reader_keeps_both_consumer_facts() {
+    // One function does both: `KafkaConsumer("orders.created")` and
+    // `cursor.execute("SELECT id FROM shipments")`.
+    let ws = workspace("topic_and_sql");
+    write(&ws, "src/jobs.py", BOTH_TOPIC_AND_SQL);
+    let graph = scan(&ws);
+
+    let tables = facts(&graph, |c| matches!(c, ContractFact::TableConsumer(_)));
+    assert!(
+        !tables.is_empty(),
+        "the SQL reader's TableConsumer was clobbered by the topic consumer"
+    );
+    let topics = facts(&graph, |c| matches!(c, ContractFact::TopicConsumer(_)));
+    assert!(!topics.is_empty(), "the topic consumer must survive too");
     let _ = fs::remove_dir_all(&ws);
 }
 

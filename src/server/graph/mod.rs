@@ -92,9 +92,10 @@ pub enum SensorOwner {
     /// plus `Produces` / `Consumes` edges. Its `replace_sensor_output`
     /// call retracts only those.
     EventSensor,
-    /// Phase D (spec §7): the sql sensor owns `Table` nodes plus
-    /// `ReadsTable` / `WritesTable` edges. A rescan replaces only
-    /// its own previous output.
+    /// Phase D (spec §7): the sql sensor owns `Table` nodes, the
+    /// synthetic `sql-read:` consumer nodes, and `ReadsTable` /
+    /// `WritesTable` edges. A rescan replaces only its own previous
+    /// output.
     SqlSensor,
     /// Phase E (spec §8.2): the legacy `proto_sensor` emits bare
     /// `Module` nodes with no contract fact; those are owned here.
@@ -175,8 +176,16 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         (_, Some(ContractFact::TopicConsumer(_))) => Some(SensorOwner::EventSensor),
         // Phase D (spec §7): a `Table` node carries a `Table`
         // contract fact (or at scan time a `name`-only payload).
-        // The sql sensor owns it.
+        // The sql sensor owns it — and its synthetic `sql-read:`
+        // consumer node, so a rescan retracts a reader whose SQL
+        // site was deleted (the stale-reader bug class). The name
+        // guard keeps pre-fix graphs working: their `TableConsumer`
+        // facts ride real symbol nodes, which this sensor no longer
+        // re-emits — retracting those would delete the symbol.
         (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
+        (_, Some(ContractFact::TableConsumer(_))) if node.name.starts_with("sql-read:") => {
+            Some(SensorOwner::SqlSensor)
+        }
         // Phase E (spec §8.2): each gRPC contract sensor owns its own
         // output. Sharing one owner meant `grpc_consumer`'s rescan
         // retracted `grpc_provider`'s Schema/Field nodes and

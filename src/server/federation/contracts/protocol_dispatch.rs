@@ -218,8 +218,8 @@ impl ProtocolDispatch for WebSocketDispatch {
 
 // ─── TableDispatch ────────────────────────────────────────────────────
 
-/// Phase D (spec §7): resolves a `TableConsumer` (a source node
-/// whose body contains literal SQL, emitted by `sql_sensor`) to the
+/// Phase D (spec §7): resolves a `TableConsumer` (a synthetic
+/// `sql-read:<path>:<line>` node emitted by `sql_sensor`) to the
 /// `ContractKey::Table { name }` endpoints of the services that own
 /// those tables. Without this dispatch a SQL reader never entered
 /// `ContractIndex.consumers`, so `get_contract` / `list_unresolved`
