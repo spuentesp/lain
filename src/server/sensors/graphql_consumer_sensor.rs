@@ -136,7 +136,12 @@ pub fn scan_workspace_graphql_consumer(
             let mut node = GraphNode::new(NodeType::Function, id_name.clone(), c.site_path.clone());
             node.id = id.clone();
             node.line_start = Some(c.site_line);
-            node.line_end = Some(c.site_line);
+            // `line_end` stays `None` deliberately: `util::enclosing_symbol`
+            // picks the smallest `line_start..=line_end` covering a line, so
+            // a range-0 call node would BEAT the real enclosing function and
+            // steal every peer sensor's edge anchor. Same rule as
+            // `sql-read:` / `topic-read:`.
+            node.line_end = None;
             node.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
                 op: c.op,
                 field: c.field.clone(),
@@ -187,7 +192,12 @@ pub fn scan_workspace_graphql_consumer(
             let mut node = GraphNode::new(NodeType::Function, id_name.clone(), c.site_path.clone());
             node.id = id.clone();
             node.line_start = Some(c.site_line);
-            node.line_end = Some(c.site_line);
+            // `line_end` stays `None` deliberately: `util::enclosing_symbol`
+            // picks the smallest `line_start..=line_end` covering a line, so
+            // a range-0 call node would BEAT the real enclosing function and
+            // steal every peer sensor's edge anchor. Same rule as
+            // `sql-read:` / `topic-read:`.
+            node.line_end = None;
             node.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
                 op: c.op,
                 field: c.field.clone(),

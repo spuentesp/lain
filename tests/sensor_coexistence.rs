@@ -686,26 +686,25 @@ fn a_topic_consumer_on_a_symbol_node_makes_it_sensor_retractable() {
     );
 }
 
-/// The SECOND-scan form is currently blocked by a real defect:
-/// `replace_sensor_output` step 2 removes an owner's nodes **and their
-/// incident edges** (`graph/mod.rs:896`, `remove_node`). `event_sensor`
-/// upserts `TopicConsumer` onto the enclosing symbol node
-/// (`event_sensor.rs:586`), which makes that symbol
-/// `SensorOwner::EventSensor`. On the next `run_all`, event's rescan
-/// retracts the symbol and with it every edge another sensor attached
-/// to it — `sql_sensor`'s `ReadsTable` included. The fact comes back
-/// (event re-inserts it); the edges do not, because they are not in
-/// event's `edges` slice.
+/// The SECOND-scan half of the bug class, kept green as a regression
+/// pin. The pre-fix mechanism: `replace_sensor_output` step 2 removes
+/// an owner's nodes **and their incident edges** (`graph/mod.rs:896`,
+/// `remove_node`), and `event_sensor` upserted `TopicConsumer` onto the
+/// enclosing symbol node — making that symbol `SensorOwner::EventSensor`.
+/// On the next `run_all`, event's rescan retracted the symbol and with
+/// it every edge another sensor attached to it — `sql_sensor`'s
+/// `ReadsTable` included. The fact came back (event re-inserts it); the
+/// edges did not, because they are not in event's `edges` slice.
 ///
-/// Not a `line_end` problem: `resolve_function_id`
-/// (`event_sensor.rs:125`) returns the existing symbol's id, and
-/// `upsert_node`'s hydration guard (`graph/mod.rs:416`) skips the
-/// replace for an unhydrated node onto a hydrated one. The destroy path
-/// is the delete-then-insert of `replace_sensor_output`, which
-/// `upsert_node` alone never exercises.
+/// Not a `line_end` problem: `util::enclosing_symbol` returned the
+/// existing symbol's id, and `upsert_node`'s hydration guard
+/// (`graph/mod.rs:416`) skips the replace for an unhydrated node onto a
+/// hydrated one. The destroy path is the delete-then-insert of
+/// `replace_sensor_output`, which `upsert_node` alone never exercises.
 ///
-/// Un-ignored: this is now the reproduction, and turning it green is the
-/// acceptance criterion for the fix.
+/// If this fails with `round 1: no ReadsTable edge`, the shared-symbol
+/// shape has returned: `TopicConsumer` is riding a node another sensor
+/// owns again.
 #[test]
 fn a_rescan_keeps_reads_table_on_the_enclosing_function_second_scan() {
     let ws = workspace("same_line_two_scans");
@@ -816,6 +815,98 @@ fn deleting_the_sql_site_retracts_the_reader_on_rescan() {
     );
 }
 
+/// The same hygiene story for `topic-read:` — the behaviour the
+/// `sensor_owner_of` `TopicConsumer` arm exists to provide. Without
+/// that arm, deleting a subscribe site would leave a phantom consumer
+/// in `ContractIndex`: the false-positive direction, where a reader
+/// that no longer exists still keeps `NoKnownImpact` off the table.
+#[test]
+fn deleting_the_topic_site_retracts_the_consumer_on_rescan() {
+    let ws = workspace("topic_site_deleted");
+    write(
+        &ws,
+        "src/jobs.py",
+        "def job():\n    consumer = KafkaConsumer(\"orders.created\")\n",
+    );
+
+    let graph = scan(&ws);
+    let before = facts(&graph, |c| matches!(c, ContractFact::TopicConsumer(_))).len();
+    assert_eq!(before, 1, "one consumer expected, got {before}");
+
+    // Remove the subscribe site entirely; the consumer must be retracted.
+    write(&ws, "src/jobs.py", "def job():\n    return 1\n");
+    run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+
+    let after = facts(&graph, |c| matches!(c, ContractFact::TopicConsumer(_))).len();
+    assert_eq!(
+        after, 0,
+        "a consumer whose topic site was deleted must be retracted on rescan"
+    );
+}
+
+/// `graphql-call:` / `rpc-call:` nodes are `Function`-typed with BOTH
+/// bounds set (`line_end = Some(site_line)`), so `util::enclosing_symbol`
+/// — which picks the smallest `line_start..=line_end` covering the line
+/// — returns them at range 0 and they **beat the real enclosing
+/// function**. On a same-line site (bundled/minified code is exactly
+/// this layout) the peer's edge then anchors on the synthetic call node
+/// instead of the function, and function-rooted traversal misses the
+/// read. `sql-read:`/`topic-read:` avoid this by keeping `line_end: None`.
+///
+/// Pinned so the two pre-existing emitters cannot regress the fix's
+/// anchor rule: ReadsTable must ride the enclosing function.
+#[test]
+fn a_peer_edge_anchors_on_the_function_not_the_call_node() {
+    let ws = workspace("call_node_anchor");
+    // One line: a graphql call site AND a SQL site. The call site is
+    // detected by graphql_consumer (which emits `graphql-call:`), the
+    // SQL by sql_sensor.
+    write(
+        &ws,
+        "src/jobs.py",
+        "def job():\n    gql(\"query { x }\"); cursor.execute(\"SELECT id FROM shipments\")\n",
+    );
+
+    let graph = GraphDatabase::new(&ws.join("db.bin")).expect("open graph");
+    let ns = RepoNamespace::for_test();
+    let mut fn_node = lain::schema::GraphNode::new_in(
+        NodeType::Function,
+        "job".into(),
+        "src/jobs.py".into(),
+        &ns,
+    );
+    fn_node.line_start = Some(1);
+    fn_node.line_end = Some(2);
+    fn_node.id = lain::schema::GraphNode::generate_id(
+        &NodeType::Function,
+        "src/jobs.py",
+        "job",
+        Some(1),
+        &ns,
+    );
+    let fn_node_id = fn_node.id.clone();
+    graph.upsert_node(fn_node).expect("insert enclosing symbol");
+
+    for round in 0..2 {
+        run_all(&graph, &ws, &ns, "svc");
+        let reads: Vec<_> = graph
+            .all_edges()
+            .into_iter()
+            .filter(|e| e.edge_type == lain::schema::EdgeType::ReadsTable)
+            .collect();
+        assert!(!reads.is_empty(), "round {round}: no ReadsTable edge");
+        for e in &reads {
+            let src = graph.get_node(&e.source_id).unwrap().expect("source node");
+            assert_eq!(
+                src.id, fn_node_id,
+                "round {round}: ReadsTable must anchor on the enclosing \
+                 function, not on a synthetic call node — got {} ({:?})",
+                src.name, src.node_type
+            );
+        }
+    }
+}
+
 // ─── Task 3 audit: no sensor shares a symbol node with another ───────
 //
 // The bug class is "a sensor sets a `ContractFact` on a node whose id
@@ -848,13 +939,24 @@ fn deleting_the_sql_site_retracts_the_reader_on_rescan() {
 // a load-bearing coincidence, so it is pinned below as a regression
 // guard: it is not proving a bug exists, it is proving the pair keeps
 // not colliding.
+//
+// The table above answers the FACT-collision question only. A second
+// direction exists: a synthetic node can be visible to
+// `util::enclosing_symbol` and therefore steal a peer's *edge anchor*
+// even though its fact is safe. `graphql-call:` / `rpc-call:` did
+// exactly that — `Function`-typed with `line_end = Some(line)`, so at
+// range 0 they beat the real function in `enclosing_symbol`'s
+// `min_by`. Both now keep `line_end: None` like `sql-read:` /
+// `topic-read:`, pinned by `a_peer_edge_anchors_on_the_function_not_the_call_node`.
 
 #[test]
 fn websocket_and_http_client_keep_separate_nodes_and_edges() {
     let ws = workspace("ws_and_http_client");
-    // Each call sits inside a function so the sensor emits its
-    // `SendsHttp` edge from an enclosing symbol — a module-level call
-    // produces no edge at all, which made the edge assertion vacuous.
+    // The two idioms in one workspace. Note the calls sit inside
+    // functions, but that does NOT make `SendsHttp` sourceable here:
+    // `scan()` runs `run_all` only, with no tree-sitter indexer, so no
+    // symbol nodes exist to anchor an edge on. See the edge-count note
+    // further down.
     write(
         &ws,
         "src/api.ts",

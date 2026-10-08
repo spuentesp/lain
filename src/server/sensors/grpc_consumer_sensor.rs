@@ -114,7 +114,12 @@ pub fn scan_workspace_grpc_consumer(
                 GraphNode::new(NodeType::Function, id_name.clone(), call.site.path.clone());
             node.id = id;
             node.line_start = Some(call.site.line);
-            node.line_end = Some(call.site.line);
+            // `line_end` stays `None` deliberately: `util::enclosing_symbol`
+            // picks the smallest `line_start..=line_end` covering a line, so
+            // a range-0 call node would BEAT the real enclosing function and
+            // steal every peer sensor's edge anchor. Same rule as
+            // `sql-read:` / `topic-read:`.
+            node.line_end = None;
             let composed_service = compose_service_name(&call.package, &call.service);
             node.contract = Some(ContractFact::RpcConsumer(RpcConsumerFact {
                 system: RpcSystem::Grpc,

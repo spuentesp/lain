@@ -45,6 +45,10 @@ sensor, and that sensor must be the only one that retracts it.
   `insert_edges_batch` drops an edge whose endpoints aren't in the
   graph (`graph/mod.rs:1156`) without failing, so an unmaterialized
   endpoint makes the edge vanish rather than error.
+- The name guards are a **migration** path, not decoration: a pre-fix
+  graph carries its fact on a real symbol node, which must not be
+  retracted. Those stale facts stay in `ContractIndex` until
+  `lain reindex` — say so in the CHANGELOG when a guard is added.
 
 If you're here to add a sixth sensor, the canonical shape is the
 existing five files — copy their structure, not their walker.
