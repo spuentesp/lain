@@ -55,6 +55,8 @@ I8 **Scan ownership / no peer retraction.** `replace_sensor_output(s)` retracts 
    `sensor_owner_of` assigns to `s`, then inserts `s`'s current scan output — a scan never removes
    a peer sensor's nodes. Modeled in `docs/formal/ScanRetract.tla`; enforced by
    `src/server/graph/mod.rs::replace_sensor_output` / `sensor_owner_of`.
+   A node carrying a `ContractFact` is owned by exactly one sensor, and
+   a rescan never removes a node or edge another sensor produced.
 
 I3 and I7 get TLA+ models (§9). I2, I4–I6 get property tests.
 
