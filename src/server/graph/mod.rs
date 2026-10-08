@@ -65,7 +65,7 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
 ///
 /// - `HttpRoute` with `ProviderOrigin::Code` → [`SensorOwner::HttpSensor`]
 /// - `HttpRoute` with `ProviderOrigin::OpenApi` → [`SensorOwner::OpenApiSensor`]
-/// - `Schema`, `Field` → [`SensorOwner::ProtoSensor`] for `.proto`,
+/// - `Schema`, `Field` → [`SensorOwner::GrpcProviderSensor`] for `.proto`,
 ///   [`SensorOwner::GraphqlSensor`] for `.graphql`/`.gql`,
 ///   [`SensorOwner::EventSensor`] for `.avsc`, else
 ///   [`SensorOwner::OpenApiSensor`] (which owns `openapi.json` too —
@@ -138,7 +138,12 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         },
         (NodeType::Schema, Some(ContractFact::Schema { .. })) => {
             if node.path.ends_with(".proto") {
-                Some(SensorOwner::ProtoSensor)
+                // `grpc_provider_sensor` is the sole emitter of `.proto`
+                // Schema/Field nodes, so it owns them and retracts them
+                // on rescan. Routing them to `ProtoSensor` (which never
+                // calls `replace_sensor_output`) left stale schemas in
+                // the graph forever when a message was deleted.
+                Some(SensorOwner::GrpcProviderSensor)
             } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
                 Some(SensorOwner::GraphqlSensor)
             } else if node.path.ends_with(".avsc") {
@@ -155,7 +160,7 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         }
         (NodeType::Field, Some(ContractFact::Field(_))) => {
             if node.path.ends_with(".proto") {
-                Some(SensorOwner::ProtoSensor)
+                Some(SensorOwner::GrpcProviderSensor)
             } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
                 Some(SensorOwner::GraphqlSensor)
             } else if node.path.ends_with(".avsc") {

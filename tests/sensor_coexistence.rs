@@ -307,11 +307,60 @@ stub.GetOrder(orders_pb2.Order(id="1"))
     for n in &schemas {
         assert_eq!(
             sensor_owner_of(n),
-            Some(SensorOwner::ProtoSensor),
-            "proto Schema node {} must be owned by the gRPC sensor family",
+            Some(SensorOwner::GrpcProviderSensor),
+            "proto Schema node {} must be owned by the sensor that emits it \
+             (grpc_provider) so a rescan can retract it when the message is gone",
             n.id
         );
     }
+    let _ = fs::remove_dir_all(&ws);
+}
+
+/// The staleness half: `grpc_provider_sensor` emits `.proto`
+/// `Schema`/`Field` nodes but `sensor_owner_of` maps them to
+/// `ProtoSensor` — and `proto_sensor` never calls
+/// `replace_sensor_output` at all. So nothing retracts them: delete a
+/// message from a `.proto`, rescan, and the schema stays forever.
+///
+/// Same "stale reader" class as the sql/topic consumer bugs, in the
+/// accumulation direction.
+#[test]
+fn deleting_a_proto_message_retracts_its_schema() {
+    let ws = workspace("proto_schema_stale");
+    write(&ws, "proto/orders.proto", PROTO);
+    let graph = scan(&ws);
+
+    let before = nodes_of(&graph, NodeType::Schema)
+        .into_iter()
+        .filter(|n| n.name == "Order")
+        .count();
+    assert_eq!(before, 1, "one Order schema expected, got {before}");
+
+    // Delete the message; keep the file (so it is not an orphan sweep
+    // case — this must be the sensor's own retraction).
+    write(
+        &ws,
+        "proto/orders.proto",
+        r#"
+syntax = "proto3";
+
+package orders;
+
+service Orders {
+  rpc GetOrder (Order) returns (Order);
+}
+"#,
+    );
+    run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+
+    let after = nodes_of(&graph, NodeType::Schema)
+        .into_iter()
+        .filter(|n| n.name == "Order")
+        .count();
+    assert_eq!(
+        after, 0,
+        "a message deleted from a .proto must have its Schema retracted on rescan"
+    );
     let _ = fs::remove_dir_all(&ws);
 }
 
