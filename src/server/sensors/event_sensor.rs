@@ -520,13 +520,19 @@ fn emit_sites(
             nodes.push(node);
         }
 
-        // The synthetic per-site node. It carries the `TopicConsumer`
-        // fact below, and doubles as the `Produces`/`Consumes` edge
-        // source when no enclosing function is indexed. The fallback
-        // is load-bearing: `insert_edges_batch` drops an edge whose
-        // endpoints aren't in the graph (`graph/mod.rs:1156`), so a
-        // source id that nothing materializes silently loses the edge
-        // rather than failing loudly.
+        // The synthetic per-site node. Two jobs:
+        //
+        // 1. Edge anchor — the `Produces`/`Consumes` edge source when
+        //    no enclosing function is indexed. Must be emitted for
+        //    EVERY site, including producers: `insert_edges_batch`
+        //    drops an edge whose endpoints aren't in the graph
+        //    (`graph/mod.rs:1156`) without failing, so an unmaterialized
+        //    source makes the edge vanish rather than error.
+        // 2. Fact carrier for subscription sites (see the block below).
+        //
+        // It is never `source_id` when a symbol IS indexed — that is
+        // what cost peer sensors their edges before (see
+        // `util::SQL_READ_PREFIX`).
         let id_name = format!(
             "{}{graph_path}:{}",
             crate::server::sensors::util::TOPIC_READ_PREFIX,
@@ -542,8 +548,8 @@ fn emit_sites(
 
         // Edge source: the enclosing function when one is indexed (so
         // call-chain traversal is unchanged), else the site's own
-        // synthetic node — which the consumer block below emits, so
-        // the edge never dangles.
+        // synthetic node — which we materialize below, so the edge
+        // never dangles.
         let source_id =
             crate::server::sensors::util::enclosing_symbol(graph, graph_path, site.line)
                 .map(|sym| sym.id.clone())
@@ -570,34 +576,39 @@ fn emit_sites(
             detail: None,
         });
 
-        // The consumer side: emit one `TopicConsumer` contract fact
-        // on the source function. We attach it to the same source_id
-        // so the joiner can resolve `consumer → topic` per function.
-        // The fact is what `ContractJoiner::run` matches against
-        // producer-side `Topic` nodes.
-        if emitted_consumer_facts.insert(source_id.clone()) {
-            // Synthetic node — NOT `source_id`. `replace_sensor_output`
-            // step 2 deletes an owner's nodes and their incident edges;
-            // putting `TopicConsumer` on the enclosing symbol made that
-            // symbol `EventSensor`-owned and cost every peer sensor its
-            // edges on the next scan (see `util::SQL_READ_PREFIX`).
+        // Emit the synthetic node when it is either the edge anchor or
+        // the fact carrier. A producer site whose enclosing function IS
+        // indexed needs neither — its edge rides the symbol — so no
+        // node is emitted for it.
+        let is_subscription = matches!(site.kind, SiteKind::Consumes | SiteKind::Scheduled);
+        let is_edge_anchor = source_id == site_node_id;
+        if (is_subscription || is_edge_anchor)
+            && emitted_consumer_facts.insert(site_node_id.clone())
+        {
             let mut consumer_node =
                 GraphNode::new(NodeType::Function, id_name, graph_path.to_string());
             consumer_node.id = site_node_id.clone();
             consumer_node.line_start = Some(site.line);
-            // `line_end` stays `None` deliberately: `util::enclosing_symbol`
-            // requires both bounds, so no later scan can resolve *this*
-            // node as an enclosing symbol and re-create a shared-id
-            // collision. Same rule as `sql-read:`.
-            let kind = match site.kind {
-                SiteKind::Scheduled => TopicConsumerKind::Scheduled,
-                _ => TopicConsumerKind::Subscription,
-            };
-            consumer_node.contract = Some(CF::TopicConsumer(TopicConsumerFact {
-                broker: site.broker.clone(),
-                name: topic_name.clone(),
-                kind,
-            }));
+            // `line_end` stays `None` deliberately:
+            // `util::enclosing_symbol` requires both bounds, so no
+            // later scan can resolve *this* node as an enclosing
+            // symbol and re-create a shared-id collision. Same rule
+            // as `sql-read:`.
+            if is_subscription {
+                // ONLY subscription sites carry the fact. A
+                // `Produces` site is not a subscriber — emitting one
+                // puts a false consumer in `ContractIndex`, and
+                // false consumers hide real ones.
+                let kind = match site.kind {
+                    SiteKind::Scheduled => TopicConsumerKind::Scheduled,
+                    _ => TopicConsumerKind::Subscription,
+                };
+                consumer_node.contract = Some(CF::TopicConsumer(TopicConsumerFact {
+                    broker: site.broker.clone(),
+                    name: topic_name.clone(),
+                    kind,
+                }));
+            }
             nodes.push(consumer_node);
         }
     }
@@ -610,6 +621,7 @@ fn emit_sites(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::federation::contracts::model::ContractFact;
     use crate::schema::{GraphNode, NodeType, RepoNamespace};
 
     fn empty_db() -> GraphDatabase {
@@ -733,6 +745,88 @@ mod tests {
             .filter(|e| e.edge_type == EdgeType::Consumes)
             .count();
         assert!(consumes >= 1);
+    }
+
+    /// A pure producer must NOT emit a `TopicConsumer` fact. It
+    /// produces; claiming it subscribes is a false consumer in
+    /// `ContractIndex` — and false consumers are the noise that hides
+    /// real ones.
+    #[test]
+    fn a_producer_site_emits_no_topic_consumer_fact() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("orders.ts"),
+            "async function publish() {\n  await producer.send({ topic: 'orders.created', messages: [] });\n}\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let consumers = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| matches!(n.contract, Some(ContractFact::TopicConsumer(_))))
+            .count();
+        assert_eq!(
+            consumers, 0,
+            "a producer site must not emit a TopicConsumer fact — it produces, \
+             it does not subscribe"
+        );
+    }
+
+    /// Two defects share one cause: the consumer-fact block runs for
+    /// every site kind and de-dupes on `source_id`.
+    ///
+    /// 1. A producer site registers `TopicConsumer` for the topic it
+    ///    *produces* — a false consumer in `ContractIndex`.
+    /// 2. When the enclosing symbol is indexed, both sites share one
+    ///    `source_id`, so the first site's fact wins the de-dupe and
+    ///    the other site's real topic is **dropped** — a discovered
+    ///    consumer disappearing, this codebase's worst failure.
+    ///
+    /// Minted explicitly (no tree-sitter indexer in `scan_workspace_event`)
+    /// so case 2 is actually exercised.
+    #[test]
+    fn a_function_that_produces_and_consumes_keeps_the_consumer_fact() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("relay.py"),
+            "def relay():\n    producer.send(topic='orders.created', value={})\n    c1 = KafkaConsumer('orders.shipped')\n    c2 = KafkaConsumer('orders.delivered')\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        let mut fn_node = GraphNode::new(NodeType::Function, "relay".into(), "relay.py".into());
+        fn_node.line_start = Some(1);
+        fn_node.line_end = Some(4);
+        fn_node.id = GraphNode::generate_id(&NodeType::Function, "relay.py", "relay", Some(1), &ns);
+        graph.upsert_node(fn_node).expect("insert enclosing symbol");
+
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let consumed: Vec<String> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter_map(|n| match n.contract {
+                Some(ContractFact::TopicConsumer(f)) => Some(f.name),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !consumed.contains(&"orders.created".to_string()),
+            "a producer must not register as a consumer of its own topic — \
+             got {consumed:?}"
+        );
+        assert!(
+            consumed.contains(&"orders.shipped".to_string()),
+            "the orders.shipped consumer fact was dropped — got {consumed:?}"
+        );
+        assert!(
+            consumed.contains(&"orders.delivered".to_string()),
+            "a second topic site in the same function lost its fact to the \
+             source_id de-dupe — got {consumed:?}"
+        );
     }
 
     /// Celery `@app.task` decorator emits a scheduled topic.

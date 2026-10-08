@@ -171,14 +171,18 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         // nodes, and the catch-all's sensor would then retract them on
         // every rescan.
         //
-        // §6.7 (stretch): the consumer-side function node carries a
-        // `TopicConsumer` contract fact; the event sensor owns it.
-        // The event sensor owns its synthetic `topic-read:` consumer
-        // nodes. The name guard is the migration arm: pre-fix graphs
-        // carry `TopicConsumer` on the real symbol node, and retracting
-        // those would delete real function nodes (and their edges) from
-        // an operator's graph.
-        (_, Some(ContractFact::TopicConsumer(_)))
+        // §6.7 (stretch): the event sensor owns its synthetic
+        // `topic-read:` nodes. Ownership keys on the NAME PREFIX, not
+        // on the fact: the node is also the `Produces`/`Consumes` edge
+        // anchor for a producer site, which carries **no** fact at all
+        // (a producer is not a subscriber), and an unowned node is
+        // never retracted — it leaks when the site is deleted.
+        //
+        // The name guard doubles as the migration arm: pre-fix graphs
+        // carry `TopicConsumer` on the real symbol node (named after
+        // the function), and retracting those would delete real
+        // function nodes and their edges from an operator's graph.
+        (NodeType::Function, _)
             if node
                 .name
                 .starts_with(crate::server::sensors::util::TOPIC_READ_PREFIX) =>
