@@ -1792,6 +1792,32 @@ async fn run_trace_impact(
                 .iter()
                 .map(|provider| provider.node_id.as_str().to_string()),
         );
+        // `ResponseSchema` / `HasField` are `Propagation::Incoming`
+        // (`graph_backend.rs::impact_propagation`): the BFS walks
+        // schema → endpoint and field → schema, so from the endpoint
+        // node alone the endpoint's own `Schema` / `Field` nodes are
+        // unreachable — an endpoint seed could only ever see "who
+        // calls this", never "what this exposes". Seed the endpoint's
+        // attached Schema nodes and their `HasField` targets (the
+        // fields must be seeds too: `Incoming` registers `HasField`
+        // under the Field node, so a Schema seed cannot reach its own
+        // fields) alongside the endpoint's providers.
+        let schema_ids: Vec<String> = endpoint
+            .schemas
+            .values()
+            .map(|schema| schema.node_id.as_str().to_string())
+            .collect();
+        starts.extend(schema_ids.iter().cloned());
+        if let Ok(edges) = backend.all_edges() {
+            let mut field_ids: Vec<String> = edges
+                .iter()
+                .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)
+                .filter(|e| schema_ids.contains(&e.source_id))
+                .map(|e| e.target_id.clone())
+                .collect();
+            field_ids.sort();
+            starts.extend(field_ids);
+        }
     } else if has_field {
         let field = from.get("field").cloned().unwrap_or(Value::Null);
         let endpoint = field.get("endpoint").cloned().unwrap_or(Value::Null);
