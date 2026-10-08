@@ -2291,6 +2291,18 @@ pub fn could_match(
 /// we return `true` unless a match can be positively ruled out.
 /// Returning `true` costs a `NeedsInvestigation`; returning `false`
 /// wrongly permits `NoKnownImpact` (I3).
+///
+/// **Only `UrlExpr` targets reach this in production.**
+/// `consumer_key()` maps every `Unresolved` resolution to
+/// `UrlExpr(call_id.name())`, and `build_coverage` is the only
+/// production source of `coverage.unresolved_consumers` — the sole
+/// input to `could_match`. So the `Contract`-keyed match arms below
+/// (the `false` directions) are reachable only from tests that
+/// hand-build `Contract` keys today. If anything starts feeding
+/// `Contract`-keyed consumers in — e.g. the `ambiguous` list — those
+/// arms go live without any test noticing. The `UrlExpr` path is
+/// separately pinned by
+/// `could_match_is_conservative_when_the_consumer_key_is_unknown`.
 fn non_http_could_match(target: &ConsumerTargetKey, endpoint_key: &ContractKey) -> bool {
     use ContractKey::*;
     let ConsumerTargetKey::Contract(tc) = target else {

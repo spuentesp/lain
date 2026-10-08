@@ -93,7 +93,12 @@ prepare_ready() {
           echo "FAIL: $tag snapshot not ready after ${round} rounds (state=$state)" >&2
           return 1
         fi
-        echo "  waiting for $tag snapshot (state=$state, round $round)…"
+        # Progress goes to stderr: callers capture this function's
+        # stdout as the snapshot id (`SNAP=$(prepare_ready …)`), so a
+        # line here would corrupt the id and the next tool call would
+        # embed a literal newline in JSON. That is what made the suite
+        # die with `KeyError: 'result'` on every cold run.
+        echo "  waiting for $tag snapshot (state=$state, round $round)…" >&2
         ;;
       *)
         echo "FAIL: $tag prepare_snapshot failed (state=$state, snap=$snap)" >&2

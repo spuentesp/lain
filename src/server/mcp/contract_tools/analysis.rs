@@ -1808,7 +1808,17 @@ async fn run_trace_impact(
             .map(|schema| schema.node_id.as_str().to_string())
             .collect();
         starts.extend(schema_ids.iter().cloned());
-        if let Ok(edges) = backend.all_edges() {
+        // Propagate rather than silently skip: a skipped seed reverts
+        // the trace to the pre-fix blindness where an endpoint cannot
+        // see its own schema, and the response would look complete.
+        // The standing rule is never claim absent when unanalysed —
+        // silently degrading the seed set is the same failure.
+        let edges = backend.all_edges().map_err(|e| ToolOutcome {
+            structured: json!({}),
+            text: format!("could not enumerate edges for the schema seed: {e}"),
+            is_error: true,
+        })?;
+        {
             let mut field_ids: Vec<String> = edges
                 .iter()
                 .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)

@@ -81,7 +81,7 @@ for round in 1 2 3 4 5 6 7 8; do
   case "$SNAP_STATE" in
     ready) break ;;
     pending|indexing)
-      echo "  waiting for snapshot (state=$SNAP_STATE, round $round)…"
+      echo "  waiting for snapshot (state=$SNAP_STATE, round $round)…" >&2
       ;;
     *)
       echo "FAIL: prepare_snapshot state=$SNAP_STATE (expected ready)"
