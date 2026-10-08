@@ -112,35 +112,6 @@ pub fn scan_workspace_event(
     Ok(all_nodes.len())
 }
 
-/// Resolve the enclosing function/method for a given `(path, line)`.
-/// Returns the function's id and a fresh node id when no function
-/// exists yet in the graph.
-fn resolve_function_id(
-    graph: &GraphDatabase,
-    graph_path_str: &str,
-    name_hint: &str,
-    line: u32,
-    namespace: &RepoNamespace,
-) -> String {
-    if let Some(sym) = crate::server::sensors::util::enclosing_symbol(graph, graph_path_str, line) {
-        return sym.id.clone();
-    }
-    // No existing function indexed: mint a synthetic one anchored at
-    // the site line so the `Produces` / `Consumes` edge has a real
-    // source.
-    GraphNode::generate_id(
-        &NodeType::Function,
-        graph_path_str,
-        if name_hint.is_empty() {
-            "event_site"
-        } else {
-            name_hint
-        },
-        Some(line),
-        namespace,
-    )
-}
-
 // ─── Detection (regex-first, language-dispatched) ────────────────────
 
 /// `const NAME = "value";` (TS / JS / Go) and `NAME = "value"` at
@@ -487,6 +458,14 @@ fn parse_def_name(line: &str) -> Option<String> {
 
 // ─── Emission ────────────────────────────────────────────────────────
 
+/// Emit one `Topic` node plus a `Produces`/`Consumes` edge per site.
+///
+/// Edge-source invariant: the source is either an already-indexed
+/// enclosing symbol, or the per-site synthetic node that the consumer
+/// block below emits — never a third, unmaterialized id.
+/// `insert_edges_batch` drops an edge whose endpoints aren't in the
+/// graph (`graph/mod.rs:1156`), so an unmaterialized source does not
+/// fail loudly: the edge simply vanishes.
 fn emit_sites(
     sites: &[DetectedSite],
     graph_path: &str,
@@ -541,11 +520,34 @@ fn emit_sites(
             nodes.push(node);
         }
 
-        // Resolve the enclosing function id. We always emit a node
-        // here so the graph has a stable handle, even when no
-        // Function/Method was indexed before.
-        let owner_hint = site.owner_name.clone().unwrap_or_default();
-        let source_id = resolve_function_id(graph, graph_path, &owner_hint, site.line, namespace);
+        // The synthetic per-site node. It carries the `TopicConsumer`
+        // fact below, and doubles as the `Produces`/`Consumes` edge
+        // source when no enclosing function is indexed. The fallback
+        // is load-bearing: `insert_edges_batch` drops an edge whose
+        // endpoints aren't in the graph (`graph/mod.rs:1156`), so a
+        // source id that nothing materializes silently loses the edge
+        // rather than failing loudly.
+        let id_name = format!(
+            "{}{graph_path}:{}",
+            crate::server::sensors::util::TOPIC_READ_PREFIX,
+            site.line
+        );
+        let site_node_id = GraphNode::generate_id(
+            &NodeType::Function,
+            graph_path,
+            &id_name,
+            Some(site.line),
+            namespace,
+        );
+
+        // Edge source: the enclosing function when one is indexed (so
+        // call-chain traversal is unchanged), else the site's own
+        // synthetic node — which the consumer block below emits, so
+        // the edge never dangles.
+        let source_id =
+            crate::server::sensors::util::enclosing_symbol(graph, graph_path, site.line)
+                .map(|sym| sym.id.clone())
+                .unwrap_or_else(|| site_node_id.clone());
 
         let edge_type = match site.kind {
             SiteKind::Produces => EdgeType::Produces,
@@ -579,21 +581,9 @@ fn emit_sites(
             // putting `TopicConsumer` on the enclosing symbol made that
             // symbol `EventSensor`-owned and cost every peer sensor its
             // edges on the next scan (see `util::SQL_READ_PREFIX`).
-            let id_name = format!(
-                "{}{graph_path}:{}",
-                crate::server::sensors::util::TOPIC_READ_PREFIX,
-                site.line
-            );
-            let id = GraphNode::generate_id(
-                &NodeType::Function,
-                graph_path,
-                &id_name,
-                Some(site.line),
-                namespace,
-            );
             let mut consumer_node =
                 GraphNode::new(NodeType::Function, id_name, graph_path.to_string());
-            consumer_node.id = id;
+            consumer_node.id = site_node_id.clone();
             consumer_node.line_start = Some(site.line);
             // `line_end` stays `None` deliberately: `util::enclosing_symbol`
             // requires both bounds, so no later scan can resolve *this*
