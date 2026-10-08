@@ -5,7 +5,12 @@
 //! statement with a focused hand-rolled parser, and emits one
 //! `Table { service: "", name }` per distinct name plus a `ReadsTable`
 //! / `WritesTable` edge from the enclosing function (or `File` for
-//! module-level calls) to the table.
+//! module-level calls) to the table. Every source node that reads a
+//! table also gets a `TableConsumer` contract fact listing the tables
+//! it touches — the consumer-side counterpart of those edges, without
+//! which a SQL reader can never enter `ContractIndex.consumers`
+//! (`joiner::resolve_table_consumer` resolves it against the
+//! `ContractKey::Table` endpoints).
 //!
 //! The parser is deliberately narrow: it handles the canonical SQL
 //! shapes the recognized call sites emit (SELECT with CTE /
@@ -36,7 +41,9 @@
 
 use crate::error::LainError;
 use crate::federation::contracts::coverage::UnresolvedRecord;
-use crate::federation::contracts::model::{ContractFact, SourceSite, Table, UnresolvedReason};
+use crate::federation::contracts::model::{
+    ContractFact, SourceSite, Table, TableConsumerFact, UnresolvedReason,
+};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::SensorEntry;
@@ -174,8 +181,16 @@ pub fn scan_workspace_sql_with_report(
         })
         .collect();
 
+    // `emitted` feeds `SensorCountField::SqlTables` and is pinned by
+    // tests/sql_tables.rs as the number of `Table` nodes minted —
+    // the `TableConsumer` facts riding on enclosing source nodes are
+    // not tables and are not counted here.
+    let table_count = all_nodes
+        .iter()
+        .filter(|n| n.node_type == NodeType::Table)
+        .count();
     Ok(crate::server::sensors::ScanReport {
-        emitted: all_nodes.len(),
+        emitted: table_count,
         error: None,
         unresolved: unresolved_records,
     })
@@ -966,6 +981,11 @@ fn build_graph(
     let mut unresolved: Vec<UnresolvedRecord> = Vec::new();
     let mut emitted_table_ids: BTreeMap<String, String> = BTreeMap::new();
     let mut per_reason_dynamic: BTreeMap<UnresolvedReason, (usize, Vec<String>)> = BTreeMap::new();
+    // Source node id → every distinct table that source's parsed
+    // statements touch. Fed into one `TableConsumer` fact per source
+    // after the site loop (one fact covers all tables because
+    // `GraphNode.contract` holds a single fact per node).
+    let mut consumer_tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for site in sites {
         if site.stmt.tables.is_empty() {
@@ -1023,6 +1043,10 @@ fn build_graph(
                 // the edge so we don't mint a phantom source.
                 continue;
             };
+            consumer_tables
+                .entry(source_id.clone())
+                .or_default()
+                .insert(table_name.clone());
             let mut edge = GraphEdge::new(edge_kind.clone(), source_id, table_id);
             edge.provenance = Some(EdgeProvenance::Static {
                 source: crate::schema::StaticSource::Regex,
@@ -1033,6 +1057,21 @@ fn build_graph(
             });
             edges.push(edge);
         }
+    }
+
+    // Phase D (spec §7): one `TableConsumer` fact per source node,
+    // cloned from the node already in the graph so the upsert
+    // preserves its fields. This is what lets the joiner resolve the
+    // reader as a consumer of `table:<name>` endpoints; the fact
+    // mirrors the `ReadsTable` / `WritesTable` edges emitted above.
+    for (source_id, tables) in &consumer_tables {
+        let Ok(Some(mut source_node)) = graph.get_node(source_id) else {
+            continue;
+        };
+        source_node.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+            tables: tables.iter().cloned().collect(),
+        }));
+        nodes.push(source_node);
     }
 
     for (reason, (count, sample_ids)) in per_reason_dynamic {
@@ -1262,6 +1301,7 @@ mod tests {
             Some(1),
             &ns,
         );
+        let fn_node_id = fn_node.id.clone();
         graph.upsert_node(fn_node).unwrap();
 
         let site = SqlSite {
@@ -1274,9 +1314,25 @@ mod tests {
         };
         let (nodes, edges, unresolved) = build_graph(&graph, &[site], "src/orders.py", &ns);
         assert!(unresolved.is_empty());
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].node_type, NodeType::Table);
-        assert_eq!(nodes[0].name, "orders");
+        // The `Table` node plus the reader's `TableConsumer` fact
+        // (cloned onto the enclosing function node).
+        assert_eq!(nodes.len(), 2);
+        let table = nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Table)
+            .expect("Table node emitted");
+        assert_eq!(table.name, "orders");
+        let reader = nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function)
+            .expect("TableConsumer node emitted for the enclosing function");
+        assert_eq!(reader.id, fn_node_id);
+        match reader.contract.as_ref() {
+            Some(ContractFact::TableConsumer(f)) => {
+                assert_eq!(f.tables, vec!["orders".to_string()]);
+            }
+            other => panic!("expected TableConsumer fact, got {other:?}"),
+        }
         assert_eq!(edges.len(), 1);
         assert!(matches!(edges[0].edge_type, EdgeType::ReadsTable));
     }

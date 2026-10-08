@@ -118,6 +118,17 @@ pub enum ContractFact {
     WebSocketConsumer(WebSocketConsumerFact),
     /// Phase F (Gap 19): WebSocket route to handler link.
     WebSocketHandler(WebSocketHandlerFact),
+    /// Phase D (spec §7): one function (or module-level file) whose
+    /// body contains literal SQL against the listed tables. Emitted
+    /// by `sql_sensor` on the enclosing source node — the consumer
+    /// mirror of the `ReadsTable` / `WritesTable` edges, and the
+    /// only way a SQL reader enters `ContractIndex.consumers`
+    /// (mirrors how `TopicConsumer` rides on the subscribing
+    /// function). Declared **last** in the enum so bincode's
+    /// variant indices for every pre-existing variant are
+    /// unchanged — graphs written before this variant decode
+    /// unchanged (fold into unreleased v3, spec §2).
+    TableConsumer(TableConsumerFact),
 }
 
 // ─── HTTP provider ────────────────────────────────────────────────────
@@ -465,6 +476,20 @@ pub struct FieldReadFact {
 pub struct Table {
     pub service: String,
     pub name: String,
+}
+
+/// Phase D (spec §7): the tables one SQL-reading source node
+/// touches. Emitted by `sql_sensor` on the enclosing function (or
+/// file, for module-level SQL) alongside the `ReadsTable` /
+/// `WritesTable` edges, so the joiner can resolve the reader as a
+/// consumer of `ContractKey::Table { name }` endpoints. The list
+/// carries every distinct literal table the source's parsed
+/// statements reference, sorted for determinism (I4); one fact
+/// covers all of them because `GraphNode.contract` holds a single
+/// fact per node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TableConsumerFact {
+    pub tables: Vec<String>,
 }
 
 // ─── Schema fields ────────────────────────────────────────────────────

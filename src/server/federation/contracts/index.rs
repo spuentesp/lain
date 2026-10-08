@@ -248,6 +248,10 @@ pub fn node_type_of(fact: &ContractFact) -> NodeType {
             NodeType::HttpRoute
         }
         ContractFact::WebSocketConsumer(_) => NodeType::HttpClientCall,
+        // Phase D (spec §7): the SQL reader rides on the enclosing
+        // function (or file for module-level SQL) — same shape as
+        // `TopicConsumer` / `RpcConsumer` / `GraphqlConsumer`.
+        ContractFact::TableConsumer(_) => NodeType::Function,
     }
 }
 

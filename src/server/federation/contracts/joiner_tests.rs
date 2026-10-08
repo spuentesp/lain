@@ -15,8 +15,8 @@ use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, FieldMeta, FieldReadFact,
     GraphqlConsumerFact, GraphqlOp, GraphqlProviderFact, HostPart, HttpMethod, JsonPath,
     MethodSpec, NormalizedUrl, ProviderFact, ProviderOrigin, RpcConsumerFact, RpcProviderFact,
-    RpcSystem, ServiceName, Table, TopicConsumerFact, TopicConsumerKind, TypeDesc,
-    WebSocketConsumerFact, WebSocketProviderFact,
+    RpcSystem, ServiceName, Table, TableConsumerFact, TopicConsumerFact, TopicConsumerKind,
+    TypeDesc, WebSocketConsumerFact, WebSocketProviderFact,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{
@@ -2709,6 +2709,113 @@ fn table_ownership_keys_on_db_name_not_just_table_name() {
             .endpoints
             .contains_key(&table_endpoint_id("reports", "analytics_metrics")),
         "the scanning repo (reports) is not the table's owner; analytics_db declared it"
+    );
+}
+
+// ─── Phase D (spec §7): table consumers — a SQL reader must join ──────
+//
+// The empirical gap behind `sql_table_reads_are_listed_through_get_contract`
+// (tests/contract_tool_e2e_non_http.rs): the joiner had no
+// table-consumer model at all, so a function reading a table could
+// never enter `ContractIndex.consumers`. Without these, there can be
+// no unresolved table consumer either — which made Task 1's `Table`
+// arm in `could_match` unreachable in production.
+
+/// A SQL-reading source node as `sql_sensor` emits it: the enclosing
+/// function (or file) carrying a `TableConsumer` fact listing every
+/// distinct literal table the source's parsed statements touch.
+fn sql_reader_node(repo: &str, path: &str, name: &str, line: u32, tables: &[&str]) -> GraphNode {
+    let mut n = GraphNode::new_in(
+        NodeType::Function,
+        name.to_string(),
+        path.to_string(),
+        &repo_ns(),
+    );
+    n.repo_id = Some(repo.to_string());
+    n.id = make_id(repo, NodeType::Function, path, name, line);
+    n.line_start = Some(line);
+    n.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+        tables: tables.iter().map(|s| (*s).to_string()).collect(),
+    }));
+    n
+}
+
+#[test]
+fn a_sql_reader_binds_to_the_table_endpoint() {
+    // A function that calls `cursor.execute("SELECT id FROM shipments")`
+    // must produce a ConsumerResolution for `table:shipments`, and a
+    // Binds edge to the service that owns that table.
+    let table = table_node("logistics", "db/schema.sql", "shipments", 1);
+    let reader = sql_reader_node(
+        "platform",
+        "scripts/report.py",
+        "load_shipments",
+        10,
+        &["shipments"],
+    );
+    let cfg = default_config();
+    let out = ContractJoiner::run(&[table, reader.clone()], &[], &cfg);
+
+    let cid = GlobalId::parse(&reader.id).expect("global id parse");
+    let res = out
+        .index
+        .consumers
+        .get(&cid)
+        .expect("a SQL reader must be indexed as a consumer, not dropped");
+    assert!(
+        matches!(res.target, Some(ConsumerTarget::Binds { .. })),
+        "the reader must bind to table:shipments: {:?}",
+        res.target
+    );
+    let owner_endpoint = table_endpoint_id("logistics", "shipments");
+    assert!(
+        res.bound_endpoints.contains(&owner_endpoint),
+        "bound_endpoints must contain the owning service's table endpoint: {:?}",
+        res.bound_endpoints
+    );
+
+    assert_eq!(
+        out.binds.len(),
+        1,
+        "exactly one Binds edge: {:?}",
+        out.binds
+    );
+    let edge = &out.binds[0];
+    assert_eq!(edge.consumer, cid, "the Binds edge starts at the reader");
+    assert_eq!(
+        edge.provider_service,
+        ServiceName("logistics".into()),
+        "the Binds edge targets the service that owns the table"
+    );
+    assert_eq!(edge.target_endpoint, owner_endpoint);
+}
+
+#[test]
+fn a_sql_reader_for_an_unowned_table_is_unresolved_not_silent() {
+    // `SELECT id FROM nope` must land in `Unresolved`, not vanish —
+    // silence is what makes `NoKnownImpact` claimable.
+    let reader = sql_reader_node("platform", "scripts/report.py", "probe", 10, &["nope"]);
+    let cfg = default_config();
+    let out = ContractJoiner::run(std::slice::from_ref(&reader), &[], &cfg);
+
+    let cid = GlobalId::parse(&reader.id).expect("global id parse");
+    let res = out
+        .index
+        .consumers
+        .get(&cid)
+        .expect("a reader of an unowned table must still be indexed, not dropped");
+    match &res.target {
+        Some(ConsumerTarget::Unresolved { reason, .. }) => assert_eq!(
+            *reason,
+            UnresolvedReason::NoMatch,
+            "no endpoint owns `nope`, so the consumer is Unresolved{{NoMatch}}"
+        ),
+        other => panic!("an unowned table must be Unresolved, got {other:?}"),
+    }
+    assert!(
+        out.binds.is_empty(),
+        "no table endpoint exists, so no Binds edge may be invented: {:?}",
+        out.binds
     );
 }
 

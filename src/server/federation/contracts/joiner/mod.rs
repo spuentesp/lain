@@ -35,11 +35,12 @@
 //!   `provider_node_id`, `provenance_for_detail`, plus the
 //!   `is_wrapper_candidate` / `registry_lookup_name` helpers
 //!   used by the rule-1 gate.
-//! - [`consumer_protocol`] — the three protocol resolvers
-//!   (Topic, RPC, GraphQL) using the shared `resolve_by_key` +
-//!   `AmbiguityPolicy` from R13 (review §S6). Exports
-//!   `resolve_topic_consumer`, `resolve_rpc_consumer`,
-//!   `resolve_graphql_consumer`.
+//! - [`consumer_protocol`] — the protocol resolvers
+//!   (Topic, RPC, GraphQL, WebSocket, SQL tables) using the shared
+//!   `resolve_by_key` + `AmbiguityPolicy` from R13 (review §S6).
+//!   Exports `resolve_topic_consumer`, `resolve_rpc_consumer`,
+//!   `resolve_graphql_consumer`, `resolve_websocket_consumer`,
+//!   `resolve_table_consumer`.
 //! - [`confirmed`] — step 6: apply operator-declared confirmed
 //!   bindings (§7.6). Exports `apply_confirmed_binding`.
 //!
@@ -79,7 +80,7 @@ pub(super) mod endpoints;
 
 pub use consumer_http::resolve_consumer_to_service;
 pub use consumer_protocol::{
-    resolve_graphql_consumer, resolve_rpc_consumer, resolve_topic_consumer,
+    resolve_graphql_consumer, resolve_rpc_consumer, resolve_table_consumer, resolve_topic_consumer,
     resolve_websocket_consumer,
 };
 pub use endpoints::EndpointProviderRecord;

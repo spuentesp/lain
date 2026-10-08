@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use crate::federation::contracts::config::ContractFederationConfig;
 use crate::federation::contracts::index::ConsumerResolution;
 use crate::federation::contracts::joiner::{
-    resolve_graphql_consumer, resolve_rpc_consumer, resolve_topic_consumer,
+    resolve_graphql_consumer, resolve_rpc_consumer, resolve_table_consumer, resolve_topic_consumer,
     resolve_websocket_consumer, EndpointProviderRecord,
 };
 use crate::federation::contracts::model::{ContractFact, ServiceName};
@@ -37,8 +37,9 @@ mod sealed {
 }
 
 /// One consumer-side dispatch entry. The trait is sealed so the
-/// only impls are the three protocol-specific dispatchers
-/// (`TopicDispatch`, `RpcDispatch`, `GraphqlDispatch`) below.
+/// only impls are the protocol-specific dispatchers
+/// (`TopicDispatch`, `RpcDispatch`, `GraphqlDispatch`,
+/// `WebSocketDispatch`, `TableDispatch`) below.
 /// Adding a new protocol is one new struct + two impls (`Sealed`
 /// + `ProtocolDispatch`) plus a Vec entry at the call site.
 pub trait ProtocolDispatch: sealed::Sealed {
@@ -215,6 +216,46 @@ impl ProtocolDispatch for WebSocketDispatch {
     }
 }
 
+// ─── TableDispatch ────────────────────────────────────────────────────
+
+/// Phase D (spec §7): resolves a `TableConsumer` (a source node
+/// whose body contains literal SQL, emitted by `sql_sensor`) to the
+/// `ContractKey::Table { name }` endpoints of the services that own
+/// those tables. Without this dispatch a SQL reader never entered
+/// `ContractIndex.consumers`, so `get_contract` / `list_unresolved`
+/// could not show table readers and Task 1's `Table` arm of
+/// `could_match` was unreachable in production.
+pub struct TableDispatch;
+
+impl sealed::Sealed for TableDispatch {}
+
+impl ProtocolDispatch for TableDispatch {
+    fn matches(&self, fact: &ContractFact) -> bool {
+        matches!(fact, ContractFact::TableConsumer(_))
+    }
+
+    fn dispatch(
+        &self,
+        call_id: &GlobalId,
+        own_service: &ServiceName,
+        fact: &ContractFact,
+        endpoints: &BTreeMap<
+            (
+                ServiceName,
+                crate::federation::contracts::model::ContractKey,
+            ),
+            Vec<EndpointProviderRecord>,
+        >,
+        _config: &ContractFederationConfig,
+        binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
+    ) -> ConsumerResolution {
+        let ContractFact::TableConsumer(table_consumer) = fact else {
+            unreachable!("TableDispatch::dispatch called with non-TableConsumer fact")
+        };
+        resolve_table_consumer(call_id, table_consumer, own_service, endpoints, binds)
+    }
+}
+
 /// The default dispatch chain. The orchestrator iterates this
 /// Vec in order — the first dispatch whose `matches` returns
 /// true handles the node. Adding a new protocol is one Vec
@@ -225,5 +266,6 @@ pub fn default_dispatch_chain() -> Vec<Box<dyn ProtocolDispatch>> {
         Box::new(RpcDispatch),
         Box::new(GraphqlDispatch),
         Box::new(WebSocketDispatch),
+        Box::new(TableDispatch),
     ]
 }

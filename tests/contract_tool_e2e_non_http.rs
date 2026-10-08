@@ -144,6 +144,44 @@ async fn graphql_selected_fields_are_joinable_through_trace_impact() {
     );
 }
 
+/// GraphQL, endpoint seed: `trace_impact` from the endpoint itself
+/// must reach the endpoint's own response schema — `ResponseSchema`
+/// and `HasField` are `Propagation::Incoming`, so from the endpoint
+/// node the BFS walks only upstream (to the consumer function) and
+/// the endpoint's `Schema` / `Field` nodes are unreachable unless
+/// the seeding makes them start nodes too.
+#[tokio::test]
+async fn graphql_endpoint_seed_reaches_its_own_schema_and_field_binds() {
+    let t4 = t4().await;
+    let status = HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&t4.mgr, &status);
+
+    let out = trace_impact_handle(
+        &ctx,
+        json!({
+            "snapshot": t4.base,
+            "from": {"endpoint": {"service": "orders", "key": "graphql:query:orders"}},
+            "depth": 3,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!out.is_error, "trace_impact errored: {:#?}", out.structured);
+    let paths = out.structured["data"]["paths"]
+        .as_array()
+        .unwrap_or_else(|| panic!("paths: {:#?}", out.structured));
+    let hops: Vec<&str> = paths
+        .iter()
+        .flat_map(|p| p["hops"].as_array().unwrap())
+        .filter_map(|h| h["node"].as_str())
+        .collect();
+    assert!(
+        hops.iter().any(|n| n.contains("customer_id")),
+        "the endpoint's own response field must be reachable from an \
+         endpoint seed: {hops:?}"
+    );
+}
+
 /// WebSocket: reports declares `app.ws("/feed", …)` and billing
 /// dials `ws://reports/feed`. Tracing from the provider endpoint
 /// must reach the consumer through the joiner's `Binds` edge.
@@ -184,25 +222,18 @@ async fn websocket_provider_reaches_its_consumer_in_trace_impact() {
 /// through `get_contract` under the repo's own service name, with
 /// the reader listed as its consumer.
 ///
-/// KNOWN-RED (soundness finding, reported with Task 2): the
-/// endpoint half passes — sql_sensor emits the `Table` fact and the
-/// joiner keys it `platform` / `table:shipments`. The consumer half
-/// cannot pass today: the joiner's dispatch chain has no table arm
-/// (`default_dispatch_chain` covers Topic/Rpc/Graphql/WebSocket),
-/// `ContractFact::Table` falls through the HTTP ladder's
-/// `ContractFact::Consumer` filter, and the reading function carries
-/// no consumer fact at all — so a reader can never enter
-/// `ContractIndex.consumers`, and no fixture can change that. Do not
-/// weaken this assertion; the fix belongs in the joiner/sensor layer.
-///
-/// `#[ignore]` keeps CI green while the gap is unfixed — the reason is
-/// the finding. Removing the attribute is the acceptance criterion for
-/// the fix (a `TableDispatch` keyed on `ReadsTable` edges, or a consumer
-/// fact on the reading function). Note this gap also makes
-/// `an_unresolved_table_consumer_blocks_no_known_impact` unreachable in
-/// production: there can be no unresolved table consumer because there
-/// can be no table consumer at all.
-#[ignore = "known soundness gap: the joiner has no table-consumer model, so a SQL reader never enters ContractIndex.consumers. Fix in the joiner/sensor layer; see docs/superpowers/plans/2026-10-07-contract-soundness.md"]
+/// This was the known-red soundness finding from Task 2: the
+/// endpoint half always passed (sql_sensor emits the `Table` fact
+/// and the joiner keys it `platform` / `table:shipments`), but the
+/// consumer half could not — the joiner had no table-consumer model
+/// (`default_dispatch_chain` covered Topic/Rpc/Graphql/WebSocket
+/// only, and the reading function carried no consumer fact), so a
+/// SQL reader could never enter `ContractIndex.consumers`. Fixed by
+/// `ContractFact::TableConsumer` (emitted by `sql_sensor` on the
+/// reading source node) + `TableDispatch` /
+/// `resolve_table_consumer` in the joiner. The fix also makes
+/// Task 1's `Table` arm in `could_match` reachable in production:
+/// an unresolved table consumer can now exist.
 #[tokio::test]
 async fn sql_table_reads_are_listed_through_get_contract() {
     let t4 = t4().await;
