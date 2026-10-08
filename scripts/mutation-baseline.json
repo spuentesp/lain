@@ -56,10 +56,10 @@
       "survived": 0
     },
     {
-      "killed": 21,
+      "killed": 25,
       "mutants": 29,
       "path": "src/server/sensors/payload_schema.rs",
-      "survived": 8
+      "survived": 4
     },
     {
       "killed": 17,
@@ -74,10 +74,7 @@
     "src/server/ingest/resolve.rs:661:ge->gt": "equivalent: same four-guard max_edges budget",
     "src/server/ingest/resolve.rs:665:ge->gt": "equivalent: same four-guard max_edges budget",
     "src/server/ingest/resolve.rs:683:ge->gt": "equivalent: same four-guard max_edges budget",
-    "src/server/sensors/payload_schema.rs:645:and->or": "equivalent: both branches consume the literal \"map\" and read the same field name from the post-map cursor",
-    "src/server/sensors/payload_schema.rs:696:eq->ne": "equivalent: third arm of an || chain; the first two already cover non-underscore",
-    "src/server/sensors/payload_schema.rs:723:eq->ne": "equivalent: newline counter inside consume_balanced_block; no fixture asserts that exact line count",
-    "src/server/sensors/payload_schema.rs:735:eq->ne": "equivalent: || with :736; flipping one arm still exits the loop via the other",
-    "src/server/sensors/payload_schema.rs:736:eq->ne": "equivalent: reached only when :735 is true; the loop exits either way"
-  }
+    "src/server/sensors/payload_schema.rs:696:eq->ne": "equivalent: third arm of an || chain; the first two already cover non-underscore. VERIFIED by direct apply->test->revert probe: parsers_adversarial does not kill it."
+  },
+  "triage_notes": "Triage entries must be verified by probe, not reasoned. Four earlier 'equivalent' claims for payload_schema (645, 723, 735, 736) were wrong: a direct apply->test->revert run showed parsers_adversarial kills all four. They are removed here and counted as killed. Only 696 is genuinely equivalent \u2014 also probe-verified."
 }
