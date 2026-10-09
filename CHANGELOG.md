@@ -94,6 +94,16 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **`install_language_server` works for rust and ruby again.** The
+  v0.8.0 LSP-install allowlist (security hardening: only curated
+  package managers may run at startup) omitted `rustup` and `gem`, so
+  the shipped recipes for rust-analyzer and solargraph were
+  unconditionally refused. Both are on the list now, guarded by a
+  property test that every registry recipe passes the gate.
+  **v0.8.0 as released is affected** — `install_language_server
+  "rust"` fails there until the next release. The health-badge
+  action's `lain-version` default is held at v0.7.4 until then; bump
+  it together with the release metadata.
 - **`workspace_dir` contract mirrors now track the checkout.** Two bugs
   froze contract snapshots of local repos at their clone-time commit
   while the symbol layer kept following HEAD:
