@@ -37,6 +37,21 @@ pub struct ContractFederationConfig {
     pub schemas: Vec<SchemaDecl>,
     #[serde(default)]
     pub bindings: Vec<ConfirmedBinding>,
+    #[serde(default)]
+    pub databases: Vec<DatabaseDecl>,
+}
+
+/// One database declaration in `repos.yaml#databases` (Gap 23).
+/// Maps a named database to its owning service, associated tables,
+/// and services it is shared with.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseDecl {
+    pub name: String,
+    pub service: String,
+    #[serde(default)]
+    pub tables: Vec<String>,
+    #[serde(default)]
+    pub shared_with: Vec<String>,
 }
 
 /// One declared service. `repo` is a configured repo id; `paths` are
@@ -79,9 +94,8 @@ pub struct HttpClientDecl {
     pub path_arg: Option<u8>,
 }
 
-/// One schema declaration (PR 15 stretch). Stored today so the
-/// `ContractFederationConfig::load` round-trip is total, but the
-/// joiner does not yet consult it.
+/// One schema declaration. Consulted by the joiner to attach
+/// event topic payload schemas to endpoints (§6.7, Gap 20).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SchemaDecl {
     pub topic: String,
@@ -193,6 +207,10 @@ impl ContractFederationConfig {
                     out.bindings = serde_yaml::from_value(v.clone())
                         .map_err(|e| LainError::Config(format!("bindings: {e}")))?
                 }
+                "databases" => {
+                    out.databases = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("databases: {e}")))?
+                }
                 "contract" => {
                     let nested: ContractFederationConfig = serde_yaml::from_value(v.clone())
                         .map_err(|e| LainError::Config(format!("contract: {e}")))?;
@@ -210,6 +228,9 @@ impl ContractFederationConfig {
                     }
                     if out.bindings.is_empty() {
                         out.bindings = nested.bindings;
+                    }
+                    if out.databases.is_empty() {
+                        out.databases = nested.databases;
                     }
                 }
                 // Other top-level keys are the existing
@@ -412,6 +433,95 @@ impl ContractFederationConfig {
                     repo = s.repo
                 )));
             }
+            // Task 4: also require a *configured* service whose
+            // `repo` matches. An implicit service (a repo id with
+            // no `services[]` entry) cannot own a payload schema
+            // — `field_join` has no `service_decl` to read
+            // `base_path` from, and the payload would silently
+            // attach to a wrong endpoint. Reject at validate() so
+            // the operator sees the misconfig rather than
+            // discovering it via a missing `FieldRemoved` verdict.
+            if !self.services.iter().any(|svc| svc.repo == s.repo) {
+                return Err(LainError::Config(format!(
+                    "schemas entry '{topic}' references repo '{repo}' with no configured service",
+                    topic = s.topic,
+                    repo = s.repo
+                )));
+            }
+        }
+
+        // Database declarations validation (Gap 23 + Task 7).
+        //
+        // Reject two databases with the same `name`, the same
+        // table listed twice in one database, and the same table
+        // listed by two databases. The joiner keys table ownership
+        // on `db.name` (with `shared_with` widening); ambiguity
+        // here would silently attribute facts to the wrong
+        // service.
+        //
+        // `db.service` and each `shared_with` entry are validated
+        // against `known_services` (configured + implicit repo
+        // ids), aligning with `http_clients.service` and
+        // `bindings.provider.service` so a repo-backed service
+        // without an explicit `services[]` entry is accepted
+        // consistently.
+        let mut db_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for db in &self.databases {
+            if db.name.is_empty() {
+                return Err(LainError::Config(
+                    "database declaration name cannot be empty".to_string(),
+                ));
+            }
+            if !db_names.insert(db.name.as_str()) {
+                return Err(LainError::Config(format!(
+                    "duplicate database name '{name}'",
+                    name = db.name
+                )));
+            }
+            if !known_services.contains(db.service.as_str()) {
+                return Err(LainError::Config(format!(
+                    "database '{}' references unknown service '{}'",
+                    db.name, db.service
+                )));
+            }
+            for shared in &db.shared_with {
+                if !known_services.contains(shared.as_str()) {
+                    return Err(LainError::Config(format!(
+                        "database '{}' shared_with references unknown service '{}'",
+                        db.name, shared
+                    )));
+                }
+            }
+            // Reject the same table name twice in one database —
+            // the joiner cannot dedup without changing the
+            // observable mapping.
+            let mut seen_tables: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for t in &db.tables {
+                if !seen_tables.insert(t.as_str()) {
+                    return Err(LainError::Config(format!(
+                        "table '{t}' is listed more than once in database '{db}'",
+                        t = t,
+                        db = db.name
+                    )));
+                }
+            }
+        }
+        // Reject the same table name listed by two different
+        // databases. The joiner cannot pick one without inventing
+        // a tie-break rule; the operator must disambiguate.
+        let mut table_owners: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for db in &self.databases {
+            for t in &db.tables {
+                if let Some(prev) = table_owners.insert(t.as_str(), db.name.as_str()) {
+                    return Err(LainError::Config(format!(
+                        "table '{t}' is listed by both database '{prev}' and '{cur}'",
+                        t = t,
+                        prev = prev,
+                        cur = db.name
+                    )));
+                }
+            }
         }
 
         Ok(())
@@ -441,6 +551,7 @@ impl ContractFederationConfig {
             "generic_keys": self.generic_keys,
             "schemas": self.schemas,
             "bindings": self.bindings,
+            "databases": self.databases,
         });
         let s = canonical.to_string();
         blake3::hash(s.as_bytes()).to_hex().to_string()

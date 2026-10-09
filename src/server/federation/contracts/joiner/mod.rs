@@ -35,11 +35,12 @@
 //!   `provider_node_id`, `provenance_for_detail`, plus the
 //!   `is_wrapper_candidate` / `registry_lookup_name` helpers
 //!   used by the rule-1 gate.
-//! - [`consumer_protocol`] — the three protocol resolvers
-//!   (Topic, RPC, GraphQL) using the shared `resolve_by_key` +
-//!   `AmbiguityPolicy` from R13 (review §S6). Exports
-//!   `resolve_topic_consumer`, `resolve_rpc_consumer`,
-//!   `resolve_graphql_consumer`.
+//! - [`consumer_protocol`] — the protocol resolvers
+//!   (Topic, RPC, GraphQL, WebSocket, SQL tables) using the shared
+//!   `resolve_by_key` + `AmbiguityPolicy` from R13 (review §S6).
+//!   Exports `resolve_topic_consumer`, `resolve_rpc_consumer`,
+//!   `resolve_graphql_consumer`, `resolve_websocket_consumer`,
+//!   `resolve_table_consumer`.
 //! - [`confirmed`] — step 6: apply operator-declared confirmed
 //!   bindings (§7.6). Exports `apply_confirmed_binding`.
 //!
@@ -75,11 +76,12 @@ use crate::server::sensors::env_sensor::EnvBindingIndex;
 mod confirmed;
 mod consumer_http;
 mod consumer_protocol;
-mod endpoints;
+pub(super) mod endpoints;
 
 pub use consumer_http::resolve_consumer_to_service;
 pub use consumer_protocol::{
-    resolve_graphql_consumer, resolve_rpc_consumer, resolve_topic_consumer,
+    resolve_graphql_consumer, resolve_rpc_consumer, resolve_table_consumer, resolve_topic_consumer,
+    resolve_websocket_consumer,
 };
 pub use endpoints::EndpointProviderRecord;
 
@@ -269,16 +271,19 @@ impl ContractJoiner {
         let mut unresolved_env_vars: BTreeMap<String, u32> = BTreeMap::new();
         let mut ambiguous_env_vars: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-        // Step 4 — resolve consumers (§7.3 table).
-        let mut consumers: BTreeMap<GlobalId, ConsumerResolution> = BTreeMap::new();
+        // Step 4 — resolve consumers (§7.3 table). Keyed by call site,
+        // holding one resolution per fact the node carries: a synthetic
+        // `topic-read:` node can subscribe to several topics on one
+        // line, and each subscription is a distinct consumer.
+        let mut consumers: BTreeMap<GlobalId, Vec<ConsumerResolution>> = BTreeMap::new();
         let mut external: BTreeMap<String, u32> = BTreeMap::new();
         let mut unnormalized: Vec<GlobalId> = Vec::new();
         let mut binds: Vec<BindsEdge> = Vec::new();
         let dispatch_chain: Vec<Box<dyn ProtocolDispatch>> = default_dispatch_chain();
-        for node in nodes {
-            let Some(fact) = node.contract.as_ref() else {
-                continue;
-            };
+        for (node, fact) in nodes
+            .iter()
+            .flat_map(|n| n.contract.iter().map(move |f| (n, f)))
+        {
             let call_id = match GlobalId::parse(&node.id) {
                 Ok(g) => g,
                 Err(_) => continue,
@@ -298,7 +303,10 @@ impl ContractJoiner {
                         config,
                         &mut binds,
                     );
-                    consumers.insert(call_id.clone(), resolution);
+                    consumers
+                        .entry(call_id.clone())
+                        .or_default()
+                        .push(resolution);
                     dispatched = true;
                     break;
                 }
@@ -344,9 +352,10 @@ impl ContractJoiner {
                         .get(call_id.as_str())
                         .cloned()
                         .unwrap_or_else(|| implicit_service(node));
-                    consumers.insert(
-                        call_id.clone(),
-                        ConsumerResolution {
+                    consumers
+                        .entry(call_id.clone())
+                        .or_default()
+                        .push(ConsumerResolution {
                             call_id: call_id.clone(),
                             service: own_service_for_unresolved,
                             target: Some(ConsumerTarget::Unresolved {
@@ -355,8 +364,7 @@ impl ContractJoiner {
                             }),
                             bound_endpoints: Vec::new(),
                             reads_complete: consumer.reads_complete,
-                        },
-                    );
+                        });
                     continue;
                 }
             }
@@ -387,7 +395,10 @@ impl ContractJoiner {
             ) {
                 unnormalized.push(call_id.clone());
             }
-            consumers.insert(call_id.clone(), resolution);
+            consumers
+                .entry(call_id.clone())
+                .or_default()
+                .push(resolution);
         }
 
         // Step 6 — apply confirmed bindings (§7.6).
@@ -410,7 +421,7 @@ impl ContractJoiner {
             .iter()
             .filter(|n| {
                 n.node_type == crate::schema::NodeType::FieldRef
-                    && matches!(n.contract.as_ref(), Some(ContractFact::FieldRead(_)))
+                    && matches!(n.contract.first(), Some(ContractFact::FieldRead(_)))
             })
             .collect();
         let field_ref_nodes_owned: Vec<GraphNode> =
@@ -420,7 +431,7 @@ impl ContractJoiner {
             .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsFrom)
             .cloned()
             .collect();
-        let schemas: EndpointSchemas = collect_endpoint_schemas(nodes, edges, &assignments);
+        let schemas: EndpointSchemas = collect_endpoint_schemas(nodes, edges, &assignments, config);
         let (field_refs, _schemaless, _unknown, field_binds) =
             resolve_field_refs(&field_ref_nodes_owned, &reads_from_edges, &binds, &schemas);
         binds.extend(field_binds);
@@ -500,6 +511,8 @@ impl ContractJoiner {
                 ContractKey::Topic { .. } => HttpMethod::Any,
                 ContractKey::Rpc { .. } => HttpMethod::Any,
                 ContractKey::Graphql { .. } => HttpMethod::Any,
+                ContractKey::WebSocket { .. } => HttpMethod::Any,
+                ContractKey::Table { .. } => HttpMethod::Any,
             };
             let template = key.leaf().to_string();
             let provider_records: Vec<EndpointProvider> = providers

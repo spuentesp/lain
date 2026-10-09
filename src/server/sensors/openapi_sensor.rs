@@ -389,13 +389,13 @@ fn enrich_with_openapi_dry(
             route_node.docstring = op.summary.clone();
 
             // Provider contract fact — same as PR 5.
-            route_node.contract = Some(ContractFact::Provider(ProviderFact {
+            route_node.contract = vec![ContractFact::Provider(ProviderFact {
                 method,
                 template: template.clone(),
                 handler: None, // spec-only
                 operation_id: Some(operation_id.clone()),
                 origin: ProviderOrigin::OpenApi,
-            }));
+            })];
 
             nodes.push(route_node);
 
@@ -600,9 +600,9 @@ fn emit_response_union(
     let mut schema_node = GraphNode::new(NodeType::Schema, schema_name, spec_path.to_string());
     schema_node.id = schema_id.clone();
     schema_node.line_start = Some(schema_line);
-    schema_node.contract = Some(ContractFact::Schema {
+    schema_node.contract = vec![ContractFact::Schema {
         direction: Direction::Response,
-    });
+    }];
     edges.push(GraphEdge::new(
         EdgeType::ResponseSchema,
         route_id.to_string(),
@@ -713,7 +713,7 @@ fn make_field_node(
     let mut node = GraphNode::new(NodeType::Field, name, spec_path.to_string());
     node.id = id;
     node.line_start = Some(line);
-    node.contract = Some(ContractFact::Field(meta.clone()));
+    node.contract = vec![ContractFact::Field(meta.clone())];
     node
 }
 
@@ -776,9 +776,9 @@ fn emit_request_schema(
     let mut schema_node = GraphNode::new(NodeType::Schema, schema_name, spec_path.to_string());
     schema_node.id = schema_id.clone();
     schema_node.line_start = Some(schema_line);
-    schema_node.contract = Some(ContractFact::Schema {
+    schema_node.contract = vec![ContractFact::Schema {
         direction: Direction::Request,
-    });
+    }];
     edges.push(GraphEdge::new(
         EdgeType::RequestSchema,
         route_id.to_string(),
@@ -1034,7 +1034,7 @@ paths:
             .find(|n| n.name == "shared")
             .expect("shared field present");
         assert_eq!(
-            shared.contract.as_ref().unwrap(),
+            shared.contract.first().unwrap(),
             &crate::federation::contracts::model::ContractFact::Field(
                 crate::federation::contracts::model::FieldMeta {
                     ty: crate::federation::contracts::model::TypeDesc::Unknown,
@@ -1052,7 +1052,7 @@ paths:
             .find(|n| n.name == "only_200")
             .expect("only_200 field present");
         assert_eq!(
-            only_200.contract.as_ref().unwrap(),
+            only_200.contract.first().unwrap(),
             &crate::federation::contracts::model::ContractFact::Field(
                 crate::federation::contracts::model::FieldMeta {
                     ty: crate::federation::contracts::model::TypeDesc::Integer,
@@ -1070,7 +1070,7 @@ paths:
             .find(|n| n.name == "only_201")
             .expect("only_201 field present");
         assert_eq!(
-            only_201.contract.as_ref().unwrap(),
+            only_201.contract.first().unwrap(),
             &crate::federation::contracts::model::ContractFact::Field(
                 crate::federation::contracts::model::FieldMeta {
                     ty: crate::federation::contracts::model::TypeDesc::Boolean,
@@ -1129,7 +1129,7 @@ paths:
             .find(|n| n.name == "$query.limit")
             .expect("$query.limit field present");
         if let crate::federation::contracts::model::ContractFact::Field(meta) =
-            limit.contract.as_ref().unwrap()
+            limit.contract.first().unwrap()
         {
             assert_eq!(
                 meta.ty,
@@ -1146,7 +1146,7 @@ paths:
             .find(|n| n.name == "name")
             .expect("name field present");
         if let crate::federation::contracts::model::ContractFact::Field(meta) =
-            name.contract.as_ref().unwrap()
+            name.contract.first().unwrap()
         {
             assert_eq!(
                 meta.ty,
@@ -1164,7 +1164,7 @@ paths:
             .find(|n| n.name == "note")
             .expect("note field present");
         if let crate::federation::contracts::model::ContractFact::Field(meta) =
-            note.contract.as_ref().unwrap()
+            note.contract.first().unwrap()
         {
             assert!(!meta.required);
             assert!(meta.nullable, "note has nullable: true");
@@ -1205,7 +1205,7 @@ paths:
             .into_iter()
             .filter(|n| {
                 n.node_type == NodeType::Schema
-                    && n.contract.as_ref().is_some_and(|c| {
+                    && n.contract.first().is_some_and(|c| {
                         matches!(
                             c,
                             crate::federation::contracts::model::ContractFact::Schema {

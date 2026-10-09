@@ -408,7 +408,13 @@ impl EdgeType {
             | EdgeType::WritesTable
             | EdgeType::Produces
             | EdgeType::Consumes => true,
-            EdgeType::PayloadSchema | EdgeType::Imports | EdgeType::DeployedTo => false,
+            // Known-but-unindexed: nothing emits a `PayloadSchema` edge
+            // yet. `payload_schema.rs` parses Avro/JSON-Schema/protobuf
+            // payloads, but no sensor mints the Topic→Schema edge, so
+            // advertising it would make `describe_schema` lie to clients.
+            EdgeType::PayloadSchema
+            | EdgeType::Imports
+            | EdgeType::DeployedTo => false,
         }
     }
 
@@ -533,7 +539,9 @@ impl EdgeType {
             ],
             // Schema / field / payload edges all originate from a
             // schema-bearing node.
-            EdgeType::RequestSchema | EdgeType::ResponseSchema => &[NodeType::HttpRoute],
+            EdgeType::RequestSchema | EdgeType::ResponseSchema => {
+                &[NodeType::HttpRoute, NodeType::Module]
+            }
             EdgeType::PayloadSchema => &[NodeType::Topic],
             EdgeType::HasField => &[NodeType::Schema],
             EdgeType::ReadsField => &[NodeType::Function, NodeType::Method],
@@ -603,7 +611,11 @@ impl EdgeType {
             EdgeType::PayloadSchema => &[NodeType::Schema],
             EdgeType::HasField => &[NodeType::Field],
             EdgeType::ReadsField => &[NodeType::FieldRef],
-            EdgeType::ReadsFrom => &[NodeType::HttpClientCall],
+            EdgeType::ReadsFrom => &[
+                NodeType::HttpClientCall,
+                NodeType::Function,
+                NodeType::Method,
+            ],
             // `Binds` targets: the provider side. HttpClientCall →
             // HttpRoute, FieldRef → Field, consumer Topic → producer
             // Topic.
@@ -723,11 +735,21 @@ pub struct GraphNode {
     /// - `Field` → `ContractFact::Field`
     /// - `FieldRef` → `ContractFact::FieldRead`
     ///
+    /// Every fact this node carries. A list rather than a single
+    /// `Option` because one node can genuinely record more than one:
+    /// two subscriptions to different topics on one physical line
+    /// share a `topic-read:<path>:<line>` node and each is a
+    /// `TopicConsumer`. The nodes are one-fact-per-*owner* — see
+    /// `sensor_owner_of`, which must find a single owner across all of
+    /// them.
+    ///
     /// `#[serde(default)]` so JSON readers tolerate absence for
     /// pre-schema-v3 callers; bincode forwards it on the wire (see
-    /// the comment on `repo_id` above).
+    /// the comment on `repo_id` above). Changing the shape here
+    /// changes the bincode layout — bump `PATH_FORMAT_VERSION` and
+    /// `FEDERATION_GRAPH_VERSION` with it.
     #[serde(default)]
-    pub contract: Option<crate::federation::contracts::model::ContractFact>,
+    pub contract: Vec<crate::federation::contracts::model::ContractFact>,
     /// How a function is invoked at runtime. Set by
     /// `entry_point_sensor` on function nodes (`§6.6`). `None`
     /// for nodes that are not entry points or whose sensor has
@@ -889,7 +911,7 @@ impl GraphNode {
             commit_hash: None,
             is_hydrated: true,
             repo_id: None,
-            contract: None,
+            contract: Vec::new(),
             entry: None,
         }
     }
@@ -1058,6 +1080,16 @@ pub struct GraphEdge {
 }
 
 impl GraphEdge {
+    /// Build a static-analysis edge.
+    ///
+    /// Every edge a sensor emits is a static fact, so it carries
+    /// `Static{TreeSitter}` provenance by default. Leaving it `None`
+    /// made impact-path hops report `{"kind":"unknown","confidence":0.0}`
+    /// and drove `min_confidence` to 0.0 on every multi-hop path, so
+    /// the documented `min_confidence` filter could only ever drop
+    /// everything. Deserialized legacy edges that carry no provenance
+    /// still read as `None` and are still treated as 0.0 by
+    /// `traverse_impact` — confidence remains evidence-backed.
     pub fn new(edge_type: EdgeType, source_id: String, target_id: String) -> Self {
         Self {
             edge_type,
@@ -1065,7 +1097,9 @@ impl GraphEdge {
             target_id,
             weight: None,
             cross_repo: false,
-            provenance: None,
+            provenance: Some(EdgeProvenance::Static {
+                source: StaticSource::TreeSitter,
+            }),
             site: None,
             detail: None,
         }

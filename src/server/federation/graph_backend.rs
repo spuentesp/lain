@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 /// layout change. Old v2 files are refused at load — recovery is
 /// `lain reindex`.
 pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
-pub const FEDERATION_GRAPH_VERSION: u32 = 3;
+pub const FEDERATION_GRAPH_VERSION: u32 = 4;
 pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
 
 /// Sibling file holding the validated payload (everything after the
@@ -423,7 +423,7 @@ impl GraphBackend for PetgraphBackend {
             // Confidence must be evidence-backed. Explicit weights win;
             // otherwise derive it from provenance. A legacy edge with
             // neither is unknown (0.0), not implicitly verified static data.
-            let conf = e.weight.unwrap_or_else(|| match e.provenance.as_ref() {
+            let conf = e.weight.unwrap_or(match e.provenance.as_ref() {
                 Some(crate::schema::EdgeProvenance::Static { .. })
                 | Some(crate::schema::EdgeProvenance::Confirmed { .. }) => 1.0,
                 Some(crate::schema::EdgeProvenance::Heuristic { confidence, .. }) => *confidence,

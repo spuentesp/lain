@@ -62,13 +62,13 @@ fn provider_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::HttpRoute, path, name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::Provider(ProviderFact {
+    n.contract = vec![ContractFact::Provider(ProviderFact {
         method,
         template: template.to_string(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::Code,
-    }));
+    })];
     n
 }
 
@@ -92,7 +92,7 @@ fn receiver_consumer_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::HttpClientCall, path, name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::Consumer(ConsumerFact {
+    n.contract = vec![ContractFact::Consumer(ConsumerFact {
         method,
         url,
         via: CallVia::Receiver {
@@ -102,7 +102,7 @@ fn receiver_consumer_node(
         },
         url_expr: format!("{expr}.{fn_name}(...)"),
         reads_complete: true,
-    }));
+    })];
     n
 }
 
@@ -132,6 +132,7 @@ fn orders_billing_config() -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -204,7 +205,7 @@ fn b1_known_base_binds_to_orders_service() {
         1,
     );
     let gid = lain::federation::repo_id::GlobalId::from_string(&call_id);
-    let resolution = out.index.consumers.get(&gid).expect("consumer present");
+    let resolution = out.index.consumer(&gid).expect("consumer present");
     match &resolution.target {
         Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
@@ -428,7 +429,7 @@ fn b5_python_ctor_client_with_known_base_binds() {
     // — the joiner's `target_service_from_hosts` already handles
     // this; the registry entry is a parallel channel that
     // resolves the same way.
-    if let Some(ContractFact::Consumer(c)) = consumer.contract.as_mut() {
+    if let Some(ContractFact::Consumer(c)) = consumer.contract.first_mut() {
         c.via = CallVia::Library {
             name: "httpx".into(),
         };

@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::federation::contracts::index::{BoundField, EndpointId, FieldRefResolution};
 use crate::federation::contracts::model::{
-    ContractFact, ContractKey, Direction, FieldMeta, JsonPath, ServiceName,
+    ContractFact, Direction, FieldMeta, JsonPath, ServiceName,
 };
 use crate::federation::repo_id::GlobalId;
 use crate::schema::{EdgeProvenance, GraphEdge, GraphNode};
@@ -79,13 +79,14 @@ pub(crate) fn collect_endpoint_schemas(
     nodes: &[GraphNode],
     edges: &[GraphEdge],
     assignments: &BTreeMap<String, ServiceName>,
+    config: &crate::federation::contracts::config::ContractFederationConfig,
 ) -> EndpointSchemas {
     // 1. Index every Schema + Field node by global id so we can
     //    resolve their contract payloads in O(1).
     let mut schema_by_id: BTreeMap<String, Direction> = BTreeMap::new();
     let mut field_node_by_id: BTreeMap<String, (JsonPath, FieldMeta)> = BTreeMap::new();
     for node in nodes {
-        match node.contract.as_ref() {
+        match node.contract.first() {
             Some(ContractFact::Schema { direction }) => {
                 schema_by_id.insert(node.id.clone(), *direction);
             }
@@ -130,13 +131,14 @@ pub(crate) fn collect_endpoint_schemas(
     }
 
     // 3. Route id → list of `(direction, schema_id)`. The route id
-    //    is the `HttpRoute` node's global id; we resolve the service
+    //    is the route or topic node's global id; we resolve the service
     //    from the assignments map.
     let mut schemas_by_route: BTreeMap<String, Vec<(Direction, String)>> = BTreeMap::new();
     for edge in edges {
         let dir = match edge.edge_type {
             crate::schema::EdgeType::RequestSchema => Some(Direction::Request),
             crate::schema::EdgeType::ResponseSchema => Some(Direction::Response),
+            crate::schema::EdgeType::PayloadSchema => Some(Direction::Payload),
             _ => None,
         };
         let Some(dir) = dir else { continue };
@@ -147,10 +149,7 @@ pub(crate) fn collect_endpoint_schemas(
     }
 
     // 4. For every route that has at least one schema, resolve its
-    //    service and `(method, template)` so we can index by
-    //    `EndpointId`. Routes without a service assignment are
-    //    dropped — they live in the per-repo graph but the
-    //    federation can't route them.
+    //    service and ContractKey so we can index by `EndpointId`.
     let mut by_endpoint: BTreeMap<EndpointId, BTreeMap<Direction, Vec<ResponseField>>> =
         BTreeMap::new();
     let mut schema_node: BTreeMap<EndpointId, BTreeMap<Direction, GlobalId>> = BTreeMap::new();
@@ -158,19 +157,17 @@ pub(crate) fn collect_endpoint_schemas(
         let Some(svc) = assignments.get(&route_id) else {
             continue;
         };
-        // The route's `ContractKey` is `(method, template)` — recover
-        // both from the route's `ProviderFact`.
         let Some(route_node) = nodes.iter().find(|n| n.id == route_id) else {
             continue;
         };
-        let Some(ContractFact::Provider(p)) = route_node.contract.as_ref() else {
+        // Task 4: derive the key via the same function the endpoint
+        // table uses, so a `base_path` / `route_prefixes` on the
+        // service produces the same key in both places.
+        let Some((endpoint_id, _template)) =
+            super::joiner::endpoints::contract_key_for_provider(route_node, svc, config)
+        else {
             continue;
         };
-        let key = ContractKey::Http {
-            method: crate::federation::contracts::model::MethodSpec::Known(p.method),
-            template: p.template.clone(),
-        };
-        let endpoint_id: EndpointId = (svc.clone(), key);
         let bucket = by_endpoint.entry(endpoint_id.clone()).or_default();
         let mut node_map: BTreeMap<Direction, GlobalId> = BTreeMap::new();
         for (dir, schema_id) in schemas {
@@ -189,10 +186,140 @@ pub(crate) fn collect_endpoint_schemas(
         }
     }
 
+    // Step 4b: Schemas explicitly declared in repos.yaml via `schemas` (Gap 20).
+    //
+    // Task 4: the pre-fix code built the endpoint id from
+    // `decl.repo` (treated as a service name) and `"kafka"`
+    // (hardcoded broker), so any service whose configured name
+    // differed from its repo id (e.g. `payments-api` over repo
+    // `payments`) or whose topic sat on a non-kafka broker never
+    // reached the endpoint the joiner built. Fix: look up the
+    // topic provider that actually emits `decl.topic` and reuse
+    // `contract_key_for_provider` for the broker + full template,
+    // so the key byte-matches the one `build_endpoints` produced.
+    for decl in &config.schemas {
+        let Some(schema_node_rec) = pick_schema_node(nodes, &decl.repo, &decl.file, None) else {
+            continue;
+        };
+        let Some(fields) = fields_by_schema.get(&schema_node_rec.id) else {
+            continue;
+        };
+        let Ok(schema_gid) = GlobalId::parse(&schema_node_rec.id) else {
+            continue;
+        };
+        let Some(svc) = assignments.get(&schema_node_rec.id).cloned() else {
+            continue;
+        };
+
+        // Verify the matched schema node belongs to a service
+        // whose configured repo is `decl.repo`. `validate()` is
+        // the strict gate that catches the misconfig, but the
+        // joiner can be invoked without it (e.g. from tests
+        // that hand-build the inputs). Without this check the
+        // schema would silently attach to the wrong endpoint
+        // whenever the operator typoed the repo.
+        let svc_repo_matches = config
+            .services
+            .iter()
+            .find(|s| s.name == svc.0)
+            .map(|s| s.repo == decl.repo)
+            .unwrap_or(false);
+        if !svc_repo_matches {
+            continue;
+        }
+
+        // Find the topic provider that emits `decl.topic` from
+        // the same service. `validate()` already guarantees a
+        // service exists for `decl.repo`, but a deployment may
+        // publish the topic from a sibling service inside the
+        // same repo — fall back to any matching topic provider
+        // so the schema reaches the right endpoint.
+        //
+        // `min_by` on the node id rather than `find`: two providers can
+        // match the same template, and `find` would take whichever the
+        // caller happened to pass first — so the join output would
+        // depend on input order (I4). The id is a total order over the
+        // candidates, so the choice is stable.
+        let topic_node = nodes
+            .iter()
+            .filter(|n| {
+                n.node_type == crate::schema::NodeType::Topic
+                    && matches!(n.contract.first(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
+                    && assignments.get(&n.id) == Some(&svc)
+            })
+            .min_by(|a, b| a.id.cmp(&b.id))
+            .or_else(|| {
+                nodes
+                    .iter()
+                    .filter(|n| {
+                        n.node_type == crate::schema::NodeType::Topic
+                            && matches!(n.contract.first(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
+                    })
+                    .min_by(|a, b| a.id.cmp(&b.id))
+            });
+        let Some(topic_node) = topic_node else {
+            continue;
+        };
+        let Some((endpoint_id, _template)) =
+            super::joiner::endpoints::contract_key_for_provider(topic_node, &svc, config)
+        else {
+            continue;
+        };
+        let bucket = by_endpoint.entry(endpoint_id.clone()).or_default();
+        bucket
+            .entry(Direction::Payload)
+            .or_default()
+            .extend(fields.iter().cloned());
+        schema_node
+            .entry(endpoint_id)
+            .or_default()
+            .insert(Direction::Payload, schema_gid);
+    }
+
     EndpointSchemas {
         by_endpoint,
         schema_node,
     }
+}
+
+/// Step 4b's Schema-node lookup: among the `Schema` nodes whose path
+/// is `file` (or ends in `/file`), pick the one a `repos.yaml`
+/// `schemas:` entry refers to — deterministically (I4). Several
+/// types can share one file (a multi-type SDL), and `nodes` order
+/// comes from a DashMap iteration, so "first match" would make the
+/// output depend on insertion order. The pick is a total order on
+/// the node itself, never on iteration order: an exact `name` match
+/// first (when the caller knows the declared type), then a node from
+/// the declared `repo`, then the lowest `line_start` (`None` counts
+/// as `u32::MAX` — an unpositioned node cannot outrank a positioned
+/// one), then the lexicographically smallest `GlobalId`.
+fn pick_schema_node<'a>(
+    nodes: &'a [GraphNode],
+    repo: &str,
+    file: &str,
+    name: Option<&str>,
+) -> Option<&'a GraphNode> {
+    nodes
+        .iter()
+        .filter(|n| {
+            n.node_type == crate::schema::NodeType::Schema
+                && (n.path == file || n.path.ends_with(&format!("/{file}")))
+        })
+        .min_by(|a, b| {
+            let a_name = name.is_some_and(|w| a.name == w);
+            let b_name = name.is_some_and(|w| b.name == w);
+            let a_repo = a.repo_id.as_deref() == Some(repo);
+            let b_repo = b.repo_id.as_deref() == Some(repo);
+            b_name
+                .cmp(&a_name)
+                .then_with(|| b_repo.cmp(&a_repo))
+                .then_with(|| {
+                    a.line_start
+                        .unwrap_or(u32::MAX)
+                        .cmp(&b.line_start.unwrap_or(u32::MAX))
+                })
+                .then_with(|| a.id.cmp(&b.id))
+        })
 }
 
 /// Resolve every `FieldRef` against the bound endpoints of its
@@ -282,7 +409,7 @@ pub(crate) fn resolve_field_refs(
         let Ok(fid) = GlobalId::parse(&node.id) else {
             continue;
         };
-        let Some(ContractFact::FieldRead(read)) = node.contract.as_ref() else {
+        let Some(ContractFact::FieldRead(read)) = node.contract.first() else {
             continue;
         };
         let Some(call_id) = reads_from.get(&node.id) else {
@@ -326,7 +453,9 @@ pub(crate) fn resolve_field_refs(
         let mut bound_fields: Vec<BoundField> = Vec::new();
         for (endpoint, ep_bind) in endpoints {
             let response_fields = match schemas.by_endpoint.get(endpoint) {
-                Some(dirs) => dirs.get(&Direction::Response),
+                Some(dirs) => dirs
+                    .get(&Direction::Response)
+                    .or_else(|| dirs.get(&Direction::Payload)),
                 None => None,
             };
             let Some(response_fields) = response_fields else {
@@ -581,7 +710,9 @@ fn endpoint_service(endpoints: &BTreeMap<EndpointId, EndpointBindInfo>) -> Servi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::federation::contracts::model::{HttpMethod, MethodSpec, TypeDesc};
+    use crate::federation::contracts::model::{
+        ContractKey, HttpMethod, MethodSpec, ProviderFact, ProviderOrigin, TypeDesc,
+    };
 
     fn http_key(method: HttpMethod, template: &str) -> ContractKey {
         ContractKey::Http {
@@ -601,6 +732,203 @@ mod tests {
                 enum_values: None,
             },
         }
+    }
+
+    /// Two topic providers can carry the same `ProviderFact.template`
+    /// and still resolve to *different* endpoints: the broker lives in
+    /// the node name (`broker/topic`) and `default_broker_for` folds it
+    /// into `ContractKey::Topic`. So the pick is observable — and it
+    /// must not depend on the order the node list arrived in (I4: join
+    /// output is order-independent). `find` took whichever match the
+    /// caller happened to pass first; the lookup now tie-breaks on the
+    /// node id, which is a total order over the candidates.
+    ///
+    /// `EndpointSchemas` does not derive `PartialEq`, so the
+    /// comparison is over its `Debug` rendering — stable here because
+    /// the maps are `BTreeMap` and the lists are `Vec`.
+    #[test]
+    fn topic_provider_choice_is_independent_of_node_order() {
+        use crate::federation::contracts::config::{
+            ContractFederationConfig, SchemaDecl, ServiceDecl,
+        };
+        use crate::federation::contracts::model::{ProviderOrigin, ServiceName};
+        use crate::federation::repo_id::RepoId;
+        use crate::schema::{EdgeType, NodeType};
+
+        let svc = ServiceName("orders".into());
+
+        let mk_schema = |name: &str, line: u32| -> String {
+            let gid = GlobalId::new(
+                &RepoId::new("orders").unwrap(),
+                NodeType::Schema,
+                "payload.avsc",
+                name,
+                Some(line),
+            );
+            gid.as_str().to_string()
+        };
+        let schema_id = mk_schema("Order", 7);
+        let field_gid = GlobalId::new(
+            &RepoId::new("orders").unwrap(),
+            NodeType::Field,
+            "payload.avsc",
+            "customer_id",
+            Some(8),
+        );
+        let field_id = field_gid.as_str().to_string();
+
+        let mut schema_node =
+            GraphNode::new(NodeType::Schema, "Order".into(), "payload.avsc".into());
+        schema_node.id = schema_id.clone();
+        schema_node.contract = vec![ContractFact::Schema {
+            direction: Direction::Payload,
+        }];
+        let mut field_node =
+            GraphNode::new(NodeType::Field, "customer_id".into(), "payload.avsc".into());
+        field_node.id = field_id.clone();
+        field_node.contract = vec![ContractFact::Field(FieldMeta {
+            ty: TypeDesc::String,
+            required: true,
+            nullable: false,
+            enum_values: None,
+        })];
+        let has_field = GraphEdge::new(EdgeType::HasField, schema_id.clone(), field_id);
+
+        // Two topic providers with the *same* template but different
+        // brokers, so `contract_key_for_provider` yields two distinct
+        // `EndpointId`s and the pick is observable. Same broker would
+        // collapse the candidates to one key and the test would pass
+        // vacuously (it did, the first time).
+        let mk_topic = |path: &str, line: u32, broker: &str| {
+            let label = format!("{broker}/orders.created");
+            let gid = GlobalId::new(
+                &RepoId::new("orders").unwrap(),
+                NodeType::Topic,
+                path,
+                &label,
+                Some(line),
+            );
+            let mut n = GraphNode::new(NodeType::Topic, label, path.into());
+            n.id = gid.as_str().to_string();
+            n.contract = vec![ContractFact::Provider(ProviderFact {
+                method: HttpMethod::Any,
+                template: "orders.created".into(),
+                handler: None,
+                operation_id: None,
+                origin: ProviderOrigin::Code,
+            })];
+            n
+        };
+        let topic_a = mk_topic("src/a.py", 1, "kafka");
+        let topic_b = mk_topic("src/b.py", 2, "rabbit");
+        // The documented tie-break is "lowest node id", not "either, as
+        // long as it is stable" — so the fixture also knows which one
+        // should win.
+        let winner = if topic_a.id <= topic_b.id {
+            &topic_a
+        } else {
+            &topic_b
+        };
+
+        let mut assignments = BTreeMap::new();
+        assignments.insert(topic_a.id.clone(), svc.clone());
+        assignments.insert(topic_b.id.clone(), svc.clone());
+        assignments.insert(schema_id.clone(), svc.clone());
+
+        let mut services = ServiceDecl {
+            name: "orders".into(),
+            repo: "orders".into(),
+            paths: Vec::new(),
+            hosts: Vec::new(),
+            env: Vec::new(),
+            base_path: None,
+            route_prefixes: Vec::new(),
+        };
+        services.name = "orders".into();
+        let config = ContractFederationConfig {
+            services: vec![services],
+            schemas: vec![SchemaDecl {
+                topic: "orders.created".into(),
+                repo: "orders".into(),
+                file: "payload.avsc".into(),
+            }],
+            ..Default::default()
+        };
+
+        let forward = vec![
+            schema_node.clone(),
+            field_node.clone(),
+            topic_a.clone(),
+            topic_b.clone(),
+        ];
+        let reverse = vec![
+            schema_node.clone(),
+            field_node.clone(),
+            topic_b.clone(),
+            topic_a.clone(),
+        ];
+        let only_winner = vec![schema_node, field_node, winner.clone()];
+        // The edge list order is not what is under test; keep it fixed.
+        let edges = vec![has_field];
+
+        let a = collect_endpoint_schemas(&forward, &edges, &assignments, &config);
+        let b = collect_endpoint_schemas(&reverse, &edges, &assignments, &config);
+        let c = collect_endpoint_schemas(&only_winner, &edges, &assignments, &config);
+
+        assert!(
+            !a.by_endpoint.is_empty(),
+            "the fixture resolved no topic provider — this test would be vacuous"
+        );
+        let key_of = |n: &GraphNode| {
+            super::super::joiner::endpoints::contract_key_for_provider(n, &svc, &config)
+                .expect("fixture topic nodes carry a provider contract")
+                .0
+        };
+        let (key_a, key_b) = (key_of(&topic_a), key_of(&topic_b));
+        assert_ne!(
+            key_a, key_b,
+            "fixture candidates must resolve to distinct endpoints, \
+             or the pick is unobservable and the test is vacuous"
+        );
+        assert_eq!(
+            a.by_endpoint.keys().collect::<Vec<_>>(),
+            vec![&key_of(winner)],
+            "the join must pick the lowest node id, deterministically"
+        );
+        assert_eq!(
+            format!("{a:?}"),
+            format!("{b:?}"),
+            "join output must not depend on the order the node list arrives in"
+        );
+        assert_eq!(
+            format!("{a:?}"),
+            format!("{c:?}"),
+            "a lower-priority candidate must not change the join output"
+        );
+
+        // The fallback tier ("a deployment may publish the topic from a
+        // sibling service") is a second `.find()` site in the same
+        // lookup and needs the same order check: with neither topic node
+        // assigned to `svc`, only the fallback can resolve, and it must
+        // also pick the lowest node id.
+        let mut sibling_assignments = BTreeMap::new();
+        sibling_assignments.insert(schema_id, svc.clone());
+        let d1 = collect_endpoint_schemas(&forward, &edges, &sibling_assignments, &config);
+        let d2 = collect_endpoint_schemas(&reverse, &edges, &sibling_assignments, &config);
+        assert!(
+            !d1.by_endpoint.is_empty(),
+            "fallback tier resolved no topic provider — that check would be vacuous"
+        );
+        assert_eq!(
+            d1.by_endpoint.keys().collect::<Vec<_>>(),
+            vec![&key_of(winner)],
+            "the fallback must pick the lowest node id too"
+        );
+        assert_eq!(
+            format!("{d1:?}"),
+            format!("{d2:?}"),
+            "fallback output must not depend on the order the node list arrives in"
+        );
     }
 
     #[test]
@@ -990,10 +1318,11 @@ mod tests {
         node.id = format!("billing:FieldRef:billing.py:{chain}:1");
         node.repo_id = Some("billing".into());
         node.line_start = Some(1);
-        node.contract = Some(ContractFact::FieldRead(FieldReadFact {
+        node.contract = vec![ContractFact::FieldRead(FieldReadFact {
             chain: chain.parse().unwrap(),
             exact,
-        }));
+            origin: crate::federation::contracts::model::FieldReadOrigin::FieldAccess,
+        })];
         node
     }
 
@@ -1020,5 +1349,559 @@ mod tests {
             route_match: crate::schema::RouteMatch::Exact,
             stripped_prefix: None,
         }
+    }
+
+    // ─── Task 6 (mutation-credibility plan): boundary fixtures ─────
+
+    #[test]
+    fn is_suffix_rejects_a_partial_byte_match() {
+        // `fp[fp.len() - read.len()..] == read[..]` is a segment-
+        // suffix check: a path that merely *starts* with the read
+        // chain must not match, and a shorter fp never can.
+        let fp: JsonPath = "orders.customer_id".parse().unwrap();
+        let rc: JsonPath = "customer_id".parse().unwrap();
+        assert!(is_suffix(&fp, &rc), "a trailing segment must match");
+        let prefix: JsonPath = "customer_id_orders".parse().unwrap();
+        assert!(
+            !is_suffix(&prefix, &rc),
+            "a prefix match must not be accepted as a suffix match"
+        );
+        let shorter: JsonPath = "cust".parse().unwrap();
+        assert!(
+            !is_suffix(&shorter, &rc),
+            "a shorter fp cannot suffix-match"
+        );
+    }
+
+    #[test]
+    fn field_join_unique_suffix_guard_refuses_two_candidates() {
+        // `suffix_matches.len() == 1` — two ResponseFields sharing a
+        // path suffix must not silently bind to the first: §7.5
+        // step 3 sends them down the ambiguous arm (one Binds each
+        // at 0.3), never to `suffix_matches[0]`.
+        let endpoint: EndpointId = (
+            ServiceName("orders".into()),
+            http_key(HttpMethod::Get, "/api/orders"),
+        );
+        let schemas = schemas_with(
+            endpoint.clone(),
+            vec![
+                field("orders:Field:openapi.yaml:a.total:10", "a.total"),
+                field("orders:Field:openapi.yaml:b.total:11", "b.total"),
+            ],
+        );
+        let fr_node = node_field_ref("total", true);
+        let reads_from: Vec<GraphEdge> = vec![edge(
+            crate::schema::EdgeType::ReadsFrom,
+            &fr_node.id,
+            "billing:HttpClientCall:billing.py:get:1",
+        )];
+        let binds = vec![bind_edge(
+            "billing:HttpClientCall:billing.py:get:1",
+            &endpoint,
+        )];
+        let (out, schemaless, _unknown, field_binds) =
+            resolve_field_refs(&[fr_node], &reads_from, &binds, &schemas);
+        assert!(schemaless.is_empty());
+        let r = out.values().next().unwrap();
+        assert!(!r.unknown, "ambiguous suffix binds are known, not unknown");
+        assert_eq!(
+            r.bound_fields.len(),
+            2,
+            "two fields sharing a suffix must both bind ambiguously, not pick the first: {:?}",
+            r.bound_fields
+        );
+        assert_eq!(field_binds.len(), 2, "two ambiguous field binds");
+        for fb in &field_binds {
+            assert!((fb.confidence - 0.3).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn field_bind_tie_keeps_the_read_side_provenance() {
+        // §4.6 tie-break (`r_conf <= endpoint.confidence`): when
+        // read and endpoint bind are both Heuristic at equal
+        // confidence, the weaker-source detail of the *read* side
+        // wins. The fixture pins a genuine tie — both sides at 0.6.
+        let endpoint: EndpointId = (
+            ServiceName("orders".into()),
+            http_key(HttpMethod::Get, "/api/orders"),
+        );
+        let schemas = schemas_with(
+            endpoint.clone(),
+            vec![field(
+                "orders:Field:openapi.yaml:customer.id:5",
+                "customer.id",
+            )],
+        );
+        // Non-exact read → Heuristic { field_suffix, 0.6 }.
+        let fr_node = node_field_ref("id", false);
+        let reads_from: Vec<GraphEdge> = vec![edge(
+            crate::schema::EdgeType::ReadsFrom,
+            &fr_node.id,
+            "billing:HttpClientCall:billing.py:get:1",
+        )];
+        let mut binds = vec![bind_edge(
+            "billing:HttpClientCall:billing.py:get:1",
+            &endpoint,
+        )];
+        binds[0].confidence = 0.6;
+        binds[0].provenance = EdgeProvenance::Heuristic {
+            detector: "unbound_host".into(),
+            confidence: 0.6,
+        };
+        let (_out, _schemaless, _unknown, field_binds) =
+            resolve_field_refs(&[fr_node], &reads_from, &binds, &schemas);
+        assert_eq!(field_binds.len(), 1, "unique suffix must bind");
+        let fb = &field_binds[0];
+        assert!((fb.confidence - 0.6).abs() < f32::EPSILON, "min(0.6, 0.6)");
+        match &fb.provenance {
+            EdgeProvenance::Heuristic {
+                detector,
+                confidence,
+            } => {
+                assert_eq!(
+                    detector, "field_suffix",
+                    "a confidence tie must keep the read side's detector"
+                );
+                assert!((confidence - 0.6).abs() < f32::EPSILON);
+            }
+            other => panic!("expected Heuristic provenance, got {other:?}"),
+        }
+    }
+
+    // ─── `collect_endpoint_schemas` negative branches ────────────────
+
+    fn schema_graph_node(repo: &str, path: &str, name: &str, line: u32) -> GraphNode {
+        let mut n = GraphNode::new_in(
+            crate::schema::NodeType::Schema,
+            name.to_string(),
+            path.to_string(),
+            &crate::schema::RepoNamespace::for_test(),
+        );
+        n.repo_id = Some(repo.to_string());
+        n.id = format!("{repo}:Schema:{path}:{name}:{line}");
+        n.line_start = Some(line);
+        n.contract = vec![ContractFact::Schema {
+            direction: Direction::Payload,
+        }];
+        n
+    }
+
+    fn payload_field_node(repo: &str, path: &str, name: &str, line: u32) -> GraphNode {
+        let mut n = GraphNode::new_in(
+            crate::schema::NodeType::Field,
+            name.to_string(),
+            path.to_string(),
+            &crate::schema::RepoNamespace::for_test(),
+        );
+        n.repo_id = Some(repo.to_string());
+        n.id = format!("{repo}:Field:{path}:{name}:{line}");
+        n.line_start = Some(line);
+        n.contract = vec![ContractFact::Field(FieldMeta {
+            ty: TypeDesc::String,
+            required: true,
+            nullable: false,
+            enum_values: None,
+        })];
+        n
+    }
+
+    fn topic_provider_graph_node(
+        repo: &str,
+        node_name: &str,
+        template: &str,
+        line: u32,
+    ) -> GraphNode {
+        let mut n = GraphNode::new_in(
+            crate::schema::NodeType::Topic,
+            node_name.to_string(),
+            "src/events.py".to_string(),
+            &crate::schema::RepoNamespace::for_test(),
+        );
+        n.repo_id = Some(repo.to_string());
+        n.id = format!("{repo}:Topic:src/events.py:{node_name}:{line}");
+        n.line_start = Some(line);
+        n.contract = vec![ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Any,
+            template: template.to_string(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        })];
+        n
+    }
+
+    fn http_provider_graph_node(repo: &str, template: &str, line: u32) -> GraphNode {
+        let node_name = format!("http-post-{template}");
+        let mut n = GraphNode::new_in(
+            crate::schema::NodeType::HttpRoute,
+            node_name.clone(),
+            "src/api.py".to_string(),
+            &crate::schema::RepoNamespace::for_test(),
+        );
+        n.repo_id = Some(repo.to_string());
+        n.id = format!("{repo}:HttpRoute:src/api.py:{node_name}:{line}");
+        n.line_start = Some(line);
+        n.contract = vec![ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Post,
+            template: template.to_string(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        })];
+        n
+    }
+
+    fn assign_map(pairs: &[(String, &str)]) -> BTreeMap<String, ServiceName> {
+        pairs
+            .iter()
+            .map(|(id, svc)| (id.clone(), ServiceName(svc.to_string())))
+            .collect()
+    }
+
+    fn cfg_with_decl(
+        services: &[&str],
+        decl_repo: &str,
+        decl_file: &str,
+        decl_topic: &str,
+    ) -> crate::federation::contracts::config::ContractFederationConfig {
+        use crate::federation::contracts::config::{
+            ContractFederationConfig, SchemaDecl, ServiceDecl,
+        };
+        ContractFederationConfig {
+            services: services
+                .iter()
+                .map(|name| ServiceDecl {
+                    name: (*name).into(),
+                    repo: (*name).into(),
+                    paths: vec![],
+                    hosts: vec![],
+                    env: vec![],
+                    base_path: None,
+                    route_prefixes: vec![],
+                })
+                .collect(),
+            http_clients: vec![],
+            generic_keys: vec![],
+            schemas: vec![SchemaDecl {
+                topic: decl_topic.into(),
+                repo: decl_repo.into(),
+                file: decl_file.into(),
+            }],
+            bindings: vec![],
+            databases: vec![],
+        }
+    }
+
+    fn cfg_without_decl(
+        services: &[&str],
+    ) -> crate::federation::contracts::config::ContractFederationConfig {
+        use crate::federation::contracts::config::{ContractFederationConfig, ServiceDecl};
+        ContractFederationConfig {
+            services: services
+                .iter()
+                .map(|name| ServiceDecl {
+                    name: (*name).into(),
+                    repo: (*name).into(),
+                    paths: vec![],
+                    hosts: vec![],
+                    env: vec![],
+                    base_path: None,
+                    route_prefixes: vec![],
+                })
+                .collect(),
+            http_clients: vec![],
+            generic_keys: vec![],
+            schemas: vec![],
+            bindings: vec![],
+            databases: vec![],
+        }
+    }
+
+    fn has_payload(out: &EndpointSchemas, key: &EndpointId) -> bool {
+        out.by_endpoint
+            .get(key)
+            .map(|dirs| dirs.contains_key(&Direction::Payload))
+            .unwrap_or(false)
+    }
+
+    fn topic_key(svc: &str, broker: &str, name: &str) -> EndpointId {
+        (
+            ServiceName(svc.to_string()),
+            ContractKey::Topic {
+                broker: broker.to_string(),
+                name: name.to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn schema_attach_drops_a_retracted_route() {
+        // Defensive gate at `find(|n| n.id == route_id)`: the
+        // `PayloadSchema` edge names a route that no longer exists
+        // in `nodes` (the route was retracted before its schema
+        // was — the caller still supplies its assignment). The
+        // schema must be dropped; it must not attach through
+        // whatever node happens to sit at the head of the list.
+        let topic = topic_provider_graph_node("orders", "kafka/orders.events", "orders.events", 10);
+        let schema = schema_graph_node("orders", "schemas/orders.avsc", "OrderEvent", 1);
+        let fld = payload_field_node("orders", "schemas/orders.avsc", "order_id", 3);
+        let has_field = GraphEdge::new(
+            crate::schema::EdgeType::HasField,
+            schema.id.clone(),
+            fld.id.clone(),
+        );
+        let ghost = "orders:Topic:src/events.py:orders_events:99".to_string();
+        let payload_edge = GraphEdge::new(
+            crate::schema::EdgeType::PayloadSchema,
+            ghost.clone(),
+            schema.id.clone(),
+        );
+        let assignments = assign_map(&[
+            (ghost, "orders"),
+            (topic.id.clone(), "orders"),
+            (schema.id.clone(), "orders"),
+            (fld.id.clone(), "orders"),
+        ]);
+        let cfg = cfg_without_decl(&["orders"]);
+        let out = collect_endpoint_schemas(
+            &[topic, schema, fld],
+            &[has_field, payload_edge],
+            &assignments,
+            &cfg,
+        );
+        assert!(
+            out.by_endpoint.is_empty(),
+            "a retracted route must drop its schema, not attach it to another node: {:?}",
+            out.by_endpoint
+        );
+    }
+
+    #[test]
+    fn decl_loop_ignores_a_missing_schema_file() {
+        // `n.path == decl.file` / `node_type == Schema && (…)`
+        // false branches: `config.schemas` names
+        // `schemas/orders.avsc` but no node carries that path. A
+        // decoy Schema node with a different path must not be
+        // picked up by the find, and nothing may attach.
+        let decoy = schema_graph_node("orders", "schemas/decoy.avsc", "Decoy", 5);
+        let decoy_field = payload_field_node("orders", "schemas/decoy.avsc", "decoy_id", 6);
+        let topic = topic_provider_graph_node("orders", "kafka/orders.events", "orders.events", 10);
+        let has_field = GraphEdge::new(
+            crate::schema::EdgeType::HasField,
+            decoy.id.clone(),
+            decoy_field.id.clone(),
+        );
+        let assignments = assign_map(&[
+            (decoy.id.clone(), "orders"),
+            (decoy_field.id.clone(), "orders"),
+            (topic.id.clone(), "orders"),
+        ]);
+        let cfg = cfg_with_decl(
+            &["orders"],
+            "orders",
+            "schemas/orders.avsc",
+            "orders.events",
+        );
+        let out = collect_endpoint_schemas(
+            &[decoy, decoy_field, topic],
+            &[has_field],
+            &assignments,
+            &cfg,
+        );
+        assert!(
+            out.by_endpoint.is_empty(),
+            "a missing declared schema file must attach nothing: {:?}",
+            out.by_endpoint
+        );
+    }
+
+    #[test]
+    fn decl_loop_attaches_to_the_owning_topic_not_a_decoy() {
+        // Primary find false branches: among two same-service
+        // topics, only the one whose template equals `decl.topic`
+        // may receive the schema — a decoy topic must not win the
+        // find on type, assignment, or template inequality.
+        let decoy = topic_provider_graph_node("orders", "kafka/decoy.events", "decoy.events", 5);
+        let real = topic_provider_graph_node("orders", "kafka/orders.events", "orders.events", 10);
+        let schema = schema_graph_node("orders", "schemas/orders.avsc", "OrderEvent", 1);
+        let fld = payload_field_node("orders", "schemas/orders.avsc", "order_id", 3);
+        let has_field = GraphEdge::new(
+            crate::schema::EdgeType::HasField,
+            schema.id.clone(),
+            fld.id.clone(),
+        );
+        let assignments = assign_map(&[
+            (decoy.id.clone(), "orders"),
+            (real.id.clone(), "orders"),
+            (schema.id.clone(), "orders"),
+            (fld.id.clone(), "orders"),
+        ]);
+        let cfg = cfg_with_decl(
+            &["orders"],
+            "orders",
+            "schemas/orders.avsc",
+            "orders.events",
+        );
+        let out = collect_endpoint_schemas(
+            &[decoy, real, schema, fld],
+            &[has_field],
+            &assignments,
+            &cfg,
+        );
+        assert!(
+            has_payload(&out, &topic_key("orders", "kafka", "orders.events")),
+            "the owning topic endpoint must carry the declared schema: {:?}",
+            out.by_endpoint.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !has_payload(&out, &topic_key("orders", "kafka", "decoy.events")),
+            "a same-service decoy topic must not receive the schema"
+        );
+    }
+
+    #[test]
+    fn decl_loop_primary_find_skips_a_sibling_service_topic() {
+        // The primary find pins the assignment to the declaring
+        // service: a sibling service publishing the same topic
+        // name (on another broker) may not win the find.
+        let mine = topic_provider_graph_node("orders", "kafka/orders.events", "orders.events", 10);
+        let sibling =
+            topic_provider_graph_node("reports", "rabbitmq/orders.events", "orders.events", 20);
+        let schema = schema_graph_node("orders", "schemas/orders.avsc", "OrderEvent", 1);
+        let fld = payload_field_node("orders", "schemas/orders.avsc", "order_id", 3);
+        let has_field = GraphEdge::new(
+            crate::schema::EdgeType::HasField,
+            schema.id.clone(),
+            fld.id.clone(),
+        );
+        let assignments = assign_map(&[
+            (mine.id.clone(), "orders"),
+            (sibling.id.clone(), "reports"),
+            (schema.id.clone(), "orders"),
+            (fld.id.clone(), "orders"),
+        ]);
+        let cfg = cfg_with_decl(
+            &["orders", "reports"],
+            "orders",
+            "schemas/orders.avsc",
+            "orders.events",
+        );
+        let out = collect_endpoint_schemas(
+            &[mine, sibling, schema, fld],
+            &[has_field],
+            &assignments,
+            &cfg,
+        );
+        assert!(
+            has_payload(&out, &topic_key("orders", "kafka", "orders.events")),
+            "the declaring service's own topic endpoint must carry the schema: {:?}",
+            out.by_endpoint.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !has_payload(&out, &topic_key("orders", "rabbitmq", "orders.events")),
+            "the sibling-service topic endpoint must not receive the schema"
+        );
+    }
+
+    #[test]
+    fn decl_loop_fallback_finds_the_sibling_service_topic() {
+        // Fallback find: no topic of `decl.topic` is assigned to
+        // `orders` (the sibling publishes it), so the fallback must
+        // find it — and must not be short-circuited by a same-
+        // service decoy topic or by an HTTP route whose template
+        // equals the topic name.
+        let http = http_provider_graph_node("orders", "orders.events", 5);
+        let decoy = topic_provider_graph_node("orders", "kafka/decoy.events", "decoy.events", 10);
+        let sibling =
+            topic_provider_graph_node("reports", "kafka/orders.events", "orders.events", 20);
+        let schema = schema_graph_node("orders", "schemas/orders.avsc", "OrderEvent", 1);
+        let fld = payload_field_node("orders", "schemas/orders.avsc", "order_id", 3);
+        let has_field = GraphEdge::new(
+            crate::schema::EdgeType::HasField,
+            schema.id.clone(),
+            fld.id.clone(),
+        );
+        let assignments = assign_map(&[
+            (http.id.clone(), "orders"),
+            (decoy.id.clone(), "orders"),
+            (sibling.id.clone(), "reports"),
+            (schema.id.clone(), "orders"),
+            (fld.id.clone(), "orders"),
+        ]);
+        let cfg = cfg_with_decl(
+            &["orders", "reports"],
+            "orders",
+            "schemas/orders.avsc",
+            "orders.events",
+        );
+        let out = collect_endpoint_schemas(
+            &[http, decoy, sibling, schema, fld],
+            &[has_field],
+            &assignments,
+            &cfg,
+        );
+        assert!(
+            has_payload(&out, &topic_key("orders", "kafka", "orders.events")),
+            "the fallback must find the sibling-service topic: {:?}",
+            out.by_endpoint.keys().collect::<Vec<_>>()
+        );
+        let http_key: EndpointId = (
+            ServiceName("orders".into()),
+            ContractKey::Http {
+                method: MethodSpec::Known(HttpMethod::Post),
+                template: "orders.events".into(),
+            },
+        );
+        assert!(
+            !has_payload(&out, &http_key),
+            "an HTTP route sharing the topic name must not receive the payload schema"
+        );
+        assert!(
+            !has_payload(&out, &topic_key("orders", "kafka", "decoy.events")),
+            "a same-service decoy topic must not receive the schema"
+        );
+    }
+
+    #[test]
+    fn schema_lookup_is_order_independent_when_two_types_share_a_file() {
+        // Two Schema nodes, same path, same repo, different names —
+        // the multi-type-SDL collision (`schema.graphql` declaring
+        // both `Order` and `Customer`). The pick must give the same
+        // answer in either insertion order.
+        let a = schema_graph_node("orders", "schema.graphql", "Order", 1);
+        let b = schema_graph_node("orders", "schema.graphql", "Customer", 20);
+
+        let nodes = vec![b.clone(), a.clone()];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", Some("Order"))
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Order");
+
+        let nodes = vec![a.clone(), b.clone()];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", Some("Order"))
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Order");
+
+        // Production calls the picker with no name hint (`SchemaDecl`
+        // carries only topic/repo/file); the tie-break must still be
+        // order-independent — lowest `line_start` wins.
+        let nodes = vec![b.clone(), a.clone()];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", None)
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Order");
+
+        // Same line, different names, no name hint: the
+        // lexicographically smallest `GlobalId` wins.
+        let x = schema_graph_node("orders", "schema.graphql", "Alpha", 5);
+        let z = schema_graph_node("orders", "schema.graphql", "Zeta", 5);
+        let nodes = vec![z.clone(), x.clone()];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", None)
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Alpha");
+        let nodes = vec![x, z];
+        let picked = pick_schema_node(&nodes, "orders", "schema.graphql", None)
+            .expect("a schema node matches");
+        assert_eq!(picked.name, "Alpha");
     }
 }

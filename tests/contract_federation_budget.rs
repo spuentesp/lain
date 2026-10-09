@@ -86,6 +86,7 @@ async fn rejoin_budget_on_tokio_bytes() {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
     let data_dir = project.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();

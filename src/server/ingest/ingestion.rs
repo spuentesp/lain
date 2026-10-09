@@ -696,10 +696,21 @@ impl LainServer {
         // edge types it produces — `HttpRoute`, `CallsHttp`, `Implements`
         // — could never appear in a graph, while `describe_schema`
         // advertised them and `get_cross_runtime_callers` read them.
+        // Single workspace: there is no federation repo id, so the
+        // workspace directory name is the identity that `get_service`
+        // will later look up with.
+        let repo_label = self
+            .ingest()
+            .config()
+            .workspace
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let sensor_counts = crate::server::sensors::run_all(
             self.ingest().graph(),
             &self.ingest().config().workspace,
             self.ingest().id_namespace(),
+            &repo_label,
         );
         if sensor_counts.total() > 0 {
             info!("Protocol sensors contributed {:?}", sensor_counts);
@@ -1836,8 +1847,12 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     // explicit that sensors are part of the snapshot-indexing
     // surface ("tree-sitter symbols + static resolve + sensors
     // only").
-    let (sensor_counts, sensor_reports) =
-        crate::server::sensors::run_all_with_reports(graph, path, namespace);
+    let (sensor_counts, sensor_reports) = crate::server::sensors::run_all_with_reports(
+        graph,
+        path,
+        namespace,
+        source_repo.as_ref().map(|r| r.as_str()).unwrap_or(""),
+    );
     if sensor_counts.total() > 0 {
         info!(
             "[federation] {:?}: protocol sensors contributed {:?}",

@@ -33,9 +33,11 @@
 //! `ContractIndex` already uses `BTreeMap`, so output is
 //! byte-identical across calls for the same view (modulo `meta`).
 
-use super::envelope::{check_api_version, error_outcome, outcome, success_envelope};
+use super::envelope::{
+    check_api_version, error_outcome, outcome, success_envelope, success_envelope_with_view,
+};
 use super::paging::{apply_limit, decode_cursor, fingerprint};
-use super::scope::live_scope;
+use super::view::{resolve_view, snapshot_label as view_snapshot_label};
 use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
 use crate::federation::contracts::index::{
     ConsumerResolution, ConsumerTarget, ContractIndex, Endpoint, EndpointId, UnresolvedReason,
@@ -48,7 +50,6 @@ use crate::schema::{EdgeProvenance, RouteMatch};
 use crate::server::mcp::handler::McpContext;
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Instant;
 
 // ─── dispatch ─────────────────────────────────────────────────────────
@@ -162,12 +163,14 @@ async fn run_list_contracts(
     started: Instant,
 ) -> Result<ToolOutcome, ToolOutcome> {
     let snap_label = snapshot_label(&args_map);
-    let view = match resolve_view(ctx, &args_map, started).await? {
-        ViewHandle::Empty(_reason) => {
-            let scope = live_scope_when_live(ctx, &args_map);
-            return Ok(empty_outcome(scope, "list_contracts", &snap_label, started));
-        }
-        ViewHandle::Index { index, .. } => index,
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(view) = resolved.index().cloned() else {
+        return Ok(empty_outcome(
+            resolved.scope().clone(),
+            "list_contracts",
+            &snap_label,
+            started,
+        ));
     };
     let limit = parse_limit(&args_map, started)?;
     let cursor = parse_cursor(&args_map, started)?;
@@ -183,6 +186,28 @@ async fn run_list_contracts(
         .get("kind")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    // Reject an unknown kind instead of returning an empty page. An
+    // empty page reads as "no such contract here", which is the
+    // `absent` vs `not analysed` conflation the coverage ledger exists
+    // to prevent. Keep this list in step with `ContractKey::kind()`
+    // and the `kind` enum in `schemas/list_contracts.in.json`.
+    const VALID_KINDS: &[&str] = &["http", "topic", "rpc", "graphql", "websocket", "table"];
+    if let Some(ref k) = kind_filter {
+        if !VALID_KINDS.contains(&k.as_str()) {
+            return Err(error_outcome(
+                "invalid_argument",
+                format!("unknown kind {k:?}"),
+                Some(json!({
+                    "arg": "kind",
+                    "reason": "unknown",
+                    "allowed": VALID_KINDS,
+                })),
+                &view_snapshot_label(&args_map),
+                started,
+            ));
+        }
+    }
 
     let mut items: Vec<Value> = Vec::new();
     for (endpoint_id, endpoint) in &view.endpoints {
@@ -241,8 +266,14 @@ async fn run_list_contracts(
     if let Some(tok) = next_cursor {
         data["cursor"] = json!(tok);
     }
-    data["scope"] = scope_for_view(ctx, &args_map);
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    data["scope"] = resolved.scope().clone();
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     let text = render_list_contracts(&data);
     Ok(outcome(envelope, &data, text))
 }
@@ -255,17 +286,15 @@ async fn run_get_contract(
     started: Instant,
 ) -> Result<ToolOutcome, ToolOutcome> {
     let snap_label = snapshot_label(&args_map);
-    let view = match resolve_view(ctx, &args_map, started).await? {
-        ViewHandle::Empty(_) => {
-            return Ok(error_outcome(
-                "contract_not_found",
-                "no contract index available for this snapshot",
-                Some(json!({"endpoint": null})),
-                &snap_label,
-                started,
-            ));
-        }
-        ViewHandle::Index { index, .. } => index,
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(view) = resolved.index().cloned() else {
+        return Ok(error_outcome(
+            "contract_not_found",
+            "no contract index available for this snapshot",
+            Some(json!({"endpoint": null})),
+            &snap_label,
+            started,
+        ));
     };
     let key_str = args_map
         .get("key")
@@ -363,8 +392,14 @@ async fn run_get_contract(
     }
 
     let mut data = json!({"items": items});
-    data["scope"] = scope_for_view(ctx, &args_map);
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    data["scope"] = resolved.scope().clone();
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     let text = render_get_contract(&data);
     Ok(outcome(envelope, &data, text))
 }
@@ -377,15 +412,12 @@ async fn run_list_unresolved(
     started: Instant,
 ) -> Result<ToolOutcome, ToolOutcome> {
     let snap_label = snapshot_label(&args_map);
-    let view = match resolve_view(ctx, &args_map, started).await? {
-        ViewHandle::Empty(_) => {
-            let mut data = json!({"items": [], "ambiguous": []});
-            data["scope"] = scope_for_view(ctx, &args_map);
-            let envelope =
-                success_envelope(data.clone(), &snap_label, snap_label != "live", started);
-            return Ok(outcome(envelope, &data, render_list_unresolved(&data)));
-        }
-        ViewHandle::Index { index, .. } => index,
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(view) = resolved.index().cloned() else {
+        let mut data = json!({"items": [], "ambiguous": []});
+        data["scope"] = resolved.scope().clone();
+        let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+        return Ok(outcome(envelope, &data, render_list_unresolved(&data)));
     };
     let limit = parse_limit(&args_map, started)?;
     let cursor = parse_cursor(&args_map, started)?;
@@ -399,7 +431,7 @@ async fn run_list_unresolved(
         .map(|s| ServiceName(s.to_string()));
 
     let mut items: Vec<Value> = Vec::new();
-    for (call_id, resolution) in &view.consumers {
+    for (call_id, resolution) in view.consumer_resolutions() {
         let Some(target) = &resolution.target else {
             continue;
         };
@@ -434,7 +466,7 @@ async fn run_list_unresolved(
     }
 
     let mut ambiguous: Vec<Value> = Vec::new();
-    for (call_id, resolution) in &view.consumers {
+    for (call_id, resolution) in view.consumer_resolutions() {
         if let Some(ConsumerTarget::Binds { .. }) = &resolution.target {
             if resolution.bound_endpoints.len() > 1 {
                 let mut cands: Vec<Value> = Vec::new();
@@ -463,8 +495,14 @@ async fn run_list_unresolved(
     if let Some(tok) = next_cursor {
         data["cursor"] = json!(tok);
     }
-    data["scope"] = scope_for_view(ctx, &args_map);
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    data["scope"] = resolved.scope().clone();
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     let text = render_list_unresolved(&data);
     Ok(outcome(envelope, &data, text))
 }
@@ -477,17 +515,15 @@ async fn run_check_binding(
     started: Instant,
 ) -> Result<ToolOutcome, ToolOutcome> {
     let snap_label = snapshot_label(&args_map);
-    let view = match resolve_view(ctx, &args_map, started).await? {
-        ViewHandle::Empty(_) => {
-            return Ok(error_outcome(
-                "contract_not_found",
-                "no contract index available for this snapshot",
-                Some(json!({"endpoint": null})),
-                &snap_label,
-                started,
-            ));
-        }
-        ViewHandle::Index { index, .. } => index,
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(view) = resolved.index().cloned() else {
+        return Ok(error_outcome(
+            "contract_not_found",
+            "no contract index available for this snapshot",
+            Some(json!({"endpoint": null})),
+            &snap_label,
+            started,
+        ));
     };
 
     let consumer_raw = args_map
@@ -560,7 +596,7 @@ async fn run_check_binding(
     let endpoint_id: EndpointId = (ServiceName(service_str.to_string()), key.clone());
     let endpoint_def = view.endpoints.get(&endpoint_id);
 
-    let resolution = view.consumers.get(&consumer_id).cloned();
+    let resolution = view.consumer(&consumer_id).cloned();
     let mut reasons: Vec<&'static str> = Vec::new();
 
     if resolution.is_none() {
@@ -620,7 +656,13 @@ async fn run_check_binding(
         })
     };
 
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     let text = render_check_binding(&data);
     Ok(outcome(envelope, &data, text))
 }
@@ -644,155 +686,6 @@ fn parse_endpoint(v: &Value) -> Result<Value, ToolOutcome> {
     }
 }
 
-// ─── view resolution ─────────────────────────────────────────────────
-
-/// Either an empty view (no `ContractIndex`, e.g. live with no
-/// federation) or the resolved `ContractIndex` plus a `HoldGuard`
-/// for residency.
-pub enum ViewHandle {
-    Empty(&'static str),
-    Index {
-        index: Arc<ContractIndex>,
-        /// Hold on the residency slot; kept alive for the duration
-        /// of the analysis. Dropped at the end of the handler.
-        _hold: Option<Arc<()>>,
-    },
-}
-
-pub async fn resolve_view(
-    ctx: &McpContext<'_>,
-    args_map: &Map<String, Value>,
-    started: Instant,
-) -> Result<ViewHandle, ToolOutcome> {
-    let snap_label = snapshot_label(args_map);
-    if snap_label == "live" {
-        let fed = ctx.federation.ok_or_else(|| {
-            error_outcome(
-                "federation_disabled",
-                "this server is not configured with a federation",
-                None,
-                &snap_label,
-                started,
-            )
-        })?;
-        if let Err(e) = fed.rejoin_contracts_if_dirty() {
-            return Err(error_outcome(
-                "invalid_argument",
-                format!("rejoin failed: {e}"),
-                None,
-                &snap_label,
-                started,
-            ));
-        }
-        let Some(idx) = fed.contract_index() else {
-            return Ok(ViewHandle::Empty("federation disabled or empty"));
-        };
-        return Ok(ViewHandle::Index {
-            index: idx,
-            _hold: None,
-        });
-    }
-    if !snap_label.starts_with(crate::federation::contracts::snapshots::SNAPSHOT_ID_PREFIX) {
-        return Err(error_outcome(
-            "snapshot_not_found",
-            format!("snapshot {snap_label:?} not found"),
-            Some(json!({"snapshot": snap_label})),
-            &snap_label,
-            started,
-        ));
-    }
-    let mgr = ctx.snapshots.ok_or_else(|| {
-        error_outcome(
-            "snapshot_manager_unavailable",
-            "snapshot manager is not configured for this server",
-            None,
-            &snap_label,
-            started,
-        )
-    })?;
-    let outcome = mgr.get(&snap_label, 5_000).await.map_err(|e| match e {
-        crate::federation::contracts::snapshots::manager::PrepareError::SnapshotNotFound {
-            snapshot,
-        } => error_outcome(
-            "snapshot_not_found",
-            format!("snapshot {snapshot:?} not found"),
-            Some(json!({"snapshot": snapshot})),
-            &snap_label,
-            started,
-        ),
-        crate::federation::contracts::snapshots::manager::PrepareError::Busy { retry_after_ms } => {
-            error_outcome(
-                "busy",
-                "snapshot residency busy",
-                Some(json!({"retry_after_ms": retry_after_ms})),
-                &snap_label,
-                started,
-            )
-        }
-        crate::federation::contracts::snapshots::manager::PrepareError::RepoNotRegistered {
-            repo,
-        } => error_outcome(
-            "repo_not_registered",
-            format!("repo {repo:?} not configured"),
-            Some(json!({"repo": repo})),
-            &snap_label,
-            started,
-        ),
-        other => error_outcome(
-            "invalid_argument",
-            format!("{other:?}"),
-            None,
-            &snap_label,
-            started,
-        ),
-    })?;
-    // §10.5: 5_000 ms residency grace for analysis tools.
-    let (fed, _guard) = mgr
-        .from_snapshot_with_wait_ms(&outcome.record, 5_000)
-        .map_err(|e| {
-            error_outcome(
-                "invalid_argument",
-                format!("from_snapshot failed: {e}"),
-                None,
-                &snap_label,
-                started,
-            )
-        })?;
-    let ci = fed.contract_index.read().clone();
-    let Some(idx) = ci else {
-        return Ok(ViewHandle::Empty("snapshot has no contract index"));
-    };
-    Ok(ViewHandle::Index {
-        index: idx,
-        _hold: None,
-    })
-}
-
-fn live_scope_when_live(ctx: &McpContext<'_>, args_map: &Map<String, Value>) -> Value {
-    if snapshot_label(args_map) == "live" {
-        ctx.federation.map(live_scope).unwrap_or_else(empty_scope)
-    } else {
-        empty_scope()
-    }
-}
-
-fn scope_for_view(ctx: &McpContext<'_>, args_map: &Map<String, Value>) -> Value {
-    // Snapshot view: scope comes from the snapshot record. The
-    // §9.6 fields mirror the §10.8 wire shape.
-    if snapshot_label(args_map) == "live" {
-        return ctx.federation.map(live_scope).unwrap_or_else(empty_scope);
-    }
-    empty_scope()
-}
-
-fn empty_scope() -> Value {
-    json!({
-        "reviewed": [],
-        "unreviewed": [],
-        "configured_only": true,
-    })
-}
-
 fn empty_outcome(scope: Value, _name: &str, snapshot: &str, started: Instant) -> ToolOutcome {
     let data = json!({"items": [], "scope": scope});
     let envelope = success_envelope(data.clone(), snapshot, snapshot != "live", started);
@@ -810,11 +703,7 @@ fn object_or_empty(args: Value) -> Map<String, Value> {
 }
 
 pub(crate) fn snapshot_label(args_map: &Map<String, Value>) -> String {
-    args_map
-        .get("snapshot")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "live".to_string())
+    view_snapshot_label(args_map)
 }
 
 fn parse_limit(args_map: &Map<String, Value>, started: Instant) -> Result<usize, ToolOutcome> {
@@ -874,8 +763,8 @@ fn parse_cursor(
 }
 
 fn bound_consumers_count(idx: &ContractIndex, endpoint_id: &EndpointId) -> usize {
-    idx.consumers
-        .values()
+    idx.consumer_resolutions()
+        .map(|(_, r)| r)
         .filter(|r| match &r.target {
             Some(ConsumerTarget::Binds { .. }) => r.bound_endpoints.contains(endpoint_id),
             _ => false,
@@ -885,7 +774,7 @@ fn bound_consumers_count(idx: &ContractIndex, endpoint_id: &EndpointId) -> usize
 
 fn collect_consumers_for_endpoint(idx: &ContractIndex, endpoint_id: &EndpointId) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
-    for (call_id, res) in &idx.consumers {
+    for (call_id, res) in idx.consumer_resolutions() {
         if !res.bound_endpoints.contains(endpoint_id) {
             continue;
         }
@@ -954,7 +843,7 @@ fn bound_field_for_call<'a>(
     if fr.call != call_id.as_str() {
         return None;
     }
-    let call = idx.consumers.get(call_id)?;
+    let call = idx.consumer(call_id)?;
     fr.bound_fields
         .iter()
         .find(|b| call.bound_endpoints.contains(&b.endpoint))
@@ -1061,6 +950,7 @@ pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         DynamicTopic => "dynamic_topic",
         ExternalRef => "external_ref",
         DynamicSql => "dynamic_sql",
+        OrmDynamicQuery => "orm_dynamic_query",
     }
 }
 

@@ -46,7 +46,9 @@
 //! per-shape analysis lives here.
 
 use crate::error::LainError;
-use crate::federation::contracts::model::{ContractFact, FieldReadFact, JsonPath, PathSegment};
+use crate::federation::contracts::model::{
+    ContractFact, FieldReadFact, FieldReadOrigin, JsonPath, PathSegment,
+};
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
@@ -93,7 +95,6 @@ pub struct FieldRead {
     pub exact: bool,
     pub path: String,
     pub line: u32,
-    pub reader_id: String,
 }
 
 /// One emission produced by `detect_reads`. Public so tests can
@@ -149,7 +150,7 @@ crate::server::sensors::register_sensor!(
     2,
     |graph, root, namespace| {
         let repo_id = RepoId::new(root.to_string_lossy().as_ref())
-            .unwrap_or_else(|_| RepoId::new("field-access-sensor").unwrap());
+            .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
         scan_workspace_field_access(graph, root, namespace, &repo_id)
     }
 );
@@ -793,7 +794,6 @@ fn collect_pattern_reads<'a>(
                     exact: true,
                     path: file_path.to_string(),
                     line,
-                    reader_id: "self".to_string(),
                 });
             }
             "pair" => {
@@ -815,7 +815,6 @@ fn collect_pattern_reads<'a>(
                                 exact: true,
                                 path: file_path.to_string(),
                                 line,
-                                reader_id: "self".to_string(),
                             });
                         } else {
                             collect_pattern_reads(v, src, &JsonPath(chain), reads, file_path, line);
@@ -832,7 +831,6 @@ fn collect_pattern_reads<'a>(
                     exact: true,
                     path: file_path.to_string(),
                     line,
-                    reader_id: "self".to_string(),
                 });
             }
             // Sequence destructuring (`[a, [b]] = x`) — the chain
@@ -1105,7 +1103,6 @@ fn handle_subscript<'a>(
             exact: true,
             path: file_path.to_string(),
             line,
-            reader_id: "self".to_string(),
         });
     }
 }
@@ -1189,7 +1186,6 @@ fn handle_attribute<'a>(
             exact: true,
             path: file_path.to_string(),
             line,
-            reader_id: "self".to_string(),
         });
         let _ = escapes;
     }
@@ -1256,7 +1252,6 @@ fn handle_python_in<'a>(
             exact: true,
             path: file_path.to_string(),
             line,
-            reader_id: "self".to_string(),
         });
     } else {
         escapes.insert(Escape::Stored);
@@ -1390,7 +1385,6 @@ fn handle_python_dict_pattern(
                             exact: true,
                             path: file_path.to_string(),
                             line,
-                            reader_id: "self".to_string(),
                         });
                     }
                 }
@@ -1427,7 +1421,6 @@ fn handle_python_dict_pattern(
                         exact: true,
                         path: file_path.to_string(),
                         line,
-                        reader_id: "self".to_string(),
                     });
                 }
                 // Recurse into the value-side case_pattern for any
@@ -1840,7 +1833,6 @@ fn handle_tsjs_in(
             exact: true,
             path: file_path.to_string(),
             line,
-            reader_id: "self".to_string(),
         });
     } else {
         escapes.insert(Escape::Stored);
@@ -1884,7 +1876,6 @@ fn handle_tsjs_object_pattern(
                         exact: true,
                         path: file_path.to_string(),
                         line,
-                        reader_id: "self".to_string(),
                     });
                 }
             }
@@ -2884,7 +2875,6 @@ fn handle_csharp_subscript(
         exact: true,
         path: file_path.to_string(),
         line,
-        reader_id: "self".to_string(),
     });
 }
 
@@ -3072,7 +3062,6 @@ fn handle_ruby_call(
                 exact: true,
                 path: file_path.to_string(),
                 line,
-                reader_id: "self".to_string(),
             });
         }
     }
@@ -3944,16 +3933,24 @@ fn build_emission(
         // a genuinely module-level read (no function covers the
         // line) falls back to the File node — the same convention
         // `enclosing_sends_http_edge` uses for module-level calls.
+        //
+        // When neither exists, skip the edge (the `sql_sensor`
+        // `enclosing_or_file` rule): `insert_edges_batch` drops an
+        // edge whose endpoints aren't in the graph
+        // (`graph/mod.rs:1156`) without failing, so a minted phantom
+        // source would make the link vanish silently. The `FieldRef`
+        // node below still records the read — the source *site* is
+        // known even when the reading function is not. That is the
+        // graph saying "I cannot name the reader", not losing the read.
         let reads_field_source =
             crate::server::sensors::util::enclosing_symbol(graph, &read_path, read.line)
                 .map(|n| n.id)
-                .unwrap_or_else(|| {
+                .or_else(|| {
                     graph
                         .get_all_nodes()
                         .into_iter()
                         .find(|n| n.node_type == NodeType::File && n.path == read_path)
                         .map(|n| n.id)
-                        .unwrap_or_else(|| "self".to_string())
                 });
         let mut node = GraphNode::new_in(
             NodeType::FieldRef,
@@ -3969,28 +3966,30 @@ fn build_emission(
             namespace,
         );
         node.line_start = Some(read.line);
-        node.contract = Some(ContractFact::FieldRead(FieldReadFact {
+        node.contract = vec![ContractFact::FieldRead(FieldReadFact {
             chain: read.chain.clone(),
             exact: read.exact,
-        }));
-        let mut e = GraphEdge::new(
-            EdgeType::ReadsField,
-            reads_field_source.clone(),
-            node.id.clone(),
-        );
-        e.site = Some(crate::federation::contracts::model::SourceSite {
-            path: read_path,
-            line: read.line,
-        });
-        e.provenance = Some(EdgeProvenance::Static {
-            source: crate::schema::StaticSource::TreeSitter,
-        });
+            origin: FieldReadOrigin::FieldAccess,
+        })];
+        // Only link `ReadsField` when the reader is known; an
+        // unattributed read keeps its `FieldRef` node and `ReadsFrom`
+        // edge but no reader link.
+        if let Some(reader_id) = reads_field_source {
+            let mut e = GraphEdge::new(EdgeType::ReadsField, reader_id, node.id.clone());
+            e.site = Some(crate::federation::contracts::model::SourceSite {
+                path: read_path,
+                line: read.line,
+            });
+            e.provenance = Some(EdgeProvenance::Static {
+                source: crate::schema::StaticSource::TreeSitter,
+            });
+            edges.push(e);
+        }
         // `ReadsFrom`: FieldRef → the HttpClientCall.
         let mut rf = GraphEdge::new(EdgeType::ReadsFrom, node.id.clone(), call_id.clone());
         rf.provenance = Some(EdgeProvenance::Static {
             source: crate::schema::StaticSource::TreeSitter,
         });
-        edges.push(e);
         edges.push(rf);
         nodes.push(node);
     }
@@ -4013,7 +4012,7 @@ fn patch_reads_complete(graph: &GraphDatabase, call_id: &str) -> Result<(), Lain
     let Some(mut node) = graph.get_node(call_id)? else {
         return Ok(());
     };
-    let Some(ContractFact::Consumer(consumer)) = node.contract.as_mut() else {
+    let Some(ContractFact::Consumer(consumer)) = node.contract.first_mut() else {
         return Ok(());
     };
     if consumer.reads_complete {
@@ -5093,6 +5092,11 @@ mod tests {
     use super::*;
     use crate::schema::{NodeType, RepoNamespace};
 
+    fn empty_db() -> GraphDatabase {
+        let dir = tempfile::tempdir().expect("tempdir");
+        GraphDatabase::new(&dir.path().join("graph.bin")).unwrap()
+    }
+
     fn field_ref_chain(name: &str) -> JsonPath {
         // For convenience, build a path from a dotted chain.
         let segments: Vec<PathSegment> = name
@@ -5129,10 +5133,62 @@ mod tests {
             exact: true,
             path: "src/x.py".into(),
             line: 5,
-            reader_id: "self".into(),
         };
         assert_eq!(r.chain.to_string(), "customer.id");
         assert!(r.exact);
+    }
+
+    /// `build_emission` must never hand back an edge whose endpoints
+    /// are not materialized. `insert_edges_batch` drops such an edge
+    /// silently (`graph/mod.rs:1156`), so a phantom source looks like
+    /// a successful emit while the `ReadsField` link simply vanishes —
+    /// "which function reads this field" becomes unanswerable.
+    ///
+    /// The old fallback minted the literal `"self"` when there was no
+    /// enclosing symbol and no File node.
+    #[test]
+    fn every_emitted_edge_has_materialized_endpoints() {
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        // The `HttpClientCall` the reads belong to is owned by another
+        // sensor, so it is already in the graph by the time
+        // `build_emission` runs. Seeded here so both ends are checkable.
+        let mut call = GraphNode::new(NodeType::HttpClientCall, "GET /a".into(), "src/x.py".into());
+        call.id = "call-node-id".into();
+        graph.upsert_node(call).expect("insert call node");
+
+        let emission = FieldAccessEmission {
+            path: "src/x.py".into(),
+            call_id: "call-node-id".into(),
+            sender_id: String::new(),
+            reads: vec![FieldRead {
+                chain: field_ref_chain("customer.id"),
+                exact: true,
+                path: "src/x.py".into(),
+                line: 5,
+            }],
+            escapes: BTreeSet::new(),
+            reads_complete: true,
+        };
+
+        let (nodes, edges) = build_emission(&graph, &emission, &ns);
+
+        let known: std::collections::BTreeSet<String> = nodes
+            .iter()
+            .map(|n| n.id.clone())
+            .chain(graph.get_all_nodes().into_iter().map(|n| n.id))
+            .collect();
+        for e in &edges {
+            for end in [&e.source_id, &e.target_id] {
+                assert!(
+                    known.contains(end),
+                    "{} {:?} is not a materialized node — insert_edges_batch \
+                     will silently drop this edge",
+                    e.edge_type,
+                    end
+                );
+            }
+        }
     }
 
     #[test]
@@ -5957,7 +6013,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
             ns,
         );
         call_node.line_start = Some(call_line);
-        call_node.contract = Some(ContractFact::Consumer(ConsumerFact {
+        call_node.contract = vec![ContractFact::Consumer(ConsumerFact {
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
                 host: HostPart::Literal("orders".into()),
@@ -5968,7 +6024,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
             },
             url_expr: "\"http://orders/api/1\"".into(),
             reads_complete: true,
-        }));
+        })];
         let mut sends = GraphEdge::new(
             EdgeType::SendsHttp,
             sender_node.id.clone(),
@@ -6000,7 +6056,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
             .into_iter()
             .find(|n| {
                 n.node_type == NodeType::FieldRef
-                    && matches!(&n.contract, Some(ContractFact::FieldRead(fr)) if fr.chain.to_string() == chain)
+                    && matches!(n.contract.first(), Some(ContractFact::FieldRead(fr)) if fr.chain.to_string() == chain)
             })
             .unwrap_or_else(|| panic!("FieldRef for chain {chain:?} must exist"))
     }
@@ -6098,7 +6154,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
         // stays `reads_complete = true` (and the node survives — it
         // is never re-emitted through this sensor's owner).
         let call_node = graph.get_node(&call_id).unwrap().expect("call node");
-        match call_node.contract {
+        match call_node.contract.first() {
             Some(ContractFact::Consumer(c)) => {
                 assert!(
                     c.reads_complete,
@@ -6166,7 +6222,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
         // The escape (`return order` in a caller frame) patched the
         // phase-1 consumer fact in place.
         let call_node = graph.get_node(&call_id).unwrap().expect("call node");
-        match call_node.contract {
+        match call_node.contract.first() {
             Some(ContractFact::Consumer(c)) => {
                 assert!(
                     !c.reads_complete,
@@ -6220,7 +6276,6 @@ async function fetch_data() { return await fetch(\"/a\"); }
                 exact: true,
                 path: "src/main.py".into(),
                 line: 3, // module level: no function covers line 3
-                reader_id: "self".into(),
             }],
             escapes: BTreeSet::new(),
             reads_complete: true,

@@ -165,7 +165,7 @@ impl ContractSurface {
             };
             reads_by_call.entry(call_id).or_default().insert(path);
         }
-        for (call_id, resolution) in &index.consumers {
+        for (call_id, resolution) in index.consumer_resolutions() {
             let def = consumer_to_def(call_id, resolution, &reads_by_call);
             let key = consumer_key(call_id, resolution);
             surface.consumers.insert(key, def);
@@ -376,6 +376,13 @@ pub enum ChangeKind {
     /// only when `ChangedFilesSource` reports a file in
     /// `source_files` differs between base and head.
     ChangedWithoutSchema { endpoint: EndpointId },
+    /// Sibling of `ChangedWithoutSchema` for endpoints that DO carry
+    /// a schema on both sides. The schema is byte-identical so
+    /// `diff_fields` reports nothing, but a handler source file
+    /// changed — the behaviour behind the endpoint may have moved.
+    /// Without this rule a pure behaviour change is invisible to
+    /// `diff_contracts`.
+    HandlerChanged { endpoint: EndpointId },
     /// §9.3: consumer in head but not in base, unresolved in head.
     ConsumerEndpointUnmatched { consumer: ConsumerKey },
     /// §9.3: head consumer bound to an endpoint with a schema reads
@@ -402,6 +409,22 @@ pub enum ChangeKind {
 pub trait ChangedFilesSource {
     fn changed_files(&self, base: &str, head: &str) -> BTreeSet<String>;
 
+    /// Changed line ranges **within one repo**: `path -> merged
+    /// [start, end]` spans. `None` means "unknown" and the caller falls
+    /// back to whole-file attribution. A changed path **absent** from the
+    /// map is also treated as unknown.
+    ///
+    /// Scoped to a repo on purpose: two services both having
+    /// `src/main.rs` must not borrow each other's line numbers.
+    fn changed_line_ranges_for_repo(
+        &self,
+        _repo: &str,
+        _base: &str,
+        _head: &str,
+    ) -> Option<ChangedLines> {
+        None
+    }
+
     fn changed_files_for_repo(&self, _repo: &str, base: &str, head: &str) -> RepoDiffResult {
         let files = self.changed_files(base, head);
         if files.is_empty() {
@@ -415,6 +438,11 @@ pub trait ChangedFilesSource {
         BTreeSet::new()
     }
 }
+
+/// Merged changed-line spans per file: `file -> [(start, end), …]`,
+/// inclusive line bounds. Used to attribute a change inside a shared
+/// file to the specific sites it touched.
+pub type ChangedLines = std::collections::BTreeMap<String, Vec<(u32, u32)>>;
 
 /// A precomputed changed-files set. Used by tests and by callers that
 /// already hold a `BTreeSet<String>` from another source.
@@ -545,16 +573,56 @@ pub fn diff_contracts(
         });
     }
 
+    // Which sites each handler file hosts, per endpoint, keyed by
+    // `(repo, path) -> endpoint -> anchor lines`.
+    //
+    // An anchor is the route node's line, and only counts when the route
+    // node lives in the handler's own file (a routing table) and the id
+    // actually carries a line. `GlobalId::new` writes `0` when the line
+    // is unknown (`repo_id.rs`), so `0` is treated as "no anchor".
+    //
+    // Repo-keyed on purpose: two services both having `src/main.rs` must
+    // not borrow each other's line numbers.
+    let mut handler_file_anchors: BTreeMap<(String, String), BTreeMap<EndpointId, BTreeSet<u32>>> =
+        BTreeMap::new();
+    for (eid, def) in base.endpoints.iter().chain(head.endpoints.iter()) {
+        for p in &def.providers {
+            if let Some(h) = p.handler.as_ref() {
+                if p.node_id.path().as_deref() == Some(h.path.as_str()) {
+                    if let Some(line) = p.node_id.line_start().filter(|l| *l != 0) {
+                        handler_file_anchors
+                            .entry((p.node_id.repo_id().to_string(), h.path.clone()))
+                            .or_default()
+                            .entry(eid.clone())
+                            .or_default()
+                            .insert(line);
+                    }
+                }
+            }
+        }
+    }
+
     // Stage 3 — field-level diffs for paired endpoints.
     for (base_id, head_id) in &pairings {
         let base_def = &base.endpoints[base_id];
         let head_def = &head.endpoints[head_id];
+        // Anything pushed for THIS endpoint below (path/method rename,
+        // field diff) explains the endpoint on its own. `HandlerChanged`
+        // exists for "schema byte-identical, handler moved — the case
+        // nothing else would report", so it must stay silent whenever
+        // one of those fires. Captured before the path/method block:
+        // taking it after would let a route rename double-report.
+        let explained_before = changes.len();
         // Determine if this is a PathChanged or MethodChanged pair.
         let base_method = method_of(base_id);
         let head_method = method_of(head_id);
         let path_changed = base_id.1 != head_id.1;
         let method_changed = base_method != head_method;
-        if path_changed && !method_changed {
+        // A pairing can move in both path and method at once. `from` /
+        // `to` are full `ContractKey`s, so `PathChanged` already carries
+        // the method half — report the move rather than dropping it on
+        // the floor because neither single-change rule matched.
+        if path_changed {
             changes.push(Change {
                 service: head_id.0.clone(),
                 kind: ChangeKind::PathChanged {
@@ -562,7 +630,7 @@ pub fn diff_contracts(
                     to: head_id.1.clone(),
                 },
             });
-        } else if method_changed && !path_changed {
+        } else if method_changed {
             changes.push(Change {
                 service: head_id.0.clone(),
                 kind: ChangeKind::MethodChanged {
@@ -581,27 +649,54 @@ pub fn diff_contracts(
                 head_def.schemas.get(&direction),
             );
         }
-        // ChangedWithoutSchema rule (§9.2, Gaps P1.6, P1.7, P1.8) —
-        // both sides have no schema and handler/provider source file
-        // differs in the provider repository.
-        // File-level change is classified conservatively as PossibleBehaviorChange
-        // (Compat::NeedsReview, Class::NeedsInvestigation).
-        if !base_def.has_schema && !head_def.has_schema {
-            let base_sha = "";
-            let head_sha = "";
-            let provider_repos = endpoint_provider_repos(base_def, head_def);
+        // Did something else already explain this endpoint? If so the
+        // rule above already reported it and no handler-change rule is
+        // needed.
+        let explained = changes.len() > explained_before;
+        // §9.2 ChangedWithoutSchema + its schema-bearing sibling
+        // HandlerChanged. Both ask whether a handler / provider
+        // source file changed in the provider repository, and differ
+        // in whether the endpoint carries a schema.
+        //
+        // `HandlerChanged` looks at handler files ONLY. `source_files`
+        // also contains the schema node's path (where field metadata
+        // lives), which would make an edit to `openapi.yaml` for one
+        // endpoint trip the rule on every other endpoint in that file.
+        // Keyed `(repo, path)`: two services both having `src/main.rs`
+        // must not share line numbers.
+        let handler_files: BTreeSet<(String, String)> = base_def
+            .providers
+            .iter()
+            .chain(head_def.providers.iter())
+            .filter_map(|p| {
+                p.handler
+                    .as_ref()
+                    .map(|h| (p.node_id.repo_id().to_string(), h.path.clone()))
+            })
+            .collect();
+        let base_sha = "";
+        let head_sha = "";
+        let provider_repos = endpoint_provider_repos(base_def, head_def);
 
-            let mut fired = false;
-            if provider_repos.is_empty() {
-                let changed = changed_files.changed_files(base_sha, head_sha);
+        let mut source_changed = false;
+        let mut all_changed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        {
+            let mut note = |repo: &str, changed: &std::collections::BTreeSet<String>| {
                 if base_def
                     .source_files
                     .iter()
                     .chain(head_def.source_files.iter())
                     .any(|f| changed.contains(f))
                 {
-                    fired = true;
+                    source_changed = true;
                 }
+                all_changed
+                    .entry(repo.to_string())
+                    .or_default()
+                    .extend(changed.iter().cloned());
+            };
+            if provider_repos.is_empty() {
+                note("", &changed_files.changed_files(base_sha, head_sha));
             } else {
                 for repo in &provider_repos {
                     match changed_files.changed_files_for_repo(repo, base_sha, head_sha) {
@@ -610,31 +705,88 @@ pub fn diff_contracts(
                         // repository as unreviewed and prevents a
                         // NoKnownImpact conclusion.
                         RepoDiffResult::Unavailable(_) => {}
-                        RepoDiffResult::Changed(ref changed) => {
-                            if base_def
-                                .source_files
-                                .iter()
-                                .chain(head_def.source_files.iter())
-                                .any(|f| changed.contains(f))
-                            {
-                                fired = true;
-                                break;
-                            }
-                        }
+                        RepoDiffResult::Changed(ref changed) => note(repo, changed),
                         RepoDiffResult::Unchanged => {}
                     }
                 }
             }
-
-            if fired {
-                changes.push(Change {
-                    service: head_id.0.clone(),
-                    kind: ChangeKind::ChangedWithoutSchema {
-                        endpoint: head_id.clone(),
-                    },
-                });
-            }
         }
+
+        // Attribute an edit inside a shared handler file to the sites it
+        // actually touched.
+        //
+        // The sound default is whole-file: every claimant is implicated.
+        // Spans narrow that **only** when they prove a claimant untouched
+        // — and an anchor is a single route line, not the boundary of a
+        // claimant's code, so "my anchor was not hit" is not proof.
+        // Narrowing happens only when *every* changed line is somebody's
+        // anchor (a pure site edit); any unexplained line (a body, a
+        // helper) means the edit cannot be attributed and everyone is
+        // implicated. A claimant with no anchor at all can never be ruled
+        // out.
+        let handler_changed = handler_files.iter().any(|(repo, f)| {
+            if !all_changed
+                .get(repo)
+                .map(|s| s.contains(f))
+                .unwrap_or(false)
+            {
+                return false;
+            }
+            let Some(spans) = changed_files
+                .changed_line_ranges_for_repo(repo, base_sha, head_sha)
+                .and_then(|r| r.get(f.as_str()).cloned())
+            else {
+                // Unknown granularity for this file → whole-file.
+                return true;
+            };
+            let by_eid = handler_file_anchors.get(&(repo.clone(), f.clone()));
+            let Some(mine) = by_eid.and_then(|m| m.get(head_id)) else {
+                // This claimant has no anchor here, so nothing rules it
+                // out. Implicate it.
+                return true;
+            };
+            let anchor_points: BTreeSet<u32> = by_eid
+                .map(|m| m.values().flatten().copied().collect())
+                .unwrap_or_default();
+            // Cheap reject before walking lines: a span set wider than
+            // the anchor set cannot be covered by it.
+            let changed_lines: u64 = spans.iter().map(|(s, e)| u64::from(*e - *s) + 1).sum();
+            if changed_lines > anchor_points.len() as u64 {
+                return true;
+            }
+            if !spans
+                .iter()
+                .all(|(s, e)| (*s..=*e).all(|l| anchor_points.contains(&l)))
+            {
+                // Some changed line belongs to nobody's anchor → the
+                // edit cannot be attributed. Whole-file.
+                return true;
+            }
+            // Every changed line is a known site: implicate only the
+            // claimants whose site was actually hit.
+            mine.iter()
+                .any(|l| spans.iter().any(|(s, e)| *l >= *s && *l <= *e))
+        });
+
+        if source_changed && !base_def.has_schema && !head_def.has_schema {
+            changes.push(Change {
+                service: head_id.0.clone(),
+                kind: ChangeKind::ChangedWithoutSchema {
+                    endpoint: head_id.clone(),
+                },
+            });
+        } else if handler_changed && base_def.has_schema && head_def.has_schema && !explained {
+            // Identical schema, changed handler: the behaviour may
+            // have moved and nothing else would report it.
+            changes.push(Change {
+                service: head_id.0.clone(),
+                kind: ChangeKind::HandlerChanged {
+                    endpoint: head_id.clone(),
+                },
+            });
+        }
+        // A schema appeared or disappeared, or the schema changed:
+        // `diff_fields` above already reports that, so no extra rule.
     }
 
     changes.sort_by(|a, b| {
@@ -768,6 +920,9 @@ fn kind_label(kind: &ChangeKind) -> String {
         ChangeKind::ChangedWithoutSchema { endpoint } => {
             format!("changed-no-schema:{}", endpoint.1)
         }
+        ChangeKind::HandlerChanged { endpoint } => {
+            format!("handler-changed:{}", endpoint.1)
+        }
         ChangeKind::ConsumerEndpointUnmatched { consumer } => {
             format!("consumer-unmatched:{}", consumer_label(consumer))
         }
@@ -806,7 +961,11 @@ fn method_of(id: &EndpointId) -> Option<crate::federation::contracts::model::Htt
             MethodSpec::Known(m) => Some(*m),
             MethodSpec::Unknown => None,
         },
-        ContractKey::Topic { .. } | ContractKey::Rpc { .. } | ContractKey::Graphql { .. } => None,
+        ContractKey::Topic { .. }
+        | ContractKey::Rpc { .. }
+        | ContractKey::Graphql { .. }
+        | ContractKey::WebSocket { .. }
+        | ContractKey::Table { .. } => None,
     }
 }
 
@@ -1359,7 +1518,7 @@ pub fn classify(kind: &ChangeKind, direction: Direction) -> Compat {
         },
         EndpointRemoved { .. } | PathChanged { .. } | MethodChanged { .. } => Compat::Breaking,
         EndpointAdded { .. } => Compat::Compatible,
-        ChangedWithoutSchema { .. } => Compat::NeedsReview,
+        ChangedWithoutSchema { .. } | HandlerChanged { .. } => Compat::NeedsReview,
         ConsumerEndpointUnmatched { .. } | ConsumerFieldUnmatched { .. } => Compat::Breaking,
         ConsumerRebound { .. } => Compat::Compatible,
     }
@@ -1706,6 +1865,23 @@ pub fn evaluate(
                 //0.9 cannot model what callers send.
                 class_overall = Class::NeedsInvestigation;
                 reason_overall = Some(Reason::SendsNotModeled);
+            } else if matches!(
+                change.kind,
+                ChangeKind::ChangedWithoutSchema { .. } | ChangeKind::HandlerChanged { .. }
+            ) {
+                // A handler changed on an endpoint we cannot reason
+                // about: with no bound consumer to trace, the
+                // zero-consumer verdict must be the same one the
+                // per-consumer table gives, never `NoKnownImpact`.
+                // `ChangedWithoutSchema` carries `NoSchema` (§9.5);
+                // its schema-bearing sibling `HandlerChanged` carries
+                // `NeedsReview`, matching `per_consumer_verdict`.
+                let reason = match change.kind {
+                    ChangeKind::ChangedWithoutSchema { .. } => Reason::NoSchema,
+                    _ => Reason::NeedsReview,
+                };
+                class_overall = Class::NeedsInvestigation;
+                reason_overall = Some(reason);
             } else {
                 class_overall = Class::NoKnownImpact;
                 reason_overall = None;
@@ -1861,7 +2037,8 @@ fn provider_target_endpoint(change: &Change) -> Option<EndpointId> {
         | ChangeKind::NullabilityChanged { endpoint, .. }
         | ChangeKind::EnumValueRemoved { endpoint, .. }
         | ChangeKind::EnumValueAdded { endpoint, .. }
-        | ChangeKind::ChangedWithoutSchema { endpoint } => Some(endpoint.clone()),
+        | ChangeKind::ChangedWithoutSchema { endpoint }
+        | ChangeKind::HandlerChanged { endpoint } => Some(endpoint.clone()),
         // EndpointRemoved carries the removed key on its `service`;
         // the endpoint was live in base, so we project it as the
         // target so the could-match rule (and the per-base-consumer
@@ -2075,11 +2252,16 @@ fn strongest(affected: &[Affected]) -> Class {
 
 // ─── could-match rule (§9.7) ─────────────────────────────────────────
 
-/// An unresolved HTTP consumer `u` in a reviewed repo **could match**
+/// An unresolved consumer `u` in a reviewed repo **could match**
 /// a change on endpoint `(s, K)` iff `u` is not external, `u`'s
-/// target service is `s` or unknown, `u`'s method equals K's or one
-/// of them is `Unknown` or `ANY`, and `u`'s template is `None` or
-/// matches K by §7.4 (prefix tolerance included).
+/// target service is `s` or unknown, the protocol families are not
+/// positively ruled out, and — for HTTP/WebSocket — `u`'s method
+/// equals K's or one of them is `Unknown` or `ANY` and `u`'s
+/// template is `None` or matches K by §7.4 (prefix tolerance
+/// included). Non-HTTP consumers are matched on their own key by
+/// [`non_http_could_match`]; whenever a match cannot be ruled out
+/// this returns `true` — conservative by direction (I3): a wrong
+/// `false` would permit `NoKnownImpact`.
 pub fn could_match(
     consumer_key: &ConsumerKey,
     endpoint: &EndpointId,
@@ -2112,21 +2294,47 @@ pub fn could_match(
     if !target_service_ok {
         return false;
     }
-    // Method check.
+    // Method + template check (HTTP / WebSocket only).
     let (consumer_method, consumer_template) = match &consumer_key.target {
         ConsumerTargetKey::Contract(ContractKey::Http { method, template }) => {
             (method.clone(), Some(template.clone()))
         }
-        ConsumerTargetKey::Contract(ContractKey::Topic { .. }) => return false,
-        ConsumerTargetKey::Contract(ContractKey::Rpc { .. }) => return false,
-        ConsumerTargetKey::Contract(ContractKey::Graphql { .. }) => return false,
+        ConsumerTargetKey::Contract(ContractKey::WebSocket { route }) => (
+            MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any),
+            Some(route.clone()),
+        ),
+        // Non-HTTP protocols have no method/template axis. They are
+        // matched on their own key below; do NOT `return false` here,
+        // which is what let `NoKnownImpact` through while an
+        // unresolved topic/RPC/GraphQL/Table consumer existed (I3).
+        ConsumerTargetKey::Contract(
+            ContractKey::Topic { .. }
+            | ContractKey::Rpc { .. }
+            | ContractKey::Graphql { .. }
+            | ContractKey::Table { .. },
+        ) => {
+            return non_http_could_match(&consumer_key.target, &endpoint.1);
+        }
         ConsumerTargetKey::UrlExpr(_) => (MethodSpec::Unknown, None),
     };
     let endpoint_method = match &endpoint.1 {
         ContractKey::Http { method, .. } => method.clone(),
-        ContractKey::Topic { .. } => return false,
-        ContractKey::Rpc { .. } => return false,
-        ContractKey::Graphql { .. } => return false,
+        ContractKey::WebSocket { .. } => {
+            MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any)
+        }
+        // A non-HTTP endpoint has no HTTP method axis, and only an
+        // HTTP-keyed or `UrlExpr` consumer gets this far (non-HTTP
+        // consumers returned above). Delegate to the shared helper:
+        // an `UrlExpr` consumer cannot be ruled out (`true`); a
+        // cross-family HTTP key can (`false`). Never `return false`
+        // unconditionally — that is what let `NoKnownImpact` through
+        // for an unresolved consumer of any protocol (I3).
+        ContractKey::Topic { .. }
+        | ContractKey::Rpc { .. }
+        | ContractKey::Graphql { .. }
+        | ContractKey::Table { .. } => {
+            return non_http_could_match(&consumer_key.target, &endpoint.1);
+        }
     };
     match (consumer_method, endpoint_method) {
         (MethodSpec::Known(cm), MethodSpec::Known(em)) => {
@@ -2138,12 +2346,13 @@ pub fn could_match(
     }
     // Template check.
     if let Some(template) = consumer_template.as_deref() {
-        let endpoint_template = match &endpoint.1 {
-            ContractKey::Http { template, .. } => template.clone(),
-            _ => return false,
-        };
-        if !template_matches(template, &endpoint_template) {
-            return false;
+        // WebSocket routes and other non-HTTP families: there is no
+        // HTTP template axis to compare — cannot rule the match out,
+        // so do NOT `return false` (conservative).
+        if let ContractKey::Http { template: et, .. } = &endpoint.1 {
+            if !template_matches(template, et) {
+                return false;
+            }
         }
     }
     // PR 18 — operationId candidate. The URL did not match any
@@ -2166,6 +2375,70 @@ pub fn could_match(
         }
     }
     true
+}
+
+/// §9.7 for the non-HTTP protocols. Conservative by construction:
+/// we return `true` unless a match can be positively ruled out.
+/// Returning `true` costs a `NeedsInvestigation`; returning `false`
+/// wrongly permits `NoKnownImpact` (I3).
+///
+/// **Only `UrlExpr` targets reach this in production.**
+/// `consumer_key()` maps every `Unresolved` resolution to
+/// `UrlExpr(call_id.name())`, and `build_coverage` is the only
+/// production source of `coverage.unresolved_consumers` — the sole
+/// input to `could_match`. So the `Contract`-keyed match arms below
+/// (the `false` directions) are reachable only from tests that
+/// hand-build `Contract` keys today. If anything starts feeding
+/// `Contract`-keyed consumers in — e.g. the `ambiguous` list — those
+/// arms go live without any test noticing. The `UrlExpr` path is
+/// separately pinned by
+/// `could_match_is_conservative_when_the_consumer_key_is_unknown`.
+fn non_http_could_match(target: &ConsumerTargetKey, endpoint_key: &ContractKey) -> bool {
+    use ContractKey::*;
+    let ConsumerTargetKey::Contract(tc) = target else {
+        // A URL-shaped consumer against a non-HTTP endpoint cannot be
+        // ruled out from the URL alone.
+        return true;
+    };
+    match (tc, endpoint_key) {
+        (
+            Topic {
+                broker: cb,
+                name: cn,
+            },
+            Topic {
+                broker: eb,
+                name: en,
+            },
+        ) => {
+            // Same topic name; brokers are interchangeable when either
+            // side defaulted. Unknown in either direction -> true.
+            cn == en && (cb == eb || cb.is_empty() || eb.is_empty())
+        }
+        (
+            Rpc {
+                service: cs,
+                method: cm,
+                ..
+            },
+            Rpc {
+                service: es,
+                method: em,
+                ..
+            },
+        ) => {
+            // Method must agree; a package-qualified service may differ
+            // by suffix, so only a hard mismatch rules it out.
+            cm == em && (cs == es || cs.ends_with(es.as_str()) || es.ends_with(cs.as_str()))
+        }
+        (Graphql { field: cf, .. }, Graphql { field: ef, .. }) => cf == ef,
+        (Table { .. }, Table { .. }) => {
+            // Table identity is not carried on the key; cannot rule out.
+            true
+        }
+        // Different protocol families can be ruled out.
+        _ => false,
+    }
 }
 
 /// Local template-match that mirrors §7.4. Returns true on direct
@@ -2215,8 +2488,7 @@ fn template_matches(consumer: &str, provider: &str) -> bool {
 /// resolution is `Unresolved`.
 pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Scope) -> Coverage {
     let unresolved: Vec<ConsumerKey> = index
-        .consumers
-        .iter()
+        .consumer_resolutions()
         .filter_map(|(call_id, resolution)| {
             let key = consumer_key(call_id, resolution);
             match &resolution.target {
@@ -2226,8 +2498,7 @@ pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Sc
         })
         .collect();
     let ambiguous: Vec<ConsumerKey> = index
-        .consumers
-        .iter()
+        .consumer_resolutions()
         .filter_map(|(call_id, resolution)| {
             if resolution.bound_endpoints.len() > 1 {
                 let key = consumer_key(call_id, resolution);
@@ -2240,10 +2511,12 @@ pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Sc
     let unnormalized: Vec<ConsumerKey> = index
         .unnormalized
         .iter()
-        .filter_map(|call_id| {
+        .flat_map(|call_id| {
             index
                 .consumers
                 .get(call_id)
+                .into_iter()
+                .flatten()
                 .map(|r| consumer_key(call_id, r))
         })
         .collect();

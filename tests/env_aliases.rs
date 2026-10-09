@@ -72,13 +72,13 @@ fn provider_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::HttpRoute, path, name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::Provider(ProviderFact {
+    n.contract = vec![ContractFact::Provider(ProviderFact {
         method,
         template: template.to_string(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::Code,
-    }));
+    })];
     n
 }
 
@@ -99,7 +99,7 @@ fn library_consumer_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::HttpClientCall, path, name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::Consumer(ConsumerFact {
+    n.contract = vec![ContractFact::Consumer(ConsumerFact {
         method,
         url,
         via: CallVia::Library {
@@ -107,7 +107,7 @@ fn library_consumer_node(
         },
         url_expr: format!("{name}(...)"),
         reads_complete: true,
-    }));
+    })];
     n
 }
 
@@ -126,6 +126,7 @@ fn orders_config() -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -287,7 +288,7 @@ fn c2_no_env_file_lands_in_unresolved() {
     );
     let call_id = make_id("billing", NodeType::HttpClientCall, "src/c.ts", "do_get", 1);
     let gid = lain::federation::repo_id::GlobalId::from_string(&call_id);
-    let resolution = out.index.consumers.get(&gid).expect("C2: consumer present");
+    let resolution = out.index.consumer(&gid).expect("C2: consumer present");
     match &resolution.target {
         Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::EnvUnmapped,
@@ -353,7 +354,7 @@ fn c3_conflicting_env_values_are_ambiguous() {
     );
     let call_id = make_id("billing", NodeType::HttpClientCall, "src/c.ts", "do_get", 1);
     let gid = lain::federation::repo_id::GlobalId::from_string(&call_id);
-    let resolution = out.index.consumers.get(&gid).expect("C3: consumer present");
+    let resolution = out.index.consumer(&gid).expect("C3: consumer present");
     match &resolution.target {
         Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::EnvAmbiguous,
@@ -508,7 +509,7 @@ fn c6_phase_b_registry_base_with_env_var_binds() {
     consumer.repo_id = Some("billing".to_string());
     consumer.id = make_id("billing", NodeType::HttpClientCall, "src/c.ts", "do_get", 1);
     consumer.line_start = Some(1);
-    consumer.contract = Some(ContractFact::Consumer(ConsumerFact {
+    consumer.contract = vec![ContractFact::Consumer(ConsumerFact {
         method: MethodSpec::Known(HttpMethod::Get),
         url: NormalizedUrl {
             host: lain::federation::contracts::model::HostPart::None,
@@ -521,7 +522,7 @@ fn c6_phase_b_registry_base_with_env_var_binds() {
         },
         url_expr: "ordersClient.get(...)".into(),
         reads_complete: true,
-    }));
+    })];
 
     let mut registry = ClientRegistry::new();
     registry.insert(ClientDef {

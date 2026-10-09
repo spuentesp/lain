@@ -23,8 +23,8 @@ use crate::federation::contracts::index::{
     EndpointSchema, UnresolvedReason,
 };
 use crate::federation::contracts::model::{
-    ContractKey, Direction, FieldMeta, HttpMethod, JsonPath, MethodSpec, PathSegment,
-    ProviderOrigin, ServiceName, SymbolKey, TypeDesc,
+    ContractKey, Direction, FieldMeta, GraphqlOp, HttpMethod, JsonPath, MethodSpec, PathSegment,
+    ProviderOrigin, RpcSystem, ServiceName, SymbolKey, TypeDesc,
 };
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::EdgeProvenance;
@@ -1633,6 +1633,356 @@ fn could_match_rejects_operation_id_mismatch() {
     );
 }
 
+// ─── Task 1 — non-HTTP could-match (I3 verdict soundness) ────────────
+//
+// `could_match` must be conservative for every protocol family
+// (§9.7): returning `true` costs a `NeedsInvestigation` (a lead),
+// returning `false` wrongly permits `NoKnownImpact` (a wrong answer
+// to a user). These tests pin that an unresolved non-HTTP consumer
+// blocks `NoKnownImpact` on its protocol's endpoint, that an
+// unknown-key (`UrlExpr`) consumer cannot be ruled out against a
+// non-HTTP endpoint, and — the over-reporting guard — that a clean
+// non-HTTP scope with nothing unresolved keeps `NoKnownImpact`.
+
+/// Complete coverage for one in-scope repo: reviewed scope plus a
+/// valid ledger entry, so the `evaluate` coverage gate stays quiet
+/// and any `NeedsInvestigation` in these tests can only come from
+/// the could-match rule.
+fn complete_coverage_for(service: &str) -> Coverage {
+    let mut coverage = coverage_with_reviewed(vec![service]);
+    coverage.repo_coverages.insert(
+        service.into(),
+        crate::federation::contracts::coverage::RepoCoverage {
+            cache_key: crate::federation::contracts::index_cache::CacheKey::new(
+                service,
+                "abc",
+                crate::federation::contracts::analyzer_version(),
+            ),
+            ..Default::default()
+        },
+    );
+    coverage
+}
+
+#[test]
+fn an_unresolved_topic_consumer_blocks_no_known_impact() {
+    let call = id(
+        "billing",
+        "TopicConsumer",
+        "src/b.py",
+        "subscribe_orders",
+        1,
+    );
+    let topic = ContractKey::Topic {
+        broker: "kafka".into(),
+        name: "orders.created".into(),
+    };
+    let endpoint = (svc("orders"), topic.clone());
+
+    let mut head = ContractSurface::default();
+    let mut payload = BTreeMap::new();
+    payload.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Payload, payload);
+    head.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let consumer_key = consumer_key_for_call(&call, topic.clone());
+    head.consumers.insert(
+        consumer_key.clone(),
+        ConsumerDef {
+            call: call.clone(),
+            resolution: SurfaceResolution::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: Some(svc("orders")),
+            },
+            reads: BTreeSet::new(),
+            reads_complete: true,
+        },
+    );
+
+    let mut coverage = complete_coverage_for("orders");
+    coverage.unresolved_consumers.push(consumer_key);
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Payload,
+            path: path(&["order_id"]),
+        },
+    };
+    let impact = evaluate(&change, &head, &head, &coverage);
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "an unresolved topic consumer must block NoKnownImpact: {impact:?}"
+    );
+}
+
+#[test]
+fn an_unresolved_rpc_consumer_blocks_no_known_impact() {
+    let call = id("billing", "RpcConsumer", "src/b.py", "get_order", 1);
+    let rpc = ContractKey::Rpc {
+        system: RpcSystem::Grpc,
+        service: "orders.Orders".into(),
+        method: "GetOrder".into(),
+    };
+    let endpoint = (svc("orders"), rpc.clone());
+
+    let mut head = ContractSurface::default();
+    let mut response = BTreeMap::new();
+    response.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Response, response);
+    head.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let consumer_key = consumer_key_for_call(&call, rpc.clone());
+    head.consumers.insert(
+        consumer_key.clone(),
+        ConsumerDef {
+            call: call.clone(),
+            resolution: SurfaceResolution::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: Some(svc("orders")),
+            },
+            reads: BTreeSet::new(),
+            reads_complete: true,
+        },
+    );
+
+    let mut coverage = complete_coverage_for("orders");
+    coverage.unresolved_consumers.push(consumer_key);
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Response,
+            path: path(&["order_id"]),
+        },
+    };
+    let impact = evaluate(&change, &head, &head, &coverage);
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "an unresolved rpc consumer must block NoKnownImpact: {impact:?}"
+    );
+}
+
+#[test]
+fn an_unresolved_graphql_consumer_blocks_no_known_impact() {
+    let call = id("billing", "GraphqlConsumer", "src/b.ts", "queryOrders", 1);
+    let gql = ContractKey::Graphql {
+        op: GraphqlOp::Query,
+        field: "orders".into(),
+    };
+    let endpoint = (svc("orders"), gql.clone());
+
+    let mut head = ContractSurface::default();
+    let mut response = BTreeMap::new();
+    response.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Response, response);
+    head.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let consumer_key = consumer_key_for_call(&call, gql.clone());
+    head.consumers.insert(
+        consumer_key.clone(),
+        ConsumerDef {
+            call: call.clone(),
+            resolution: SurfaceResolution::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: Some(svc("orders")),
+            },
+            reads: BTreeSet::new(),
+            reads_complete: true,
+        },
+    );
+
+    let mut coverage = complete_coverage_for("orders");
+    coverage.unresolved_consumers.push(consumer_key);
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Response,
+            path: path(&["customer_id"]),
+        },
+    };
+    let impact = evaluate(&change, &head, &head, &coverage);
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "an unresolved graphql consumer must block NoKnownImpact: {impact:?}"
+    );
+}
+
+#[test]
+fn an_unresolved_table_consumer_blocks_no_known_impact() {
+    let call = id("billing", "TableConsumer", "src/b.py", "read_shipments", 1);
+    let table = ContractKey::Table {
+        name: "shipments".into(),
+    };
+    let endpoint = (svc("orders"), table.clone());
+
+    let mut head = ContractSurface::default();
+    let mut payload = BTreeMap::new();
+    payload.insert(path(&["shipment_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Payload, payload);
+    head.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let consumer_key = consumer_key_for_call(&call, table.clone());
+    head.consumers.insert(
+        consumer_key.clone(),
+        ConsumerDef {
+            call: call.clone(),
+            resolution: SurfaceResolution::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: Some(svc("orders")),
+            },
+            reads: BTreeSet::new(),
+            reads_complete: true,
+        },
+    );
+
+    let mut coverage = complete_coverage_for("orders");
+    coverage.unresolved_consumers.push(consumer_key);
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Payload,
+            path: path(&["shipment_id"]),
+        },
+    };
+    let impact = evaluate(&change, &head, &head, &coverage);
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "an unresolved table consumer must block NoKnownImpact: {impact:?}"
+    );
+}
+
+#[test]
+fn could_match_is_conservative_when_the_consumer_key_is_unknown() {
+    let call = id("billing", "HttpClientCall", "src/b.py", "fetch", 1);
+    let mut head = ContractSurface::default();
+    let consumer_def = ConsumerDef {
+        call: call.clone(),
+        resolution: SurfaceResolution::Unresolved {
+            reason: UnresolvedReason::NoMatch,
+            target_service: None,
+        },
+        reads: BTreeSet::new(),
+        reads_complete: true,
+    };
+    // A `UrlExpr` consumer: the call yielded no `ContractKey`, so
+    // we cannot rule it out from the URL alone.
+    let key = ConsumerKey {
+        caller: SymbolKey {
+            repo: repo("billing"),
+            path: "src/b.py".into(),
+            container: None,
+            name: "fetch".into(),
+        },
+        target: ConsumerTargetKey::UrlExpr("fetch".into()),
+    };
+    head.consumers.insert(key.clone(), consumer_def);
+    let target = (
+        svc("orders"),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "orders.created".into(),
+        },
+    );
+    assert!(
+        could_match(&key, &target, &head),
+        "a UrlExpr consumer against a Topic endpoint cannot be ruled out \
+         and must could-match"
+    );
+}
+
+#[test]
+fn a_non_http_endpoint_still_allows_no_known_impact_when_nothing_is_unresolved() {
+    // The fix must not over-report: a clean scope with no unresolved
+    // consumers keeps `NoKnownImpact`, before and after the change.
+    let topic = ContractKey::Topic {
+        broker: "kafka".into(),
+        name: "orders.created".into(),
+    };
+    let endpoint = (svc("orders"), topic);
+
+    let mut payload = BTreeMap::new();
+    payload.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Payload, payload);
+    let mut base = ContractSurface::default();
+    base.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let head = base.clone();
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Payload,
+            path: path(&["order_id"]),
+        },
+    };
+    let impact = evaluate(&change, &base, &head, &complete_coverage_for("orders"));
+    assert_eq!(
+        impact.class,
+        Class::NoKnownImpact,
+        "a non-HTTP change with nothing unresolved must keep \
+         NoKnownImpact: {impact:?}"
+    );
+}
+
+/// The `evaluate` coverage gate (`NoKnownImpactSound`, TLA+
+/// CoverageClaim.tla) is protocol-agnostic: a topic change under an
+/// incomplete ledger must still downgrade `NoKnownImpact` →
+/// `NeedsInvestigation` even when no unresolved consumer exists to
+/// could-match. Today this gate was only exercised for HTTP.
+#[test]
+fn incomplete_coverage_still_downgrades_a_topic_change() {
+    let topic = ContractKey::Topic {
+        broker: "kafka".into(),
+        name: "orders.created".into(),
+    };
+    let endpoint = (svc("orders"), topic);
+
+    let mut payload = BTreeMap::new();
+    payload.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Payload, payload);
+    let mut base = ContractSurface::default();
+    base.endpoints
+        .insert(endpoint.clone(), endpoint_def_with_fields(schemas));
+    let head = base.clone();
+
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::FieldRemoved {
+            endpoint,
+            direction: Direction::Payload,
+            path: path(&["order_id"]),
+        },
+    };
+    // Reviewed scope but NO ledger entry — the coverage gate must
+    // downgrade; nothing else in this test can produce a lead.
+    let coverage = coverage_with_reviewed(vec!["orders"]);
+    let impact = evaluate(&change, &base, &head, &coverage);
+    assert_eq!(
+        impact.class,
+        Class::NeedsInvestigation,
+        "an incomplete coverage ledger must downgrade a topic change: {impact:?}"
+    );
+    assert_eq!(impact.reason, Some(Reason::UnresolvedCandidates));
+}
+
 // ─── Property: diff(a, a) is empty ──────────────────────────────────
 
 #[test]
@@ -2306,7 +2656,7 @@ fn build_coverage_reflects_index_state() {
     let _ = &mut consumer;
     index.consumers.insert(
         call.clone(),
-        ConsumerResolution {
+        vec![ConsumerResolution {
             call_id: call.clone(),
             service: svc("billing"),
             target: Some(ConsumerTarget::Unresolved {
@@ -2315,7 +2665,7 @@ fn build_coverage_reflects_index_state() {
             }),
             bound_endpoints: Vec::new(),
             reads_complete: true,
-        },
+        }],
     );
     let cov = build_coverage(
         &index,
@@ -2420,7 +2770,7 @@ fn coverage_complete_unresolved_could_match_blocks_complete() {
     let mut index = ContractIndex::default();
     index.consumers.insert(
         call.clone(),
-        ConsumerResolution {
+        vec![ConsumerResolution {
             call_id: call.clone(),
             service: svc("billing"),
             target: Some(ConsumerTarget::Unresolved {
@@ -2429,7 +2779,7 @@ fn coverage_complete_unresolved_could_match_blocks_complete() {
             }),
             bound_endpoints: Vec::new(),
             reads_complete: true,
-        },
+        }],
     );
     let mut coverage = build_coverage(
         &index,
@@ -2670,6 +3020,86 @@ fn changed_without_schema_fires_on_handler_file_edit() {
     );
 }
 
+// ─── Task 3 — ChangedWithoutSchema must not reach NoKnownImpact ─────
+
+#[test]
+fn a_schemaless_endpoint_with_no_consumers_is_never_no_known_impact() {
+    // Handler file changed, endpoint has no schema, no bound consumer,
+    // no unresolved candidates, coverage complete.
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/handlers/label.py".into(),
+        container: None,
+        name: "print_label".into(),
+    };
+    let node_id = id(
+        "orders",
+        "HttpRoute",
+        "src/routes.py",
+        "GET /api/orders/{}/label",
+        5,
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/{}/label".into(),
+            providers: vec![EndpointProvider {
+                node_id: node_id.clone(),
+                origin: ProviderOrigin::Code,
+                handler: Some(handler.clone()),
+                operation_id: None,
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+    let surface = ContractSurface::from_index(&index);
+    let base = surface.clone();
+    let head = surface;
+    let changed = BTreeSet::from(["src/handlers/label.py".to_string()]);
+    let src = StaticChangedFiles(changed);
+    let changes = diff_contracts(&base, &head, &src);
+    let cw = changes
+        .iter()
+        .find(|c| matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. }))
+        .expect("ChangedWithoutSchema must fire");
+    let impact = evaluate(cw, &base, &head, &complete_coverage_for("orders"));
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "a changed handler on a schemaless endpoint with no consumers is \
+         an unanalysed behaviour change, not 'no impact'"
+    );
+}
+
+#[test]
+fn a_compatible_change_with_no_consumers_stays_no_known_impact() {
+    // The Task 3 fix must not swallow the `Compatible` arm: an
+    // additive endpoint change with no consumers is genuinely
+    // NoKnownImpact under complete coverage.
+    let change = Change {
+        service: svc("orders"),
+        kind: ChangeKind::EndpointAdded {
+            key: http_key(HttpMethod::Get, "/api/orders/lookup"),
+        },
+    };
+    let impact = evaluate(
+        &change,
+        &ContractSurface::default(),
+        &ContractSurface::default(),
+        &complete_coverage_for("orders"),
+    );
+    assert_eq!(
+        impact.class,
+        Class::NoKnownImpact,
+        "a compatible change with no consumers must stay NoKnownImpact: \
+         {impact:?}"
+    );
+}
+
 // Edge case from Bug A's spec Review Focus: when neither
 // `handler: SymbolKey` nor a spec node resolves to a path,
 // `source_files` ends up empty. The `ChangedWithoutSchema` rule must
@@ -2889,4 +3319,858 @@ fn unavailable_diff_does_not_invent_a_handler_change() {
         }),
         "an unavailable git diff is not proof that provider source changed"
     );
+}
+
+#[test]
+fn topic_payload_schema_removal_reports_breaking_change() {
+    let mut base_index = ContractIndex::default();
+    let topic_ep = (
+        svc("orders"),
+        ContractKey::Topic {
+            broker: "kafka".into(),
+            name: "orders.events".into(),
+        },
+    );
+    let mut fields = BTreeMap::new();
+    fields.insert(path(&["order_id"]), field(TypeDesc::String, true, false));
+    fields.insert(path(&["amount"]), field(TypeDesc::Number, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(
+        Direction::Payload,
+        EndpointSchema {
+            node_id: id("orders", "Schema", "schemas/orders.avsc", "OrderEvent", 1),
+            fields,
+        },
+    );
+    base_index.endpoints.insert(
+        topic_ep.clone(),
+        Endpoint {
+            id: topic_ep.clone(),
+            method: HttpMethod::Any,
+            template: "orders.events".into(),
+            providers: vec![],
+            schemas,
+        },
+    );
+
+    let mut head_index = base_index.clone();
+    head_index
+        .endpoints
+        .get_mut(&topic_ep)
+        .unwrap()
+        .schemas
+        .get_mut(&Direction::Payload)
+        .unwrap()
+        .fields
+        .remove(&path(&["amount"]));
+
+    let base = ContractSurface::from_index(&base_index);
+    let head = ContractSurface::from_index(&head_index);
+    let changes = diff_contracts(&base, &head, &*changed_set());
+
+    let removed = changes.iter().find(|c| {
+        matches!(&c.kind, ChangeKind::FieldRemoved { path: p, direction: d, .. } if p == &path(&["amount"]) && *d == Direction::Payload)
+    });
+    assert!(
+        removed.is_some(),
+        "must detect FieldRemoved in Direction::Payload"
+    );
+}
+
+// ─── HandlerChanged: schema-bearing endpoints ────────────────────────
+//
+// `ChangedWithoutSchema` fires only when BOTH sides have no schema.
+// A behaviour change behind an endpoint that DOES have a schema
+// therefore produced no `ChangeKind` at all — `diff_fields` saw an
+// identical schema and said nothing — so a pure behaviour change was
+// invisible to `diff_contracts`. These tests pin the sibling rule.
+
+/// An endpoint that HAS a response schema and a bound handler.
+fn schema_bearing_endpoint() -> (ContractIndex, EndpointId) {
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/orders/handlers.rs".into(),
+        container: None,
+        name: "get_order".into(),
+    };
+    let node_id = id(
+        "orders",
+        "HttpRoute",
+        "src/orders/routes.rs",
+        "GET /api/orders/:id",
+        12,
+    );
+    let mut fields = BTreeMap::new();
+    fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(
+        Direction::Response,
+        EndpointSchema {
+            node_id: id("orders", "Schema", "openapi.yaml", "OrderResponse", 7),
+            fields,
+        },
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/{}".into(),
+            providers: vec![EndpointProvider {
+                node_id,
+                origin: ProviderOrigin::Code,
+                handler: Some(handler),
+                operation_id: None,
+            }],
+            schemas,
+        },
+    );
+    (index, endpoint)
+}
+
+#[test]
+fn handler_change_on_a_schema_bearing_endpoint_is_reported() {
+    let (index, _ep) = schema_bearing_endpoint();
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    // The handler file changed; the schema is byte-identical.
+    let src = StaticChangedFiles(BTreeSet::from(["src/orders/handlers.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. })),
+        "a schema-bearing endpoint whose handler file changed must not vanish: {changes:?}"
+    );
+    // The schema is unchanged, so no field-level change may appear.
+    assert!(
+        changes.iter().all(|c| !matches!(
+            c.kind,
+            ChangeKind::FieldAdded { .. } | ChangeKind::FieldRemoved { .. }
+        )),
+        "identical schemas must not produce field changes: {changes:?}"
+    );
+    // And it must not be mislabelled as the schema-less rule.
+    assert!(
+        changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. })),
+        "schema-bearing endpoints must not use ChangedWithoutSchema: {changes:?}"
+    );
+}
+
+#[test]
+fn schema_bearing_endpoint_unchanged_handler_emits_nothing() {
+    let (index, _ep) = schema_bearing_endpoint();
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    let src = StaticChangedFiles(BTreeSet::new());
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes.is_empty(),
+        "no file changed -> no change, got {changes:?}"
+    );
+}
+
+#[test]
+fn schema_less_endpoint_still_reports_changed_without_schema() {
+    // Regression guard: widening detection must not swallow the old
+    // rule or repurpose its label.
+    let mut index = ContractIndex::default();
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}/label");
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/orders/label.rs".into(),
+        container: None,
+        name: "get_order_label".into(),
+    };
+    let node_id = id(
+        "orders",
+        "HttpRoute",
+        "src/orders/label.rs",
+        "GET /api/orders/:id/label",
+        8,
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/{}/label".into(),
+            providers: vec![EndpointProvider {
+                node_id,
+                origin: ProviderOrigin::Code,
+                handler: Some(handler),
+                operation_id: None,
+            }],
+            schemas: BTreeMap::new(),
+        },
+    );
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    let src = StaticChangedFiles(BTreeSet::from(["src/orders/label.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::ChangedWithoutSchema { .. })),
+        "schema-less endpoint must keep ChangedWithoutSchema: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::HandlerChanged { .. })),
+        "schema-less endpoints must not use HandlerChanged: {changes:?}"
+    );
+}
+
+/// A pairing that moved in BOTH path and method reported nothing at
+/// all — `PathChanged` required the method to be unchanged and
+/// `MethodChanged` required the path to be unchanged, so their union
+/// left a hole. `from` / `to` are full `ContractKey`s, so `PathChanged`
+/// already carries the method half.
+#[test]
+fn a_path_and_method_rename_is_reported() {
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/main.rs".into(),
+        container: None,
+        name: "get_order".into(),
+    };
+    let mut response_fields = BTreeMap::new();
+    response_fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Response, response_fields);
+
+    let base_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let head_endpoint = endpoint_id("orders", HttpMethod::Post, "/api/order/{}");
+    let provider = ProviderRef {
+        node_id: id("orders", "HttpRoute", "src/main.rs", "get_order", 12),
+        handler: Some(handler),
+        operation_id: None,
+    };
+    let mut base_endpoints = BTreeMap::new();
+    base_endpoints.insert(
+        base_endpoint,
+        EndpointDef {
+            providers: vec![provider.clone()],
+            schemas: schemas.clone(),
+            has_schema: true,
+            source_files: BTreeSet::new(),
+        },
+    );
+    let mut head_endpoints = BTreeMap::new();
+    head_endpoints.insert(
+        head_endpoint,
+        EndpointDef {
+            providers: vec![provider],
+            schemas,
+            has_schema: true,
+            source_files: BTreeSet::new(),
+        },
+    );
+    let base = ContractSurface {
+        endpoints: base_endpoints,
+        consumers: BTreeMap::new(),
+    };
+    let head = ContractSurface {
+        endpoints: head_endpoints,
+        consumers: BTreeMap::new(),
+    };
+    let src = StaticChangedFiles(BTreeSet::new());
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::PathChanged { .. })),
+        "a rename that moved both path and method must not go unreported: {changes:?}"
+    );
+}
+
+/// Pins the *principled* suppression that makes it safe to attribute a
+/// shared-handler change to every claimant: when `PathChanged` /
+/// `MethodChanged` / a schema diff already explains this endpoint,
+/// `HandlerChanged` must not also fire.
+///
+/// `HandlerChanged`'s stated purpose is "schema byte-identical, handler
+/// moved — the case **nothing else** would report". A route rename
+/// reports `PathChanged`; adding `HandlerChanged` for the same edit
+/// counts it twice.
+///
+/// Note this case was once suppressed *accidentally* by the old
+/// `owners.len() == 1` attribution gate (a rename yields two distinct
+/// `EndpointId`s, so the file looked shared). That gate is gone, so the
+/// `explained` suppression below is the only thing standing between us
+/// and the double report — which is what this test is for.
+#[test]
+fn handler_change_alongside_a_path_rename_is_not_double_reported() {
+    // The `s6-rename-path` shape: the route moved
+    // `/api/orders/{}` → `/api/order/{}` and the routing table (the
+    // handler's file) was edited to do it. `PathChanged` already
+    // explains the endpoint, so `HandlerChanged` — whose stated purpose
+    // is "schema byte-identical, handler moved, the case **nothing
+    // else** would report" — must not also fire. Reporting both counts
+    // one edit twice.
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/main.rs".into(),
+        container: None,
+        name: "get_order".into(),
+    };
+    let mut response_fields = BTreeMap::new();
+    response_fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Response, response_fields);
+
+    let base_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let head_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/order/{}");
+    let provider = |name: &str| ProviderRef {
+        node_id: id("orders", "HttpRoute", "src/main.rs", name, 12),
+        handler: Some(handler.clone()),
+        operation_id: None,
+    };
+
+    let mut base_endpoints = BTreeMap::new();
+    base_endpoints.insert(
+        base_endpoint.clone(),
+        EndpointDef {
+            providers: vec![provider("get_order")],
+            schemas: schemas.clone(),
+            has_schema: true,
+            source_files: BTreeSet::new(),
+        },
+    );
+    let mut head_endpoints = BTreeMap::new();
+    head_endpoints.insert(
+        head_endpoint.clone(),
+        EndpointDef {
+            providers: vec![provider("get_order")],
+            schemas,
+            has_schema: true,
+            source_files: BTreeSet::new(),
+        },
+    );
+    let base = ContractSurface {
+        endpoints: base_endpoints,
+        consumers: BTreeMap::new(),
+    };
+    let head = ContractSurface {
+        endpoints: head_endpoints,
+        consumers: BTreeMap::new(),
+    };
+    let src = StaticChangedFiles(BTreeSet::from(["src/main.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::PathChanged { .. })),
+        "the rename must report PathChanged: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::HandlerChanged { .. })),
+        "PathChanged already explains this endpoint; HandlerChanged would \
+         count the same edit twice: {changes:?}"
+    );
+}
+
+/// Two schema-bearing endpoints whose handler symbols both live in
+/// `src/main.rs` (a routing table). An edit to that file is a real
+/// behaviour risk for **both** — suppressing it entirely lets
+/// `NoKnownImpact` stand while behaviour may have moved, which is this
+/// codebase's worst failure. So both claimants get a `HandlerChanged`
+/// lead.
+///
+/// The earlier silence here was justified by a T1 precision regression
+/// ("reporting it three times") on the `s6-rename-path` scenario. That
+/// regression was a **double report**, not a mis-attribution: `s6` is a
+/// route rename, `PathChanged` already explains it, and `HandlerChanged`
+/// was counting the same edit again. That case is now suppressed
+/// explicitly by `handler_change_alongside_a_path_rename_is_not_double_reported`,
+/// so this one is free to be honest.
+///
+/// These are *leads* (`NeedsInvestigation`), not proven breaks — which
+/// is exactly the "risks requiring investigation" bucket.
+/// Line-level attribution: when the diff reports *which lines* of a
+/// shared handler file changed, only the endpoint whose site sits in
+/// those lines is implicated. This is what stops a routing-table edit
+/// for one endpoint from becoming a lead against its siblings.
+/// Build a `ContractIndex` of schema-bearing endpoints whose handlers
+/// all live in one file — the shared-routing-table shape. Each entry is
+/// `(template, route_name, handler_name, route_line)`.
+fn shared_handler_file_index(
+    handler_path: &str,
+    sites: &[(&str, &str, &str, u32)],
+) -> ContractIndex {
+    let mut index = ContractIndex::default();
+    for (template, route_name, handler_name, line) in sites {
+        let endpoint = endpoint_id("orders", HttpMethod::Get, template);
+        let mut fields = BTreeMap::new();
+        fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            Direction::Response,
+            EndpointSchema {
+                node_id: id("orders", "Schema", "openapi.yaml", route_name, 7),
+                fields,
+            },
+        );
+        index.endpoints.insert(
+            endpoint.clone(),
+            Endpoint {
+                id: endpoint.clone(),
+                method: HttpMethod::Get,
+                template: (*template).into(),
+                providers: vec![EndpointProvider {
+                    node_id: id("orders", "HttpRoute", handler_path, route_name, *line),
+                    origin: ProviderOrigin::Code,
+                    handler: Some(SymbolKey {
+                        repo: repo("orders"),
+                        path: handler_path.into(),
+                        container: None,
+                        name: (*handler_name).into(),
+                    }),
+                    operation_id: None,
+                }],
+                schemas,
+            },
+        );
+    }
+    index
+}
+
+/// A file-anchored source: `changed` is the changed path set for the
+/// named repo, `spans` its changed line ranges.
+fn anchored_source(
+    repo_name: &str,
+    changed: &[&str],
+    spans: &[(&str, Vec<(u32, u32)>)],
+) -> crate::federation::contracts::changed_files::MultiRepoChangedFiles {
+    use crate::federation::contracts::changed_files::{MultiRepoChangedFiles, RepoDiffResult};
+    let mut by_repo = BTreeMap::new();
+    by_repo.insert(
+        repo_name.to_string(),
+        if changed.is_empty() {
+            RepoDiffResult::Unchanged
+        } else {
+            RepoDiffResult::Changed(
+                changed
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect::<BTreeSet<_>>(),
+            )
+        },
+    );
+    let mut per_file = crate::federation::contracts::diff::ChangedLines::new();
+    for (f, s) in spans {
+        per_file.insert((*f).to_string(), s.clone());
+    }
+    let mut line_ranges = BTreeMap::new();
+    line_ranges.insert(repo_name.to_string(), per_file);
+    MultiRepoChangedFiles {
+        by_repo,
+        line_ranges,
+    }
+}
+
+/// A mixed edit — one line that *is* a claimant's site, and one that is
+/// not (a handler body further down the same file). Whole-file
+/// attribution must be used: the anchor of the second claimant is not
+/// the boundary of its code, so "anchor not hit" does not prove it was
+/// untouched.
+#[test]
+fn a_mixed_site_and_body_edit_falls_back_to_whole_file() {
+    let index = shared_handler_file_index(
+        "src/main.rs",
+        &[
+            ("/api/orders/{}", "GET /api/orders/:id", "get_order", 12),
+            ("/api/orders/me", "GET /api/orders/me", "get_me", 18),
+        ],
+    );
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+
+    // Line 12 = get_order's route site; line 40 = get_me's body, which
+    // is not anybody's anchor.
+    let src = anchored_source(
+        "orders",
+        &["src/main.rs"],
+        &[("src/main.rs", vec![(12, 12), (40, 40)])],
+    );
+
+    let changes = diff_contracts(&base, &head, &src);
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        2,
+        "a body line nobody anchors cannot rule any claimant out — both \
+         must be implicated, else get_me goes silent while its code moved: \
+         {changes:?}"
+    );
+}
+
+/// A claimant with no anchor in the changed file (its route node lives
+/// elsewhere) can never be ruled out. Hitting some *other* claimant's
+/// anchor must not silence it.
+#[test]
+fn a_claimant_without_an_anchor_is_never_silenced() {
+    let mut index = shared_handler_file_index(
+        "src/main.rs",
+        &[("/api/orders/{}", "GET /api/orders/:id", "get_order", 12)],
+    );
+    // Second endpoint: handler claims `src/main.rs`, but its route node
+    // is in `src/routes.rs` — so it contributes no anchor.
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/me");
+    let mut fields = BTreeMap::new();
+    fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(
+        Direction::Response,
+        EndpointSchema {
+            node_id: id("orders", "Schema", "openapi.yaml", "GET /api/orders/me", 7),
+            fields,
+        },
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/me".into(),
+            providers: vec![EndpointProvider {
+                node_id: id(
+                    "orders",
+                    "HttpRoute",
+                    "src/routes.rs",
+                    "GET /api/orders/me",
+                    18,
+                ),
+                origin: ProviderOrigin::Code,
+                handler: Some(SymbolKey {
+                    repo: repo("orders"),
+                    path: "src/main.rs".into(),
+                    container: None,
+                    name: "get_me".into(),
+                }),
+                operation_id: None,
+            }],
+            schemas,
+        },
+    );
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+
+    // Only get_order's site changed.
+    let src = anchored_source(
+        "orders",
+        &["src/main.rs"],
+        &[("src/main.rs", vec![(12, 12)])],
+    );
+
+    let changes = diff_contracts(&base, &head, &src);
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        2,
+        "get_me has no anchor to rule it out, so it must stay a lead: {changes:?}"
+    );
+}
+
+/// Two repos each with a `src/main.rs` must not borrow each other's
+/// line numbers. Repo A's body edit at line 18 must not be treated as
+/// "attributed" because repo B happens to have a route site at 18.
+#[test]
+fn handler_anchors_do_not_leak_across_repos() {
+    let mut index = shared_handler_file_index(
+        "src/main.rs",
+        &[("/api/orders/{}", "GET /api/orders/:id", "get_order", 20)],
+    );
+    // Billing's own endpoint, same file name, route site at line 18.
+    let endpoint = endpoint_id("billing", HttpMethod::Get, "/invoices/{}");
+    let mut fields = BTreeMap::new();
+    fields.insert(path(&["id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(
+        Direction::Response,
+        EndpointSchema {
+            node_id: id("billing", "Schema", "openapi.yaml", "GET /invoices/:id", 7),
+            fields,
+        },
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/invoices/{}".into(),
+            providers: vec![EndpointProvider {
+                node_id: id(
+                    "billing",
+                    "HttpRoute",
+                    "src/main.rs",
+                    "GET /invoices/:id",
+                    18,
+                ),
+                origin: ProviderOrigin::Code,
+                handler: Some(SymbolKey {
+                    repo: repo("billing"),
+                    path: "src/main.rs".into(),
+                    container: None,
+                    name: "get_invoice".into(),
+                }),
+                operation_id: None,
+            }],
+            schemas,
+        },
+    );
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+
+    // orders' `src/main.rs` line 18 changed — a body line, not a site.
+    let src = anchored_source(
+        "orders",
+        &["src/main.rs"],
+        &[("src/main.rs", vec![(18, 18)])],
+    );
+
+    let changes = diff_contracts(&base, &head, &src);
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        1,
+        "orders' edit must implicate orders' claimant and nothing else — \
+         billing's line 18 is a different file in a different repo: {changes:?}"
+    );
+    assert!(
+        matches!(
+            handler_changes[0].kind,
+            ChangeKind::HandlerChanged { ref endpoint } if endpoint.0 == svc("orders")
+        ),
+        "the lead must be the orders endpoint, got {changes:?}"
+    );
+}
+
+#[test]
+fn handler_change_in_a_shared_file_is_attributed_by_changed_lines() {
+    let mut index = ContractIndex::default();
+    for (template, route_name, handler_name, line) in [
+        ("/api/orders/{}", "GET /api/orders/:id", "get_order", 12),
+        ("/api/orders/me", "GET /api/orders/me", "get_me", 18),
+    ] {
+        let endpoint = endpoint_id("orders", HttpMethod::Get, template);
+        let mut fields = BTreeMap::new();
+        fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            Direction::Response,
+            EndpointSchema {
+                node_id: id("orders", "Schema", "openapi.yaml", route_name, 7),
+                fields,
+            },
+        );
+        index.endpoints.insert(
+            endpoint.clone(),
+            Endpoint {
+                id: endpoint.clone(),
+                method: HttpMethod::Get,
+                template: template.into(),
+                providers: vec![EndpointProvider {
+                    node_id: id("orders", "HttpRoute", "src/main.rs", route_name, line),
+                    origin: ProviderOrigin::Code,
+                    handler: Some(SymbolKey {
+                        repo: repo("orders"),
+                        path: "src/main.rs".into(),
+                        container: None,
+                        name: handler_name.into(),
+                    }),
+                    operation_id: None,
+                }],
+                schemas,
+            },
+        );
+    }
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+
+    // Only line 12 changed — `get_order`'s site. `get_me` at 18 is
+    // untouched and must not be dragged in.
+    let mut line_ranges = crate::federation::contracts::diff::ChangedLines::new();
+    line_ranges.insert("src/main.rs".to_string(), vec![(12, 12)]);
+    let mut by_repo = BTreeMap::new();
+    by_repo.insert(
+        "orders".to_string(),
+        crate::federation::contracts::changed_files::RepoDiffResult::Changed(BTreeSet::from([
+            "src/main.rs".to_string(),
+        ])),
+    );
+    let src = crate::federation::contracts::changed_files::MultiRepoChangedFiles {
+        by_repo,
+        line_ranges: {
+            let mut m = BTreeMap::new();
+            m.insert("orders".to_string(), line_ranges);
+            m
+        },
+    };
+
+    let changes = diff_contracts(&base, &head, &src);
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        1,
+        "only the endpoint whose site is in the changed lines may be \
+         implicated — got {changes:?}"
+    );
+    assert!(
+        matches!(
+            handler_changes[0].kind,
+            ChangeKind::HandlerChanged { ref endpoint } if endpoint.1
+                == http_key(HttpMethod::Get, "/api/orders/{}")
+        ),
+        "the implicated endpoint must be get_order's, got {changes:?}"
+    );
+}
+
+#[test]
+fn handler_change_in_a_shared_file_is_reported_for_every_claimant() {
+    let mut index = ContractIndex::default();
+    for (template, route_name, handler_name, line) in [
+        ("/api/orders/{}", "GET /api/orders/:id", "get_order", 12),
+        ("/api/orders/me", "GET /api/orders/me", "get_me", 13),
+    ] {
+        let endpoint = endpoint_id("orders", HttpMethod::Get, template);
+        let mut fields = BTreeMap::new();
+        fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            Direction::Response,
+            EndpointSchema {
+                node_id: id("orders", "Schema", "openapi.yaml", route_name, 7),
+                fields,
+            },
+        );
+        index.endpoints.insert(
+            endpoint.clone(),
+            Endpoint {
+                id: endpoint.clone(),
+                method: HttpMethod::Get,
+                template: template.into(),
+                providers: vec![EndpointProvider {
+                    node_id: id("orders", "HttpRoute", "src/main.rs", route_name, line),
+                    origin: ProviderOrigin::Code,
+                    handler: Some(SymbolKey {
+                        repo: repo("orders"),
+                        path: "src/main.rs".into(),
+                        container: None,
+                        name: handler_name.into(),
+                    }),
+                    operation_id: None,
+                }],
+                schemas,
+            },
+        );
+    }
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    let src = StaticChangedFiles(BTreeSet::from(["src/main.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        2,
+        "an edit to a file two endpoints share is a behaviour risk for both; \
+         suppressing it lets NoKnownImpact stand — got {changes:?}"
+    );
+}
+
+#[test]
+fn handler_change_alongside_a_schema_change_is_not_double_reported() {
+    // The endpoint's own schema changed AND its handler file changed.
+    // `diff_fields` already reports the schema change; `HandlerChanged`
+    // is only for "schema byte-identical", so it must stay silent.
+    let (mut index, ep) = schema_bearing_endpoint();
+    let mut head_index = index.clone();
+    head_index
+        .endpoints
+        .get_mut(&ep)
+        .unwrap()
+        .schemas
+        .get_mut(&Direction::Response)
+        .unwrap()
+        .fields
+        .insert(path(&["total"]), field(TypeDesc::Number, true, false));
+
+    let base = ContractSurface::from_index(&index);
+    let head = ContractSurface::from_index(&head_index);
+    let src = StaticChangedFiles(BTreeSet::from(["src/orders/handlers.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::FieldAdded { .. })),
+        "the schema change must still be reported: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::HandlerChanged { .. })),
+        "a schema change already explains the diff; HandlerChanged must \
+         not double-report it: {changes:?}"
+    );
+    let _ = &mut index;
+}
+
+// `HandlerChanged` has the same zero-consumer hazard as
+// `ChangedWithoutSchema`: a schema-bearing endpoint whose handler
+// changed, with no bound consumer and no could-match candidates, must
+// not be reported as "no known impact". The schema is byte-identical,
+// so nothing else in the diff explains the change — it is an
+// unanalysed behaviour change.
+
+#[test]
+fn handler_changed_with_no_consumers_is_never_no_known_impact() {
+    let (index, _ep) = schema_bearing_endpoint();
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+    // The handler file changed; the schema is byte-identical; the
+    // endpoint has one provider and zero bound consumers.
+    let src = StaticChangedFiles(BTreeSet::from(["src/orders/handlers.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    let hc = changes
+        .iter()
+        .find(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .expect("HandlerChanged must fire for a schema-bearing endpoint whose handler moved");
+    let impact = evaluate(hc, &base, &head, &complete_coverage_for("orders"));
+    assert_ne!(
+        impact.class,
+        Class::NoKnownImpact,
+        "a changed handler on a schema-bearing endpoint with no consumers is \
+         an unanalysed behaviour change, not 'no impact'"
+    );
+    assert_eq!(impact.class, Class::NeedsInvestigation);
 }

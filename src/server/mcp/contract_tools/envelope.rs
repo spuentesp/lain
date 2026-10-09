@@ -88,13 +88,72 @@ pub fn success_envelope(
     success_envelope_with_view(data, snapshot, reproducible, view, started)
 }
 
+/// Recursively fill the `commit` and `text` of every evidence
+/// reference (`{id, repo, path, line, commit, text}`) whose `commit`
+/// is still empty, using the view's resolved SHAs.
+///
+/// `text` becomes `repo@sha:path:line` — the form
+/// `resolve_evidence` already accepts as a reference, so a client can
+/// round-trip it straight back. References to a repo the view did not
+/// resolve keep their empty `commit`; those are unresolvable by
+/// construction and must not be given a fabricated SHA.
+pub fn fill_evidence_refs(value: &mut Value, commits: &std::collections::BTreeMap<String, String>) {
+    match value {
+        Value::Object(map) => {
+            let is_ref = map.contains_key("id")
+                && map.contains_key("path")
+                && map.contains_key("line")
+                && map.get("commit").and_then(|v| v.as_str()) == Some("");
+            if is_ref {
+                let repo = map
+                    .get("repo")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(commit) = commits.get(&repo) {
+                    if !commit.is_empty() {
+                        let path = map
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let line = map.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                        map.insert("commit".to_string(), json!(commit));
+                        if !path.is_empty() {
+                            map.insert(
+                                "text".to_string(),
+                                json!(format!("{repo}@{commit}:{path}:{line}")),
+                            );
+                        }
+                    }
+                }
+            }
+            for (_, v) in map.iter_mut() {
+                fill_evidence_refs(v, commits);
+            }
+        }
+        Value::Array(items) => {
+            for v in items.iter_mut() {
+                fill_evidence_refs(v, commits);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn success_envelope_with_view(
-    data: Value,
+    mut data: Value,
     snapshot: &str,
     reproducible: bool,
     view: ViewInfo,
     started: Instant,
 ) -> Value {
+    // Evidence references are built by several helpers that do not
+    // have the view in hand, so they leave `commit`/`text` empty.
+    // Fill them here — the one place that always knows the view's
+    // resolved SHAs — so every ref an external client sees is
+    // self-contained and round-trips into `resolve_evidence`.
+    fill_evidence_refs(&mut data, &view.git_commits);
     let view_val = json!({
         "kind": view.kind,
         "snapshot_id": view.snapshot_id,

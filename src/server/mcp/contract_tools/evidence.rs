@@ -16,9 +16,9 @@
 //!   at the snapshot commit, never a working tree.
 //! - Live content is read from disk + `dirty` flag set.
 
-use super::envelope::{check_api_version, error_outcome, outcome, success_envelope};
+use super::envelope::{check_api_version, error_outcome, outcome, success_envelope_with_view};
+use super::view::{resolve_view, ContractView};
 use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
-use crate::federation::contracts::snapshots::record::SnapshotRecord;
 use crate::federation::contracts::snapshots::RepoSnapshotState;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::GraphBackend;
@@ -27,7 +27,6 @@ use crate::server::mcp::handler::McpContext;
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 
 // ─── dispatch ─────────────────────────────────────────────────────────
@@ -126,7 +125,7 @@ async fn run_resolve_evidence<'a>(
             started,
         ));
     }
-    let ctx_view = resolve_view_state(ctx, &args_map, started).await?;
+    let ctx_view = resolve_view(ctx, &args_map, started).await?;
     let mut items: Vec<Value> = Vec::new();
     for r in refs_raw {
         let s = r.as_str().unwrap_or("").to_string();
@@ -152,7 +151,13 @@ async fn run_resolve_evidence<'a>(
         items.push(item);
     }
     let data = json!({"items": items});
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        ctx_view.label(),
+        ctx_view.reproducible(),
+        ctx_view.view_info(),
+        started,
+    );
     let text = render_resolve_evidence(&data);
     Ok(outcome(envelope, &data, text))
 }
@@ -199,351 +204,208 @@ fn parse_ref(s: &str) -> ParsedRef {
     ParsedRef::Malformed
 }
 
-/// The snapshot view: the pinned record plus the resident
-/// federation opened for it (backend + manager `data_dir`). Boxed
-/// so both `ViewState` variants stay the same size
-/// (`clippy::large_enum_variant`).
-struct SnapshotViewState {
-    record: SnapshotRecord,
-    federation: Arc<crate::federation::contracts::snapshots::SnapshotFederation>,
-}
-
-enum ViewState<'a> {
-    Live { fed: &'a FederatedIndex },
-    Snapshot(Box<SnapshotViewState>),
-}
-
-async fn resolve_view_state<'a>(
-    ctx: &'a McpContext<'a>,
-    args_map: &Map<String, Value>,
-    started: Instant,
-) -> Result<ViewState<'a>, ToolOutcome> {
-    let snap_label = snapshot_label(args_map);
-    if snap_label == "live" {
-        let fed = ctx.federation.ok_or_else(|| {
-            error_outcome(
-                "federation_disabled",
-                "this server is not configured with a federation",
-                None,
-                &snap_label,
-                started,
-            )
-        })?;
-        return Ok(ViewState::Live { fed });
-    }
-    if !snap_label.starts_with(crate::federation::contracts::snapshots::SNAPSHOT_ID_PREFIX) {
-        return Err(error_outcome(
-            "snapshot_not_found",
-            format!("snapshot {snap_label:?} not found"),
-            Some(json!({"snapshot": snap_label})),
-            &snap_label,
-            started,
-        ));
-    }
-    let mgr = ctx.snapshots.ok_or_else(|| {
-        error_outcome(
-            "snapshot_manager_unavailable",
-            "snapshot manager is not configured for this server",
-            None,
-            &snap_label,
-            started,
-        )
-    })?;
-    let outcome = mgr.get(&snap_label, 5_000).await.map_err(|e| match e {
-        crate::federation::contracts::snapshots::manager::PrepareError::SnapshotNotFound {
-            snapshot,
-        } => error_outcome(
-            "snapshot_not_found",
-            format!("snapshot {snapshot:?} not found"),
-            Some(json!({"snapshot": snapshot})),
-            &snap_label,
-            started,
-        ),
-        crate::federation::contracts::snapshots::manager::PrepareError::Busy { retry_after_ms } => {
-            error_outcome(
-                "busy",
-                "snapshot residency busy",
-                Some(json!({"retry_after_ms": retry_after_ms})),
-                &snap_label,
-                started,
-            )
-        }
-        other => error_outcome(
-            "invalid_argument",
-            format!("{other:?}"),
-            None,
-            &snap_label,
-            started,
-        ),
-    })?;
-    // Open a residency slot for the snapshot so the in-memory
-    // backend is queryable. Honor §10.5's 5_000 ms grace for
-    // analysis / evidence tools.
-    let wait_ms = std::cmp::min(
-        args_map
-            .get("wait_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5_000),
-        60_000,
-    );
-    let (fed, _hold) = mgr
-        .from_snapshot_with_wait_ms(&outcome.record, wait_ms)
-        .map_err(|e| {
-            error_outcome(
-                "invalid_argument",
-                format!("from_snapshot: {e}"),
-                None,
-                &snap_label,
-                started,
-            )
-        })?;
-    Ok(ViewState::Snapshot(Box::new(SnapshotViewState {
-        record: outcome.record,
-        federation: Arc::clone(&fed),
-    })))
-}
-
-fn resolve_global_id<'a>(view: &ViewState<'a>, id: &GlobalId, context_lines: u32) -> Value {
-    // Walk the federation's node table for `live`; the snapshot
-    // path looks up via the projection's `from_snapshot`. For
-    // simplicity we delegate to `get_node`-style lookups on the
-    // federation's backend.
-    match view {
-        ViewState::Live { fed } => {
-            let backend = fed.backend();
-            match backend.get_node(id.as_str()) {
-                Ok(Some(node)) => {
-                    let line = node.line_start.unwrap_or(0);
-                    let path = node.path.clone();
-                    let snippet = backend
-                        .get_node(id.as_str())
-                        .ok()
-                        .flatten()
-                        .and_then(|_| snippet_from_live(fed, &path, line, context_lines));
-                    json!({
-                        "ref": id.as_str(),
-                        "exists": true,
-                        "node": {
-                            "id": id.as_str(),
-                            "node_type": format!("{:?}", node.node_type),
-                            "name": node.name,
-                            "ref": {
-                                "id": id.as_str(),
-                                "repo": id.repo_id(),
-                                "commit": "",
-                                "path": path,
-                                "line": line,
-                                "text": "",
-                            },
-                        },
-                        "snippet": snippet,
-                    })
-                }
-                _ => json!({
-                    "ref": id.as_str(),
-                    "exists": false,
-                    "reason": "no_such_node",
-                }),
-            }
-        }
-        ViewState::Snapshot(inner) => {
-            let record = &inner.record;
-            let fed = &inner.federation;
-            // Check the repo is in the snapshot. The GlobalId's
-            // first segment is the bare repo id (§4.1, §5.1).
-            let Some(snap_id) = id.repo_id().split(':').next() else {
-                return json!({
-                    "ref": id.as_str(),
-                    "exists": false,
-                    "reason": "malformed",
-                });
-            };
-            if !record.repos.contains_key(snap_id) {
-                return json!({
-                    "ref": id.as_str(),
-                    "exists": false,
-                    "reason": "unknown_repo",
-                });
-            }
-            if let Some(state) = record.repo_states.get(snap_id) {
-                if matches!(state, RepoSnapshotState::Excluded) {
-                    return json!({
-                        "ref": id.as_str(),
-                        "exists": false,
-                        "reason": "malformed",
-                    });
-                }
-            }
-            // Real lookup: query the snapshot's backend for the
-            // node id. `line_mismatch` (§12): a GlobalId whose
-            // node no longer starts at the cited line — the exact
-            // id misses, but the same symbol at another line means
-            // the ref moved rather than disappeared.
-            let exact = fed.backend.get_node(id.as_str()).ok().flatten();
-            let node = match exact {
-                Some(node) => node,
-                None => {
-                    let reason = if same_symbol_at_other_line(fed, id) {
-                        "line_mismatch"
-                    } else {
-                        "no_such_node"
-                    };
-                    return json!({
-                        "ref": id.as_str(),
-                        "exists": false,
-                        "reason": reason,
-                    });
-                }
-            };
-            let actual_line = node.line_start.unwrap_or(0);
-            let cited_line = id.line_start().unwrap_or(0);
-            if actual_line != cited_line {
-                return json!({
-                    "ref": id.as_str(),
-                    "exists": false,
-                    "reason": "line_mismatch",
-                });
-            }
-            let path = node.path.clone();
-            let commit = record.repos.get(snap_id).cloned().unwrap_or_default();
-            let snippet =
-                snapshot_blob_window(fed, snap_id, &commit, &path, actual_line, context_lines);
-            json!({
+fn resolve_global_id(view: &ContractView<'_>, id: &GlobalId, context_lines: u32) -> Value {
+    if let Some(record) = view.snapshot_record() {
+        let repo = id.repo_id();
+        if !record.repos.contains_key(repo) {
+            return json!({
                 "ref": id.as_str(),
-                "exists": true,
-                "node": {
-                    "id": id.as_str(),
-                    "node_type": format!("{:?}", node.node_type),
-                    "name": node.name,
-                    "ref": {
-                        "id": id.as_str(),
-                        "repo": id.repo_id(),
-                        "commit": commit,
-                        "path": path,
-                        "line": actual_line,
-                        "text": "",
-                    },
-                },
-                "snippet": snippet,
-            })
+                "exists": false,
+                "reason": "unknown_repo",
+            });
+        }
+        if matches!(
+            record.repo_states.get(repo),
+            Some(RepoSnapshotState::Excluded)
+        ) {
+            return json!({
+                "ref": id.as_str(),
+                "exists": false,
+                "reason": "malformed",
+            });
         }
     }
+    let backend = view.backend();
+    let Some(node) = backend.get_node(id.as_str()).ok().flatten() else {
+        let reason = view
+            .snapshot_federation()
+            .filter(|federation| same_symbol_at_other_line(federation, id))
+            .map_or("no_such_node", |_| "line_mismatch");
+        return json!({
+            "ref": id.as_str(),
+            "exists": false,
+            "reason": reason,
+        });
+    };
+    let line = node.line_start.unwrap_or(0);
+    let path = node.path.clone();
+
+    if let Some(federation) = view.live_federation() {
+        let snippet = snippet_from_live(federation, &path, line, context_lines);
+        return json!({
+            "ref": id.as_str(),
+            "exists": true,
+            "node": {
+                "id": id.as_str(),
+                "node_type": format!("{:?}", node.node_type),
+                "name": node.name,
+                "ref": {
+                    "id": id.as_str(),
+                    "repo": id.repo_id(),
+                    "commit": view.commits().get(id.repo_id()).cloned().unwrap_or_default(),
+                    "path": path,
+                    "line": line,
+                    "text": "",
+                },
+            },
+            "snippet": snippet,
+        });
+    }
+
+    let record = view.snapshot_record().expect("snapshot view has a record");
+    let federation = view
+        .snapshot_federation()
+        .expect("snapshot view has a federation");
+    let repo = id.repo_id();
+    if line != id.line_start().unwrap_or(0) {
+        return json!({
+            "ref": id.as_str(),
+            "exists": false,
+            "reason": "line_mismatch",
+        });
+    }
+    let commit = record.repos.get(repo).cloned().unwrap_or_default();
+    let snippet = snapshot_blob_window(federation, repo, &commit, &path, line, context_lines);
+    json!({
+        "ref": id.as_str(),
+        "exists": true,
+        "node": {
+            "id": id.as_str(),
+            "node_type": format!("{:?}", node.node_type),
+            "name": node.name,
+            "ref": {
+                "id": id.as_str(),
+                "repo": repo,
+                "commit": commit,
+                "path": path,
+                "line": line,
+                "text": "",
+            },
+        },
+        "snippet": snippet,
+    })
 }
 
-fn resolve_evidence_text<'a>(
-    view: &ViewState<'a>,
+fn resolve_evidence_text(
+    view: &ContractView<'_>,
     parts: &EvidenceTextParts,
     context_lines: u32,
 ) -> Value {
     let ref_str = format!("{}@{}:{}:{}", parts.repo, parts.sha, parts.path, parts.line);
     // Verify the repo + commit exist in the view.
-    let commit_for_repo = match view {
-        ViewState::Live { fed } => {
-            let Some(repo_id) = crate::federation::repo_id::RepoId::new(&parts.repo).ok() else {
-                return json!({
-                    "ref": ref_str,
-                    "exists": false,
-                    "reason": "unknown_repo",
-                });
-            };
-            if fed.get_repo(&repo_id).is_none() {
-                return json!({
-                    "ref": ref_str,
-                    "exists": false,
-                    "reason": "unknown_repo",
-                });
-            }
-            let commit = fed
-                .get_repo(&repo_id)
-                .and_then(|r| r.db().get_last_commit().ok().flatten());
-            commit
+    let commit_for_repo = if let Some(fed) = view.live_federation() {
+        let Some(repo_id) = crate::federation::repo_id::RepoId::new(&parts.repo).ok() else {
+            return json!({
+                "ref": ref_str,
+                "exists": false,
+                "reason": "unknown_repo",
+            });
+        };
+        if fed.get_repo(&repo_id).is_none() {
+            return json!({
+                "ref": ref_str,
+                "exists": false,
+                "reason": "unknown_repo",
+            });
         }
-        ViewState::Snapshot(inner) => {
-            let record = &inner.record;
-            if !record.repos.contains_key(&parts.repo) {
-                return json!({
-                    "ref": ref_str,
-                    "exists": false,
-                    "reason": "unknown_repo",
-                });
-            }
-            let view_commit = record.repos.get(&parts.repo).cloned().unwrap_or_default();
-            if !sha_prefix_matches(&parts.sha, &view_commit) {
-                return json!({
-                    "ref": ref_str,
-                    "exists": false,
-                    "reason": "commit_not_in_view",
-                });
-            }
-            Some(view_commit)
+        let commit = fed
+            .get_repo(&repo_id)
+            .and_then(|r| r.db().get_last_commit().ok().flatten());
+        commit
+    } else {
+        let record = view.snapshot_record().expect("snapshot view has a record");
+        if !record.repos.contains_key(&parts.repo) {
+            return json!({
+                "ref": ref_str,
+                "exists": false,
+                "reason": "unknown_repo",
+            });
         }
+        let view_commit = record.repos.get(&parts.repo).cloned().unwrap_or_default();
+        if !sha_prefix_matches(&parts.sha, &view_commit) {
+            return json!({
+                "ref": ref_str,
+                "exists": false,
+                "reason": "commit_not_in_view",
+            });
+        }
+        Some(view_commit)
     };
 
     // Read the file from the right source.
-    let read: Option<String> = match view {
-        ViewState::Live { fed } => {
-            let repo_id = crate::federation::repo_id::RepoId::new(&parts.repo).ok();
-            let local_path =
-                repo_id.and_then(|rid| fed.get_repo(&rid).map(|r| r.local_path().to_path_buf()));
-            local_path.and_then(|p| {
-                read_file_lines(&p, &parts.path, parts.line, context_lines)
-                    .ok()
-                    .flatten()
-            })
-        }
-        ViewState::Snapshot(inner) => {
-            // `commit_for_repo` already proved repo-in-view and
-            // sha-prefix match against the view commit (§12).
-            let commit = commit_for_repo.clone().unwrap_or_default();
-            let fed = &inner.federation;
-            // The file must exist with that line at the view
-            // commit — read it from the repo's mirror via git2.
-            let Some(text) = snapshot_blob_at(fed, &parts.repo, &commit, &parts.path) else {
-                return json!({
-                    "ref": ref_str,
-                    "exists": false,
-                    "reason": "no_such_node",
-                });
-            };
-            let lines: Vec<&str> = text.lines().collect();
-            let cited = parts.line as usize;
-            if cited == 0 || cited > lines.len() {
-                return json!({
-                    "ref": ref_str,
-                    "exists": false,
-                    "reason": "no_such_node",
-                });
-            }
-            let start = cited.saturating_sub(context_lines as usize + 1);
-            let end = (cited + context_lines as usize + 1).min(lines.len());
-            let snippet = lines[start..end].join("\n");
-            // §12: `node` is the innermost node whose range
-            // covers the line.
-            let mut item = json!({
+    let read: Option<String> = if let Some(fed) = view.live_federation() {
+        let repo_id = crate::federation::repo_id::RepoId::new(&parts.repo).ok();
+        let local_path =
+            repo_id.and_then(|rid| fed.get_repo(&rid).map(|r| r.local_path().to_path_buf()));
+        local_path.and_then(|p| {
+            read_file_lines(&p, &parts.path, parts.line, context_lines)
+                .ok()
+                .flatten()
+        })
+    } else {
+        // `commit_for_repo` already proved repo-in-view and
+        // sha-prefix match against the view commit (§12).
+        let commit = commit_for_repo.clone().unwrap_or_default();
+        let fed = view
+            .snapshot_federation()
+            .expect("snapshot view has a federation");
+        // The file must exist with that line at the view
+        // commit — read it from the repo's mirror via git2.
+        let Some(text) = snapshot_blob_at(fed, &parts.repo, &commit, &parts.path) else {
+            return json!({
                 "ref": ref_str,
-                "exists": true,
-                "snippet": snippet,
+                "exists": false,
+                "reason": "no_such_node",
             });
-            if let Some(node) = innermost_node_at_line(fed, &parts.repo, &parts.path, parts.line) {
-                let node_line = node.line_start.unwrap_or(0);
-                let node_name = node.name.clone();
-                let node_id = node.id.clone();
-                item["node"] = json!({
-                    "id": node_id,
-                    "node_type": format!("{:?}", node.node_type),
-                    "name": node_name,
-                    "ref": {
-                        "id": node.id,
-                        "repo": parts.repo,
-                        "commit": commit,
-                        "path": node.path,
-                        "line": node_line,
-                        "text": "",
-                    },
-                });
-            }
-            return item;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let cited = parts.line as usize;
+        if cited == 0 || cited > lines.len() {
+            return json!({
+                "ref": ref_str,
+                "exists": false,
+                "reason": "no_such_node",
+            });
         }
+        let start = cited.saturating_sub(context_lines as usize + 1);
+        let end = (cited + context_lines as usize + 1).min(lines.len());
+        let snippet = lines[start..end].join("\n");
+        // §12: `node` is the innermost node whose range
+        // covers the line.
+        let mut item = json!({
+            "ref": ref_str,
+            "exists": true,
+            "snippet": snippet,
+        });
+        if let Some(node) = innermost_node_at_line(fed, &parts.repo, &parts.path, parts.line) {
+            let node_line = node.line_start.unwrap_or(0);
+            let node_name = node.name.clone();
+            let node_id = node.id.clone();
+            item["node"] = json!({
+                "id": node_id,
+                "node_type": format!("{:?}", node.node_type),
+                "name": node_name,
+                "ref": {
+                    "id": node.id,
+                    "repo": parts.repo,
+                    "commit": commit,
+                    "path": node.path,
+                    "line": node_line,
+                    "text": "",
+                },
+            });
+        }
+        return item;
     };
 
     match read {
@@ -684,9 +546,9 @@ async fn run_read_source(
     }
 
     // Walk the view's file set to confirm the path is indexed.
-    let view = resolve_view_state(ctx, &args_map, started).await?;
-    let (commit, source_kind, clamped_start, clamped_end, total_lines, line_text) = match &view {
-        ViewState::Live { fed } => {
+    let view = resolve_view(ctx, &args_map, started).await?;
+    let (commit, source_kind, clamped_start, clamped_end, total_lines, line_text) =
+        if let Some(fed) = view.live_federation() {
             let rid = crate::federation::repo_id::RepoId::new(&repo).ok();
             let local_path = rid
                 .as_ref()
@@ -765,9 +627,8 @@ async fn run_read_source(
                 total_lines,
                 line_text,
             )
-        }
-        ViewState::Snapshot(inner) => {
-            let record = &inner.record;
+        } else {
+            let record = view.snapshot_record().expect("snapshot view has a record");
             if !record.repos.contains_key(&repo) {
                 return Err(error_outcome(
                     "repo_not_registered",
@@ -821,8 +682,7 @@ async fn run_read_source(
                 total_lines,
                 line_text,
             )
-        }
-    };
+        };
 
     let data = json!({
         "commit": commit,
@@ -833,7 +693,13 @@ async fn run_read_source(
         "text": line_text,
         "source": source_kind,
     });
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        view.label(),
+        view.reproducible(),
+        view.view_info(),
+        started,
+    );
     let text = format!("# read_source: {} ({} lines)\n", path, total_lines);
     Ok(outcome(envelope, &data, text))
 }
@@ -936,8 +802,14 @@ fn snapshot_blob_window(
 ) -> Option<String> {
     let text = snapshot_blob_at(fed, repo, commit, path)?;
     let lines: Vec<&str> = text.lines().collect();
-    let cited = line as usize;
-    if cited == 0 || cited > lines.len() {
+    if lines.is_empty() {
+        return None;
+    }
+    // `line_start == 0` marks a node with no line anchor (OpenAPI
+    // operations, schema nodes). Clamp to line 1 so the reference
+    // still resolves to real source instead of `null`.
+    let cited = if line == 0 { 1 } else { line as usize };
+    if cited > lines.len() {
         return None;
     }
     let start = cited.saturating_sub(context_lines as usize + 1);

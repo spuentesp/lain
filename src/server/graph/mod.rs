@@ -65,7 +65,13 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
 ///
 /// - `HttpRoute` with `ProviderOrigin::Code` → [`SensorOwner::HttpSensor`]
 /// - `HttpRoute` with `ProviderOrigin::OpenApi` → [`SensorOwner::OpenApiSensor`]
-/// - `Schema`, `Field` → [`SensorOwner::OpenApiSensor`]
+/// - `Schema`, `Field` → [`SensorOwner::GrpcProviderSensor`] for `.proto`,
+///   [`SensorOwner::GraphqlProviderSensor`] for `.graphql`/`.gql`,
+///   [`SensorOwner::EventSensor`] for `.avsc`, else
+///   [`SensorOwner::OpenApiSensor`] (which owns `openapi.json` too —
+///   never route `.json` to the event sensor)
+/// - Contract facts win over node-type catch-alls: `WebSocketConsumer`
+///   rides on `HttpClientCall`, `TopicConsumer` on `Function`
 /// - `HttpClientCall` → [`SensorOwner::HttpClientSensor`] (PR 6)
 /// - `FieldRef` → [`SensorOwner::FieldAccessSensor`] (PR 9)
 /// - `EntryPointSensor` is special: it clears every node's `entry`
@@ -86,63 +92,213 @@ pub enum SensorOwner {
     /// plus `Produces` / `Consumes` edges. Its `replace_sensor_output`
     /// call retracts only those.
     EventSensor,
-    /// Phase D (spec §7): the sql sensor owns `Table` nodes plus
-    /// `ReadsTable` / `WritesTable` edges. A rescan replaces only
-    /// its own previous output.
+    /// Phase D (spec §7): the sql sensor owns `Table` nodes, the
+    /// synthetic `sql-read:` consumer nodes, and `ReadsTable` /
+    /// `WritesTable` edges. A rescan replaces only its own previous
+    /// output.
     SqlSensor,
-    /// Phase E (spec §8.2): the gRPC provider, handler-link, and
-    /// consumer sensors all own `Module` / `Function` nodes that
-    /// carry `RpcProvider` / `RpcHandler` / `RpcConsumer` contract
-    /// facts. They share a single `SensorOwner` so a rescan
-    /// retracts all three groups together (the older `proto_sensor`
-    /// did not manage these; the new sensors replace it).
+    /// Phase E (spec §8.2): the legacy `proto_sensor` emits bare
+    /// `Module` nodes with no contract fact. Those are owned here and
+    /// retracted on every `scan_workspace`, so a service renamed away
+    /// in a `.proto` does not leave its old node behind. The three gRPC
+    /// contract sensors each own their own output — see
+    /// `GrpcProviderSensor` / `GrpcConsumerSensor` /
+    /// `GrpcHandlerLinkSensor`; their `Module` nodes carry `RpcProvider`
+    /// / `RpcHandler` facts and are claimed by those arms first.
     ProtoSensor,
-    /// Phase E (spec §8.3): the GraphQL provider, handler-link,
-    /// and consumer sensors all own `Module` / `Function` nodes
-    /// that carry `GraphqlProvider` / `GraphqlHandler` /
-    /// `GraphqlConsumer` contract facts. They share a single
-    /// `SensorOwner` so a rescan retracts all three groups
-    /// together.
+    /// Phase E (spec §8.3): legacy `graphql_sensor` output — bare
+    /// `Interface` nodes. Same rule as [`Self::ProtoSensor`]: owned
+    /// here and retracted per scan. The three GraphQL contract sensors
+    /// own their own output.
     GraphqlSensor,
+    /// Each protocol sensor owns exactly what it emits. Splitting
+    /// these out of the family owners is what makes coexistence
+    /// work: `replace_sensor_output` retracts every node with the
+    /// given owner, so a shared owner means the sensor that runs
+    /// last deletes its peers' Schema / Field / FieldRef nodes.
+    GrpcProviderSensor,
+    GrpcConsumerSensor,
+    GrpcHandlerLinkSensor,
+    GraphqlProviderSensor,
+    GraphqlConsumerSensor,
+    GraphqlResolverLinkSensor,
+    /// Phase F (Gap 19): the WebSocket sensor family owns nodes
+    /// carrying WebSocketProvider / WebSocketConsumer / WebSocketHandler facts.
+    WebSocketSensor,
 }
 
 /// Map a node to its sensor owner (§6.1 derivation rules). Returns
 /// `None` for nodes that no sensor claims (pre-schema-v3 nodes,
 /// regular code symbols).
+///
+/// A node can carry several facts — two subscriptions on one line share
+/// a `topic-read:` node and each is a `TopicConsumer`. Owner derivation
+/// runs per fact and the results must agree. If they do not, the node is
+/// treated as unowned rather than retracted under one sensor, which
+/// would delete the other sensor's data with it: a node that lingers is
+/// the safe failure, a peer's lost edges are not.
 pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
+    let mut owner: Option<SensorOwner> = None;
+    for fact in &node.contract {
+        let Some(o) = derive_owner(node, Some(fact)) else {
+            continue;
+        };
+        match owner {
+            None => owner = Some(o),
+            Some(prev) if prev == o => {}
+            Some(prev) => {
+                debug_assert!(
+                    false,
+                    "node {} carries facts with two owners ({prev:?} vs {o:?})",
+                    node.id
+                );
+                return None;
+            }
+        }
+    }
+    if node.contract.is_empty() {
+        // No facts: the node-type catch-alls and the legacy
+        // fact-less `Module` / `Interface` arms still apply.
+        owner = derive_owner(node, None);
+    }
+    owner
+}
+
+fn derive_owner(
+    node: &GraphNode,
+    fact: Option<&crate::federation::contracts::model::ContractFact>,
+) -> Option<SensorOwner> {
     use crate::federation::contracts::model::{ContractFact, ProviderOrigin};
     use crate::schema::NodeType;
-    match (node.node_type.clone(), node.contract.as_ref()) {
+    match (node.node_type.clone(), fact) {
         (NodeType::HttpRoute, Some(ContractFact::Provider(p))) => match p.origin {
             ProviderOrigin::Code => Some(SensorOwner::HttpSensor),
             ProviderOrigin::OpenApi => Some(SensorOwner::OpenApiSensor),
         },
-        (NodeType::Schema, Some(ContractFact::Schema { .. })) => Some(SensorOwner::OpenApiSensor),
-        (NodeType::Field, Some(ContractFact::Field(_))) => Some(SensorOwner::OpenApiSensor),
+        (NodeType::Schema, Some(ContractFact::Schema { .. })) => {
+            if node.path.ends_with(".proto") {
+                // `grpc_provider_sensor` is the sole emitter of `.proto`
+                // Schema/Field nodes, so it owns them and retracts them
+                // on rescan. Routing them to `ProtoSensor` (which never
+                // calls `replace_sensor_output`) left stale schemas in
+                // the graph forever when a message was deleted.
+                Some(SensorOwner::GrpcProviderSensor)
+            } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
+                // Same rule for the same reason: `graphql_provider_sensor`
+                // is the emitter, and `SensorOwner::GraphqlSensor` is
+                // never passed to `replace_sensor_output` — so those
+                // nodes were never retracted either.
+                Some(SensorOwner::GraphqlProviderSensor)
+            } else if node.path.ends_with(".avsc") {
+                // Avro payload schemas belong to the event/topic
+                // sensor. NOTE: `.json` is deliberately NOT here —
+                // `openapi_sensor` emits Schema/Field nodes for
+                // `openapi.json` / `swagger.json`, and routing those to
+                // EventSensor makes `event_sensor`'s
+                // `replace_sensor_output` retract them on every scan.
+                //
+                // NOTE: no sensor emits these today — `parse_payload_file`,
+                // which would have fed them, had no callers and was
+                // removed. The arm is kept because a future emitter is
+                // plausible and the routing is decided here; do not read
+                // it as live coverage.
+                Some(SensorOwner::EventSensor)
+            } else {
+                Some(SensorOwner::OpenApiSensor)
+            }
+        }
+        (NodeType::Field, Some(ContractFact::Field(_))) => {
+            if node.path.ends_with(".proto") {
+                Some(SensorOwner::GrpcProviderSensor)
+            } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
+                Some(SensorOwner::GraphqlProviderSensor)
+            } else if node.path.ends_with(".avsc") {
+                Some(SensorOwner::EventSensor)
+            } else {
+                Some(SensorOwner::OpenApiSensor)
+            }
+        }
+        // Contract-fact ownership must win over the node-type
+        // catch-alls below: several facts RIDE on a shared node type
+        // (`WebSocketConsumer` on `HttpClientCall`, `TopicConsumer` on
+        // `Function`). A catch-all listed first would claim those
+        // nodes, and the catch-all's sensor would then retract them on
+        // every rescan.
+        //
+        // §6.7 (stretch): the event sensor owns its synthetic
+        // `topic-read:` nodes. Ownership keys on the NAME PREFIX, not
+        // on the fact: the node is also the `Produces`/`Consumes` edge
+        // anchor for a producer site, which carries **no** fact at all
+        // (a producer is not a subscriber), and an unowned node is
+        // never retracted — it leaks when the site is deleted.
+        //
+        // The name guard doubles as the migration arm: pre-fix graphs
+        // carry `TopicConsumer` on the real symbol node (named after
+        // the function), and retracting those would delete real
+        // function nodes and their edges from an operator's graph.
+        (NodeType::Function, _)
+            if node
+                .name
+                .starts_with(crate::server::sensors::util::TOPIC_READ_PREFIX) =>
+        {
+            Some(SensorOwner::EventSensor)
+        }
+        // Phase D (spec §7): a `Table` node carries a `Table`
+        // contract fact (or at scan time a `name`-only payload).
+        // The sql sensor owns it — and its synthetic `sql-read:`
+        // consumer node, so a rescan retracts a reader whose SQL
+        // site was deleted (the stale-reader bug class). The name
+        // guard keeps pre-fix graphs working: their `TableConsumer`
+        // facts ride real symbol nodes, which this sensor no longer
+        // re-emits — retracting those would delete the symbol.
+        (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
+        (_, Some(ContractFact::TableConsumer(_)))
+            if node
+                .name
+                .starts_with(crate::server::sensors::util::SQL_READ_PREFIX) =>
+        {
+            Some(SensorOwner::SqlSensor)
+        }
+        // Phase E (spec §8.2): each gRPC contract sensor owns its own
+        // output. Sharing one owner meant `grpc_consumer`'s rescan
+        // retracted `grpc_provider`'s Schema/Field nodes and
+        // RequestSchema/ResponseSchema edges on every run.
+        (_, Some(ContractFact::RpcProvider(_))) => Some(SensorOwner::GrpcProviderSensor),
+        (_, Some(ContractFact::RpcHandler(_))) => Some(SensorOwner::GrpcHandlerLinkSensor),
+        (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::GrpcConsumerSensor),
+        // Phase E (spec §8.3): same split for the GraphQL family.
+        (_, Some(ContractFact::GraphqlProvider(_))) => Some(SensorOwner::GraphqlProviderSensor),
+        (_, Some(ContractFact::GraphqlHandler(_))) => Some(SensorOwner::GraphqlResolverLinkSensor),
+        (_, Some(ContractFact::GraphqlConsumer(_))) => Some(SensorOwner::GraphqlConsumerSensor),
+        // A `FieldRef` minted by the GraphQL consumer must not be owned
+        // by `field_access`, or the latter's rescan deletes it.
+        (NodeType::FieldRef, Some(ContractFact::FieldRead(r)))
+            if r.origin
+                == crate::federation::contracts::model::FieldReadOrigin::GraphqlConsumer =>
+        {
+            Some(SensorOwner::GraphqlConsumerSensor)
+        }
+        // Phase F (Gap 19): WebSocket facts are owned by WebSocketSensor.
+        (_, Some(ContractFact::WebSocketProvider(_)))
+        | (_, Some(ContractFact::WebSocketHandler(_)))
+        | (_, Some(ContractFact::WebSocketConsumer(_))) => Some(SensorOwner::WebSocketSensor),
+        // Legacy scanners emit bare `Module` / `Interface` nodes with no
+        // contract fact (`proto_sensor`, `graphql_sensor`). Placed after
+        // every fact arm on purpose: `grpc_provider_sensor` and
+        // `graphql_provider_sensor` also emit `Module`, but theirs carry
+        // `RpcProvider` / `GraphqlProvider` and are claimed above — a
+        // catch-all placed earlier would take retraction away from the
+        // sensor that emitted the node.
+        (NodeType::Module, None) if node.path.ends_with(".proto") => Some(SensorOwner::ProtoSensor),
+        (NodeType::Interface | NodeType::Module, None)
+            if node.path.ends_with(".graphql") || node.path.ends_with(".gql") =>
+        {
+            Some(SensorOwner::GraphqlSensor)
+        }
+        // Node-type catch-alls last.
         (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
         (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
         (NodeType::Topic, _) => Some(SensorOwner::EventSensor),
-        // §6.7 (stretch): the consumer-side function node carries a
-        // `TopicConsumer` contract fact; the event sensor owns it.
-        (_, Some(ContractFact::TopicConsumer(_))) => Some(SensorOwner::EventSensor),
-        // Phase D (spec §7): a `Table` node carries a `Table`
-        // contract fact (or at scan time a `name`-only payload).
-        // The sql sensor owns it.
-        (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
-        // Phase E (spec §8.2): `RpcProvider` / `RpcHandler` /
-        // `RpcConsumer` ride on Module / Function nodes. All three
-        // are owned by the gRPC sensor family so a rescan
-        // retracts them together.
-        (_, Some(ContractFact::RpcProvider(_)))
-        | (_, Some(ContractFact::RpcHandler(_)))
-        | (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::ProtoSensor),
-        // Phase E (spec §8.3): `GraphqlProvider` / `GraphqlHandler` /
-        // `GraphqlConsumer` ride on Module / Function nodes. All
-        // three are owned by the GraphQL sensor family so a rescan
-        // retracts them together.
-        (_, Some(ContractFact::GraphqlProvider(_)))
-        | (_, Some(ContractFact::GraphqlHandler(_)))
-        | (_, Some(ContractFact::GraphqlConsumer(_))) => Some(SensorOwner::GraphqlSensor),
         _ => None,
     }
 }
@@ -2448,13 +2604,13 @@ mod replace_tests {
             "GET /api/users".into(),
             "openapi.yaml".into(),
         );
-        route_v1.contract = Some(ContractFact::Provider(ProviderFact {
+        route_v1.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Get,
             template: "/api/users".into(),
             handler: None,
             operation_id: Some("listUsers".into()),
             origin: ProviderOrigin::OpenApi,
-        }));
+        })];
         g.insert_nodes_batch(&[route_v1]).unwrap();
         assert!(g.find_node_by_name("GET /api/users").is_some());
 
@@ -2475,13 +2631,13 @@ mod replace_tests {
             "POST /api/users".into(),
             "openapi.yaml".into(),
         );
-        route_v2.contract = Some(ContractFact::Provider(ProviderFact {
+        route_v2.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Post,
             template: "/api/users".into(),
             handler: None,
             operation_id: Some("createUser".into()),
             origin: ProviderOrigin::OpenApi,
-        }));
+        })];
         let removed = g
             .replace_sensor_output(SensorOwner::OpenApiSensor, &[route_v2], &[])
             .unwrap();
@@ -2510,13 +2666,13 @@ mod replace_tests {
             "GET /api/users".into(),
             "routes.go".into(),
         );
-        code_route.contract = Some(ContractFact::Provider(ProviderFact {
+        code_route.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Get,
             template: "/api/users".into(),
             handler: None,
             operation_id: None,
             origin: ProviderOrigin::Code,
-        }));
+        })];
         g.insert_nodes_batch(&[code_route]).unwrap();
 
         // OpenApiSensor rescan with no operations must not delete
@@ -3370,6 +3526,650 @@ mod load_from_disk_name_index_tests {
         assert!(
             reader.find_node_by_name("missing").is_none(),
             "unknown names still return None"
+        );
+    }
+}
+
+// ─── Task 9 — BFS depth-gate regression tests
+//
+//     The mutation harness reports 4 survivors in
+//     `src/server/graph/mod.rs`, all on the same class:
+//     `if current_depth >= max_depth { continue; }` (and the
+//     `if next_depth >= min_depth` variant in `traverse`).
+//     A mutation `>=` → `>` walks one extra hop. The cases
+//     below pin a chain of length 3 and assert each BFS
+//     returns exactly the nodes the depth window allows —
+//     one more node would be a regression. The four BFS
+//     variants covered: `traverse`, `subgraph_around`,
+//     `bfs_from`, and the inner-`next_depth` check in
+//     `traverse`.
+
+#[cfg(test)]
+mod bfs_depth_gate_tests {
+    use super::*;
+    use crate::schema::{GraphNode, NodeType};
+    use std::collections::HashSet;
+
+    /// Build a fresh graph with a linear chain
+    ///   start -> a -> b -> c
+    /// of `Module` nodes connected by `EdgeType::Calls`. Returns
+    /// the `GraphDatabase` and the node ids in hop order. A
+    /// 4-hop chain lets the `>=` vs `>` distinction on a
+    /// `max_depth=2` cap actually matter (with a 3-hop chain
+    /// the cap never fires).
+    fn build_four_hop_chain(tag: &str) -> (GraphDatabase, [String; 4]) {
+        let dir = std::env::temp_dir().join(format!("lain_bfs_depth_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = GraphDatabase::new(&dir).expect("graph");
+        let mk = |name: &str, path: &str| {
+            let mut n = GraphNode::new(NodeType::Module, name.into(), path.into());
+            n.id = GraphNode::generate_id(
+                &NodeType::Module,
+                path,
+                name,
+                Some(1),
+                &RepoNamespace::for_test(),
+            );
+            n
+        };
+        let start = mk("start", "src/start.rs");
+        let a = mk("a", "src/a.rs");
+        let b = mk("b", "src/b.rs");
+        let c = mk("c", "src/c.rs");
+        let ids = [start.id.clone(), a.id.clone(), b.id.clone(), c.id.clone()];
+        g.insert_nodes_batch(&[start, a, b, c]).unwrap();
+        let state = g.build_state();
+        let s = state.index_map[&ids[0]];
+        let ai = state.index_map[&ids[1]];
+        let bi = state.index_map[&ids[2]];
+        let ci = state.index_map[&ids[3]];
+        let mut state = state;
+        state.graph.add_edge(
+            s,
+            ai,
+            GraphEdge::new(EdgeType::Calls, ids[0].clone(), ids[1].clone()),
+        );
+        state.graph.add_edge(
+            ai,
+            bi,
+            GraphEdge::new(EdgeType::Calls, ids[1].clone(), ids[2].clone()),
+        );
+        state.graph.add_edge(
+            bi,
+            ci,
+            GraphEdge::new(EdgeType::Calls, ids[2].clone(), ids[3].clone()),
+        );
+        std::fs::write(&g.persistence_path, persist::encode_state(&state).unwrap()).unwrap();
+        g.load_from_disk().unwrap();
+        (g, ids)
+    }
+
+    /// Shorter 3-hop chain for cases where the depth cap does
+    /// not need to fire — used by the success-side assertions
+    /// that pin the inclusion contract.
+    fn build_three_hop_chain(tag: &str) -> (GraphDatabase, [String; 3]) {
+        let dir = std::env::temp_dir().join(format!("lain_bfs_depth3_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = GraphDatabase::new(&dir).expect("graph");
+        let mk = |name: &str, path: &str| {
+            let mut n = GraphNode::new(NodeType::Module, name.into(), path.into());
+            n.id = GraphNode::generate_id(
+                &NodeType::Module,
+                path,
+                name,
+                Some(1),
+                &RepoNamespace::for_test(),
+            );
+            n
+        };
+        let start = mk("start", "src/start.rs");
+        let a = mk("a", "src/a.rs");
+        let b = mk("b", "src/b.rs");
+        let ids = [start.id.clone(), a.id.clone(), b.id.clone()];
+        g.insert_nodes_batch(&[start, a, b]).unwrap();
+        let state = g.build_state();
+        let s = state.index_map[&ids[0]];
+        let ai = state.index_map[&ids[1]];
+        let bi = state.index_map[&ids[2]];
+        let mut state = state;
+        state.graph.add_edge(
+            s,
+            ai,
+            GraphEdge::new(EdgeType::Calls, ids[0].clone(), ids[1].clone()),
+        );
+        state.graph.add_edge(
+            ai,
+            bi,
+            GraphEdge::new(EdgeType::Calls, ids[1].clone(), ids[2].clone()),
+        );
+        std::fs::write(&g.persistence_path, persist::encode_state(&state).unwrap()).unwrap();
+        g.load_from_disk().unwrap();
+        (g, ids)
+    }
+
+    #[test]
+    fn bfs_from_max_depth_one_returns_one_neighbor_not_two() {
+        // `bfs_from(start, 1)` should visit exactly the start's
+        // direct neighbor (depth 1). The 3-hop chain's `b` is at
+        // depth 2 and must NOT appear. A mutation `>=`→`>` would
+        // walk one extra hop and return both `a` and `b`.
+        let (g, ids) = build_three_hop_chain("bfs_from");
+        let results = g.bfs_from(&ids[0], 1);
+        let names: HashSet<String> = results.into_iter().map(|(n, _, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string()]),
+            "max_depth=1 must return exactly one neighbor, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn bfs_from_max_depth_two_returns_both_neighbors() {
+        // The positive counterpart: at max_depth=2 the BFS
+        // returns both `a` (depth 1) and `b` (depth 2). This
+        // pins the contract on the success side, so a future
+        // mutation that breaks the depth cap from the other
+        // direction (e.g. early termination) trips the test.
+        let (g, ids) = build_three_hop_chain("bfs_from_pos");
+        let results = g.bfs_from(&ids[0], 2);
+        let names: HashSet<String> = results.into_iter().map(|(n, _, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            "max_depth=2 must return both neighbors, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn traverse_with_range_one_two_does_not_walk_depth_three() {
+        // `traverse(start, Calls, 1..2, Outgoing)` returns the
+        // depth-1 and depth-2 nodes reachable from `start` —
+        // `a` and `b` in a 4-hop chain. The depth-3 node
+        // (`c`) must NOT appear. The relevant gate is line
+        // 1258 (`current_depth >= max_depth`); mutated to
+        // `>`, the BFS walks into `c` as well, and the
+        // result is {a, b, c} instead of {a, b}.
+        // (The start itself is never in the result because
+        // the BFS only adds nodes reached via an edge.)
+        let (g, ids) = build_four_hop_chain("traverse");
+        let nodes = g
+            .traverse(&ids[0], EdgeType::Calls, 1..2, Direction::Outgoing)
+            .expect("traverse");
+        let names: HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            "traverse 1..2 must yield depth-1 and depth-2 only, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn traverse_with_range_one_four_includes_depth_three_node() {
+        // Success side: range `1..4` returns all three
+        // reachable nodes from `start` (a, b, c). With a
+        // 4-hop chain, the depth cap (`max_depth = 4`)
+        // does not fire — `c` is at depth 3 and 3 < 4.
+        // This pins the inclusion contract so a
+        // regression that drops the depth-3 node is caught.
+        let (g, ids) = build_four_hop_chain("traverse_pos");
+        let nodes = g
+            .traverse(&ids[0], EdgeType::Calls, 1..4, Direction::Outgoing)
+            .expect("traverse");
+        let names: HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]),
+            "traverse 1..4 must yield all three reachable nodes, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn traverse_with_range_two_three_returns_exactly_the_window() {
+        // Min side of the window: `if next_depth >= min_depth`
+        // (line 1281). Window [2,3] on the 4-node chain
+        // start -> a -> b -> c must return exactly {b, c}.
+        // Mutated to `>`, the node at exactly min_depth is
+        // dropped and the walk returns one hop too few:
+        // {c} instead of {b, c}.
+        let (g, ids) = build_four_hop_chain("traverse_min");
+        let nodes = g
+            .traverse(&ids[0], EdgeType::Calls, 2..3, Direction::Outgoing)
+            .expect("traverse");
+        let names: HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["b".to_string(), "c".to_string()]),
+            "traverse 2..3 must yield exactly the depth-2 and depth-3 nodes, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn subgraph_around_radius_one_includes_only_one_hop() {
+        // `subgraph_around(start, 1)` should include the center
+        // plus 1-hop neighbors (2 nodes total). The relevant
+        // gate is line 1343 (`current_depth >= radius`); mutated
+        // to `>`, the BFS walks into the 2-hop node and
+        // returns 3 nodes.
+        let (g, ids) = build_three_hop_chain("subgraph");
+        let sub = g.subgraph_around(&ids[0], 1).expect("subgraph");
+        let names: HashSet<String> = sub.into_iter().map(|(n, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["start".to_string(), "a".to_string()]),
+            "radius=1 must include center + 1-hop only, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn subgraph_around_radius_two_includes_two_hops() {
+        // Success side: radius=2 includes all 3 nodes. This
+        // pins the success contract so a regression that
+        // short-circuits early (e.g. on a different gate) is
+        // caught.
+        let (g, ids) = build_three_hop_chain("subgraph_pos");
+        let sub = g.subgraph_around(&ids[0], 2).expect("subgraph");
+        let names: HashSet<String> = sub.into_iter().map(|(n, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["start".to_string(), "a".to_string(), "b".to_string()]),
+            "radius=2 must include center + 2 hops, got: {:?}",
+            names
+        );
+    }
+}
+
+#[cfg(test)]
+mod survivor_pin_tests {
+    //! Fixtures for the mutation survivors measured in
+    //! `scripts/mutation-baseline.json` — each test pins one
+    //! comparison so flipping its operator fails a test.
+
+    use super::*;
+    use crate::federation::contracts::model::{ContractFact, FieldReadFact, FieldReadOrigin};
+
+    fn db(tag: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(format!("lain_survivor_{tag}"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    /// Line-range lookup: both boundaries of a symbol's span are
+    /// inclusive, and a line outside the span matches nothing.
+    #[test]
+    fn location_range_boundaries_are_inclusive() {
+        let g = db("loc_range");
+        let mut span = GraphNode::new(NodeType::Function, "span".into(), "src/lines.rs".into());
+        span.line_start = Some(1);
+        span.line_end = Some(10);
+        g.insert_nodes_batch(std::slice::from_ref(&span)).unwrap();
+
+        assert!(
+            g.get_node_at_location("src/lines.rs", 1).is_some(),
+            "line_start == line must be inside the symbol"
+        );
+        assert!(
+            g.get_node_at_location("src/lines.rs", 10).is_some(),
+            "line_end == line must be inside the symbol"
+        );
+        assert!(
+            g.get_node_at_location("src/lines.rs", 50).is_none(),
+            "a symbol spanning 1..=10 must not match line 50"
+        );
+    }
+
+    /// Linear Contains chain of `hops` edges out of `main`.
+    /// Returns the database and the node ids in hop order.
+    fn build_deep_chain(tag: &str, hops: usize) -> (GraphDatabase, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("lain_survivor_chain_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = GraphDatabase::new(&dir).expect("graph");
+        let mut ids = Vec::with_capacity(hops + 1);
+        let mut nodes = Vec::with_capacity(hops + 1);
+        for i in 0..=hops {
+            let name = if i == 0 {
+                "main".to_string()
+            } else {
+                format!("h{i}")
+            };
+            let n = GraphNode::new(NodeType::Function, name, format!("src/h{i}.rs"));
+            ids.push(n.id.clone());
+            nodes.push(n);
+        }
+        g.insert_nodes_batch(&nodes).unwrap();
+        let edges: Vec<GraphEdge> = (0..hops)
+            .map(|i| GraphEdge::new(EdgeType::Contains, ids[i].clone(), ids[i + 1].clone()))
+            .collect();
+        g.insert_edges_batch(&edges).unwrap();
+        (g, ids)
+    }
+
+    /// The BFS walks `Contains` children from `main`/`App`, stops at
+    /// the depth-50 cap, and leaves anything past the cap unassigned.
+    #[test]
+    fn calculate_depths_caps_at_fifty_and_walks_contains_only() {
+        let (g, ids) = build_deep_chain("cap", 50);
+        g.calculate_depths().unwrap();
+        let depth = |i: usize| g.get_node(&ids[i]).unwrap().unwrap().depth_from_main;
+
+        assert_eq!(depth(0), Some(0), "the entry point seeds at depth 0");
+        assert_eq!(
+            depth(1),
+            Some(1),
+            "only Contains children are walked: the first hop is depth 1"
+        );
+        assert_eq!(depth(49), Some(49), "the chain walks up to the cap");
+        assert_eq!(
+            depth(50),
+            None,
+            "a node past the depth-50 cap stays unassigned"
+        );
+    }
+
+    /// `find_entry_points` returns exactly the nodes named `main`
+    /// or `App` — nothing else, neither name dropped.
+    #[test]
+    fn find_entry_points_is_exactly_main_and_app() {
+        let g = db("entry_points");
+        let nodes = ["main", "App", "other"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                GraphNode::new(NodeType::Function, (*name).into(), format!("src/f{i}.rs"))
+            })
+            .collect::<Vec<_>>();
+        g.insert_nodes_batch(&nodes).unwrap();
+
+        let mut found: Vec<String> = g
+            .find_entry_points()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec!["App".to_string(), "main".to_string()],
+            "only main and App are entry points"
+        );
+    }
+
+    /// A `FieldRef` whose `FieldRead` was minted by the GraphQL
+    /// consumer belongs to `GraphqlConsumerSensor`, not the
+    /// `FieldAccessSensor` catch-all (and vice versa).
+    #[test]
+    fn field_read_origin_decides_field_ref_ownership() {
+        let mk = |origin: FieldReadOrigin| {
+            let mut n = GraphNode::new(
+                NodeType::FieldRef,
+                "customer_id".into(),
+                "src/api.ts".into(),
+            );
+            n.contract = vec![ContractFact::FieldRead(FieldReadFact {
+                chain: "customer_id".parse().unwrap(),
+                exact: true,
+                origin,
+            })];
+            n
+        };
+
+        assert_eq!(
+            sensor_owner_of(&mk(FieldReadOrigin::GraphqlConsumer)),
+            Some(SensorOwner::GraphqlConsumerSensor),
+            "graphql_consumer's FieldRef must not fall through to field_access"
+        );
+        assert_eq!(
+            sensor_owner_of(&mk(FieldReadOrigin::FieldAccess)),
+            Some(SensorOwner::FieldAccessSensor),
+            "field_access's FieldRef keeps the catch-all owner"
+        );
+    }
+
+    /// Re-scanning a file must restore every incoming edge captured
+    /// from untouched files — one per edge type, not just the first.
+    #[test]
+    fn replace_restores_each_preserved_incoming_edge_type() {
+        let g = db("replace_incoming");
+        let caller = GraphNode::new(NodeType::Function, "caller".into(), "src/other.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "callee".into(), "src/probe.rs".into());
+        let (caller_id, callee_id) = (caller.id.clone(), callee.id.clone());
+        g.insert_nodes_batch(&[caller, callee.clone()]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::Calls, caller_id.clone(), callee_id.clone()),
+            GraphEdge::new(EdgeType::Uses, caller_id, callee_id.clone()),
+        ])
+        .unwrap();
+
+        g.replace_nodes_for_paths(&["src/probe.rs".to_string()], &[callee])
+            .unwrap();
+
+        let incoming = g.get_edges_to(&callee_id).unwrap();
+        assert_eq!(
+            incoming.len(),
+            2,
+            "both preserved incoming edge types must come back: {incoming:?}"
+        );
+        assert!(
+            incoming.iter().any(|e| e.edge_type == EdgeType::Calls),
+            "the Calls edge was not restored: {incoming:?}"
+        );
+        assert!(
+            incoming.iter().any(|e| e.edge_type == EdgeType::Uses),
+            "the Uses edge was not restored: {incoming:?}"
+        );
+    }
+
+    /// One edge per (source, target, type): re-inserting the same
+    /// triple is a no-op, a different type on the same pair is added.
+    #[test]
+    fn insert_edges_batch_dedups_by_edge_type_only() {
+        let g = db("batch_dedup");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/b.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone())])
+            .unwrap();
+        assert_eq!(g.edge_count(), 1);
+
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone())])
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            1,
+            "re-inserting the same (pair, type) must not duplicate"
+        );
+
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Contains, a_id, b_id)])
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "a different edge type on the same pair must be added"
+        );
+    }
+
+    /// `upsert_edge` is idempotent per (pair, type) and still admits
+    /// a different type between the same two nodes.
+    #[test]
+    fn upsert_edge_is_idempotent_per_type_and_admits_other_types() {
+        let g = db("upsert_types");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/b.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone()))
+            .unwrap();
+        assert_eq!(g.edge_count(), 1);
+
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone()))
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            1,
+            "the same upsert twice must stay one edge"
+        );
+
+        g.upsert_edge(GraphEdge::new(EdgeType::Contains, a_id, b_id))
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "a different edge type must not be treated as a duplicate"
+        );
+    }
+
+    /// `find_path` reports the path it actually walked.
+    #[test]
+    fn find_path_returns_the_route_it_walked() {
+        let g = db("find_path");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/b.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone())])
+            .unwrap();
+
+        let path = g.find_path(&a_id, &b_id).unwrap();
+        assert_eq!(path.len(), 2, "a direct call is a two-node path");
+        assert_eq!(path[0].id, a_id, "the path starts at `from`");
+        assert_eq!(path[1].id, b_id, "the path ends at `to`");
+    }
+
+    /// `calls_in` / `calls_out` count `Calls` edges only; the
+    /// parallel `Uses` / `Imports` / `Contains` edges on the same
+    /// nodes must not be counted.
+    #[test]
+    fn anchor_calls_counters_count_only_calls_edges() {
+        let g = db("anchor_calls");
+        let f = GraphNode::new(NodeType::Function, "f".into(), "src/f.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "g".into(), "src/g.rs".into());
+        let x = GraphNode::new(NodeType::Function, "x".into(), "src/x.rs".into());
+        let file = GraphNode::new(NodeType::File, "g.rs".into(), "src/g.rs".into());
+        let (f_id, g_id) = (f.id.clone(), callee.id.clone());
+        let (x_id, file_id) = (x.id.clone(), file.id.clone());
+        g.insert_nodes_batch(&[f, callee, x, file]).unwrap();
+        g.insert_edges_batch(&[
+            // g: one Calls incoming, two wrong-type incoming.
+            GraphEdge::new(EdgeType::Calls, f_id.clone(), g_id.clone()),
+            GraphEdge::new(EdgeType::Uses, x_id.clone(), g_id.clone()),
+            GraphEdge::new(EdgeType::Contains, file_id.clone(), g_id.clone()),
+            // f: one Calls outgoing, two wrong-type outgoing.
+            GraphEdge::new(EdgeType::Uses, f_id.clone(), x_id),
+            GraphEdge::new(EdgeType::Imports, f_id.clone(), file_id),
+        ])
+        .unwrap();
+
+        g.calculate_anchor_scores().unwrap();
+
+        let f_node = g.get_node(&f_id).unwrap().unwrap();
+        let g_node = g.get_node(&g_id).unwrap().unwrap();
+        assert_eq!(f_node.calls_out, Some(1), "f calls exactly one callee");
+        assert_eq!(g_node.calls_in, Some(1), "g has exactly one caller");
+        assert_eq!(
+            f_node.fan_out,
+            Some(3),
+            "fan_out counts every outgoing edge"
+        );
+        assert_eq!(g_node.fan_in, Some(3), "fan_in counts every incoming edge");
+    }
+
+    /// `incoming_calls` answers "who Calls this" — a non-Calls edge
+    /// into the same node must be ignored.
+    #[test]
+    fn incoming_calls_lists_only_calls_callers() {
+        let g = db("incoming_calls");
+        let caller = GraphNode::new(NodeType::Function, "caller".into(), "src/caller.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "callee".into(), "src/callee.rs".into());
+        let file = GraphNode::new(NodeType::File, "callee.rs".into(), "src/callee.rs".into());
+        let (caller_id, callee_id) = (caller.id.clone(), callee.id.clone());
+        let file_id = file.id.clone();
+        g.insert_nodes_batch(&[caller, callee, file]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::Calls, caller_id.clone(), callee_id.clone()),
+            GraphEdge::new(EdgeType::Contains, file_id, callee_id.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            g.incoming_calls(&callee_id),
+            vec![caller_id.clone()],
+            "only the Calls source counts as a caller (Contains must be ignored)"
+        );
+    }
+
+    /// `calls_http_pairs` reports `CallsHttp` edges only.
+    #[test]
+    fn calls_http_pairs_lists_only_callshttp_edges() {
+        let g = db("calls_http");
+        let route = GraphNode::new(NodeType::HttpRoute, "/users".into(), "src/r.rs".into());
+        let handler = GraphNode::new(NodeType::Function, "list".into(), "src/h.rs".into());
+        let (route_id, handler_id) = (route.id.clone(), handler.id.clone());
+        g.insert_nodes_batch(&[route, handler]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::CallsHttp, route_id.clone(), handler_id.clone()),
+            GraphEdge::new(EdgeType::Calls, handler_id.clone(), route_id.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            g.calls_http_pairs(),
+            vec![(route_id, handler_id)],
+            "the plain Calls edge must not leak into the CallsHttp pair list"
+        );
+    }
+
+    /// `get_file_node` finds the `File` node even when other node
+    /// types share the path index entry.
+    #[test]
+    fn get_file_node_returns_the_file_node_among_siblings() {
+        let g = db("file_node");
+        let file = GraphNode::new(NodeType::File, "a.rs".into(), "src/a.rs".into());
+        let symbol = GraphNode::new(NodeType::Function, "thing".into(), "src/a.rs".into());
+        g.insert_nodes_batch(&[file, symbol]).unwrap();
+
+        let found = g
+            .get_file_node("src/a.rs")
+            .expect("the path has a File node");
+        assert_eq!(found.node_type, NodeType::File, "must be the File node");
+        assert_eq!(found.name, "a.rs");
+    }
+
+    /// `has_references_from` needs an outgoing `Calls` or `Uses`
+    /// edge — any other edge type is not a reference.
+    #[test]
+    fn has_references_from_requires_an_outgoing_calls_or_uses_edge() {
+        let g = db("has_refs");
+        let x = GraphNode::new(NodeType::Function, "x".into(), "src/x.rs".into());
+        let z = GraphNode::new(NodeType::Function, "z".into(), "src/z.rs".into());
+        let y = GraphNode::new(NodeType::Function, "y".into(), "src/y.rs".into());
+        let w = GraphNode::new(NodeType::Function, "w".into(), "src/w.rs".into());
+        let (x_id, z_id, y_id, w_id) = (x.id.clone(), z.id.clone(), y.id.clone(), w.id.clone());
+        g.insert_nodes_batch(&[x, z, y, w]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::Calls, x_id.clone(), y_id.clone()),
+            GraphEdge::new(EdgeType::Uses, z_id.clone(), y_id.clone()),
+        ])
+        .unwrap();
+
+        assert!(
+            g.has_references_from(&x_id),
+            "an outgoing Calls edge is a reference"
+        );
+        assert!(
+            g.has_references_from(&z_id),
+            "an outgoing Uses edge is a reference"
+        );
+        assert!(
+            !g.has_references_from(&w_id),
+            "a node with no outgoing edges has no references"
         );
     }
 }

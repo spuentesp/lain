@@ -41,5 +41,8 @@ mod patterns_override;
 #[path = "sensors/patterns_new_framework.rs"]
 mod patterns_new_framework;
 
+#[path = "sensors/patterns_protocol_idioms.rs"]
+mod patterns_protocol_idioms;
+
 #[path = "sensors/adversarial.rs"]
 mod adversarial;

@@ -76,7 +76,7 @@ pub fn scan_workspace_handler_link(
         return Ok(0);
     }
     let repo_id = RepoId::new(root.to_string_lossy().as_ref())
-        .unwrap_or_else(|_| RepoId::new("unknown").expect("valid repo id"));
+        .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
     let code_ext = |p: &Path| {
         p.extension()
             .and_then(|e| e.to_str())
@@ -89,37 +89,44 @@ pub fn scan_workspace_handler_link(
         let graph_path_str = crate::graph::graph_path(root, &path);
         let links = detect_handler_links(&content, &ext, &graph_path_str, &repo_id);
         for link in links {
-            let id_name = format!("rpc-handler:{}", link.handler_function.name);
-            let id = GraphNode::generate_id(
-                &NodeType::Module,
+            let id_name = format!(
+                "{}{}",
+                crate::server::sensors::util::RPC_HANDLER_PREFIX,
+                link.handler_function.name
+            );
+            let mut node = crate::server::sensors::util::site_node(
+                NodeType::Module,
+                id_name,
                 &graph_path_str,
-                &id_name,
                 Some(link.site_line),
+                link.site_line,
                 namespace,
             );
-            let mut node =
-                GraphNode::new(NodeType::Module, id_name.clone(), graph_path_str.clone());
-            node.id = id;
-            node.line_start = Some(link.site_line);
             node.line_end = Some(link.site_line);
             let key = ContractKey::Rpc {
                 system: RpcSystem::Grpc,
                 service: link.rpc_service.clone(),
                 method: link.rpc_method_scope.clone(),
             };
-            node.contract = Some(ContractFact::RpcHandler(RpcHandlerFact {
+            node.contract = vec![ContractFact::RpcHandler(RpcHandlerFact {
                 rpc_service: key,
                 handler_function: link.handler_function.clone(),
                 origin: link.origin,
-            }));
+            })];
             all_nodes.push(node);
             total += 1;
         }
     }
-    if !all_nodes.is_empty() {
-        let _ =
-            graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &[] as &[GraphEdge]);
-    }
+    // Replace unconditionally. A scan that finds nothing must still
+    // retract what a previous scan emitted — this guard used to skip
+    // the only call that retracts, so deleting the last call site from
+    // a repo left the old nodes forever. `sql_sensor` has always done
+    // this unconditionally.
+    graph.replace_sensor_output(
+        SensorOwner::GrpcHandlerLinkSensor,
+        &all_nodes,
+        &[] as &[GraphEdge],
+    )?;
     Ok(total)
 }
 

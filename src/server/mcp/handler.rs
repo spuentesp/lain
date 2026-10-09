@@ -864,6 +864,73 @@ struct LainHandler {
     snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
 }
 
+impl LainHandler {
+    async fn call_tool_inner(
+        &self,
+        params: CallToolRequestParams,
+    ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError>
+    {
+        let static_graph_generation_unix: Option<i64> = self
+            .server
+            .as_deref()
+            .and_then(|s| s.static_graph_generation_unix());
+        let empty: Map<String, serde_json::Value> = Map::new();
+        let args_owned: Map<String, serde_json::Value> =
+            params.arguments.as_ref().unwrap_or(&empty).clone();
+        let handler_status = HandlerStatus {
+            transport: self.status_transport,
+            port: self.status_port,
+            started_at: self.status_started_at,
+            last_sync_at: self.status_last_sync_at.clone(),
+            last_error: self.status_last_error.clone(),
+            repo_count: self
+                .federation
+                .as_ref()
+                .map(|f| f.list_repos().len())
+                .unwrap_or(0),
+            workspaces_count: self
+                .workspaces
+                .as_ref()
+                .map(|w| w.read().workspaces.len())
+                .unwrap_or(0),
+        };
+
+        if let Some(gated) = gate_for_dispatch(
+            &self.executor,
+            self.federation.as_deref(),
+            params.name.as_str(),
+            &args_owned,
+        ) {
+            return Ok(gated_tool_result(
+                &gated,
+                self.executor.overlay(),
+                static_graph_generation_unix,
+            ));
+        }
+
+        let (text, is_error, structured) = dispatch_tool_call(
+            &self.executor,
+            self.federation.as_deref(),
+            self.workspaces.as_ref(),
+            &handler_status,
+            self.reload_bus.as_deref(),
+            self.server.as_deref(),
+            self.snapshots.as_ref(),
+            params.name.as_str(),
+            args_owned,
+        )
+        .await;
+
+        Ok(tool_result_with_structured(
+            text,
+            is_error,
+            structured,
+            self.executor.overlay(),
+            static_graph_generation_unix,
+        ))
+    }
+}
+
 /// Tools that cannot answer in the current mode, and must therefore not
 /// be advertised.
 ///
@@ -1003,64 +1070,7 @@ impl ServerHandler for LainHandler {
         _runtime: Arc<dyn McpServer>,
     ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError>
     {
-        let static_graph_generation_unix: Option<i64> = self
-            .server
-            .as_deref()
-            .and_then(|s| s.static_graph_generation_unix());
-        let empty: Map<String, serde_json::Value> = Map::new();
-        let args_owned: Map<String, serde_json::Value> =
-            params.arguments.as_ref().unwrap_or(&empty).clone();
-        let handler_status = HandlerStatus {
-            transport: self.status_transport,
-            port: self.status_port,
-            started_at: self.status_started_at,
-            last_sync_at: self.status_last_sync_at.clone(),
-            last_error: self.status_last_error.clone(),
-            repo_count: self
-                .federation
-                .as_ref()
-                .map(|f| f.list_repos().len())
-                .unwrap_or(0),
-            workspaces_count: self
-                .workspaces
-                .as_ref()
-                .map(|w| w.read().workspaces.len())
-                .unwrap_or(0),
-        };
-
-        if let Some(gated) = gate_for_dispatch(
-            &self.executor,
-            self.federation.as_deref(),
-            params.name.as_str(),
-            &args_owned,
-        ) {
-            return Ok(gated_tool_result(
-                &gated,
-                self.executor.overlay(),
-                static_graph_generation_unix,
-            ));
-        }
-
-        let (text, is_error, structured) = dispatch_tool_call(
-            &self.executor,
-            self.federation.as_deref(),
-            self.workspaces.as_ref(),
-            &handler_status,
-            self.reload_bus.as_deref(),
-            self.server.as_deref(),
-            self.snapshots.as_ref(),
-            params.name.as_str(),
-            args_owned,
-        )
-        .await;
-
-        Ok(tool_result_with_structured(
-            text,
-            is_error,
-            structured,
-            self.executor.overlay(),
-            static_graph_generation_unix,
-        ))
+        self.call_tool_inner(params).await
     }
 }
 

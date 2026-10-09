@@ -1,10 +1,11 @@
-//! Consumer-side protocol resolvers — Topic, RPC, GraphQL.
+//! Consumer-side protocol resolvers — Topic, RPC, GraphQL,
+//! WebSocket, SQL tables.
 //!
 //! Each resolver is a thin wrapper around the shared
 //! [`resolve_by_key`] helper that walks the [`EndpointTable`],
 //! applies a `candidate_filter`, skips own-service providers, and
 //! decides the bind / unresolved verdict from the supplied
-//! [`AmbiguityPolicy`]. The three protocols differ only in:
+//! [`AmbiguityPolicy`]. The protocol resolvers differ only in:
 //!
 //! 1. The `ContractKey` shape they construct (Topic / Rpc /
 //!    Graphql).
@@ -23,11 +24,13 @@ use crate::federation::contracts::config::ContractFederationConfig;
 use crate::federation::contracts::index::{ConsumerResolution, ConsumerTarget, UnresolvedReason};
 use crate::federation::contracts::joiner::endpoints::EndpointTable;
 use crate::federation::contracts::model::{
-    ContractKey, HostPart, MethodSpec, RpcConsumerFact, ServiceName, TopicConsumerFact,
+    ContractKey, HostPart, MethodSpec, RpcConsumerFact, ServiceName, TableConsumerFact,
+    TopicConsumerFact,
 };
 use crate::federation::contracts::url_resolution::host_matches_pattern;
 use crate::federation::repo_id::GlobalId;
 use crate::schema::{EdgeProvenance, RouteMatch};
+use std::collections::BTreeSet;
 
 /// How [`resolve_by_key`] turns an N-candidate match into a
 /// [`ConsumerTarget`]. The three protocol resolvers share the
@@ -357,6 +360,177 @@ fn rpc_stub_unknown(call_id: &GlobalId, own_service: &ServiceName) -> ConsumerRe
             target_service: None,
         }),
         bound_endpoints: Vec::new(),
+        reads_complete: true,
+    }
+}
+
+/// Phase F (Gap 19): resolve a WebSocket consumer against the endpoint table.
+pub fn resolve_websocket_consumer(
+    call_id: &GlobalId,
+    consumer: &crate::federation::contracts::model::WebSocketConsumerFact,
+    own_service: &ServiceName,
+    endpoints: &EndpointTable,
+    config: &crate::federation::contracts::config::ContractFederationConfig,
+    binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
+) -> ConsumerResolution {
+    // Host evidence first, exactly as `resolve_rpc_consumer` does it.
+    // Without this the resolver bound on `route` alone, so
+    // `wss://api.thirdparty.com/feed` invented a Binds edge to whatever
+    // internal service happened to declare `/feed`.
+    let candidate_services: Vec<ServiceName> = match &consumer.url.host {
+        HostPart::None => Vec::new(),
+        HostPart::Literal(host) => {
+            let mut svcs: Vec<ServiceName> = config
+                .services
+                .iter()
+                .filter(|s| s.hosts.iter().any(|pat| host_matches_pattern(pat, host)))
+                .map(|s| ServiceName(s.name.clone()))
+                .collect();
+            svcs.sort();
+            svcs
+        }
+        HostPart::Env(_) | HostPart::Expr(_) => Vec::new(),
+    };
+
+    // A literal host that names no configured service means the dial
+    // left the federation. There is no provider we may name, so this is
+    // `Unresolved` rather than a guessed bind. (An `External` terminal
+    // state would be nicer; the `external` map is only populated by the
+    // HTTP ladder today, so we stay conservative and say "unknown".)
+    if matches!(consumer.url.host, HostPart::Literal(_)) && candidate_services.is_empty() {
+        return ConsumerResolution {
+            call_id: call_id.clone(),
+            service: own_service.clone(),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: None,
+            }),
+            bound_endpoints: Vec::new(),
+            reads_complete: true,
+        };
+    }
+
+    let key = ContractKey::WebSocket {
+        route: consumer.route.clone(),
+    };
+    // Ambiguity must refuse. `NoMatch` bound on *any* candidate count
+    // at confidence 1.0, so two services exposing `/ws` multi-bound;
+    // GraphQL has refused that since §8.3 and WebSocket must too.
+    let allowed = candidate_services.clone();
+    resolve_by_key(
+        call_id,
+        &key,
+        endpoints,
+        |(svc, k): &(ServiceName, ContractKey)| {
+            k == &key && (allowed.is_empty() || allowed.contains(svc))
+        },
+        AmbiguityPolicy::GraphqlNoOp {
+            route_owner: Some(own_service.clone()),
+        },
+        own_service,
+        binds,
+    )
+}
+
+/// Phase D (spec §7): resolve a `TableConsumer` — a synthetic
+/// `sql-read:<path>:<line>` node whose fact lists the literal tables
+/// a SQL site reads — against the endpoint table.
+/// Tables are identified by name alone; ownership (which service's
+/// endpoint table a `Table` node lands in) was already applied by
+/// [`build_endpoints`](super::endpoints::build_endpoints) via the
+/// `databases[]` config, so the joiner only has to find the
+/// `(service, ContractKey::Table { name })` entries whose name the
+/// consumer reads.
+///
+/// Unlike the HTTP / topic / RPC / GraphQL / WebSocket resolvers
+/// there is **no own-service skip**: a table endpoint's provider is
+/// the table declaration itself, not a same-service API, and spec
+/// §7's handler → function → table traversal is exactly the
+/// intra-service edge (`platform` reading its own `shipments` table
+/// is the canonical case the contract-tool e2e pins). §7.8 / I5's
+/// "no same-service Binds" rule is about a service consuming its
+/// own API endpoints; it does not apply to data endpoints.
+///
+/// Every table in the fact must have at least one owning endpoint,
+/// or the whole consumer is `Unresolved { reason: NoMatch }` — I2
+/// (no silent drop): a reader of an unowned table must be visible
+/// to `list_unresolved`, because silence is what lets
+/// `NoKnownImpact` be claimed while a possible reader exists. When
+/// all tables resolve, one `Binds` edge per `(service, table)` is
+/// pushed; a table widened to several services by
+/// `databases[].shared_with` multi-binds, mirroring the topic
+/// resolver's behaviour for a topic owned by two services.
+pub fn resolve_table_consumer(
+    call_id: &GlobalId,
+    consumer: &TableConsumerFact,
+    own_service: &ServiceName,
+    endpoints: &EndpointTable,
+    binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
+) -> ConsumerResolution {
+    let wanted: BTreeSet<&str> = consumer.tables.iter().map(String::as_str).collect();
+    let mut candidates: Vec<(ServiceName, ContractKey, GlobalId)> = Vec::new();
+    let mut covered: BTreeSet<String> = BTreeSet::new();
+    for ((svc, key), providers) in endpoints {
+        let ContractKey::Table { name } = key else {
+            continue;
+        };
+        if !wanted.contains(name.as_str()) {
+            continue;
+        }
+        if let Some(provider) = providers.first() {
+            covered.insert(name.clone());
+            candidates.push((svc.clone(), key.clone(), provider.id.clone()));
+        }
+    }
+    // No endpoint owns every table the source reads → the consumer
+    // is unresolved as a whole (all-or-nothing keeps the index and
+    // the `Binds` edge set consistent with each other).
+    if candidates.is_empty() || covered.len() != wanted.len() {
+        return ConsumerResolution {
+            call_id: call_id.clone(),
+            service: own_service.clone(),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: None,
+            }),
+            bound_endpoints: Vec::new(),
+            reads_complete: true,
+        };
+    }
+    let mut bound: Vec<(ServiceName, ContractKey)> = Vec::new();
+    for (svc, key, provider_id) in &candidates {
+        binds.push(crate::federation::contracts::joiner::BindsEdge {
+            consumer: call_id.clone(),
+            provider: provider_id.clone(),
+            consumer_service: own_service.clone(),
+            provider_service: svc.clone(),
+            target_endpoint: (svc.clone(), key.clone()),
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::Regex,
+            },
+            confidence: 1.0,
+            route_match: RouteMatch::Exact,
+            stripped_prefix: None,
+        });
+        bound.push((svc.clone(), key.clone()));
+    }
+    bound.sort_by(|a, b| {
+        a.0 .0
+            .cmp(&b.0 .0)
+            .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
+    });
+    ConsumerResolution {
+        call_id: call_id.clone(),
+        service: own_service.clone(),
+        target: Some(ConsumerTarget::Binds {
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::Regex,
+            },
+            confidence: 1.0,
+            route_match: RouteMatch::Exact,
+            stripped_prefix: None,
+        }),
+        bound_endpoints: bound,
         reads_complete: true,
     }
 }

@@ -131,6 +131,7 @@ async fn build_three_repo_federation(
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
     fed.set_contract_config(cfg);
 
@@ -217,7 +218,7 @@ async fn build_three_repo_federation(
     );
     billing_route.id = billing_route_id.clone();
     billing_route.line_start = Some(1);
-    billing_route.contract = Some(ContractFact::Provider(
+    billing_route.contract = vec![ContractFact::Provider(
         lain::federation::contracts::model::ProviderFact {
             method: lain::federation::contracts::model::HttpMethod::Get,
             template: "/invoices/{}".to_string(),
@@ -230,7 +231,7 @@ async fn build_three_repo_federation(
             origin: lain::federation::contracts::model::ProviderOrigin::Code,
             operation_id: None,
         },
-    ));
+    )];
     billing_g
         .insert_nodes_batch(std::slice::from_ref(&billing_route))
         .unwrap();
@@ -307,7 +308,7 @@ async fn build_three_repo_federation(
     http_call.id = http_call_id.clone();
     http_call.line_start = Some(20);
     http_call.line_end = Some(21);
-    http_call.contract = Some(ContractFact::Consumer(ConsumerFact {
+    http_call.contract = vec![ContractFact::Consumer(ConsumerFact {
         method: MethodSpec::Known(HttpMethod::Get),
         url: NormalizedUrl {
             host: HostPart::Env(vec!["BILLING_URL".to_string()]),
@@ -318,7 +319,7 @@ async fn build_three_repo_federation(
         },
         url_expr: "${process.env.BILLING_URL}/invoices/${id}".to_string(),
         reads_complete: true,
-    }));
+    })];
     reports_g
         .insert_nodes_batch(std::slice::from_ref(&http_call))
         .unwrap();
@@ -491,6 +492,22 @@ async fn scenario_17_get_service_billing_lists_reports_with_both_used_by() {
         u["caller"]["name"].as_str(),
         Some("buildMonthlyReport"),
         "use.caller.name mismatch: {u:?}"
+    );
+    // The consumer must be attributed to the endpoint it actually
+    // calls. Regression: `build_consumer_rows` resolved the endpoint
+    // with a `.find()` over the whole Endpoint table matching on
+    // ContractKey *string*, so every consumer of a service was
+    // attributed to the alphabetically-first endpoint whose key
+    // collided with that service's key set.
+    assert_eq!(
+        u["endpoint"]["service"].as_str(),
+        Some("billing"),
+        "use.endpoint.service mismatch: {u:?}"
+    );
+    assert_eq!(
+        u["endpoint"]["key"].as_str(),
+        Some("http:GET /invoices/{}"),
+        "use.endpoint.key must be the endpoint the caller really invokes: {u:?}"
     );
     let used_by = u["used_by"].as_array().expect("used_by array");
     let mut found_http_handler = false;
@@ -1311,6 +1328,159 @@ mod snap_harness;
 
 use snap_harness as harness;
 
+#[tokio::test]
+async fn snapshot_contract_tools_use_one_pinned_view() {
+    let fixture = harness::build_fixture();
+    let manager = harness::manager(&fixture.root);
+    let config = harness::contract_config(&fixture.root);
+    let commits = harness::all_repos_at(&fixture.root, "base");
+    let snapshot =
+        harness::prepare_ready(&manager, commits.clone(), None, Arc::clone(&config)).await;
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&manager, &status);
+
+    let listed = list_contracts_handle(&ctx, json!({"snapshot": snapshot}))
+        .await
+        .unwrap();
+    assert!(!listed.is_error, "list_contracts: {:#?}", listed.structured);
+    assert_eq!(listed.structured["view"]["kind"], json!("snapshot"));
+    assert_eq!(listed.structured["view"]["snapshot_id"], json!(snapshot));
+    assert_eq!(
+        listed.structured["view"]["git_commits"],
+        serde_json::to_value(&commits).unwrap()
+    );
+    let reviewed = listed.structured["data"]["scope"]["reviewed"]
+        .as_array()
+        .expect("snapshot reviewed scope");
+    assert_eq!(reviewed.len(), commits.len());
+
+    let contract = listed.structured["data"]["items"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item["providers"]
+                    .as_array()
+                    .is_some_and(|providers| !providers.is_empty())
+            })
+        })
+        .expect("snapshot contract with a provider");
+    let endpoint = contract["endpoint"].clone();
+    let provider_ids: std::collections::BTreeSet<String> = contract["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|provider| provider["id"].as_str().map(str::to_owned))
+        .collect();
+
+    // The context deliberately has no live federation. A snapshot
+    // trace must use the resident snapshot backend and start at one
+    // of the endpoint's provider nodes.
+    let traced = trace_impact_handle(
+        &ctx,
+        json!({
+            "snapshot": snapshot,
+            "from": {"endpoint": endpoint},
+            "depth": 4,
+            "cap": 20,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!traced.is_error, "trace_impact: {:#?}", traced.structured);
+    assert_eq!(
+        traced.structured["view"]["git_commits"],
+        serde_json::to_value(&commits).unwrap()
+    );
+    let paths = traced.structured["data"]["paths"]
+        .as_array()
+        .expect("trace paths");
+    assert!(!paths.is_empty(), "provider seed should yield a path");
+    assert!(paths.iter().all(|path| {
+        path["start"]
+            .as_str()
+            .is_some_and(|start| provider_ids.contains(start))
+    }));
+
+    let provider = provider_ids.iter().next().unwrap().clone();
+    let evidence = resolve_evidence_handle(&ctx, json!({"snapshot": snapshot, "refs": [provider]}))
+        .await
+        .unwrap();
+    assert!(
+        !evidence.is_error,
+        "resolve_evidence: {:#?}",
+        evidence.structured
+    );
+    assert_eq!(
+        evidence.structured["view"]["git_commits"],
+        serde_json::to_value(&commits).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn snapshot_view_retains_residency_hold_until_drop() {
+    let fixture = harness::build_fixture();
+    let manager = harness::manager_with_cap(&fixture.root, 1);
+    let config = harness::contract_config(&fixture.root);
+    let base = harness::prepare_ready(
+        &manager,
+        harness::all_repos_at(&fixture.root, "base"),
+        None,
+        Arc::clone(&config),
+    )
+    .await;
+    let head = harness::derive_head(
+        &manager,
+        config,
+        &fixture.root,
+        &base,
+        &[("orders", "s1-remove-customer-id")],
+    )
+    .await;
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = harness::snapshot_ctx(&manager, &status);
+    let base_args = json!({"snapshot": base, "wait_ms": 1})
+        .as_object()
+        .unwrap()
+        .clone();
+    let head_args = json!({"snapshot": head, "wait_ms": 1})
+        .as_object()
+        .unwrap()
+        .clone();
+
+    let base_view = lain::server::mcp::contract_tools::view::resolve_view(
+        &ctx,
+        &base_args,
+        std::time::Instant::now(),
+    )
+    .await
+    .expect("resolve base snapshot view");
+    let while_held = lain::server::mcp::contract_tools::view::resolve_view(
+        &ctx,
+        &head_args,
+        std::time::Instant::now(),
+    )
+    .await;
+    let busy = match while_held {
+        Ok(_) => panic!("a second resident view must not evict a held snapshot"),
+        Err(outcome) => outcome,
+    };
+    assert_eq!(busy.structured["error"]["code"], json!("busy"));
+    assert_eq!(busy.structured["error"]["retryable"], json!(true));
+    assert_eq!(
+        busy.structured["error"]["details"]["retry_after_ms"],
+        json!(250)
+    );
+
+    drop(base_view);
+    lain::server::mcp::contract_tools::view::resolve_view(
+        &ctx,
+        &head_args,
+        std::time::Instant::now(),
+    )
+    .await
+    .expect("head view resolves after the base hold is released");
+}
+
 async fn run_diff(ctx: &McpContext<'_>, base: &str, head: &str) -> Value {
     let args = json!({"base": base, "head": head, "cap": 100});
     let outcome = diff_contracts_handle(ctx, args).await.unwrap();
@@ -2001,6 +2171,11 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
         let data = run_diff(&ctx, base_id, &head_id).await;
         let reported = changes_of(&data);
         let (m, e, r) = diff_metrics_for_scenario(&reported, &s.expected.changes);
+        if r > e {
+            println!(
+                "PR13_OVERREPORT scenario {id} matched={m} expected={e} reported={r}: {reported:?}"
+            );
+        }
         total_matched += m;
         total_expected += e;
         total_reported += r;
@@ -2054,8 +2229,8 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     // diff scenarios don't track them. Excluding those keeps the
     // precision/recall metrics stable per the task brief.
     let reported_binds: Vec<(String, String, String, String)> = index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .filter_map(|c| {
             let target = c.target.as_ref()?;
             if let lain::federation::contracts::index::ConsumerTarget::Binds { .. } = target {
@@ -2151,7 +2326,10 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     // at the exact scenario instead of forcing the operator to dig
     // through the run logs.
     let per_scenario_json: std::collections::BTreeMap<String, (usize, usize, usize)> = per_scenario;
-    let _ = per_scenario_json;
+    println!(
+        "PR13_PER_SCENARIO_JSON {}",
+        serde_json::to_string(&per_scenario_json).unwrap()
+    );
 
     let metrics = Metrics {
         diff_precision,
@@ -2248,13 +2426,13 @@ mod pr15_event {
         .as_str()
         .to_string();
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Provider(ProviderFact {
+        n.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Any,
             template: topic.to_string(),
             handler: None,
             operation_id: None,
             origin: ProviderOrigin::Code,
-        }));
+        })];
         n
     }
 
@@ -2279,11 +2457,11 @@ mod pr15_event {
         .as_str()
         .to_string();
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+        n.contract = vec![ContractFact::TopicConsumer(TopicConsumerFact {
             broker: broker.to_string(),
             name: topic.to_string(),
             kind: TopicConsumerKind::Subscription,
-        }));
+        })];
         n
     }
 
@@ -2367,6 +2545,7 @@ mod pr15_event {
             generic_keys: vec![],
             schemas: vec![],
             bindings: vec![],
+            databases: vec![],
         };
         fed.set_contract_config(cfg);
 
@@ -2491,8 +2670,8 @@ mod pr15_event {
 
         // Two consumers, one producer: both binds resolve.
         let binds_by_consumer: Vec<(String, String)> = index
-            .consumers
-            .values()
+            .consumer_resolutions()
+            .map(|(_, r)| r)
             .filter_map(|c| {
                 if let Some(lain::federation::contracts::index::ConsumerTarget::Binds { .. }) =
                     c.target
@@ -2561,7 +2740,6 @@ mod pr18_operation_id {
         ProviderOrigin,
     };
     use lain::schema::{GraphNode, NodeType, RepoNamespace};
-    use std::collections::BTreeMap;
 
     fn ns() -> RepoNamespace {
         RepoNamespace::for_test()
@@ -2585,13 +2763,13 @@ mod pr18_operation_id {
         n.repo_id = Some(repo.to_string());
         n.id = format!("{repo}:HttpRoute:{path}:{name}:{line}");
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Provider(ProviderFact {
+        n.contract = vec![ContractFact::Provider(ProviderFact {
             method,
             template: template.to_string(),
             handler: None,
             operation_id: Some(operation_id.to_string()),
             origin: ProviderOrigin::OpenApi,
-        }));
+        })];
         n
     }
 
@@ -2605,7 +2783,7 @@ mod pr18_operation_id {
         n.repo_id = Some(repo.to_string());
         n.id = format!("{repo}:HttpClientCall:{path}:{name}:{line}");
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Consumer(ConsumerFact {
+        n.contract = vec![ContractFact::Consumer(ConsumerFact {
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
                 host: lain::federation::contracts::model::HostPart::Literal("orders.svc".into()),
@@ -2620,7 +2798,7 @@ mod pr18_operation_id {
             },
             url_expr: "client.orders.getOrderById({id: 42})".to_string(),
             reads_complete: true,
-        }));
+        })];
         n
     }
 
@@ -2644,6 +2822,7 @@ mod pr18_operation_id {
             generic_keys: vec![],
             schemas: vec![],
             bindings: vec![],
+            databases: vec![],
         }
     }
 
@@ -2694,8 +2873,7 @@ mod pr18_operation_id {
         let cid = lain::federation::repo_id::GlobalId::from_string(&consumer.id);
         let resolution: &ConsumerResolution = out
             .index
-            .consumers
-            .get(&cid)
+            .consumer(&cid)
             .expect("consumer resolution present");
         match &resolution.target {
             Some(ConsumerTarget::Binds {
@@ -2733,13 +2911,13 @@ mod pr18_operation_id {
             n.repo_id = Some("orders".into());
             n.id = "orders:HttpRoute:openapi.yaml:getOrder:1".into();
             n.line_start = Some(1);
-            n.contract = Some(ContractFact::Provider(ProviderFact {
+            n.contract = vec![ContractFact::Provider(ProviderFact {
                 method: HttpMethod::Get,
                 template: "/api/orders/{}".to_string(),
                 handler: None,
                 operation_id: None,
                 origin: ProviderOrigin::OpenApi,
-            }));
+            })];
             n
         };
         let consumer = sdk_consumer("billing", "src/sdk.ts", "getOrderById", 1, "getOrderById");
@@ -2775,13 +2953,13 @@ mod pr18_operation_id {
             n.repo_id = Some("billing".into());
             n.id = "billing:HttpRoute:openapi.yaml:list_invoices:2".into();
             n.line_start = Some(2);
-            n.contract = Some(ContractFact::Provider(ProviderFact {
+            n.contract = vec![ContractFact::Provider(ProviderFact {
                 method: HttpMethod::Get,
                 template: "/invoices".to_string(),
                 handler: None,
                 operation_id: Some("list_invoices".to_string()),
                 origin: ProviderOrigin::OpenApi,
-            }));
+            })];
             n
         };
         let consumer = sdk_consumer("orders", "src/sdk.ts", "getOrderById", 1, "getOrderById");
@@ -2817,17 +2995,18 @@ mod pr18_operation_id {
         let b = ContractJoiner::run(&[provider, consumer], &[], &sdk_config());
         assert_eq!(a, b, "operationId fallback is deterministic across runs");
         // Determinism on the index side too: same operation_id
-        // placement must produce identical bound endpoints.
-        let a_endpoints: BTreeMap<_, _> = a
+        // placement must produce identical bound endpoints. A `Vec`
+        // rather than a map: one call site can carry several
+        // resolutions (several facts on one node), and the map key
+        // would collapse them.
+        let a_endpoints: Vec<_> = a
             .index
-            .consumers
-            .iter()
+            .consumer_resolutions()
             .map(|(k, v)| (k.clone(), v.bound_endpoints.clone()))
             .collect();
-        let b_endpoints: BTreeMap<_, _> = b
+        let b_endpoints: Vec<_> = b
             .index
-            .consumers
-            .iter()
+            .consumer_resolutions()
             .map(|(k, v)| (k.clone(), v.bound_endpoints.clone()))
             .collect();
         assert_eq!(a_endpoints, b_endpoints);

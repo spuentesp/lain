@@ -265,6 +265,31 @@ fn is_word_boundary(b: u8) -> bool {
     !((b as char).is_ascii_alphanumeric() || b == b'_')
 }
 
+// ─── Line continuations ───────────────────────────────────────────────
+
+/// Join lines continued with a trailing `\`. Each pair `\n` where the
+/// preceding char is `\` collapses to nothing; the `\` itself is
+/// preserved so a tokeniser that tracks `option { ... }` brace
+/// nesting sees the join and stays balanced.
+///
+/// This is the C-style line-continuation rule, the same one the proto
+/// spec uses for `option { … }` blocks and any other wrap-friendly
+/// declaration. Callers that need a per-language variant (Python's
+/// `\\`, GraphQL's none, …) layer that on top.
+pub fn join_continued_lines(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_ended_with_continuation = false;
+    for ch in input.chars() {
+        if prev_ended_with_continuation && ch == '\n' {
+            prev_ended_with_continuation = false;
+            continue;
+        }
+        prev_ended_with_continuation = ch == '\\';
+        out.push(ch);
+    }
+    out
+}
+
 // ─── Line iteration ───────────────────────────────────────────────────
 
 /// Yield `(line_no, line)` for every line in `src` matching

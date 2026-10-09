@@ -415,7 +415,13 @@ fn test_contract_nodes_and_edges_are_marked_indexed() {
     ] {
         assert!(e.is_indexed(), "{e} is wired and must be marked indexed");
     }
-    assert!(!EdgeType::PayloadSchema.is_indexed());
+    // `PayloadSchema` has no producer yet — `payload_schema.rs` parses
+    // payload files but no sensor mints the Topic → Schema edge. It must
+    // stay in the "known fiction" set or `describe_schema` lies.
+    assert!(
+        !EdgeType::PayloadSchema.is_indexed(),
+        "PayloadSchema has no producer and must not be advertised as indexed"
+    );
 }
 
 /// `source_types` / `target_types` for each new edge — `describe_schema`
@@ -434,7 +440,11 @@ fn test_contract_edge_endpoints_match_node_type_definitions() {
     );
     assert_eq!(
         EdgeType::RequestSchema.source_types(),
-        &[NodeType::HttpRoute]
+        &[NodeType::HttpRoute, NodeType::Module]
+    );
+    assert_eq!(
+        EdgeType::ResponseSchema.source_types(),
+        &[NodeType::HttpRoute, NodeType::Module]
     );
     assert_eq!(EdgeType::ResponseSchema.target_types(), &[NodeType::Schema]);
     assert_eq!(EdgeType::PayloadSchema.source_types(), &[NodeType::Topic]);
@@ -448,7 +458,11 @@ fn test_contract_edge_endpoints_match_node_type_definitions() {
     assert_eq!(EdgeType::ReadsFrom.source_types(), &[NodeType::FieldRef]);
     assert_eq!(
         EdgeType::ReadsFrom.target_types(),
-        &[NodeType::HttpClientCall]
+        &[
+            NodeType::HttpClientCall,
+            NodeType::Function,
+            NodeType::Method
+        ]
     );
     // `Binds`: consumer → provider. Three source shapes (HttpClientCall,
     // FieldRef, Topic) and three target shapes (HttpRoute, Field,
@@ -474,7 +488,7 @@ fn test_contract_edge_endpoints_match_node_type_definitions() {
 #[test]
 fn test_graph_node_new_initializes_contract_and_entry_to_none() {
     let node = GraphNode::new(NodeType::Function, "f".into(), "src/lib.rs".into());
-    assert!(node.contract.is_none());
+    assert!(node.contract.is_empty());
     assert!(node.entry.is_none());
 }
 
@@ -589,13 +603,13 @@ fn test_graph_node_bincode_roundtrips_with_contract_field() {
         "src/orders.py".to_string(),
     );
     original.line_start = Some(7);
-    original.contract = Some(ContractFact::Provider(ProviderFact {
+    original.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Get,
         template: "/orders/{}".to_string(),
         handler: None,
         operation_id: Some("getOrder".to_string()),
         origin: ProviderOrigin::OpenApi,
-    }));
+    })];
     original.entry = Some(EntryKind::HttpHandler);
 
     let bytes =

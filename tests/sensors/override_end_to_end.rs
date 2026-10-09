@@ -215,7 +215,7 @@ languages:
         method, url, via, ..
     } = match http_client_call
         .contract
-        .as_ref()
+        .first()
         .expect("HttpClientCall carries a ConsumerFact contract")
     {
         ContractFact::Consumer(c) => c.clone(),
@@ -474,7 +474,7 @@ fn build() -> Router {
 
     // The HttpRoute node must carry a Provider contract with method =
     // Get and a normalised template "/users".
-    match route_node.contract.as_ref() {
+    match route_node.contract.first() {
         Some(ContractFact::Provider(p)) => {
             assert_eq!(p.method, HttpMethod::Get);
             assert_eq!(p.template, "/users");

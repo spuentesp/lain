@@ -488,9 +488,8 @@ pub fn run_all_with_coverage(
     repo_id: &RepoId,
     cache_key: &IcCacheKey,
 ) -> (SensorCounts, RepoCoverage) {
-    let (counts, reports) = run_all_with_reports(graph, root, namespace);
+    let (counts, reports) = run_all_with_reports(graph, root, namespace, repo_id.as_str());
     let ledger = coverage_from_reports(root, cache_key, &counts, &reports);
-    let _ = repo_id;
     (counts, ledger)
 }
 
@@ -535,10 +534,42 @@ pub(crate) fn coverage_from_reports(
         let entry = bucket.entry(python_label.clone()).or_default();
         entry.files_seen += py_files_seen;
         entry.emitted += report.emitted;
+        entry.unresolved.extend(report.unresolved.clone());
         if let Some(err) = &report.error {
             entry.error = Some(err.clone());
         }
     }
+
+    // Gap 26: record SkipReason::UnsupportedLanguage for unanalyzed languages present in the workspace.
+    let mut files_by_lang: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for r in &records {
+        if let Some(lang) = r.lang {
+            let label = lang_label(lang).to_string();
+            let path_str = r.path.to_string_lossy().to_string();
+            files_by_lang.entry(label).or_default().push(path_str);
+        }
+    }
+
+    for (lang_str, file_paths) in files_by_lang {
+        let has_analyzed = ledger.ledger.values().any(|sensor_map| {
+            sensor_map
+                .get(&lang_str)
+                .map(|s| s.files_analyzed > 0)
+                .unwrap_or(false)
+        });
+        if !has_analyzed {
+            let sample_paths: Vec<String> = file_paths.iter().take(5).cloned().collect();
+            let skip = SkipRecord {
+                reason: SkipReason::UnsupportedLanguage,
+                count: file_paths.len(),
+                sample_paths,
+            };
+            let bucket = ledger.ledger.entry("classifier".to_string()).or_default();
+            let entry = bucket.entry(lang_str).or_default();
+            entry.files_skipped.push(skip);
+        }
+    }
+
     // Derive the per-sensor totals for back-compat with the existing
     // `SensorCounts.sensor_counts` field.
     ledger.sensor_counts = counts.as_map();
@@ -1026,5 +1057,26 @@ mod tests {
         cover.ledger.insert("http_sensor".to_string(), sl);
         let reasons = reasons_for(&cover);
         assert!(reasons.contains(&UnresolvedReason::WrapperUnconfigured));
+    }
+
+    #[test]
+    fn coverage_from_reports_records_unsupported_language() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let key =
+            crate::federation::contracts::index_cache::CacheKey::new("test_repo", "head", "0.9.0");
+        let counts = SensorCounts::default();
+        let reports = vec![];
+        let cover = coverage_from_reports(dir.path(), &key, &counts, &reports);
+
+        let classifier = cover.ledger.get("classifier").expect("classifier ledger");
+        let rust_entry = classifier.get("rust").expect("rust entry");
+        assert!(
+            rust_entry
+                .files_skipped
+                .iter()
+                .any(|s| matches!(s.reason, SkipReason::UnsupportedLanguage)),
+            "rust files marked as UnsupportedLanguage when no sensor analyzes them"
+        );
     }
 }

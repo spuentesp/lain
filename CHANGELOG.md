@@ -5,6 +5,28 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+### Changed
+
+- **Schema bump.** `GraphNode.contract` is now a `Vec<ContractFact>`
+  rather than a single `Option`, so one node can record several facts.
+  This closes a real gap: two subscriptions to different topics on one
+  physical line share the `topic-read:<path>:<line>` node, and with one
+  fact slot the second topic's consumer was silently dropped. The same
+  shape covers any two facts co-located on one node.
+  - `PATH_FORMAT_VERSION` 4 → 5 (`src/server/graph/persist.rs`).
+    Per-repo graphs written by an older lain are discarded and rebuilt
+    on load.
+  - `FEDERATION_GRAPH_VERSION` 3 → 4
+    (`src/server/federation/graph_backend.rs`). The loader refuses a
+    mismatched header with `FederationSchemaMismatch`.
+  - **Recovery: run `lain reindex`.** No silent migration — the
+    federated graph is regenerable from per-repo graphs, and a
+    hand-written transform risks hiding real corruption.
+
+  Read paths that expect one fact per node now say so explicitly
+  (`ContractIndex::consumer`); paths that must see every fact iterate
+  (`ContractIndex::consumer_resolutions`, `sensor_owner_of`).
+
 ## [0.9.0] - 2026-10-04
 
 LAIN 0.9 introduces cross-repo contract federation. For every

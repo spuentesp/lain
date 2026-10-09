@@ -47,7 +47,7 @@
 use crate::error::LainError;
 use crate::federation::contracts::model::{ContractFact, GraphqlConsumerFact, GraphqlOp};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{GraphEdge, GraphNode, RepoNamespace};
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -59,6 +59,7 @@ use std::path::Path;
 pub struct GraphqlConsumerField {
     pub op: GraphqlOp,
     pub field: String,
+    pub selected_fields: Vec<String>,
     /// `true` when the document was a fragment-only or
     /// interpolated operation; the sensor emits NO
     /// `GraphqlConsumer` record for these and the joiner
@@ -84,7 +85,9 @@ crate::server::sensors::register_sensor!(
 /// Walk `root`, find every recognised GraphQL consumer (gql /
 /// graphql tagged templates, .graphql / .gql document
 /// references, .graphql document files), and emit one
-/// `GraphqlConsumer` `Function` node per top-level field.
+/// `GraphqlConsumer` `Function` node per top-level field,
+/// plus `FieldRef` nodes for selected fields linked via
+/// `ReadsFrom` and `ReadsField` edges.
 /// Returns the count emitted.
 pub fn scan_workspace_graphql_consumer(
     graph: &GraphDatabase,
@@ -96,6 +99,7 @@ pub fn scan_workspace_graphql_consumer(
     }
     let mut total = 0usize;
     let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
     // The consumer sensor covers two surfaces:
     //   1. .graphql / .gql document files (read as
     //      standalone documents; emit one consumer per
@@ -118,24 +122,42 @@ pub fn scan_workspace_graphql_consumer(
         let graph_path_str = graph_path(root, &path);
         let consumers = parse_document(&content, &graph_path_str);
         for c in consumers {
-            let id_name = format!("graphql-call:{}:{}", c.op, c.field);
-            let id = GraphNode::generate_id(
-                &NodeType::Function,
+            if c.dynamic {
+                continue;
+            }
+            let id_name = format!(
+                "{}{}:{}",
+                crate::server::sensors::util::GRAPHQL_CALL_PREFIX,
+                c.op,
+                c.field
+            );
+            let mut node = crate::server::sensors::util::synthetic_site_node(
+                id_name,
                 &c.site_path,
-                &id_name,
-                Some(c.site_line),
+                c.site_line,
                 namespace,
             );
-            let mut node = GraphNode::new(NodeType::Function, id_name.clone(), c.site_path.clone());
-            node.id = id;
-            node.line_start = Some(c.site_line);
-            node.line_end = Some(c.site_line);
-            node.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
+            node.contract = vec![ContractFact::GraphqlConsumer(GraphqlConsumerFact {
                 op: c.op,
                 field: c.field.clone(),
-            }));
+            })];
+            let id = node.id.clone();
             all_nodes.push(node);
             total += 1;
+
+            crate::server::sensors::util::emit_graphql_field_refs(
+                crate::server::sensors::util::GraphqlFieldRefs {
+                    consumer_id: &id,
+                    op: c.op,
+                    field: &c.field,
+                    site_path: &c.site_path,
+                    site_line: c.site_line,
+                    selected_fields: &c.selected_fields,
+                    namespace,
+                },
+                &mut all_nodes,
+                &mut all_edges,
+            );
         }
     }
     let code_ext = |p: &Path| {
@@ -155,33 +177,42 @@ pub fn scan_workspace_graphql_consumer(
             if c.dynamic {
                 continue;
             }
-            let id_name = format!("graphql-call:{}:{}", c.op, c.field);
-            let id = GraphNode::generate_id(
-                &NodeType::Function,
+            let id_name = format!(
+                "{}{}:{}",
+                crate::server::sensors::util::GRAPHQL_CALL_PREFIX,
+                c.op,
+                c.field
+            );
+            let mut node = crate::server::sensors::util::synthetic_site_node(
+                id_name,
                 &c.site_path,
-                &id_name,
-                Some(c.site_line),
+                c.site_line,
                 namespace,
             );
-            let mut node = GraphNode::new(NodeType::Function, id_name.clone(), c.site_path.clone());
-            node.id = id;
-            node.line_start = Some(c.site_line);
-            node.line_end = Some(c.site_line);
-            node.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
+            node.contract = vec![ContractFact::GraphqlConsumer(GraphqlConsumerFact {
                 op: c.op,
                 field: c.field.clone(),
-            }));
+            })];
+            let id = node.id.clone();
             all_nodes.push(node);
             total += 1;
+
+            crate::server::sensors::util::emit_graphql_field_refs(
+                crate::server::sensors::util::GraphqlFieldRefs {
+                    consumer_id: &id,
+                    op: c.op,
+                    field: &c.field,
+                    site_path: &c.site_path,
+                    site_line: c.site_line,
+                    selected_fields: &c.selected_fields,
+                    namespace,
+                },
+                &mut all_nodes,
+                &mut all_edges,
+            );
         }
     }
-    if !all_nodes.is_empty() {
-        let _ = graph.replace_sensor_output(
-            SensorOwner::GraphqlSensor,
-            &all_nodes,
-            &[] as &[GraphEdge],
-        );
-    }
+    graph.replace_sensor_output(SensorOwner::GraphqlConsumerSensor, &all_nodes, &all_edges)?;
     Ok(total)
 }
 
@@ -192,52 +223,37 @@ pub fn scan_workspace_graphql_consumer(
 /// detector without going through the graph emission path.
 pub fn detect_in_code(content: &str, graph_path: &str) -> Vec<GraphqlConsumerField> {
     let mut out: Vec<GraphqlConsumerField> = Vec::new();
-    for (idx, line) in content.lines().enumerate() {
-        let line_no = (idx as u32) + 1;
-        let trimmed = line.trim();
-        // TS / JS tagged templates: `gql\`...\``,
-        // `graphql\`...\``. The body is everything between
-        // the backticks on the same line (multiline is rare
-        // but the same shape — we treat the line as the
-        // body when it contains the closing backtick).
-        for tag in ["gql`", "graphql`"] {
-            if let Some(start) = trimmed.find(tag) {
-                let body_start = start + tag.len();
-                if let Some(end_rel) = trimmed[body_start..].find('`') {
-                    let body = &trimmed[body_start..body_start + end_rel];
-                    out.extend(parse_operation_body(body, graph_path, line_no));
-                }
-                // Multiline: we skip for v1.
-            }
-        }
-        // Python: `gql("...")` or
-        // `client.execute("query { ... }")` — the
-        // function-call form. We look for `gql(` or
-        // `.execute(` and read the first string-literal
-        // argument.
-        if let Some(start) = trimmed.find("gql(\"") {
-            let body_start = start + "gql(\"".len();
-            if let Some(end_rel) = trimmed[body_start..].find("\")") {
-                let body = &trimmed[body_start..body_start + end_rel];
+    // TS / JS tagged templates: `gql\`...\``, `graphql\`...\``
+    for tag in ["gql`", "graphql`"] {
+        let mut search_from = 0;
+        while let Some(rel) = content[search_from..].find(tag) {
+            let start = search_from + rel;
+            let body_start = start + tag.len();
+            let line_no = (content[..start].chars().filter(|&c| c == '\n').count() as u32) + 1;
+            if let Some(end_rel) = content[body_start..].find('`') {
+                let body = &content[body_start..body_start + end_rel];
                 out.extend(parse_operation_body(body, graph_path, line_no));
+                search_from = body_start + end_rel + 1;
+            } else {
+                break;
             }
         }
-        if let Some(start) = trimmed.find(".execute(\"") {
-            let body_start = start + ".execute(\"".len();
-            if let Some(end_rel) = trimmed[body_start..].find("\")") {
-                let body = &trimmed[body_start..body_start + end_rel];
+    }
+    // Python / JS function calls: `gql("...")` or `.execute("...")`
+    for tag in ["gql(\"", ".execute(\""] {
+        let mut search_from = 0;
+        while let Some(rel) = content[search_from..].find(tag) {
+            let start = search_from + rel;
+            let body_start = start + tag.len();
+            let line_no = (content[..start].chars().filter(|&c| c == '\n').count() as u32) + 1;
+            if let Some(end_rel) = content[body_start..].find("\")") {
+                let body = &content[body_start..body_start + end_rel];
                 out.extend(parse_operation_body(body, graph_path, line_no));
+                search_from = body_start + end_rel + 2;
+            } else {
+                break;
             }
         }
-        // Apollo persisted operations: the canonical pattern
-        // is `useQuery(GET_ORDERS)` or
-        // `client.query({ query: GET_ORDERS, ... })` — the
-        // operation name is the identifier. We do a coarse
-        // scan for the `query <Name>` declaration in the
-        // same file (the F1 + F2 acceptance scenario covers
-        // the non-persisted case; persisted-operation
-        // detection is left for a follow-up if the operator
-        // surfaces it).
     }
     out
 }
@@ -260,6 +276,7 @@ pub fn parse_document(content: &str, graph_path: &str) -> Vec<GraphqlConsumerFie
         return vec![GraphqlConsumerField {
             op: GraphqlOp::Query,
             field: String::new(),
+            selected_fields: Vec::new(),
             dynamic: true,
             site_path: graph_path.to_string(),
             site_line: 1,
@@ -279,16 +296,18 @@ pub fn parse_document(content: &str, graph_path: &str) -> Vec<GraphqlConsumerFie
             out.push(GraphqlConsumerField {
                 op,
                 field: String::new(),
+                selected_fields: Vec::new(),
                 dynamic: true,
                 site_path: graph_path.to_string(),
                 site_line: line_no,
             });
             continue;
         }
-        for field in fields {
+        for (field, selected_fields) in fields {
             out.push(GraphqlConsumerField {
                 op,
                 field,
+                selected_fields,
                 dynamic: false,
                 site_path: graph_path.to_string(),
                 site_line: line_no,
@@ -300,6 +319,7 @@ pub fn parse_document(content: &str, graph_path: &str) -> Vec<GraphqlConsumerFie
         out.push(GraphqlConsumerField {
             op: GraphqlOp::Query,
             field: String::new(),
+            selected_fields: Vec::new(),
             dynamic: true,
             site_path: graph_path.to_string(),
             site_line: 1,
@@ -443,7 +463,7 @@ fn extract_top_level_fields_for_op(
     op: GraphqlOp,
     _line: u32,
     _graph_path: &str,
-) -> Vec<String> {
+) -> Vec<(String, Vec<String>)> {
     let bytes = content.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -501,34 +521,57 @@ fn extract_top_level_fields_for_op(
             i += 1;
         }
         let body = &content[body_start..i];
-        return top_level_fields_in(body);
+        return top_level_fields_with_selections(body);
     }
     Vec::new()
 }
 
-/// Walk a `{ ... }` body and return the top-level field
-/// names. Nested selections (`orders { id }`) are skipped
-/// by tracking brace depth.
-fn top_level_fields_in(body: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// Maximum recursion depth for nested selection sets.
+/// Adversarial `a{a{a{…` input without a bound blows the
+/// default Rust stack (abort, not unwind). Real GraphQL
+/// queries nest at most a handful of layers; 256 is generous.
+const MAX_SELECTION_DEPTH: usize = 256;
+
+pub fn top_level_fields_with_selections(body: &str) -> Vec<(String, Vec<String>)> {
+    top_level_fields_with_selections_at_depth(body, 0)
+}
+
+fn top_level_fields_with_selections_at_depth(
+    body: &str,
+    depth: usize,
+) -> Vec<(String, Vec<String>)> {
+    if depth > MAX_SELECTION_DEPTH {
+        // Bound the recursion so adversarial nesting cannot
+        // abort the process. The bound is well above any
+        // realistic GraphQL document; reaching it is a sign
+        // the input is malformed, and we silently truncate
+        // the field list at this depth.
+        return Vec::new();
+    }
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
     let bytes = body.as_bytes();
     let mut i = 0usize;
+
     while i < bytes.len() {
         let c = bytes[i];
         if (c as char).is_ascii_whitespace() || c == b',' {
             i += 1;
             continue;
         }
-        if c == b'{' {
-            // Skip nested block.
-            let mut depth: u32 = 1;
+        if c == b'}' {
             i += 1;
-            while i < bytes.len() && depth > 0 {
+            continue;
+        }
+        if c == b'{' {
+            // Unattached block, skip
+            let mut brace_depth: u32 = 1;
+            i += 1;
+            while i < bytes.len() && brace_depth > 0 {
                 if bytes[i] == b'{' {
-                    depth += 1;
+                    brace_depth += 1;
                 } else if bytes[i] == b'}' {
-                    depth -= 1;
-                    if depth == 0 {
+                    brace_depth -= 1;
+                    if brace_depth == 0 {
                         i += 1;
                         break;
                     }
@@ -537,28 +580,253 @@ fn top_level_fields_in(body: &str) -> Vec<String> {
             }
             continue;
         }
-        if c == b'}' {
-            i += 1;
+        if is_fragment_spread(bytes, i) {
+            let (new_i, inline_body) = scan_fragment_spread(body, bytes, i);
+            i = new_i;
+            if let Some(inline_body) = inline_body {
+                // Inline fragments (`... on Type { ... }` or
+                // `... { ... }`) contribute their fields at
+                // the current level — the parent object already
+                // declares the fields the inline condition
+                // applies to. Recurse with the depth bound so
+                // the same cap protects the call.
+                out.extend(top_level_fields_with_selections_at_depth(
+                    inline_body,
+                    depth + 1,
+                ));
+            }
             continue;
         }
-        // Read the field name.
+
+        // Read field identifier (or alias)
         let name_start = i;
         while i < bytes.len() && is_ident_continue(c_at(bytes, i)) {
             i += 1;
         }
-        let name = std::str::from_utf8(&bytes[name_start..i])
+        let mut field_name = std::str::from_utf8(&bytes[name_start..i])
             .unwrap_or("")
             .trim()
             .to_string();
-        if !name.is_empty() {
-            out.push(name);
-        }
-        // Skip until the next top-level entry (`,` or `}`).
-        while i < bytes.len() && bytes[i] != b',' && bytes[i] != b'}' && bytes[i] != b'{' {
+
+        if field_name.is_empty() {
             i += 1;
+            continue;
+        }
+
+        // Skip whitespace
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+
+        // Check if this was an alias: `alias: actual_field`
+        if i < bytes.len() && bytes[i] == b':' {
+            i += 1; // skip ':'
+            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                i += 1;
+            }
+            let target_start = i;
+            while i < bytes.len() && is_ident_continue(c_at(bytes, i)) {
+                i += 1;
+            }
+            let actual = std::str::from_utf8(&bytes[target_start..i])
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !actual.is_empty() {
+                field_name = actual;
+            }
+        }
+
+        // Skip arguments `(...)` if present
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'(' {
+            let mut brace_depth: u32 = 1;
+            i += 1;
+            while i < bytes.len() && brace_depth > 0 {
+                if bytes[i] == b'(' {
+                    brace_depth += 1;
+                } else if bytes[i] == b')' {
+                    brace_depth -= 1;
+                }
+                i += 1;
+            }
+        }
+
+        // Skip directives `@name(...)` if present
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+        while i < bytes.len() && bytes[i] == b'@' {
+            i += 1;
+            while i < bytes.len() && is_ident_continue(c_at(bytes, i)) {
+                i += 1;
+            }
+            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'(' {
+                let mut brace_depth: u32 = 1;
+                i += 1;
+                while i < bytes.len() && brace_depth > 0 {
+                    if bytes[i] == b'(' {
+                        brace_depth += 1;
+                    } else if bytes[i] == b')' {
+                        brace_depth -= 1;
+                    }
+                    i += 1;
+                }
+            }
+            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                i += 1;
+            }
+        }
+
+        // Now check if there is a selection set `{ ... }`
+        let mut selections = Vec::new();
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'{' {
+            let sel_start = i + 1;
+            let mut brace_depth: u32 = 1;
+            i += 1;
+            while i < bytes.len() && brace_depth > 0 {
+                if bytes[i] == b'{' {
+                    brace_depth += 1;
+                } else if bytes[i] == b'}' {
+                    brace_depth -= 1;
+                    if brace_depth == 0 {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            let sel_body = &body[sel_start..i];
+            if i < bytes.len() && bytes[i] == b'}' {
+                i += 1;
+            }
+            selections = top_level_fields_in_at_depth(sel_body, depth + 1);
+        }
+
+        if field_name != "__typename" {
+            out.push((field_name, selections));
         }
     }
     out
+}
+
+fn is_fragment_spread(bytes: &[u8], at: usize) -> bool {
+    // `...` at a non-identifier position is a fragment spread.
+    // The preceding byte (if any) must not be part of an
+    // identifier — `1..3` is a numeric range, not a spread.
+    let prev_ok =
+        at == 0 || !(bytes[at - 1] as char).is_ascii_alphanumeric() && bytes[at - 1] != b'_';
+    let rest = &bytes[at..];
+    prev_ok && rest.len() >= 3 && rest[0] == b'.' && rest[1] == b'.' && rest[2] == b'.'
+}
+
+/// Consume a fragment spread (`...Name?`, `... on Type?`,
+/// inline selection set, optional directives) starting at the
+/// `...` token at position `at`. Returns `(new_cursor,
+/// optional_inline_body)`. The inline body is the slice
+/// between the `{` and matching `}` of an inline fragment —
+/// `None` for `...fragName` (named spread). Named spreads have
+/// no fields to add at the current level; inline fragments
+/// contribute their fields, so the caller recurses into the
+/// returned slice with the depth bound applied.
+fn scan_fragment_spread<'a>(body: &'a str, bytes: &[u8], at: usize) -> (usize, Option<&'a str>) {
+    let mut i = at + 3; // past the `...`
+                        // Optional spread name (named spread) OR
+                        // `on TypeName` (inline fragment with a
+                        // type condition). We accept one
+                        // identifier; if the next token is `on`
+                        // the user wrote `... on Paid { ... }`,
+                        // otherwise they wrote `...fragName`.
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] != b'{' && bytes[i] != b'@' {
+        let ident_start = i;
+        while i < bytes.len() && is_ident_continue(bytes[i]) {
+            i += 1;
+        }
+        let ident = std::str::from_utf8(&bytes[ident_start..i]).unwrap_or("");
+        if ident == "on" {
+            // `... on Type` — also skip the type name.
+            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+                i += 1;
+            }
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+        }
+    }
+    // Optional directives `@name(args)`.
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    while i < bytes.len() && bytes[i] == b'@' {
+        i += 1;
+        while i < bytes.len() && is_ident_continue(bytes[i]) {
+            i += 1;
+        }
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'(' {
+            let mut brace_depth: u32 = 1;
+            i += 1;
+            while i < bytes.len() && brace_depth > 0 {
+                if bytes[i] == b'(' {
+                    brace_depth += 1;
+                } else if bytes[i] == b')' {
+                    brace_depth -= 1;
+                }
+                i += 1;
+            }
+        }
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+    }
+    // Optional selection set `{ ... }`. Named spreads have none;
+    // inline fragments do. If present, return the slice so the
+    // caller can recurse into it.
+    if i < bytes.len() && bytes[i] == b'{' {
+        let sel_start = i + 1;
+        let mut brace_depth: u32 = 1;
+        i += 1;
+        while i < bytes.len() && brace_depth > 0 {
+            if bytes[i] == b'{' {
+                brace_depth += 1;
+            } else if bytes[i] == b'}' {
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    break;
+                }
+            }
+            i += 1;
+        }
+        let sel_body = &body[sel_start..i];
+        if i < bytes.len() && bytes[i] == b'}' {
+            i += 1;
+        }
+        return (i, Some(sel_body));
+    }
+    (i, None)
+}
+
+pub fn top_level_fields_in(body: &str) -> Vec<String> {
+    top_level_fields_in_at_depth(body, 0)
+}
+
+fn top_level_fields_in_at_depth(body: &str, depth: usize) -> Vec<String> {
+    top_level_fields_with_selections_at_depth(body, depth)
+        .into_iter()
+        .map(|(f, _)| f)
+        .collect()
 }
 
 fn c_at(bytes: &[u8], i: usize) -> u8 {
@@ -583,6 +851,7 @@ fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<Graph
         out.push(GraphqlConsumerField {
             op: GraphqlOp::Query,
             field: String::new(),
+            selected_fields: Vec::new(),
             dynamic: true,
             site_path: graph_path.to_string(),
             site_line: line_no,
@@ -623,10 +892,11 @@ fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<Graph
         i += 1;
     }
     let inner = &body[body_start..i];
-    for f in top_level_fields_in(inner) {
+    for (f, selected_fields) in top_level_fields_with_selections(inner) {
         out.push(GraphqlConsumerField {
             op,
             field: f,
+            selected_fields,
             dynamic: false,
             site_path: graph_path.to_string(),
             site_line: line_no,
@@ -636,6 +906,7 @@ fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<Graph
         out.push(GraphqlConsumerField {
             op,
             field: String::new(),
+            selected_fields: Vec::new(),
             dynamic: true,
             site_path: graph_path.to_string(),
             site_line: line_no,

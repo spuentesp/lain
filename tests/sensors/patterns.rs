@@ -244,13 +244,28 @@ fn generated_queries_cover_all_eight_languages() {
             .join("src/server/sensors/patterns/frameworks.yaml"),
     )
     .expect("frameworks.yaml readable");
-    let yaml_id_count = yaml_text
-        .lines()
-        .filter(|line| line.trim_start().starts_with("- id:"))
-        .count();
+    // Only entries that own a `.scm` body count against `generated::LEN`.
+    // Tier 1 added `topic_*` / `scheduled` / `websocket_*` idioms, which
+    // are pure regex data and have no tree-sitter query by construction.
+    let tree_sitter_kinds = ["kind: route", "kind: outbound", "kind: entrypoint"];
+    let mut yaml_id_count = 0usize;
+    let mut pending_id = false;
+    for line in yaml_text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("- id:") {
+            pending_id = true;
+            continue;
+        }
+        if pending_id {
+            if tree_sitter_kinds.iter().any(|k| t.starts_with(k)) {
+                yaml_id_count += 1;
+            }
+            pending_id = false;
+        }
+    }
     assert!(
         patterns::generated::LEN >= yaml_id_count,
-        "the generated LEN ({}) must be ≥ the YAML framework count ({yaml_id_count})",
+        "the generated LEN ({}) must be ≥ the tree-sitter-eligible YAML framework count ({yaml_id_count})",
         patterns::generated::LEN,
     );
 }

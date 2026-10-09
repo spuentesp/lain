@@ -13,9 +13,9 @@
 //! `decode_from_slice`.
 
 use crate::federation::contracts::model::{
-    CallVia, ContractFact, ContractKey, Direction, EntryKind, FieldMeta, FieldReadFact, HostPart,
-    HttpMethod, JsonPath, MethodSpec, NormalizedUrl, PathSegment, ProviderFact, ProviderOrigin,
-    ServiceName, SourceSite, SymbolKey, TypeDesc,
+    CallVia, ContractFact, ContractKey, Direction, EntryKind, FieldMeta, FieldReadFact,
+    FieldReadOrigin, HostPart, HttpMethod, JsonPath, MethodSpec, NormalizedUrl, PathSegment,
+    ProviderFact, ProviderOrigin, ServiceName, SourceSite, SymbolKey, TypeDesc,
 };
 use crate::federation::repo_id::RepoId;
 
@@ -57,12 +57,40 @@ fn field_read_fact_roundtrips_through_bincode() {
             PathSegment::Name("city".to_string()),
         ]),
         exact: true,
+        origin: FieldReadOrigin::GraphqlConsumer,
     });
     let bytes =
         bincode::serde::encode_to_vec(&original, bincode::config::legacy()).expect("encode");
     let (decoded, _consumed): (ContractFact, usize) =
         bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).expect("decode");
     assert_eq!(decoded, original);
+}
+
+/// `origin` is `#[serde(default)]` so a JSON payload without the field
+/// still deserialises, as `FieldAccess`. (Bincode is not
+/// self-describing; this covers the serde-JSON path an external client
+/// or a hand-written fixture uses.)
+#[test]
+fn field_read_origin_defaults_to_field_access() {
+    let without_origin = serde_json::json!({
+        "FieldRead": { "chain": [{"Name": "x"}], "exact": true }
+    });
+    let fact: ContractFact =
+        serde_json::from_value(without_origin).expect("legacy payload deserialises");
+    match fact {
+        ContractFact::FieldRead(r) => assert_eq!(r.origin, FieldReadOrigin::FieldAccess),
+        other => panic!("expected FieldRead, got {other:?}"),
+    }
+
+    // And an explicit origin round-trips.
+    let with_origin = serde_json::json!({
+        "FieldRead": { "chain": [{"Name": "x"}], "exact": true, "origin": "graphql_consumer" }
+    });
+    let fact: ContractFact = serde_json::from_value(with_origin).expect("deserialises");
+    match fact {
+        ContractFact::FieldRead(r) => assert_eq!(r.origin, FieldReadOrigin::GraphqlConsumer),
+        other => panic!("expected FieldRead, got {other:?}"),
+    }
 }
 
 /// Every `HttpMethod` variant round-trips. The literal `MethodSpec`

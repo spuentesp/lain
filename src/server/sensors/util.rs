@@ -4,7 +4,7 @@
 //! here is imported, never re-implemented per sensor.
 
 use crate::graph::GraphDatabase;
-use crate::schema::GraphNode;
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use std::path::Path;
 use tree_sitter::{Language, Parser, Tree};
 
@@ -12,6 +12,21 @@ use tree_sitter::{Language, Parser, Tree};
 // accessor below can read from `Patterns::patterns()` without forcing
 // every sensor to re-import `crate::server::sensors::patterns`.
 use crate::server::sensors::patterns::Patterns;
+
+// ─── Repo identity ─────────────────────────────────────────────
+
+/// Fallback `RepoId` for a sensor whose caller could not supply one.
+///
+/// Deliberately a single neutral token. A `RepoId` must never be a
+/// sensor name: `SymbolKey.repo` is rendered as an evidence field
+/// (`diff_contracts`' `handlers[].repo`) and an external client
+/// resolves it as a repository. Note that `RepoId::new` rejects any
+/// value containing `/`, so `RepoId::new(root.to_string_lossy())`
+/// fails for every real workspace path and this fallback is the
+/// common case, not an edge case.
+pub fn fallback_repo_id() -> crate::federation::repo_id::RepoId {
+    crate::federation::repo_id::RepoId::new("unknown").expect("'unknown' is a valid RepoId")
+}
 
 // ─── Language classification ────────────────────────────────────
 
@@ -458,6 +473,412 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
                 .then_with(|| b.0.line_start.cmp(&a.0.line_start))
         })
         .map(|(n, _)| n)
+}
+
+// ─── Shared emitters for the protocol sensors ──────────────────────
+
+/// Prefix for synthetic nodes carrying a per-site consumer fact.
+///
+/// A sensor must never put its `ContractFact` on a node another sensor
+/// owns — `replace_sensor_output` step 2 deletes an owner's nodes *and
+/// their incident edges* (`graph/mod.rs:896`), so a shared symbol node
+/// means one sensor's rescan silently destroys another's edges. Each
+/// protocol that annotates a source site gets its own synthetic node
+/// named `<prefix><path>:<line>`.
+pub const SQL_READ_PREFIX: &str = "sql-read:";
+/// See [`SQL_READ_PREFIX`]. Carries `TopicConsumerFact`.
+pub const TOPIC_READ_PREFIX: &str = "topic-read:";
+/// See [`SQL_READ_PREFIX`]. Carries `RpcConsumerFact`.
+pub const RPC_CALL_PREFIX: &str = "rpc-call:";
+/// See [`SQL_READ_PREFIX`]. Carries `GraphqlConsumerFact`.
+pub const GRAPHQL_CALL_PREFIX: &str = "graphql-call:";
+/// See [`SQL_READ_PREFIX`]. Carries `RpcHandlerFact` on a `Module` node.
+pub const RPC_HANDLER_PREFIX: &str = "rpc-handler:";
+/// See [`SQL_READ_PREFIX`]. Carries `GraphqlHandlerFact` on a `Module` node.
+pub const GRAPHQL_HANDLER_PREFIX: &str = "graphql-handler:";
+/// See [`SQL_READ_PREFIX`]. Carries `WebSocketConsumerFact` on an
+/// `HttpClientCall` node.
+pub const WS_CLIENT_PREFIX: &str = "ws:client:";
+/// See [`SQL_READ_PREFIX`]. Carries `WebSocketProviderFact` on an
+/// `HttpRoute` node.
+pub const WS_SERVER_PREFIX: &str = "ws:server:";
+
+/// Build a per-site node with the identity rules every protocol sensor
+/// shares: id from `(node_type, id_name, path, id_line)` under
+/// `namespace`, and `line_start` set to `line`. `line_end` and
+/// `contract` are the caller's to set (or not).
+///
+/// `id_line` is identity, not position, which is why it is a parameter
+/// and not a default. `Some(line)` keeps two sites of the same
+/// `id_name` in one file distinct (`sql-read:` and the other consumer
+/// prefixes rely on that). `None` collapses them into one node —
+/// `websocket_sensor` relies on *that*, because its `id_name` is
+/// `ws:client:<host><route>` and one node per `(file, url)` is the
+/// contract, whichever line the dial sits on. Either way the id is the
+/// join key: change it and stored graphs plus every cross-repo `Binds`
+/// edge keyed on the old id need a `lain reindex`, not a rescan.
+///
+/// `line_end` is load-bearing for `Function`-typed sites and inert
+/// elsewhere (see [`synthetic_site_node`]), so it is stated where it
+/// matters rather than defaulted where it might later start to.
+pub fn site_node(
+    node_type: crate::schema::NodeType,
+    id_name: String,
+    path: &str,
+    id_line: Option<u32>,
+    line: u32,
+    namespace: &crate::schema::RepoNamespace,
+) -> crate::schema::GraphNode {
+    let id = crate::schema::GraphNode::generate_id(&node_type, path, &id_name, id_line, namespace);
+    let mut node = crate::schema::GraphNode::new(node_type, id_name, path.to_string());
+    node.id = id;
+    node.line_start = Some(line);
+    node
+}
+
+/// Build the synthetic per-site node every consumer sensor emits: one
+/// `Function`-typed node named `<prefix><path>:<line>`. The caller
+/// attaches its `ContractFact` — most sites carry one, but
+/// `event_sensor`'s producer edge-anchor does not, so the shape and the
+/// content are separated here rather than forced into one signature.
+///
+/// `line_end` is deliberately `None` and must stay that way:
+/// [`enclosing_symbol`] requires both bounds, so a synthetic node with
+/// `line_end` set wins its `min_by` (a zero-width range beats the real
+/// enclosing function) and steals every peer sensor's edge anchor. The
+/// `id` is derived from `id_name`, so the name prefix that
+/// `sensor_owner_of`'s ownership guard matches is part of the identity
+/// — a node can never be both synthetic-named and collision-prone with
+/// a real symbol.
+pub fn synthetic_site_node(
+    id_name: String,
+    path: &str,
+    line: u32,
+    namespace: &crate::schema::RepoNamespace,
+) -> crate::schema::GraphNode {
+    let mut node = site_node(
+        crate::schema::NodeType::Function,
+        id_name,
+        path,
+        Some(line),
+        line,
+        namespace,
+    );
+    // Explicit, not a default: `site_node` leaves `line_end` alone, and
+    // this is the site where "alone" must mean `None`.
+    node.line_end = None;
+    node
+}
+//
+// The graphql consumer sensor used to duplicate this 25-line block
+// at two call sites (SDL-derived consumers, then code-derived
+// consumers); the two copies drifted only in the data they
+// received, never in the emission shape. This helper is the single
+// source of truth so the two call sites cannot diverge again.
+
+use crate::federation::contracts::model::{
+    ContractFact, FieldReadFact, FieldReadOrigin, GraphqlOp, JsonPath, PathSegment,
+};
+
+// ─── Tier-1 line-idiom walker (Task 8) ──────────────────────────────
+//
+// Pre-Tier-1, the event_sensor and websocket_sensor each carried
+// ~150 lines of hardcoded per-framework detection logic (kafkajs /
+// aiokafka / rdkafka / kafka-go / Celery / NestJS /
+// `app.ws` / `new WebSocket` / `onopen = …`). The new walker is
+// the single line-idiom consumer: it takes a list of pre-compiled
+// regexes (built from `frameworks.yaml` entries) and a line of
+// source, and yields the captured value plus an opaque
+// `framework_id` so the caller can attribute the match back to
+// the YAML entry that produced it. Detection is a pure data
+// change; the per-kind projection (`Topic` node, `Produces` edge,
+// `HttpRoute` with `WebSocketProvider` fact, …) stays in Rust.
+//
+// The walker compiles each entry's `path_regex` exactly once (a
+// `Vec<CompiledIdiom>` the caller builds once per scan) so
+// repeated calls across files do not re-run the DFA minimisation.
+
+/// One pre-compiled framework entry, ready for the walker to apply.
+/// `kind` is the `FrameworkKind` discriminator (the walker uses
+/// it only to route the capture into the right field of the
+/// returned [`IdiomMatch`]; it does not filter on `kind`).
+pub struct CompiledIdiom {
+    pub kind: crate::server::sensors::patterns::FrameworkKind,
+    pub id: String,
+    regex: regex::Regex,
+}
+
+impl CompiledIdiom {
+    fn from_def(def: &crate::server::sensors::patterns::FrameworkDef) -> Option<Self> {
+        let path_re = def.path_regex.as_deref()?;
+        let regex = regex::Regex::new(path_re).ok()?;
+        Some(Self {
+            id: def.id.clone(),
+            kind: def.kind,
+            regex,
+        })
+    }
+}
+
+/// One match the walker yielded for a line. `literal` and
+/// `identifier` are the two named slots the YAML's regex
+/// captures. The walker tracks which group matched so the
+/// caller can decide how to interpret it: a literal slot
+/// captures a string-literal value (e.g. `'orders'`); an
+/// identifier slot captures a bare identifier (e.g. `TOPIC_NAME`)
+/// that may or may not resolve to a string via the same-file
+/// constant table.
+///
+/// A single YAML entry's regex can declare both slots
+/// `(?:["'](LITERAL)["']|IDENT)` so one entry covers both
+/// idiomatic shapes. The walker populates whichever matched;
+/// both `None` is impossible because the regex would not have
+/// matched at all.
+///
+/// For entries whose regex declares a single capture group
+/// (e.g. WebSocket client URLs), only one of the two slots is
+/// populated per match — the YAML author picks which one
+/// (the `compile_idioms` helper tags the slot based on the
+/// entry's `kind` and the `group_roles` table below).
+///
+/// `line` is the 1-based source line the caller stamped before
+/// invoking the walker; the per-line walker does not know it
+/// itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdiomMatch {
+    pub framework_id: String,
+    pub kind: crate::server::sensors::patterns::FrameworkKind,
+    /// String-literal capture (e.g. the contents of `"orders"`).
+    /// Populated when the matched regex's literal-form group
+    /// captured a non-empty value.
+    pub literal: Option<String>,
+    /// Bare-identifier capture (e.g. `TOPIC_NAME`). Populated
+    /// when the matched regex's identifier-form group captured
+    /// a non-empty value.
+    pub identifier: Option<String>,
+    /// 1-based source line the caller stamped before invoking
+    /// the walker. Carried on the match so the caller's emission
+    /// step does not have to thread `line_no` through every
+    /// helper.
+    pub line: u32,
+}
+
+impl IdiomMatch {
+    /// Convenience accessor: the literal slot if present,
+    /// otherwise the identifier slot. The two slots are
+    /// mutually exclusive (a single match can populate at most
+    /// one), so this is the "the value of this match" form
+    /// when the caller does not care whether the value was a
+    /// literal or an identifier (e.g. the WebSocket client URL
+    /// case — both are valid URLs).
+    pub fn value(&self) -> Option<&str> {
+        self.literal.as_deref().or(self.identifier.as_deref())
+    }
+}
+
+/// Per-entry mapping of capture-group index → slot. The walker
+/// reads this to populate `IdiomMatch::literal` vs
+/// `IdiomMatch::identifier` correctly. The convention encoded
+/// here is the one `frameworks.yaml` follows:
+///
+/// - `TopicProducer` / `TopicConsumer`: group 1 is the literal,
+///   group 2 is the identifier (when the regex has both).
+/// - `Scheduled`: group 1 is the spec literal. The Celery
+///   marker regex has no group; the walker tags the empty
+///   match as `literal: None, identifier: Some("")` so the
+///   caller's `schedule_value` falls back to the function-
+///   lookahead path.
+/// - `WebSocketClient` / `WebSocketServer`: group 1 is the
+///   literal (URL / route).
+/// - `WebSocketHandler`: group 1 is the event name (kept in
+///   the regex for the alternation), group 2 is the handler
+///   name. The walker tags group 1 as `literal` and group 2
+///   as `identifier`; the websocket caller reads
+///   `identifier` as the handler name.
+fn group_roles(kind: crate::server::sensors::patterns::FrameworkKind) -> &'static [(usize, Slot)] {
+    use crate::server::sensors::patterns::FrameworkKind as K;
+    match kind {
+        K::WebSocketHandler => &[(1, Slot::Literal), (2, Slot::Identifier)],
+        K::TopicProducer | K::TopicConsumer | K::Scheduled => {
+            &[(1, Slot::Literal), (2, Slot::Identifier)]
+        }
+        K::WebSocketClient | K::WebSocketServer => &[(1, Slot::Literal)],
+        // Not used by the Tier-1 walker.
+        K::Route | K::Outbound | K::EntryPoint => &[],
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Literal,
+    Identifier,
+}
+
+/// Generic Tier-1 line-idiom walker. Applies every compiled
+/// idiom to `line` and returns the captures, classified by
+/// slot (literal vs identifier). The walker is per-line (the
+/// per-line shape is the same in every Tier-1 consumer); the
+/// caller drives the line loop and the `strip_line_comment`
+/// step.
+///
+/// `idioms` is borrowed because the typical caller builds it
+/// once per scan (or once per process — the regex compilation
+/// is the only allocation) and reuses it across every line of
+/// every file.
+///
+/// A match is yielded whenever the regex matches, even if
+/// every capture group is empty. This is the Celery
+/// `@app.task` / `@shared_task` case: the regex has no
+/// capture group, and the caller's `schedule_value` falls
+/// through to the function-lookahead path. Without this
+/// "yield on regex match" rule, the walker would never
+/// surface a Celery match and the joiner would never see a
+/// `scheduled` Topic.
+pub fn walk_idioms(idioms: &[CompiledIdiom], line: &str, line_no: u32) -> Vec<IdiomMatch> {
+    let mut out: Vec<IdiomMatch> = Vec::new();
+    for idiom in idioms {
+        let roles = group_roles(idiom.kind);
+        for cap in idiom.regex.captures_iter(line) {
+            let mut literal: Option<String> = None;
+            let mut identifier: Option<String> = None;
+            for (group_idx, slot) in roles {
+                if let Some(m) = cap.get(*group_idx) {
+                    let s = m.as_str();
+                    if s.is_empty() {
+                        continue;
+                    }
+                    match slot {
+                        Slot::Literal => literal = Some(s.to_string()),
+                        Slot::Identifier => identifier = Some(s.to_string()),
+                    }
+                }
+            }
+            out.push(IdiomMatch {
+                framework_id: idiom.id.clone(),
+                kind: idiom.kind,
+                literal,
+                identifier,
+                line: line_no,
+            });
+        }
+    }
+    out
+}
+
+/// Build a `Vec<CompiledIdiom>` from a YAML-framework iterator.
+/// Entries whose `path_regex` is missing or fails to compile are
+/// silently dropped (the YAML schema says `path_regex` is the
+/// idioms' "the walker has something to match against" field —
+/// missing it is the same as the entry being a stub). Tests
+/// surface malformed entries via the `Patterns::framework` /
+/// `Patterns::route_patterns_map` paths.
+pub fn compile_idioms<'a, I>(iter: I) -> Vec<CompiledIdiom>
+where
+    I: IntoIterator<Item = &'a crate::server::sensors::patterns::FrameworkDef>,
+{
+    iter.into_iter()
+        .filter_map(CompiledIdiom::from_def)
+        .collect()
+}
+
+/// Build the full per-`Lang` idiom set in one shot: every
+/// Tier-1 entry in the registry, partitioned by the call site
+/// (the caller iterates lines and calls [`walk_idioms`] with
+/// each sub-list). The signature returns the four sub-lists
+/// `(producers, consumers, scheduled, …)` so the caller can
+/// decide which to dispatch in which language walker without
+/// re-querying `Patterns`.
+#[allow(clippy::type_complexity)]
+pub fn topic_idioms_for(
+    patterns: &Patterns,
+    lang: Lang,
+) -> (Vec<CompiledIdiom>, Vec<CompiledIdiom>, Vec<CompiledIdiom>) {
+    (
+        compile_idioms(patterns.topic_producer_patterns(lang)),
+        compile_idioms(patterns.topic_consumer_patterns(lang)),
+        compile_idioms(patterns.scheduled_patterns(lang)),
+    )
+}
+
+/// Build the WebSocket idiom set from a `Patterns` instance.
+/// The pre-Tier-1 `websocket_sensor.rs` applied the same four
+/// regexes to every source line regardless of `Lang`; the
+/// migration keeps the same shape — the walker consumes the
+/// `*_all` accessors and applies them to every file. A future
+/// refinement that splits WebSocket detection by `Lang` (so
+/// `wss?://…` in a Go file is filtered out, say) can swap
+/// `*_all` for `*(lang)` here without touching the walker.
+pub fn websocket_idioms_for(
+    patterns: &Patterns,
+) -> (Vec<CompiledIdiom>, Vec<CompiledIdiom>, Vec<CompiledIdiom>) {
+    (
+        compile_idioms(patterns.websocket_client_patterns_all()),
+        compile_idioms(patterns.websocket_server_patterns_all()),
+        compile_idioms(patterns.websocket_handler_patterns_all()),
+    )
+}
+
+/// Bundle the parameters for [`emit_graphql_field_refs`].
+pub struct GraphqlFieldRefs<'a> {
+    pub consumer_id: &'a str,
+    pub op: GraphqlOp,
+    pub field: &'a str,
+    pub site_path: &'a str,
+    pub site_line: u32,
+    pub selected_fields: &'a [String],
+    pub namespace: &'a RepoNamespace,
+}
+
+/// Emit one `FieldRef` node per selected GraphQL field, plus
+/// `ReadsFrom` and `ReadsField` edges linking it to the consumer
+/// node. The id naming scheme (`graphql-read:<op>:<field>:<sel>`)
+/// and the `FieldReadOrigin::GraphqlConsumer` origin are part of the
+/// graph contract — joiner dispatch and `tests/graphql_resolution.rs`
+/// match on them.
+pub fn emit_graphql_field_refs(
+    spec: GraphqlFieldRefs<'_>,
+    all_nodes: &mut Vec<GraphNode>,
+    all_edges: &mut Vec<GraphEdge>,
+) {
+    let GraphqlFieldRefs {
+        consumer_id,
+        op,
+        field,
+        site_path,
+        site_line,
+        selected_fields,
+        namespace,
+    } = spec;
+    for (idx, sel) in selected_fields.iter().enumerate() {
+        let ref_id_name = format!("graphql-read:{}:{}:{}", op, field, sel);
+        let ref_id = GraphNode::generate_id(
+            &NodeType::FieldRef,
+            site_path,
+            &ref_id_name,
+            Some(site_line + idx as u32),
+            namespace,
+        );
+        let mut ref_node = GraphNode::new(NodeType::FieldRef, sel.clone(), site_path.to_string());
+        ref_node.id = ref_id.clone();
+        ref_node.line_start = Some(site_line + idx as u32);
+        ref_node.line_end = Some(site_line + idx as u32);
+        ref_node.contract = vec![ContractFact::FieldRead(FieldReadFact {
+            chain: JsonPath(vec![PathSegment::Name(sel.clone())]),
+            exact: true,
+            origin: FieldReadOrigin::GraphqlConsumer,
+        })];
+        all_nodes.push(ref_node);
+        all_edges.push(GraphEdge::new(
+            EdgeType::ReadsFrom,
+            ref_id.clone(),
+            consumer_id.to_string(),
+        ));
+        all_edges.push(GraphEdge::new(
+            EdgeType::ReadsField,
+            consumer_id.to_string(),
+            ref_id,
+        ));
+    }
 }
 
 #[cfg(test)]

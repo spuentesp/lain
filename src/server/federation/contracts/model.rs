@@ -112,6 +112,23 @@ pub enum ContractFact {
     /// sensor detected (Apollo resolver map / graphql-java
     /// `DataFetcher` / gqlgen / Strawberry).
     GraphqlHandler(GraphqlHandlerFact),
+    /// Phase F (Gap 19): WebSocket server endpoint declaration.
+    WebSocketProvider(WebSocketProviderFact),
+    /// Phase F (Gap 19): WebSocket client dial/connection site.
+    WebSocketConsumer(WebSocketConsumerFact),
+    /// Phase F (Gap 19): WebSocket route to handler link.
+    WebSocketHandler(WebSocketHandlerFact),
+    /// Phase D (spec §7): one function (or module-level file) whose
+    /// body contains literal SQL against the listed tables. Emitted
+    /// by `sql_sensor` on the enclosing source node — the consumer
+    /// mirror of the `ReadsTable` / `WritesTable` edges, and the
+    /// only way a SQL reader enters `ContractIndex.consumers`
+    /// (mirrors how `TopicConsumer` rides on the subscribing
+    /// function). Declared **last** in the enum so bincode's
+    /// variant indices for every pre-existing variant are
+    /// unchanged — graphs written before this variant decode
+    /// unchanged (fold into unreleased v3, spec §2).
+    TableConsumer(TableConsumerFact),
 }
 
 // ─── HTTP provider ────────────────────────────────────────────────────
@@ -260,6 +277,29 @@ pub enum GraphqlHandlerOrigin {
     Strawberry,
 }
 
+// ─── WebSocket provider / consumer / handler (Phase F, Gap 19) ─────────
+
+/// One WebSocket endpoint declaration on the server/provider side.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSocketProviderFact {
+    pub route: String,
+    pub handler: Option<SymbolKey>,
+}
+
+/// One WebSocket client dial/connection site on the consumer side.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSocketConsumerFact {
+    pub url: NormalizedUrl,
+    pub route: String,
+}
+
+/// Link from WebSocket route to implementing handler.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebSocketHandlerFact {
+    pub route: String,
+    pub handler: SymbolKey,
+}
+
 // ─── HTTP consumer ────────────────────────────────────────────────────
 
 /// One outbound HTTP call site. Emitted by `http_client_sensor`.
@@ -382,13 +422,36 @@ pub enum HostPart {
 
 // ─── Field reads ──────────────────────────────────────────────────────
 
+/// Which sensor minted a field read. `sensor_owner_of` needs this
+/// because `field_access_sensor` and `graphql_consumer_sensor` both
+/// emit `FieldRef` + `FieldRead` — without a discriminator they share
+/// one `SensorOwner`, and whichever runs later retracts the other's
+/// output on every scan.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldReadOrigin {
+    /// `field_access_sensor` — response-field access on a bound
+    /// identifier. The default, so deserialising older graphs is
+    /// unchanged.
+    #[default]
+    FieldAccess,
+    /// `graphql_consumer_sensor` — a field selected in a GraphQL
+    /// operation.
+    GraphqlConsumer,
+}
+
 /// One field read from a call's response. Emitted by
-/// `field_access_sensor` per bound-identifier access. `exact` is true
+/// `field_access_sensor` per bound-identifier access and by
+/// `graphql_consumer_sensor` per selected field. `exact` is true
 /// when the read was on a bound identifier (§6.5).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FieldReadFact {
     pub chain: JsonPath,
     pub exact: bool,
+    /// Owning sensor. `#[serde(default)]` keeps older graphs
+    /// deserialising as `FieldAccess`.
+    #[serde(default)]
+    pub origin: FieldReadOrigin,
 }
 
 // ─── SQL tables (Phase D, spec §7) ────────────────────────────────────
@@ -413,6 +476,19 @@ pub struct FieldReadFact {
 pub struct Table {
     pub service: String,
     pub name: String,
+}
+
+/// Phase D (spec §7): the tables one SQL site's parsed statement
+/// touches. Emitted by `sql_sensor` on a synthetic
+/// `sql-read:<path>:<line>` Function node alongside the `ReadsTable`
+/// / `WritesTable` edges, so the joiner can resolve the reader as a
+/// consumer of `ContractKey::Table { name }` endpoints. The list
+/// carries every distinct literal table the statement references,
+/// sorted for determinism (I4); one fact covers all of them because
+/// `GraphNode.contract` holds a single fact per node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TableConsumerFact {
+    pub tables: Vec<String>,
 }
 
 // ─── Schema fields ────────────────────────────────────────────────────
@@ -548,6 +624,14 @@ pub enum ContractKey {
         op: GraphqlOp,
         field: String,
     },
+    /// Phase F (Gap 19): WebSocket endpoint identified by normalized route.
+    WebSocket {
+        route: String,
+    },
+    /// Phase D (Gap 23): Database table contract.
+    Table {
+        name: String,
+    },
 }
 
 /// Phase E (spec §8.3): the GraphQL operation kind for a
@@ -607,6 +691,12 @@ impl std::fmt::Display for ContractKey {
             ContractKey::Graphql { op, field } => {
                 write!(f, "graphql:{}:{}", op, field)
             }
+            ContractKey::WebSocket { route } => {
+                write!(f, "websocket:{}", route)
+            }
+            ContractKey::Table { name } => {
+                write!(f, "table:{}", name)
+            }
         }
     }
 }
@@ -614,9 +704,7 @@ impl std::fmt::Display for ContractKey {
 impl ContractKey {
     /// Wire-form of the key (the `Display` round-trip). One per
     /// variant: `http:<METHOD> <template>`, `topic:<broker>/<name>`,
-    /// `rpc:<service>/<method>`, `graphql:<op>:<field>`. The §4.4
-    /// `Display` / `FromStr` grammar is shared with this method —
-    /// any change to one must propagate to the other.
+    /// `rpc:<service>/<method>`, `graphql:<op>:<field>`, `websocket:<route>`, `table:<name>`.
     pub fn wire_form(&self) -> String {
         self.to_string()
     }
@@ -625,50 +713,43 @@ impl ContractKey {
     /// * `Http` — the route template (e.g. `/api/orders/{id}`);
     /// * `Topic` — the topic name;
     /// * `Rpc` — the method name;
-    /// * `Graphql` — the field name.
-    ///
-    /// Used by the joiner's `Endpoint { method, template }`
-    /// projection (§7.3 step 2) and by §9.4 specificity scoring;
-    /// consolidated here so the Phase E follow-up (Thrift /
-    /// Connect-RPC per spec §8.1) only adds the new variant's
-    /// arm, not four call-site matches.
+    /// * `Graphql` — the field name;
+    /// * `WebSocket` — the route;
+    /// * `Table` — the table name.
     pub fn leaf(&self) -> &str {
         match self {
             ContractKey::Http { template, .. } => template,
             ContractKey::Topic { name, .. } => name,
             ContractKey::Rpc { method, .. } => method,
             ContractKey::Graphql { field, .. } => field,
+            ContractKey::WebSocket { route } => route,
+            ContractKey::Table { name } => name,
         }
     }
 
     /// Short variant tag (`"http"` / `"topic"` / `"rpc"` /
-    /// `"graphql"`). Used by tool envelopes that filter by
-    /// protocol kind — `mcp::contracts::list_contracts`'s
-    /// `kind_filter` parameter, for one.
+    /// `"graphql"` / `"websocket"` / `"table"`).
     pub fn kind(&self) -> &'static str {
         match self {
             ContractKey::Http { .. } => "http",
             ContractKey::Topic { .. } => "topic",
             ContractKey::Rpc { .. } => "rpc",
             ContractKey::Graphql { .. } => "graphql",
+            ContractKey::WebSocket { .. } => "websocket",
+            ContractKey::Table { .. } => "table",
         }
     }
 
     /// True iff this key carries an embedded service name equal
-    /// to `caller_service`. Only `Rpc` keys embed a service in the
-    /// key shape (per spec §8.2 — package-qualified
-    /// `package.Service`); the other variants are protocol-scoped
-    /// and rely on the joiner's `(service, key)` pair for I5
-    /// same-service filtering, so this method returns `false`
-    /// for them. Used by I5 ("no same-service Binds") checks
-    /// inside `resolve_rpc_consumer` and the topic / GraphQL
-    /// resolvers' candidate filtering.
+    /// to `caller_service`.
     pub fn is_self_service(&self, caller_service: &str) -> bool {
         match self {
             ContractKey::Rpc { service, .. } => service == caller_service,
-            ContractKey::Http { .. } | ContractKey::Topic { .. } | ContractKey::Graphql { .. } => {
-                false
-            }
+            ContractKey::Http { .. }
+            | ContractKey::Topic { .. }
+            | ContractKey::Graphql { .. }
+            | ContractKey::WebSocket { .. }
+            | ContractKey::Table { .. } => false,
         }
     }
 }
@@ -723,6 +804,16 @@ impl std::str::FromStr for ContractKey {
             return Ok(ContractKey::Graphql {
                 op,
                 field: field.to_string(),
+            });
+        }
+        if let Some(route) = s.strip_prefix("websocket:") {
+            return Ok(ContractKey::WebSocket {
+                route: route.to_string(),
+            });
+        }
+        if let Some(name) = s.strip_prefix("table:") {
+            return Ok(ContractKey::Table {
+                name: name.to_string(),
             });
         }
         Err(format!("unknown contract key kind: {s:?}"))
@@ -849,6 +940,9 @@ pub enum UnresolvedReason {
     /// statement (DDL, PRAGMA, …). Either way, no `Table` edge
     /// can be emitted.
     DynamicSql,
+    /// Phase D (Gap 23): ORM or query-builder call where the table reference
+    /// is dynamic or unresolved statically.
+    OrmDynamicQuery,
 }
 
 /// A JSON pointer (or, here, JSON path) into a payload. Segments are

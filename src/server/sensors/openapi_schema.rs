@@ -393,7 +393,7 @@ fn emit_field(
     let mut node = GraphNode::new(NodeType::Field, name.clone(), spec_path.to_string());
     node.id = id.clone();
     node.line_start = Some(line);
-    node.contract = Some(ContractFact::Field(meta.clone()));
+    node.contract = vec![ContractFact::Field(meta.clone())];
     out.fields.push(FieldRecord {
         path: path.clone(),
         id,

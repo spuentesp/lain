@@ -30,9 +30,10 @@
 //! `complete` field is computed with the
 //! `coverage_complete(coverage, endpoint, index)` gate.
 
-use super::contracts::{resolve_view, ViewHandle};
-use super::envelope::{check_api_version, error_outcome, outcome, success_envelope};
-use super::scope::live_scope;
+use super::envelope::{
+    check_api_version, error_outcome, outcome, success_envelope, success_envelope_with_view,
+};
+use super::view::resolve_view;
 use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
 use crate::federation::contracts::changed_files::{MirrorChangedFiles, MultiRepoChangedFiles};
 use crate::federation::contracts::diff::{
@@ -540,7 +541,8 @@ fn change_endpoint_id(kind: &ChangeKind, service: &ServiceName) -> Option<Endpoi
         | ChangeKind::NullabilityChanged { endpoint, .. }
         | ChangeKind::EnumValueRemoved { endpoint, .. }
         | ChangeKind::EnumValueAdded { endpoint, .. }
-        | ChangeKind::ChangedWithoutSchema { endpoint } => Some(endpoint.clone()),
+        | ChangeKind::ChangedWithoutSchema { endpoint }
+        | ChangeKind::HandlerChanged { endpoint } => Some(endpoint.clone()),
         ChangeKind::EndpointRemoved { key } | ChangeKind::EndpointAdded { key } => {
             Some((service.clone(), key.clone()))
         }
@@ -677,15 +679,26 @@ fn build_changed_source(
 ) -> MultiRepoChangedFiles {
     let src = MirrorChangedFiles::new(data_dir);
     let mut by_repo = std::collections::BTreeMap::new();
+    let mut line_ranges = std::collections::BTreeMap::new();
     for (repo, base_sha) in &base.repos {
         let head_sha = head
             .repos
             .get(repo)
             .cloned()
             .unwrap_or_else(|| base_sha.clone());
-        by_repo.insert(repo.clone(), src.diff_repo(repo, base_sha, &head_sha));
+        // One pass over the git diff for both the changed paths and the
+        // changed line spans — `diff_repo` + `diff_lines_repo` would
+        // walk the tree twice.
+        let (files, lines) = src.diff_repo_with_lines(repo, base_sha, &head_sha);
+        by_repo.insert(repo.clone(), files);
+        if let Some(ranges) = lines {
+            line_ranges.insert(repo.clone(), ranges);
+        }
     }
-    MultiRepoChangedFiles { by_repo }
+    MultiRepoChangedFiles {
+        by_repo,
+        line_ranges,
+    }
 }
 
 async fn load_snapshot(
@@ -791,17 +804,24 @@ fn snapshot_contract_index(
             .unwrap_or(5_000),
         60_000,
     );
-    let (fed, guard) = mgr
-        .from_snapshot_with_wait_ms(record, wait_ms)
-        .map_err(|e| {
-            error_outcome(
-                "invalid_argument",
-                format!("from_snapshot: {e}"),
-                None,
-                &record.id,
-                started,
-            )
-        })?;
+    let (fed, guard) =
+        mgr.from_snapshot_with_wait_ms(record, wait_ms)
+            .map_err(|error| match error {
+                crate::error::LainError::SnapshotResidencyBusy { retry_after_ms } => error_outcome(
+                    "busy",
+                    "snapshot residency busy",
+                    Some(json!({"retry_after_ms": retry_after_ms})),
+                    &record.id,
+                    started,
+                ),
+                other => error_outcome(
+                    "invalid_argument",
+                    format!("from_snapshot: {other}"),
+                    None,
+                    &record.id,
+                    started,
+                ),
+            })?;
     let ci = fed.contract_index.read().clone();
     let index = ci.ok_or_else(|| {
         error_outcome(
@@ -1094,7 +1114,9 @@ fn impact_to_value(
         value["from"] = json!(from.to_string());
         value["to"] = json!(to.to_string());
     }
-    if let ChangeKind::ChangedWithoutSchema { endpoint } = kind {
+    if let ChangeKind::ChangedWithoutSchema { endpoint } | ChangeKind::HandlerChanged { endpoint } =
+        kind
+    {
         if let Some(ep) = head_index.endpoints.get(endpoint) {
             let handlers: Vec<Value> = ep
                 .providers
@@ -1102,7 +1124,14 @@ fn impact_to_value(
                 .filter_map(|p| {
                     p.handler.as_ref().map(|h| {
                         json!({
-                            "repo": h.repo.as_str(),
+                            // The provider node's repo, not `h.repo`:
+                            // `RepoId::new` rejects paths containing
+                            // `/`, so every sensor's `unwrap_or_else`
+                            // fallback ran and minted the sensor name
+                            // into `SymbolKey.repo`. Evidence must name
+                            // a repository an external client can
+                            // resolve.
+                            "repo": p.node_id.repo_id(),
                             "file": h.path,
                             "symbol": h.name,
                         })
@@ -1137,7 +1166,8 @@ fn endpoint_from_change(
         | ChangeKind::NullabilityChanged { endpoint, .. }
         | ChangeKind::EnumValueRemoved { endpoint, .. }
         | ChangeKind::EnumValueAdded { endpoint, .. }
-        | ChangeKind::ChangedWithoutSchema { endpoint } => (endpoint.0.clone(), endpoint.1.clone()),
+        | ChangeKind::ChangedWithoutSchema { endpoint }
+        | ChangeKind::HandlerChanged { endpoint } => (endpoint.0.clone(), endpoint.1.clone()),
         ChangeKind::ConsumerEndpointUnmatched { consumer }
         | ChangeKind::ConsumerFieldUnmatched { consumer, .. }
         | ChangeKind::ConsumerRebound { consumer, .. } => {
@@ -1173,6 +1203,8 @@ fn endpoint_from_change(
                                 ContractKey::Topic { .. } => continue,
                                 ContractKey::Rpc { .. } => continue,
                                 ContractKey::Graphql { .. } => continue,
+                                ContractKey::WebSocket { .. } => continue,
+                                ContractKey::Table { .. } => continue,
                             };
                             if !method_compatible(&m, &id_method) {
                                 continue;
@@ -1541,6 +1573,7 @@ fn kind_label(kind: &ChangeKind) -> &'static str {
         ChangeKind::EnumValueRemoved { .. } => "EnumValueRemoved",
         ChangeKind::EnumValueAdded { .. } => "EnumValueAdded",
         ChangeKind::ChangedWithoutSchema { .. } => "ChangedWithoutSchema",
+        ChangeKind::HandlerChanged { .. } => "HandlerChanged",
         ChangeKind::ConsumerEndpointUnmatched { .. } => "ConsumerEndpointUnmatched",
         ChangeKind::ConsumerFieldUnmatched { .. } => "ConsumerFieldUnmatched",
         ChangeKind::ConsumerRebound { .. } => "ConsumerRebound",
@@ -1719,34 +1752,21 @@ async fn run_trace_impact(
         ));
     }
 
-    let view_index = match resolve_view(ctx, &args_map, started).await? {
-        ViewHandle::Empty(_) => {
-            return Err(error_outcome(
-                "contract_not_found",
-                "no contract index available for this snapshot",
-                Some(json!({"endpoint": null})),
-                &snap_label,
-                started,
-            ));
-        }
-        ViewHandle::Index { index, .. } => index,
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(view_index) = resolved.index().cloned() else {
+        return Err(error_outcome(
+            "contract_not_found",
+            "no contract index available for this snapshot",
+            Some(json!({"endpoint": null})),
+            &snap_label,
+            started,
+        ));
     };
 
     // The traversal backend doubles as the view the field arm
     // resolves `Field` node ids from (§9.5 traces field changes
     // from the changed `Field`).
-    let backend = match ctx.federation {
-        Some(fed) => fed.backend(),
-        None => {
-            return Err(error_outcome(
-                "federation_disabled",
-                "federation backend unavailable",
-                None,
-                &snap_label,
-                started,
-            ));
-        }
-    };
+    let backend = resolved.backend();
 
     // Find starting node ids.
     let mut starts: Vec<String> = Vec::new();
@@ -1762,8 +1782,63 @@ async fn run_trace_impact(
                 started,
             )
         })?;
-        let _eid: EndpointId = (ServiceName(endpoint.0.clone()), key);
-        starts.push(endpoint.0.clone());
+        let endpoint_id: EndpointId = (ServiceName(endpoint.0.clone()), key);
+        let endpoint = view_index.endpoints.get(&endpoint_id).ok_or_else(|| {
+            error_outcome(
+                "contract_not_found",
+                "endpoint is not present in the selected view",
+                Some(json!({
+                    "endpoint": {
+                        "service": endpoint_id.0 .0,
+                        "key": endpoint_id.1.to_string(),
+                    }
+                })),
+                &snap_label,
+                started,
+            )
+        })?;
+        starts.extend(
+            endpoint
+                .providers
+                .iter()
+                .map(|provider| provider.node_id.as_str().to_string()),
+        );
+        // `ResponseSchema` / `HasField` are `Propagation::Incoming`
+        // (`graph_backend.rs::impact_propagation`): the BFS walks
+        // schema → endpoint and field → schema, so from the endpoint
+        // node alone the endpoint's own `Schema` / `Field` nodes are
+        // unreachable — an endpoint seed could only ever see "who
+        // calls this", never "what this exposes". Seed the endpoint's
+        // attached Schema nodes and their `HasField` targets (the
+        // fields must be seeds too: `Incoming` registers `HasField`
+        // under the Field node, so a Schema seed cannot reach its own
+        // fields) alongside the endpoint's providers.
+        let schema_ids: Vec<String> = endpoint
+            .schemas
+            .values()
+            .map(|schema| schema.node_id.as_str().to_string())
+            .collect();
+        starts.extend(schema_ids.iter().cloned());
+        // Propagate rather than silently skip: a skipped seed reverts
+        // the trace to the pre-fix blindness where an endpoint cannot
+        // see its own schema, and the response would look complete.
+        // The standing rule is never claim absent when unanalysed —
+        // silently degrading the seed set is the same failure.
+        let edges = backend.all_edges().map_err(|e| ToolOutcome {
+            structured: json!({}),
+            text: format!("could not enumerate edges for the schema seed: {e}"),
+            is_error: true,
+        })?;
+        {
+            let mut field_ids: Vec<String> = edges
+                .iter()
+                .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)
+                .filter(|e| schema_ids.contains(&e.source_id))
+                .map(|e| e.target_id.clone())
+                .collect();
+            field_ids.sort();
+            starts.extend(field_ids);
+        }
     } else if has_field {
         let field = from.get("field").cloned().unwrap_or(Value::Null);
         let endpoint = field.get("endpoint").cloned().unwrap_or(Value::Null);
@@ -1874,13 +1949,19 @@ async fn run_trace_impact(
     for p in &paths {
         paths_value.push(graph_path_to_value(p));
     }
-    let scope = scope_for_view(ctx, &args_map);
+    let scope = resolved.scope().clone();
     let data = json!({
         "paths": paths_value,
         "truncated": truncated,
         "scope": scope,
     });
-    let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+    let envelope = success_envelope_with_view(
+        data.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     let text = render_trace_impact(&data);
     Ok(outcome(envelope, &data, text))
 }
@@ -1900,7 +1981,19 @@ fn graph_path_to_value(p: &GraphImpactPath) -> Value {
             "provenance": provenance_label(h.edge.provenance.as_ref()),
         }));
     }
-    let start = p.hops.first().map(|h| h.node.id.as_str()).unwrap_or("");
+    let start = p
+        .hops
+        .first()
+        .map(|hop| {
+            if hop.edge.target_id == hop.node.id && hop.edge.source_id != hop.node.id {
+                hop.edge.source_id.as_str()
+            } else if hop.edge.source_id == hop.node.id && hop.edge.target_id != hop.node.id {
+                hop.edge.target_id.as_str()
+            } else {
+                hop.node.id.as_str()
+            }
+        })
+        .unwrap_or("");
     json!({
         "start": start,
         "min_confidence": p.min_confidence,
@@ -1910,6 +2003,11 @@ fn graph_path_to_value(p: &GraphImpactPath) -> Value {
 
 fn provenance_label(p: Option<&EdgeProvenance>) -> Value {
     let Some(p) = p else {
+        // A legacy edge with no recorded provenance. Treated as 0.0
+        // here and in `traverse_impact`, because confidence must be
+        // evidence-backed. Sensors now emit `Static` by default
+        // (`GraphEdge::new`), so this arm only fires for edges
+        // deserialized from an older store.
         return json!({"kind": "unknown", "confidence": 0.0});
     };
     let kind = match p {
@@ -1975,18 +2073,18 @@ async fn run_get_coverage(
     started: Instant,
 ) -> Result<ToolOutcome, ToolOutcome> {
     let snap_label = snapshot_label(&args_map);
-    let view = match resolve_view(ctx, &args_map, started).await? {
-        ViewHandle::Empty(_) => {
-            let data =
-                json!({"complete": true, "scope": scope_for_view(ctx, &args_map), "repos": []});
-            let envelope =
-                success_envelope(data.clone(), &snap_label, snap_label != "live", started);
-            return Ok(outcome(envelope, &data, render_coverage(&data)));
-        }
-        ViewHandle::Index { index, .. } => index,
+    let resolved = resolve_view(ctx, &args_map, started).await?;
+    let Some(view) = resolved.index().cloned() else {
+        let data = json!({
+            "complete": true,
+            "scope": resolved.scope().clone(),
+            "repos": [],
+        });
+        let envelope = success_envelope(data.clone(), &snap_label, snap_label != "live", started);
+        return Ok(outcome(envelope, &data, render_coverage(&data)));
     };
     let endpoint_arg = args_map.get("endpoint").cloned();
-    let scope_value = scope_for_view(ctx, &args_map);
+    let scope_value = resolved.scope().clone();
     let scope = parse_scope(scope_value);
     let (coverage_repos, repo_coverages) = if snap_label != "live" {
         if let Some(mgr) = ctx.snapshots {
@@ -2081,7 +2179,13 @@ async fn run_get_coverage(
     coverage.complete = complete;
     let mut value = coverage_to_value(&coverage);
     value["complete"] = json!(complete);
-    let envelope = success_envelope(value.clone(), &snap_label, snap_label != "live", started);
+    let envelope = success_envelope_with_view(
+        value.clone(),
+        resolved.label(),
+        resolved.reproducible(),
+        resolved.view_info(),
+        started,
+    );
     let text = render_coverage(&value);
     Ok(outcome(envelope, &value, text))
 }
@@ -2094,14 +2198,6 @@ fn render_coverage(data: &Value) -> String {
         repos, data["complete"]
     ));
     out
-}
-
-fn empty_scope() -> Value {
-    json!({
-        "reviewed": [],
-        "unreviewed": [],
-        "configured_only": true,
-    })
 }
 
 fn parse_scope(v: Value) -> DiffScope {
@@ -2166,13 +2262,6 @@ fn snapshot_label(args_map: &Map<String, Value>) -> String {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "live".to_string())
-}
-
-fn scope_for_view(ctx: &McpContext<'_>, args_map: &Map<String, Value>) -> Value {
-    if snapshot_label(args_map) == "live" {
-        return ctx.federation.map(live_scope).unwrap_or_else(empty_scope);
-    }
-    empty_scope()
 }
 
 #[cfg(test)]
@@ -2297,6 +2386,79 @@ mod tests {
         assert_eq!(value["impact"]["class"], "NeedsInvestigation");
     }
 
+    /// `handlers[].repo` must be the repo that owns the provider node,
+    /// never the sensor name that leaked into `SymbolKey.repo`.
+    ///
+    /// `RepoId::new` rejects any value containing `/`, and every real
+    /// sensor call passes `root.to_string_lossy()` (a filesystem path),
+    /// so the `unwrap_or_else` fallback always ran and minted
+    /// `RepoId::new("http-sensor")`. That value is rendered as evidence
+    /// and an external client cannot resolve it as a repository.
+    #[test]
+    fn handler_repo_is_the_provider_repo_not_a_sensor_name() {
+        let provider_id =
+            GlobalId::parse("orders:HttpRoute:src/orders/label.rs:GET /api/orders/%3Aid/label:8")
+                .expect("valid global id");
+        let ep_id: crate::federation::contracts::index::EndpointId = (
+            ServiceName("orders".into()),
+            ContractKey::Http {
+                method: MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Get),
+                template: "/api/orders/{}/label".into(),
+            },
+        );
+        let endpoint = crate::federation::contracts::index::Endpoint {
+            id: ep_id.clone(),
+            method: crate::federation::contracts::model::HttpMethod::Get,
+            template: "/api/orders/{}/label".into(),
+            providers: vec![crate::federation::contracts::index::EndpointProvider {
+                node_id: provider_id,
+                origin: crate::federation::contracts::model::ProviderOrigin::Code,
+                handler: Some(SymbolKey {
+                    repo: RepoId::new("http-sensor").unwrap(),
+                    path: "src/orders/label.rs".into(),
+                    container: None,
+                    name: "get_order_label".into(),
+                }),
+                operation_id: None,
+            }],
+            schemas: Default::default(),
+        };
+        let mut head_index = ContractIndex::default();
+        head_index.endpoints.insert(ep_id.clone(), endpoint);
+
+        let kind = ChangeKind::ChangedWithoutSchema {
+            endpoint: ep_id.clone(),
+        };
+        let impact = Impact {
+            service: ServiceName("orders".into()),
+            kind: kind.clone(),
+            class: Class::NeedsInvestigation,
+            reason: Some(DiffReason::NeedsReview),
+            affected: vec![],
+            scope: DiffScope::default(),
+            coverage: DiffCoverage::default(),
+            compatible_changes: 0,
+        };
+        let value = impact_to_value(
+            &impact,
+            &kind,
+            &ServiceName("orders".into()),
+            Compat::NeedsReview,
+            50,
+            &head_index,
+            None,
+        );
+
+        let handlers = value["handlers"].as_array().expect("handlers present");
+        assert_eq!(handlers[0]["symbol"], "get_order_label");
+        assert_eq!(handlers[0]["file"], "src/orders/label.rs");
+        assert_eq!(
+            handlers[0]["repo"], "orders",
+            "handlers[].repo must be the provider's repo, not the sensor name"
+        );
+        assert_ne!(handlers[0]["repo"], "http-sensor");
+    }
+
     #[test]
     fn parse_endpoint_for_trace_returns_pair() {
         let v = json!({"service": "orders", "key": "http:GET /x"});
@@ -2323,7 +2485,10 @@ mod tests {
         // a UUID-based id).
         assert!(v["start"].is_string());
         assert_eq!(v["min_confidence"], 1.0);
-        assert_eq!(v["hops"][0]["provenance"]["kind"], "unknown");
-        assert_eq!(v["hops"][0]["provenance"]["confidence"], 0.0);
+        // A sensor-emitted edge with no finer attribution is still a
+        // static fact — never `unknown`/0.0, which would make
+        // `min_confidence` useless as a filter.
+        assert_eq!(v["hops"][0]["provenance"]["kind"], "static");
+        assert_eq!(v["hops"][0]["provenance"]["confidence"], 1.0);
     }
 }

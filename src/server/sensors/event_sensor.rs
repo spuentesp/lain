@@ -32,6 +32,8 @@ use crate::error::LainError;
 use crate::federation::contracts::model::SourceSite;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::patterns::Patterns;
+use crate::server::sensors::util::{self, Lang};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -108,35 +110,6 @@ pub fn scan_workspace_event(
 
     graph.replace_sensor_output(SensorOwner::EventSensor, &all_nodes, &all_edges)?;
     Ok(all_nodes.len())
-}
-
-/// Resolve the enclosing function/method for a given `(path, line)`.
-/// Returns the function's id and a fresh node id when no function
-/// exists yet in the graph.
-fn resolve_function_id(
-    graph: &GraphDatabase,
-    graph_path_str: &str,
-    name_hint: &str,
-    line: u32,
-    namespace: &RepoNamespace,
-) -> String {
-    if let Some(sym) = crate::server::sensors::util::enclosing_symbol(graph, graph_path_str, line) {
-        return sym.id.clone();
-    }
-    // No existing function indexed: mint a synthetic one anchored at
-    // the site line so the `Produces` / `Consumes` edge has a real
-    // source.
-    GraphNode::generate_id(
-        &NodeType::Function,
-        graph_path_str,
-        if name_hint.is_empty() {
-            "event_site"
-        } else {
-            name_hint
-        },
-        Some(line),
-        namespace,
-    )
 }
 
 // ─── Detection (regex-first, language-dispatched) ────────────────────
@@ -249,432 +222,206 @@ fn detect_sites(
     constants: &BTreeMap<String, String>,
 ) -> Vec<DetectedSite> {
     let mut out: Vec<DetectedSite> = Vec::new();
-    match ext {
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
-            detect_ts_sites(&mut out, content, constants);
-        }
-        "py" => {
-            detect_py_sites(&mut out, content, constants);
-        }
-        "rs" => {
-            detect_rust_sites(&mut out, content, constants);
-        }
-        "go" => {
-            detect_go_sites(&mut out, content, constants);
-        }
-        _ => {}
-    }
-    out
-}
-
-fn detect_ts_sites(
-    out: &mut Vec<DetectedSite>,
-    content: &str,
-    constants: &BTreeMap<String, String>,
-) {
-    // kafkajs / confluent-kafka: `producer.send({ topic: 'foo' })` and
-    // `consumer.run({ topics: ['foo'] })`.
-    for (idx, line) in content.lines().enumerate() {
+    let lang = match ext_to_lang(ext) {
+        Some(l) => l,
+        None => return out,
+    };
+    let patterns = Patterns::patterns();
+    let (producers, consumers, scheduled) = util::topic_idioms_for(patterns, lang);
+    let lines: Vec<&str> = content.lines().collect();
+    for (idx, raw) in lines.iter().enumerate() {
         let line_num = idx as u32 + 1;
         // Strip line comments. Without this, a commented-out
         // `producer.send({ topic: 'foo' })` would still match the
         // regex and emit a phantom Topic.
-        let line = strip_line_comment(line);
+        let line = strip_line_comment(raw);
         let trimmed = line.trim();
-
-        // Producer pattern.
-        if trimmed.contains(".send(") || trimmed.contains(".send (") {
-            if let Some(topic) = extract_object_property(line, "topic") {
+        if trimmed.is_empty() {
+            continue;
+        }
+        for m in util::walk_idioms(&producers, line, line_num) {
+            if let Some(value) = resolve_idiom_capture(&m, constants) {
                 out.push(DetectedSite {
                     kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_object_property_identifier(line, "topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
+                    topic: Some(value),
                     broker: DEFAULT_BROKER.into(),
                     line: line_num,
                     owner_name: None,
                 });
             }
         }
-
-        // Consumer pattern: `consumer.run({ topics: ['foo'] })` or
-        // `consumer.subscribe({ topics: [...] })`.
-        if trimmed.contains(".run(") || trimmed.contains(".subscribe(") {
-            if let Some(topic) = extract_array_string_member(line) {
+        for m in util::walk_idioms(&consumers, line, line_num) {
+            if let Some(value) = resolve_idiom_capture(&m, constants) {
                 out.push(DetectedSite {
                     kind: SiteKind::Consumes,
-                    topic: Some(topic),
+                    topic: Some(value),
                     broker: DEFAULT_BROKER.into(),
                     line: line_num,
                     owner_name: None,
                 });
             }
         }
+        for m in util::walk_idioms(&scheduled, line, line_num) {
+            // The walker returns the spec (or a Celery-marker
+            // match with no spec). Project to `(topic, owner_name,
+            // broker)` based on the framework id.
+            let (topic, owner_name, broker) = schedule_value(&m, &lines, idx, ext, constants);
+            out.push(DetectedSite {
+                kind: SiteKind::Scheduled,
+                topic,
+                broker,
+                line: line_num,
+                owner_name,
+            });
+        }
+    }
+    out
+}
 
-        // Celery-style scheduled task: `@Cron('...')` decorator on
-        // a function — the next non-empty line is the function it
-        // decorates.
-        if let Some(spec) = extract_decorator_arg(trimmed, "Cron") {
-            let mut owner_name: Option<String> = None;
-            for ahead in content.lines().skip(idx + 1).take(5) {
-                let ahead = ahead.trim();
-                if ahead.is_empty() || ahead.starts_with("//") {
-                    continue;
+/// Map a file extension to the Tier-1 `Lang` the walker uses for
+/// per-language idiom selection. Returns `None` for extensions no
+/// event-sensor walker handles (the caller skips them).
+fn ext_to_lang(ext: &str) -> Option<Lang> {
+    match ext {
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
+        "py" => Some(Lang::Python),
+        "rs" => Some(Lang::Rust),
+        "go" => Some(Lang::Go),
+        _ => None,
+    }
+}
+
+/// Resolve the walker's capture to a topic name. The walker
+/// tracks which slot (`literal` vs `identifier`) matched; the
+/// caller (event_sensor) interprets them per the pre-Tier-1
+/// rules:
+/// - `literal` set: the source had a quoted string, the value
+///   is the literal contents. Use as-is.
+/// - `identifier` set: the source had a bare identifier (e.g.
+///   `topic: TOPIC_NAME`); try to resolve it against the
+///   same-file constants table. If the constant is missing,
+///   return `None` (a dynamic topic — the emitter drops it
+///   and the joiner surfaces it in `coverage.unnormalized`).
+fn resolve_idiom_capture(
+    m: &util::IdiomMatch,
+    constants: &BTreeMap<String, String>,
+) -> Option<String> {
+    if let Some(lit) = m.literal.as_deref() {
+        return Some(lit.to_string());
+    }
+    if let Some(ident) = m.identifier.as_deref() {
+        if let Some(resolved) = constants.get(ident) {
+            return Some(resolved.clone());
+        }
+        // Bare identifier that doesn't resolve to a constant:
+        // a dynamic topic. The original Rust detector's
+        // `extract_object_property_identifier` + `resolve_topic_name`
+        // chain returned `None` here too, and the emitter's
+        // `site.topic.clone() → match None → continue` filtered
+        // it out. Tier 1 preserves that behaviour: a
+        // `producer.send({ topic: <bare> })` where `<bare>` is
+        // not a same-file constant emits no Topic node.
+        return None;
+    }
+    None
+}
+
+/// Project a `Scheduled` walker match into the `(topic, owner_name,
+/// broker)` triple the emitter expects. The exact behaviour depends
+/// on the framework:
+/// - NestJS `@Cron('spec')` — the spec is the topic; the function
+///   name is the owner. The walker captured the spec; the
+///   lookahead finds the function name.
+/// - Celery `@app.task` / `@shared_task` — no spec; the topic is
+///   the function name. The walker captured `None` for the spec;
+///   the lookahead finds the function name.
+///
+/// The Celery case is the one with no spec — when the walker
+/// yields a match with no `literal` slot, we fall back to the
+/// function-lookahead populating the topic.
+fn schedule_value(
+    m: &util::IdiomMatch,
+    lines: &[&str],
+    idx: usize,
+    ext: &str,
+    _constants: &BTreeMap<String, String>,
+) -> (Option<String>, Option<String>, String) {
+    let spec = m.literal.clone();
+    // Lookahead for the decorated function (5 lines, stop at the
+    // next decorator / function-decl / blank-line skip). The
+    // shape of the function declaration varies by language.
+    let owner_name = lookahead_for_function(lines, idx + 1, ext);
+    let (broker, topic) = match m.framework_id.as_str() {
+        "celery-task" => ("celery".to_string(), owner_name.clone().or(spec)),
+        // NestJS `@Cron` and any other `Scheduled` entry the YAML
+        // grows in the future.
+        _ => (
+            "schedule".to_string(),
+            spec.clone().or_else(|| owner_name.clone()),
+        ),
+    };
+    (topic, owner_name, broker)
+}
+
+/// Look at the next few lines after a `@decorator` and return
+/// the name of the function the decorator decorates. Stops at a
+/// blank line, a non-blank non-decorator non-function line, or
+/// the next decorator. Returns `None` if the lookahead cannot
+/// resolve a function name.
+fn lookahead_for_function(lines: &[&str], start: usize, ext: &str) -> Option<String> {
+    for ahead in lines.iter().skip(start).take(5) {
+        let ahead = ahead.trim();
+        if ahead.is_empty() {
+            continue;
+        }
+        // The comment marker depends on the language. Mirrors
+        // the per-language dispatch in `detect_sites`.
+        if (ext == "py" && ahead.starts_with('#')) || (ext != "py" && ahead.starts_with("//")) {
+            continue;
+        }
+        // Stop at the next decorator — it's not the function.
+        if ahead.starts_with('@') {
+            return None;
+        }
+        let name = match ext {
+            "py" => {
+                if ahead.starts_with("def ") || ahead.starts_with("async def ") {
+                    parse_def_name(ahead)
+                } else {
+                    return None;
                 }
+            }
+            _ => {
                 if ahead.starts_with("function ")
                     || ahead.starts_with("async function ")
                     || ahead.starts_with("export ")
                 {
-                    owner_name = parse_function_name(ahead);
-                    break;
-                }
-                if ahead.starts_with("@") {
-                    break;
+                    parse_function_name(ahead)
+                } else {
+                    return None;
                 }
             }
-            out.push(DetectedSite {
-                kind: SiteKind::Scheduled,
-                topic: Some(spec),
-                broker: "schedule".into(),
-                line: line_num,
-                owner_name,
-            });
-        }
+        };
+        return name;
     }
-}
-
-fn detect_py_sites(
-    out: &mut Vec<DetectedSite>,
-    content: &str,
-    constants: &BTreeMap<String, String>,
-) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_num = idx as u32 + 1;
-        let line = strip_line_comment(line);
-        let trimmed = line.trim();
-
-        // aiokafka: `KafkaConsumer(topic)` constructor or
-        // `producer.send_and_wait(topic, ...)`.
-        if trimmed.contains("AIOKafkaProducer(") || trimmed.contains("KafkaProducer(") {
-            if let Some(topic) = extract_positional_string_arg(trimmed, "AIOKafkaProducer")
-                .or_else(|| extract_positional_string_arg(trimmed, "KafkaProducer"))
-            {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-        if trimmed.contains("AIOKafkaConsumer(") || trimmed.contains("KafkaConsumer(") {
-            if let Some(topic) = extract_positional_string_arg(trimmed, "AIOKafkaConsumer")
-                .or_else(|| extract_positional_string_arg(trimmed, "KafkaConsumer"))
-            {
-                out.push(DetectedSite {
-                    kind: SiteKind::Consumes,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-        // `.send_and_wait("topic", ...)` or `.send(topic="foo", ...)`.
-        if trimmed.contains(".send_and_wait(") || trimmed.contains(".send(") {
-            if let Some(topic) = extract_first_string_arg(trimmed) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_kwarg_identifier(trimmed, "topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-
-        // Celery `@app.task` and `@shared_task` decorators.
-        if let Some(spec) = extract_py_decorator_task(trimmed) {
-            let mut owner_name: Option<String> = None;
-            for ahead in content.lines().skip(idx + 1).take(5) {
-                let ahead = ahead.trim();
-                if ahead.is_empty() || ahead.starts_with("#") {
-                    continue;
-                }
-                if ahead.starts_with("def ") || ahead.starts_with("async def ") {
-                    owner_name = parse_def_name(ahead);
-                    break;
-                }
-                if ahead.starts_with("@") {
-                    break;
-                }
-            }
-            // For Celery the broker is `celery` and the topic is the
-            // module path / task name. We use the function name as a
-            // stable identifier when present.
-            out.push(DetectedSite {
-                kind: SiteKind::Scheduled,
-                topic: owner_name.clone().or(Some(spec)),
-                broker: "celery".into(),
-                line: line_num,
-                owner_name,
-            });
-        }
-    }
-}
-
-fn detect_rust_sites(
-    out: &mut Vec<DetectedSite>,
-    content: &str,
-    constants: &BTreeMap<String, String>,
-) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_num = idx as u32 + 1;
-        let line = strip_line_comment(line);
-        let trimmed = line.trim();
-
-        // rdkafka producer: `FutureRecord::to("topic")` is the
-        // canonical publish shape — the topic name is the first
-        // argument. Detect before the `::send(` shape so a single-line
-        // `let record = FutureRecord::to("...")` form is also covered.
-        if trimmed.contains("FutureRecord::to(") {
-            if let Some(topic) = extract_first_string_arg(trimmed) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_first_ident_arg(trimmed) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-
-        // rdkafka: `FutureProducer::send(record, ...)` where the
-        // record's topic is a string literal in
-        // `FutureRecord { topic: ... }`.
-        if trimmed.contains("::send(") || trimmed.contains(".send(") {
-            // The topic name appears as a string literal in the
-            // `FutureRecord` struct's `topic` field.
-            if let Some(topic) = extract_object_property(line, "topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_object_property_identifier(line, "topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-
-        // StreamConsumer::subscribe(&["foo", "bar"]) — single-element
-        // arrays only, to keep the regex simple.
-        if trimmed.contains("::subscribe(") || trimmed.contains(".subscribe(") {
-            if let Some(topic) = extract_array_string_member(line) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Consumes,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-    }
-}
-
-fn detect_go_sites(
-    out: &mut Vec<DetectedSite>,
-    content: &str,
-    constants: &BTreeMap<String, String>,
-) {
-    for (idx, line) in content.lines().enumerate() {
-        let line_num = idx as u32 + 1;
-        let line = strip_line_comment(line);
-        let trimmed = line.trim();
-
-        // kafka-go: `producer.SendMessage(&kafka.Message{Topic: "foo"})`
-        // or `writer.WriteMessages(ctx, kafka.Message{Topic: "foo"})`.
-        // Match `SendMessage` as a prefix so `SendMessages(` (the
-        // segmentio/kafka-go WriteMessages sibling) is also covered.
-        if trimmed.contains("SendMessage") || trimmed.contains("WriteMessages(") {
-            if let Some(topic) = extract_struct_field(line, "Topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            } else if let Some(name) = extract_struct_field_identifier(line, "Topic") {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: resolve_topic_name(&name, constants),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-        // `consumer.SubscribeTopics("foo")`.
-        if trimmed.contains("SubscribeTopics(") {
-            if let Some(topic) = extract_first_string_arg(trimmed) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Consumes,
-                    topic: Some(topic),
-                    broker: DEFAULT_BROKER.into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
-        }
-    }
+    None
 }
 
 // ─── Per-language string extractors ───────────────────────────────────
+//
+// The pre-Tier-1 `event_sensor` carried ~200 lines of bespoke
+// per-language extractors (kafkajs / aiokafka / rdkafka / kafka-go /
+// Celery / NestJS). Tier 1 collapsed all of them into
+// `frameworks.yaml` regexes consumed by the generic walker in
+// `crate::server::sensors::util::walk_idioms`. The only
+// per-language helper still needed is the function-lookahead
+// (the language's "function declaration" shape), which lives in
+// `lookahead_for_function` and the two `parse_function_name` /
+// `parse_def_name` helpers below.
 
-/// Look for `{ key: "<value>" }` patterns. Returns the literal value.
-fn extract_object_property(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}:");
-    let idx = line.find(&needle)?;
-    let rest = &line[idx + needle.len()..];
-    let rhs = rest.trim_start();
-    extract_string_literal(rhs)
-}
-
-fn extract_object_property_identifier(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}:");
-    let idx = line.find(&needle)?;
-    let rest = &line[idx + needle.len()..];
-    let rhs = rest.trim_start();
-    let ident: String = rhs
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect();
-    if ident.is_empty() {
-        None
-    } else {
-        Some(ident)
-    }
-}
-
-fn extract_struct_field(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}:");
-    let idx = line.find(&needle)?;
-    let rest = &line[idx + needle.len()..];
-    let rhs = rest.trim_start();
-    extract_string_literal(rhs)
-}
-
-fn extract_struct_field_identifier(line: &str, key: &str) -> Option<String> {
-    extract_object_property_identifier(line, key)
-}
-
-/// Look for the first quoted string in the line that appears inside
-/// `[ ... ]`. Returns it.
-fn extract_array_string_member(line: &str) -> Option<String> {
-    let lbracket = line.find('[')?;
-    let rbracket = line.rfind(']')?;
-    let inside = &line[lbracket..=rbracket];
-    extract_string_literal(inside.trim_matches(|c: char| c == '[' || c == ']').trim())
-}
-
-fn extract_first_string_arg(line: &str) -> Option<String> {
-    let open = line.find('(')?;
-    let close = line.rfind(')').unwrap_or(line.len());
-    let inside = &line[open + 1..close];
-    extract_string_literal(inside.trim())
-}
-
-/// Like `extract_first_string_arg` but for a bare identifier arg
-/// (e.g. `FutureRecord::to(TOPIC)` where `TOPIC` is a constant).
-fn extract_first_ident_arg(line: &str) -> Option<String> {
-    let open = line.find('(')?;
-    let close = line.rfind(')').unwrap_or(line.len());
-    let inside = &line[open + 1..close];
-    let ident: String = inside
-        .trim()
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect();
-    if ident.is_empty() || !is_ident(&ident) {
-        None
-    } else {
-        Some(ident)
-    }
-}
-
-fn extract_positional_string_arg(line: &str, ctor: &str) -> Option<String> {
-    let needle = format!("{ctor}(");
-    let idx = line.find(&needle)?;
-    let after = &line[idx + needle.len()..];
-    extract_string_literal(after.trim())
-}
-
-fn extract_kwarg_identifier(line: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}=");
-    let idx = line.find(&needle)?;
-    let after = &line[idx + needle.len()..];
-    let ident: String = after
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect();
-    if ident.is_empty() {
-        None
-    } else {
-        Some(ident)
-    }
-}
-
-fn extract_decorator_arg(line: &str, name: &str) -> Option<String> {
-    let needle = format!("@{name}(");
-    let idx = line.find(&needle)?;
-    let after = &line[idx + needle.len()..];
-    extract_string_literal(after.trim())
-}
-
-fn extract_py_decorator_task(line: &str) -> Option<String> {
-    // `@app.task` or `@shared_task` decorators. The function name
-    // comes from the next line; the "topic" here is just a sentinel
-    // string (`"celery:<name>"`) so it sorts deterministically. The
-    // joiner uses the `owner_name` to look up the actual function.
-    if line.starts_with("@app.task") || line.starts_with("@shared_task") {
-        Some("celery:task".into())
-    } else {
-        None
-    }
-}
-
+/// Parse `function foo(…)` / `async function foo(…)` /
+/// `export function foo(…)` / `export const foo = …` /
+/// `function $foo(…)` to extract the name.
 fn parse_function_name(line: &str) -> Option<String> {
     let after = line
         .trim_start_matches("export ")
@@ -692,6 +439,7 @@ fn parse_function_name(line: &str) -> Option<String> {
     }
 }
 
+/// Parse `def foo(…)` / `async def foo(…)` to extract the name.
 fn parse_def_name(line: &str) -> Option<String> {
     let after = line
         .trim_start_matches("async def")
@@ -708,12 +456,16 @@ fn parse_def_name(line: &str) -> Option<String> {
     }
 }
 
-fn resolve_topic_name(ident: &str, constants: &BTreeMap<String, String>) -> Option<String> {
-    constants.get(ident).cloned()
-}
-
 // ─── Emission ────────────────────────────────────────────────────────
 
+/// Emit one `Topic` node plus a `Produces`/`Consumes` edge per site.
+///
+/// Edge-source invariant: the source is either an already-indexed
+/// enclosing symbol, or the per-site synthetic node that the consumer
+/// block below emits — never a third, unmaterialized id.
+/// `insert_edges_batch` drops an edge whose endpoints aren't in the
+/// graph (`graph/mod.rs:1156`), so an unmaterialized source does not
+/// fail loudly: the edge simply vanishes.
 fn emit_sites(
     sites: &[DetectedSite],
     graph_path: &str,
@@ -727,10 +479,6 @@ fn emit_sites(
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut edges: Vec<GraphEdge> = Vec::new();
     let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
-    // De-dupe the consumer-side function nodes we re-emit. We only
-    // need to write the `TopicConsumer` contract fact once per
-    // function.
-    let mut emitted_consumer_facts: BTreeSet<String> = BTreeSet::new();
 
     for site in sites {
         let topic_name = match site.topic.clone() {
@@ -756,7 +504,7 @@ fn emit_sites(
                 GraphNode::new(NodeType::Topic, topic_label.clone(), graph_path.to_string());
             node.id = topic_id.clone();
             node.line_start = Some(site.line);
-            node.contract = Some(CF::Provider(
+            node.contract = vec![CF::Provider(
                 crate::federation::contracts::model::ProviderFact {
                     method: crate::federation::contracts::model::HttpMethod::Any,
                     template: topic_name.clone(),
@@ -764,15 +512,45 @@ fn emit_sites(
                     operation_id: None,
                     origin: crate::federation::contracts::model::ProviderOrigin::Code,
                 },
-            ));
+            )];
             nodes.push(node);
         }
 
-        // Resolve the enclosing function id. We always emit a node
-        // here so the graph has a stable handle, even when no
-        // Function/Method was indexed before.
-        let owner_hint = site.owner_name.clone().unwrap_or_default();
-        let source_id = resolve_function_id(graph, graph_path, &owner_hint, site.line, namespace);
+        // The synthetic per-site node. Two jobs, and it is emitted when
+        // either one needs it (the block below):
+        //
+        // 1. Edge anchor — the `Produces`/`Consumes` edge source when
+        //    no enclosing function is indexed. `insert_edges_batch`
+        //    drops an edge whose endpoints aren't in the graph
+        //    (`graph/mod.rs:1156`) without failing, so an unmaterialized
+        //    source makes the edge vanish rather than error.
+        // 2. Fact carrier for subscription sites.
+        //
+        // When a symbol IS indexed the edge rides the symbol instead —
+        // that is what kept peer sensors' edges alive (see
+        // `util::SQL_READ_PREFIX`) — and a producer site then needs
+        // neither job, so no node is emitted for it.
+        let id_name = format!(
+            "{}{graph_path}:{}",
+            crate::server::sensors::util::TOPIC_READ_PREFIX,
+            site.line
+        );
+        let site_node_id = GraphNode::generate_id(
+            &NodeType::Function,
+            graph_path,
+            &id_name,
+            Some(site.line),
+            namespace,
+        );
+
+        // Edge source: the enclosing function when one is indexed (so
+        // call-chain traversal is unchanged), else the site's own
+        // synthetic node — which we materialize below, so the edge
+        // never dangles.
+        let source_id =
+            crate::server::sensors::util::enclosing_symbol(graph, graph_path, site.line)
+                .map(|sym| sym.id.clone())
+                .unwrap_or_else(|| site_node_id.clone());
 
         let edge_type = match site.kind {
             SiteKind::Produces => EdgeType::Produces,
@@ -795,32 +573,49 @@ fn emit_sites(
             detail: None,
         });
 
-        // The consumer side: emit one `TopicConsumer` contract fact
-        // on the source function. We attach it to the same source_id
-        // so the joiner can resolve `consumer → topic` per function.
-        // The fact is what `ContractJoiner::run` matches against
-        // producer-side `Topic` nodes.
-        if emitted_consumer_facts.insert(source_id.clone()) {
-            let mut consumer_node = GraphNode::new(
-                NodeType::Function,
-                if owner_hint.is_empty() {
-                    topic_label.clone()
-                } else {
-                    owner_hint.clone()
-                },
-                graph_path.to_string(),
-            );
-            consumer_node.id = source_id.clone();
-            consumer_node.line_start = Some(site.line);
+        // Emit the synthetic node when it is either the edge anchor or
+        // the fact carrier. A producer site whose enclosing function IS
+        // indexed needs neither — its edge rides the symbol — so no
+        // node is emitted for it.
+        let is_subscription = matches!(site.kind, SiteKind::Consumes | SiteKind::Scheduled);
+        let is_edge_anchor = source_id == site_node_id;
+        if !is_subscription && !is_edge_anchor {
+            continue;
+        }
+        // ONLY subscription sites carry a fact. A `Produces` site is
+        // not a subscriber — emitting one puts a false consumer in
+        // `ContractIndex`, and false consumers hide real ones.
+        let fact = is_subscription.then(|| {
             let kind = match site.kind {
                 SiteKind::Scheduled => TopicConsumerKind::Scheduled,
                 _ => TopicConsumerKind::Subscription,
             };
-            consumer_node.contract = Some(CF::TopicConsumer(TopicConsumerFact {
+            CF::TopicConsumer(TopicConsumerFact {
                 broker: site.broker.clone(),
                 name: topic_name.clone(),
                 kind,
-            }));
+            })
+        });
+        // Two sites on one physical line share the synthetic node
+        // (`topic-read:<path>:<line>`). `GraphNode.contract` is a list,
+        // so each subscription records its own fact and none of them is
+        // lost; a `Produces` site contributes none at all and the node
+        // exists purely as the edge anchor. An exact duplicate is not
+        // appended twice — one site repeating the same topic must not
+        // double-count the consumer.
+        if let Some(existing) = nodes.iter_mut().find(|n| n.id == site_node_id) {
+            if let Some(f) = fact {
+                if !existing.contract.contains(&f) {
+                    existing.contract.push(f);
+                }
+            }
+        } else {
+            let mut consumer_node = crate::server::sensors::util::synthetic_site_node(
+                id_name, graph_path, site.line, namespace,
+            );
+            if let Some(f) = fact {
+                consumer_node.contract.push(f);
+            }
             nodes.push(consumer_node);
         }
     }
@@ -833,6 +628,7 @@ fn emit_sites(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::federation::contracts::model::ContractFact;
     use crate::schema::{GraphNode, NodeType, RepoNamespace};
 
     fn empty_db() -> GraphDatabase {
@@ -956,6 +752,179 @@ mod tests {
             .filter(|e| e.edge_type == EdgeType::Consumes)
             .count();
         assert!(consumes >= 1);
+    }
+
+    /// A pure producer must NOT emit a `TopicConsumer` fact. It
+    /// produces; claiming it subscribes is a false consumer in
+    /// `ContractIndex` — and false consumers are the noise that hides
+    /// real ones.
+    #[test]
+    fn a_producer_site_emits_no_topic_consumer_fact() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("orders.ts"),
+            "async function publish() {\n  await producer.send({ topic: 'orders.created', messages: [] });\n}\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let consumers = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| {
+                n.contract
+                    .iter()
+                    .any(|f| matches!(f, ContractFact::TopicConsumer(_)))
+            })
+            .count();
+        assert_eq!(
+            consumers, 0,
+            "a producer site must not emit a TopicConsumer fact — it produces, \
+             it does not subscribe"
+        );
+    }
+
+    /// Two defects share one cause: the consumer-fact block runs for
+    /// every site kind and de-dupes on `source_id`.
+    ///
+    /// 1. A producer site registers `TopicConsumer` for the topic it
+    ///    *produces* — a false consumer in `ContractIndex`.
+    /// 2. When the enclosing symbol is indexed, both sites share one
+    ///    `source_id`, so the first site's fact wins the de-dupe and
+    ///    the other site's real topic is **dropped** — a discovered
+    ///    consumer disappearing, this codebase's worst failure.
+    ///
+    /// Minted explicitly (no tree-sitter indexer in `scan_workspace_event`)
+    /// so case 2 is actually exercised.
+    #[test]
+    fn a_function_that_produces_and_consumes_keeps_the_consumer_fact() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("relay.py"),
+            "def relay():\n    producer.send(topic='orders.created', value={})\n    c1 = KafkaConsumer('orders.shipped')\n    c2 = KafkaConsumer('orders.delivered')\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        let mut fn_node = GraphNode::new(NodeType::Function, "relay".into(), "relay.py".into());
+        fn_node.line_start = Some(1);
+        fn_node.line_end = Some(4);
+        fn_node.id = GraphNode::generate_id(&NodeType::Function, "relay.py", "relay", Some(1), &ns);
+        graph.upsert_node(fn_node).expect("insert enclosing symbol");
+
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let consumed: Vec<String> = graph
+            .get_all_nodes()
+            .into_iter()
+            .flat_map(|n| {
+                n.contract
+                    .iter()
+                    .filter_map(|f| match f {
+                        ContractFact::TopicConsumer(t) => Some(t.name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            !consumed.contains(&"orders.created".to_string()),
+            "a producer must not register as a consumer of its own topic — \
+             got {consumed:?}"
+        );
+        assert!(
+            consumed.contains(&"orders.shipped".to_string()),
+            "the orders.shipped consumer fact was dropped — got {consumed:?}"
+        );
+        assert!(
+            consumed.contains(&"orders.delivered".to_string()),
+            "a second topic site in the same function lost its fact to the \
+             source_id de-dupe — got {consumed:?}"
+        );
+    }
+
+    /// Two topic sites on ONE physical line share the synthetic node
+    /// (`topic-read:<path>:<line>`), and `GraphNode.contract` holds a
+    /// single fact — so at most one of them can be recorded. But which
+    /// one must not depend on the order the regex walk happened to see
+    /// them in: a `Produces` site processed first used to claim the
+    /// de-dupe slot with NO fact, and the real consumer on the same
+    /// line then lost its fact entirely.
+    #[test]
+    fn a_consumer_fact_is_never_lost_to_a_same_line_producer() {
+        for (label, line) in [
+            (
+                "producer first",
+                "    producer.send(topic='orders.created', value={}); c = KafkaConsumer('orders.shipped')\n",
+            ),
+            (
+                "consumer first",
+                "    c = KafkaConsumer('orders.shipped'); producer.send(topic='orders.created', value={})\n",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("relay.py"), format!("def relay():\n{line}")).unwrap();
+            let graph = empty_db();
+            let ns = RepoNamespace::for_test();
+            scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+            let consumed: Vec<String> = graph
+                .get_all_nodes()
+                .into_iter()
+                .flat_map(|n| {
+                n.contract
+                .iter()
+                .filter_map(|f| match f {
+                    ContractFact::TopicConsumer(t) => Some(t.name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+            })
+                .collect();
+            assert!(
+                consumed.contains(&"orders.shipped".to_string()),
+                "{label}: the consumer's fact must survive sharing a line \
+                 with a producer — got {consumed:?}"
+            );
+        }
+    }
+
+    /// The point of `contract` being a list: two subscriptions to
+    /// different topics on one physical line share the synthetic node
+    /// (`topic-read:<path>:<line>`), and each must be recorded. When
+    /// `contract` held a single fact the second topic's consumer
+    /// vanished — a discovered consumer silently disappearing.
+    #[test]
+    fn two_subscriptions_on_one_line_are_both_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("relay.py"),
+            "def relay():\n    c = KafkaConsumer('orders.shipped'); d = KafkaConsumer('orders.delivered')\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let consumed: Vec<String> = graph
+            .get_all_nodes()
+            .into_iter()
+            .flat_map(|n| n.contract)
+            .filter_map(|f| match f {
+                ContractFact::TopicConsumer(t) => Some(t.name),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            consumed.contains(&"orders.shipped".to_string()),
+            "first subscription lost: {consumed:?}"
+        );
+        assert!(
+            consumed.contains(&"orders.delivered".to_string()),
+            "second subscription on the same line must not be dropped — got {consumed:?}"
+        );
     }
 
     /// Celery `@app.task` decorator emits a scheduled topic.

@@ -66,7 +66,7 @@ fn make_index() -> ContractIndex {
     );
     idx.consumers.insert(
         consumer_id.clone(),
-        ConsumerResolution {
+        vec![ConsumerResolution {
             call_id: consumer_id,
             service: svc.clone(),
             target: Some(ConsumerTarget::Binds {
@@ -80,7 +80,7 @@ fn make_index() -> ContractIndex {
             }),
             bound_endpoints: vec![(svc, key)],
             reads_complete: true,
-        },
+        }],
     );
     idx
 }

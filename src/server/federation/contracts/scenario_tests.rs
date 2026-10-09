@@ -53,7 +53,7 @@ fn contract_node(
     )
     .as_str()
     .to_string();
-    n.contract = Some(fact);
+    n.contract = vec![fact];
     n
 }
 
@@ -121,6 +121,7 @@ fn orders_config() -> ContractFederationConfig {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     }
 }
 
@@ -210,8 +211,7 @@ fn scenario_14_external_host_recorded_not_unresolved() {
     );
     // Confirm no unresolved NoMatch or NoRouteInService was emitted
     // for this call: the external path is preferred.
-    let consumers = &out.index.consumers;
-    assert!(consumers.values().all(|r| !matches!(
+    assert!(out.index.consumer_resolutions().all(|(_, r)| !matches!(
         r.target,
         Some(
             crate::federation::contracts::index::ConsumerTarget::Unresolved {
@@ -358,6 +358,7 @@ fn scenario_16_shipping_to_inventory_one_binds_cross_repo_false() {
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![],
+        databases: vec![],
     };
     let out = ContractJoiner::run(&[p_inv, c], &[], &cfg);
     assert_eq!(out.binds.len(), 1, "exactly one Binds");

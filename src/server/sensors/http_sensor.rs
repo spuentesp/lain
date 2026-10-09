@@ -571,7 +571,7 @@ pub fn routes_to_graph(
         node.id = node_id.clone();
         node.line_start = Some(route.line);
         node.signature = Some(route.handler_name.clone());
-        node.contract = Some(crate::federation::contracts::model::ContractFact::Provider(
+        node.contract = vec![crate::federation::contracts::model::ContractFact::Provider(
             ProviderFact {
                 method: route.method,
                 template,
@@ -584,7 +584,7 @@ pub fn routes_to_graph(
                 operation_id: None,
                 origin: ProviderOrigin::Code,
             },
-        ));
+        )];
 
         nodes.push(node);
 
@@ -676,7 +676,7 @@ crate::server::sensors::register_sensor!(
     HttpRoutes,
     |graph, root, namespace| {
         let repo_id = RepoId::new(root.to_string_lossy().as_ref())
-            .unwrap_or_else(|_| RepoId::new("http-sensor").unwrap());
+            .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
         scan_workspace_routes(graph, root, namespace, &repo_id)
     }
 );
@@ -905,7 +905,7 @@ mod tests {
             &crate::schema::RepoNamespace::for_test(),
             &repo_id,
         );
-        let provider = match nodes[0].contract.as_ref().expect("contract set") {
+        let provider = match nodes[0].contract.first().expect("contract set") {
             ContractFact::Provider(p) => p.clone(),
             other => panic!("expected Provider fact, got {other:?}"),
         };
@@ -1322,6 +1322,78 @@ fun Application.module() {
         assert!(
             as_java.is_empty(),
             "C# syntax in a .java file must not be a Java route: {as_java:?}"
+        );
+    }
+
+    /// `strip_quotes` unwraps only a balanced pair of quote chars:
+    /// `len() >= 2` is inclusive (a two-char literal strips to ""),
+    /// and a half-open input (`x"`, `'x`, a lone quote) is not a
+    /// quoted literal — the guard must fail rather than slice it.
+    #[test]
+    fn strip_quotes_requires_a_balanced_pair() {
+        assert_eq!(strip_quotes("\"\""), "", "empty double-quoted literal");
+        assert_eq!(strip_quotes("''"), "", "empty single-quoted literal");
+        assert_eq!(strip_quotes("x\""), "x\"", "trailing quote only");
+        assert_eq!(strip_quotes("\""), "\"", "lone double quote");
+        assert_eq!(strip_quotes("'x"), "'x", "leading quote only");
+        assert_eq!(strip_quotes("'"), "'", "lone single quote");
+        assert_eq!(strip_quotes("\"/api\""), "/api", "balanced still strips");
+        assert_eq!(strip_quotes("'/api'"), "/api", "balanced still strips");
+    }
+
+    /// Same-file router prefixes are keyed by extension: `.rs` runs
+    /// the axum/actix branch, `.ts` must not — even when the file
+    /// body happens to look like Rust router code.
+    #[test]
+    fn router_prefix_extraction_stays_in_its_extension_branch() {
+        let src = "let api = Router::new()\n    .route(\"/users\", get(list_users));\nlet app = Router::new().nest(\"/api\", api);\n";
+
+        let rs = extract_router_prefixes(src, "rs");
+        assert_eq!(
+            rs.get("api").map(String::as_str),
+            Some("/api"),
+            "the axum branch must run for .rs files: {rs:?}"
+        );
+
+        let ts = extract_router_prefixes(src, "ts");
+        assert!(
+            ts.is_empty(),
+            "a .ts file must not take the Rust prefix branch: {ts:?}"
+        );
+    }
+
+    /// An override `.scm` body that is only comments (or blank
+    /// lines) carries no query: the walker returns `None` instead
+    /// of compiling an empty query.
+    #[test]
+    fn a_comment_only_query_body_is_skipped() {
+        let root = std::env::temp_dir().join("lain_http_comment_only_body");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join(".lain").join("patterns").join("python");
+        std::fs::create_dir_all(&dir).expect("mkdir override dir");
+        std::fs::write(
+            dir.join("fastapi-route.scm"),
+            "; comment-only body: no patterns\n",
+        )
+        .expect("write override .scm");
+
+        let mut patterns = Patterns::clone_default();
+        patterns
+            .load_overrides(&root)
+            .expect("a comment-only .scm compiles");
+
+        let content = "@app.get(\"/x\")\nasync def x():\n    pass\n";
+        let tree = parse_for_lang(Lang::Python, content).expect("python parses");
+        let out = try_treesitter_extract(
+            &patterns,
+            "python-fastapi-route",
+            content,
+            std::path::Path::new("app.py"),
+            Some(&tree),
+        );
+        assert!(
+            out.is_none(),
+            "a body with only comments must not reach the query compiler: {out:?}"
         );
     }
 }

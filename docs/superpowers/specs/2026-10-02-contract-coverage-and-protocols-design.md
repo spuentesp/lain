@@ -44,10 +44,19 @@ I2 **Every discovered call/operation lands in exactly one terminal state** in `C
 I3 **Verdict soundness.** `NoKnownImpact(change)` ⇒ every repo in scope is `Analyzed` for every
    language present that can carry a consumer, and no unresolved consumer could match.
 I4 **Determinism / order independence** of join output (extends §7.8).
-I5 **No same-service Binds** (extends §7.8 to RPC and GraphQL).
+I5 **No same-service Binds** (extends §7.8 to RPC and GraphQL). Data endpoints
+   (`ContractKey::Table`) are exempt: a service reading its own warehouse table is
+   not API self-consumption, and §7.8's rule targets a service calling its own
+   published endpoints.
 I6 **Resolution precedence is a total order**; adding evidence never lowers a bind's rank.
 I7 **Index generation consistency.** A tool call reads one generation of `ContractIndex`, never a
    mix across live rejoin / snapshot swap.
+I8 **Scan ownership / no peer retraction.** `replace_sensor_output(s)` retracts only the nodes
+   `sensor_owner_of` assigns to `s`, then inserts `s`'s current scan output — a scan never removes
+   a peer sensor's nodes. Modeled in `docs/formal/ScanRetract.tla`; enforced by
+   `src/server/graph/mod.rs::replace_sensor_output` / `sensor_owner_of`.
+   A node carrying a `ContractFact` is owned by exactly one sensor, and
+   a rescan never removes a node or edge another sensor produced.
 
 I3 and I7 get TLA+ models (§9). I2, I4–I6 get property tests.
 

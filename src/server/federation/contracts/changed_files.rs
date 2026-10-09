@@ -19,9 +19,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use git2::{DiffFormat, DiffOptions, Oid, Repository};
+use git2::{DiffOptions, Oid, Repository};
 
-use super::diff::ChangedFilesSource;
+use super::diff::{ChangedFilesSource, ChangedLines};
 
 /// Tri-state outcome of diffing a repository between two revisions (§9.2, Gap P1.7).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,49 +119,133 @@ impl MirrorChangedFiles {
         }
     }
 
-    /// Compute tri-state diff for a single repository.
-    pub fn diff_repo(&self, repo: &str, base_sha: &str, head_sha: &str) -> RepoDiffResult {
+    /// Compute the changed file set **and** the changed line spans in a
+    /// single pass over the git diff. Callers that need both must use
+    /// this rather than `diff_repo` + `diff_lines_repo`, which would
+    /// walk the tree twice.
+    ///
+    /// `lines` is `None` when the diff could not be computed (missing
+    /// mirror, bad SHA) and the caller must fall back to whole-file
+    /// attribution. A changed file with no hunks (delete, rename, mode
+    /// change) simply has no entry in `lines` — also "unknown" to the
+    /// caller, which keeps the fallback sound.
+    pub fn diff_repo_with_lines(
+        &self,
+        repo: &str,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> (RepoDiffResult, Option<ChangedLines>) {
         if !base_sha.is_empty() && base_sha == head_sha {
-            return RepoDiffResult::Unchanged;
+            return (RepoDiffResult::Unchanged, Some(ChangedLines::new()));
         }
         let r = match self.repo(repo) {
             Some(r) => r,
             None => {
-                return RepoDiffResult::Unavailable(format!("git mirror missing for repo {repo}"));
+                return (
+                    RepoDiffResult::Unavailable(format!("git mirror missing for repo {repo}")),
+                    None,
+                );
             }
         };
-        match self.diff_impl(&r, base_sha, head_sha) {
-            Ok(files) => {
-                if files.is_empty() {
+        match self.diff_full_impl(&r, base_sha, head_sha) {
+            Ok((files, lines)) => {
+                let res = if files.is_empty() {
                     RepoDiffResult::Unchanged
                 } else {
                     RepoDiffResult::Changed(files)
-                }
+                };
+                (res, Some(lines))
             }
-            Err(e) => RepoDiffResult::Unavailable(format!("git error diffing repo {repo}: {e}")),
+            Err(e) => (
+                RepoDiffResult::Unavailable(format!("git error diffing repo {repo}: {e}")),
+                None,
+            ),
         }
     }
 
-    fn diff_impl(
+    /// Compute tri-state diff for a single repository.
+    pub fn diff_repo(&self, repo: &str, base_sha: &str, head_sha: &str) -> RepoDiffResult {
+        self.diff_repo_with_lines(repo, base_sha, head_sha).0
+    }
+
+    /// Compute changed line ranges for a single repository: each
+    /// changed file maps to merged `[start, end]` spans of the lines
+    /// the diff touched (the *head* side).
+    ///
+    /// Returns `None` when the diff cannot be computed. A changed file
+    /// with no hunks (delete, rename, mode change) simply has no entry
+    /// — the caller treats an absent entry as "unknown" and falls back
+    /// to whole-file attribution, which keeps the fallback sound.
+    pub fn diff_lines_repo(
+        &self,
+        repo: &str,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> Option<ChangedLines> {
+        self.diff_repo_with_lines(repo, base_sha, head_sha).1
+    }
+
+    fn diff_full_impl(
         &self,
         r: &Repository,
         base_sha: &str,
         head_sha: &str,
-    ) -> Result<BTreeSet<String>, git2::Error> {
+    ) -> Result<(BTreeSet<String>, ChangedLines), git2::Error> {
         let base_tree = lookup_tree(r, base_sha)?;
         let head_tree = lookup_tree(r, head_sha)?;
         let mut opts = DiffOptions::new();
         opts.include_typechange(true);
         let diff = r.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))?;
-        let mut out: BTreeSet<String> = BTreeSet::new();
-        diff.print(DiffFormat::NameOnly, |_delta, _hunk, line| {
-            let path = String::from_utf8_lossy(line.content()).trim().to_string();
-            if !path.is_empty() {
-                out.insert(path);
-            }
-            true
-        })?;
-        Ok(out)
+
+        let mut files: BTreeSet<String> = BTreeSet::new();
+        let mut per_file: ChangedLines = ChangedLines::new();
+        diff.foreach(
+            &mut |delta, _| {
+                for p in [delta.new_file().path(), delta.old_file().path()]
+                    .into_iter()
+                    .flatten()
+                {
+                    files.insert(p.to_string_lossy().to_string());
+                }
+                true
+            },
+            None,
+            // The hunk callback has to be present for the line callback
+            // to fire; it has nothing to add.
+            Some(&mut |_delta, _hunk| true),
+            Some(&mut |delta, _hunk, line| {
+                // Only the lines the diff actually touched. A hunk's
+                // line count includes its context, so taking the hunk
+                // range wholesale would implicate every sibling site
+                // that happens to sit near an edit.
+                let touched = matches!(
+                    line.origin_value(),
+                    git2::DiffLineType::Addition | git2::DiffLineType::Deletion
+                );
+                if touched {
+                    // Attribute against the HEAD side where possible so
+                    // the spans line up with head-side anchors; fall
+                    // back to the old number for pure deletions.
+                    let Some(no) = line.new_lineno().or(line.old_lineno()) else {
+                        return true;
+                    };
+                    let path = delta
+                        .new_file()
+                        .path()
+                        .or_else(|| delta.old_file().path())
+                        .map(|p| p.to_string_lossy().to_string());
+                    if let Some(path) = path {
+                        per_file.entry(path).or_default().push((no, no));
+                    }
+                }
+                true
+            }),
+        )?;
+
+        for spans in per_file.values_mut() {
+            merge_spans(spans);
+        }
+        Ok((files, per_file))
     }
 
     /// Pre-fetch a repo's mirror (so the lazy open happens up
@@ -174,6 +258,21 @@ impl MirrorChangedFiles {
 
 fn mirror_path(data_dir: &Path, repo: &str) -> PathBuf {
     data_dir.join("mirrors").join(format!("{repo}.git"))
+}
+
+/// Sort point-spans and fold the adjacent ones together, so a set of
+/// touched lines becomes the smallest set of `[start, end]` ranges
+/// covering them.
+fn merge_spans(spans: &mut Vec<(u32, u32)>) {
+    spans.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (s, e) in spans.drain(..) {
+        match merged.last_mut() {
+            Some(last) if s <= last.1.saturating_add(1) => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    *spans = merged;
 }
 
 fn lookup_tree<'r>(repo: &'r Repository, sha: &str) -> Result<git2::Tree<'r>, git2::Error> {
@@ -241,6 +340,10 @@ impl ChangedFilesSource for RepoScopedChangedFiles {
 /// maps each repo to its tri-state diff outcome.
 pub struct MultiRepoChangedFiles {
     pub by_repo: BTreeMap<String, RepoDiffResult>,
+    /// Per-repo changed line ranges. A repo with no entry, or a file
+    /// with no entry inside one, is "unknown" at that granularity and
+    /// the caller falls back to whole-file attribution.
+    pub line_ranges: BTreeMap<String, ChangedLines>,
 }
 
 impl MultiRepoChangedFiles {
@@ -266,7 +369,10 @@ impl MultiRepoChangedFiles {
                 (repo, res)
             })
             .collect();
-        Self { by_repo: mapped }
+        Self {
+            by_repo: mapped,
+            line_ranges: BTreeMap::new(),
+        }
     }
 }
 
@@ -281,6 +387,18 @@ impl ChangedFilesSource for MultiRepoChangedFiles {
             }
         }
         out
+    }
+
+    /// One repo's changed spans. Only computed when that repo
+    /// contributed some — otherwise the caller falls back to whole-file
+    /// attribution, which is the sound default.
+    fn changed_line_ranges_for_repo(
+        &self,
+        repo: &str,
+        _base: &str,
+        _head: &str,
+    ) -> Option<ChangedLines> {
+        self.line_ranges.get(repo).cloned()
     }
 
     fn changed_files_for_repo(&self, repo: &str, _base: &str, _head: &str) -> RepoDiffResult {
@@ -385,6 +503,87 @@ mod tests {
         assert!(
             same.is_empty(),
             "expected no diff for identical SHAs: {same:?}"
+        );
+    }
+
+    /// Changed line spans are what let a change inside a shared file be
+    /// attributed to the site it touched. A whole-file "it changed" is
+    /// not enough to distinguish a routing-table edit from a sibling
+    /// handler's edit.
+    #[test]
+    fn mirror_changed_files_reports_changed_line_spans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("src");
+        let mirror = tmp.path().join("mirrors").join("src.git");
+        let (base, head, path) =
+            init_repo_with_history(&work, &[("a.txt", "hello\n"), ("b.txt", "world\n")]);
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        setup_mirror(&work, &mirror);
+        let src = MirrorChangedFiles::new(tmp.path());
+
+        let ranges = src
+            .diff_lines_repo("src", &base, &head)
+            .expect("line ranges should compute when the diff succeeds");
+        let spans = ranges
+            .get(&path)
+            .unwrap_or_else(|| panic!("no spans for {path}: {ranges:?}"));
+        assert!(
+            spans.contains(&(1, 1)),
+            "the edit rewrote line 1 of {path}, expected (1,1) in {spans:?}"
+        );
+        // Identical SHAs: nothing changed, empty map (not None — the
+        // diff succeeded and found nothing).
+        let same = src
+            .diff_lines_repo("src", &base, &base)
+            .expect("identical SHAs still compute");
+        assert!(same.is_empty(), "expected no spans, got {same:?}");
+        // Missing mirror: `None`, i.e. unknown — the caller must fall
+        // back to whole-file attribution rather than silence.
+        assert!(src.diff_lines_repo("missing", &base, &head).is_none());
+    }
+
+    /// The span must cover only the lines the diff *touched*, not the
+    /// whole hunk. A hunk's line count includes its context, so
+    /// `hunk.new_lines()` gives a multi-line span for a one-line edit
+    /// and implicates every sibling site near it — which silently
+    /// narrowed attribution until it was caught end-to-end in T1's
+    /// `s6-rename-path`. Pinned here so a fixture change cannot
+    /// unpin it.
+    #[test]
+    fn changed_line_spans_exclude_the_hunks_context_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("src");
+        let mirror = tmp.path().join("mirrors").join("src.git");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&["init", "-q", "-b", "main"], &work);
+        git(&["config", "user.email", "test@lain"], &work);
+        git(&["config", "user.name", "lain"], &work);
+        // Seven lines so the edit is interior and the hunk carries
+        // context on both sides.
+        let before = "a\nb\nc\nd\ne\nf\ng\n";
+        std::fs::write(work.join("a.txt"), before).unwrap();
+        git(&["add", "-A"], &work);
+        git(&["commit", "--quiet", "-m", "init"], &work);
+        let base = git_stdout(&["rev-parse", "HEAD"], &work);
+
+        let after = "a\nb\nc\nD\ne\nf\ng\n"; // line 4 only
+        std::fs::write(work.join("a.txt"), after).unwrap();
+        git(&["add", "-A"], &work);
+        git(&["commit", "--quiet", "-m", "edit"], &work);
+        let head = git_stdout(&["rev-parse", "HEAD"], &work);
+
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        setup_mirror(&work, &mirror);
+        let src = MirrorChangedFiles::new(tmp.path());
+
+        let ranges = src
+            .diff_lines_repo("src", &base, &head)
+            .expect("line ranges should compute");
+        assert_eq!(
+            ranges.get("a.txt"),
+            Some(&vec![(4, 4)]),
+            "only line 4 changed — the hunk's context lines (2,3,5,6) must \
+             not be counted as changed: {ranges:?}"
         );
     }
 

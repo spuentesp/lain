@@ -415,10 +415,13 @@ mod indexed_flag_tests {
             !NodeType::Resource.is_indexed(),
             "Resource has no producer in this codebase"
         );
+        // `PayloadSchema` is parsed by `payload_schema.rs` but no sensor
+        // mints the Topic → Schema edge yet, so advertising it would make
+        // `describe_schema` promise an edge clients can never observe.
         for e in [
-            EdgeType::PayloadSchema,
             EdgeType::Imports,
             EdgeType::DeployedTo,
+            EdgeType::PayloadSchema,
         ] {
             assert!(!e.is_indexed(), "{e} has no producer in this codebase");
         }

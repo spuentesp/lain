@@ -555,7 +555,7 @@ impl FederatedIndex {
         let mut contract_ids: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
         for n in &batch_nodes {
-            if n.contract.is_some() {
+            if !n.contract.is_empty() {
                 contract_ids.insert(n.id.clone());
             }
         }
@@ -1208,6 +1208,7 @@ impl FederatedIndex {
                     EdgeType::HasField
                         | EdgeType::RequestSchema
                         | EdgeType::ResponseSchema
+                        | EdgeType::PayloadSchema
                         | EdgeType::ReadsFrom
                 )
             })

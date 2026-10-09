@@ -40,7 +40,7 @@ use crate::federation::contracts::model::{
     ContractFact, HostPart, RpcConsumerFact, RpcSystem, SourceSite,
 };
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{GraphEdge, GraphNode, RepoNamespace};
 use crate::server::sensors::util::compose_service_name;
 use std::path::Path;
 
@@ -102,35 +102,40 @@ pub fn scan_workspace_grpc_consumer(
         let graph_path_str = graph_path(root, &path);
         let calls = detect_stub_calls(&content, &ext, &graph_path_str);
         for call in calls {
-            let id_name = format!("rpc-call:{}:{}", call.service, call.method);
-            let id = GraphNode::generate_id(
-                &NodeType::Function,
+            let id_name = format!(
+                "{}{}:{}",
+                crate::server::sensors::util::RPC_CALL_PREFIX,
+                call.service,
+                call.method
+            );
+            let mut node = crate::server::sensors::util::synthetic_site_node(
+                id_name,
                 &call.site.path,
-                &id_name,
-                Some(call.site.line),
+                call.site.line,
                 namespace,
             );
-            let mut node =
-                GraphNode::new(NodeType::Function, id_name.clone(), call.site.path.clone());
-            node.id = id;
-            node.line_start = Some(call.site.line);
-            node.line_end = Some(call.site.line);
             let composed_service = compose_service_name(&call.package, &call.service);
-            node.contract = Some(ContractFact::RpcConsumer(RpcConsumerFact {
+            node.contract = vec![ContractFact::RpcConsumer(RpcConsumerFact {
                 system: RpcSystem::Grpc,
                 service: composed_service,
                 method: call.method.clone(),
                 channel_target: call.channel_target.clone(),
                 channel_host_part: call.channel_host_part.clone(),
-            }));
+            })];
             all_nodes.push(node);
             total += 1;
         }
     }
-    if !all_nodes.is_empty() {
-        let _ =
-            graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &[] as &[GraphEdge]);
-    }
+    // Replace unconditionally. A scan that finds nothing must still
+    // retract what a previous scan emitted — this guard used to skip
+    // the only call that retracts, so deleting the last call site from
+    // a repo left the old nodes forever. `sql_sensor` has always done
+    // this unconditionally.
+    graph.replace_sensor_output(
+        SensorOwner::GrpcConsumerSensor,
+        &all_nodes,
+        &[] as &[GraphEdge],
+    )?;
     Ok(total)
 }
 

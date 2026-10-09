@@ -182,6 +182,16 @@ path = "src/bin/lain-git-sidecar.rs"
 name = "sidecar_bench"
 path = "src/bin/sidecar_bench.rs"
 
+# Real-repos federation checks. Nested under `tests/real_federation/`
+# and therefore NOT auto-discovered: cargo only picks up `tests/*.rs`
+# and `tests/*/main.rs`. Declared explicitly so the file is compiled
+# (and thus type-checked and linted) and so the command in its header —
+# `cargo test --test metrics -- --ignored` — actually resolves. The
+# tests stay `#[ignore]`d because they clone from the network.
+[[test]]
+name = "metrics"
+path = "tests/real_federation/metrics.rs"
+
 [features]
 # No features defined yet. (The `test-utils` feature was removed in
 # the docs/dead-code sweep — the only thing it gated was a
