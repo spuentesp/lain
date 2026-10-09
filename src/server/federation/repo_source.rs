@@ -368,7 +368,10 @@ impl RepoSource for ShallowCloneSource {
 
 /// Back-compat source for today's single-workspace mode. The workspace
 /// directory already contains a checkout on disk; the file watcher handles
-/// live updates, so `fetch` is a no-op and the source is always fresh.
+/// live updates, so `fetch` is a no-op here. The contract layer does not
+/// read the working tree — it reads `<data_dir>/mirrors/<repo>.git`, and
+/// that mirror is refreshed at ref resolution (`contracts/mirrors.rs`),
+/// so workspace_dir sources track committed state there too.
 pub struct WorkspaceDirSource {
     repo_id: RepoId,
     local_path: PathBuf,
