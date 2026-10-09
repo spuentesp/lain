@@ -34,7 +34,7 @@ use crate::federation::contracts::config::RoutePrefix;
 use crate::federation::contracts::index::{
     BoundField, ConsumerTarget, ContractIndex, Endpoint, ServiceInfo, UnresolvedReason,
 };
-use crate::federation::contracts::model::{EntryKind, ProviderOrigin};
+use crate::federation::contracts::model::ProviderOrigin;
 use crate::federation::contracts::snapshots::RepoSnapshotState;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::GraphBackend;
@@ -919,16 +919,6 @@ fn _bound_field_json(b: &BoundField) -> Value {
         "endpoint": {"service": b.endpoint.0.0, "key": b.endpoint.1.to_string()},
         "confidence": b.confidence,
     })
-}
-
-#[allow(dead_code)]
-fn _entry_kind_display(k: EntryKind) -> &'static str {
-    match k {
-        EntryKind::HttpHandler => "http_handler",
-        EntryKind::Scheduled => "scheduled",
-        EntryKind::Cli => "cli",
-        EntryKind::Main => "main",
-    }
 }
 
 #[cfg(test)]

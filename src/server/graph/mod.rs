@@ -159,6 +159,12 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
                 // `openapi.json` / `swagger.json`, and routing those to
                 // EventSensor makes `event_sensor`'s
                 // `replace_sensor_output` retract them on every scan.
+                //
+                // NOTE: no sensor emits these today — `parse_payload_file`,
+                // which would have fed them, had no callers and was
+                // removed. The arm is kept because a future emitter is
+                // plausible and the routing is decided here; do not read
+                // it as live coverage.
                 Some(SensorOwner::EventSensor)
             } else {
                 Some(SensorOwner::OpenApiSensor)

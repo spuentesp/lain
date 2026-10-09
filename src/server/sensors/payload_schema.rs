@@ -808,24 +808,6 @@ fn classify_proto_type(name: &str) -> TypeDesc {
     }
 }
 
-/// Parse any supported schema file into payload schemas.
-pub fn parse_payload_file(content: &str, ext: &str) -> Vec<ParsedPayloadSchema> {
-    match ext {
-        "avsc" => parse_avro_schema(content).into_iter().collect(),
-        "json" => {
-            if let Some(avro) = parse_avro_schema(content) {
-                vec![avro]
-            } else if let Some(js) = parse_json_schema(content) {
-                vec![js]
-            } else {
-                Vec::new()
-            }
-        }
-        "proto" => parse_proto_messages(content),
-        _ => Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

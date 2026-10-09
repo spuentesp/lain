@@ -95,7 +95,6 @@ pub struct FieldRead {
     pub exact: bool,
     pub path: String,
     pub line: u32,
-    pub reader_id: String,
 }
 
 /// One emission produced by `detect_reads`. Public so tests can
@@ -795,7 +794,6 @@ fn collect_pattern_reads<'a>(
                     exact: true,
                     path: file_path.to_string(),
                     line,
-                    reader_id: "self".to_string(),
                 });
             }
             "pair" => {
@@ -817,7 +815,6 @@ fn collect_pattern_reads<'a>(
                                 exact: true,
                                 path: file_path.to_string(),
                                 line,
-                                reader_id: "self".to_string(),
                             });
                         } else {
                             collect_pattern_reads(v, src, &JsonPath(chain), reads, file_path, line);
@@ -834,7 +831,6 @@ fn collect_pattern_reads<'a>(
                     exact: true,
                     path: file_path.to_string(),
                     line,
-                    reader_id: "self".to_string(),
                 });
             }
             // Sequence destructuring (`[a, [b]] = x`) — the chain
@@ -1107,7 +1103,6 @@ fn handle_subscript<'a>(
             exact: true,
             path: file_path.to_string(),
             line,
-            reader_id: "self".to_string(),
         });
     }
 }
@@ -1191,7 +1186,6 @@ fn handle_attribute<'a>(
             exact: true,
             path: file_path.to_string(),
             line,
-            reader_id: "self".to_string(),
         });
         let _ = escapes;
     }
@@ -1258,7 +1252,6 @@ fn handle_python_in<'a>(
             exact: true,
             path: file_path.to_string(),
             line,
-            reader_id: "self".to_string(),
         });
     } else {
         escapes.insert(Escape::Stored);
@@ -1392,7 +1385,6 @@ fn handle_python_dict_pattern(
                             exact: true,
                             path: file_path.to_string(),
                             line,
-                            reader_id: "self".to_string(),
                         });
                     }
                 }
@@ -1429,7 +1421,6 @@ fn handle_python_dict_pattern(
                         exact: true,
                         path: file_path.to_string(),
                         line,
-                        reader_id: "self".to_string(),
                     });
                 }
                 // Recurse into the value-side case_pattern for any
@@ -1842,7 +1833,6 @@ fn handle_tsjs_in(
             exact: true,
             path: file_path.to_string(),
             line,
-            reader_id: "self".to_string(),
         });
     } else {
         escapes.insert(Escape::Stored);
@@ -1886,7 +1876,6 @@ fn handle_tsjs_object_pattern(
                         exact: true,
                         path: file_path.to_string(),
                         line,
-                        reader_id: "self".to_string(),
                     });
                 }
             }
@@ -2886,7 +2875,6 @@ fn handle_csharp_subscript(
         exact: true,
         path: file_path.to_string(),
         line,
-        reader_id: "self".to_string(),
     });
 }
 
@@ -3074,7 +3062,6 @@ fn handle_ruby_call(
                 exact: true,
                 path: file_path.to_string(),
                 line,
-                reader_id: "self".to_string(),
             });
         }
     }
@@ -5146,7 +5133,6 @@ mod tests {
             exact: true,
             path: "src/x.py".into(),
             line: 5,
-            reader_id: "self".into(),
         };
         assert_eq!(r.chain.to_string(), "customer.id");
         assert!(r.exact);
@@ -5180,7 +5166,6 @@ mod tests {
                 exact: true,
                 path: "src/x.py".into(),
                 line: 5,
-                reader_id: "self".into(),
             }],
             escapes: BTreeSet::new(),
             reads_complete: true,
@@ -6291,7 +6276,6 @@ async function fetch_data() { return await fetch(\"/a\"); }
                 exact: true,
                 path: "src/main.py".into(),
                 line: 3, // module level: no function covers line 3
-                reader_id: "self".into(),
             }],
             escapes: BTreeSet::new(),
             reads_complete: true,
