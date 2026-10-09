@@ -409,14 +409,19 @@ pub enum ChangeKind {
 pub trait ChangedFilesSource {
     fn changed_files(&self, base: &str, head: &str) -> BTreeSet<String>;
 
-    /// Changed line ranges per file, when the source can compute them.
+    /// Changed line ranges **within one repo**: `path -> merged
+    /// [start, end]` spans. `None` means "unknown" and the caller falls
+    /// back to whole-file attribution. A changed path **absent** from the
+    /// map is also treated as unknown.
     ///
-    /// `None` means "unknown" and the caller falls back to whole-file
-    /// attribution. `Some(map)` gives merged `[start, end]` spans per
-    /// file — a changed file **absent** from the map is also treated as
-    /// unknown, so a source that can compute only some files stays
-    /// sound.
-    fn changed_line_ranges(&self, _base: &str, _head: &str) -> Option<ChangedLines> {
+    /// Scoped to a repo on purpose: two services both having
+    /// `src/main.rs` must not borrow each other's line numbers.
+    fn changed_line_ranges_for_repo(
+        &self,
+        _repo: &str,
+        _base: &str,
+        _head: &str,
+    ) -> Option<ChangedLines> {
         None
     }
 
@@ -568,22 +573,25 @@ pub fn diff_contracts(
         });
     }
 
-    // Which sites each handler file hosts, per endpoint: `file ->
-    // endpoint -> anchor lines`. An anchor is the route node's line,
-    // and only counts when the route node lives in the handler's own
-    // file (a routing table). When they differ — handler in
-    // `handlers.rs`, route in `routes.rs` — there is no line evidence
-    // for that file and the caller falls back to whole-file
-    // attribution rather than guessing.
-    let mut handler_file_anchors: BTreeMap<String, BTreeMap<EndpointId, BTreeSet<u32>>> =
+    // Which sites each handler file hosts, per endpoint, keyed by
+    // `(repo, path) -> endpoint -> anchor lines`.
+    //
+    // An anchor is the route node's line, and only counts when the route
+    // node lives in the handler's own file (a routing table) and the id
+    // actually carries a line. `GlobalId::new` writes `0` when the line
+    // is unknown (`repo_id.rs`), so `0` is treated as "no anchor".
+    //
+    // Repo-keyed on purpose: two services both having `src/main.rs` must
+    // not borrow each other's line numbers.
+    let mut handler_file_anchors: BTreeMap<(String, String), BTreeMap<EndpointId, BTreeSet<u32>>> =
         BTreeMap::new();
     for (eid, def) in base.endpoints.iter().chain(head.endpoints.iter()) {
         for p in &def.providers {
             if let Some(h) = p.handler.as_ref() {
                 if p.node_id.path().as_deref() == Some(h.path.as_str()) {
-                    if let Some(line) = p.node_id.line_start() {
+                    if let Some(line) = p.node_id.line_start().filter(|l| *l != 0) {
                         handler_file_anchors
-                            .entry(h.path.clone())
+                            .entry((p.node_id.repo_id().to_string(), h.path.clone()))
                             .or_default()
                             .entry(eid.clone())
                             .or_default()
@@ -650,20 +658,26 @@ pub fn diff_contracts(
         // also contains the schema node's path (where field metadata
         // lives), which would make an edit to `openapi.yaml` for one
         // endpoint trip the rule on every other endpoint in that file.
-        let handler_files: BTreeSet<&String> = base_def
+        // Keyed `(repo, path)`: two services both having `src/main.rs`
+        // must not share line numbers.
+        let handler_files: BTreeSet<(String, String)> = base_def
             .providers
             .iter()
             .chain(head_def.providers.iter())
-            .filter_map(|p| p.handler.as_ref().map(|h| &h.path))
+            .filter_map(|p| {
+                p.handler
+                    .as_ref()
+                    .map(|h| (p.node_id.repo_id().to_string(), h.path.clone()))
+            })
             .collect();
         let base_sha = "";
         let head_sha = "";
         let provider_repos = endpoint_provider_repos(base_def, head_def);
 
         let mut source_changed = false;
-        let mut all_changed: BTreeSet<String> = BTreeSet::new();
+        let mut all_changed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         {
-            let mut note = |changed: &std::collections::BTreeSet<String>| {
+            let mut note = |repo: &str, changed: &std::collections::BTreeSet<String>| {
                 if base_def
                     .source_files
                     .iter()
@@ -672,10 +686,13 @@ pub fn diff_contracts(
                 {
                     source_changed = true;
                 }
-                all_changed.extend(changed.iter().cloned());
+                all_changed
+                    .entry(repo.to_string())
+                    .or_default()
+                    .extend(changed.iter().cloned());
             };
             if provider_repos.is_empty() {
-                note(&changed_files.changed_files(base_sha, head_sha));
+                note("", &changed_files.changed_files(base_sha, head_sha));
             } else {
                 for repo in &provider_repos {
                     match changed_files.changed_files_for_repo(repo, base_sha, head_sha) {
@@ -684,7 +701,7 @@ pub fn diff_contracts(
                         // repository as unreviewed and prevents a
                         // NoKnownImpact conclusion.
                         RepoDiffResult::Unavailable(_) => {}
-                        RepoDiffResult::Changed(ref changed) => note(changed),
+                        RepoDiffResult::Changed(ref changed) => note(repo, changed),
                         RepoDiffResult::Unchanged => {}
                     }
                 }
@@ -692,36 +709,59 @@ pub fn diff_contracts(
         }
 
         // Attribute an edit inside a shared handler file to the sites it
-        // actually touched. Whole-file attribution (every claimant) is
-        // the sound default; line spans are used to narrow it only when
-        // they can *prove* a site untouched, and never to silence
-        // everyone.
-        let line_ranges = changed_files.changed_line_ranges(base_sha, head_sha);
-        let handler_changed = handler_files.iter().any(|f| {
-            if !all_changed.contains(*f) {
+        // actually touched.
+        //
+        // The sound default is whole-file: every claimant is implicated.
+        // Spans narrow that **only** when they prove a claimant untouched
+        // — and an anchor is a single route line, not the boundary of a
+        // claimant's code, so "my anchor was not hit" is not proof.
+        // Narrowing happens only when *every* changed line is somebody's
+        // anchor (a pure site edit); any unexplained line (a body, a
+        // helper) means the edit cannot be attributed and everyone is
+        // implicated. A claimant with no anchor at all can never be ruled
+        // out.
+        let handler_changed = handler_files.iter().any(|(repo, f)| {
+            if !all_changed
+                .get(repo)
+                .map(|s| s.contains(f))
+                .unwrap_or(false)
+            {
                 return false;
             }
-            let Some(spans) = line_ranges.as_ref().and_then(|r| r.get(f.as_str())) else {
+            let Some(spans) = changed_files
+                .changed_line_ranges_for_repo(repo, base_sha, head_sha)
+                .and_then(|r| r.get(f.as_str()).cloned())
+            else {
                 // Unknown granularity for this file → whole-file.
                 return true;
             };
-            let hits = |lines: &BTreeSet<u32>| {
-                lines
-                    .iter()
-                    .any(|l| spans.iter().any(|(s, e)| *l >= *s && *l <= *e))
+            let by_eid = handler_file_anchors.get(&(repo.clone(), f.clone()));
+            let Some(mine) = by_eid.and_then(|m| m.get(head_id)) else {
+                // This claimant has no anchor here, so nothing rules it
+                // out. Implicate it.
+                return true;
             };
-            let by_eid = handler_file_anchors.get(f.as_str());
-            let matched_any = by_eid.map(|m| m.values().any(hits)).unwrap_or(false);
-            if !matched_any {
-                // The edit touched this file but no claimed site — a
-                // body edit outside any anchor. Fall back to whole-file:
-                // silence is the dangerous direction.
+            let anchor_points: BTreeSet<u32> = by_eid
+                .map(|m| m.values().flatten().copied().collect())
+                .unwrap_or_default();
+            // Cheap reject before walking lines: a span set wider than
+            // the anchor set cannot be covered by it.
+            let changed_lines: u64 = spans.iter().map(|(s, e)| u64::from(*e - *s) + 1).sum();
+            if changed_lines > anchor_points.len() as u64 {
                 return true;
             }
-            by_eid
-                .and_then(|m| m.get(head_id))
-                .map(hits)
-                .unwrap_or(false)
+            if !spans
+                .iter()
+                .all(|(s, e)| (*s..=*e).all(|l| anchor_points.contains(&l)))
+            {
+                // Some changed line belongs to nobody's anchor → the
+                // edit cannot be attributed. Whole-file.
+                return true;
+            }
+            // Every changed line is a known site: implicate only the
+            // claimants whose site was actually hit.
+            mine.iter()
+                .any(|l| spans.iter().any(|(s, e)| *l >= *s && *l <= *e))
         });
 
         if source_changed && !base_def.has_schema && !head_def.has_schema {

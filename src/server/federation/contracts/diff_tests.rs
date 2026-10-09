@@ -3539,10 +3539,11 @@ fn schema_less_endpoint_still_reports_changed_without_schema() {
 /// reports `PathChanged`; adding `HandlerChanged` for the same edit
 /// counts it twice.
 ///
-/// Note the current `owners.len() == 1` gate suppresses this case
-/// *accidentally* — a rename yields two distinct `EndpointId`s, so the
-/// file looks shared. That is not the reason to be silent here, and the
-/// gate must not be what stands between us and the double report.
+/// Note this case was once suppressed *accidentally* by the old
+/// `owners.len() == 1` attribution gate (a rename yields two distinct
+/// `EndpointId`s, so the file looked shared). That gate is gone, so the
+/// `explained` suppression below is the only thing standing between us
+/// and the double report — which is what this test is for.
 #[test]
 fn handler_change_alongside_a_path_rename_is_not_double_reported() {
     // The `s6-rename-path` shape: the route moved
@@ -3638,6 +3639,270 @@ fn handler_change_alongside_a_path_rename_is_not_double_reported() {
 /// shared handler file changed, only the endpoint whose site sits in
 /// those lines is implicated. This is what stops a routing-table edit
 /// for one endpoint from becoming a lead against its siblings.
+/// Build a `ContractIndex` of schema-bearing endpoints whose handlers
+/// all live in one file — the shared-routing-table shape. Each entry is
+/// `(template, route_name, handler_name, route_line)`.
+fn shared_handler_file_index(
+    handler_path: &str,
+    sites: &[(&str, &str, &str, u32)],
+) -> ContractIndex {
+    let mut index = ContractIndex::default();
+    for (template, route_name, handler_name, line) in sites {
+        let endpoint = endpoint_id("orders", HttpMethod::Get, template);
+        let mut fields = BTreeMap::new();
+        fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            Direction::Response,
+            EndpointSchema {
+                node_id: id("orders", "Schema", "openapi.yaml", route_name, 7),
+                fields,
+            },
+        );
+        index.endpoints.insert(
+            endpoint.clone(),
+            Endpoint {
+                id: endpoint.clone(),
+                method: HttpMethod::Get,
+                template: (*template).into(),
+                providers: vec![EndpointProvider {
+                    node_id: id("orders", "HttpRoute", handler_path, route_name, *line),
+                    origin: ProviderOrigin::Code,
+                    handler: Some(SymbolKey {
+                        repo: repo("orders"),
+                        path: handler_path.into(),
+                        container: None,
+                        name: (*handler_name).into(),
+                    }),
+                    operation_id: None,
+                }],
+                schemas,
+            },
+        );
+    }
+    index
+}
+
+/// A file-anchored source: `changed` is the changed path set for the
+/// named repo, `spans` its changed line ranges.
+fn anchored_source(
+    repo_name: &str,
+    changed: &[&str],
+    spans: &[(&str, Vec<(u32, u32)>)],
+) -> crate::federation::contracts::changed_files::MultiRepoChangedFiles {
+    use crate::federation::contracts::changed_files::{MultiRepoChangedFiles, RepoDiffResult};
+    let mut by_repo = BTreeMap::new();
+    by_repo.insert(
+        repo_name.to_string(),
+        if changed.is_empty() {
+            RepoDiffResult::Unchanged
+        } else {
+            RepoDiffResult::Changed(
+                changed
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect::<BTreeSet<_>>(),
+            )
+        },
+    );
+    let mut per_file = crate::federation::contracts::diff::ChangedLines::new();
+    for (f, s) in spans {
+        per_file.insert((*f).to_string(), s.clone());
+    }
+    let mut line_ranges = BTreeMap::new();
+    line_ranges.insert(repo_name.to_string(), per_file);
+    MultiRepoChangedFiles {
+        by_repo,
+        line_ranges,
+    }
+}
+
+/// A mixed edit — one line that *is* a claimant's site, and one that is
+/// not (a handler body further down the same file). Whole-file
+/// attribution must be used: the anchor of the second claimant is not
+/// the boundary of its code, so "anchor not hit" does not prove it was
+/// untouched.
+#[test]
+fn a_mixed_site_and_body_edit_falls_back_to_whole_file() {
+    let index = shared_handler_file_index(
+        "src/main.rs",
+        &[
+            ("/api/orders/{}", "GET /api/orders/:id", "get_order", 12),
+            ("/api/orders/me", "GET /api/orders/me", "get_me", 18),
+        ],
+    );
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+
+    // Line 12 = get_order's route site; line 40 = get_me's body, which
+    // is not anybody's anchor.
+    let src = anchored_source(
+        "orders",
+        &["src/main.rs"],
+        &[("src/main.rs", vec![(12, 12), (40, 40)])],
+    );
+
+    let changes = diff_contracts(&base, &head, &src);
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        2,
+        "a body line nobody anchors cannot rule any claimant out — both \
+         must be implicated, else get_me goes silent while its code moved: \
+         {changes:?}"
+    );
+}
+
+/// A claimant with no anchor in the changed file (its route node lives
+/// elsewhere) can never be ruled out. Hitting some *other* claimant's
+/// anchor must not silence it.
+#[test]
+fn a_claimant_without_an_anchor_is_never_silenced() {
+    let mut index = shared_handler_file_index(
+        "src/main.rs",
+        &[("/api/orders/{}", "GET /api/orders/:id", "get_order", 12)],
+    );
+    // Second endpoint: handler claims `src/main.rs`, but its route node
+    // is in `src/routes.rs` — so it contributes no anchor.
+    let endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/me");
+    let mut fields = BTreeMap::new();
+    fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(
+        Direction::Response,
+        EndpointSchema {
+            node_id: id("orders", "Schema", "openapi.yaml", "GET /api/orders/me", 7),
+            fields,
+        },
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/api/orders/me".into(),
+            providers: vec![EndpointProvider {
+                node_id: id(
+                    "orders",
+                    "HttpRoute",
+                    "src/routes.rs",
+                    "GET /api/orders/me",
+                    18,
+                ),
+                origin: ProviderOrigin::Code,
+                handler: Some(SymbolKey {
+                    repo: repo("orders"),
+                    path: "src/main.rs".into(),
+                    container: None,
+                    name: "get_me".into(),
+                }),
+                operation_id: None,
+            }],
+            schemas,
+        },
+    );
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+
+    // Only get_order's site changed.
+    let src = anchored_source(
+        "orders",
+        &["src/main.rs"],
+        &[("src/main.rs", vec![(12, 12)])],
+    );
+
+    let changes = diff_contracts(&base, &head, &src);
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        2,
+        "get_me has no anchor to rule it out, so it must stay a lead: {changes:?}"
+    );
+}
+
+/// Two repos each with a `src/main.rs` must not borrow each other's
+/// line numbers. Repo A's body edit at line 18 must not be treated as
+/// "attributed" because repo B happens to have a route site at 18.
+#[test]
+fn handler_anchors_do_not_leak_across_repos() {
+    let mut index = shared_handler_file_index(
+        "src/main.rs",
+        &[("/api/orders/{}", "GET /api/orders/:id", "get_order", 20)],
+    );
+    // Billing's own endpoint, same file name, route site at line 18.
+    let endpoint = endpoint_id("billing", HttpMethod::Get, "/invoices/{}");
+    let mut fields = BTreeMap::new();
+    fields.insert(path(&["id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(
+        Direction::Response,
+        EndpointSchema {
+            node_id: id("billing", "Schema", "openapi.yaml", "GET /invoices/:id", 7),
+            fields,
+        },
+    );
+    index.endpoints.insert(
+        endpoint.clone(),
+        Endpoint {
+            id: endpoint.clone(),
+            method: HttpMethod::Get,
+            template: "/invoices/{}".into(),
+            providers: vec![EndpointProvider {
+                node_id: id(
+                    "billing",
+                    "HttpRoute",
+                    "src/main.rs",
+                    "GET /invoices/:id",
+                    18,
+                ),
+                origin: ProviderOrigin::Code,
+                handler: Some(SymbolKey {
+                    repo: repo("billing"),
+                    path: "src/main.rs".into(),
+                    container: None,
+                    name: "get_invoice".into(),
+                }),
+                operation_id: None,
+            }],
+            schemas,
+        },
+    );
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+
+    // orders' `src/main.rs` line 18 changed — a body line, not a site.
+    let src = anchored_source(
+        "orders",
+        &["src/main.rs"],
+        &[("src/main.rs", vec![(18, 18)])],
+    );
+
+    let changes = diff_contracts(&base, &head, &src);
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        1,
+        "orders' edit must implicate orders' claimant and nothing else — \
+         billing's line 18 is a different file in a different repo: {changes:?}"
+    );
+    assert!(
+        matches!(
+            handler_changes[0].kind,
+            ChangeKind::HandlerChanged { ref endpoint } if endpoint.0 == svc("orders")
+        ),
+        "the lead must be the orders endpoint, got {changes:?}"
+    );
+}
+
 #[test]
 fn handler_change_in_a_shared_file_is_attributed_by_changed_lines() {
     let mut index = ContractIndex::default();

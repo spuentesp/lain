@@ -132,12 +132,15 @@ fn graphql_provider_schemas_survive_a_full_run_all() {
     );
 
     // And the ownership must actually be per-sensor, or the next
-    // `run_all` will clobber again.
+    // `run_all` will clobber again. Owned by the *emitter*
+    // (graphql_provider_sensor), which is the sensor that calls
+    // `replace_sensor_output` — `SensorOwner::GraphqlSensor` is passed
+    // by nobody, so nodes it owned were never retracted.
     for n in nodes_of(&graph, NodeType::Schema) {
         assert_eq!(
             sensor_owner_of(&n),
-            Some(SensorOwner::GraphqlSensor),
-            "Schema node {} should be owned by the GraphQL sensor family",
+            Some(SensorOwner::GraphqlProviderSensor),
+            "Schema node {} should be owned by the sensor that emits it",
             n.id
         );
     }
@@ -360,6 +363,47 @@ service Orders {
     assert_eq!(
         after, 0,
         "a message deleted from a .proto must have its Schema retracted on rescan"
+    );
+    let _ = fs::remove_dir_all(&ws);
+}
+
+/// The same staleness for `.graphql`: `graphql_provider_sensor` emits
+/// `Schema`/`Field` nodes but `sensor_owner_of` mapped them to
+/// `SensorOwner::GraphqlSensor`, which no sensor ever passes to
+/// `replace_sensor_output`. Nothing retracted them — delete a type from
+/// the SDL and its schema stayed forever.
+#[test]
+fn deleting_a_graphql_type_retracts_its_schema() {
+    let ws = workspace("graphql_schema_stale");
+    write(&ws, "schema.graphql", GRAPHQL_SCHEMA);
+    let graph = scan(&ws);
+
+    let before = nodes_of(&graph, NodeType::Schema)
+        .into_iter()
+        .filter(|n| n.name == "Order")
+        .count();
+    assert_eq!(before, 1, "one Order schema expected, got {before}");
+
+    // Delete the type; keep the file (so it is the sensor's own
+    // retraction, not the orphan sweep).
+    write(
+        &ws,
+        "schema.graphql",
+        r#"
+type Query {
+  orders: [ID!]!
+}
+"#,
+    );
+    run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+
+    let after = nodes_of(&graph, NodeType::Schema)
+        .into_iter()
+        .filter(|n| n.name == "Order")
+        .count();
+    assert_eq!(
+        after, 0,
+        "a type deleted from a .graphql must have its Schema retracted on rescan"
     );
     let _ = fs::remove_dir_all(&ws);
 }

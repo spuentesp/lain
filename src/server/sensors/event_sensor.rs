@@ -479,9 +479,8 @@ fn emit_sites(
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut edges: Vec<GraphEdge> = Vec::new();
     let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
-    // De-dupe the consumer-side function nodes we re-emit. We only
-    // need to write the `TopicConsumer` contract fact once per
-    // function.
+    // De-dupe the synthetic per-site nodes: one node (and at most one
+    // `TopicConsumer` fact) per `topic-read:<path>:<line>` site.
     let mut emitted_consumer_facts: BTreeSet<String> = BTreeSet::new();
 
     for site in sites {
@@ -520,19 +519,20 @@ fn emit_sites(
             nodes.push(node);
         }
 
-        // The synthetic per-site node. Two jobs:
+        // The synthetic per-site node. Two jobs, and it is emitted when
+        // either one needs it (the block below):
         //
         // 1. Edge anchor — the `Produces`/`Consumes` edge source when
-        //    no enclosing function is indexed. Must be emitted for
-        //    EVERY site, including producers: `insert_edges_batch`
+        //    no enclosing function is indexed. `insert_edges_batch`
         //    drops an edge whose endpoints aren't in the graph
         //    (`graph/mod.rs:1156`) without failing, so an unmaterialized
         //    source makes the edge vanish rather than error.
-        // 2. Fact carrier for subscription sites (see the block below).
+        // 2. Fact carrier for subscription sites.
         //
-        // It is never `source_id` when a symbol IS indexed — that is
-        // what cost peer sensors their edges before (see
-        // `util::SQL_READ_PREFIX`).
+        // When a symbol IS indexed the edge rides the symbol instead —
+        // that is what kept peer sensors' edges alive (see
+        // `util::SQL_READ_PREFIX`) — and a producer site then needs
+        // neither job, so no node is emitted for it.
         let id_name = format!(
             "{}{graph_path}:{}",
             crate::server::sensors::util::TOPIC_READ_PREFIX,

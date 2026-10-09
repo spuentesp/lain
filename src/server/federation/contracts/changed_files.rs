@@ -367,33 +367,16 @@ impl ChangedFilesSource for MultiRepoChangedFiles {
         out
     }
 
-    /// Merge every repo's ranges into one map. Only computed when at
-    /// least one repo contributed some — otherwise the caller falls
-    /// back to whole-file attribution, which is the sound default.
-    fn changed_line_ranges(&self, _base: &str, _head: &str) -> Option<ChangedLines> {
-        if self.line_ranges.is_empty() {
-            return None;
-        }
-        let mut out = ChangedLines::new();
-        for ranges in self.line_ranges.values() {
-            for (file, spans) in ranges {
-                out.entry(file.clone())
-                    .or_default()
-                    .extend(spans.iter().copied());
-            }
-        }
-        for spans in out.values_mut() {
-            spans.sort_unstable();
-            let mut merged: Vec<(u32, u32)> = Vec::new();
-            for (s, e) in spans.drain(..) {
-                match merged.last_mut() {
-                    Some(last) if s <= last.1.saturating_add(1) => last.1 = last.1.max(e),
-                    _ => merged.push((s, e)),
-                }
-            }
-            *spans = merged;
-        }
-        Some(out)
+    /// One repo's changed spans. Only computed when that repo
+    /// contributed some — otherwise the caller falls back to whole-file
+    /// attribution, which is the sound default.
+    fn changed_line_ranges_for_repo(
+        &self,
+        repo: &str,
+        _base: &str,
+        _head: &str,
+    ) -> Option<ChangedLines> {
+        self.line_ranges.get(repo).cloned()
     }
 
     fn changed_files_for_repo(&self, repo: &str, _base: &str, _head: &str) -> RepoDiffResult {
@@ -536,6 +519,52 @@ mod tests {
         // back to whole-file attribution rather than silence.
         assert!(src.diff_lines_repo("missing", &base, &head).is_none());
     }
+
+    /// The span must cover only the lines the diff *touched*, not the
+    /// whole hunk. A hunk's line count includes its context, so
+    /// `hunk.new_lines()` gives a multi-line span for a one-line edit
+    /// and implicates every sibling site near it — which silently
+    /// narrowed attribution until it was caught end-to-end in T1's
+    /// `s6-rename-path`. Pinned here so a fixture change cannot
+    /// unpin it.
+    #[test]
+    fn changed_line_spans_exclude_the_hunks_context_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("src");
+        let mirror = tmp.path().join("mirrors").join("src.git");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&["init", "-q", "-b", "main"], &work);
+        git(&["config", "user.email", "test@lain"], &work);
+        git(&["config", "user.name", "lain"], &work);
+        // Seven lines so the edit is interior and the hunk carries
+        // context on both sides.
+        let before = "a\nb\nc\nd\ne\nf\ng\n";
+        std::fs::write(work.join("a.txt"), before).unwrap();
+        git(&["add", "-A"], &work);
+        git(&["commit", "--quiet", "-m", "init"], &work);
+        let base = git_stdout(&["rev-parse", "HEAD"], &work);
+
+        let after = "a\nb\nc\nD\ne\nf\ng\n"; // line 4 only
+        std::fs::write(work.join("a.txt"), after).unwrap();
+        git(&["add", "-A"], &work);
+        git(&["commit", "--quiet", "-m", "edit"], &work);
+        let head = git_stdout(&["rev-parse", "HEAD"], &work);
+
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        setup_mirror(&work, &mirror);
+        let src = MirrorChangedFiles::new(tmp.path());
+
+        let ranges = src
+            .diff_lines_repo("src", &base, &head)
+            .expect("line ranges should compute");
+        assert_eq!(
+            ranges.get("a.txt"),
+            Some(&vec![(4, 4)]),
+            "only line 4 changed — the hunk's context lines (2,3,5,6) must \
+             not be counted as changed: {ranges:?}"
+        );
+    }
+
     #[test]
     fn mirror_changed_files_returns_empty_when_mirror_missing() {
         let tmp = tempfile::tempdir().unwrap();

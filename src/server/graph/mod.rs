@@ -66,7 +66,7 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
 /// - `HttpRoute` with `ProviderOrigin::Code` → [`SensorOwner::HttpSensor`]
 /// - `HttpRoute` with `ProviderOrigin::OpenApi` → [`SensorOwner::OpenApiSensor`]
 /// - `Schema`, `Field` → [`SensorOwner::GrpcProviderSensor`] for `.proto`,
-///   [`SensorOwner::GraphqlSensor`] for `.graphql`/`.gql`,
+///   [`SensorOwner::GraphqlProviderSensor`] for `.graphql`/`.gql`,
 ///   [`SensorOwner::EventSensor`] for `.avsc`, else
 ///   [`SensorOwner::OpenApiSensor`] (which owns `openapi.json` too —
 ///   never route `.json` to the event sensor)
@@ -98,16 +98,22 @@ pub enum SensorOwner {
     /// output.
     SqlSensor,
     /// Phase E (spec §8.2): the legacy `proto_sensor` emits bare
-    /// `Module` nodes with no contract fact; those are owned here.
-    /// The three gRPC contract sensors each own their own output —
-    /// see `GrpcProviderSensor` / `GrpcConsumerSensor` /
-    /// `GrpcHandlerLinkSensor`. Sharing one owner made a later
-    /// sensor's `replace_sensor_output` retract an earlier one's
-    /// nodes on every scan.
+    /// `Module` nodes with no contract fact. **Currently unused as an
+    /// owner** — `sensor_owner_of` returns `None` for those nodes, so
+    /// nothing retracts them and a renamed service leaves its old
+    /// `Module` behind. Making them ownable is not a one-line change:
+    /// `grpc_provider_sensor` / `grpc_handler_link_sensor` also emit
+    /// `Module` nodes (the latter carrying an `RpcHandler` fact, which
+    /// the fact arm claims first), so a type-and-path catch-all here
+    /// would take retraction away from the sensor that emitted the
+    /// node. The three gRPC contract sensors each own their own output
+    /// — see `GrpcProviderSensor` / `GrpcConsumerSensor` /
+    /// `GrpcHandlerLinkSensor`.
     ProtoSensor,
     /// Phase E (spec §8.3): legacy `graphql_sensor` output — bare
-    /// `Interface`/`Module` nodes with no contract fact. The three
-    /// GraphQL contract sensors each own their own output.
+    /// `Interface` nodes. Same situation as [`Self::ProtoSensor`]:
+    /// nothing passes this owner to `replace_sensor_output`, so those
+    /// nodes are not retracted.
     GraphqlSensor,
     /// Each protocol sensor owns exactly what it emits. Splitting
     /// these out of the family owners is what makes coexistence
@@ -145,7 +151,11 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
                 // the graph forever when a message was deleted.
                 Some(SensorOwner::GrpcProviderSensor)
             } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
-                Some(SensorOwner::GraphqlSensor)
+                // Same rule for the same reason: `graphql_provider_sensor`
+                // is the emitter, and `SensorOwner::GraphqlSensor` is
+                // never passed to `replace_sensor_output` — so those
+                // nodes were never retracted either.
+                Some(SensorOwner::GraphqlProviderSensor)
             } else if node.path.ends_with(".avsc") {
                 // Avro payload schemas belong to the event/topic
                 // sensor. NOTE: `.json` is deliberately NOT here —
@@ -162,7 +172,7 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
             if node.path.ends_with(".proto") {
                 Some(SensorOwner::GrpcProviderSensor)
             } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
-                Some(SensorOwner::GraphqlSensor)
+                Some(SensorOwner::GraphqlProviderSensor)
             } else if node.path.ends_with(".avsc") {
                 Some(SensorOwner::EventSensor)
             } else {

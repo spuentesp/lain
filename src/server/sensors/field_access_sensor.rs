@@ -5161,9 +5161,16 @@ mod tests {
     /// The old fallback minted the literal `"self"` when there was no
     /// enclosing symbol and no File node.
     #[test]
-    fn every_emitted_edge_has_a_materialized_source() {
+    fn every_emitted_edge_has_materialized_endpoints() {
         let graph = empty_db();
         let ns = RepoNamespace::for_test();
+        // The `HttpClientCall` the reads belong to is owned by another
+        // sensor, so it is already in the graph by the time
+        // `build_emission` runs. Seeded here so both ends are checkable.
+        let mut call = GraphNode::new(NodeType::HttpClientCall, "GET /a".into(), "src/x.py".into());
+        call.id = "call-node-id".into();
+        graph.upsert_node(call).expect("insert call node");
+
         let emission = FieldAccessEmission {
             path: "src/x.py".into(),
             call_id: "call-node-id".into(),
@@ -5187,12 +5194,15 @@ mod tests {
             .chain(graph.get_all_nodes().into_iter().map(|n| n.id))
             .collect();
         for e in &edges {
-            assert!(
-                known.contains(&e.source_id),
-                "ReadsField source {:?} is not a materialized node — \
-                 insert_edges_batch will silently drop this edge",
-                e.source_id
-            );
+            for end in [&e.source_id, &e.target_id] {
+                assert!(
+                    known.contains(end),
+                    "{} {:?} is not a materialized node — insert_edges_batch \
+                     will silently drop this edge",
+                    e.edge_type,
+                    end
+                );
+            }
         }
     }
 

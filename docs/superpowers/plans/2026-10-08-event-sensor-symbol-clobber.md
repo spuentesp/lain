@@ -1,5 +1,20 @@
 # Event-Sensor Symbol Clobber Plan
 
+> **STATUS: DONE (shipped as `adccbf8f..cae035ac`, plus `58b4aa5d`).**
+> This plan has been executed. Do **not** implement it again. The
+> checkboxes are left unchecked to preserve the plan as written, and
+> some step snippets show the *pre-fix* code they were written against —
+> in particular Task 2 Step 3 below, which emits a `TopicConsumer` fact
+> for every `SiteKind` and de-dupes on `source_id`. Re-applying it would
+> reintroduce the producer-emits-consumer defect fixed in `58b4aa5d`
+> ("a producer is not a consumer, and one fact per site"). The shipped
+> form is in `src/server/sensors/event_sensor.rs::emit_sites`. Task 1's
+> claim that the repro test is `#[ignore]`d is also out of date: it is
+> not, and it is green.
+>
+> For agentic workers: this file is now historical reference. If you
+> were asked to execute it, stop and report that it is already done.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop `event_sensor`'s rescan from deleting a peer sensor's edges by moving `TopicConsumer` off the shared symbol node, so `ReadsTable` and every other symbol-incident edge survives `run_all`.
@@ -148,6 +163,14 @@ pub const TOPIC_READ_PREFIX: &str = "topic-read:";
 - [ ] **Step 2: point `sql_sensor` and `event_sensor` at them.** In `sql_sensor.rs` replace the literal `format!("sql-read:{graph_path_str}:{}", site.line)` with `format!("{}{graph_path_str}:{}", crate::server::sensors::util::SQL_READ_PREFIX, site.line)`, and likewise `graph/mod.rs:186`'s `node.name.starts_with("sql-read:")`. Same for `event_sensor`'s new prefix. Six literal sites total (grep `"sql-read:"` and confirm).
 
 - [ ] **Step 3: the emission** in `event_sensor.rs`'s consumer branch. Replace the shared-symbol node with a synthetic one; **keep the `Produces`/`Consumes` edges on `source_id`** so call-chain traversal is unchanged:
+
+> **Do not apply this snippet as written.** It emits a `TopicConsumer`
+> fact for *every* `SiteKind` and de-dupes on `source_id`. The shipped
+> code guards the fact to `Consumes`/`Scheduled` only, de-dupes per
+> site, and emits the synthetic node whenever it is the edge anchor *or*
+> the fact carrier. See `emit_sites` in
+> `src/server/sensors/event_sensor.rs`. It is kept here only to show
+> what was replaced.
 
 ```rust
         if emitted_consumer_facts.insert(source_id.clone()) {
