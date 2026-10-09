@@ -3529,13 +3529,200 @@ fn schema_less_endpoint_still_reports_changed_without_schema() {
     );
 }
 
+/// Pins the *principled* suppression that makes it safe to attribute a
+/// shared-handler change to every claimant: when `PathChanged` /
+/// `MethodChanged` / a schema diff already explains this endpoint,
+/// `HandlerChanged` must not also fire.
+///
+/// `HandlerChanged`'s stated purpose is "schema byte-identical, handler
+/// moved — the case **nothing else** would report". A route rename
+/// reports `PathChanged`; adding `HandlerChanged` for the same edit
+/// counts it twice.
+///
+/// Note the current `owners.len() == 1` gate suppresses this case
+/// *accidentally* — a rename yields two distinct `EndpointId`s, so the
+/// file looks shared. That is not the reason to be silent here, and the
+/// gate must not be what stands between us and the double report.
 #[test]
-fn handler_change_in_a_shared_file_is_not_attributed_to_one_endpoint() {
-    // Two schema-bearing endpoints whose handler symbols both live in
-    // `src/main.rs` (a routing table). An edit to that file cannot be
-    // blamed on either endpoint, so no `HandlerChanged` may fire —
-    // reporting it three times was the precision regression this rule
-    // caused on the T1 fixture's `s6-rename-path` scenario.
+fn handler_change_alongside_a_path_rename_is_not_double_reported() {
+    // The `s6-rename-path` shape: the route moved
+    // `/api/orders/{}` → `/api/order/{}` and the routing table (the
+    // handler's file) was edited to do it. `PathChanged` already
+    // explains the endpoint, so `HandlerChanged` — whose stated purpose
+    // is "schema byte-identical, handler moved, the case **nothing
+    // else** would report" — must not also fire. Reporting both counts
+    // one edit twice.
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/main.rs".into(),
+        container: None,
+        name: "get_order".into(),
+    };
+    let mut response_fields = BTreeMap::new();
+    response_fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Response, response_fields);
+
+    let base_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let head_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/order/{}");
+    let provider = |name: &str| ProviderRef {
+        node_id: id("orders", "HttpRoute", "src/main.rs", name, 12),
+        handler: Some(handler.clone()),
+        operation_id: None,
+    };
+
+    let mut base_endpoints = BTreeMap::new();
+    base_endpoints.insert(
+        base_endpoint.clone(),
+        EndpointDef {
+            providers: vec![provider("get_order")],
+            schemas: schemas.clone(),
+            has_schema: true,
+            source_files: BTreeSet::new(),
+        },
+    );
+    let mut head_endpoints = BTreeMap::new();
+    head_endpoints.insert(
+        head_endpoint.clone(),
+        EndpointDef {
+            providers: vec![provider("get_order")],
+            schemas,
+            has_schema: true,
+            source_files: BTreeSet::new(),
+        },
+    );
+    let base = ContractSurface {
+        endpoints: base_endpoints,
+        consumers: BTreeMap::new(),
+    };
+    let head = ContractSurface {
+        endpoints: head_endpoints,
+        consumers: BTreeMap::new(),
+    };
+    let src = StaticChangedFiles(BTreeSet::from(["src/main.rs".to_string()]));
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::PathChanged { .. })),
+        "the rename must report PathChanged: {changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::HandlerChanged { .. })),
+        "PathChanged already explains this endpoint; HandlerChanged would \
+         count the same edit twice: {changes:?}"
+    );
+}
+
+/// Two schema-bearing endpoints whose handler symbols both live in
+/// `src/main.rs` (a routing table). An edit to that file is a real
+/// behaviour risk for **both** — suppressing it entirely lets
+/// `NoKnownImpact` stand while behaviour may have moved, which is this
+/// codebase's worst failure. So both claimants get a `HandlerChanged`
+/// lead.
+///
+/// The earlier silence here was justified by a T1 precision regression
+/// ("reporting it three times") on the `s6-rename-path` scenario. That
+/// regression was a **double report**, not a mis-attribution: `s6` is a
+/// route rename, `PathChanged` already explains it, and `HandlerChanged`
+/// was counting the same edit again. That case is now suppressed
+/// explicitly by `handler_change_alongside_a_path_rename_is_not_double_reported`,
+/// so this one is free to be honest.
+///
+/// These are *leads* (`NeedsInvestigation`), not proven breaks — which
+/// is exactly the "risks requiring investigation" bucket.
+/// Line-level attribution: when the diff reports *which lines* of a
+/// shared handler file changed, only the endpoint whose site sits in
+/// those lines is implicated. This is what stops a routing-table edit
+/// for one endpoint from becoming a lead against its siblings.
+#[test]
+fn handler_change_in_a_shared_file_is_attributed_by_changed_lines() {
+    let mut index = ContractIndex::default();
+    for (template, route_name, handler_name, line) in [
+        ("/api/orders/{}", "GET /api/orders/:id", "get_order", 12),
+        ("/api/orders/me", "GET /api/orders/me", "get_me", 18),
+    ] {
+        let endpoint = endpoint_id("orders", HttpMethod::Get, template);
+        let mut fields = BTreeMap::new();
+        fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            Direction::Response,
+            EndpointSchema {
+                node_id: id("orders", "Schema", "openapi.yaml", route_name, 7),
+                fields,
+            },
+        );
+        index.endpoints.insert(
+            endpoint.clone(),
+            Endpoint {
+                id: endpoint.clone(),
+                method: HttpMethod::Get,
+                template: template.into(),
+                providers: vec![EndpointProvider {
+                    node_id: id("orders", "HttpRoute", "src/main.rs", route_name, line),
+                    origin: ProviderOrigin::Code,
+                    handler: Some(SymbolKey {
+                        repo: repo("orders"),
+                        path: "src/main.rs".into(),
+                        container: None,
+                        name: handler_name.into(),
+                    }),
+                    operation_id: None,
+                }],
+                schemas,
+            },
+        );
+    }
+    let base = ContractSurface::from_index(&index);
+    let head = base.clone();
+
+    // Only line 12 changed — `get_order`'s site. `get_me` at 18 is
+    // untouched and must not be dragged in.
+    let mut line_ranges = crate::federation::contracts::diff::ChangedLines::new();
+    line_ranges.insert("src/main.rs".to_string(), vec![(12, 12)]);
+    let mut by_repo = BTreeMap::new();
+    by_repo.insert(
+        "orders".to_string(),
+        crate::federation::contracts::changed_files::RepoDiffResult::Changed(BTreeSet::from([
+            "src/main.rs".to_string(),
+        ])),
+    );
+    let src = crate::federation::contracts::changed_files::MultiRepoChangedFiles {
+        by_repo,
+        line_ranges: {
+            let mut m = BTreeMap::new();
+            m.insert("orders".to_string(), line_ranges);
+            m
+        },
+    };
+
+    let changes = diff_contracts(&base, &head, &src);
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        1,
+        "only the endpoint whose site is in the changed lines may be \
+         implicated — got {changes:?}"
+    );
+    assert!(
+        matches!(
+            handler_changes[0].kind,
+            ChangeKind::HandlerChanged { ref endpoint } if endpoint.1
+                == http_key(HttpMethod::Get, "/api/orders/{}")
+        ),
+        "the implicated endpoint must be get_order's, got {changes:?}"
+    );
+}
+
+#[test]
+fn handler_change_in_a_shared_file_is_reported_for_every_claimant() {
     let mut index = ContractIndex::default();
     for (template, route_name, handler_name, line) in [
         ("/api/orders/{}", "GET /api/orders/:id", "get_order", 12),
@@ -3578,12 +3765,15 @@ fn handler_change_in_a_shared_file_is_not_attributed_to_one_endpoint() {
     let src = StaticChangedFiles(BTreeSet::from(["src/main.rs".to_string()]));
 
     let changes = diff_contracts(&base, &head, &src);
-    assert!(
-        changes
-            .iter()
-            .all(|c| !matches!(c.kind, ChangeKind::HandlerChanged { .. })),
-        "an edit to a file shared by two endpoints must not be attributed \
-         to either: {changes:?}"
+    let handler_changes: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::HandlerChanged { .. }))
+        .collect();
+    assert_eq!(
+        handler_changes.len(),
+        2,
+        "an edit to a file two endpoints share is a behaviour risk for both; \
+         suppressing it lets NoKnownImpact stand — got {changes:?}"
     );
 }
 

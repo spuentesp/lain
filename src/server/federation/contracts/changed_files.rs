@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock};
 
 use git2::{DiffFormat, DiffOptions, Oid, Repository};
 
-use super::diff::ChangedFilesSource;
+use super::diff::{ChangedFilesSource, ChangedLines};
 
 /// Tri-state outcome of diffing a repository between two revisions (§9.2, Gap P1.7).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +142,83 @@ impl MirrorChangedFiles {
         }
     }
 
+    /// Compute changed line ranges for a single repository: each
+    /// changed file maps to merged `[start, end]` spans of the lines
+    /// the diff touched (the *head* side).
+    ///
+    /// Returns `None` when the diff cannot be computed. A changed file
+    /// with no hunks (delete, rename, mode change) simply has no entry
+    /// — the caller treats an absent entry as "unknown" and falls back
+    /// to whole-file attribution, which keeps the fallback sound.
+    pub fn diff_lines_repo(
+        &self,
+        repo: &str,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> Option<ChangedLines> {
+        if !base_sha.is_empty() && base_sha == head_sha {
+            return Some(ChangedLines::new());
+        }
+        let r = self.repo(repo)?;
+        let base_tree = lookup_tree(&r, base_sha).ok()?;
+        let head_tree = lookup_tree(&r, head_sha).ok()?;
+        let mut opts = DiffOptions::new();
+        opts.include_typechange(true);
+        let diff = r
+            .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))
+            .ok()?;
+
+        let mut per_file: ChangedLines = ChangedLines::new();
+        diff.foreach(
+            &mut |_delta, _| true,
+            None,
+            Some(&mut |_delta, _hunk| true),
+            Some(&mut |delta, _hunk, line| {
+                // Only the lines the diff actually touched. A hunk's
+                // line count includes its context, so taking the hunk
+                // range wholesale would implicate every sibling site
+                // that happens to sit near an edit.
+                let touched = matches!(
+                    line.origin_value(),
+                    git2::DiffLineType::Addition | git2::DiffLineType::Deletion
+                );
+                if touched {
+                    // Attribute against the HEAD side where possible so
+                    // the spans line up with head-side anchors; fall
+                    // back to the old number for pure deletions.
+                    let Some(no) = line.new_lineno().or(line.old_lineno()) else {
+                        return true;
+                    };
+                    let path = delta
+                        .new_file()
+                        .path()
+                        .or_else(|| delta.old_file().path())
+                        .map(|p| p.to_string_lossy().to_string());
+                    if let Some(path) = path {
+                        per_file.entry(path).or_default().push((no, no));
+                    }
+                }
+                true
+            }),
+        )
+        .ok()?;
+
+        for spans in per_file.values_mut() {
+            spans.sort_unstable();
+            let mut merged: Vec<(u32, u32)> = Vec::new();
+            for (s, e) in spans.drain(..) {
+                match merged.last_mut() {
+                    Some(last) if s <= last.1.saturating_add(1) => {
+                        last.1 = last.1.max(e);
+                    }
+                    _ => merged.push((s, e)),
+                }
+            }
+            *spans = merged;
+        }
+        Some(per_file)
+    }
+
     fn diff_impl(
         &self,
         r: &Repository,
@@ -241,6 +318,10 @@ impl ChangedFilesSource for RepoScopedChangedFiles {
 /// maps each repo to its tri-state diff outcome.
 pub struct MultiRepoChangedFiles {
     pub by_repo: BTreeMap<String, RepoDiffResult>,
+    /// Per-repo changed line ranges. A repo with no entry, or a file
+    /// with no entry inside one, is "unknown" at that granularity and
+    /// the caller falls back to whole-file attribution.
+    pub line_ranges: BTreeMap<String, ChangedLines>,
 }
 
 impl MultiRepoChangedFiles {
@@ -266,7 +347,10 @@ impl MultiRepoChangedFiles {
                 (repo, res)
             })
             .collect();
-        Self { by_repo: mapped }
+        Self {
+            by_repo: mapped,
+            line_ranges: BTreeMap::new(),
+        }
     }
 }
 
@@ -281,6 +365,35 @@ impl ChangedFilesSource for MultiRepoChangedFiles {
             }
         }
         out
+    }
+
+    /// Merge every repo's ranges into one map. Only computed when at
+    /// least one repo contributed some — otherwise the caller falls
+    /// back to whole-file attribution, which is the sound default.
+    fn changed_line_ranges(&self, _base: &str, _head: &str) -> Option<ChangedLines> {
+        if self.line_ranges.is_empty() {
+            return None;
+        }
+        let mut out = ChangedLines::new();
+        for ranges in self.line_ranges.values() {
+            for (file, spans) in ranges {
+                out.entry(file.clone())
+                    .or_default()
+                    .extend(spans.iter().copied());
+            }
+        }
+        for spans in out.values_mut() {
+            spans.sort_unstable();
+            let mut merged: Vec<(u32, u32)> = Vec::new();
+            for (s, e) in spans.drain(..) {
+                match merged.last_mut() {
+                    Some(last) if s <= last.1.saturating_add(1) => last.1 = last.1.max(e),
+                    _ => merged.push((s, e)),
+                }
+            }
+            *spans = merged;
+        }
+        Some(out)
     }
 
     fn changed_files_for_repo(&self, repo: &str, _base: &str, _head: &str) -> RepoDiffResult {
@@ -388,6 +501,41 @@ mod tests {
         );
     }
 
+    /// Changed line spans are what let a change inside a shared file be
+    /// attributed to the site it touched. A whole-file "it changed" is
+    /// not enough to distinguish a routing-table edit from a sibling
+    /// handler's edit.
+    #[test]
+    fn mirror_changed_files_reports_changed_line_spans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("src");
+        let mirror = tmp.path().join("mirrors").join("src.git");
+        let (base, head, path) =
+            init_repo_with_history(&work, &[("a.txt", "hello\n"), ("b.txt", "world\n")]);
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        setup_mirror(&work, &mirror);
+        let src = MirrorChangedFiles::new(tmp.path());
+
+        let ranges = src
+            .diff_lines_repo("src", &base, &head)
+            .expect("line ranges should compute when the diff succeeds");
+        let spans = ranges
+            .get(&path)
+            .unwrap_or_else(|| panic!("no spans for {path}: {ranges:?}"));
+        assert!(
+            spans.contains(&(1, 1)),
+            "the edit rewrote line 1 of {path}, expected (1,1) in {spans:?}"
+        );
+        // Identical SHAs: nothing changed, empty map (not None — the
+        // diff succeeded and found nothing).
+        let same = src
+            .diff_lines_repo("src", &base, &base)
+            .expect("identical SHAs still compute");
+        assert!(same.is_empty(), "expected no spans, got {same:?}");
+        // Missing mirror: `None`, i.e. unknown — the caller must fall
+        // back to whole-file attribution rather than silence.
+        assert!(src.diff_lines_repo("missing", &base, &head).is_none());
+    }
     #[test]
     fn mirror_changed_files_returns_empty_when_mirror_missing() {
         let tmp = tempfile::tempdir().unwrap();

@@ -2171,6 +2171,11 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
         let data = run_diff(&ctx, base_id, &head_id).await;
         let reported = changes_of(&data);
         let (m, e, r) = diff_metrics_for_scenario(&reported, &s.expected.changes);
+        if r > e {
+            println!(
+                "PR13_OVERREPORT scenario {id} matched={m} expected={e} reported={r}: {reported:?}"
+            );
+        }
         total_matched += m;
         total_expected += e;
         total_reported += r;
@@ -2321,7 +2326,10 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     // at the exact scenario instead of forcing the operator to dig
     // through the run logs.
     let per_scenario_json: std::collections::BTreeMap<String, (usize, usize, usize)> = per_scenario;
-    let _ = per_scenario_json;
+    println!(
+        "PR13_PER_SCENARIO_JSON {}",
+        serde_json::to_string(&per_scenario_json).unwrap()
+    );
 
     let metrics = Metrics {
         diff_precision,

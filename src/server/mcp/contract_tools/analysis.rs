@@ -679,6 +679,7 @@ fn build_changed_source(
 ) -> MultiRepoChangedFiles {
     let src = MirrorChangedFiles::new(data_dir);
     let mut by_repo = std::collections::BTreeMap::new();
+    let mut line_ranges = std::collections::BTreeMap::new();
     for (repo, base_sha) in &base.repos {
         let head_sha = head
             .repos
@@ -686,8 +687,14 @@ fn build_changed_source(
             .cloned()
             .unwrap_or_else(|| base_sha.clone());
         by_repo.insert(repo.clone(), src.diff_repo(repo, base_sha, &head_sha));
+        if let Some(ranges) = src.diff_lines_repo(repo, base_sha, &head_sha) {
+            line_ranges.insert(repo.clone(), ranges);
+        }
     }
-    MultiRepoChangedFiles { by_repo }
+    MultiRepoChangedFiles {
+        by_repo,
+        line_ranges,
+    }
 }
 
 async fn load_snapshot(

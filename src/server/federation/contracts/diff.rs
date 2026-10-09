@@ -409,6 +409,17 @@ pub enum ChangeKind {
 pub trait ChangedFilesSource {
     fn changed_files(&self, base: &str, head: &str) -> BTreeSet<String>;
 
+    /// Changed line ranges per file, when the source can compute them.
+    ///
+    /// `None` means "unknown" and the caller falls back to whole-file
+    /// attribution. `Some(map)` gives merged `[start, end]` spans per
+    /// file — a changed file **absent** from the map is also treated as
+    /// unknown, so a source that can compute only some files stays
+    /// sound.
+    fn changed_line_ranges(&self, _base: &str, _head: &str) -> Option<ChangedLines> {
+        None
+    }
+
     fn changed_files_for_repo(&self, _repo: &str, base: &str, head: &str) -> RepoDiffResult {
         let files = self.changed_files(base, head);
         if files.is_empty() {
@@ -422,6 +433,11 @@ pub trait ChangedFilesSource {
         BTreeSet::new()
     }
 }
+
+/// Merged changed-line spans per file: `file -> [(start, end), …]`,
+/// inclusive line bounds. Used to attribute a change inside a shared
+/// file to the specific sites it touched.
+pub type ChangedLines = std::collections::BTreeMap<String, Vec<(u32, u32)>>;
 
 /// A precomputed changed-files set. Used by tests and by callers that
 /// already hold a `BTreeSet<String>` from another source.
@@ -552,26 +568,29 @@ pub fn diff_contracts(
         });
     }
 
-    // Which endpoints claim each handler file (union of base and
-    // head). `HandlerChanged` only fires for a file claimed by exactly
-    // one endpoint: an edit to a shared file (a routing table holding
-    // three handlers) cannot be attributed to any one of them, and
-    // reporting it as a per-endpoint lead is noise. Single-handler
-    // files stay fully attributed. Keyed by `EndpointId` so an
-    // endpoint present in both surfaces is counted once.
-    let mut handler_file_owners: BTreeMap<String, BTreeSet<EndpointId>> = BTreeMap::new();
+    // Which sites each handler file hosts, per endpoint: `file ->
+    // endpoint -> anchor lines`. An anchor is the route node's line,
+    // and only counts when the route node lives in the handler's own
+    // file (a routing table). When they differ — handler in
+    // `handlers.rs`, route in `routes.rs` — there is no line evidence
+    // for that file and the caller falls back to whole-file
+    // attribution rather than guessing.
+    let mut handler_file_anchors: BTreeMap<String, BTreeMap<EndpointId, BTreeSet<u32>>> =
+        BTreeMap::new();
     for (eid, def) in base.endpoints.iter().chain(head.endpoints.iter()) {
-        let mut claimed: BTreeSet<&String> = BTreeSet::new();
         for p in &def.providers {
             if let Some(h) = p.handler.as_ref() {
-                claimed.insert(&h.path);
+                if p.node_id.path().as_deref() == Some(h.path.as_str()) {
+                    if let Some(line) = p.node_id.line_start() {
+                        handler_file_anchors
+                            .entry(h.path.clone())
+                            .or_default()
+                            .entry(eid.clone())
+                            .or_default()
+                            .insert(line);
+                    }
+                }
             }
-        }
-        for f in claimed {
-            handler_file_owners
-                .entry(f.clone())
-                .or_default()
-                .insert(eid.clone());
         }
     }
 
@@ -579,6 +598,13 @@ pub fn diff_contracts(
     for (base_id, head_id) in &pairings {
         let base_def = &base.endpoints[base_id];
         let head_def = &head.endpoints[head_id];
+        // Anything pushed for THIS endpoint below (path/method rename,
+        // field diff) explains the endpoint on its own. `HandlerChanged`
+        // exists for "schema byte-identical, handler moved — the case
+        // nothing else would report", so it must stay silent whenever
+        // one of those fires. Captured before the path/method block:
+        // taking it after would let a route rename double-report.
+        let explained_before = changes.len();
         // Determine if this is a PathChanged or MethodChanged pair.
         let base_method = method_of(base_id);
         let head_method = method_of(head_id);
@@ -602,7 +628,6 @@ pub fn diff_contracts(
             });
         }
         // Field-level diff (per direction).
-        let schema_changes_before = changes.len();
         for direction in [Direction::Request, Direction::Response, Direction::Payload] {
             diff_fields(
                 &mut changes,
@@ -612,11 +637,10 @@ pub fn diff_contracts(
                 head_def.schemas.get(&direction),
             );
         }
-        // Did the schema itself change? If so the field-level diff
-        // above already reported it and no handler-change rule is
-        // needed — `HandlerChanged` is for "schema byte-identical,
-        // handler moved", the case nothing else would report.
-        let schema_reported = changes.len() > schema_changes_before;
+        // Did something else already explain this endpoint? If so the
+        // rule above already reported it and no handler-change rule is
+        // needed.
+        let explained = changes.len() > explained_before;
         // §9.2 ChangedWithoutSchema + its schema-bearing sibling
         // HandlerChanged. Both ask whether a handler / provider
         // source file changed in the provider repository, and differ
@@ -637,7 +661,7 @@ pub fn diff_contracts(
         let provider_repos = endpoint_provider_repos(base_def, head_def);
 
         let mut source_changed = false;
-        let mut handler_changed = false;
+        let mut all_changed: BTreeSet<String> = BTreeSet::new();
         {
             let mut note = |changed: &std::collections::BTreeSet<String>| {
                 if base_def
@@ -648,17 +672,7 @@ pub fn diff_contracts(
                 {
                     source_changed = true;
                 }
-                if handler_files.iter().any(|f| {
-                    // Attribution: only a file this endpoint alone
-                    // claims can be blamed on this endpoint.
-                    changed.contains(*f)
-                        && handler_file_owners
-                            .get(f.as_str())
-                            .map(|owners| owners.len() == 1)
-                            .unwrap_or(false)
-                }) {
-                    handler_changed = true;
-                }
+                all_changed.extend(changed.iter().cloned());
             };
             if provider_repos.is_empty() {
                 note(&changed_files.changed_files(base_sha, head_sha));
@@ -677,6 +691,39 @@ pub fn diff_contracts(
             }
         }
 
+        // Attribute an edit inside a shared handler file to the sites it
+        // actually touched. Whole-file attribution (every claimant) is
+        // the sound default; line spans are used to narrow it only when
+        // they can *prove* a site untouched, and never to silence
+        // everyone.
+        let line_ranges = changed_files.changed_line_ranges(base_sha, head_sha);
+        let handler_changed = handler_files.iter().any(|f| {
+            if !all_changed.contains(*f) {
+                return false;
+            }
+            let Some(spans) = line_ranges.as_ref().and_then(|r| r.get(f.as_str())) else {
+                // Unknown granularity for this file → whole-file.
+                return true;
+            };
+            let hits = |lines: &BTreeSet<u32>| {
+                lines
+                    .iter()
+                    .any(|l| spans.iter().any(|(s, e)| *l >= *s && *l <= *e))
+            };
+            let by_eid = handler_file_anchors.get(f.as_str());
+            let matched_any = by_eid.map(|m| m.values().any(hits)).unwrap_or(false);
+            if !matched_any {
+                // The edit touched this file but no claimed site — a
+                // body edit outside any anchor. Fall back to whole-file:
+                // silence is the dangerous direction.
+                return true;
+            }
+            by_eid
+                .and_then(|m| m.get(head_id))
+                .map(hits)
+                .unwrap_or(false)
+        });
+
         if source_changed && !base_def.has_schema && !head_def.has_schema {
             changes.push(Change {
                 service: head_id.0.clone(),
@@ -684,8 +731,7 @@ pub fn diff_contracts(
                     endpoint: head_id.clone(),
                 },
             });
-        } else if handler_changed && base_def.has_schema && head_def.has_schema && !schema_reported
-        {
+        } else if handler_changed && base_def.has_schema && head_def.has_schema && !explained {
             // Identical schema, changed handler: the behaviour may
             // have moved and nothing else would report it.
             changes.push(Change {
