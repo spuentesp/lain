@@ -98,22 +98,18 @@ pub enum SensorOwner {
     /// output.
     SqlSensor,
     /// Phase E (spec §8.2): the legacy `proto_sensor` emits bare
-    /// `Module` nodes with no contract fact. **Currently unused as an
-    /// owner** — `sensor_owner_of` returns `None` for those nodes, so
-    /// nothing retracts them and a renamed service leaves its old
-    /// `Module` behind. Making them ownable is not a one-line change:
-    /// `grpc_provider_sensor` / `grpc_handler_link_sensor` also emit
-    /// `Module` nodes (the latter carrying an `RpcHandler` fact, which
-    /// the fact arm claims first), so a type-and-path catch-all here
-    /// would take retraction away from the sensor that emitted the
-    /// node. The three gRPC contract sensors each own their own output
-    /// — see `GrpcProviderSensor` / `GrpcConsumerSensor` /
-    /// `GrpcHandlerLinkSensor`.
+    /// `Module` nodes with no contract fact. Those are owned here and
+    /// retracted on every `scan_workspace`, so a service renamed away
+    /// in a `.proto` does not leave its old node behind. The three gRPC
+    /// contract sensors each own their own output — see
+    /// `GrpcProviderSensor` / `GrpcConsumerSensor` /
+    /// `GrpcHandlerLinkSensor`; their `Module` nodes carry `RpcProvider`
+    /// / `RpcHandler` facts and are claimed by those arms first.
     ProtoSensor,
     /// Phase E (spec §8.3): legacy `graphql_sensor` output — bare
-    /// `Interface` nodes. Same situation as [`Self::ProtoSensor`]:
-    /// nothing passes this owner to `replace_sensor_output`, so those
-    /// nodes are not retracted.
+    /// `Interface` nodes. Same rule as [`Self::ProtoSensor`]: owned
+    /// here and retracted per scan. The three GraphQL contract sensors
+    /// own their own output.
     GraphqlSensor,
     /// Each protocol sensor owns exactly what it emits. Splitting
     /// these out of the family owners is what makes coexistence
@@ -243,6 +239,19 @@ pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
         (_, Some(ContractFact::WebSocketProvider(_)))
         | (_, Some(ContractFact::WebSocketHandler(_)))
         | (_, Some(ContractFact::WebSocketConsumer(_))) => Some(SensorOwner::WebSocketSensor),
+        // Legacy scanners emit bare `Module` / `Interface` nodes with no
+        // contract fact (`proto_sensor`, `graphql_sensor`). Placed after
+        // every fact arm on purpose: `grpc_provider_sensor` and
+        // `graphql_provider_sensor` also emit `Module`, but theirs carry
+        // `RpcProvider` / `GraphqlProvider` and are claimed above — a
+        // catch-all placed earlier would take retraction away from the
+        // sensor that emitted the node.
+        (NodeType::Module, None) if node.path.ends_with(".proto") => Some(SensorOwner::ProtoSensor),
+        (NodeType::Interface | NodeType::Module, None)
+            if node.path.ends_with(".graphql") || node.path.ends_with(".gql") =>
+        {
+            Some(SensorOwner::GraphqlSensor)
+        }
         // Node-type catch-alls last.
         (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
         (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),

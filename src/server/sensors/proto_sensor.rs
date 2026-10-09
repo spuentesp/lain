@@ -6,7 +6,7 @@
 //! Edges created: Implements (handler -> gRPC service method)
 
 use crate::error::LainError;
-use crate::graph::GraphDatabase;
+use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::path::Path;
 
@@ -101,6 +101,8 @@ pub fn enrich_with_proto(
     proto_path: &Path,
     root: &Path,
     namespace: &crate::schema::RepoNamespace,
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<GraphEdge>,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
@@ -133,14 +135,17 @@ pub fn enrich_with_proto(
         );
         service_node.id = service_id.clone();
         service_node.signature = Some(format!("{} -> {}", svc.input_type, svc.output_type));
-        graph.upsert_node(service_node)?;
+        nodes.push(service_node);
 
         // Find handler by method name (not package-qualified)
         if let Some(handler) =
             crate::server::sensors::util::find_handler_in_graph(graph, &svc.method_name)
         {
-            let edge = GraphEdge::new(EdgeType::Implements, handler.id.clone(), service_id);
-            graph.insert_edge(&edge)?;
+            edges.push(GraphEdge::new(
+                EdgeType::Implements,
+                handler.id.clone(),
+                service_id,
+            ));
             count += 1;
         }
     }
@@ -155,17 +160,23 @@ pub fn scan_workspace(
     namespace: &crate::schema::RepoNamespace,
 ) -> Result<usize, LainError> {
     let mut count = 0;
+    let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("proto") {
-            match enrich_with_proto(graph, path, root, namespace) {
+            match enrich_with_proto(graph, path, root, namespace, &mut all_nodes, &mut all_edges) {
                 Ok(n) => count += n,
                 Err(e) => tracing::warn!("Failed to parse {:?}: {}", path, e),
             }
         }
     }
 
+    // One replace for the whole scan, not per file: `replace_sensor_output`
+    // retracts every node this owner made and inserts only what it is
+    // handed, so calling it per file would delete the earlier files' nodes.
+    graph.replace_sensor_output(SensorOwner::ProtoSensor, &all_nodes, &all_edges)?;
     Ok(count)
 }
 

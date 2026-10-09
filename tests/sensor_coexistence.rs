@@ -408,6 +408,88 @@ type Query {
     let _ = fs::remove_dir_all(&ws);
 }
 
+/// The same staleness for fact-less `Module` nodes: `proto_sensor`
+/// upserted them and nothing retracted them, so renaming a service left
+/// the old node in the graph forever.
+#[test]
+fn deleting_a_proto_service_retracts_its_module() {
+    let ws = workspace("proto_module_stale");
+    write(
+        &ws,
+        "proto/orders.proto",
+        r#"
+syntax = "proto3";
+
+package orders;
+
+service Orders {
+  rpc GetOrder (Order) returns (Order);
+}
+"#,
+    );
+    let graph = scan(&ws);
+
+    let before = nodes_of(&graph, NodeType::Module).len();
+    assert!(
+        before >= 1,
+        "expected at least one Module node, got {before}"
+    );
+
+    // Rename the service; keep the file so this is the sensor's own
+    // retraction, not the orphan sweep.
+    write(
+        &ws,
+        "proto/orders.proto",
+        r#"
+syntax = "proto3";
+
+package orders;
+
+service Billing {
+  rpc GetInvoice (Invoice) returns (Invoice);
+}
+"#,
+    );
+    run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+
+    let stale = nodes_of(&graph, NodeType::Module)
+        .into_iter()
+        .filter(|n| n.name.contains("Orders"))
+        .count();
+    assert_eq!(
+        stale, 0,
+        "a service renamed away in a .proto must have its Module retracted on rescan"
+    );
+    let _ = fs::remove_dir_all(&ws);
+}
+
+/// The twin for fact-less `Interface` nodes from `graphql_sensor`.
+#[test]
+fn deleting_a_graphql_operation_retracts_its_interface() {
+    let ws = workspace("graphql_iface_stale");
+    write(&ws, "schema.graphql", "query orders {\n  id\n}\n");
+    let graph = scan(&ws);
+
+    let before = nodes_of(&graph, NodeType::Interface).len();
+    assert!(
+        before >= 1,
+        "expected at least one Interface node, got {before}"
+    );
+
+    write(&ws, "schema.graphql", "query invoices {\n  id\n}\n");
+    run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+
+    let stale = nodes_of(&graph, NodeType::Interface)
+        .into_iter()
+        .filter(|n| n.name.contains("orders"))
+        .count();
+    assert_eq!(
+        stale, 0,
+        "an operation removed from a .graphql must have its Interface retracted on rescan"
+    );
+    let _ = fs::remove_dir_all(&ws);
+}
+
 // ─── 5. WebSocket providers must be retracted on rescan ──────────────
 //
 // `sensor_owner_of` returns `WebSocketSensor`, but no sensor passed that
