@@ -234,18 +234,28 @@ pub(crate) fn collect_endpoint_schemas(
         // publish the topic from a sibling service inside the
         // same repo — fall back to any matching topic provider
         // so the schema reaches the right endpoint.
+        //
+        // `min_by` on the node id rather than `find`: two providers can
+        // match the same template, and `find` would take whichever the
+        // caller happened to pass first — so the join output would
+        // depend on input order (I4). The id is a total order over the
+        // candidates, so the choice is stable.
         let topic_node = nodes
             .iter()
-            .find(|n| {
+            .filter(|n| {
                 n.node_type == crate::schema::NodeType::Topic
                     && matches!(n.contract.first(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
                     && assignments.get(&n.id) == Some(&svc)
             })
+            .min_by(|a, b| a.id.cmp(&b.id))
             .or_else(|| {
-                nodes.iter().find(|n| {
-                    n.node_type == crate::schema::NodeType::Topic
-                        && matches!(n.contract.first(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
-                })
+                nodes
+                    .iter()
+                    .filter(|n| {
+                        n.node_type == crate::schema::NodeType::Topic
+                            && matches!(n.contract.first(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
+                    })
+                    .min_by(|a, b| a.id.cmp(&b.id))
             });
         let Some(topic_node) = topic_node else {
             continue;
@@ -722,6 +732,203 @@ mod tests {
                 enum_values: None,
             },
         }
+    }
+
+    /// Two topic providers can carry the same `ProviderFact.template`
+    /// and still resolve to *different* endpoints: the broker lives in
+    /// the node name (`broker/topic`) and `default_broker_for` folds it
+    /// into `ContractKey::Topic`. So the pick is observable — and it
+    /// must not depend on the order the node list arrived in (I4: join
+    /// output is order-independent). `find` took whichever match the
+    /// caller happened to pass first; the lookup now tie-breaks on the
+    /// node id, which is a total order over the candidates.
+    ///
+    /// `EndpointSchemas` does not derive `PartialEq`, so the
+    /// comparison is over its `Debug` rendering — stable here because
+    /// the maps are `BTreeMap` and the lists are `Vec`.
+    #[test]
+    fn topic_provider_choice_is_independent_of_node_order() {
+        use crate::federation::contracts::config::{
+            ContractFederationConfig, SchemaDecl, ServiceDecl,
+        };
+        use crate::federation::contracts::model::{ProviderOrigin, ServiceName};
+        use crate::federation::repo_id::RepoId;
+        use crate::schema::{EdgeType, NodeType};
+
+        let svc = ServiceName("orders".into());
+
+        let mk_schema = |name: &str, line: u32| -> String {
+            let gid = GlobalId::new(
+                &RepoId::new("orders").unwrap(),
+                NodeType::Schema,
+                "payload.avsc",
+                name,
+                Some(line),
+            );
+            gid.as_str().to_string()
+        };
+        let schema_id = mk_schema("Order", 7);
+        let field_gid = GlobalId::new(
+            &RepoId::new("orders").unwrap(),
+            NodeType::Field,
+            "payload.avsc",
+            "customer_id",
+            Some(8),
+        );
+        let field_id = field_gid.as_str().to_string();
+
+        let mut schema_node =
+            GraphNode::new(NodeType::Schema, "Order".into(), "payload.avsc".into());
+        schema_node.id = schema_id.clone();
+        schema_node.contract = vec![ContractFact::Schema {
+            direction: Direction::Payload,
+        }];
+        let mut field_node =
+            GraphNode::new(NodeType::Field, "customer_id".into(), "payload.avsc".into());
+        field_node.id = field_id.clone();
+        field_node.contract = vec![ContractFact::Field(FieldMeta {
+            ty: TypeDesc::String,
+            required: true,
+            nullable: false,
+            enum_values: None,
+        })];
+        let has_field = GraphEdge::new(EdgeType::HasField, schema_id.clone(), field_id);
+
+        // Two topic providers with the *same* template but different
+        // brokers, so `contract_key_for_provider` yields two distinct
+        // `EndpointId`s and the pick is observable. Same broker would
+        // collapse the candidates to one key and the test would pass
+        // vacuously (it did, the first time).
+        let mk_topic = |path: &str, line: u32, broker: &str| {
+            let label = format!("{broker}/orders.created");
+            let gid = GlobalId::new(
+                &RepoId::new("orders").unwrap(),
+                NodeType::Topic,
+                path,
+                &label,
+                Some(line),
+            );
+            let mut n = GraphNode::new(NodeType::Topic, label, path.into());
+            n.id = gid.as_str().to_string();
+            n.contract = vec![ContractFact::Provider(ProviderFact {
+                method: HttpMethod::Any,
+                template: "orders.created".into(),
+                handler: None,
+                operation_id: None,
+                origin: ProviderOrigin::Code,
+            })];
+            n
+        };
+        let topic_a = mk_topic("src/a.py", 1, "kafka");
+        let topic_b = mk_topic("src/b.py", 2, "rabbit");
+        // The documented tie-break is "lowest node id", not "either, as
+        // long as it is stable" — so the fixture also knows which one
+        // should win.
+        let winner = if topic_a.id <= topic_b.id {
+            &topic_a
+        } else {
+            &topic_b
+        };
+
+        let mut assignments = BTreeMap::new();
+        assignments.insert(topic_a.id.clone(), svc.clone());
+        assignments.insert(topic_b.id.clone(), svc.clone());
+        assignments.insert(schema_id.clone(), svc.clone());
+
+        let mut services = ServiceDecl {
+            name: "orders".into(),
+            repo: "orders".into(),
+            paths: Vec::new(),
+            hosts: Vec::new(),
+            env: Vec::new(),
+            base_path: None,
+            route_prefixes: Vec::new(),
+        };
+        services.name = "orders".into();
+        let config = ContractFederationConfig {
+            services: vec![services],
+            schemas: vec![SchemaDecl {
+                topic: "orders.created".into(),
+                repo: "orders".into(),
+                file: "payload.avsc".into(),
+            }],
+            ..Default::default()
+        };
+
+        let forward = vec![
+            schema_node.clone(),
+            field_node.clone(),
+            topic_a.clone(),
+            topic_b.clone(),
+        ];
+        let reverse = vec![
+            schema_node.clone(),
+            field_node.clone(),
+            topic_b.clone(),
+            topic_a.clone(),
+        ];
+        let only_winner = vec![schema_node, field_node, winner.clone()];
+        // The edge list order is not what is under test; keep it fixed.
+        let edges = vec![has_field];
+
+        let a = collect_endpoint_schemas(&forward, &edges, &assignments, &config);
+        let b = collect_endpoint_schemas(&reverse, &edges, &assignments, &config);
+        let c = collect_endpoint_schemas(&only_winner, &edges, &assignments, &config);
+
+        assert!(
+            !a.by_endpoint.is_empty(),
+            "the fixture resolved no topic provider — this test would be vacuous"
+        );
+        let key_of = |n: &GraphNode| {
+            super::super::joiner::endpoints::contract_key_for_provider(n, &svc, &config)
+                .expect("fixture topic nodes carry a provider contract")
+                .0
+        };
+        let (key_a, key_b) = (key_of(&topic_a), key_of(&topic_b));
+        assert_ne!(
+            key_a, key_b,
+            "fixture candidates must resolve to distinct endpoints, \
+             or the pick is unobservable and the test is vacuous"
+        );
+        assert_eq!(
+            a.by_endpoint.keys().collect::<Vec<_>>(),
+            vec![&key_of(winner)],
+            "the join must pick the lowest node id, deterministically"
+        );
+        assert_eq!(
+            format!("{a:?}"),
+            format!("{b:?}"),
+            "join output must not depend on the order the node list arrives in"
+        );
+        assert_eq!(
+            format!("{a:?}"),
+            format!("{c:?}"),
+            "a lower-priority candidate must not change the join output"
+        );
+
+        // The fallback tier ("a deployment may publish the topic from a
+        // sibling service") is a second `.find()` site in the same
+        // lookup and needs the same order check: with neither topic node
+        // assigned to `svc`, only the fallback can resolve, and it must
+        // also pick the lowest node id.
+        let mut sibling_assignments = BTreeMap::new();
+        sibling_assignments.insert(schema_id, svc.clone());
+        let d1 = collect_endpoint_schemas(&forward, &edges, &sibling_assignments, &config);
+        let d2 = collect_endpoint_schemas(&reverse, &edges, &sibling_assignments, &config);
+        assert!(
+            !d1.by_endpoint.is_empty(),
+            "fallback tier resolved no topic provider — that check would be vacuous"
+        );
+        assert_eq!(
+            d1.by_endpoint.keys().collect::<Vec<_>>(),
+            vec![&key_of(winner)],
+            "the fallback must pick the lowest node id too"
+        );
+        assert_eq!(
+            format!("{d1:?}"),
+            format!("{d2:?}"),
+            "fallback output must not depend on the order the node list arrives in"
+        );
     }
 
     #[test]
