@@ -1,0 +1,64 @@
+{
+  "_readme": "Oracle for tests/fixtures/onboarding. Declared BEFORE any LAIN query — the runner asserts against this file, never against what the tool happened to answer. A query that returns empty where this file says non-empty is a FAIL, never a pass.",
+  "schema": 1,
+  "fixture": {
+    "language": "python",
+    "test_command": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+    "target": {"symbol": "normalize_token", "file": "core.py"},
+    "pre_edit_behavior": "strip + lowercase only; internal whitespace runs are NOT collapsed",
+    "post_edit_behavior": "also collapse internal whitespace runs to a single space"
+  },
+  "pre_edit": {
+    "direct_callers": [
+      {"symbol": "create_user", "file": "api.py"},
+      {"symbol": "load_user", "file": "session.py"}
+    ],
+    "indirect_callers": [
+      {
+        "symbol": "open_session",
+        "file": "pipeline.py",
+        "depth": 2,
+        "path": ["open_session", "load_user", "normalize_token"]
+      }
+    ],
+    "decoys": [
+      {
+        "symbol": "normalize_token_len",
+        "file": "util.py",
+        "reason": "similar name, no Calls edge to normalize_token — must never appear as a dependent"
+      }
+    ],
+    "blast_radius": {
+      "direct_dependents": 2,
+      "must_include": ["create_user", "load_user", "open_session"],
+      "must_not_include": ["normalize_token_len"]
+    },
+    "call_chain": {
+      "from": "open_session",
+      "to": "normalize_token",
+      "must_include_path": ["open_session", "load_user", "normalize_token"]
+    }
+  },
+  "edit": {
+    "description": "normalize_token collapses internal whitespace runs to a single space (e.g. '  A   B  ' -> 'a b'), public function names unchanged, tests/ untouched",
+    "helper_added": {"symbol": "collapse_ws", "file": "core.py"}
+  },
+  "post_edit": {
+    "tests_must_pass": true,
+    "consumers_covered_by_tests": ["create_user", "load_user", "open_session"],
+    "staleness_window": {
+      "tool": "get_call_sites",
+      "args": {"symbol": "collapse_ws"},
+      "before_commit": "must NOT report the new caller, and must explain the gap — a silent bare answer here is a FAIL (empty is never 'no risk')",
+      "warning_must_match_any": ["after it was last indexed", "committed and re-indexed"]
+    },
+    "index_updated": {
+      "after": "git commit of the change — the unit the index follows (the tool's own error says 'committed and re-indexed'); the update lands with the next indexing pass (a fresh lain session)",
+      "tool": "get_call_sites",
+      "args": {"symbol": "collapse_ws"},
+      "must_include": ["normalize_token"],
+      "stale_would_look_like": "no callers / symbol not found — which is a FAIL, not 'no risk'",
+      "live_session_note": "a session that was already running does not pick up new commits within 60s; re-query from a fresh session. Recorded as a documentation finding: README 'updates on change' needs this qualification."
+    }
+  }
+}

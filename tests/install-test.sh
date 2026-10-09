@@ -67,14 +67,16 @@ else
 fi
 echo ""
 
-# Test 4: Version detection (may fail offline)
-echo "Test 4: Version detection (requires internet)"
+# Test 4: Version detection
+# Real assertion, not a soft skip: a network path that silently
+# no-ops and still counts as "passed" hides regressions. If GitHub
+# is unreachable, this is a failure worth seeing.
+echo "Test 4: Version detection (GitHub latest release)"
 VERSION=$(bash -c "source '$INSTALL_SCRIPT' && get_latest_version" 2>/dev/null || echo "")
 if [[ -n "$VERSION" ]]; then
   test_passed "Version detection: $VERSION"
 else
-  echo -e "${YELLOW}⚠${NC} Version detection failed (may be offline - skipping)"
-  ((passed++))
+  test_failed "Version detection failed (GitHub unreachable or API rate-limited)"
 fi
 echo ""
 
@@ -256,6 +258,56 @@ if bash -c "source '$INSTALL_SCRIPT' && declare -f verify_installation > /dev/nu
   test_passed "verify_installation function exists (sidecar check included)"
 else
   test_failed "verify_installation function missing"
+fi
+echo ""
+
+# Test 12: release_assets_base URL resolution
+echo "Test 12: release_assets_base URL resolution"
+DEFAULT_BASE=$(bash -c "source '$INSTALL_SCRIPT' && release_assets_base '0.7.3'" 2>/dev/null || echo "")
+if [ "$DEFAULT_BASE" = "https://github.com/spuentesp/lain/releases/download/v0.7.3" ]; then
+  test_passed "Default asset base is the GitHub release for the version"
+else
+  test_failed "Default asset base wrong: got '$DEFAULT_BASE'"
+fi
+
+OVERRIDE_BASE=$(LAIN_RELEASE_BASE_URL="http://127.0.0.1:8123/artifacts/" bash -c "source '$INSTALL_SCRIPT' && release_assets_base '0.7.3'" 2>/dev/null || echo "")
+if [ "$OVERRIDE_BASE" = "http://127.0.0.1:8123/artifacts" ]; then
+  test_passed "LAIN_RELEASE_BASE_URL overrides the asset base (trailing slash stripped)"
+else
+  test_failed "Override asset base wrong: got '$OVERRIDE_BASE'"
+fi
+echo ""
+
+# Test 13: resolve_version pinning
+echo "Test 13: resolve_version pinning"
+PINNED=$(LAIN_VERSION="0.7.3" bash -c "source '$INSTALL_SCRIPT' && resolve_version" 2>/dev/null || echo "")
+if [ "$PINNED" = "0.7.3" ]; then
+  test_passed "LAIN_VERSION pins the version without a network lookup"
+else
+  test_failed "Pinned version wrong: got '$PINNED'"
+fi
+
+PINNED_V=$(LAIN_VERSION="v0.7.3" bash -c "source '$INSTALL_SCRIPT' && resolve_version" 2>/dev/null || echo "")
+if [ "$PINNED_V" = "0.7.3" ]; then
+  test_passed "Leading 'v' in LAIN_VERSION is stripped"
+else
+  test_failed "v-prefixed pin wrong: got '$PINNED_V'"
+fi
+
+# LAIN_RELEASE_BASE_URL without a pin must fail loudly: there is no
+# "latest" to query outside GitHub Releases.
+NO_PIN_ERR=$(LAIN_RELEASE_BASE_URL="http://127.0.0.1:8123/artifacts" bash -c "source '$INSTALL_SCRIPT' && resolve_version" 2>&1 || true)
+if echo "$NO_PIN_ERR" | grep -q "LAIN_VERSION is not"; then
+  test_passed "LAIN_RELEASE_BASE_URL without LAIN_VERSION is a hard error"
+else
+  test_failed "Missing-version error not raised: got '$NO_PIN_ERR'"
+fi
+
+PINNED_BASE=$(LAIN_VERSION="0.7.3" LAIN_RELEASE_BASE_URL="http://127.0.0.1:8123/artifacts" bash -c "source '$INSTALL_SCRIPT' && resolve_version" 2>/dev/null || echo "")
+if [ "$PINNED_BASE" = "0.7.3" ]; then
+  test_passed "Pinned version resolves offline under LAIN_RELEASE_BASE_URL"
+else
+  test_failed "Pinned base install version wrong: got '$PINNED_BASE'"
 fi
 echo ""
 

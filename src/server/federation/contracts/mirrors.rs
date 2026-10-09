@@ -11,10 +11,12 @@
 //!    never mutates the user's repository.
 //!
 //! 2. **Ref resolution.** A 40-hex sha, a unique sha prefix of at
-//!    least 7 hex, `refs/…`, a branch, or a tag. A ref missing
-//!    locally triggers one `git fetch --prune` of the mirror, then
-//!    fails with `RefNotFound`. A failed fetch (network, auth) is
-//!    reported per repo as `FetchFailed`.
+//!    least 7 hex, `refs/…`, a branch, or a tag. Mirrors of local
+//!    sources (the `workspace_dir` shape) are refreshed before every
+//!    resolution so their ref tips track the checkout; for remote
+//!    sources a ref missing locally triggers one `git fetch --prune`
+//!    of the mirror, then fails with `RefNotFound`. A failed fetch
+//!    (network, auth) is reported per repo as `FetchFailed`.
 //!
 //! 3. **Worktrees + per-repo lock.** `git worktree add --detach`
 //!    under `<data_dir>/worktrees/<repo>/<sha>`, removed as soon
@@ -151,10 +153,13 @@ pub const SHA_PREFIX_MIN: usize = 7;
 ///    and run `git rev-parse --verify <ref>`; on success we have
 ///    a sha.
 ///
-/// On miss, run `git fetch --prune <source>` *once* against the
-/// mirror's origin and re-attempt the resolution. A second miss
-/// surfaces as [`MirrorError::RefNotFound`]; the fetch itself
-/// failing surfaces as [`MirrorError::FetchFailed`].
+/// For a local `source` (the `workspace_dir` shape) the mirror is
+/// refreshed first, so ref tips track the checkout — otherwise a
+/// branch name would resolve to its clone-time tip forever. For a
+/// remote source: on miss, run `git fetch --prune <source>` *once*
+/// and re-attempt the resolution. A second miss surfaces as
+/// [`MirrorError::RefNotFound`]; the fetch itself failing surfaces
+/// as [`MirrorError::FetchFailed`].
 ///
 /// `source` is the URL/path the mirror was cloned from (the
 /// `workspace_dir` local path for that variant). For the
@@ -194,17 +199,29 @@ pub fn resolve_ref(
             ref_str: ref_str.to_string(),
         });
     }
+    // A mirror of a LOCAL source (the `workspace_dir` shape) goes
+    // stale silently: branch names keep resolving to their clone-time
+    // tips, so the fetch-on-miss below would never fire. Refresh
+    // before resolving — a local `git fetch --prune` is cheap and
+    // makes the mirror track the checkout. Remote sources keep the
+    // cheaper fetch-on-miss path.
+    let local_source = std::path::Path::new(source).is_dir();
+    if local_source {
+        run_git_fetch(&mirror, source)?;
+    }
     if let Some(sha) = resolve_local(&mirror, ref_str)? {
         return Ok(sha);
     }
-    // One fetch attempt, then a second resolution pass. The
-    // caller already holds the per-repo lock, so this fetch is
-    // serialized with concurrent `worktree add` / `worktree
-    // remove` / `worktree prune` on the same mirror — exactly
-    // what §8.1 requires.
-    run_git_fetch(&mirror, source)?;
-    if let Some(sha) = resolve_local(&mirror, ref_str)? {
-        return Ok(sha);
+    // One fetch attempt for non-local sources, then a second
+    // resolution pass. The caller already holds the per-repo lock, so
+    // this fetch is serialized with concurrent `worktree add` /
+    // `worktree remove` / `worktree prune` on the same mirror —
+    // exactly what §8.1 requires.
+    if !local_source {
+        run_git_fetch(&mirror, source)?;
+        if let Some(sha) = resolve_local(&mirror, ref_str)? {
+            return Ok(sha);
+        }
     }
     Err(MirrorError::RefNotFound {
         repo: repo.to_string(),
@@ -274,7 +291,11 @@ fn run_git_fetch(mirror: &Path, source: &str) -> Result<(), MirrorError> {
     }
     let output = std::process::Command::new("git")
         .current_dir(mirror)
-        .args(["fetch", "--prune", source])
+        // The mirror refspec is required: `git fetch --prune <source>`
+        // without one only lands FETCH_HEAD and leaves every ref tip
+        // stale (verified experimentally). `+refs/*:refs/*` is the
+        // refspec `clone --mirror` sets up on the remote side.
+        .args(["fetch", "--prune", source, "+refs/*:refs/*"])
         .output();
     let output = match output {
         Ok(o) => o,
@@ -621,6 +642,29 @@ mod tests {
         (path.to_string_lossy().to_string(), head)
     }
 
+    /// Add a second commit to the fixture repo, returning its sha.
+    fn commit_second_file(path: &Path) -> String {
+        std::fs::write(path.join("y.md"), "second\n").unwrap();
+        for args in [
+            &["add", "-A"][..],
+            &["commit", "-q", "-m", "second commit"][..],
+        ] {
+            let status = Command::new("git")
+                .args(["-c", "user.email=test@lain", "-c", "user.name=test"])
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        }
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        String::from_utf8(head.stdout).unwrap().trim().to_string()
+    }
+
     #[test]
     fn ensure_mirror_creates_bare_clone() {
         let tmp = tempfile::tempdir().unwrap();
@@ -691,6 +735,56 @@ mod tests {
         let resolved_prefix = resolve_ref(&lock, &data_dir, "src", prefix, &src_path)
             .expect("unique prefix resolves");
         assert_eq!(resolved_prefix, head_sha.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn run_git_fetch_updates_branch_tips_in_the_mirror() {
+        // `git fetch --prune <source>` without a refspec only lands
+        // FETCH_HEAD — branch tips in the mirror stay stale. The
+        // mirror fetch must carry the mirror refspec (+refs/*:refs/*).
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let (src_path, old_sha) = git_init_with_commit(&src, "x.md");
+        let data_dir = tmp.path().join("data");
+        let mirror = ensure_mirror(&data_dir, "src", &src_path).unwrap();
+
+        let new_sha = commit_second_file(&src);
+        run_git_fetch(&mirror, &src_path).expect("fetch from the local source");
+        let resolved = resolve_local(&mirror, "main")
+            .expect("resolve")
+            .expect("main exists");
+        assert_eq!(resolved, new_sha.to_ascii_lowercase());
+        assert_ne!(resolved, old_sha.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn resolve_ref_refreshes_stale_tip_of_local_source() {
+        // A mirror of a local source goes stale the moment the source
+        // gets a new commit: the branch name still resolves (to the old
+        // tip), so fetch-on-miss never fires. workspace_dir mirrors
+        // must track the checkout — that is the contract layer's
+        // freshness promise.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let (src_path, old_sha) = git_init_with_commit(&src, "x.md");
+        let data_dir = tmp.path().join("data");
+        let _ = ensure_mirror(&data_dir, "src", &src_path).unwrap();
+        let lock = RepoLock::acquire(&data_dir, "src").expect("lock");
+
+        let new_sha = commit_second_file(&src);
+
+        // Branch tip must track the checkout, not the clone-time tip.
+        let resolved = resolve_ref(&lock, &data_dir, "src", "main", &src_path)
+            .expect("branch resolves after the source advanced");
+        assert_eq!(resolved, new_sha.to_ascii_lowercase());
+        assert_ne!(resolved, old_sha.to_ascii_lowercase());
+
+        // A brand-new commit's sha must resolve too.
+        let by_sha = resolve_ref(&lock, &data_dir, "src", &new_sha, &src_path)
+            .expect("new commit sha resolves");
+        assert_eq!(by_sha, new_sha.to_ascii_lowercase());
     }
 
     #[test]

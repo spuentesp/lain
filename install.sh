@@ -79,6 +79,12 @@ parse_args() {
         echo ""
         echo "Environment Variables:"
         echo "  LAIN_INSTALL_DIR        Installation directory [default: ~/.local/lain]"
+        echo "  LAIN_VERSION            Version to install (skips the GitHub \"latest\" lookup)"
+        echo "  LAIN_RELEASE_BASE_URL   Download release assets from this URL instead of"
+        echo "                          GitHub Releases (mirrors, air-gapped hosts, dev"
+        echo "                          builds). Expects the GitHub release layout:"
+        echo "                          SHA256SUMS next to lain-<version>-<platform>.tar.gz."
+        echo "                          Requires LAIN_VERSION."
         exit 0
         ;;
       *)
@@ -249,6 +255,40 @@ get_latest_version() {
   echo "$version"
 }
 
+# Base URL holding the release assets for a version. Defaults to the
+# GitHub release for that tag; LAIN_RELEASE_BASE_URL redirects it to a
+# mirror, an air-gapped artifact server, or a locally packaged dev
+# build. The override must reproduce the GitHub release layout — a
+# `SHA256SUMS` sitting next to `lain-<version>-<platform>.tar.gz`.
+release_assets_base() {
+  local version="$1"
+  if [ -n "${LAIN_RELEASE_BASE_URL:-}" ]; then
+    echo "${LAIN_RELEASE_BASE_URL%/}"
+  else
+    echo "https://github.com/$REPO/releases/download/v${version}"
+  fi
+}
+
+# Which version to install. LAIN_VERSION pins it — required under
+# LAIN_RELEASE_BASE_URL, where there is no GitHub "latest" to query.
+# A leading "v" is tolerated and stripped (asset names use the bare
+# version).
+resolve_version() {
+  if [ -n "${LAIN_VERSION:-}" ]; then
+    echo "${LAIN_VERSION#v}"
+    return 0
+  fi
+  if [ -n "${LAIN_RELEASE_BASE_URL:-}" ]; then
+    error "LAIN_RELEASE_BASE_URL is set but LAIN_VERSION is not."
+    echo ""
+    echo "There is no \"latest\" release to look up outside GitHub Releases."
+    echo "Pin the version explicitly, e.g.:"
+    echo "  LAIN_VERSION=0.7.3 LAIN_RELEASE_BASE_URL=http://localhost:8000 bash install.sh"
+    exit 1
+  fi
+  get_latest_version
+}
+
 download_onnx_model() {
   local model_dir="$HOME/.local/lain/models"
   local model_file="$model_dir/all-MiniLM-L6-v2.onnx"
@@ -397,7 +437,7 @@ _verify_archive() {
   local tmpdir="$3"
   local asset_name="lain-${version}-${platform}.tar.gz"
   local tarball="${tmpdir}/lain.tar.gz"
-  local sums_url="https://github.com/$REPO/releases/download/v${version}/SHA256SUMS"
+  local sums_url="$(release_assets_base "$version")/SHA256SUMS"
 
   info "Fetching SHA256SUMS for v${version}..."
 
@@ -468,7 +508,7 @@ install() {
 
   info "Installing LAIN v${version} for $platform..."
 
-  local download_url="https://github.com/$REPO/releases/download/v${version}/lain-${version}-${platform}.tar.gz"
+  local download_url="$(release_assets_base "$version")/lain-${version}-${platform}.tar.gz"
 
   info "Downloading from $download_url..."
 
@@ -598,7 +638,7 @@ main() {
   fi
 
   local version
-  version=$(get_latest_version)
+  version=$(resolve_version)
 
   # Check if already installed — in OUR install dir, not anywhere on
   # PATH (a package-manager lain elsewhere shouldn't block us). With

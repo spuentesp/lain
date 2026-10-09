@@ -27,6 +27,23 @@ All notable changes to LAIN are documented here. Versions follow
   (`ContractIndex::consumer`); paths that must see every fact iterate
   (`ContractIndex::consumer_resolutions`, `sensor_owner_of`).
 
+### Fixed
+
+- **`workspace_dir` contract mirrors now track the checkout.** Two bugs
+  froze contract snapshots of local repos at their clone-time commit
+  while the symbol layer kept following HEAD:
+  1. `git fetch --prune <source>` without a refspec only lands
+     `FETCH_HEAD`, so the mirror's ref tips never moved — including the
+     fetch-on-miss path used by `local_clone`/`shallow_clone` sources.
+     The mirror fetch now carries `+refs/*:refs/*`.
+  2. `resolve_ref` only fetched when a ref was missing, which a stale
+     branch tip never is. Mirrors of local sources are now refreshed
+     before every ref resolution.
+
+  `diff_contracts` and friends see new commits once they are made; the
+  README now states the real contract (commits + a re-index pass, not
+  uncommitted edits).
+
 ## [0.9.0] - 2026-10-04
 
 LAIN 0.9 introduces cross-repo contract federation. For every
