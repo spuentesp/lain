@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use git2::{DiffFormat, DiffOptions, Oid, Repository};
+use git2::{DiffOptions, Oid, Repository};
 
 use super::diff::{ChangedFilesSource, ChangedLines};
 
@@ -119,27 +119,53 @@ impl MirrorChangedFiles {
         }
     }
 
-    /// Compute tri-state diff for a single repository.
-    pub fn diff_repo(&self, repo: &str, base_sha: &str, head_sha: &str) -> RepoDiffResult {
+    /// Compute the changed file set **and** the changed line spans in a
+    /// single pass over the git diff. Callers that need both must use
+    /// this rather than `diff_repo` + `diff_lines_repo`, which would
+    /// walk the tree twice.
+    ///
+    /// `lines` is `None` when the diff could not be computed (missing
+    /// mirror, bad SHA) and the caller must fall back to whole-file
+    /// attribution. A changed file with no hunks (delete, rename, mode
+    /// change) simply has no entry in `lines` — also "unknown" to the
+    /// caller, which keeps the fallback sound.
+    pub fn diff_repo_with_lines(
+        &self,
+        repo: &str,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> (RepoDiffResult, Option<ChangedLines>) {
         if !base_sha.is_empty() && base_sha == head_sha {
-            return RepoDiffResult::Unchanged;
+            return (RepoDiffResult::Unchanged, Some(ChangedLines::new()));
         }
         let r = match self.repo(repo) {
             Some(r) => r,
             None => {
-                return RepoDiffResult::Unavailable(format!("git mirror missing for repo {repo}"));
+                return (
+                    RepoDiffResult::Unavailable(format!("git mirror missing for repo {repo}")),
+                    None,
+                );
             }
         };
-        match self.diff_impl(&r, base_sha, head_sha) {
-            Ok(files) => {
-                if files.is_empty() {
+        match self.diff_full_impl(&r, base_sha, head_sha) {
+            Ok((files, lines)) => {
+                let res = if files.is_empty() {
                     RepoDiffResult::Unchanged
                 } else {
                     RepoDiffResult::Changed(files)
-                }
+                };
+                (res, Some(lines))
             }
-            Err(e) => RepoDiffResult::Unavailable(format!("git error diffing repo {repo}: {e}")),
+            Err(e) => (
+                RepoDiffResult::Unavailable(format!("git error diffing repo {repo}: {e}")),
+                None,
+            ),
         }
+    }
+
+    /// Compute tri-state diff for a single repository.
+    pub fn diff_repo(&self, repo: &str, base_sha: &str, head_sha: &str) -> RepoDiffResult {
+        self.diff_repo_with_lines(repo, base_sha, head_sha).0
     }
 
     /// Compute changed line ranges for a single repository: each
@@ -156,22 +182,36 @@ impl MirrorChangedFiles {
         base_sha: &str,
         head_sha: &str,
     ) -> Option<ChangedLines> {
-        if !base_sha.is_empty() && base_sha == head_sha {
-            return Some(ChangedLines::new());
-        }
-        let r = self.repo(repo)?;
-        let base_tree = lookup_tree(&r, base_sha).ok()?;
-        let head_tree = lookup_tree(&r, head_sha).ok()?;
+        self.diff_repo_with_lines(repo, base_sha, head_sha).1
+    }
+
+    fn diff_full_impl(
+        &self,
+        r: &Repository,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> Result<(BTreeSet<String>, ChangedLines), git2::Error> {
+        let base_tree = lookup_tree(r, base_sha)?;
+        let head_tree = lookup_tree(r, head_sha)?;
         let mut opts = DiffOptions::new();
         opts.include_typechange(true);
-        let diff = r
-            .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))
-            .ok()?;
+        let diff = r.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))?;
 
+        let mut files: BTreeSet<String> = BTreeSet::new();
         let mut per_file: ChangedLines = ChangedLines::new();
         diff.foreach(
-            &mut |_delta, _| true,
+            &mut |delta, _| {
+                for p in [delta.new_file().path(), delta.old_file().path()]
+                    .into_iter()
+                    .flatten()
+                {
+                    files.insert(p.to_string_lossy().to_string());
+                }
+                true
+            },
             None,
+            // The hunk callback has to be present for the line callback
+            // to fire; it has nothing to add.
             Some(&mut |_delta, _hunk| true),
             Some(&mut |delta, _hunk, line| {
                 // Only the lines the diff actually touched. A hunk's
@@ -200,45 +240,12 @@ impl MirrorChangedFiles {
                 }
                 true
             }),
-        )
-        .ok()?;
+        )?;
 
         for spans in per_file.values_mut() {
-            spans.sort_unstable();
-            let mut merged: Vec<(u32, u32)> = Vec::new();
-            for (s, e) in spans.drain(..) {
-                match merged.last_mut() {
-                    Some(last) if s <= last.1.saturating_add(1) => {
-                        last.1 = last.1.max(e);
-                    }
-                    _ => merged.push((s, e)),
-                }
-            }
-            *spans = merged;
+            merge_spans(spans);
         }
-        Some(per_file)
-    }
-
-    fn diff_impl(
-        &self,
-        r: &Repository,
-        base_sha: &str,
-        head_sha: &str,
-    ) -> Result<BTreeSet<String>, git2::Error> {
-        let base_tree = lookup_tree(r, base_sha)?;
-        let head_tree = lookup_tree(r, head_sha)?;
-        let mut opts = DiffOptions::new();
-        opts.include_typechange(true);
-        let diff = r.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))?;
-        let mut out: BTreeSet<String> = BTreeSet::new();
-        diff.print(DiffFormat::NameOnly, |_delta, _hunk, line| {
-            let path = String::from_utf8_lossy(line.content()).trim().to_string();
-            if !path.is_empty() {
-                out.insert(path);
-            }
-            true
-        })?;
-        Ok(out)
+        Ok((files, per_file))
     }
 
     /// Pre-fetch a repo's mirror (so the lazy open happens up
@@ -251,6 +258,21 @@ impl MirrorChangedFiles {
 
 fn mirror_path(data_dir: &Path, repo: &str) -> PathBuf {
     data_dir.join("mirrors").join(format!("{repo}.git"))
+}
+
+/// Sort point-spans and fold the adjacent ones together, so a set of
+/// touched lines becomes the smallest set of `[start, end]` ranges
+/// covering them.
+fn merge_spans(spans: &mut Vec<(u32, u32)>) {
+    spans.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (s, e) in spans.drain(..) {
+        match merged.last_mut() {
+            Some(last) if s <= last.1.saturating_add(1) => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    *spans = merged;
 }
 
 fn lookup_tree<'r>(repo: &'r Repository, sha: &str) -> Result<git2::Tree<'r>, git2::Error> {

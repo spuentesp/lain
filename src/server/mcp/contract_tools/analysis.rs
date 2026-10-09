@@ -686,8 +686,12 @@ fn build_changed_source(
             .get(repo)
             .cloned()
             .unwrap_or_else(|| base_sha.clone());
-        by_repo.insert(repo.clone(), src.diff_repo(repo, base_sha, &head_sha));
-        if let Some(ranges) = src.diff_lines_repo(repo, base_sha, &head_sha) {
+        // One pass over the git diff for both the changed paths and the
+        // changed line spans — `diff_repo` + `diff_lines_repo` would
+        // walk the tree twice.
+        let (files, lines) = src.diff_repo_with_lines(repo, base_sha, &head_sha);
+        by_repo.insert(repo.clone(), files);
+        if let Some(ranges) = lines {
             line_ranges.insert(repo.clone(), ranges);
         }
     }
