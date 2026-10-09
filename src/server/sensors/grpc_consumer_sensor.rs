@@ -127,11 +127,11 @@ pub fn scan_workspace_grpc_consumer(
         }
     }
     if !all_nodes.is_empty() {
-        let _ = graph.replace_sensor_output(
+        graph.replace_sensor_output(
             SensorOwner::GrpcConsumerSensor,
             &all_nodes,
             &[] as &[GraphEdge],
-        );
+        )?;
     }
     Ok(total)
 }

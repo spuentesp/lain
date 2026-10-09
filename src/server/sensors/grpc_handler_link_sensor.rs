@@ -117,11 +117,11 @@ pub fn scan_workspace_handler_link(
         }
     }
     if !all_nodes.is_empty() {
-        let _ = graph.replace_sensor_output(
+        graph.replace_sensor_output(
             SensorOwner::GrpcHandlerLinkSensor,
             &all_nodes,
             &[] as &[GraphEdge],
-        );
+        )?;
     }
     Ok(total)
 }

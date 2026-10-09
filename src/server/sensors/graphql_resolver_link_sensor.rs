@@ -129,11 +129,11 @@ pub fn scan_workspace_resolver_link(
         }
     }
     if !all_nodes.is_empty() {
-        let _ = graph.replace_sensor_output(
+        graph.replace_sensor_output(
             SensorOwner::GraphqlResolverLinkSensor,
             &all_nodes,
             &[] as &[GraphEdge],
-        );
+        )?;
     }
     Ok(total)
 }

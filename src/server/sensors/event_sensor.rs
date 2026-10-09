@@ -586,10 +586,7 @@ fn emit_sites(
             && emitted_consumer_facts.insert(site_node_id.clone())
         {
             let mut consumer_node = crate::server::sensors::util::synthetic_site_node(
-                id_name,
-                graph_path,
-                site.line,
-                namespace,
+                id_name, graph_path, site.line, namespace,
             );
             if is_subscription {
                 // ONLY subscription sites carry the fact. A

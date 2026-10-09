@@ -1517,3 +1517,43 @@ fn synthetic_site_nodes_never_set_line_end() {
         node.name
     );
 }
+
+/// No sensor may discard a `replace_sensor_output` result. A failed
+/// write (read-only graph, poisoned lock, or any future error path)
+/// must surface as a failed scan rather than a green one — `sql` /
+/// `http` / `event` propagate with `?`, and three sensors used to write
+/// `let _ = …`.
+///
+/// This is a source contract rather than a behavioural test because the
+/// only error `check_writable` can produce is the read-only one, and
+/// every scanner pre-empts that with `Ok(0)` — so the swallow cannot be
+/// reached through the public API today. The pin is about the rule, so
+/// a future error path does not get silently dropped.
+#[test]
+fn no_sensor_swallows_a_replace_sensor_output_error() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/sensors");
+    let mut offenders: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("read sensors dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read sensor source");
+        // A `let _ = …` that reaches `replace_sensor_output` within a
+        // few lines is a swallow; matching a window rather than one
+        // line because the call is usually wrapped across lines.
+        for (idx, _) in text.match_indices("let _ =") {
+            let tail = text
+                .get(idx..idx.saturating_add(400))
+                .unwrap_or(&text[idx..]);
+            if tail.contains("replace_sensor_output") {
+                let line = text[..idx].matches('\n').count() + 1;
+                offenders.push(format!("{}:{line}", path.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these sites discard a replace_sensor_output failure — use `?`: {offenders:?}"
+    );
+}
