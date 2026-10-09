@@ -10,7 +10,7 @@ use crate::federation::contracts::model::{
     ContractFact, HostPart, NormalizedUrl, SymbolKey, WebSocketConsumerFact, WebSocketProviderFact,
 };
 use crate::graph::{GraphDatabase, SensorOwner};
-use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::schema::{EdgeType, GraphEdge, NodeType};
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util;
 use std::path::Path;
@@ -165,16 +165,14 @@ pub fn enrich_with_websocket(
                 continue;
             }
 
-            let node_id = GraphNode::generate_id(
-                &NodeType::HttpClientCall,
+            let mut node = crate::server::sensors::util::site_node(
+                NodeType::HttpClientCall,
+                key,
                 &node_path,
-                &key,
                 None,
+                line,
                 namespace,
             );
-            let mut node = GraphNode::new(NodeType::HttpClientCall, key, node_path.clone());
-            node.id = node_id.clone();
-            node.line_start = Some(line);
             node.contract = vec![ContractFact::WebSocketConsumer(WebSocketConsumerFact {
                 url: NormalizedUrl {
                     host: if host.is_empty() {
@@ -204,11 +202,14 @@ pub fn enrich_with_websocket(
                 continue;
             }
 
-            let node_id =
-                GraphNode::generate_id(&NodeType::HttpRoute, &node_path, &key, None, namespace);
-            let mut node = GraphNode::new(NodeType::HttpRoute, key, node_path.clone());
-            node.id = node_id.clone();
-            node.line_start = Some(line);
+            let mut node = crate::server::sensors::util::site_node(
+                NodeType::HttpRoute,
+                key,
+                &node_path,
+                None,
+                line,
+                namespace,
+            );
             node.contract = vec![ContractFact::WebSocketProvider(WebSocketProviderFact {
                 route,
                 handler: None,
@@ -223,11 +224,15 @@ pub fn enrich_with_websocket(
                 continue;
             }
 
-            let node_id =
-                GraphNode::generate_id(&NodeType::HttpRoute, &node_path, &key, None, namespace);
-            let mut node = GraphNode::new(NodeType::HttpRoute, key, node_path.clone());
-            node.id = node_id.clone();
-            node.line_start = Some(line);
+            let mut node = crate::server::sensors::util::site_node(
+                NodeType::HttpRoute,
+                key,
+                &node_path,
+                None,
+                line,
+                namespace,
+            );
+            let node_id = node.id.clone();
             node.signature = Some(handler_name.clone());
             let repo_id = crate::federation::repo_id::RepoId::new(
                 root.file_name().and_then(|f| f.to_str()).unwrap_or("repo"),

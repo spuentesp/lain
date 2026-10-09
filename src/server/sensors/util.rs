@@ -503,6 +503,39 @@ pub const WS_CLIENT_PREFIX: &str = "ws:client:";
 /// `HttpRoute` node.
 pub const WS_SERVER_PREFIX: &str = "ws:server:";
 
+/// Build a per-site node with the identity rules every protocol sensor
+/// shares: id from `(node_type, id_name, path, id_line)` under
+/// `namespace`, and `line_start` set to `line`. `line_end` and
+/// `contract` are the caller's to set (or not).
+///
+/// `id_line` is identity, not position, which is why it is a parameter
+/// and not a default. `Some(line)` keeps two sites of the same
+/// `id_name` in one file distinct (`sql-read:` and the other consumer
+/// prefixes rely on that). `None` collapses them into one node —
+/// `websocket_sensor` relies on *that*, because its `id_name` is
+/// `ws:client:<host><route>` and one node per `(file, url)` is the
+/// contract, whichever line the dial sits on. Either way the id is the
+/// join key: change it and stored graphs plus every cross-repo `Binds`
+/// edge keyed on the old id need a `lain reindex`, not a rescan.
+///
+/// `line_end` is load-bearing for `Function`-typed sites and inert
+/// elsewhere (see [`synthetic_site_node`]), so it is stated where it
+/// matters rather than defaulted where it might later start to.
+pub fn site_node(
+    node_type: crate::schema::NodeType,
+    id_name: String,
+    path: &str,
+    id_line: Option<u32>,
+    line: u32,
+    namespace: &crate::schema::RepoNamespace,
+) -> crate::schema::GraphNode {
+    let id = crate::schema::GraphNode::generate_id(&node_type, path, &id_name, id_line, namespace);
+    let mut node = crate::schema::GraphNode::new(node_type, id_name, path.to_string());
+    node.id = id;
+    node.line_start = Some(line);
+    node
+}
+
 /// Build the synthetic per-site node every consumer sensor emits: one
 /// `Function`-typed node named `<prefix><path>:<line>`. The caller
 /// attaches its `ContractFact` — most sites carry one, but
@@ -523,19 +556,16 @@ pub fn synthetic_site_node(
     line: u32,
     namespace: &crate::schema::RepoNamespace,
 ) -> crate::schema::GraphNode {
-    let mut node = crate::schema::GraphNode::new(
+    let mut node = site_node(
         crate::schema::NodeType::Function,
-        id_name.clone(),
-        path.to_string(),
-    );
-    node.id = crate::schema::GraphNode::generate_id(
-        &crate::schema::NodeType::Function,
+        id_name,
         path,
-        &id_name,
         Some(line),
+        line,
         namespace,
     );
-    node.line_start = Some(line);
+    // Explicit, not a default: `site_node` leaves `line_end` alone, and
+    // this is the site where "alone" must mean `None`.
     node.line_end = None;
     node
 }

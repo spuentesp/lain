@@ -94,17 +94,14 @@ pub fn scan_workspace_handler_link(
                 crate::server::sensors::util::RPC_HANDLER_PREFIX,
                 link.handler_function.name
             );
-            let id = GraphNode::generate_id(
-                &NodeType::Module,
+            let mut node = crate::server::sensors::util::site_node(
+                NodeType::Module,
+                id_name,
                 &graph_path_str,
-                &id_name,
                 Some(link.site_line),
+                link.site_line,
                 namespace,
             );
-            let mut node =
-                GraphNode::new(NodeType::Module, id_name.clone(), graph_path_str.clone());
-            node.id = id;
-            node.line_start = Some(link.site_line);
             node.line_end = Some(link.site_line);
             let key = ContractKey::Rpc {
                 system: RpcSystem::Grpc,
