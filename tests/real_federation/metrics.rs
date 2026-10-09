@@ -24,8 +24,7 @@ fn real_repos_ground_truth_holds() {
     let script = project_root().join("tests/real_federation/ground_truth.sh");
     assert!(script.exists(), "missing {}", script.display());
 
-    let bin = std::env::var("LAIN_BIN")
-        .unwrap_or_else(|_| "target/debug/lain".to_string());
+    let bin = std::env::var("LAIN_BIN").unwrap_or_else(|_| "target/debug/lain".to_string());
     let fixture = std::env::var("REAL_FED_FIXTURE_DIR")
         .unwrap_or_else(|_| "/tmp/real-federation-test".to_string());
 
