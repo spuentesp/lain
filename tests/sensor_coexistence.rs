@@ -1201,3 +1201,299 @@ fn websocket_and_http_client_keep_separate_nodes_and_edges() {
         );
     }
 }
+
+// ─── Ownership contract ─────────────────────────────────────────────
+//
+// `sensor_owner_of` and the sensor that calls `replace_sensor_output`
+// must agree. When they diverge the node is simply never retracted —
+// which is exactly how the proto and graphql schema/module staleness
+// bugs shipped. This table is the contract; a new sensor must add a row.
+
+#[test]
+fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
+    use lain::federation::contracts::model::{
+        ContractKey, Direction, GraphqlHandlerFact, GraphqlHandlerOrigin, GraphqlOp,
+        GraphqlProviderFact, HostPart, HttpMethod, ProviderFact, ProviderOrigin, RpcConsumerFact,
+        RpcHandlerFact, RpcHandlerOrigin, RpcSystem, SymbolKey, Table, TableConsumerFact,
+        TopicConsumerFact, TopicConsumerKind, WebSocketHandlerFact,
+    };
+    use lain::server::sensors::util::{SQL_READ_PREFIX, TOPIC_READ_PREFIX};
+
+    let mk = |ty: NodeType, name: &str, path: &str| {
+        lain::schema::GraphNode::new(ty, name.to_string(), path.to_string())
+    };
+    let sym = |path: &str, name: &str| SymbolKey {
+        repo: lain::federation::repo_id::RepoId::new("orders").unwrap(),
+        path: path.to_string(),
+        container: None,
+        name: name.to_string(),
+    };
+
+    let mut rows: Vec<(&str, lain::schema::GraphNode, Option<SensorOwner>)> = Vec::new();
+
+    // HTTP routes: the provider's origin decides the owner.
+    let mut n = mk(NodeType::HttpRoute, "GET /a", "src/a.rs");
+    n.contract = Some(ContractFact::Provider(ProviderFact {
+        method: HttpMethod::Get,
+        template: "/a".into(),
+        handler: None,
+        operation_id: None,
+        origin: ProviderOrigin::Code,
+    }));
+    rows.push(("http route (code)", n, Some(SensorOwner::HttpSensor)));
+
+    let mut n = mk(NodeType::HttpRoute, "GET /b", "openapi.yaml");
+    n.contract = Some(ContractFact::Provider(ProviderFact {
+        method: HttpMethod::Get,
+        template: "/b".into(),
+        handler: None,
+        operation_id: None,
+        origin: ProviderOrigin::OpenApi,
+    }));
+    rows.push(("http route (openapi)", n, Some(SensorOwner::OpenApiSensor)));
+
+    rows.push((
+        "http client call",
+        mk(NodeType::HttpClientCall, "GET /a", "src/a.py"),
+        Some(SensorOwner::HttpClientSensor),
+    ));
+    rows.push((
+        "field ref",
+        mk(NodeType::FieldRef, "customer.id", "src/a.py"),
+        Some(SensorOwner::FieldAccessSensor),
+    ));
+    rows.push((
+        "topic node",
+        mk(NodeType::Topic, "kafka/orders.created", "src/a.py"),
+        Some(SensorOwner::EventSensor),
+    ));
+
+    // Schema / Field ownership is by file extension: the *emitter* owns
+    // them, not the family the extension suggests.
+    let mut n = mk(NodeType::Schema, "Order", "proto/a.proto");
+    n.contract = Some(ContractFact::Schema {
+        direction: Direction::Response,
+    });
+    rows.push(("proto schema", n, Some(SensorOwner::GrpcProviderSensor)));
+
+    let mut n = mk(NodeType::Schema, "Order", "schema.graphql");
+    n.contract = Some(ContractFact::Schema {
+        direction: Direction::Response,
+    });
+    rows.push((
+        "graphql schema",
+        n,
+        Some(SensorOwner::GraphqlProviderSensor),
+    ));
+
+    let mut n = mk(NodeType::Schema, "Order", "openapi.json");
+    n.contract = Some(ContractFact::Schema {
+        direction: Direction::Response,
+    });
+    rows.push(("openapi schema", n, Some(SensorOwner::OpenApiSensor)));
+
+    let mut n = mk(NodeType::Schema, "Order", "payload.avsc");
+    n.contract = Some(ContractFact::Schema {
+        direction: Direction::Response,
+    });
+    rows.push(("avro schema", n, Some(SensorOwner::EventSensor)));
+
+    // Legacy fact-less scanners.
+    rows.push((
+        "proto service module",
+        mk(NodeType::Module, "orders.Orders.GetOrder", "proto/a.proto"),
+        Some(SensorOwner::ProtoSensor),
+    ));
+    rows.push((
+        "graphql operation interface",
+        mk(NodeType::Interface, "Query: orders", "schema.graphql"),
+        Some(SensorOwner::GraphqlSensor),
+    ));
+
+    // Contract-sensor nodes carry their own fact and are claimed by
+    // their own arm even on shared node types / extensions.
+    let mut n = mk(NodeType::Module, "Orders.GetOrder", "proto/a.proto");
+    n.contract = Some(ContractFact::RpcProvider(
+        lain::federation::contracts::model::RpcProviderFact {
+            system: RpcSystem::Grpc,
+            service: "orders.Orders".into(),
+            method: "GetOrder".into(),
+            request_type: "Order".into(),
+            response_type: "Order".into(),
+            handler: None,
+        },
+    ));
+    rows.push((
+        "grpc provider module",
+        n,
+        Some(SensorOwner::GrpcProviderSensor),
+    ));
+
+    let mut n = mk(NodeType::Module, "rpc-handler:get_order", "src/a.rs");
+    n.contract = Some(ContractFact::RpcHandler(RpcHandlerFact {
+        rpc_service: ContractKey::Rpc {
+            system: RpcSystem::Grpc,
+            service: "orders.Orders".into(),
+            method: "GetOrder".into(),
+        },
+        handler_function: sym("src/a.rs", "get_order"),
+        origin: RpcHandlerOrigin::GoRegister,
+    }));
+    rows.push((
+        "grpc handler link",
+        n,
+        Some(SensorOwner::GrpcHandlerLinkSensor),
+    ));
+
+    let mut n = mk(NodeType::Function, "rpc-call:Orders.GetOrder", "src/a.py");
+    n.contract = Some(ContractFact::RpcConsumer(RpcConsumerFact {
+        system: RpcSystem::Grpc,
+        service: "orders.Orders".into(),
+        method: "GetOrder".into(),
+        channel_target: None,
+        channel_host_part: HostPart::None,
+    }));
+    rows.push((
+        "grpc consumer call",
+        n,
+        Some(SensorOwner::GrpcConsumerSensor),
+    ));
+
+    let mut n = mk(NodeType::Module, "Query:orders", "schema.graphql");
+    n.contract = Some(ContractFact::GraphqlProvider(GraphqlProviderFact {
+        op: GraphqlOp::Query,
+        field: "orders".into(),
+        return_type: "Order".into(),
+    }));
+    rows.push((
+        "graphql provider",
+        n,
+        Some(SensorOwner::GraphqlProviderSensor),
+    ));
+
+    let mut n = mk(NodeType::Module, "graphql-handler:Query:orders", "src/a.ts");
+    n.contract = Some(ContractFact::GraphqlHandler(GraphqlHandlerFact {
+        graphql_field: ContractKey::Graphql {
+            op: GraphqlOp::Query,
+            field: "orders".into(),
+        },
+        handler_function: sym("src/a.ts", "orders"),
+        origin: GraphqlHandlerOrigin::Apollo,
+    }));
+    rows.push((
+        "graphql resolver link",
+        n,
+        Some(SensorOwner::GraphqlResolverLinkSensor),
+    ));
+
+    let mut n = mk(NodeType::Function, "graphql-call:Query:orders", "src/a.ts");
+    n.contract = Some(ContractFact::GraphqlConsumer(
+        lain::federation::contracts::model::GraphqlConsumerFact {
+            op: GraphqlOp::Query,
+            field: "orders".into(),
+        },
+    ));
+    rows.push((
+        "graphql consumer call",
+        n,
+        Some(SensorOwner::GraphqlConsumerSensor),
+    ));
+
+    let mut n = mk(
+        NodeType::HttpClientCall,
+        "ws:client:x.test/feed",
+        "src/a.ts",
+    );
+    n.contract = Some(ContractFact::WebSocketHandler(WebSocketHandlerFact {
+        route: "/feed".into(),
+        handler: sym("src/a.ts", "feed"),
+    }));
+    rows.push(("websocket handler", n, Some(SensorOwner::WebSocketSensor)));
+
+    // Synthetic per-site nodes are owned by name prefix.
+    let mut n = mk(
+        NodeType::Function,
+        &format!("{SQL_READ_PREFIX}src/a.py:3"),
+        "src/a.py",
+    );
+    n.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+        tables: vec!["t".into()],
+    }));
+    rows.push(("sql-read site", n, Some(SensorOwner::SqlSensor)));
+
+    let mut n = mk(NodeType::Table, "shipments", "src/a.py");
+    n.contract = Some(ContractFact::Table(Table {
+        service: String::new(),
+        name: "shipments".into(),
+    }));
+    rows.push(("sql table", n, Some(SensorOwner::SqlSensor)));
+
+    let mut n = mk(
+        NodeType::Function,
+        &format!("{TOPIC_READ_PREFIX}src/a.py:3"),
+        "src/a.py",
+    );
+    n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+        broker: "kafka".into(),
+        name: "t".into(),
+        kind: TopicConsumerKind::Subscription,
+    }));
+    rows.push(("topic-read site", n, Some(SensorOwner::EventSensor)));
+
+    // A plain symbol is nobody's — that is the migration arm's job.
+    rows.push((
+        "plain symbol",
+        mk(NodeType::Function, "job", "src/a.py"),
+        None,
+    ));
+
+    for (what, node, want) in &rows {
+        assert_eq!(
+            sensor_owner_of(node),
+            *want,
+            "ownership drift for {what}: sensor_owner_of disagrees with the \
+             sensor that calls replace_sensor_output"
+        );
+    }
+
+    // Every owner variant must appear, or a new sensor can be added
+    // without a row and its retraction stays unpinned.
+    let covered: std::collections::BTreeSet<String> = rows
+        .iter()
+        .filter_map(|(_, _, o)| o.map(|s| format!("{s:?}")))
+        .collect();
+    let no_node_owner = [
+        // `entry_point_sensor` writes `GraphNode.entry`, a field rather
+        // than a node, and `replace_sensor_output(EntryPointSensor, …)`
+        // is a deliberate wipe-and-reapply of that field across every
+        // node. There is no node shape to pin.
+        "EntryPointSensor",
+    ];
+    for variant in [
+        "HttpSensor",
+        "OpenApiSensor",
+        "HttpClientSensor",
+        "FieldAccessSensor",
+        "EntryPointSensor",
+        "EventSensor",
+        "SqlSensor",
+        "ProtoSensor",
+        "GraphqlSensor",
+        "GrpcProviderSensor",
+        "GrpcConsumerSensor",
+        "GrpcHandlerLinkSensor",
+        "GraphqlProviderSensor",
+        "GraphqlConsumerSensor",
+        "GraphqlResolverLinkSensor",
+        "WebSocketSensor",
+    ] {
+        if no_node_owner.contains(&variant) {
+            continue;
+        }
+        assert!(
+            covered.contains(variant),
+            "SensorOwner::{variant} has no row in the ownership contract \
+             table — add one so its retraction is pinned"
+        );
+    }
+}
