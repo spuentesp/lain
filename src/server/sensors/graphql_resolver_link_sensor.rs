@@ -133,13 +133,16 @@ pub fn scan_workspace_resolver_link(
             }
         }
     }
-    if !all_nodes.is_empty() {
-        graph.replace_sensor_output(
-            SensorOwner::GraphqlResolverLinkSensor,
-            &all_nodes,
-            &[] as &[GraphEdge],
-        )?;
-    }
+    // Replace unconditionally. A scan that finds nothing must still
+    // retract what a previous scan emitted — this guard used to skip
+    // the only call that retracts, so deleting the last call site from
+    // a repo left the old nodes forever. `sql_sensor` has always done
+    // this unconditionally.
+    graph.replace_sensor_output(
+        SensorOwner::GraphqlResolverLinkSensor,
+        &all_nodes,
+        &[] as &[GraphEdge],
+    )?;
     Ok(total)
 }
 

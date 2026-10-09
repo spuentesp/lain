@@ -498,6 +498,39 @@ fn deleting_a_graphql_operation_retracts_its_interface() {
     let _ = fs::remove_dir_all(&ws);
 }
 
+/// A rescan that finds nothing must still retract. Three sensors
+/// guarded `replace_sensor_output` with `if !all_nodes.is_empty()`, so
+/// deleting the last call site from a repo left the old nodes in the
+/// graph forever — the empty-output case never reached the replace
+/// that is the only thing that retracts them.
+#[test]
+fn a_rescan_that_finds_nothing_still_retracts() {
+    let ws = workspace("grpc_consumer_gone");
+    write(&ws, "proto/orders.proto", PROTO);
+    write(
+        &ws,
+        "src/client.py",
+        "import orders_pb2\nordersStub.GetOrder(orders_pb2.Order(id=\"1\"))\n",
+    );
+    let graph = scan(&ws);
+
+    let before = facts(&graph, |c| matches!(c, ContractFact::RpcConsumer(_))).len();
+    assert_eq!(before, 1, "one RPC consumer expected, got {before}");
+
+    // Remove the call site but keep the file, so this is the sensor's
+    // own retraction on empty output — not the orphan sweep.
+    write(&ws, "src/client.py", "import orders_pb2\n");
+    run_all(&graph, &ws, &RepoNamespace::for_test(), "svc");
+
+    let after = facts(&graph, |c| matches!(c, ContractFact::RpcConsumer(_))).len();
+    assert_eq!(
+        after, 0,
+        "a scan that finds no call sites must still retract the ones it \
+         used to emit"
+    );
+    let _ = fs::remove_dir_all(&ws);
+}
+
 // ─── 5. WebSocket providers must be retracted on rescan ──────────────
 //
 // `sensor_owner_of` returns `WebSocketSensor`, but no sensor passed that

@@ -43,6 +43,29 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// True when `line` is a `mod <stem>;` declaration under any visibility:
+/// `mod x;`, `pub mod x;`, `pub(crate) mod x;`, `pub(super) mod x;`,
+/// `pub(in path) mod x;`.
+///
+/// The earlier check compared against three exact spellings, so a
+/// `pub(super) mod x;` — a perfectly good declaration — read as an
+/// orphan. Visibility form is not evidence of orphanhood; an absent
+/// declaration is.
+fn is_mod_decl(line: &str, stem: &str) -> bool {
+    let l = line.trim();
+    let Some(rest) = l.strip_suffix(';') else {
+        return false;
+    };
+    let Some((vis, name)) = rest.trim_end().split_once("mod ") else {
+        return false;
+    };
+    if name.trim() != stem {
+        return false;
+    }
+    let vis = vis.trim();
+    vis.is_empty() || vis == "pub" || (vis.starts_with("pub(") && vis.ends_with(')'))
+}
+
 #[test]
 fn every_rust_file_under_src_is_declared_as_a_module() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -68,14 +91,7 @@ fn every_rust_file_under_src_is_declared_as_a_module() {
         parents.push(root.join("main.rs"));
         let declared = parents.iter().any(|p| {
             std::fs::read_to_string(p)
-                .map(|s| {
-                    s.lines().any(|l| {
-                        let l = l.trim();
-                        l == format!("mod {stem};")
-                            || l == format!("pub mod {stem};")
-                            || l == format!("pub(crate) mod {stem};")
-                    })
-                })
+                .map(|s| s.lines().any(|l| is_mod_decl(l, &stem)))
                 .unwrap_or(false)
         });
         if !declared {
