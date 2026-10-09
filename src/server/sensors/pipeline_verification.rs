@@ -94,16 +94,16 @@ proptest! {
         write_workspace(ws.path(), &files);
 
         let g1 = GraphDatabase::empty_writable();
-        let _ = run_all(&g1, ws.path(), &ns);
+        let _ = run_all(&g1, ws.path(), &ns, "svc");
         let first = node_ids(&g1);
 
         // Deterministic across a fresh graph.
         let g2 = GraphDatabase::empty_writable();
-        let _ = run_all(&g2, ws.path(), &ns);
+        let _ = run_all(&g2, ws.path(), &ns, "svc");
         prop_assert_eq!(node_ids(&g2), first.clone(), "same workspace, different nodes");
 
         // Idempotent on the same graph.
-        let _ = run_all(&g1, ws.path(), &ns);
+        let _ = run_all(&g1, ws.path(), &ns, "svc");
         prop_assert_eq!(node_ids(&g1), first, "a second pass changed the node set");
     }
 }
@@ -123,7 +123,7 @@ fn the_property_workspace_shape_really_produces_nodes() {
         ],
     );
     let g = GraphDatabase::empty_writable();
-    let counts = run_all(&g, ws.path(), &ns);
+    let counts = run_all(&g, ws.path(), &ns, "svc");
     let total = counts.http_routes + counts.graphql + counts.openapi + counts.proto;
     assert!(
         !node_ids(&g).is_empty() || total > 0,

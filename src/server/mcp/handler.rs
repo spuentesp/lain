@@ -486,7 +486,7 @@ pub(crate) async fn call_tool_in_process(
     let status = HandlerStatus::in_process(federation.map(|f| f.list_repos().len()).unwrap_or(0));
     let workspaces = server.workspaces_handle();
     let reload_bus = server.reload_bus();
-    let (text, is_error) = dispatch_tool_call(
+    let (text, is_error, structured) = dispatch_tool_call(
         executor,
         federation,
         workspaces.as_ref(),
@@ -498,7 +498,7 @@ pub(crate) async fn call_tool_in_process(
         args,
     )
     .await;
-    tool_text_result(text, is_error, executor.overlay(), generation)
+    tool_result_with_structured(text, is_error, structured, executor.overlay(), generation)
 }
 
 fn is_loopback_host(host: &str) -> bool {
