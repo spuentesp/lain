@@ -1010,35 +1010,28 @@ fn build_graph(
         // Phase D (spec §7): one `TableConsumer` fact per site, on a
         // synthetic `sql-read:<path>:<line>` Function node — the same
         // shape `grpc_consumer` / `graphql_consumer` mint for
-        // `rpc-call:` / `graphql-call:`. The fact must NOT ride the
+        // `rpc-call:` / `graphql-call:`, all built by
+        // `util::synthetic_site_node`. The fact must NOT ride the
         // enclosing symbol: `GraphNode.contract` holds a single fact,
-        // and `event_sensor` (phase 2) writes `TopicConsumer` onto
-        // that same symbol id, silently deleting the SQL reader from
-        // `ContractIndex.consumers` on every scan. Emission is
-        // unconditional (like `rpc-call:`) — the joiner keys on the
-        // fact plus this node's path/line, not on an enclosing symbol.
+        // and a second sensor annotating that same symbol id silently
+        // deletes this reader from `ContractIndex.consumers` on every
+        // scan. Emission is unconditional (like `rpc-call:`) — the
+        // joiner keys on the fact plus this node's path/line, not on an
+        // enclosing symbol.
         let id_name = format!(
             "{}{graph_path_str}:{}",
             crate::server::sensors::util::SQL_READ_PREFIX,
             site.line
         );
-        let id = GraphNode::generate_id(
-            &NodeType::Function,
-            graph_path_str,
-            &id_name,
-            Some(site.line),
-            namespace,
-        );
-        let mut reader = GraphNode::new(NodeType::Function, id_name, graph_path_str.to_string());
-        reader.id = id;
-        reader.line_start = Some(site.line);
-        // `line_end` stays `None` deliberately (event_sensor's
-        // consumer nodes do the same): `enclosing_symbol` requires
-        // both bounds, so no later scan can resolve *this* node as an
-        // enclosing symbol and re-create the shared-id collision.
         let mut fact_tables = site.stmt.tables.clone();
         fact_tables.sort();
         fact_tables.dedup();
+        let mut reader = crate::server::sensors::util::synthetic_site_node(
+            id_name,
+            graph_path_str,
+            site.line,
+            namespace,
+        );
         reader.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
             tables: fact_tables,
         }));

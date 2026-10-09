@@ -488,6 +488,47 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
 pub const SQL_READ_PREFIX: &str = "sql-read:";
 /// See [`SQL_READ_PREFIX`]. Carries `TopicConsumerFact`.
 pub const TOPIC_READ_PREFIX: &str = "topic-read:";
+/// See [`SQL_READ_PREFIX`]. Carries `RpcConsumerFact`.
+pub const RPC_CALL_PREFIX: &str = "rpc-call:";
+/// See [`SQL_READ_PREFIX`]. Carries `GraphqlConsumerFact`.
+pub const GRAPHQL_CALL_PREFIX: &str = "graphql-call:";
+
+/// Build the synthetic per-site node every consumer sensor emits: one
+/// `Function`-typed node named `<prefix><path>:<line>`. The caller
+/// attaches its `ContractFact` — most sites carry one, but
+/// `event_sensor`'s producer edge-anchor does not, so the shape and the
+/// content are separated here rather than forced into one signature.
+///
+/// `line_end` is deliberately `None` and must stay that way:
+/// [`enclosing_symbol`] requires both bounds, so a synthetic node with
+/// `line_end` set wins its `min_by` (a zero-width range beats the real
+/// enclosing function) and steals every peer sensor's edge anchor. The
+/// `id` is derived from `id_name`, so the name prefix that
+/// `sensor_owner_of`'s ownership guard matches is part of the identity
+/// — a node can never be both synthetic-named and collision-prone with
+/// a real symbol.
+pub fn synthetic_site_node(
+    id_name: String,
+    path: &str,
+    line: u32,
+    namespace: &crate::schema::RepoNamespace,
+) -> crate::schema::GraphNode {
+    let mut node = crate::schema::GraphNode::new(
+        crate::schema::NodeType::Function,
+        id_name.clone(),
+        path.to_string(),
+    );
+    node.id = crate::schema::GraphNode::generate_id(
+        &crate::schema::NodeType::Function,
+        path,
+        &id_name,
+        Some(line),
+        namespace,
+    );
+    node.line_start = Some(line);
+    node.line_end = None;
+    node
+}
 //
 // The graphql consumer sensor used to duplicate this 25-line block
 // at two call sites (SDL-derived consumers, then code-derived

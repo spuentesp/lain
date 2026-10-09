@@ -40,7 +40,7 @@ use crate::federation::contracts::model::{
     ContractFact, HostPart, RpcConsumerFact, RpcSystem, SourceSite,
 };
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{GraphEdge, GraphNode, RepoNamespace};
 use crate::server::sensors::util::compose_service_name;
 use std::path::Path;
 
@@ -102,24 +102,18 @@ pub fn scan_workspace_grpc_consumer(
         let graph_path_str = graph_path(root, &path);
         let calls = detect_stub_calls(&content, &ext, &graph_path_str);
         for call in calls {
-            let id_name = format!("rpc-call:{}:{}", call.service, call.method);
-            let id = GraphNode::generate_id(
-                &NodeType::Function,
+            let id_name = format!(
+                "{}{}:{}",
+                crate::server::sensors::util::RPC_CALL_PREFIX,
+                call.service,
+                call.method
+            );
+            let mut node = crate::server::sensors::util::synthetic_site_node(
+                id_name,
                 &call.site.path,
-                &id_name,
-                Some(call.site.line),
+                call.site.line,
                 namespace,
             );
-            let mut node =
-                GraphNode::new(NodeType::Function, id_name.clone(), call.site.path.clone());
-            node.id = id;
-            node.line_start = Some(call.site.line);
-            // `line_end` stays `None` deliberately: `util::enclosing_symbol`
-            // picks the smallest `line_start..=line_end` covering a line, so
-            // a range-0 call node would BEAT the real enclosing function and
-            // steal every peer sensor's edge anchor. Same rule as
-            // `sql-read:` / `topic-read:`.
-            node.line_end = None;
             let composed_service = compose_service_name(&call.package, &call.service);
             node.contract = Some(ContractFact::RpcConsumer(RpcConsumerFact {
                 system: RpcSystem::Grpc,

@@ -585,15 +585,12 @@ fn emit_sites(
         if (is_subscription || is_edge_anchor)
             && emitted_consumer_facts.insert(site_node_id.clone())
         {
-            let mut consumer_node =
-                GraphNode::new(NodeType::Function, id_name, graph_path.to_string());
-            consumer_node.id = site_node_id.clone();
-            consumer_node.line_start = Some(site.line);
-            // `line_end` stays `None` deliberately:
-            // `util::enclosing_symbol` requires both bounds, so no
-            // later scan can resolve *this* node as an enclosing
-            // symbol and re-create a shared-id collision. Same rule
-            // as `sql-read:`.
+            let mut consumer_node = crate::server::sensors::util::synthetic_site_node(
+                id_name,
+                graph_path,
+                site.line,
+                namespace,
+            );
             if is_subscription {
                 // ONLY subscription sites carry the fact. A
                 // `Produces` site is not a subscriber — emitting one

@@ -1497,3 +1497,23 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
         );
     }
 }
+
+/// `line_end` must stay `None` on every synthetic site node.
+/// `util::enclosing_symbol` requires both bounds, so a synthetic node
+/// with `line_end` set wins its `min_by` (a zero-width range beats the
+/// real enclosing function) and steals a peer sensor's edge anchor —
+/// the bug fixed in cae035ac for `graphql-call:` / `rpc-call:`.
+#[test]
+fn synthetic_site_nodes_never_set_line_end() {
+    use lain::server::sensors::util::{synthetic_site_node, SQL_READ_PREFIX};
+
+    let ns = RepoNamespace::for_test();
+    let node = synthetic_site_node(format!("{SQL_READ_PREFIX}src/a.py:3"), "src/a.py", 3, &ns);
+    assert_eq!(node.line_start, Some(3));
+    assert_eq!(node.line_end, None, "line_end must stay None");
+    assert!(
+        node.name.starts_with(SQL_READ_PREFIX),
+        "the name carries the prefix the ownership guard matches on, got {:?}",
+        node.name
+    );
+}

@@ -47,7 +47,7 @@
 use crate::error::LainError;
 use crate::federation::contracts::model::{ContractFact, GraphqlConsumerFact, GraphqlOp};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{GraphEdge, GraphNode, RepoNamespace};
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -125,27 +125,23 @@ pub fn scan_workspace_graphql_consumer(
             if c.dynamic {
                 continue;
             }
-            let id_name = format!("graphql-call:{}:{}", c.op, c.field);
-            let id = GraphNode::generate_id(
-                &NodeType::Function,
+            let id_name = format!(
+                "{}{}:{}",
+                crate::server::sensors::util::GRAPHQL_CALL_PREFIX,
+                c.op,
+                c.field
+            );
+            let mut node = crate::server::sensors::util::synthetic_site_node(
+                id_name,
                 &c.site_path,
-                &id_name,
-                Some(c.site_line),
+                c.site_line,
                 namespace,
             );
-            let mut node = GraphNode::new(NodeType::Function, id_name.clone(), c.site_path.clone());
-            node.id = id.clone();
-            node.line_start = Some(c.site_line);
-            // `line_end` stays `None` deliberately: `util::enclosing_symbol`
-            // picks the smallest `line_start..=line_end` covering a line, so
-            // a range-0 call node would BEAT the real enclosing function and
-            // steal every peer sensor's edge anchor. Same rule as
-            // `sql-read:` / `topic-read:`.
-            node.line_end = None;
             node.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
                 op: c.op,
                 field: c.field.clone(),
             }));
+            let id = node.id.clone();
             all_nodes.push(node);
             total += 1;
 
@@ -181,27 +177,23 @@ pub fn scan_workspace_graphql_consumer(
             if c.dynamic {
                 continue;
             }
-            let id_name = format!("graphql-call:{}:{}", c.op, c.field);
-            let id = GraphNode::generate_id(
-                &NodeType::Function,
+            let id_name = format!(
+                "{}{}:{}",
+                crate::server::sensors::util::GRAPHQL_CALL_PREFIX,
+                c.op,
+                c.field
+            );
+            let mut node = crate::server::sensors::util::synthetic_site_node(
+                id_name,
                 &c.site_path,
-                &id_name,
-                Some(c.site_line),
+                c.site_line,
                 namespace,
             );
-            let mut node = GraphNode::new(NodeType::Function, id_name.clone(), c.site_path.clone());
-            node.id = id.clone();
-            node.line_start = Some(c.site_line);
-            // `line_end` stays `None` deliberately: `util::enclosing_symbol`
-            // picks the smallest `line_start..=line_end` covering a line, so
-            // a range-0 call node would BEAT the real enclosing function and
-            // steal every peer sensor's edge anchor. Same rule as
-            // `sql-read:` / `topic-read:`.
-            node.line_end = None;
             node.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
                 op: c.op,
                 field: c.field.clone(),
             }));
+            let id = node.id.clone();
             all_nodes.push(node);
             total += 1;
 
