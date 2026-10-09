@@ -479,9 +479,6 @@ fn emit_sites(
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut edges: Vec<GraphEdge> = Vec::new();
     let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
-    // De-dupe the synthetic per-site nodes: one node (and at most one
-    // `TopicConsumer` fact) per `topic-read:<path>:<line>` site.
-    let mut emitted_consumer_facts: BTreeSet<String> = BTreeSet::new();
 
     for site in sites {
         let topic_name = match site.topic.clone() {
@@ -582,27 +579,39 @@ fn emit_sites(
         // node is emitted for it.
         let is_subscription = matches!(site.kind, SiteKind::Consumes | SiteKind::Scheduled);
         let is_edge_anchor = source_id == site_node_id;
-        if (is_subscription || is_edge_anchor)
-            && emitted_consumer_facts.insert(site_node_id.clone())
-        {
+        if !is_subscription && !is_edge_anchor {
+            continue;
+        }
+        // ONLY subscription sites carry the fact. A `Produces` site is
+        // not a subscriber — emitting one puts a false consumer in
+        // `ContractIndex`, and false consumers hide real ones.
+        let fact = is_subscription.then(|| {
+            let kind = match site.kind {
+                SiteKind::Scheduled => TopicConsumerKind::Scheduled,
+                _ => TopicConsumerKind::Subscription,
+            };
+            CF::TopicConsumer(TopicConsumerFact {
+                broker: site.broker.clone(),
+                name: topic_name.clone(),
+                kind,
+            })
+        });
+        // Two sites on one physical line share the synthetic node
+        // (`topic-read:<path>:<line>`), and `GraphNode.contract` holds a
+        // single fact, so at most one of them can be recorded. Which one
+        // must not depend on the order the walk happened to see them in:
+        // a `Produces` site must never block a consumer's fact from
+        // landing. A later subscription can therefore fill an empty slot
+        // but never overwrite a fact already recorded.
+        if let Some(existing) = nodes.iter_mut().find(|n| n.id == site_node_id) {
+            if existing.contract.is_none() {
+                existing.contract = fact;
+            }
+        } else {
             let mut consumer_node = crate::server::sensors::util::synthetic_site_node(
                 id_name, graph_path, site.line, namespace,
             );
-            if is_subscription {
-                // ONLY subscription sites carry the fact. A
-                // `Produces` site is not a subscriber — emitting one
-                // puts a false consumer in `ContractIndex`, and
-                // false consumers hide real ones.
-                let kind = match site.kind {
-                    SiteKind::Scheduled => TopicConsumerKind::Scheduled,
-                    _ => TopicConsumerKind::Subscription,
-                };
-                consumer_node.contract = Some(CF::TopicConsumer(TopicConsumerFact {
-                    broker: site.broker.clone(),
-                    name: topic_name.clone(),
-                    kind,
-                }));
-            }
+            consumer_node.contract = fact;
             nodes.push(consumer_node);
         }
     }
@@ -821,6 +830,47 @@ mod tests {
             "a second topic site in the same function lost its fact to the \
              source_id de-dupe — got {consumed:?}"
         );
+    }
+
+    /// Two topic sites on ONE physical line share the synthetic node
+    /// (`topic-read:<path>:<line>`), and `GraphNode.contract` holds a
+    /// single fact — so at most one of them can be recorded. But which
+    /// one must not depend on the order the regex walk happened to see
+    /// them in: a `Produces` site processed first used to claim the
+    /// de-dupe slot with NO fact, and the real consumer on the same
+    /// line then lost its fact entirely.
+    #[test]
+    fn a_consumer_fact_is_never_lost_to_a_same_line_producer() {
+        for (label, line) in [
+            (
+                "producer first",
+                "    producer.send(topic='orders.created', value={}); c = KafkaConsumer('orders.shipped')\n",
+            ),
+            (
+                "consumer first",
+                "    c = KafkaConsumer('orders.shipped'); producer.send(topic='orders.created', value={})\n",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("relay.py"), format!("def relay():\n{line}")).unwrap();
+            let graph = empty_db();
+            let ns = RepoNamespace::for_test();
+            scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+            let consumed: Vec<String> = graph
+                .get_all_nodes()
+                .into_iter()
+                .filter_map(|n| match n.contract {
+                    Some(ContractFact::TopicConsumer(f)) => Some(f.name),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                consumed.contains(&"orders.shipped".to_string()),
+                "{label}: the consumer's fact must survive sharing a line \
+                 with a producer — got {consumed:?}"
+            );
+        }
     }
 
     /// Celery `@app.task` decorator emits a scheduled topic.
