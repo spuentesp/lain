@@ -492,6 +492,16 @@ pub const TOPIC_READ_PREFIX: &str = "topic-read:";
 pub const RPC_CALL_PREFIX: &str = "rpc-call:";
 /// See [`SQL_READ_PREFIX`]. Carries `GraphqlConsumerFact`.
 pub const GRAPHQL_CALL_PREFIX: &str = "graphql-call:";
+/// See [`SQL_READ_PREFIX`]. Carries `RpcHandlerFact` on a `Module` node.
+pub const RPC_HANDLER_PREFIX: &str = "rpc-handler:";
+/// See [`SQL_READ_PREFIX`]. Carries `GraphqlHandlerFact` on a `Module` node.
+pub const GRAPHQL_HANDLER_PREFIX: &str = "graphql-handler:";
+/// See [`SQL_READ_PREFIX`]. Carries `WebSocketConsumerFact` on an
+/// `HttpClientCall` node.
+pub const WS_CLIENT_PREFIX: &str = "ws:client:";
+/// See [`SQL_READ_PREFIX`]. Carries `WebSocketProviderFact` on an
+/// `HttpRoute` node.
+pub const WS_SERVER_PREFIX: &str = "ws:server:";
 
 /// Build the synthetic per-site node every consumer sensor emits: one
 /// `Function`-typed node named `<prefix><path>:<line>`. The caller

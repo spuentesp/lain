@@ -100,7 +100,12 @@ pub fn scan_workspace_resolver_link(
             }
             let links = detector.detect(&content, &path);
             for link in links {
-                let id_name = format!("graphql-handler:{}:{}", link.op, link.field);
+                let id_name = format!(
+                    "{}{}:{}",
+                    crate::server::sensors::util::GRAPHQL_HANDLER_PREFIX,
+                    link.op,
+                    link.field
+                );
                 let graph_path_str = detector.graph_path_for(&path);
                 let id = GraphNode::generate_id(
                     &NodeType::Module,

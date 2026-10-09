@@ -155,7 +155,12 @@ pub fn enrich_with_websocket(
         if !url.is_empty() {
             // Client dial -> ConsumerFact
             let (host, route) = parse_url_path_and_host(&url);
-            let key = format!("ws:client:{}:{}", host, route);
+            let key = format!(
+                "{}{}:{}",
+                crate::server::sensors::util::WS_CLIENT_PREFIX,
+                host,
+                route
+            );
             if !seen_keys.insert(key.clone()) {
                 continue;
             }
@@ -190,7 +195,11 @@ pub fn enrich_with_websocket(
             } else {
                 format!("/{server_route}")
             };
-            let key = format!("ws:server:{}", route);
+            let key = format!(
+                "{}{}",
+                crate::server::sensors::util::WS_SERVER_PREFIX,
+                route
+            );
             if !seen_keys.insert(key.clone()) {
                 continue;
             }

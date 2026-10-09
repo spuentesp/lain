@@ -89,7 +89,11 @@ pub fn scan_workspace_handler_link(
         let graph_path_str = crate::graph::graph_path(root, &path);
         let links = detect_handler_links(&content, &ext, &graph_path_str, &repo_id);
         for link in links {
-            let id_name = format!("rpc-handler:{}", link.handler_function.name);
+            let id_name = format!(
+                "{}{}",
+                crate::server::sensors::util::RPC_HANDLER_PREFIX,
+                link.handler_function.name
+            );
             let id = GraphNode::generate_id(
                 &NodeType::Module,
                 &graph_path_str,
