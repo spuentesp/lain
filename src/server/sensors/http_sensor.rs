@@ -571,7 +571,7 @@ pub fn routes_to_graph(
         node.id = node_id.clone();
         node.line_start = Some(route.line);
         node.signature = Some(route.handler_name.clone());
-        node.contract = Some(crate::federation::contracts::model::ContractFact::Provider(
+        node.contract = vec![crate::federation::contracts::model::ContractFact::Provider(
             ProviderFact {
                 method: route.method,
                 template,
@@ -584,7 +584,7 @@ pub fn routes_to_graph(
                 operation_id: None,
                 origin: ProviderOrigin::Code,
             },
-        ));
+        )];
 
         nodes.push(node);
 
@@ -905,7 +905,7 @@ mod tests {
             &crate::schema::RepoNamespace::for_test(),
             &repo_id,
         );
-        let provider = match nodes[0].contract.as_ref().expect("contract set") {
+        let provider = match nodes[0].contract.first().expect("contract set") {
             ContractFact::Provider(p) => p.clone(),
             other => panic!("expected Provider fact, got {other:?}"),
         };

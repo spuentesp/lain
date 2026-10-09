@@ -218,7 +218,7 @@ async fn build_three_repo_federation(
     );
     billing_route.id = billing_route_id.clone();
     billing_route.line_start = Some(1);
-    billing_route.contract = Some(ContractFact::Provider(
+    billing_route.contract = vec![ContractFact::Provider(
         lain::federation::contracts::model::ProviderFact {
             method: lain::federation::contracts::model::HttpMethod::Get,
             template: "/invoices/{}".to_string(),
@@ -231,7 +231,7 @@ async fn build_three_repo_federation(
             origin: lain::federation::contracts::model::ProviderOrigin::Code,
             operation_id: None,
         },
-    ));
+    )];
     billing_g
         .insert_nodes_batch(std::slice::from_ref(&billing_route))
         .unwrap();
@@ -308,7 +308,7 @@ async fn build_three_repo_federation(
     http_call.id = http_call_id.clone();
     http_call.line_start = Some(20);
     http_call.line_end = Some(21);
-    http_call.contract = Some(ContractFact::Consumer(ConsumerFact {
+    http_call.contract = vec![ContractFact::Consumer(ConsumerFact {
         method: MethodSpec::Known(HttpMethod::Get),
         url: NormalizedUrl {
             host: HostPart::Env(vec!["BILLING_URL".to_string()]),
@@ -319,7 +319,7 @@ async fn build_three_repo_federation(
         },
         url_expr: "${process.env.BILLING_URL}/invoices/${id}".to_string(),
         reads_complete: true,
-    }));
+    })];
     reports_g
         .insert_nodes_batch(std::slice::from_ref(&http_call))
         .unwrap();
@@ -2229,8 +2229,8 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     // diff scenarios don't track them. Excluding those keeps the
     // precision/recall metrics stable per the task brief.
     let reported_binds: Vec<(String, String, String, String)> = index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .filter_map(|c| {
             let target = c.target.as_ref()?;
             if let lain::federation::contracts::index::ConsumerTarget::Binds { .. } = target {
@@ -2426,13 +2426,13 @@ mod pr15_event {
         .as_str()
         .to_string();
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Provider(ProviderFact {
+        n.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Any,
             template: topic.to_string(),
             handler: None,
             operation_id: None,
             origin: ProviderOrigin::Code,
-        }));
+        })];
         n
     }
 
@@ -2457,11 +2457,11 @@ mod pr15_event {
         .as_str()
         .to_string();
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+        n.contract = vec![ContractFact::TopicConsumer(TopicConsumerFact {
             broker: broker.to_string(),
             name: topic.to_string(),
             kind: TopicConsumerKind::Subscription,
-        }));
+        })];
         n
     }
 
@@ -2670,8 +2670,8 @@ mod pr15_event {
 
         // Two consumers, one producer: both binds resolve.
         let binds_by_consumer: Vec<(String, String)> = index
-            .consumers
-            .values()
+            .consumer_resolutions()
+            .map(|(_, r)| r)
             .filter_map(|c| {
                 if let Some(lain::federation::contracts::index::ConsumerTarget::Binds { .. }) =
                     c.target
@@ -2740,7 +2740,6 @@ mod pr18_operation_id {
         ProviderOrigin,
     };
     use lain::schema::{GraphNode, NodeType, RepoNamespace};
-    use std::collections::BTreeMap;
 
     fn ns() -> RepoNamespace {
         RepoNamespace::for_test()
@@ -2764,13 +2763,13 @@ mod pr18_operation_id {
         n.repo_id = Some(repo.to_string());
         n.id = format!("{repo}:HttpRoute:{path}:{name}:{line}");
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Provider(ProviderFact {
+        n.contract = vec![ContractFact::Provider(ProviderFact {
             method,
             template: template.to_string(),
             handler: None,
             operation_id: Some(operation_id.to_string()),
             origin: ProviderOrigin::OpenApi,
-        }));
+        })];
         n
     }
 
@@ -2784,7 +2783,7 @@ mod pr18_operation_id {
         n.repo_id = Some(repo.to_string());
         n.id = format!("{repo}:HttpClientCall:{path}:{name}:{line}");
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Consumer(ConsumerFact {
+        n.contract = vec![ContractFact::Consumer(ConsumerFact {
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
                 host: lain::federation::contracts::model::HostPart::Literal("orders.svc".into()),
@@ -2799,7 +2798,7 @@ mod pr18_operation_id {
             },
             url_expr: "client.orders.getOrderById({id: 42})".to_string(),
             reads_complete: true,
-        }));
+        })];
         n
     }
 
@@ -2874,8 +2873,7 @@ mod pr18_operation_id {
         let cid = lain::federation::repo_id::GlobalId::from_string(&consumer.id);
         let resolution: &ConsumerResolution = out
             .index
-            .consumers
-            .get(&cid)
+            .consumer(&cid)
             .expect("consumer resolution present");
         match &resolution.target {
             Some(ConsumerTarget::Binds {
@@ -2913,13 +2911,13 @@ mod pr18_operation_id {
             n.repo_id = Some("orders".into());
             n.id = "orders:HttpRoute:openapi.yaml:getOrder:1".into();
             n.line_start = Some(1);
-            n.contract = Some(ContractFact::Provider(ProviderFact {
+            n.contract = vec![ContractFact::Provider(ProviderFact {
                 method: HttpMethod::Get,
                 template: "/api/orders/{}".to_string(),
                 handler: None,
                 operation_id: None,
                 origin: ProviderOrigin::OpenApi,
-            }));
+            })];
             n
         };
         let consumer = sdk_consumer("billing", "src/sdk.ts", "getOrderById", 1, "getOrderById");
@@ -2955,13 +2953,13 @@ mod pr18_operation_id {
             n.repo_id = Some("billing".into());
             n.id = "billing:HttpRoute:openapi.yaml:list_invoices:2".into();
             n.line_start = Some(2);
-            n.contract = Some(ContractFact::Provider(ProviderFact {
+            n.contract = vec![ContractFact::Provider(ProviderFact {
                 method: HttpMethod::Get,
                 template: "/invoices".to_string(),
                 handler: None,
                 operation_id: Some("list_invoices".to_string()),
                 origin: ProviderOrigin::OpenApi,
-            }));
+            })];
             n
         };
         let consumer = sdk_consumer("orders", "src/sdk.ts", "getOrderById", 1, "getOrderById");
@@ -2997,17 +2995,18 @@ mod pr18_operation_id {
         let b = ContractJoiner::run(&[provider, consumer], &[], &sdk_config());
         assert_eq!(a, b, "operationId fallback is deterministic across runs");
         // Determinism on the index side too: same operation_id
-        // placement must produce identical bound endpoints.
-        let a_endpoints: BTreeMap<_, _> = a
+        // placement must produce identical bound endpoints. A `Vec`
+        // rather than a map: one call site can carry several
+        // resolutions (several facts on one node), and the map key
+        // would collapse them.
+        let a_endpoints: Vec<_> = a
             .index
-            .consumers
-            .iter()
+            .consumer_resolutions()
             .map(|(k, v)| (k.clone(), v.bound_endpoints.clone()))
             .collect();
-        let b_endpoints: BTreeMap<_, _> = b
+        let b_endpoints: Vec<_> = b
             .index
-            .consumers
-            .iter()
+            .consumer_resolutions()
             .map(|(k, v)| (k.clone(), v.bound_endpoints.clone()))
             .collect();
         assert_eq!(a_endpoints, b_endpoints);

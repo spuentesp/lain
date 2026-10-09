@@ -175,7 +175,7 @@ pub fn enrich_with_websocket(
             let mut node = GraphNode::new(NodeType::HttpClientCall, key, node_path.clone());
             node.id = node_id.clone();
             node.line_start = Some(line);
-            node.contract = Some(ContractFact::WebSocketConsumer(WebSocketConsumerFact {
+            node.contract = vec![ContractFact::WebSocketConsumer(WebSocketConsumerFact {
                 url: NormalizedUrl {
                     host: if host.is_empty() {
                         HostPart::None
@@ -185,7 +185,7 @@ pub fn enrich_with_websocket(
                     template: Some(route.clone()),
                 },
                 route,
-            }));
+            })];
             graph.upsert_node(node)?;
             count += 1;
         } else if !server_route.is_empty() {
@@ -209,10 +209,10 @@ pub fn enrich_with_websocket(
             let mut node = GraphNode::new(NodeType::HttpRoute, key, node_path.clone());
             node.id = node_id.clone();
             node.line_start = Some(line);
-            node.contract = Some(ContractFact::WebSocketProvider(WebSocketProviderFact {
+            node.contract = vec![ContractFact::WebSocketProvider(WebSocketProviderFact {
                 route,
                 handler: None,
-            }));
+            })];
             graph.upsert_node(node)?;
             count += 1;
         } else if !handler_name.is_empty() {
@@ -233,7 +233,7 @@ pub fn enrich_with_websocket(
                 root.file_name().and_then(|f| f.to_str()).unwrap_or("repo"),
             )
             .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
-            node.contract = Some(ContractFact::WebSocketProvider(WebSocketProviderFact {
+            node.contract = vec![ContractFact::WebSocketProvider(WebSocketProviderFact {
                 route,
                 handler: Some(SymbolKey {
                     repo: repo_id,
@@ -241,7 +241,7 @@ pub fn enrich_with_websocket(
                     container: None,
                     name: handler_name.clone(),
                 }),
-            }));
+            })];
             graph.upsert_node(node)?;
 
             if let Some(handler) =
@@ -344,12 +344,12 @@ mod tests {
         let mut found_provider = false;
 
         for node in graph.all_nodes() {
-            if let Some(ContractFact::WebSocketConsumer(c)) = &node.contract {
+            if let Some(ContractFact::WebSocketConsumer(c)) = node.contract.first() {
                 if c.route == "/events/stream" {
                     found_consumer = true;
                 }
             }
-            if let Some(ContractFact::WebSocketProvider(p)) = &node.contract {
+            if let Some(ContractFact::WebSocketProvider(p)) = node.contract.first() {
                 if p.route == "/events/stream" {
                     found_provider = true;
                 }

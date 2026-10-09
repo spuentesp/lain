@@ -1032,9 +1032,9 @@ fn build_graph(
             site.line,
             namespace,
         );
-        reader.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+        reader.contract = vec![ContractFact::TableConsumer(TableConsumerFact {
             tables: fact_tables,
-        }));
+        })];
         nodes.push(reader);
 
         for table_name in &site.stmt.tables {
@@ -1056,10 +1056,10 @@ fn build_graph(
                     namespace,
                 );
                 node.id = id.clone();
-                node.contract = Some(ContractFact::Table(Table {
+                node.contract = vec![ContractFact::Table(Table {
                     service: String::new(),
                     name: table_name.clone(),
-                }));
+                })];
                 emitted_table_ids.insert(table_key.clone(), id.clone());
                 nodes.push(node);
                 id
@@ -1359,7 +1359,7 @@ mod tests {
             "the synthetic sql-read node must have no line_end: {:?}",
             reader.line_end
         );
-        match reader.contract.as_ref() {
+        match reader.contract.first() {
             Some(ContractFact::TableConsumer(f)) => {
                 assert_eq!(f.tables, vec!["orders".to_string()]);
             }
@@ -1372,7 +1372,7 @@ mod tests {
                 .unwrap()
                 .expect("enclosing symbol still present")
                 .contract
-                .is_none(),
+                .is_empty(),
             "build_graph must not set a contract on the enclosing symbol"
         );
         assert_eq!(edges.len(), 1);

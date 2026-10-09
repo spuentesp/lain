@@ -125,7 +125,7 @@ async fn list_order(pool: &sqlx::PgPool, id: i64) -> sqlx::Result<i64> {
     assert_eq!(tables.len(), 1);
     let orders = &tables[0];
     assert_eq!(orders.name, "orders");
-    let fact = orders.contract.as_ref().expect("Table contract fact");
+    let fact = orders.contract.first().expect("Table contract fact");
     match fact {
         ContractFact::Table(t) => {
             assert_eq!(t.name, "orders");
@@ -536,10 +536,10 @@ def find_users():
     );
     orders_node.repo_id = Some("inventory_repo".into());
     orders_node.id = "inventory_repo:Table:src/tables.sql:orders:1".into();
-    orders_node.contract = Some(ContractFact::Table(Table {
+    orders_node.contract = vec![ContractFact::Table(Table {
         service: "".into(),
         name: "orders".into(),
-    }));
+    })];
 
     let mut customers_node = GraphNode::new_in(
         NodeType::Table,
@@ -549,10 +549,10 @@ def find_users():
     );
     customers_node.repo_id = Some("inventory_repo".into());
     customers_node.id = "inventory_repo:Table:src/tables.sql:customers:2".into();
-    customers_node.contract = Some(ContractFact::Table(Table {
+    customers_node.contract = vec![ContractFact::Table(Table {
         service: "".into(),
         name: "customers".into(),
-    }));
+    })];
 
     let cfg = ContractFederationConfig {
         services: vec![

@@ -408,13 +408,13 @@ async fn unnormalized_consumers_are_recorded() {
     )
     .as_str()
     .to_string();
-    provider.contract = Some(ContractFact::Provider(ProviderFact {
+    provider.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Get,
         template: "/api/orders".into(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::Code,
-    }));
+    })];
 
     let mut consumer = GraphNode::new_in(
         NodeType::HttpClientCall,
@@ -431,7 +431,7 @@ async fn unnormalized_consumers_are_recorded() {
         Some(1),
     );
     consumer.id = consumer_gid.as_str().to_string();
-    consumer.contract = Some(ContractFact::Consumer(ConsumerFact {
+    consumer.contract = vec![ContractFact::Consumer(ConsumerFact {
         method: MethodSpec::Known(HttpMethod::Get),
         // Expr host — rules 3 / 4 cannot resolve it; template
         // = None — rule 5 fires.
@@ -444,7 +444,7 @@ async fn unnormalized_consumers_are_recorded() {
         },
         url_expr: String::new(),
         reads_complete: true,
-    }));
+    })];
 
     let cfg = ContractFederationConfig {
         services: vec![ServiceDecl {
@@ -482,8 +482,7 @@ async fn unnormalized_consumers_are_recorded() {
     // verdict tagged Unnormalized.
     let resolution = out
         .index
-        .consumers
-        .get(&consumer_gid)
+        .consumer(&consumer_gid)
         .expect("consumer resolution");
     assert!(matches!(
         resolution.target,
@@ -534,13 +533,13 @@ async fn field_ref_to_field_binds_edge_is_persisted() {
     );
     route.repo_id = Some("orders".into());
     route.line_start = Some(3);
-    route.contract = Some(ContractFact::Provider(ProviderFact {
+    route.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Get,
         template: "/api/orders/{}".into(),
         handler: None,
         operation_id: Some("getOrder".into()),
         origin: ProviderOrigin::OpenApi,
-    }));
+    })];
     let mut schema = GraphNode::new_in(
         NodeType::Schema,
         "response".into(),
@@ -549,9 +548,9 @@ async fn field_ref_to_field_binds_edge_is_persisted() {
     );
     schema.repo_id = Some("orders".into());
     schema.line_start = Some(8);
-    schema.contract = Some(ContractFact::Schema {
+    schema.contract = vec![ContractFact::Schema {
         direction: Direction::Response,
-    });
+    }];
     let mut field = GraphNode::new_in(
         NodeType::Field,
         "customer_id".into(),
@@ -560,12 +559,12 @@ async fn field_ref_to_field_binds_edge_is_persisted() {
     );
     field.repo_id = Some("orders".into());
     field.line_start = Some(10);
-    field.contract = Some(ContractFact::Field(FieldMeta {
+    field.contract = vec![ContractFact::Field(FieldMeta {
         ty: TypeDesc::String,
         required: true,
         nullable: false,
         enum_values: None,
-    }));
+    })];
 
     // Consumer (billing): the call and the field read — the shapes
     // `http_client_sensor` and `field_access_sensor` emit.
@@ -577,7 +576,7 @@ async fn field_ref_to_field_binds_edge_is_persisted() {
     );
     call.repo_id = Some("billing".into());
     call.line_start = Some(5);
-    call.contract = Some(ContractFact::Consumer(ConsumerFact {
+    call.contract = vec![ContractFact::Consumer(ConsumerFact {
         method: MethodSpec::Known(HttpMethod::Get),
         url: NormalizedUrl {
             host: HostPart::Literal("orders.svc".into()),
@@ -588,7 +587,7 @@ async fn field_ref_to_field_binds_edge_is_persisted() {
         },
         url_expr: "\"https://orders.svc/api/orders/42\"".into(),
         reads_complete: true,
-    }));
+    })];
     let mut fr = GraphNode::new_in(
         NodeType::FieldRef,
         "customer_id".into(),
@@ -597,11 +596,11 @@ async fn field_ref_to_field_binds_edge_is_persisted() {
     );
     fr.repo_id = Some("billing".into());
     fr.line_start = Some(5);
-    fr.contract = Some(ContractFact::FieldRead(FieldReadFact {
+    fr.contract = vec![ContractFact::FieldRead(FieldReadFact {
         chain: "customer_id".parse().unwrap(),
         exact: true,
         origin: lain::server::federation::contracts::model::FieldReadOrigin::FieldAccess,
-    }));
+    })];
 
     // Edges (per-repo local ids; `project_edges` rewrites both
     // endpoints to GlobalIds).
@@ -759,8 +758,8 @@ async fn rejoin_publishes_index_and_binds_atomically() {
             // per consumer resolution whose `target` is `Binds`.
             let consumers_with_binds: usize = snap
                 .index
-                .consumers
-                .values()
+                .consumer_resolutions()
+                .map(|(_, r)| r)
                 .filter(|c| matches!(c.target, Some(ConsumerTarget::Binds { .. })))
                 .count();
             if snap.binds.len() != consumers_with_binds {

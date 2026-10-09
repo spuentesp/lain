@@ -318,14 +318,14 @@ fn websocket_endpoints_are_emitted_via_the_data_driven_walker() {
     let mut found_provider = false;
     for node in graph.all_nodes() {
         if let Some(lain::federation::contracts::model::ContractFact::WebSocketConsumer(c)) =
-            &node.contract
+            node.contract.first()
         {
             if c.route == "/events/stream" {
                 found_consumer = true;
             }
         }
         if let Some(lain::federation::contracts::model::ContractFact::WebSocketProvider(p)) =
-            &node.contract
+            node.contract.first()
         {
             if p.route == "/events/stream" {
                 found_provider = true;

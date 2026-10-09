@@ -1793,8 +1793,10 @@ pub fn build_snapshot_contract_index(
             )
         })
         .collect();
-    let contract_nodes: Vec<GraphNode> =
-        nodes.into_iter().filter(|n| n.contract.is_some()).collect();
+    let contract_nodes: Vec<GraphNode> = nodes
+        .into_iter()
+        .filter(|n| !n.contract.is_empty())
+        .collect();
     let out = ContractJoiner::run(&contract_nodes, &contract_edges, config);
 
     // Persist the join's `Binds` edges into the snapshot backend,

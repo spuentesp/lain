@@ -93,11 +93,11 @@ fn graphql_provider_node(
     n.id = id;
     n.line_start = Some(line);
     n.line_end = Some(line);
-    n.contract = Some(ContractFact::GraphqlProvider(GraphqlProviderFact {
+    n.contract = vec![ContractFact::GraphqlProvider(GraphqlProviderFact {
         op,
         field: field.to_string(),
         return_type: return_type.to_string(),
-    }));
+    })];
     n
 }
 
@@ -115,10 +115,10 @@ fn graphql_consumer_node(
     n.id = id;
     n.line_start = Some(line);
     n.line_end = Some(line);
-    n.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
+    n.contract = vec![ContractFact::GraphqlConsumer(GraphqlConsumerFact {
         op,
         field: field.to_string(),
-    }));
+    })];
     n
 }
 
@@ -136,13 +136,13 @@ fn http_route_node(repo: &str, path: &str, template: &str, line: u32) -> GraphNo
     n.id = id;
     n.line_start = Some(line);
     n.line_end = Some(line);
-    n.contract = Some(ContractFact::Provider(ProviderFact {
+    n.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Post,
         template: template.to_string(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::Code,
-    }));
+    })];
     n
 }
 
@@ -278,7 +278,7 @@ fn f2_gql_tagged_template_binds_via_graphql_route() {
         "graphql-call:query:orders",
         7,
     );
-    let Some(resolution) = out.index.consumers.get(&consumer_id) else {
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
         panic!(
             "consumer must resolve: binds={:?} endpoints={:?}",
             out.binds, out.index.endpoints
@@ -352,12 +352,12 @@ func (r *queryResolver) Orders(ctx context.Context) ([]*Order, error) {
         op: link.op,
         field: link.field.clone(),
     };
-    n.contract = Some(ContractFact::GraphqlHandler(GraphqlHandlerFact {
+    n.contract = vec![ContractFact::GraphqlHandler(GraphqlHandlerFact {
         graphql_field: key,
         handler_function: link.handler_function.clone(),
         origin: link.origin,
-    }));
-    match &n.contract {
+    })];
+    match n.contract.first() {
         Some(ContractFact::GraphqlHandler(gh)) => {
             assert_eq!(gh.handler_function.name, "Orders");
             assert!(matches!(gh.graphql_field, ContractKey::Graphql { .. }));
@@ -442,7 +442,7 @@ fn f5_federation_ambiguous_no_single_bind() {
         "graphql-call:query:orders",
         7,
     );
-    let Some(resolution) = out.index.consumers.get(&consumer_id) else {
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
         panic!("consumer must be recorded (even when ambiguous)");
     };
     assert!(
@@ -534,7 +534,7 @@ fn f2_neg_route_owner_and_provider_can_differ() {
         "graphql-call:query:orders",
         7,
     );
-    let Some(resolution) = out.index.consumers.get(&consumer_id) else {
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
         panic!("consumer must resolve");
     };
     assert!(
@@ -590,7 +590,7 @@ fn graphql_same_service_does_not_bind() {
         "graphql-call:query:orders",
         7,
     );
-    let Some(resolution) = out.index.consumers.get(&consumer_id) else {
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
         panic!("consumer must be recorded (even when same-service)");
     };
     assert!(
@@ -766,8 +766,7 @@ const query = gql`
     let consumer_gid = GlobalId::parse(&orders_consumer_id).unwrap();
     let resolution = out
         .index
-        .consumers
-        .get(&consumer_gid)
+        .consumer(&consumer_gid)
         .expect("consumer must be resolved");
     assert!(
         !resolution.bound_endpoints.is_empty(),

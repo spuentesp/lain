@@ -86,7 +86,7 @@ pub(crate) fn collect_endpoint_schemas(
     let mut schema_by_id: BTreeMap<String, Direction> = BTreeMap::new();
     let mut field_node_by_id: BTreeMap<String, (JsonPath, FieldMeta)> = BTreeMap::new();
     for node in nodes {
-        match node.contract.as_ref() {
+        match node.contract.first() {
             Some(ContractFact::Schema { direction }) => {
                 schema_by_id.insert(node.id.clone(), *direction);
             }
@@ -238,13 +238,13 @@ pub(crate) fn collect_endpoint_schemas(
             .iter()
             .find(|n| {
                 n.node_type == crate::schema::NodeType::Topic
-                    && matches!(n.contract.as_ref(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
+                    && matches!(n.contract.first(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
                     && assignments.get(&n.id) == Some(&svc)
             })
             .or_else(|| {
                 nodes.iter().find(|n| {
                     n.node_type == crate::schema::NodeType::Topic
-                        && matches!(n.contract.as_ref(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
+                        && matches!(n.contract.first(), Some(ContractFact::Provider(p)) if p.template == decl.topic)
                 })
             });
         let Some(topic_node) = topic_node else {
@@ -399,7 +399,7 @@ pub(crate) fn resolve_field_refs(
         let Ok(fid) = GlobalId::parse(&node.id) else {
             continue;
         };
-        let Some(ContractFact::FieldRead(read)) = node.contract.as_ref() else {
+        let Some(ContractFact::FieldRead(read)) = node.contract.first() else {
             continue;
         };
         let Some(call_id) = reads_from.get(&node.id) else {
@@ -1111,11 +1111,11 @@ mod tests {
         node.id = format!("billing:FieldRef:billing.py:{chain}:1");
         node.repo_id = Some("billing".into());
         node.line_start = Some(1);
-        node.contract = Some(ContractFact::FieldRead(FieldReadFact {
+        node.contract = vec![ContractFact::FieldRead(FieldReadFact {
             chain: chain.parse().unwrap(),
             exact,
             origin: crate::federation::contracts::model::FieldReadOrigin::FieldAccess,
-        }));
+        })];
         node
     }
 
@@ -1275,9 +1275,9 @@ mod tests {
         n.repo_id = Some(repo.to_string());
         n.id = format!("{repo}:Schema:{path}:{name}:{line}");
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Schema {
+        n.contract = vec![ContractFact::Schema {
             direction: Direction::Payload,
-        });
+        }];
         n
     }
 
@@ -1291,12 +1291,12 @@ mod tests {
         n.repo_id = Some(repo.to_string());
         n.id = format!("{repo}:Field:{path}:{name}:{line}");
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Field(FieldMeta {
+        n.contract = vec![ContractFact::Field(FieldMeta {
             ty: TypeDesc::String,
             required: true,
             nullable: false,
             enum_values: None,
-        }));
+        })];
         n
     }
 
@@ -1315,13 +1315,13 @@ mod tests {
         n.repo_id = Some(repo.to_string());
         n.id = format!("{repo}:Topic:src/events.py:{node_name}:{line}");
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Provider(ProviderFact {
+        n.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Any,
             template: template.to_string(),
             handler: None,
             operation_id: None,
             origin: ProviderOrigin::Code,
-        }));
+        })];
         n
     }
 
@@ -1336,13 +1336,13 @@ mod tests {
         n.repo_id = Some(repo.to_string());
         n.id = format!("{repo}:HttpRoute:src/api.py:{node_name}:{line}");
         n.line_start = Some(line);
-        n.contract = Some(ContractFact::Provider(ProviderFact {
+        n.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Post,
             template: template.to_string(),
             handler: None,
             operation_id: None,
             origin: ProviderOrigin::Code,
-        }));
+        })];
         n
     }
 

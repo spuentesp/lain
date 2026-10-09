@@ -431,7 +431,7 @@ async fn run_list_unresolved(
         .map(|s| ServiceName(s.to_string()));
 
     let mut items: Vec<Value> = Vec::new();
-    for (call_id, resolution) in &view.consumers {
+    for (call_id, resolution) in view.consumer_resolutions() {
         let Some(target) = &resolution.target else {
             continue;
         };
@@ -466,7 +466,7 @@ async fn run_list_unresolved(
     }
 
     let mut ambiguous: Vec<Value> = Vec::new();
-    for (call_id, resolution) in &view.consumers {
+    for (call_id, resolution) in view.consumer_resolutions() {
         if let Some(ConsumerTarget::Binds { .. }) = &resolution.target {
             if resolution.bound_endpoints.len() > 1 {
                 let mut cands: Vec<Value> = Vec::new();
@@ -596,7 +596,7 @@ async fn run_check_binding(
     let endpoint_id: EndpointId = (ServiceName(service_str.to_string()), key.clone());
     let endpoint_def = view.endpoints.get(&endpoint_id);
 
-    let resolution = view.consumers.get(&consumer_id).cloned();
+    let resolution = view.consumer(&consumer_id).cloned();
     let mut reasons: Vec<&'static str> = Vec::new();
 
     if resolution.is_none() {
@@ -763,8 +763,8 @@ fn parse_cursor(
 }
 
 fn bound_consumers_count(idx: &ContractIndex, endpoint_id: &EndpointId) -> usize {
-    idx.consumers
-        .values()
+    idx.consumer_resolutions()
+        .map(|(_, r)| r)
         .filter(|r| match &r.target {
             Some(ConsumerTarget::Binds { .. }) => r.bound_endpoints.contains(endpoint_id),
             _ => false,
@@ -774,7 +774,7 @@ fn bound_consumers_count(idx: &ContractIndex, endpoint_id: &EndpointId) -> usize
 
 fn collect_consumers_for_endpoint(idx: &ContractIndex, endpoint_id: &EndpointId) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
-    for (call_id, res) in &idx.consumers {
+    for (call_id, res) in idx.consumer_resolutions() {
         if !res.bound_endpoints.contains(endpoint_id) {
             continue;
         }
@@ -843,7 +843,7 @@ fn bound_field_for_call<'a>(
     if fr.call != call_id.as_str() {
         return None;
     }
-    let call = idx.consumers.get(call_id)?;
+    let call = idx.consumer(call_id)?;
     fr.bound_fields
         .iter()
         .find(|b| call.bound_endpoints.contains(&b.endpoint))

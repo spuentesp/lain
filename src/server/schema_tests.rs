@@ -488,7 +488,7 @@ fn test_contract_edge_endpoints_match_node_type_definitions() {
 #[test]
 fn test_graph_node_new_initializes_contract_and_entry_to_none() {
     let node = GraphNode::new(NodeType::Function, "f".into(), "src/lib.rs".into());
-    assert!(node.contract.is_none());
+    assert!(node.contract.is_empty());
     assert!(node.entry.is_none());
 }
 
@@ -603,13 +603,13 @@ fn test_graph_node_bincode_roundtrips_with_contract_field() {
         "src/orders.py".to_string(),
     );
     original.line_start = Some(7);
-    original.contract = Some(ContractFact::Provider(ProviderFact {
+    original.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Get,
         template: "/orders/{}".to_string(),
         handler: None,
         operation_id: Some("getOrder".to_string()),
         origin: ProviderOrigin::OpenApi,
-    }));
+    })];
     original.entry = Some(EntryKind::HttpHandler);
 
     let bytes =

@@ -111,11 +111,11 @@ pub fn scan_workspace_handler_link(
                 service: link.rpc_service.clone(),
                 method: link.rpc_method_scope.clone(),
             };
-            node.contract = Some(ContractFact::RpcHandler(RpcHandlerFact {
+            node.contract = vec![ContractFact::RpcHandler(RpcHandlerFact {
                 rpc_service: key,
                 handler_function: link.handler_function.clone(),
                 origin: link.origin,
-            }));
+            })];
             all_nodes.push(node);
             total += 1;
         }

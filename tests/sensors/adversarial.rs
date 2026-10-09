@@ -657,11 +657,11 @@ def fetch():
         // self-describing).
         let ca = a
             .contract
-            .as_ref()
+            .first()
             .expect("HttpClientCall carries a contract");
         let cb = b
             .contract
-            .as_ref()
+            .first()
             .expect("HttpClientCall carries a contract");
         assert_eq!(
             format!("{ca:?}"),
@@ -736,8 +736,8 @@ fn build() -> Router {
     assert_eq!(routes_a.len(), routes_b.len());
     for (a, b) in routes_a.iter().zip(routes_b.iter()) {
         assert_eq!(a.name, b.name, "scan A and B must agree on the route name");
-        let ca = a.contract.as_ref().expect("HttpRoute carries a contract");
-        let cb = b.contract.as_ref().expect("HttpRoute carries a contract");
+        let ca = a.contract.first().expect("HttpRoute carries a contract");
+        let cb = b.contract.first().expect("HttpRoute carries a contract");
         // Both must be `Provider` contracts with method Get and
         // template `/users`. The `With_provider_contract_carries
         // _the_template` assertion covers the differential for

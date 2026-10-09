@@ -2656,7 +2656,7 @@ fn build_coverage_reflects_index_state() {
     let _ = &mut consumer;
     index.consumers.insert(
         call.clone(),
-        ConsumerResolution {
+        vec![ConsumerResolution {
             call_id: call.clone(),
             service: svc("billing"),
             target: Some(ConsumerTarget::Unresolved {
@@ -2665,7 +2665,7 @@ fn build_coverage_reflects_index_state() {
             }),
             bound_endpoints: Vec::new(),
             reads_complete: true,
-        },
+        }],
     );
     let cov = build_coverage(
         &index,
@@ -2770,7 +2770,7 @@ fn coverage_complete_unresolved_could_match_blocks_complete() {
     let mut index = ContractIndex::default();
     index.consumers.insert(
         call.clone(),
-        ConsumerResolution {
+        vec![ConsumerResolution {
             call_id: call.clone(),
             service: svc("billing"),
             target: Some(ConsumerTarget::Unresolved {
@@ -2779,7 +2779,7 @@ fn coverage_complete_unresolved_could_match_blocks_complete() {
             }),
             bound_endpoints: Vec::new(),
             reads_complete: true,
-        },
+        }],
     );
     let mut coverage = build_coverage(
         &index,

@@ -137,10 +137,10 @@ pub fn scan_workspace_graphql_consumer(
                 c.site_line,
                 namespace,
             );
-            node.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
+            node.contract = vec![ContractFact::GraphqlConsumer(GraphqlConsumerFact {
                 op: c.op,
                 field: c.field.clone(),
-            }));
+            })];
             let id = node.id.clone();
             all_nodes.push(node);
             total += 1;
@@ -189,10 +189,10 @@ pub fn scan_workspace_graphql_consumer(
                 c.site_line,
                 namespace,
             );
-            node.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
+            node.contract = vec![ContractFact::GraphqlConsumer(GraphqlConsumerFact {
                 op: c.op,
                 field: c.field.clone(),
-            }));
+            })];
             let id = node.id.clone();
             all_nodes.push(node);
             total += 1;

@@ -61,7 +61,7 @@ fn facts(graph: &GraphDatabase, pred: impl Fn(&ContractFact) -> bool) -> Vec<Con
     graph
         .get_all_nodes()
         .into_iter()
-        .filter_map(|n| n.contract)
+        .flat_map(|n| n.contract)
         .filter(|c| pred(c))
         .collect()
 }
@@ -175,7 +175,11 @@ fn websocket_consumers_survive_http_client_rescan() {
     let ws_consumers: Vec<_> = graph
         .get_all_nodes()
         .into_iter()
-        .filter(|n| matches!(n.contract, Some(ContractFact::WebSocketConsumer(_))))
+        .filter(|n| {
+            n.contract
+                .iter()
+                .any(|f| matches!(f, ContractFact::WebSocketConsumer(_)))
+        })
         .collect();
     assert!(
         !ws_consumers.is_empty(),
@@ -197,7 +201,11 @@ fn websocket_consumers_survive_http_client_rescan() {
     let after: Vec<_> = graph
         .get_all_nodes()
         .into_iter()
-        .filter(|n| matches!(n.contract, Some(ContractFact::WebSocketConsumer(_))))
+        .filter(|n| {
+            n.contract
+                .iter()
+                .any(|f| matches!(f, ContractFact::WebSocketConsumer(_)))
+        })
         .collect();
     assert_eq!(
         after.len(),
@@ -509,7 +517,11 @@ fn stale_websocket_providers_are_retracted_on_rescan() {
     let before: Vec<_> = graph
         .get_all_nodes()
         .into_iter()
-        .filter(|n| matches!(n.contract, Some(ContractFact::WebSocketProvider(_))))
+        .filter(|n| {
+            n.contract
+                .iter()
+                .any(|f| matches!(f, ContractFact::WebSocketProvider(_)))
+        })
         .collect();
     assert!(!before.is_empty(), "expected a WebSocketProvider node");
 
@@ -525,7 +537,11 @@ fn stale_websocket_providers_are_retracted_on_rescan() {
     let after: Vec<_> = graph
         .get_all_nodes()
         .into_iter()
-        .filter(|n| matches!(n.contract, Some(ContractFact::WebSocketProvider(_))))
+        .filter(|n| {
+            n.contract
+                .iter()
+                .any(|f| matches!(f, ContractFact::WebSocketProvider(_)))
+        })
         .collect();
     assert!(
         !after
@@ -847,11 +863,11 @@ fn a_topic_consumer_on_a_symbol_node_makes_it_sensor_retractable() {
     use lain::server::federation::contracts::model::{TopicConsumerFact, TopicConsumerKind};
     let mut n =
         lain::schema::GraphNode::new(NodeType::Function, "job".into(), "src/jobs.py".into());
-    n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+    n.contract = vec![ContractFact::TopicConsumer(TopicConsumerFact {
         broker: "kafka".into(),
         name: "orders.created".into(),
         kind: TopicConsumerKind::Subscription,
-    }));
+    })];
     assert_eq!(
         sensor_owner_of(&n),
         None,
@@ -933,9 +949,9 @@ fn sensor_owner_of_owns_only_synthetic_sql_read_nodes() {
             format!("sql-read:src/jobs.py:{}", 3),
             "src/jobs.py".into(),
         );
-        n.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+        n.contract = vec![ContractFact::TableConsumer(TableConsumerFact {
             tables: vec!["shipments".to_string()],
-        }));
+        })];
         n
     };
     assert_eq!(
@@ -951,9 +967,9 @@ fn sensor_owner_of_owns_only_synthetic_sql_read_nodes() {
     let symbol = {
         let mut n =
             lain::schema::GraphNode::new(NodeType::Function, "job".into(), "src/jobs.py".into());
-        n.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+        n.contract = vec![ContractFact::TableConsumer(TableConsumerFact {
             tables: vec!["shipments".to_string()],
-        }));
+        })];
         n
     };
     assert_eq!(
@@ -1087,7 +1103,7 @@ fn a_peer_edge_anchors_on_the_function_not_the_call_node() {
 // The bug class is "a sensor sets a `ContractFact` on a node whose id
 // comes from `util::enclosing_symbol`", which makes that symbol the
 // sensor's own and therefore deletable — along with every edge a peer
-// attached to it. Audited every `.contract = Some(ContractFact::…)`
+// attached to it. Audited every `.contract = vec![ContractFact::…]`
 // site in `src/server/sensors/`:
 //
 //   sensor                      id shape                          verdict
@@ -1165,7 +1181,7 @@ fn websocket_and_http_client_keep_separate_nodes_and_edges() {
     // and counting them would be vacuous. What this fixture *can* pin is
     // node survival and the invariant below.
     for n in graph.get_all_nodes() {
-        if n.contract.is_none() {
+        if n.contract.is_empty() {
             continue;
         }
         let synthetic = [
@@ -1233,23 +1249,23 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
 
     // HTTP routes: the provider's origin decides the owner.
     let mut n = mk(NodeType::HttpRoute, "GET /a", "src/a.rs");
-    n.contract = Some(ContractFact::Provider(ProviderFact {
+    n.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Get,
         template: "/a".into(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::Code,
-    }));
+    })];
     rows.push(("http route (code)", n, Some(SensorOwner::HttpSensor)));
 
     let mut n = mk(NodeType::HttpRoute, "GET /b", "openapi.yaml");
-    n.contract = Some(ContractFact::Provider(ProviderFact {
+    n.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Get,
         template: "/b".into(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::OpenApi,
-    }));
+    })];
     rows.push(("http route (openapi)", n, Some(SensorOwner::OpenApiSensor)));
 
     rows.push((
@@ -1271,15 +1287,15 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
     // Schema / Field ownership is by file extension: the *emitter* owns
     // them, not the family the extension suggests.
     let mut n = mk(NodeType::Schema, "Order", "proto/a.proto");
-    n.contract = Some(ContractFact::Schema {
+    n.contract = vec![ContractFact::Schema {
         direction: Direction::Response,
-    });
+    }];
     rows.push(("proto schema", n, Some(SensorOwner::GrpcProviderSensor)));
 
     let mut n = mk(NodeType::Schema, "Order", "schema.graphql");
-    n.contract = Some(ContractFact::Schema {
+    n.contract = vec![ContractFact::Schema {
         direction: Direction::Response,
-    });
+    }];
     rows.push((
         "graphql schema",
         n,
@@ -1287,15 +1303,15 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
     ));
 
     let mut n = mk(NodeType::Schema, "Order", "openapi.json");
-    n.contract = Some(ContractFact::Schema {
+    n.contract = vec![ContractFact::Schema {
         direction: Direction::Response,
-    });
+    }];
     rows.push(("openapi schema", n, Some(SensorOwner::OpenApiSensor)));
 
     let mut n = mk(NodeType::Schema, "Order", "payload.avsc");
-    n.contract = Some(ContractFact::Schema {
+    n.contract = vec![ContractFact::Schema {
         direction: Direction::Response,
-    });
+    }];
     rows.push(("avro schema", n, Some(SensorOwner::EventSensor)));
 
     // Legacy fact-less scanners.
@@ -1313,7 +1329,7 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
     // Contract-sensor nodes carry their own fact and are claimed by
     // their own arm even on shared node types / extensions.
     let mut n = mk(NodeType::Module, "Orders.GetOrder", "proto/a.proto");
-    n.contract = Some(ContractFact::RpcProvider(
+    n.contract = vec![ContractFact::RpcProvider(
         lain::federation::contracts::model::RpcProviderFact {
             system: RpcSystem::Grpc,
             service: "orders.Orders".into(),
@@ -1322,7 +1338,7 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
             response_type: "Order".into(),
             handler: None,
         },
-    ));
+    )];
     rows.push((
         "grpc provider module",
         n,
@@ -1330,7 +1346,7 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
     ));
 
     let mut n = mk(NodeType::Module, "rpc-handler:get_order", "src/a.rs");
-    n.contract = Some(ContractFact::RpcHandler(RpcHandlerFact {
+    n.contract = vec![ContractFact::RpcHandler(RpcHandlerFact {
         rpc_service: ContractKey::Rpc {
             system: RpcSystem::Grpc,
             service: "orders.Orders".into(),
@@ -1338,7 +1354,7 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
         },
         handler_function: sym("src/a.rs", "get_order"),
         origin: RpcHandlerOrigin::GoRegister,
-    }));
+    })];
     rows.push((
         "grpc handler link",
         n,
@@ -1346,13 +1362,13 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
     ));
 
     let mut n = mk(NodeType::Function, "rpc-call:Orders.GetOrder", "src/a.py");
-    n.contract = Some(ContractFact::RpcConsumer(RpcConsumerFact {
+    n.contract = vec![ContractFact::RpcConsumer(RpcConsumerFact {
         system: RpcSystem::Grpc,
         service: "orders.Orders".into(),
         method: "GetOrder".into(),
         channel_target: None,
         channel_host_part: HostPart::None,
-    }));
+    })];
     rows.push((
         "grpc consumer call",
         n,
@@ -1360,11 +1376,11 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
     ));
 
     let mut n = mk(NodeType::Module, "Query:orders", "schema.graphql");
-    n.contract = Some(ContractFact::GraphqlProvider(GraphqlProviderFact {
+    n.contract = vec![ContractFact::GraphqlProvider(GraphqlProviderFact {
         op: GraphqlOp::Query,
         field: "orders".into(),
         return_type: "Order".into(),
-    }));
+    })];
     rows.push((
         "graphql provider",
         n,
@@ -1372,14 +1388,14 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
     ));
 
     let mut n = mk(NodeType::Module, "graphql-handler:Query:orders", "src/a.ts");
-    n.contract = Some(ContractFact::GraphqlHandler(GraphqlHandlerFact {
+    n.contract = vec![ContractFact::GraphqlHandler(GraphqlHandlerFact {
         graphql_field: ContractKey::Graphql {
             op: GraphqlOp::Query,
             field: "orders".into(),
         },
         handler_function: sym("src/a.ts", "orders"),
         origin: GraphqlHandlerOrigin::Apollo,
-    }));
+    })];
     rows.push((
         "graphql resolver link",
         n,
@@ -1387,12 +1403,12 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
     ));
 
     let mut n = mk(NodeType::Function, "graphql-call:Query:orders", "src/a.ts");
-    n.contract = Some(ContractFact::GraphqlConsumer(
+    n.contract = vec![ContractFact::GraphqlConsumer(
         lain::federation::contracts::model::GraphqlConsumerFact {
             op: GraphqlOp::Query,
             field: "orders".into(),
         },
-    ));
+    )];
     rows.push((
         "graphql consumer call",
         n,
@@ -1404,10 +1420,10 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
         "ws:client:x.test/feed",
         "src/a.ts",
     );
-    n.contract = Some(ContractFact::WebSocketHandler(WebSocketHandlerFact {
+    n.contract = vec![ContractFact::WebSocketHandler(WebSocketHandlerFact {
         route: "/feed".into(),
         handler: sym("src/a.ts", "feed"),
-    }));
+    })];
     rows.push(("websocket handler", n, Some(SensorOwner::WebSocketSensor)));
 
     // Synthetic per-site nodes are owned by name prefix.
@@ -1416,16 +1432,16 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
         &format!("{SQL_READ_PREFIX}src/a.py:3"),
         "src/a.py",
     );
-    n.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+    n.contract = vec![ContractFact::TableConsumer(TableConsumerFact {
         tables: vec!["t".into()],
-    }));
+    })];
     rows.push(("sql-read site", n, Some(SensorOwner::SqlSensor)));
 
     let mut n = mk(NodeType::Table, "shipments", "src/a.py");
-    n.contract = Some(ContractFact::Table(Table {
+    n.contract = vec![ContractFact::Table(Table {
         service: String::new(),
         name: "shipments".into(),
-    }));
+    })];
     rows.push(("sql table", n, Some(SensorOwner::SqlSensor)));
 
     let mut n = mk(
@@ -1433,11 +1449,11 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
         &format!("{TOPIC_READ_PREFIX}src/a.py:3"),
         "src/a.py",
     );
-    n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+    n.contract = vec![ContractFact::TopicConsumer(TopicConsumerFact {
         broker: "kafka".into(),
         name: "t".into(),
         kind: TopicConsumerKind::Subscription,
-    }));
+    })];
     rows.push(("topic-read site", n, Some(SensorOwner::EventSensor)));
 
     // A plain symbol is nobody's — that is the migration arm's job.

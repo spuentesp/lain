@@ -91,14 +91,14 @@ fn rpc_provider_node(repo: &str, path: &str, method: &str, line: u32, service: &
     n.id = id;
     n.line_start = Some(line);
     n.line_end = Some(line);
-    n.contract = Some(ContractFact::RpcProvider(RpcProviderFact {
+    n.contract = vec![ContractFact::RpcProvider(RpcProviderFact {
         system: RpcSystem::Grpc,
         service: service.to_string(),
         method: method.to_string(),
         request_type: format!("{}Request", method),
         response_type: format!("{}Response", method),
         handler: None,
-    }));
+    })];
     n
 }
 
@@ -118,13 +118,13 @@ fn rpc_consumer_node(
     n.id = id;
     n.line_start = Some(line);
     n.line_end = Some(line);
-    n.contract = Some(ContractFact::RpcConsumer(RpcConsumerFact {
+    n.contract = vec![ContractFact::RpcConsumer(RpcConsumerFact {
         system: RpcSystem::Grpc,
         service: service.to_string(),
         method: method.to_string(),
         channel_target: channel_target.map(|s| s.to_string()),
         channel_host_part,
-    }));
+    })];
     n
 }
 
@@ -147,7 +147,7 @@ fn rpc_handler_node(
         service: rpc_service.to_string(),
         method: String::new(),
     };
-    n.contract = Some(ContractFact::RpcHandler(RpcHandlerFact {
+    n.contract = vec![ContractFact::RpcHandler(RpcHandlerFact {
         rpc_service: key,
         handler_function: SymbolKey {
             repo: repo_id(repo),
@@ -156,7 +156,7 @@ fn rpc_handler_node(
             name: handler_name.to_string(),
         },
         origin: RpcHandlerOrigin::JavaGrpcService,
-    }));
+    })];
     n
 }
 
@@ -302,7 +302,7 @@ fn e2_go_stub_binds_to_known_service() {
         "rpc-call:Orders:Get",
         12,
     );
-    let Some(resolution) = out.index.consumers.get(&consumer_id) else {
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
         panic!(
             "consumer must resolve: binds={:?} endpoints={:?}",
             out.binds, out.index.endpoints
@@ -356,7 +356,7 @@ public class OrdersImpl extends OrdersGrpc.OrdersImplBase {
     // `ContractFact::RpcHandler` payload that names both the
     // `ContractKey::Rpc` and the `SymbolKey` for the impl class.
     let handler_node = rpc_handler_node("orders", "OrdersImpl.java", 4, "Orders", "OrdersImpl");
-    match &handler_node.contract {
+    match handler_node.contract.first() {
         Some(ContractFact::RpcHandler(rh)) => {
             assert_eq!(rh.handler_function.name, "OrdersImpl");
             assert!(matches!(rh.rpc_service, ContractKey::Rpc { .. }));
@@ -398,7 +398,7 @@ fn e4_unresolved_channel_is_rpc_stub_unknown() {
         "rpc-call:Orders:Get",
         12,
     );
-    let Some(resolution) = out.index.consumers.get(&consumer_id) else {
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
         panic!("consumer must be recorded (even when unresolved)");
     };
     let Some(ConsumerTarget::Unresolved { reason, .. }) = resolution.target.as_ref() else {
@@ -450,7 +450,7 @@ fn e5_same_service_call_does_not_bind() {
         "rpc-call:Orders:Get",
         22,
     );
-    let Some(resolution) = out.index.consumers.get(&consumer_id) else {
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
         panic!("consumer must be recorded");
     };
     // I5: the call must NOT bind — same-service binds are
@@ -599,11 +599,11 @@ service Orders {
     field_ref_node.id = field_ref_id.clone();
     field_ref_node.repo_id = Some("billing".to_string());
     field_ref_node.line_start = Some(16);
-    field_ref_node.contract = Some(ContractFact::FieldRead(FieldReadFact {
+    field_ref_node.contract = vec![ContractFact::FieldRead(FieldReadFact {
         chain: JsonPath(vec![PathSegment::Name("status".to_string())]),
         exact: true,
         origin: lain::server::federation::contracts::model::FieldReadOrigin::FieldAccess,
-    }));
+    })];
 
     let reads_from_edge = GraphEdge::new(EdgeType::ReadsFrom, field_ref_id, consumer.id.clone());
 
@@ -625,8 +625,7 @@ service Orders {
     // Verify consumer bound to provider
     let resolution = out
         .index
-        .consumers
-        .get(&consumer_gid)
+        .consumer(&consumer_gid)
         .expect("consumer must be resolved");
     assert!(
         !resolution.bound_endpoints.is_empty(),

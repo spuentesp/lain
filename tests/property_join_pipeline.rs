@@ -231,18 +231,18 @@ fn ws_node(service: &str, host: &str, route: &str, line: u32) -> lain::schema::G
     .to_string();
     n.line_start = Some(line);
     if is_provider {
-        n.contract = Some(ContractFact::WebSocketProvider(WebSocketProviderFact {
+        n.contract = vec![ContractFact::WebSocketProvider(WebSocketProviderFact {
             route: route.to_string(),
             handler: None,
-        }));
+        })];
     } else {
-        n.contract = Some(ContractFact::WebSocketConsumer(WebSocketConsumerFact {
+        n.contract = vec![ContractFact::WebSocketConsumer(WebSocketConsumerFact {
             url: NormalizedUrl {
                 host: HostPart::Literal(host.to_string()),
                 template: Some(route.to_string()),
             },
             route: route.to_string(),
-        }));
+        })];
     }
     n
 }
@@ -307,19 +307,19 @@ fn topic_node(
     .to_string();
     n.line_start = Some(line);
     if is_producer {
-        n.contract = Some(ContractFact::Provider(ProviderFact {
+        n.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Any,
             template: topic.to_string(),
             handler: None,
             operation_id: None,
             origin: ProviderOrigin::Code,
-        }));
+        })];
     } else {
-        n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+        n.contract = vec![ContractFact::TopicConsumer(TopicConsumerFact {
             broker: broker.to_string(),
             name: topic.to_string(),
             kind: TopicConsumerKind::Subscription,
-        }));
+        })];
     }
     n
 }
@@ -335,8 +335,8 @@ fn every_websocket_call_lands_in_exactly_one_terminal_state() {
     let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
     let res = out
         .index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .next()
         .expect("consumer must be recorded");
     assert!(
@@ -351,8 +351,8 @@ fn every_websocket_call_lands_in_exactly_one_terminal_state() {
     let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
     let res = out
         .index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .next()
         .expect("consumer must be recorded");
     assert!(
@@ -368,8 +368,8 @@ fn every_websocket_call_lands_in_exactly_one_terminal_state() {
     let out = ContractJoiner::run(&[provider, consumer], &[], &cfg);
     let res = out
         .index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .next()
         .expect("consumer must be recorded");
     assert!(
@@ -421,8 +421,8 @@ fn every_topic_call_lands_in_exactly_one_terminal_state() {
     let out = ContractJoiner::run(&[consumer], &[], &cfg);
     let res = out
         .index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .next()
         .expect("consumer must be recorded");
     assert!(
@@ -437,8 +437,8 @@ fn every_topic_call_lands_in_exactly_one_terminal_state() {
     let out = ContractJoiner::run(&[producer, consumer], &[], &cfg);
     let res = out
         .index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .next()
         .expect("consumer must be recorded");
     assert!(
@@ -454,8 +454,8 @@ fn every_topic_call_lands_in_exactly_one_terminal_state() {
     let out = ContractJoiner::run(&[producer, consumer], &[], &cfg);
     let res = out
         .index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .next()
         .expect("consumer must be recorded");
     assert!(

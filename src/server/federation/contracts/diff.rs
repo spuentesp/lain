@@ -165,7 +165,7 @@ impl ContractSurface {
             };
             reads_by_call.entry(call_id).or_default().insert(path);
         }
-        for (call_id, resolution) in &index.consumers {
+        for (call_id, resolution) in index.consumer_resolutions() {
             let def = consumer_to_def(call_id, resolution, &reads_by_call);
             let key = consumer_key(call_id, resolution);
             surface.consumers.insert(key, def);
@@ -2488,8 +2488,7 @@ fn template_matches(consumer: &str, provider: &str) -> bool {
 /// resolution is `Unresolved`.
 pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Scope) -> Coverage {
     let unresolved: Vec<ConsumerKey> = index
-        .consumers
-        .iter()
+        .consumer_resolutions()
         .filter_map(|(call_id, resolution)| {
             let key = consumer_key(call_id, resolution);
             match &resolution.target {
@@ -2499,8 +2498,7 @@ pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Sc
         })
         .collect();
     let ambiguous: Vec<ConsumerKey> = index
-        .consumers
-        .iter()
+        .consumer_resolutions()
         .filter_map(|(call_id, resolution)| {
             if resolution.bound_endpoints.len() > 1 {
                 let key = consumer_key(call_id, resolution);
@@ -2513,10 +2511,12 @@ pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Sc
     let unnormalized: Vec<ConsumerKey> = index
         .unnormalized
         .iter()
-        .filter_map(|call_id| {
+        .flat_map(|call_id| {
             index
                 .consumers
                 .get(call_id)
+                .into_iter()
+                .flatten()
                 .map(|r| consumer_key(call_id, r))
         })
         .collect();

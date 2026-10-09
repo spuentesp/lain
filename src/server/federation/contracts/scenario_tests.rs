@@ -53,7 +53,7 @@ fn contract_node(
     )
     .as_str()
     .to_string();
-    n.contract = Some(fact);
+    n.contract = vec![fact];
     n
 }
 
@@ -211,8 +211,7 @@ fn scenario_14_external_host_recorded_not_unresolved() {
     );
     // Confirm no unresolved NoMatch or NoRouteInService was emitted
     // for this call: the external path is preferred.
-    let consumers = &out.index.consumers;
-    assert!(consumers.values().all(|r| !matches!(
+    assert!(out.index.consumer_resolutions().all(|(_, r)| !matches!(
         r.target,
         Some(
             crate::federation::contracts::index::ConsumerTarget::Unresolved {

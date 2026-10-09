@@ -297,7 +297,7 @@ fn count_distinct_consumer_services(idx: &ContractIndex, info: &ServiceInfo) -> 
         .map(|(_, k)| k.to_string())
         .collect();
     let mut consumers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for resolution in idx.consumers.values() {
+    for resolution in idx.consumer_resolutions().map(|(_, r)| r) {
         if let Some(ConsumerTarget::Binds { .. }) = &resolution.target {
             let bound = resolution
                 .bound_endpoints
@@ -312,8 +312,8 @@ fn count_distinct_consumer_services(idx: &ContractIndex, info: &ServiceInfo) -> 
 }
 
 fn count_unresolved_inbound(idx: &ContractIndex, info: &ServiceInfo) -> usize {
-    idx.consumers
-        .values()
+    idx.consumer_resolutions()
+        .map(|(_, r)| r)
         .filter(|r| {
             matches!(
                 r.target,
@@ -493,7 +493,7 @@ fn build_consumer_rows(
     let mut by_consumer: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
     let mut by_consumer_repo: BTreeMap<String, String> = BTreeMap::new();
 
-    for (call_id, resolution) in &idx.consumers {
+    for (call_id, resolution) in idx.consumer_resolutions() {
         let Some(ConsumerTarget::Binds {
             provenance,
             route_match,
@@ -638,7 +638,7 @@ fn build_unresolved_candidates(
     commit_by_repo: &std::collections::BTreeMap<String, String>,
 ) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
-    for r in idx.consumers.values() {
+    for r in idx.consumer_resolutions().map(|(_, r)| r) {
         if let Some(ConsumerTarget::Unresolved { reason, .. }) = &r.target {
             let repo = r.call_id.repo_id();
             let path = r.call_id.path().unwrap_or_default();

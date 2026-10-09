@@ -130,10 +130,47 @@ pub enum SensorOwner {
 /// Map a node to its sensor owner (§6.1 derivation rules). Returns
 /// `None` for nodes that no sensor claims (pre-schema-v3 nodes,
 /// regular code symbols).
+///
+/// A node can carry several facts — two subscriptions on one line share
+/// a `topic-read:` node and each is a `TopicConsumer`. Owner derivation
+/// runs per fact and the results must agree. If they do not, the node is
+/// treated as unowned rather than retracted under one sensor, which
+/// would delete the other sensor's data with it: a node that lingers is
+/// the safe failure, a peer's lost edges are not.
 pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
+    let mut owner: Option<SensorOwner> = None;
+    for fact in &node.contract {
+        let Some(o) = derive_owner(node, Some(fact)) else {
+            continue;
+        };
+        match owner {
+            None => owner = Some(o),
+            Some(prev) if prev == o => {}
+            Some(prev) => {
+                debug_assert!(
+                    false,
+                    "node {} carries facts with two owners ({prev:?} vs {o:?})",
+                    node.id
+                );
+                return None;
+            }
+        }
+    }
+    if node.contract.is_empty() {
+        // No facts: the node-type catch-alls and the legacy
+        // fact-less `Module` / `Interface` arms still apply.
+        owner = derive_owner(node, None);
+    }
+    owner
+}
+
+fn derive_owner(
+    node: &GraphNode,
+    fact: Option<&crate::federation::contracts::model::ContractFact>,
+) -> Option<SensorOwner> {
     use crate::federation::contracts::model::{ContractFact, ProviderOrigin};
     use crate::schema::NodeType;
-    match (node.node_type.clone(), node.contract.as_ref()) {
+    match (node.node_type.clone(), fact) {
         (NodeType::HttpRoute, Some(ContractFact::Provider(p))) => match p.origin {
             ProviderOrigin::Code => Some(SensorOwner::HttpSensor),
             ProviderOrigin::OpenApi => Some(SensorOwner::OpenApiSensor),
@@ -2567,13 +2604,13 @@ mod replace_tests {
             "GET /api/users".into(),
             "openapi.yaml".into(),
         );
-        route_v1.contract = Some(ContractFact::Provider(ProviderFact {
+        route_v1.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Get,
             template: "/api/users".into(),
             handler: None,
             operation_id: Some("listUsers".into()),
             origin: ProviderOrigin::OpenApi,
-        }));
+        })];
         g.insert_nodes_batch(&[route_v1]).unwrap();
         assert!(g.find_node_by_name("GET /api/users").is_some());
 
@@ -2594,13 +2631,13 @@ mod replace_tests {
             "POST /api/users".into(),
             "openapi.yaml".into(),
         );
-        route_v2.contract = Some(ContractFact::Provider(ProviderFact {
+        route_v2.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Post,
             template: "/api/users".into(),
             handler: None,
             operation_id: Some("createUser".into()),
             origin: ProviderOrigin::OpenApi,
-        }));
+        })];
         let removed = g
             .replace_sensor_output(SensorOwner::OpenApiSensor, &[route_v2], &[])
             .unwrap();
@@ -2629,13 +2666,13 @@ mod replace_tests {
             "GET /api/users".into(),
             "routes.go".into(),
         );
-        code_route.contract = Some(ContractFact::Provider(ProviderFact {
+        code_route.contract = vec![ContractFact::Provider(ProviderFact {
             method: HttpMethod::Get,
             template: "/api/users".into(),
             handler: None,
             operation_id: None,
             origin: ProviderOrigin::Code,
-        }));
+        })];
         g.insert_nodes_batch(&[code_route]).unwrap();
 
         // OpenApiSensor rescan with no operations must not delete
@@ -3873,11 +3910,11 @@ mod survivor_pin_tests {
                 "customer_id".into(),
                 "src/api.ts".into(),
             );
-            n.contract = Some(ContractFact::FieldRead(FieldReadFact {
+            n.contract = vec![ContractFact::FieldRead(FieldReadFact {
                 chain: "customer_id".parse().unwrap(),
                 exact: true,
                 origin,
-            }));
+            })];
             n
         };
 

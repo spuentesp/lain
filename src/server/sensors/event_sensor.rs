@@ -504,7 +504,7 @@ fn emit_sites(
                 GraphNode::new(NodeType::Topic, topic_label.clone(), graph_path.to_string());
             node.id = topic_id.clone();
             node.line_start = Some(site.line);
-            node.contract = Some(CF::Provider(
+            node.contract = vec![CF::Provider(
                 crate::federation::contracts::model::ProviderFact {
                     method: crate::federation::contracts::model::HttpMethod::Any,
                     template: topic_name.clone(),
@@ -512,7 +512,7 @@ fn emit_sites(
                     operation_id: None,
                     origin: crate::federation::contracts::model::ProviderOrigin::Code,
                 },
-            ));
+            )];
             nodes.push(node);
         }
 
@@ -582,7 +582,7 @@ fn emit_sites(
         if !is_subscription && !is_edge_anchor {
             continue;
         }
-        // ONLY subscription sites carry the fact. A `Produces` site is
+        // ONLY subscription sites carry a fact. A `Produces` site is
         // not a subscriber — emitting one puts a false consumer in
         // `ContractIndex`, and false consumers hide real ones.
         let fact = is_subscription.then(|| {
@@ -597,21 +597,25 @@ fn emit_sites(
             })
         });
         // Two sites on one physical line share the synthetic node
-        // (`topic-read:<path>:<line>`), and `GraphNode.contract` holds a
-        // single fact, so at most one of them can be recorded. Which one
-        // must not depend on the order the walk happened to see them in:
-        // a `Produces` site must never block a consumer's fact from
-        // landing. A later subscription can therefore fill an empty slot
-        // but never overwrite a fact already recorded.
+        // (`topic-read:<path>:<line>`). `GraphNode.contract` is a list,
+        // so each subscription records its own fact and none of them is
+        // lost; a `Produces` site contributes none at all and the node
+        // exists purely as the edge anchor. An exact duplicate is not
+        // appended twice — one site repeating the same topic must not
+        // double-count the consumer.
         if let Some(existing) = nodes.iter_mut().find(|n| n.id == site_node_id) {
-            if existing.contract.is_none() {
-                existing.contract = fact;
+            if let Some(f) = fact {
+                if !existing.contract.contains(&f) {
+                    existing.contract.push(f);
+                }
             }
         } else {
             let mut consumer_node = crate::server::sensors::util::synthetic_site_node(
                 id_name, graph_path, site.line, namespace,
             );
-            consumer_node.contract = fact;
+            if let Some(f) = fact {
+                consumer_node.contract.push(f);
+            }
             nodes.push(consumer_node);
         }
     }
@@ -769,7 +773,11 @@ mod tests {
         let consumers = graph
             .get_all_nodes()
             .into_iter()
-            .filter(|n| matches!(n.contract, Some(ContractFact::TopicConsumer(_))))
+            .filter(|n| {
+                n.contract
+                    .iter()
+                    .any(|f| matches!(f, ContractFact::TopicConsumer(_)))
+            })
             .count();
         assert_eq!(
             consumers, 0,
@@ -811,9 +819,14 @@ mod tests {
         let consumed: Vec<String> = graph
             .get_all_nodes()
             .into_iter()
-            .filter_map(|n| match n.contract {
-                Some(ContractFact::TopicConsumer(f)) => Some(f.name),
-                _ => None,
+            .flat_map(|n| {
+                n.contract
+                    .iter()
+                    .filter_map(|f| match f {
+                        ContractFact::TopicConsumer(t) => Some(t.name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect();
         assert!(
@@ -860,10 +873,15 @@ mod tests {
             let consumed: Vec<String> = graph
                 .get_all_nodes()
                 .into_iter()
-                .filter_map(|n| match n.contract {
-                    Some(ContractFact::TopicConsumer(f)) => Some(f.name),
+                .flat_map(|n| {
+                n.contract
+                .iter()
+                .filter_map(|f| match f {
+                    ContractFact::TopicConsumer(t) => Some(t.name.clone()),
                     _ => None,
                 })
+                .collect::<Vec<_>>()
+            })
                 .collect();
             assert!(
                 consumed.contains(&"orders.shipped".to_string()),
@@ -871,6 +889,42 @@ mod tests {
                  with a producer — got {consumed:?}"
             );
         }
+    }
+
+    /// The point of `contract` being a list: two subscriptions to
+    /// different topics on one physical line share the synthetic node
+    /// (`topic-read:<path>:<line>`), and each must be recorded. When
+    /// `contract` held a single fact the second topic's consumer
+    /// vanished — a discovered consumer silently disappearing.
+    #[test]
+    fn two_subscriptions_on_one_line_are_both_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("relay.py"),
+            "def relay():\n    c = KafkaConsumer('orders.shipped'); d = KafkaConsumer('orders.delivered')\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let consumed: Vec<String> = graph
+            .get_all_nodes()
+            .into_iter()
+            .flat_map(|n| n.contract)
+            .filter_map(|f| match f {
+                ContractFact::TopicConsumer(t) => Some(t.name),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            consumed.contains(&"orders.shipped".to_string()),
+            "first subscription lost: {consumed:?}"
+        );
+        assert!(
+            consumed.contains(&"orders.delivered".to_string()),
+            "second subscription on the same line must not be dropped — got {consumed:?}"
+        );
     }
 
     /// Celery `@app.task` decorator emits a scheduled topic.

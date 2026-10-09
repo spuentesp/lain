@@ -110,9 +110,9 @@ pub fn scan_workspace_graphql_provider(
             schema_node.id = schema_id.clone();
             schema_node.line_start = Some(obj.line);
             schema_node.line_end = Some(obj.line);
-            schema_node.contract = Some(ContractFact::Schema {
+            schema_node.contract = vec![ContractFact::Schema {
                 direction: Direction::Response,
-            });
+            }];
             all_nodes.push(schema_node);
             schemas_in_file.insert(obj.name.clone(), schema_id.clone());
 
@@ -130,14 +130,14 @@ pub fn scan_workspace_graphql_provider(
                 field_node.line_start = Some(obj.line + field.line_offset);
                 field_node.line_end = Some(obj.line + field.line_offset);
                 let required = field.return_type.ends_with('!');
-                field_node.contract = Some(ContractFact::Field(
+                field_node.contract = vec![ContractFact::Field(
                     crate::federation::contracts::model::FieldMeta {
                         ty: graphql_type_to_typedesc(&field.return_type),
                         required,
                         nullable: !required,
                         enum_values: None,
                     },
-                ));
+                )];
                 all_nodes.push(field_node);
                 all_edges.push(GraphEdge::new(
                     EdgeType::HasField,
@@ -164,11 +164,11 @@ pub fn scan_workspace_graphql_provider(
             node.id = id.clone();
             node.line_start = Some(provider.site.line);
             node.line_end = Some(provider.site.line);
-            node.contract = Some(ContractFact::GraphqlProvider(GraphqlProviderFact {
+            node.contract = vec![ContractFact::GraphqlProvider(GraphqlProviderFact {
                 op: provider.op,
                 field: provider.field.clone(),
                 return_type: provider.return_type.clone(),
-            }));
+            })];
             all_nodes.push(node);
             total += 1;
 

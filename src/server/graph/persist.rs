@@ -34,7 +34,11 @@ use std::path::Path;
 ///    `GraphEdge.site`, `GraphEdge.detail` added (bincode layout
 ///    changed). Per-repo graphs with the old version are discarded
 ///    and rebuilt on load, as today.
-pub const PATH_FORMAT_VERSION: u32 = 4;
+/// 5: `GraphNode.contract` becomes `Vec<ContractFact>` so one node can
+///    record several facts (two subscriptions to different topics on
+///    one line used to collapse into one). Bincode layout changed:
+///    old graphs are discarded and rebuilt on load, as above.
+pub const PATH_FORMAT_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct GraphState {

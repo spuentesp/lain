@@ -197,7 +197,7 @@ pub fn scan_workspace_grpc_with_report(
             schema_node.id = schema_id.clone();
             schema_node.line_start = Some(line);
             schema_node.line_end = Some(line);
-            schema_node.contract = Some(ContractFact::Schema { direction });
+            schema_node.contract = vec![ContractFact::Schema { direction }];
             all_nodes.push(schema_node);
             schemas_in_file.insert(msg.name.clone(), schema_id.clone());
 
@@ -215,7 +215,7 @@ pub fn scan_workspace_grpc_with_report(
                 field_node.id = field_id.clone();
                 field_node.line_start = Some(field.line);
                 field_node.line_end = Some(field.line);
-                field_node.contract = Some(ContractFact::Field(field.meta));
+                field_node.contract = vec![ContractFact::Field(field.meta)];
                 all_nodes.push(field_node);
                 all_edges.push(GraphEdge::new(
                     EdgeType::HasField,
@@ -243,14 +243,14 @@ pub fn scan_workspace_grpc_with_report(
             node.id = id.clone();
             node.line_start = Some(provider.site.line);
             node.line_end = Some(provider.site.line);
-            node.contract = Some(ContractFact::RpcProvider(RpcProviderFact {
+            node.contract = vec![ContractFact::RpcProvider(RpcProviderFact {
                 system: RpcSystem::Grpc,
                 service: full_service,
                 method: provider.method.clone(),
                 request_type: provider.request_type.clone(),
                 response_type: provider.response_type.clone(),
                 handler: None,
-            }));
+            })];
             all_nodes.push(node);
             total += 1;
 

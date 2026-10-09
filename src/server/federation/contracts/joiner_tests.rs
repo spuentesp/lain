@@ -54,13 +54,13 @@ fn provider_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::HttpRoute, path, name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::Provider(ProviderFact {
+    n.contract = vec![ContractFact::Provider(ProviderFact {
         method,
         template: template.to_string(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::Code,
-    }));
+    })];
     n
 }
 
@@ -82,13 +82,13 @@ fn consumer_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::HttpClientCall, path, name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::Consumer(ConsumerFact {
+    n.contract = vec![ContractFact::Consumer(ConsumerFact {
         method,
         url,
         via,
         url_expr: "".to_string(),
         reads_complete: true,
-    }));
+    })];
     n
 }
 
@@ -324,7 +324,7 @@ fn rule_1_records_unresolved_wrapper_candidate_with_no_http_client_match() {
         "rule 1 fix: the consumer is recorded as Unresolved"
     );
     let call_id = GlobalId::parse(&c.id).unwrap();
-    let resolution = out.index.consumers.get(&call_id).expect("consumer present");
+    let resolution = out.index.consumer(&call_id).expect("consumer present");
     match &resolution.target {
         Some(crate::federation::contracts::index::ConsumerTarget::Unresolved {
             reason, ..
@@ -540,11 +540,7 @@ fn rule_3_prefix_stripped_match_is_unresolved_with_known_target() {
         binds = out.binds
     );
     let call_id = GlobalId::parse(&c.id).expect("parse");
-    let resolution = out
-        .index
-        .consumers
-        .get(&call_id)
-        .expect("consumer resolution");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
     match &resolution.target {
         Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
@@ -620,7 +616,12 @@ fn rule_4_exempts_localhost() {
     // No service matches localhost, but it's exempt: falls through
     // to rule 6, finds no service that owns a generic, and ends up
     // unresolved no_match.
-    let consumer = out.index.consumers.values().next().unwrap();
+    let consumer = out
+        .index
+        .consumer_resolutions()
+        .next()
+        .map(|(_, r)| r)
+        .unwrap();
     assert!(matches!(
         consumer.target,
         Some(ConsumerTarget::Unresolved {
@@ -667,7 +668,12 @@ fn known_target_with_dynamic_path_lands_in_unresolved_no_route_in_service() {
         0,
         "row order: known target + dynamic path is rule 3, not rule 5"
     );
-    let consumer = out.index.consumers.values().next().expect("consumer");
+    let consumer = out
+        .index
+        .consumer_resolutions()
+        .next()
+        .map(|(_, r)| r)
+        .expect("consumer");
     assert!(matches!(
         consumer.target,
         Some(ConsumerTarget::Unresolved {
@@ -712,7 +718,12 @@ fn rule_5_unnormalized_recorded() {
         1,
         "rule 5: dynamic path + Expr host lands in unnormalized"
     );
-    let consumer = out.index.consumers.values().next().expect("consumer");
+    let consumer = out
+        .index
+        .consumer_resolutions()
+        .next()
+        .map(|(_, r)| r)
+        .expect("consumer");
     assert!(matches!(
         consumer.target,
         Some(ConsumerTarget::Unresolved {
@@ -863,11 +874,7 @@ fn rule_6_prefix_stripped_match_is_unresolved_with_unknown_target() {
         binds = out.binds
     );
     let call_id = GlobalId::parse(&c.id).expect("parse");
-    let resolution = out
-        .index
-        .consumers
-        .get(&call_id)
-        .expect("consumer resolution");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
     match &resolution.target {
         Some(ConsumerTarget::Unresolved {
             reason,
@@ -1178,11 +1185,7 @@ fn rule3_prefix_stripped_match_leaves_consumer_unresolved_with_could_match() {
         binds = out.binds
     );
     let call_id = GlobalId::parse(&c.id).expect("parse");
-    let resolution = out
-        .index
-        .consumers
-        .get(&call_id)
-        .expect("consumer resolution");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
     match &resolution.target {
         Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::NoRouteInService,
@@ -1355,8 +1358,8 @@ fn t9_consumer_protocol_websocket_foreign_host_no_endpoint_pair() {
     );
     let res = out
         .index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .next()
         .expect("consumer resolution must be recorded");
     assert!(
@@ -1452,8 +1455,8 @@ fn t9_consumer_protocol_topic_same_service_endpoint_is_skipped() {
     );
     let res = out
         .index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .next()
         .expect("consumer must be recorded");
     assert!(
@@ -1488,8 +1491,8 @@ fn t9_consumer_protocol_topic_zero_candidate_is_unresolved() {
     );
     let res = out
         .index
-        .consumers
-        .values()
+        .consumer_resolutions()
+        .map(|(_, r)| r)
         .next()
         .expect("consumer must be recorded");
     let Some(ConsumerTarget::Unresolved { reason, .. }) = &res.target else {
@@ -1538,7 +1541,7 @@ fn provider_node_with_operation_id(
     operation_id: Option<&str>,
 ) -> GraphNode {
     let mut n = provider_node(repo, path, name, line, method, template);
-    if let Some(ContractFact::Provider(pf)) = n.contract.as_mut() {
+    if let Some(ContractFact::Provider(pf)) = n.contract.first_mut() {
         pf.operation_id = operation_id.map(str::to_string);
         pf.origin = ProviderOrigin::OpenApi;
     }
@@ -1621,11 +1624,7 @@ fn rule_3_operation_id_fallback_binds_when_url_no_match() {
     assert!(matches!(edge.route_match, RouteMatch::Exact));
     assert_eq!(edge.provider_service.0, "orders");
     let call_id = GlobalId::parse(&c.id).expect("parse");
-    let resolution = out
-        .index
-        .consumers
-        .get(&call_id)
-        .expect("consumer resolution");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
     match &resolution.target {
         Some(ConsumerTarget::Binds {
             provenance,
@@ -1720,11 +1719,7 @@ fn rule_3_operation_id_fallback_no_match_stays_unresolved() {
         binds = out.binds
     );
     let call_id = GlobalId::parse(&c.id).expect("parse");
-    let resolution = out
-        .index
-        .consumers
-        .get(&call_id)
-        .expect("consumer resolution");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
     assert!(matches!(
         resolution.target,
         Some(ConsumerTarget::Unresolved {
@@ -1846,13 +1841,13 @@ fn topic_provider_node(
         line,
     );
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::Provider(ProviderFact {
+    n.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Any,
         template: topic_name.to_string(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::Code,
-    }));
+    })];
     n
 }
 
@@ -1874,11 +1869,11 @@ fn topic_consumer_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::Function, path, name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+    n.contract = vec![ContractFact::TopicConsumer(TopicConsumerFact {
         broker: broker.to_string(),
         name: topic_name.to_string(),
         kind: TopicConsumerKind::Subscription,
-    }));
+    })];
     n
 }
 
@@ -1944,7 +1939,7 @@ fn topic_join_same_broker_same_name_binds() {
         other => panic!("expected ContractKey::Topic, got {other:?}"),
     }
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     match &res.target {
         Some(ConsumerTarget::Binds {
             confidence,
@@ -1985,7 +1980,7 @@ fn topic_join_different_broker_is_unresolved() {
         5,
     ))
     .unwrap();
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     match &res.target {
         Some(ConsumerTarget::Unresolved { reason, .. }) => {
             assert!(matches!(reason, UnresolvedReason::NoMatch));
@@ -2020,7 +2015,7 @@ fn topic_join_different_name_is_unresolved() {
         5,
     ))
     .unwrap();
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     match &res.target {
         Some(ConsumerTarget::Unresolved { reason, .. }) => {
             assert!(matches!(reason, UnresolvedReason::NoMatch));
@@ -2051,7 +2046,7 @@ fn topic_join_no_producer_is_unresolved() {
         5,
     ))
     .unwrap();
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(matches!(
         res.target,
         Some(ConsumerTarget::Unresolved { .. })
@@ -2143,10 +2138,10 @@ fn websocket_cross_service_join_produces_binds_edge() {
         10,
     );
     provider.line_start = Some(10);
-    provider.contract = Some(ContractFact::WebSocketProvider(WebSocketProviderFact {
+    provider.contract = vec![ContractFact::WebSocketProvider(WebSocketProviderFact {
         route: "/feed".into(),
         handler: None,
-    }));
+    })];
 
     let mut consumer = GraphNode::new(
         NodeType::HttpClientCall,
@@ -2162,13 +2157,13 @@ fn websocket_cross_service_join_produces_binds_edge() {
         20,
     );
     consumer.line_start = Some(20);
-    consumer.contract = Some(ContractFact::WebSocketConsumer(WebSocketConsumerFact {
+    consumer.contract = vec![ContractFact::WebSocketConsumer(WebSocketConsumerFact {
         url: NormalizedUrl {
             host: HostPart::Literal("orders".into()),
             template: Some("/feed".into()),
         },
         route: "/feed".into(),
-    }));
+    })];
 
     let cfg = ws_config("orders", "orders");
     let out = ContractJoiner::run(&[provider.clone(), consumer.clone()], &[], &cfg);
@@ -2190,7 +2185,7 @@ fn websocket_cross_service_join_produces_binds_edge() {
     );
 
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     match &res.target {
         Some(ConsumerTarget::Binds {
             confidence,
@@ -2220,13 +2215,13 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
         10,
     );
     topic.line_start = Some(10);
-    topic.contract = Some(ContractFact::Provider(ProviderFact {
+    topic.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Any,
         template: "orders.events".into(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::Code,
-    }));
+    })];
 
     let mut schema = GraphNode::new(
         NodeType::Schema,
@@ -2242,9 +2237,9 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
         1,
     );
     schema.line_start = Some(1);
-    schema.contract = Some(ContractFact::Schema {
+    schema.contract = vec![ContractFact::Schema {
         direction: Direction::Payload,
-    });
+    }];
 
     let mut field = GraphNode::new(
         NodeType::Field,
@@ -2260,12 +2255,12 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
         3,
     );
     field.line_start = Some(3);
-    field.contract = Some(ContractFact::Field(FieldMeta {
+    field.contract = vec![ContractFact::Field(FieldMeta {
         ty: TypeDesc::String,
         required: true,
         nullable: false,
         enum_values: None,
-    }));
+    })];
 
     let mut consumer = GraphNode::new(
         NodeType::Function,
@@ -2281,11 +2276,11 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
         25,
     );
     consumer.line_start = Some(25);
-    consumer.contract = Some(ContractFact::TopicConsumer(TopicConsumerFact {
+    consumer.contract = vec![ContractFact::TopicConsumer(TopicConsumerFact {
         broker: "kafka".into(),
         name: "orders.events".into(),
         kind: TopicConsumerKind::Subscription,
-    }));
+    })];
 
     let mut field_ref = GraphNode::new(
         NodeType::FieldRef,
@@ -2301,11 +2296,11 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
         30,
     );
     field_ref.line_start = Some(30);
-    field_ref.contract = Some(ContractFact::FieldRead(FieldReadFact {
+    field_ref.contract = vec![ContractFact::FieldRead(FieldReadFact {
         chain: "order_id".parse::<JsonPath>().unwrap(),
         exact: true,
         origin: crate::federation::contracts::model::FieldReadOrigin::FieldAccess,
-    }));
+    })];
 
     let has_field_edge = GraphEdge::new(EdgeType::HasField, schema.id.clone(), field.id.clone());
     let payload_schema_edge =
@@ -2404,10 +2399,10 @@ fn ws_provider_node(service: &str, route: &str, line: u32) -> GraphNode {
     provider.repo_id = Some(service.into());
     provider.id = make_id(service, NodeType::HttpRoute, "src/server.js", route, line);
     provider.line_start = Some(line);
-    provider.contract = Some(ContractFact::WebSocketProvider(WebSocketProviderFact {
+    provider.contract = vec![ContractFact::WebSocketProvider(WebSocketProviderFact {
         route: route.into(),
         handler: None,
-    }));
+    })];
     provider
 }
 
@@ -2426,13 +2421,13 @@ fn ws_consumer_node(service: &str, host: &str, route: &str, line: u32) -> GraphN
         line,
     );
     consumer.line_start = Some(line);
-    consumer.contract = Some(ContractFact::WebSocketConsumer(WebSocketConsumerFact {
+    consumer.contract = vec![ContractFact::WebSocketConsumer(WebSocketConsumerFact {
         url: NormalizedUrl {
             host: HostPart::Literal(host.into()),
             template: Some(route.into()),
         },
         route: route.into(),
-    }));
+    })];
     consumer
 }
 
@@ -2465,7 +2460,7 @@ fn ws_consumer_with_foreign_host_does_not_bind() {
 
     let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(
         matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
         "an external WS host must not invent a Binds edge, got {:?}",
@@ -2515,7 +2510,7 @@ fn ws_consumer_with_two_matching_providers_stays_unresolved() {
 
     let out = ContractJoiner::run(&[p1, p2, consumer.clone()], &[], &cfg);
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(
         matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
         "ambiguity must refuse, not bind to both: {:?}",
@@ -2532,7 +2527,7 @@ fn ws_consumer_with_single_matching_provider_binds() {
 
     let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(
         matches!(res.target, Some(ConsumerTarget::Binds { .. })),
         "a single host+route match must bind: {:?}",
@@ -2563,10 +2558,10 @@ fn table_node(repo: &str, path: &str, name: &str, line: u32) -> GraphNode {
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::Table, path, name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::Table(Table {
+    n.contract = vec![ContractFact::Table(Table {
         service: String::new(),
         name: name.to_string(),
-    }));
+    })];
     n
 }
 
@@ -2735,9 +2730,9 @@ fn sql_reader_node(repo: &str, path: &str, name: &str, line: u32, tables: &[&str
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::Function, path, name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::TableConsumer(TableConsumerFact {
+    n.contract = vec![ContractFact::TableConsumer(TableConsumerFact {
         tables: tables.iter().map(|s| (*s).to_string()).collect(),
-    }));
+    })];
     n
 }
 
@@ -2760,8 +2755,7 @@ fn a_sql_reader_binds_to_the_table_endpoint() {
     let cid = GlobalId::parse(&reader.id).expect("global id parse");
     let res = out
         .index
-        .consumers
-        .get(&cid)
+        .consumer(&cid)
         .expect("a SQL reader must be indexed as a consumer, not dropped");
     assert!(
         matches!(res.target, Some(ConsumerTarget::Binds { .. })),
@@ -2802,8 +2796,7 @@ fn a_sql_reader_for_an_unowned_table_is_unresolved_not_silent() {
     let cid = GlobalId::parse(&reader.id).expect("global id parse");
     let res = out
         .index
-        .consumers
-        .get(&cid)
+        .consumer(&cid)
         .expect("a reader of an unowned table must still be indexed, not dropped");
     match &res.target {
         Some(ConsumerTarget::Unresolved { reason, .. }) => assert_eq!(
@@ -2839,20 +2832,20 @@ fn payload_schema_node(
     schema.repo_id = Some(repo.into());
     schema.id = make_id(repo, NodeType::Schema, path, name, line);
     schema.line_start = Some(line);
-    schema.contract = Some(ContractFact::Schema {
+    schema.contract = vec![ContractFact::Schema {
         direction: Direction::Payload,
-    });
+    }];
 
     let mut field = GraphNode::new(NodeType::Field, field_name.to_string(), path.to_string());
     field.repo_id = Some(repo.into());
     field.id = make_id(repo, NodeType::Field, path, field_name, line + 1);
     field.line_start = Some(line + 1);
-    field.contract = Some(ContractFact::Field(FieldMeta {
+    field.contract = vec![ContractFact::Field(FieldMeta {
         ty: TypeDesc::String,
         required: true,
         nullable: false,
         enum_values: None,
-    }));
+    })];
 
     let edge = GraphEdge::new(EdgeType::HasField, schema.id.clone(), field.id.clone());
     (schema, field, edge)
@@ -2883,13 +2876,13 @@ fn topic_provider_at_broker(
         line,
     );
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::Provider(ProviderFact {
+    n.contract = vec![ContractFact::Provider(ProviderFact {
         method: HttpMethod::Any,
         template: topic_name.to_string(),
         handler: None,
         operation_id: None,
         origin: ProviderOrigin::Code,
-    }));
+    })];
     n
 }
 
@@ -3136,11 +3129,11 @@ fn graphql_provider_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::Module, path, &id_name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::GraphqlProvider(GraphqlProviderFact {
+    n.contract = vec![ContractFact::GraphqlProvider(GraphqlProviderFact {
         op,
         field: field.to_string(),
         return_type: "[Order!]!".into(),
-    }));
+    })];
     n
 }
 
@@ -3161,10 +3154,10 @@ fn graphql_consumer_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::Function, path, &id_name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::GraphqlConsumer(GraphqlConsumerFact {
+    n.contract = vec![ContractFact::GraphqlConsumer(GraphqlConsumerFact {
         op,
         field: field.to_string(),
-    }));
+    })];
     n
 }
 
@@ -3179,14 +3172,14 @@ fn rpc_provider_node(repo: &str, service: &str, method: &str, line: u32) -> Grap
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::Function, "gen/service.py", &id_name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::RpcProvider(RpcProviderFact {
+    n.contract = vec![ContractFact::RpcProvider(RpcProviderFact {
         system: RpcSystem::Grpc,
         service: service.to_string(),
         method: method.to_string(),
         request_type: "HelloRequest".into(),
         response_type: "HelloReply".into(),
         handler: None,
-    }));
+    })];
     n
 }
 
@@ -3207,13 +3200,13 @@ fn rpc_consumer_node(
     n.repo_id = Some(repo.to_string());
     n.id = make_id(repo, NodeType::Function, "gen/client.py", &id_name, line);
     n.line_start = Some(line);
-    n.contract = Some(ContractFact::RpcConsumer(RpcConsumerFact {
+    n.contract = vec![ContractFact::RpcConsumer(RpcConsumerFact {
         system: RpcSystem::Grpc,
         service: service.to_string(),
         method: method.to_string(),
         channel_target: None,
         channel_host_part: HostPart::Literal(channel_host.to_string()),
-    }));
+    })];
     n
 }
 
@@ -3246,7 +3239,7 @@ fn assert_graphql_target(
     consumer: &GraphNode,
 ) -> Option<crate::federation::contracts::model::ServiceName> {
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     match &res.target {
         Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::GraphqlNoOp,
@@ -3374,7 +3367,7 @@ fn graphql_consumer_does_not_bind_across_different_fields() {
 
     let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(
         matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
         "a different (op, field) must not bind: {:?}",
@@ -3405,7 +3398,7 @@ fn rpc_channel_scope_rejects_a_provider_outside_the_channel_service() {
 
     let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(
         matches!(
             res.target,
@@ -3431,7 +3424,7 @@ fn rpc_first_pass_rejects_a_different_method() {
 
     let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(
         matches!(
             res.target,
@@ -3458,7 +3451,7 @@ fn rpc_second_pass_rejects_a_different_method() {
 
     let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(
         matches!(
             res.target,
@@ -3488,7 +3481,7 @@ fn rpc_second_pass_rejects_a_provider_outside_the_channel_service() {
 
     let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(
         matches!(
             res.target,
@@ -3517,7 +3510,7 @@ fn ws_consumer_with_route_mismatch_does_not_bind() {
 
     let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
     let cid = GlobalId::parse(&consumer.id).expect("global id parse");
-    let res = out.index.consumers.get(&cid).expect("consumer resolution");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
     assert!(
         matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
         "a route mismatch must not bind: {:?}",

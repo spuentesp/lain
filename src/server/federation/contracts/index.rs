@@ -30,11 +30,36 @@ use crate::schema::{EdgeProvenance, NodeType, RouteMatch};
 pub struct ContractIndex {
     pub services: BTreeMap<ServiceName, ServiceInfo>,
     pub endpoints: BTreeMap<EndpointId, Endpoint>,
-    pub consumers: BTreeMap<GlobalId, ConsumerResolution>,
+    /// One entry per call site, holding **one resolution per fact** the
+    /// node carries: a synthetic `topic-read:` node can subscribe to
+    /// several topics on one line, and each subscription is a distinct
+    /// consumer. Use [`Self::consumer_resolutions`] to walk them as a
+    /// flat stream.
+    pub consumers: BTreeMap<GlobalId, Vec<ConsumerResolution>>,
     pub field_refs: BTreeMap<GlobalId, FieldRefResolution>,
     pub stale_bindings: Vec<StaleBinding>,
     pub external: BTreeMap<String, u32>,
     pub unnormalized: Vec<GlobalId>,
+}
+
+impl ContractIndex {
+    /// Every `(call site, resolution)` pair, flattening the per-call
+    /// lists. This is the traversal most consumers of the index want:
+    /// a node carrying several facts contributes several entries.
+    pub fn consumer_resolutions(&self) -> impl Iterator<Item = (&GlobalId, &ConsumerResolution)> {
+        self.consumers
+            .iter()
+            .flat_map(|(id, rs)| rs.iter().map(move |r| (id, r)))
+    }
+
+    /// The first resolution recorded for one call site. For callers
+    /// that expect exactly one fact per node. Use
+    /// [`Self::consumer_resolutions`] when the node may carry several —
+    /// a `topic-read:` node subscribing to two topics does, and this
+    /// would silently hide the second.
+    pub fn consumer(&self, id: &GlobalId) -> Option<&ConsumerResolution> {
+        self.consumers.get(id).and_then(|v| v.first())
+    }
 }
 
 /// `(ServiceName, ContractKey)` — the unique identifier of an

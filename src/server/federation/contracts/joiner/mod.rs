@@ -271,16 +271,19 @@ impl ContractJoiner {
         let mut unresolved_env_vars: BTreeMap<String, u32> = BTreeMap::new();
         let mut ambiguous_env_vars: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-        // Step 4 — resolve consumers (§7.3 table).
-        let mut consumers: BTreeMap<GlobalId, ConsumerResolution> = BTreeMap::new();
+        // Step 4 — resolve consumers (§7.3 table). Keyed by call site,
+        // holding one resolution per fact the node carries: a synthetic
+        // `topic-read:` node can subscribe to several topics on one
+        // line, and each subscription is a distinct consumer.
+        let mut consumers: BTreeMap<GlobalId, Vec<ConsumerResolution>> = BTreeMap::new();
         let mut external: BTreeMap<String, u32> = BTreeMap::new();
         let mut unnormalized: Vec<GlobalId> = Vec::new();
         let mut binds: Vec<BindsEdge> = Vec::new();
         let dispatch_chain: Vec<Box<dyn ProtocolDispatch>> = default_dispatch_chain();
-        for node in nodes {
-            let Some(fact) = node.contract.as_ref() else {
-                continue;
-            };
+        for (node, fact) in nodes
+            .iter()
+            .flat_map(|n| n.contract.iter().map(move |f| (n, f)))
+        {
             let call_id = match GlobalId::parse(&node.id) {
                 Ok(g) => g,
                 Err(_) => continue,
@@ -300,7 +303,10 @@ impl ContractJoiner {
                         config,
                         &mut binds,
                     );
-                    consumers.insert(call_id.clone(), resolution);
+                    consumers
+                        .entry(call_id.clone())
+                        .or_default()
+                        .push(resolution);
                     dispatched = true;
                     break;
                 }
@@ -346,9 +352,10 @@ impl ContractJoiner {
                         .get(call_id.as_str())
                         .cloned()
                         .unwrap_or_else(|| implicit_service(node));
-                    consumers.insert(
-                        call_id.clone(),
-                        ConsumerResolution {
+                    consumers
+                        .entry(call_id.clone())
+                        .or_default()
+                        .push(ConsumerResolution {
                             call_id: call_id.clone(),
                             service: own_service_for_unresolved,
                             target: Some(ConsumerTarget::Unresolved {
@@ -357,8 +364,7 @@ impl ContractJoiner {
                             }),
                             bound_endpoints: Vec::new(),
                             reads_complete: consumer.reads_complete,
-                        },
-                    );
+                        });
                     continue;
                 }
             }
@@ -389,7 +395,10 @@ impl ContractJoiner {
             ) {
                 unnormalized.push(call_id.clone());
             }
-            consumers.insert(call_id.clone(), resolution);
+            consumers
+                .entry(call_id.clone())
+                .or_default()
+                .push(resolution);
         }
 
         // Step 6 — apply confirmed bindings (§7.6).
@@ -412,7 +421,7 @@ impl ContractJoiner {
             .iter()
             .filter(|n| {
                 n.node_type == crate::schema::NodeType::FieldRef
-                    && matches!(n.contract.as_ref(), Some(ContractFact::FieldRead(_)))
+                    && matches!(n.contract.first(), Some(ContractFact::FieldRead(_)))
             })
             .collect();
         let field_ref_nodes_owned: Vec<GraphNode> =

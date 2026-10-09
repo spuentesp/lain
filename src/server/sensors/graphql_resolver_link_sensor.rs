@@ -123,11 +123,11 @@ pub fn scan_workspace_resolver_link(
                     op: link.op,
                     field: link.field.clone(),
                 };
-                node.contract = Some(ContractFact::GraphqlHandler(GraphqlHandlerFact {
+                node.contract = vec![ContractFact::GraphqlHandler(GraphqlHandlerFact {
                     graphql_field: key,
                     handler_function: link.handler_function.clone(),
                     origin: link.origin,
-                }));
+                })];
                 all_nodes.push(node);
                 total += 1;
             }

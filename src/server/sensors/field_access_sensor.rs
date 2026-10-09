@@ -3966,11 +3966,11 @@ fn build_emission(
             namespace,
         );
         node.line_start = Some(read.line);
-        node.contract = Some(ContractFact::FieldRead(FieldReadFact {
+        node.contract = vec![ContractFact::FieldRead(FieldReadFact {
             chain: read.chain.clone(),
             exact: read.exact,
             origin: FieldReadOrigin::FieldAccess,
-        }));
+        })];
         // Only link `ReadsField` when the reader is known; an
         // unattributed read keeps its `FieldRef` node and `ReadsFrom`
         // edge but no reader link.
@@ -4012,7 +4012,7 @@ fn patch_reads_complete(graph: &GraphDatabase, call_id: &str) -> Result<(), Lain
     let Some(mut node) = graph.get_node(call_id)? else {
         return Ok(());
     };
-    let Some(ContractFact::Consumer(consumer)) = node.contract.as_mut() else {
+    let Some(ContractFact::Consumer(consumer)) = node.contract.first_mut() else {
         return Ok(());
     };
     if consumer.reads_complete {
@@ -6013,7 +6013,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
             ns,
         );
         call_node.line_start = Some(call_line);
-        call_node.contract = Some(ContractFact::Consumer(ConsumerFact {
+        call_node.contract = vec![ContractFact::Consumer(ConsumerFact {
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
                 host: HostPart::Literal("orders".into()),
@@ -6024,7 +6024,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
             },
             url_expr: "\"http://orders/api/1\"".into(),
             reads_complete: true,
-        }));
+        })];
         let mut sends = GraphEdge::new(
             EdgeType::SendsHttp,
             sender_node.id.clone(),
@@ -6056,7 +6056,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
             .into_iter()
             .find(|n| {
                 n.node_type == NodeType::FieldRef
-                    && matches!(&n.contract, Some(ContractFact::FieldRead(fr)) if fr.chain.to_string() == chain)
+                    && matches!(n.contract.first(), Some(ContractFact::FieldRead(fr)) if fr.chain.to_string() == chain)
             })
             .unwrap_or_else(|| panic!("FieldRef for chain {chain:?} must exist"))
     }
@@ -6154,7 +6154,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
         // stays `reads_complete = true` (and the node survives — it
         // is never re-emitted through this sensor's owner).
         let call_node = graph.get_node(&call_id).unwrap().expect("call node");
-        match call_node.contract {
+        match call_node.contract.first() {
             Some(ContractFact::Consumer(c)) => {
                 assert!(
                     c.reads_complete,
@@ -6222,7 +6222,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
         // The escape (`return order` in a caller frame) patched the
         // phase-1 consumer fact in place.
         let call_node = graph.get_node(&call_id).unwrap().expect("call node");
-        match call_node.contract {
+        match call_node.contract.first() {
             Some(ContractFact::Consumer(c)) => {
                 assert!(
                     !c.reads_complete,

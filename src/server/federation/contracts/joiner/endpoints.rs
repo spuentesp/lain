@@ -54,7 +54,7 @@ pub(crate) fn build_endpoints(
             Some(s) => s,
             None => continue,
         };
-        match node.contract.as_ref() {
+        match node.contract.first() {
             Some(ContractFact::Provider(provider)) => {
                 let service_decl: ServiceDecl = config
                     .services
@@ -274,7 +274,7 @@ pub(crate) fn contract_key_for_provider(
     config: &ContractFederationConfig,
 ) -> Option<(crate::federation::contracts::index::EndpointId, String)> {
     let service_decl = resolve_service_decl(svc, config);
-    let fact = node.contract.as_ref()?;
+    let fact = node.contract.first()?;
     match fact {
         ContractFact::Provider(provider) => {
             let full_template = endpoint_template_for(provider, &node.path, &service_decl);

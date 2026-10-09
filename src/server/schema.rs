@@ -735,11 +735,21 @@ pub struct GraphNode {
     /// - `Field` → `ContractFact::Field`
     /// - `FieldRef` → `ContractFact::FieldRead`
     ///
+    /// Every fact this node carries. A list rather than a single
+    /// `Option` because one node can genuinely record more than one:
+    /// two subscriptions to different topics on one physical line
+    /// share a `topic-read:<path>:<line>` node and each is a
+    /// `TopicConsumer`. The nodes are one-fact-per-*owner* — see
+    /// `sensor_owner_of`, which must find a single owner across all of
+    /// them.
+    ///
     /// `#[serde(default)]` so JSON readers tolerate absence for
     /// pre-schema-v3 callers; bincode forwards it on the wire (see
-    /// the comment on `repo_id` above).
+    /// the comment on `repo_id` above). Changing the shape here
+    /// changes the bincode layout — bump `PATH_FORMAT_VERSION` and
+    /// `FEDERATION_GRAPH_VERSION` with it.
     #[serde(default)]
-    pub contract: Option<crate::federation::contracts::model::ContractFact>,
+    pub contract: Vec<crate::federation::contracts::model::ContractFact>,
     /// How a function is invoked at runtime. Set by
     /// `entry_point_sensor` on function nodes (`§6.6`). `None`
     /// for nodes that are not entry points or whose sensor has
@@ -901,7 +911,7 @@ impl GraphNode {
             commit_hash: None,
             is_hydrated: true,
             repo_id: None,
-            contract: None,
+            contract: Vec::new(),
             entry: None,
         }
     }

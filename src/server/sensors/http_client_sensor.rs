@@ -1827,7 +1827,7 @@ fn build_graph(
     );
     node.id = node_id.clone();
     node.line_start = Some(call.line);
-    node.contract = Some(crate::federation::contracts::model::ContractFact::Consumer(
+    node.contract = vec![crate::federation::contracts::model::ContractFact::Consumer(
         ConsumerFact {
             method: call.method.clone(),
             url: call.url.clone(),
@@ -1835,7 +1835,7 @@ fn build_graph(
             url_expr: call.url_expr.clone(),
             reads_complete: call.reads_complete,
         },
-    ));
+    )];
 
     let edge = enclosing_sends_http_edge(graph, &call.path, call.line, node_id);
     (vec![node], edge.into_iter().collect())

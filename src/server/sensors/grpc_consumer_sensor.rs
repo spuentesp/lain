@@ -115,13 +115,13 @@ pub fn scan_workspace_grpc_consumer(
                 namespace,
             );
             let composed_service = compose_service_name(&call.package, &call.service);
-            node.contract = Some(ContractFact::RpcConsumer(RpcConsumerFact {
+            node.contract = vec![ContractFact::RpcConsumer(RpcConsumerFact {
                 system: RpcSystem::Grpc,
                 service: composed_service,
                 method: call.method.clone(),
                 channel_target: call.channel_target.clone(),
                 channel_host_part: call.channel_host_part.clone(),
-            }));
+            })];
             all_nodes.push(node);
             total += 1;
         }

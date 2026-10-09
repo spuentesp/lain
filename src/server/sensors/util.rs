@@ -832,11 +832,11 @@ pub fn emit_graphql_field_refs(
         ref_node.id = ref_id.clone();
         ref_node.line_start = Some(site_line + idx as u32);
         ref_node.line_end = Some(site_line + idx as u32);
-        ref_node.contract = Some(ContractFact::FieldRead(FieldReadFact {
+        ref_node.contract = vec![ContractFact::FieldRead(FieldReadFact {
             chain: JsonPath(vec![PathSegment::Name(sel.clone())]),
             exact: true,
             origin: FieldReadOrigin::GraphqlConsumer,
-        }));
+        })];
         all_nodes.push(ref_node);
         all_edges.push(GraphEdge::new(
             EdgeType::ReadsFrom,

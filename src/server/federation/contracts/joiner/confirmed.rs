@@ -32,7 +32,7 @@ pub(crate) fn apply_confirmed_binding(
     assignments: &BTreeMap<String, ServiceName>,
     endpoints: &EndpointTable,
     binds: &mut Vec<BindsEdge>,
-    consumers: &mut BTreeMap<GlobalId, ConsumerResolution>,
+    consumers: &mut BTreeMap<GlobalId, Vec<ConsumerResolution>>,
     stale_bindings: &mut Vec<StaleBinding>,
 ) {
     let provider_key = match parse_contract_key(&binding.provider.key) {
@@ -67,7 +67,7 @@ pub(crate) fn apply_confirmed_binding(
     };
     let mut matched_any = false;
     for node in nodes {
-        let Some(ContractFact::Consumer(consumer)) = node.contract.as_ref() else {
+        let Some(ContractFact::Consumer(consumer)) = node.contract.first() else {
             continue;
         };
         let Ok(gid) = GlobalId::parse(&node.id) else {
@@ -113,9 +113,12 @@ pub(crate) fn apply_confirmed_binding(
             route_match: RouteMatch::Exact,
             stripped_prefix: None,
         });
+        // An operator confirmation overrides whatever the joiner
+        // inferred for this call site, so the entry is replaced
+        // wholesale rather than appended to.
         consumers.insert(
             gid.clone(),
-            ConsumerResolution {
+            vec![ConsumerResolution {
                 call_id: gid,
                 service: own_svc,
                 target: Some(ConsumerTarget::Binds {
@@ -126,7 +129,7 @@ pub(crate) fn apply_confirmed_binding(
                 }),
                 bound_endpoints: vec![(provider_svc.clone(), provider_key.clone())],
                 reads_complete: consumer.reads_complete,
-            },
+            }],
         );
     }
     if !matched_any {

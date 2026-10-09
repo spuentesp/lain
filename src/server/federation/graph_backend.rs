@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 /// layout change. Old v2 files are refused at load — recovery is
 /// `lain reindex`.
 pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
-pub const FEDERATION_GRAPH_VERSION: u32 = 3;
+pub const FEDERATION_GRAPH_VERSION: u32 = 4;
 pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
 
 /// Sibling file holding the validated payload (everything after the
