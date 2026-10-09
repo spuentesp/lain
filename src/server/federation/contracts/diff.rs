@@ -618,7 +618,11 @@ pub fn diff_contracts(
         let head_method = method_of(head_id);
         let path_changed = base_id.1 != head_id.1;
         let method_changed = base_method != head_method;
-        if path_changed && !method_changed {
+        // A pairing can move in both path and method at once. `from` /
+        // `to` are full `ContractKey`s, so `PathChanged` already carries
+        // the method half — report the move rather than dropping it on
+        // the floor because neither single-change rule matched.
+        if path_changed {
             changes.push(Change {
                 service: head_id.0.clone(),
                 kind: ChangeKind::PathChanged {
@@ -626,7 +630,7 @@ pub fn diff_contracts(
                     to: head_id.1.clone(),
                 },
             });
-        } else if method_changed && !path_changed {
+        } else if method_changed {
             changes.push(Change {
                 service: head_id.0.clone(),
                 kind: ChangeKind::MethodChanged {

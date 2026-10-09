@@ -3529,6 +3529,70 @@ fn schema_less_endpoint_still_reports_changed_without_schema() {
     );
 }
 
+/// A pairing that moved in BOTH path and method reported nothing at
+/// all — `PathChanged` required the method to be unchanged and
+/// `MethodChanged` required the path to be unchanged, so their union
+/// left a hole. `from` / `to` are full `ContractKey`s, so `PathChanged`
+/// already carries the method half.
+#[test]
+fn a_path_and_method_rename_is_reported() {
+    let handler = SymbolKey {
+        repo: repo("orders"),
+        path: "src/main.rs".into(),
+        container: None,
+        name: "get_order".into(),
+    };
+    let mut response_fields = BTreeMap::new();
+    response_fields.insert(path(&["customer_id"]), field(TypeDesc::String, true, false));
+    let mut schemas = BTreeMap::new();
+    schemas.insert(Direction::Response, response_fields);
+
+    let base_endpoint = endpoint_id("orders", HttpMethod::Get, "/api/orders/{}");
+    let head_endpoint = endpoint_id("orders", HttpMethod::Post, "/api/order/{}");
+    let provider = ProviderRef {
+        node_id: id("orders", "HttpRoute", "src/main.rs", "get_order", 12),
+        handler: Some(handler),
+        operation_id: None,
+    };
+    let mut base_endpoints = BTreeMap::new();
+    base_endpoints.insert(
+        base_endpoint,
+        EndpointDef {
+            providers: vec![provider.clone()],
+            schemas: schemas.clone(),
+            has_schema: true,
+            source_files: BTreeSet::new(),
+        },
+    );
+    let mut head_endpoints = BTreeMap::new();
+    head_endpoints.insert(
+        head_endpoint,
+        EndpointDef {
+            providers: vec![provider],
+            schemas,
+            has_schema: true,
+            source_files: BTreeSet::new(),
+        },
+    );
+    let base = ContractSurface {
+        endpoints: base_endpoints,
+        consumers: BTreeMap::new(),
+    };
+    let head = ContractSurface {
+        endpoints: head_endpoints,
+        consumers: BTreeMap::new(),
+    };
+    let src = StaticChangedFiles(BTreeSet::new());
+
+    let changes = diff_contracts(&base, &head, &src);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c.kind, ChangeKind::PathChanged { .. })),
+        "a rename that moved both path and method must not go unreported: {changes:?}"
+    );
+}
+
 /// Pins the *principled* suppression that makes it safe to attribute a
 /// shared-handler change to every claimant: when `PathChanged` /
 /// `MethodChanged` / a schema diff already explains this endpoint,
