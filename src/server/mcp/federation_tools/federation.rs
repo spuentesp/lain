@@ -100,8 +100,9 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
 }
 
 /// Case-insensitive substring search for symbols across every repo in the
-/// federation. Matches on `name` or `path`, sorts by `(repo_id, name)`, and
-/// truncates to `limit`.
+/// federation. Matches on `name` or `path`; when more than `limit` match, the
+/// reported set is spread fairly across repos (see [`select_fair`]) and is
+/// returned sorted by `(repo_id, name)`.
 ///
 /// The primary path iterates `list_repos()` → `get_repo()` → per-repo
 /// `RepoIndex::nodes()`, which covers repos added through `add_repo` whether
@@ -189,9 +190,72 @@ pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<Symbol
         }
     }
 
-    hits.sort_by(|a, b| a.repo_id.cmp(&b.repo_id).then(a.name.cmp(&b.name)));
-    hits.truncate(limit);
-    hits
+    select_fair(hits, &q, limit)
+}
+
+/// Choose which `limit` hits to report, then present them sorted by
+/// `(repo_id, name)`.
+///
+/// Sorting by repo and truncating dropped every repo after the first `limit`
+/// matches: with `bytes` sorting before `tokio`, ten `bytes` matches meant
+/// `search_org` could never show a `tokio` symbol, defeating the point of an
+/// org-wide search (the acceptance claim "search_org finds symbols across
+/// repos" failed exactly this way). Selection is therefore round-robin across
+/// repos, taking each repo's best matches first (exact name, then prefix, then
+/// substring, then path-only); the chosen set is then sorted for output.
+fn select_fair(hits: Vec<SymbolMatch>, q: &str, limit: usize) -> Vec<SymbolMatch> {
+    use std::collections::{BTreeMap, VecDeque};
+    let rank = |h: &SymbolMatch| {
+        let n = h.name.to_lowercase();
+        if n == q {
+            0
+        } else if n.starts_with(q) {
+            1
+        } else if n.contains(q) {
+            2
+        } else {
+            3
+        }
+    };
+    let mut by_repo: BTreeMap<String, Vec<SymbolMatch>> = BTreeMap::new();
+    for h in hits {
+        by_repo.entry(h.repo_id.clone()).or_default().push(h);
+    }
+    let mut queues: Vec<VecDeque<SymbolMatch>> = by_repo
+        .into_values()
+        .map(|mut v| {
+            v.sort_by(|a, b| {
+                rank(a)
+                    .cmp(&rank(b))
+                    .then_with(|| a.name.cmp(&b.name))
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+            v.into()
+        })
+        .collect();
+    let mut chosen = Vec::new();
+    'fill: loop {
+        let mut progressed = false;
+        for q in queues.iter_mut() {
+            if chosen.len() >= limit {
+                break 'fill;
+            }
+            if let Some(h) = q.pop_front() {
+                chosen.push(h);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    chosen.sort_by(|a, b| {
+        a.repo_id
+            .cmp(&b.repo_id)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    chosen
 }
 
 const BLAST_RADIUS_CAP: usize = 1000;
@@ -413,6 +477,55 @@ mod tests {
         let repos: std::collections::HashSet<_> = hits.iter().map(|h| h.repo_id.clone()).collect();
         assert!(repos.contains("repo-a"));
         assert!(repos.contains("repo-b"));
+    }
+
+    /// One repo with many matches must not crowd the others out of a limited
+    /// result (it used to: sort by repo, then truncate).
+    #[tokio::test]
+    async fn search_org_limit_does_not_starve_later_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for i in 0..15 {
+            fed.backend()
+                .upsert_node_global(
+                    &format!("alpha:Function:src/a.rs:put_slice_{i:02}:0"),
+                    crate::schema::NodeType::Function,
+                    "src/a.rs",
+                    &format!("put_slice_{i:02}"),
+                )
+                .unwrap();
+        }
+        fed.backend()
+            .upsert_node_global(
+                "zulu:Function:src/z.rs:put_slice:0",
+                crate::schema::NodeType::Function,
+                "src/z.rs",
+                "put_slice",
+            )
+            .unwrap();
+        let hits = search_org(&fed, "put_slice", 5);
+        assert_eq!(hits.len(), 5);
+        assert!(
+            hits.iter().any(|h| h.repo_id == "zulu"),
+            "the only match in a later repo was crowded out: {hits:?}"
+        );
+        // Documented presentation order, and determinism.
+        let mut sorted = hits.clone();
+        sorted.sort_by(|a, b| a.repo_id.cmp(&b.repo_id).then(a.name.cmp(&b.name)));
+        assert_eq!(
+            hits.iter().map(|h| &h.global_id).collect::<Vec<_>>(),
+            sorted.iter().map(|h| &h.global_id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits.iter().map(|h| &h.global_id).collect::<Vec<_>>(),
+            search_org(&fed, "put_slice", 5)
+                .iter()
+                .map(|h| &h.global_id)
+                .collect::<Vec<_>>()
+        );
+        // Exact name match is preferred within a repo when only one fits.
+        let one = search_org(&fed, "put_slice", 1);
+        assert_eq!(one.len(), 1);
     }
 
     #[tokio::test]

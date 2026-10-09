@@ -35,6 +35,26 @@ pub struct Fixture {
     pub root: PathBuf,
 }
 
+/// The `bash` that runs the fixture scripts. On Windows a bare `bash` resolves
+/// to `System32\bash.exe`, the WSL launcher ("no installed distributions"),
+/// so use Git for Windows' own `bash.exe`; `LAIN_TEST_BASH` overrides.
+fn git_bash() -> std::ffi::OsString {
+    if let Some(p) = std::env::var_os("LAIN_TEST_BASH") {
+        return p;
+    }
+    if cfg!(windows) {
+        for cand in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ] {
+            if std::path::Path::new(cand).exists() {
+                return cand.into();
+            }
+        }
+    }
+    "bash".into()
+}
+
 fn fixture_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
@@ -50,7 +70,10 @@ fn fixture_t4_script() -> PathBuf {
 fn run_fixture_script(script: PathBuf) -> Fixture {
     let tmp = tempfile::tempdir().expect("fixture tempdir");
     let root = tmp.path().to_path_buf();
-    let status = Command::new(&script)
+    // Through `bash`: Windows cannot execute a `.sh` file directly
+    // ("%1 is not a valid Win32 application"); CI has Git Bash.
+    let status = Command::new(git_bash())
+        .arg(&script)
         .arg(&root)
         .status()
         .unwrap_or_else(|e| panic!("spawn {}: {e}", script.display()));

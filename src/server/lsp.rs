@@ -1401,6 +1401,12 @@ impl LspMultiplexer {
     /// In both cases the transition is logged at WARN level so
     /// operators see when LSP silently degrades.
     fn record_lsp_failure(&mut self, binary: &str, kind: FailureKind) {
+        self.record_lsp_failure_at(binary, kind, unix_millis_now());
+    }
+
+    /// [`Self::record_lsp_failure`] with the clock injected (restart-window
+    /// arithmetic), so the breaker can be verified deterministically.
+    fn record_lsp_failure_at(&mut self, binary: &str, kind: FailureKind, now_ms: u64) {
         match kind {
             FailureKind::ProcessExited => {
                 // If the binary is already marked unavailable (by the
@@ -1418,7 +1424,7 @@ impl LspMultiplexer {
                 // Drop the dead child; the next ensure_server call
                 // will see `!started.contains(binary)` and respawn.
                 self.started.remove(binary);
-                self.record_restart(binary);
+                self.record_restart_at(binary, now_ms);
             }
             FailureKind::RequestError | FailureKind::Timeout => {
                 let count = self
@@ -1439,23 +1445,10 @@ impl LspMultiplexer {
         }
     }
 
-    /// Record one LSP restart attempt for `binary`. Sliding-window
-    /// budget: if `LSP_RESTART_BUDGET` restarts happen within
-    /// `LSP_RESTART_WINDOW`, mark the binary unavailable. Otherwise
-    /// the count is informational (logged at DEBUG for operator
-    /// tracing).
-    ///
-    /// `now_ms` defaults to the monotonic clock via `unix_millis_now`;
-    /// the explicit parameter exists so tests can pin time without
-    /// racing the wall clock or relying on `Instant::now()` happening to
-    /// be far enough into the process for `saturating_sub` arithmetic
-    /// to make sense.
-    fn record_restart(&mut self, binary: &str) {
-        let now_ms = unix_millis_now();
-        self.record_restart_at(binary, now_ms);
-    }
-
-    /// Same as [`Self::record_restart`] but with the window reference
+    /// Record one LSP restart attempt for `binary` at `now_ms`: sliding-window
+    /// budget — more than `LSP_RESTART_BUDGET` restarts inside
+    /// `LSP_RESTART_WINDOW` mark the binary unavailable. Same as the old
+    /// wall-clock variant but with the window reference
     /// time pinned explicitly. Visible for tests.
     fn record_restart_at(&mut self, binary: &str, now_ms: u64) {
         let window_ms = LSP_RESTART_WINDOW.as_millis() as u64;
@@ -1792,6 +1785,9 @@ impl LspPool {
         size: usize,
         runtime: &crate::tuning::RuntimeConfig,
     ) -> Result<Self, LainError> {
+        // At least one: `next()` indexes with `counter % len`, which divides by
+        // zero for an empty pool.
+        let size = size.max(1);
         let mut multiplexers = Vec::with_capacity(size);
         for _ in 0..size {
             multiplexers.push(Arc::new(AsyncMutex::new(LspMultiplexer::new(
@@ -3221,3 +3217,7 @@ pub mod test_support {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "lsp_verification.rs"]
+mod verification;

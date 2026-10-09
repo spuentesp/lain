@@ -746,9 +746,15 @@ test('categorizeTool: categorizes known tools across domains', () => {
   assert.strictEqual(app.categorizeTool('claim_files'), 'Multiplayer');
   assert.strictEqual(app.categorizeTool('release_files'), 'Multiplayer');
   assert.strictEqual(app.categorizeTool('list_active_agents'), 'Multiplayer');
+  assert.strictEqual(app.categorizeTool('register_agent'), 'Multiplayer');
 
   assert.strictEqual(app.categorizeTool('list_workspaces'), 'Federation');
   assert.strictEqual(app.categorizeTool('get_workspace_graph'), 'Federation');
+  assert.strictEqual(app.categorizeTool('get_workspace'), 'Federation');
+
+  assert.strictEqual(app.categorizeTool('list_contracts'), 'Contracts');
+  assert.strictEqual(app.categorizeTool('list_services'), 'Contracts');
+  assert.strictEqual(app.categorizeTool('diff_contracts'), 'Contracts');
 
   assert.strictEqual(app.categorizeTool('run_build'), 'Execution');
   assert.strictEqual(app.categorizeTool('run_tests'), 'Execution');

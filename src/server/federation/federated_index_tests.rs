@@ -938,3 +938,78 @@ async fn removing_repo_retracts_backend_edges_and_survives_other_projection() {
     stale_handle.sync_overlay().await.unwrap();
     assert_eq!(PetgraphBackend::new(state.path()).unwrap().node_count(), 1);
 }
+
+/// Removing a repo while a projection is in flight must not resurrect it.
+///
+/// `project_nodes` re-checks that the repo is registered *inside*
+/// `projection_lock`, and `remove_repo` purges and deregisters under the same
+/// lock, so whichever runs second either sees nothing to project (NotFound) or
+/// removes what was projected. If that invariant is lost, a removed repo's
+/// symbols keep answering `search_org` forever. Loops many races.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_a_repo_during_projection_never_resurrects_its_nodes() {
+    use crate::schema::{GraphNode, NodeType};
+    for round in 0..25 {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = Arc::new(FederatedIndex::new(petgraph_backend(&tmp)));
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let id = RepoId::new("repo-a").unwrap();
+        fed.add_repo(
+            Box::new(WorkspaceDirSource::new(id.clone(), src_dir.path().to_path_buf()).unwrap()),
+            tmp.path(),
+        )
+        .await
+        .unwrap();
+        let repo = fed.get_repo(&id).unwrap();
+        for i in 0..40 {
+            repo.db()
+                .upsert_node(GraphNode::new(
+                    NodeType::Function,
+                    format!("f{i}"),
+                    format!("/src/f{i}.rs"),
+                ))
+                .unwrap();
+        }
+
+        let projector = {
+            let (fed, id) = (Arc::clone(&fed), id.clone());
+            tokio::spawn(async move {
+                for _ in 0..30 {
+                    let _ = fed.project_repo(&id).await; // NotFound after removal is fine
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let remover = {
+            let (fed, id) = (Arc::clone(&fed), id.clone());
+            tokio::spawn(async move {
+                for _ in 0..(round % 5) {
+                    tokio::task::yield_now().await;
+                }
+                fed.remove_repo(&id).unwrap();
+            })
+        };
+        projector.await.unwrap();
+        remover.await.unwrap();
+
+        assert!(
+            fed.get_repo(&id).is_none(),
+            "round {round}: repo still registered"
+        );
+        let leftover: Vec<String> = fed
+            .backend()
+            .list_nodes()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .filter(|gid| gid.starts_with("repo-a:"))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "round {round}: {} nodes of a removed repo were resurrected, e.g. {:?}",
+            leftover.len(),
+            &leftover[..leftover.len().min(3)]
+        );
+    }
+}

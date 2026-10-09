@@ -31,7 +31,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task;
 use tracing::{error, info};
-use uuid::Uuid;
 
 /// Shared registry types used by interactive tool responses. Keeping these
 /// aliases in the tools module gives handlers a stable vocabulary and avoids
@@ -187,26 +186,20 @@ impl ToolExecutor {
         let jobs_path =
             std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
         if let Ok(contents) = std::fs::read_to_string(&jobs_path) {
-            let jobs_registry = Arc::clone(&jobs_registry);
-            let jobs_path_for_log = jobs_path.clone();
-            task::spawn(async move {
-                match serde_json::from_str::<Vec<JobInfo>>(&contents) {
-                    Ok(vec) => {
-                        let mut guard = jobs_registry.lock();
-                        for j in vec {
-                            guard.insert(j.id.clone(), j);
-                        }
-                    }
-                    // A store that exists but will not parse means jobs
-                    // were lost, most likely to an interrupted write.
-                    // Skipping in silence made that indistinguishable
-                    // from having had no jobs at all.
-                    Err(e) => tracing::warn!(
-                        "job store at {jobs_path_for_log} could not be read ({e}); \
-                         previously running jobs will not be resumed"
-                    ),
-                }
-            });
+            // Restored inline: the file is already read synchronously, so a
+            // spawned task bought nothing and panicked ("no reactor
+            // running") when an executor was built outside a Tokio runtime.
+            match serde_json::from_str::<Vec<JobInfo>>(&contents) {
+                Ok(vec) => crate::server::job_store::restore(&jobs_registry, vec),
+                // A store that exists but will not parse means jobs
+                // were lost, most likely to an interrupted write.
+                // Skipping in silence made that indistinguishable
+                // from having had no jobs at all.
+                Err(e) => tracing::warn!(
+                    "job store at {jobs_path} could not be read ({e}); \
+                     previously running jobs will not be resumed"
+                ),
+            }
         }
 
         Self {
@@ -321,6 +314,11 @@ impl ToolExecutor {
     async fn persist_jobs_snapshot(
         jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     ) -> Result<(), LainError> {
+        // Snapshot AND write under one lock: with the snapshot taken first and
+        // the write racing, a slower writer holding an OLDER snapshot could
+        // land last and roll `jobs.json` back past a newer completion.
+        static PERSIST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _ordered = PERSIST.lock().await;
         let path = std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
         let vec: Vec<JobInfo> = {
             let guard = jobs.lock();
@@ -371,58 +369,43 @@ impl ToolExecutor {
                     let name_owned = name.to_string();
 
                     const MAX_CONCURRENT_JOBS: usize = 10;
-                    {
-                        let guard = self.jobs.lock();
-                        let running = guard
-                            .values()
-                            .filter(|j| matches!(j.state, JobState::Running))
-                            .count();
-                        if running >= MAX_CONCURRENT_JOBS {
-                            return Err(LainError::Mcp(format!(
-                                "Too many concurrent jobs (max {})",
-                                MAX_CONCURRENT_JOBS
-                            )));
-                        }
-                    }
-
-                    let job_id = Uuid::new_v4().to_string();
-                    let job = JobInfo {
-                        id: job_id.clone(),
-                        created_at: std::time::SystemTime::now(),
-                        state: JobState::Running,
-                    };
-
-                    {
-                        let mut guard = self.jobs.lock();
-                        guard.insert(job_id.clone(), job.clone());
-                    }
+                    // Count and insert in one critical section (CapBound,
+                    // docs/formal/JobRegistry.tla).
+                    let job_id =
+                        crate::server::job_store::try_start(&self.jobs, MAX_CONCURRENT_JOBS)
+                            .map_err(|_| {
+                                LainError::Mcp(format!(
+                                    "Too many concurrent jobs (max {})",
+                                    MAX_CONCURRENT_JOBS
+                                ))
+                            })?;
 
                     let jobs_registry = Arc::clone(&self.jobs);
                     let webhooks = Arc::clone(&self.job_webhooks);
                     let job_id_clone = job_id.clone();
                     task::spawn(async move {
-                        let res = exec.call_inner(&name_owned, Some(&owned)).await;
+                        // The tool runs in its own task so a panic surfaces as
+                        // a `JoinError` here instead of unwinding past the
+                        // bookkeeping and leaving the job `Running` forever
+                        // (which also leaked one of the concurrency slots).
+                        let res = match task::spawn(async move {
+                            exec.call_inner(&name_owned, Some(&owned)).await
+                        })
+                        .await
                         {
-                            let mut guard = jobs_registry.lock();
-                            if let Some(j) = guard.get_mut(&job_id_clone) {
-                                match &res {
-                                    Ok(out) => {
-                                        j.state = JobState::Completed {
-                                            success: true,
-                                            output: Some(out.clone()),
-                                            error: None,
-                                        }
-                                    }
-                                    Err(e) => {
-                                        j.state = JobState::Completed {
-                                            success: false,
-                                            output: None,
-                                            error: Some(e.to_string()),
-                                        }
-                                    }
-                                }
-                            }
-                        } // guard dropped here — must release before webhook/persist
+                            Ok(res) => res,
+                            Err(join_err) => Err(LainError::Other(format!(
+                                "background job panicked or was cancelled: {join_err}"
+                            ))),
+                        };
+                        crate::server::job_store::finish(
+                            &jobs_registry,
+                            &job_id_clone,
+                            match &res {
+                                Ok(out) => Ok(out.clone()),
+                                Err(e) => Err(e.to_string()),
+                            },
+                        );
 
                         let hooks = {
                             let h = webhooks.lock().await;
@@ -536,6 +519,10 @@ impl ToolExecutor {
                     None => return Err(LainError::NotFound(format!("Job not found: {}", job_id))),
                 }
             }
+            // Test-only: lets the job registry's panic handling be exercised
+            // through the real executor. Not compiled into release builds.
+            #[cfg(test)]
+            "debug_panic" => panic!("debug_panic: deliberate test panic"),
             "debug_sleep" => {
                 let secs = args.get("secs").and_then(|v| v.as_u64()).unwrap_or(1);
                 tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
@@ -931,12 +918,68 @@ impl ToolExecutor {
         // query returns nothing" looks like a tool bug but is in fact
         // a missing-data bug; the histogram makes the data
         // visible. Sorted alphabetically by EdgeType Debug name for
-        // stable output across runs.
+        // stable output across runs. `edge_counts_by_type` seeds every
+        // declared variant at 0 so a missing edge type is visible as
+        // `Calls: 0` instead of just absent.
         let edge_hist = ctx.graph.edge_counts_by_type();
         if !edge_hist.is_empty() {
             output.push_str("\n### Edge counts by type\n");
             for (kind, count) in &edge_hist {
                 output.push_str(&format!("- **{kind}**: {count}\n"));
+            }
+            // B11 follow-up: when the call graph is empty on a repo
+            // that has Rust/Python/Go/etc. source, every impact query
+            // will return nothing. Surface that as a banner so the
+            // next user doesn't have to diff `get_health` against
+            // `describe_schema` to spot the silent failure.
+            // `Calls == 0` is the headline failure mode: a repo with
+            // a populated Contains tree but no Calls is the exact
+            // pattern we saw in the 2026-10-04 Lain-on-Lain
+            // dogfooding (10k nodes, 0 Calls). `Uses` is a co-signal
+            // but not strictly required (the structural scanner
+            // populates Uses from type references even when the call
+            // resolver fails), so a one-off `Uses: 1` shouldn't mask
+            // the absence of Calls.
+            let calls = edge_hist.get("Calls").copied().unwrap_or(0);
+            if calls == 0 {
+                output.push_str(
+                    "\n⚠ **call graph is empty** — `Calls` is 0. \
+                     Every `get_blast_radius` / `get_call_chain` / \
+                     `assess_change` answer will be empty. Check the \
+                     LSP phase of the indexer (rust-analyzer / pylsp / \
+                     …); the structural edges are present so the \
+                     indexer ran, but the call-resolution phase did \
+                     not.\n",
+                );
+            }
+
+            // B4: per-file call-graph coverage. The 2026-10-04
+            // dogfooding found 198 of 224 files in `scripts/` and
+            // `tests/` had no call edges at all — the same number
+            // was already in `find_dead_code`'s ⚠ line, but only
+            // visible to users who ran that tool. `get_health` is
+            // the first place an operator looks; surface the
+            // coverage there too. A covered/total of (N, N) means
+            // the indexer did its job; anything less means some
+            // files had no `Calls`/`Uses` edge.
+            let (covered, total) = ctx.graph.call_graph_file_coverage();
+            if total > 0 {
+                let uncovered = total.saturating_sub(covered);
+                let pct = (covered as f64 / total as f64) * 100.0;
+                output.push_str(&format!(
+                    "\n- **Call-graph file coverage:** {covered} / {total} \
+                     files ({pct:.0}%) have at least one `Calls` or \
+                     `Uses` edge.",
+                ));
+                if uncovered > 0 {
+                    output.push_str(&format!(
+                        " ⚠ **{uncovered} file(s) have no call edges** \
+                         — the indexer did not extract their call graph. \
+                         This usually means a language server is missing; \
+                         see `find_dead_code` for the file list."
+                    ));
+                }
+                output.push('\n');
             }
         }
 
@@ -1513,6 +1556,75 @@ mod tests {
         assert!(
             banner.contains("0s"),
             "future timestamp must clamp to 0s, not panic: {banner}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod job_panic_tests {
+    use super::*;
+
+    /// A background tool that panics must end as a *failed* job, not stay
+    /// `Running` forever (JobRegistry.tla, `NoGhost`) — and must free its slot.
+    #[tokio::test]
+    async fn a_panicking_background_job_is_recorded_as_failed_and_frees_its_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `LAIN_JOB_STORE` is process-global: set it only around executor
+        // construction and the persistence at the end, and restore it, so
+        // sibling tests never see this test's store.
+        let store = tmp.path().join("jobs.json");
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("LAIN_JOB_STORE", v),
+                    None => std::env::remove_var("LAIN_JOB_STORE"),
+                }
+            }
+        }
+        let _restore = RestoreEnv(std::env::var_os("LAIN_JOB_STORE"));
+        std::env::set_var("LAIN_JOB_STORE", &store);
+        let graph = crate::graph::GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let exec = create_test_executor_with_graph(graph);
+
+        let mut args = Map::new();
+        args.insert("background".into(), Value::Bool(true));
+        let resp = exec.call("debug_panic", Some(&args)).await.unwrap();
+        let id = serde_json::from_str::<Value>(&resp).unwrap()["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut status = Map::new();
+        status.insert("job_id".into(), Value::String(id));
+        let mut last = String::new();
+        for _ in 0..100 {
+            last = exec.call("get_job_status", Some(&status)).await.unwrap();
+            if !last.contains("Running") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !last.contains("Running"),
+            "job stuck Running after panic: {last}"
+        );
+        // The job persists its snapshot after finishing; wait for it so the
+        // write lands in THIS test's store, not the default path, once the
+        // env var is restored.
+        for _ in 0..200 {
+            if store.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(store.exists(), "job snapshot was never persisted");
+        assert!(last.contains("panicked"), "failure not recorded: {last}");
+        assert!(last.contains("\"success\":false"), "{last}");
+        assert_eq!(
+            crate::server::job_store::try_start(&exec.jobs, 1).map(|_| ()),
+            Ok(()),
+            "the panicked job still occupies a slot"
         );
     }
 }

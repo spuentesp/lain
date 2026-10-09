@@ -109,7 +109,9 @@ impl LainServer {
         // `warming_up` for the duration of this pass, or graph-required
         // tools keep dispatching against a graph this pass is actively
         // mutating.
-        self.readiness().resume_warming_up();
+        // Held to the end of the pass (any exit, incl. `?` and cancellation):
+        // an overlapping pass that finishes first must not publish `ready`.
+        let _pass = self.readiness().begin_pass();
 
         // 1. Parallel Map Phase: Scan files for structure and external references
         let files = if let Some(ref last) = last_commit {
@@ -1160,7 +1162,12 @@ impl LainServer {
             return Err(LainError::Cancelled);
         }
         let key = graph_path(&self.ingest().config().workspace, path);
-        if !path.is_file() {
+        // A file replaced by a symlink that leaves the workspace is treated as
+        // gone: it must not be (re)indexed, and anything already indexed under
+        // that path is retracted.
+        let escapes = path.is_file()
+            && !crate::server::path_util::resolves_inside(&self.ingest().config().workspace, path);
+        if !path.is_file() || escapes {
             self.remove_owned_overlay_path(&key);
             // The file is gone; drop its hash entry so a future
             // re-creation starts with a clean cache.

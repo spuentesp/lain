@@ -1171,6 +1171,7 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
         server.ingest().graph(),
         server.overlay(),
         10,
+        true,
     )
     .expect("find_anchors should not error");
     // The exact text varies (anchors vs "No anchors"), but it must

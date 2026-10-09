@@ -33,10 +33,27 @@ pub fn socket_path_for(repos_yaml: &Path) -> PathBuf {
     // first one's socket, and `lain repos add` in one project reloaded
     // another project's server. Both sides canonicalize, so `./repos.yaml`
     // and an absolute spelling agree.
+    // A config that does not exist yet cannot be canonicalized, but its
+    // identity must not change when it is created: resolve the parent
+    // directory and keep the file name. (Hashing the unresolved spelling
+    // before creation and the resolved one after gave two different sockets
+    // wherever the directory sits behind a symlink — macOS temp dirs,
+    // `/var` -> `/private/var` — so a reload was sent to nothing.)
     let full = dunce::canonicalize(repos_yaml).unwrap_or_else(|_| {
-        std::env::current_dir()
-            .map(|d| d.join(repos_yaml))
-            .unwrap_or_else(|_| repos_yaml.to_path_buf())
+        let abs = if repos_yaml.is_absolute() {
+            repos_yaml.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|d| d.join(repos_yaml))
+                .unwrap_or_else(|_| repos_yaml.to_path_buf())
+        };
+        match (
+            abs.parent().and_then(|p| dunce::canonicalize(p).ok()),
+            abs.file_name(),
+        ) {
+            (Some(parent), Some(name)) => parent.join(name),
+            _ => abs,
+        }
     });
     // FNV-1a: stable across processes and Rust versions, unlike the std
     // hasher's unspecified algorithm.
@@ -150,6 +167,29 @@ pub async fn spawn_signal_listener_at(
 
 #[cfg(test)]
 mod tests {
+    /// The socket for a config must not change when the config is created,
+    /// even when its directory is reached through a symlink (macOS temp dirs).
+    #[cfg(unix)]
+    #[test]
+    fn socket_path_is_stable_across_creating_the_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let spelled = link.join("workspaces.yaml");
+
+        let before = socket_path_for(&spelled); // file does not exist yet
+        std::fs::write(&spelled, "workspaces: []\n").unwrap();
+        let after = socket_path_for(&spelled);
+        assert_eq!(before, after, "creating the config moved its socket");
+        assert_eq!(
+            after,
+            socket_path_for(&real.join("workspaces.yaml")),
+            "two spellings of one file must share a socket"
+        );
+    }
+
     use super::*;
 
     #[test]

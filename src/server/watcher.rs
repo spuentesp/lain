@@ -1754,3 +1754,7 @@ mod handle_lifecycle_tests {
         panic!("config watcher thread did not exit within 2s of handle drop");
     }
 }
+
+#[cfg(test)]
+#[path = "watcher_verification.rs"]
+mod verification;

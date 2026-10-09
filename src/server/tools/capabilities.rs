@@ -665,7 +665,15 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     c(
         "get_audit_log",
-        Package::Social,
+        // Promoted from Social to Core (B10, 2026-10-04): the audit
+        // log is the durable counterpart to the in-memory presence
+        // state and is useful in solo sessions too. With the old
+        // placement an agent asking "what changed while I was away?"
+        // had to load the `social` package first, even when the
+        // answer was just the events from their own previous run.
+        // Surfaced as a Plumbing-level tool: cheap, read-only, and
+        // safe to advertise by default.
+        Package::Core,
         Level::Plumbing,
         "recent coordination events for this workspace",
         "reviewing what happened while you were away",
@@ -786,10 +794,18 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     c(
         "run_enrichment",
-        Package::Ops,
+        // Promoted from Ops to Core (B3, 2026-10-04): the
+        // recovery path for "get_health says Calls: 0". The
+        // existing recovery was `lain reindex` (full rebuild)
+        // and `run_enrichment` (lighter pass). With this in
+        // core, an agent seeing the B11 warning banner
+        // ("⚠ call graph is empty") can ask for the lighter
+        // pass without first having to `load_package("ops")`.
+        // Full reindex is still a CLI subcommand.
+        Package::Core,
         Level::Plumbing,
         "force a full architectural enrichment pass",
-        "graph metadata looks stale",
+        "graph metadata looks stale, or `get_health` reports Calls: 0",
     ),
     c(
         "sync_state",
@@ -1009,11 +1025,14 @@ mod tests {
     }
 
     #[test]
-    fn core_is_the_eighteen_tool_default() {
+    fn core_is_the_twenty_tool_default() {
         // 16 comprehension/impact tools plus the two skill-layer
         // tools (list_packages / load_package) that make every other
-        // package discoverable.
-        assert_eq!(package_tools(Package::Core).len(), 18);
+        // package discoverable, plus `get_audit_log` and
+        // `run_enrichment`, promoted to core by the 2026-10-04 dogfooding so
+        // an agent seeing the "Calls: 0" warning can ask for the lighter
+        // recovery pass without first loading the `social` / `ops` packages.
+        assert_eq!(package_tools(Package::Core).len(), 20);
     }
 
     #[test]

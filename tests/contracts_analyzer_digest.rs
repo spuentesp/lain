@@ -39,6 +39,26 @@ use std::sync::Arc;
 /// Locate the fixture script (`scripts/contracts-fixture.sh`)
 /// from the crate root. `CARGO_MANIFEST_DIR` is set by cargo at
 /// compile time to the package root.
+/// The `bash` that runs the fixture scripts. On Windows a bare `bash` resolves
+/// to `System32\bash.exe`, the WSL launcher ("no installed distributions"),
+/// so use Git for Windows' own `bash.exe`; `LAIN_TEST_BASH` overrides.
+fn git_bash() -> std::ffi::OsString {
+    if let Some(p) = std::env::var_os("LAIN_TEST_BASH") {
+        return p;
+    }
+    if cfg!(windows) {
+        for cand in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ] {
+            if std::path::Path::new(cand).exists() {
+                return cand.into();
+            }
+        }
+    }
+    "bash".into()
+}
+
 fn fixture_script() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
@@ -51,7 +71,10 @@ fn fixture_script() -> std::path::PathBuf {
 fn build_fixture() -> (tempfile::TempDir, FixtureRepos) {
     let tmp = tempfile::tempdir().expect("fixture tempdir");
     let root = tmp.path().to_path_buf();
-    let status = Command::new(fixture_script())
+    // Through `bash`: Windows cannot execute a `.sh` file directly
+    // ("%1 is not a valid Win32 application"); CI has Git Bash.
+    let status = Command::new(git_bash())
+        .arg(fixture_script())
         .arg(&root)
         .status()
         .expect("spawn contracts-fixture.sh");

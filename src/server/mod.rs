@@ -4,6 +4,7 @@
 //! the ingest pipeline, the watcher, and the volatile overlay.
 
 pub mod federation;
+mod job_store;
 pub mod mcp;
 pub mod refresh;
 pub mod tools;

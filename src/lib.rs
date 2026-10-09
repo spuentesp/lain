@@ -6,6 +6,7 @@ pub mod server;
 pub mod sidecar;
 pub mod sidecar_proto;
 pub mod state;
+pub mod sync;
 
 #[cfg(test)]
 pub mod test_util;

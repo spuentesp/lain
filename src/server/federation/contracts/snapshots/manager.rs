@@ -13,14 +13,14 @@
 //! the tools touch snapshot state.
 
 use crate::server::time::now_unix;
+use crate::sync::{AtomicUsize, Ordering};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::LainError;
 use crate::federation::contracts::config::ContractFederationConfig;
@@ -1154,12 +1154,31 @@ impl SnapshotManager {
         record: &SnapshotRecord,
         wait_ms: u64,
     ) -> Result<(Arc<SnapshotFederation>, HoldGuard), LainError> {
+        self.from_snapshot_inner(record, wait_ms, MAX_ACQUIRE_ATTEMPTS)
+    }
+
+    /// A hold must be taken while the federation is provably resident
+    /// (`docs/formal/SnapshotInstallHold.tla`): the resident lock is held
+    /// across the lookup *and* `HoldGuard::new`, so `try_evict_one_lru_unheld`
+    /// cannot slip between them. The guard's lifetime is explicit here rather
+    /// than relying on `if let` scrutinee temporaries, whose scope changed in
+    /// edition 2024.
+    fn hold_if_resident(&self, id: &str) -> Option<(Arc<SnapshotFederation>, HoldGuard)> {
+        let resident = self.resident.lock();
+        let fed = resident.get(id)?.clone();
+        let guard = HoldGuard::new(Arc::clone(&fed), Arc::clone(&self.residency_notify));
+        Some((fed, guard))
+    }
+
+    fn from_snapshot_inner(
+        self: &Arc<Self>,
+        record: &SnapshotRecord,
+        wait_ms: u64,
+        attempts_left: u8,
+    ) -> Result<(Arc<SnapshotFederation>, HoldGuard), LainError> {
         // 1. Try the resident cache first.
-        if let Some(fed) = self.resident.lock().get(&record.id).cloned() {
-            return Ok((
-                Arc::clone(&fed),
-                HoldGuard::new(fed, Arc::clone(&self.residency_notify)),
-            ));
+        if let Some(hit) = self.hold_if_resident(&record.id) {
+            return Ok(hit);
         }
         // 2. Single-flight per id (TLA+ SnapshotResidency variant
         // (c)). Two concurrent `from_snapshot_with_wait_ms` calls
@@ -1188,9 +1207,19 @@ impl SnapshotManager {
         };
         let outcome = if is_first {
             let build_result = self.build_snapshot_federation(record);
+            // Install AND hold in one critical section: a separate
+            // `HoldGuard::new` after the lock drops leaves a window in which
+            // another install evicts the (still unheld) entry.
+            // The busy outcome stays classified as `BuildOutcome::Busy`
+            // (with its retry hint) instead of being flattened into an
+            // error — the tail of this function distinguishes them.
+            let mut builder_guard: Option<HoldGuard> = None;
             let outcome = match build_result {
-                Ok(fed) => match self.install_resident(Arc::clone(&fed), wait_ms) {
-                    Ok(()) => BuildOutcome::Ok(fed),
+                Ok(fed) => match self.install_resident_held(Arc::clone(&fed), wait_ms) {
+                    Ok(guard) => {
+                        builder_guard = Some(guard);
+                        BuildOutcome::Ok(fed)
+                    }
                     Err(busy) => BuildOutcome::Busy {
                         retry_after_ms: busy.retry_after_ms,
                     },
@@ -1237,6 +1266,9 @@ impl SnapshotManager {
                 }
                 map.remove(&record.id);
             }
+            if let (BuildOutcome::Ok(fed), Some(guard)) = (&outcome, builder_guard) {
+                return Ok((Arc::clone(fed), guard));
+            }
             outcome
         } else {
             // Joiner: another caller is already building or has
@@ -1248,10 +1280,19 @@ impl SnapshotManager {
             state.as_ref().expect("notified with no value").clone()
         };
         match outcome {
-            BuildOutcome::Ok(fed) => Ok((
-                Arc::clone(&fed),
-                HoldGuard::new(fed, Arc::clone(&self.residency_notify)),
-            )),
+            // Joiner: hold under the resident lock. If the builder's entry
+            // was evicted before we got here, retry (bounded) instead of
+            // "holding" a snapshot that is no longer resident.
+            BuildOutcome::Ok(_) => match self.hold_if_resident(&record.id) {
+                Some(hit) => Ok(hit),
+                None if attempts_left > 1 => {
+                    self.from_snapshot_inner(record, wait_ms, attempts_left - 1)
+                }
+                None => Err(LainError::Other(format!(
+                    "snapshot {} was evicted while being acquired; retry",
+                    record.id
+                ))),
+            },
             BuildOutcome::Err(e) => Err(LainError::Other(e)),
             BuildOutcome::Busy { retry_after_ms } => {
                 Err(LainError::SnapshotResidencyBusy { retry_after_ms })
@@ -1322,11 +1363,24 @@ impl SnapshotManager {
         Ok(fed)
     }
 
+    /// Test/compat shim: install without keeping the hold.
+    #[cfg(test)]
     fn install_resident(
         self: &Arc<Self>,
         fed: Arc<SnapshotFederation>,
         wait_ms: u64,
     ) -> Result<(), InstallBusy> {
+        self.install_resident_held(fed, wait_ms).map(drop)
+    }
+
+    /// Insert `fed` into the resident set and return its [`HoldGuard`],
+    /// created while the resident lock is still held so the new entry is
+    /// never observable as unheld (`SnapshotInstallHold.tla`).
+    fn install_resident_held(
+        self: &Arc<Self>,
+        fed: Arc<SnapshotFederation>,
+        wait_ms: u64,
+    ) -> Result<HoldGuard, InstallBusy> {
         // §8.5: when every resident federation is held, the call
         // must wait up to `wait_ms` for a hold to release, then
         // return `busy` (with `retry_after_ms`) instead of building
@@ -1374,7 +1428,7 @@ impl SnapshotManager {
                 let mut resident = self.resident.lock();
                 if resident.len() < cap {
                     resident.insert(fed.snapshot_id.clone(), fed.clone());
-                    return Ok(());
+                    return Ok(HoldGuard::new(fed, Arc::clone(&self.residency_notify)));
                 }
             }
             // Resident is full (`len() == cap`). Try to evict
@@ -1387,7 +1441,7 @@ impl SnapshotManager {
                 let mut resident = self.resident.lock();
                 if resident.len() < cap {
                     resident.insert(fed.snapshot_id.clone(), fed.clone());
-                    return Ok(());
+                    return Ok(HoldGuard::new(fed, Arc::clone(&self.residency_notify)));
                 }
             }
             // Cap is full and every entry is held. Wait for a
@@ -1479,6 +1533,9 @@ impl SnapshotManager {
         self.resident.lock().remove(snapshot_id).is_some()
     }
 }
+
+/// Bounded retries when a joined build is evicted before the joiner holds it.
+const MAX_ACQUIRE_ATTEMPTS: u8 = 3;
 
 /// Busy result from `install_resident` when every slot is held
 /// for longer than `wait_ms`. The tool layer maps this to
@@ -2789,26 +2846,63 @@ repos:
             last_access_unix: now_unix(),
         };
 
-        let result = mgr
+        // `pre_fed` was never installed in the resident set (a real builder
+        // installs *before* publishing), which models an eviction between
+        // publish and hold. The joiner must not "hold" a non-resident
+        // snapshot (docs/formal/SnapshotInstallHold.tla): it retries a bounded
+        // number of times, then reports the eviction.
+        let err = mgr
             .from_snapshot_with_wait_ms(&record, 1_000)
-            .expect("joiner returns the pre-published outcome");
-        let (returned_fed, _hold) = result;
-
+            .err()
+            .expect("a joiner must not hold a snapshot that is not resident");
         assert!(
-            Arc::ptr_eq(&returned_fed, &pre_fed),
-            "joiner returns the pre-published fed \
-             (TLA+ SnapshotInFlightSlot.tla variant (b) — Fix S2). \
-             Pre-fix a third caller could observe the slot \
-             removed and start a duplicate build; post-fix the \
-             joiner still sees the slot in the map (the builder's \
-             remove is held under the same map lock as the \
-             publish)."
+            err.to_string().contains("evicted while being acquired"),
+            "unexpected error: {err}"
         );
+        assert_eq!(pre_fed.held.load(Ordering::Acquire), 0, "no leaked hold");
+
         assert!(
             mgr.in_flight.lock().contains_key(&id),
             "joiner does not remove the in_flight slot; \
              only the builder's atomic publish+remove does"
         );
+    }
+
+    /// `install_resident_held` returns the entry already held: a concurrent
+    /// install at capacity must see it as held, never as an evictable
+    /// `held == 0` entry (the window `SnapshotInstallHold.tla` found).
+    #[test]
+    fn freshly_installed_snapshot_is_held_before_the_lock_drops() {
+        use std::path::PathBuf;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = IndexCache::new(dir.path());
+        let mgr = Arc::new(SnapshotManager::with_cap(dir.path(), cache, 1));
+        let mk = |id: &str| {
+            Arc::new(SnapshotFederation {
+                snapshot_id: id.into(),
+                backend: Arc::new(PetgraphBackend::ephemeral(dir.path())),
+                holds: Mutex::new(Vec::new()),
+                residency: Arc::new(ResidencyTracker::new()),
+                contract_index: parking_lot::RwLock::new(None),
+                last_used_unix: Mutex::new(now_unix()),
+                held: AtomicUsize::new(0),
+                data_dir: PathBuf::from("."),
+            })
+        };
+        let a = mk("snap_a");
+        let guard = mgr
+            .install_resident_held(Arc::clone(&a), 0)
+            .expect("room for one");
+        assert_eq!(a.held.load(Ordering::Acquire), 1, "held at insert time");
+
+        // Cap is 1 and the only resident entry is held: B must be refused,
+        // and A must still be resident.
+        assert!(mgr.install_resident(mk("snap_b"), 0).is_err());
+        assert!(mgr.resident.lock().contains_key("snap_a"));
+        drop(guard);
+        // Released: now B may evict A.
+        assert!(mgr.install_resident(mk("snap_b"), 0).is_ok());
+        assert!(!mgr.resident.lock().contains_key("snap_a"));
     }
 
     #[test]
@@ -2916,3 +3010,11 @@ repos:
         );
     }
 }
+
+#[cfg(lain_loom)]
+#[path = "manager_verification.rs"]
+mod verification;
+
+#[cfg(all(test, not(lain_loom)))]
+#[path = "manager_residency_verification.rs"]
+mod residency_verification;

@@ -363,6 +363,9 @@ fn call_lines_in(
         return Vec::new();
     }
     let path = workspace.join(&caller.path);
+    if !crate::server::path_util::resolves_inside(workspace, &path) {
+        return Vec::new();
+    }
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };

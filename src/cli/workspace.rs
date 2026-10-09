@@ -65,20 +65,57 @@ fn is_plugin_root(dir: &Path) -> bool {
 /// (which is expected to be a git workspace root). Returns `false`
 /// on any IO error — the safe default is "we cannot prove the
 /// binary is dev-env-resident, so behave as a normal client".
+///
+/// B2 (2026-10-04): a dev install can be a symlink that resolves
+/// *into* the source tree (e.g. `~/.local/bin/lain -> .../target/
+/// debug/lain`). The naive `current_exe().canonicalize()` check
+/// returns true, the dev-runner heuristic fires, and
+/// `find_git_workspace_root` refuses to identify a workspace the
+/// user clearly intended to use. The fix: also check the symlink
+/// path itself. If `current_exe()` is *not* inside the source tree
+/// (it's a published install, even if the symlink target happens
+/// to live in the source tree), the heuristic does not apply.
 fn binary_lives_inside(root: &Path) -> bool {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return false,
     };
-    let exe = match exe.canonicalize() {
+    let canonical = match exe.canonicalize() {
         Ok(p) => p,
         Err(_) => return false,
     };
-    let root = match root.canonicalize() {
+    let canonical_root = match root.canonicalize() {
         Ok(p) => p,
         Err(_) => return false,
     };
-    exe.starts_with(&root)
+    binary_inside_canonicalized(&exe, &canonical, &canonical_root)
+}
+
+/// Pure predicate for `binary_lives_inside`. Public-in-crate so the
+/// tests in this module can exercise the symlink cases without
+/// needing to mutate `current_exe()`.
+fn binary_inside_canonicalized(exe: &Path, canonical: &Path, canonical_root: &Path) -> bool {
+    if !canonical.starts_with(canonical_root) {
+        return false;
+    }
+    // The canonical binary path is inside the source tree. But is
+    // the *symlink path* also inside it? If the user installed the
+    // binary via a symlink that lives outside the tree (e.g.
+    // `~/.local/bin/lain -> .../target/debug/lain`), this is a
+    // *published* dev install, not `cargo run`. `current_exe()`
+    // reports the symlink path, not the target, so we can check it
+    // directly. Canonicalize just the symlink path's parent (so a
+    // symlinked directory tree still resolves) — not the symlink
+    // itself, which would resolve to the target.
+    let exe_parent = match exe.parent() {
+        Some(p) => p,
+        None => return canonical.starts_with(canonical_root),
+    };
+    let canonical_exe_parent = match exe_parent.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return canonical.starts_with(canonical_root),
+    };
+    canonical_exe_parent.starts_with(canonical_root)
 }
 
 /// Read the parent process's cwd via `/proc/$PPID/cwd`.
@@ -263,5 +300,73 @@ mod tests {
                 eprintln!("parent_process_cwd returned None (likely sandboxed)");
             }
         }
+    }
+
+    // --- B2 regression: symlink path also has to be inside the
+    // workspace for the dev-runner heuristic to fire. Without
+    // this, a published install whose symlink target happens to
+    // live in the source tree (`~/.local/bin/lain -> .../target/
+    // debug/lain`) trips the heuristic and `find_git_workspace_root`
+    // returns None from inside the repo. ---
+
+    #[test]
+    fn binary_inside_canonicalized_true_when_canonical_and_symlink_inside() {
+        // Direct `cargo run` / `cargo test` shape: the symlink path
+        // equals the canonical path (no symlink involved) and both
+        // live in the source tree.
+        let tree = mk_repo();
+        let exe = tree.path().join("target/debug/lain");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"binary").unwrap();
+        let canonical = exe.canonicalize().unwrap();
+        let root = tree.path().canonicalize().unwrap();
+        assert!(binary_inside_canonicalized(&exe, &canonical, &root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_inside_canonicalized_false_when_symlink_outside_tree() {
+        // B2 reproduction: the symlink path lives in a different
+        // place from the canonical target, and the canonical target
+        // is *inside* the source tree.
+        //   tree/   target/debug/lain   (canonical, inside the tree)
+        //   outside/bin                 (symlink path, outside the tree)
+        let tree = mk_repo();
+        let inside = tree.path().join("target/debug/lain");
+        std::fs::create_dir_all(inside.parent().unwrap()).unwrap();
+        std::fs::write(&inside, b"binary").unwrap();
+
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_bin = outside_dir.path().join("lain");
+        std::os::unix::fs::symlink(&inside, &outside_bin).unwrap();
+
+        let canonical = inside.canonicalize().unwrap();
+        let root = tree.path().canonicalize().unwrap();
+        // The naive `canonical.starts_with(root)` check would be
+        // true here; the B2 fix correctly returns false.
+        assert!(canonical.starts_with(&root));
+        assert!(!binary_inside_canonicalized(
+            &outside_bin,
+            &canonical,
+            &root
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_inside_canonicalized_true_when_symlink_inside_tree() {
+        // A symlink whose source path AND target are both inside the
+        // tree — still a dev-runner shape.
+        let tree = mk_repo();
+        let target = tree.path().join("target/debug/lain-actual");
+        let link = tree.path().join("bin/lain");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"binary").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let canonical = target.canonicalize().unwrap();
+        let root = tree.path().canonicalize().unwrap();
+        assert!(binary_inside_canonicalized(&link, &canonical, &root));
     }
 }

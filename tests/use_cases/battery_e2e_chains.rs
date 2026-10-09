@@ -75,7 +75,7 @@ fn chain_search_to_anchors_to_blast_to_trace() {
         .expect("search step must find real_hub");
 
     // Step 2: find_anchors — confirm real_hub is the top.
-    let anchors_text = find_anchors(&db, &overlay, 10).expect("find_anchors");
+    let anchors_text = find_anchors(&db, &overlay, 10, true).expect("find_anchors");
     let first_anchor = anchors_text
         .lines()
         .find(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))

@@ -6,6 +6,7 @@
 //! in [`persist`].
 
 pub(crate) mod persist;
+pub(crate) mod wal;
 
 pub use persist::{inspect_persisted_graph, GraphInspectionError, PATH_FORMAT_VERSION};
 
@@ -303,6 +304,18 @@ fn derive_owner(
     }
 }
 
+/// Total order for ranking anchors: score descending, then name, path and id
+/// ascending, so equal scores rank the same way on every call and in every
+/// process (`find_anchors` returned different symbols for tied scores).
+pub(crate) fn anchor_order(a: &GraphNode, b: &GraphNode) -> std::cmp::Ordering {
+    b.anchor_score
+        .unwrap_or(0.0)
+        .total_cmp(&a.anchor_score.unwrap_or(0.0))
+        .then_with(|| a.name.cmp(&b.name))
+        .then_with(|| a.path.cmp(&b.path))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 #[derive(Clone)]
 pub struct GraphDatabase {
     graph: Arc<RwLock<StableGraph<GraphNode, GraphEdge>>>,
@@ -327,6 +340,16 @@ pub struct GraphDatabase {
     /// per ref.
     name_index: Arc<DashMap<String, Vec<NodeIndex>>>,
     last_commit: Arc<RwLock<Option<String>>>,
+    /// True while `load_from_disk` replays the WAL: replayed ops go through
+    /// the normal mutators and must not be logged again (doing so appended to
+    /// the very file being read, so replay never reached EOF).
+    wal_replaying: Arc<std::sync::atomic::AtomicBool>,
+    /// Open append handle for the WAL (see `wal::WalWriter`); shared by clones.
+    wal_writer: Arc<parking_lot::Mutex<wal::WalWriter>>,
+    /// One checkpoint at a time: rotate / snapshot / discard must not interleave
+    /// with another checkpoint's (a second saver merged into the first one's
+    /// retired log, then the first deleted it; both also shared one temp file).
+    checkpoint_lock: Arc<parking_lot::Mutex<()>>,
     persistence_path: PathBuf,
     /// When true, every public `insert_*` / `set_*` / `save_to_disk` returns
     /// `LainError::Other("graph is read-only")`. Set by `open_read_only`,
@@ -438,6 +461,12 @@ impl GraphDatabase {
             path_index: Arc::new(DashMap::new()),
             name_index: Arc::new(DashMap::new()),
             last_commit: Arc::new(RwLock::new(None)),
+            wal_replaying: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            wal_writer: Arc::new(parking_lot::Mutex::new(wal::WalWriter::new(
+                wal::wal_path_for(memory_path),
+                wal::SyncPolicy::from_env(),
+            ))),
+            checkpoint_lock: Arc::new(parking_lot::Mutex::new(())),
             persistence_path: memory_path.to_path_buf(),
             read_only: false,
             // Default to the test namespace so existing callers
@@ -493,9 +522,38 @@ impl GraphDatabase {
         self.upsert_node(node.clone())
     }
 
+    /// Whether mutations are logged: only for graphs that persist to disk, and
+    /// never while the log itself is being replayed.
+    fn wal_enabled(&self) -> bool {
+        !self.persistence_path.as_os_str().is_empty()
+            && !self
+                .wal_replaying
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Log `ops` (one write, one fsync). **Callers must hold the graph write
+    /// lock**, so the log's order is exactly the order mutations take effect
+    /// and a checkpoint (which rotates under the same lock) cannot slip
+    /// between an op being logged and being applied.
+    fn log_ops(&self, ops: &[wal::GraphOp]) -> Result<(), LainError> {
+        if ops.is_empty() || !self.wal_enabled() {
+            return Ok(());
+        }
+        self.wal_writer
+            .lock()
+            .append(ops)
+            .map_err(|e| LainError::Database(format!("wal append: {e}")))
+    }
+
+    fn log_op(&self, op: wal::GraphOp) -> Result<(), LainError> {
+        self.log_ops(std::slice::from_ref(&op))
+    }
+
     pub fn upsert_node(&self, node: GraphNode) -> Result<(), LainError> {
         self.check_writable()?;
         let mut graph = self.graph.write();
+        // Logged under the write lock, before the mutation (see `log_ops`).
+        self.log_op(wal::GraphOp::UpsertNode(node.clone()))?;
 
         if let Some(idx) = self.index_map.get(&node.id).map(|r| *r.value()) {
             let existing_hydrated = graph[idx].is_hydrated;
@@ -517,6 +575,11 @@ impl GraphDatabase {
         self.check_writable()?;
         // Phase 1: Collect indices and path entries under graph lock
         let mut graph = self.graph.write();
+        let wal_ops: Vec<wal::GraphOp> = new_nodes
+            .iter()
+            .map(|n| wal::GraphOp::UpsertNode(n.clone()))
+            .collect();
+        self.log_ops(&wal_ops)?;
 
         // Collect work: also update the indexes inline (still holding
         // the graph write lock). The previous code released the graph
@@ -818,12 +881,12 @@ impl GraphDatabase {
     /// two repos can share a path, so path is not a usable key there.
     pub fn remove_nodes_by_ids(&self, ids: &[String]) -> Result<usize, LainError> {
         self.check_writable()?;
-
         let mut removed = 0usize;
         let mut cleared_paths: Vec<(String, NodeIndex)> = Vec::new();
         let mut cleared_names: Vec<(String, NodeIndex)> = Vec::new();
         {
             let mut graph = self.graph.write();
+            self.log_op(wal::GraphOp::RemoveNodesByIds(ids.to_vec()))?;
             for id in ids {
                 let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
                     continue;
@@ -884,7 +947,11 @@ impl GraphDatabase {
     pub fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
 
-        let targets: std::collections::HashSet<(String, String, EdgeType)> = edges
+        // B5 (2026-10-04): append a single batched
+        // `GraphOp::RemoveEdges` op to the WAL before mutating
+        // in-memory. The whole batch is one frame; replay
+        // reconstructs it atomically.
+        let endpoints: Vec<(String, String, EdgeType)> = edges
             .iter()
             .map(|e| {
                 (
@@ -894,10 +961,14 @@ impl GraphDatabase {
                 )
             })
             .collect();
-
         let mut removed = 0usize;
         {
             let mut graph = self.graph.write();
+            self.log_op(wal::GraphOp::RemoveEdges {
+                endpoints: endpoints.clone(),
+            })?;
+            let targets: std::collections::HashSet<(String, String, EdgeType)> =
+                endpoints.into_iter().collect();
             // Collect first, mutate after: `remove_edge` invalidates the
             // edge-index iterator (`edges_directed` / `edges_connecting`)
             // the moment a removal lands.
@@ -1166,6 +1237,7 @@ impl GraphDatabase {
                 LainError::NotFound(format!("Target node {} not found", edge.target_id))
             })?;
 
+        self.log_op(wal::GraphOp::UpsertEdge(edge.clone()))?;
         graph.add_edge(source_idx, target_idx, edge.clone());
         Ok(())
     }
@@ -1220,6 +1292,18 @@ impl GraphDatabase {
     pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
         let mut graph = self.graph.write();
+        // Log only the edges this call will actually add (both endpoints
+        // local). Logging every edge, including the ones dropped below, made
+        // replay hit "node not found" and fail the whole load.
+        let wal_ops: Vec<wal::GraphOp> = new_edges
+            .iter()
+            .filter(|e| {
+                self.index_map.get(&e.source_id).is_some()
+                    && self.index_map.get(&e.target_id).is_some()
+            })
+            .map(|e| wal::GraphOp::UpsertEdge(e.clone()))
+            .collect();
+        self.log_ops(&wal_ops)?;
         let mut external = self.pending_external_edges.lock();
 
         let mut dropped = 0usize;
@@ -1297,6 +1381,11 @@ impl GraphDatabase {
             }
         }
         drop(graph);
+        // B5 (2026-10-04): write-ahead log. `insert_edge` is
+        // the actual mutator; the WAL append happens there
+        // too, but `upsert_edge` short-circuits above when the
+        // edge already exists, so we only append on the
+        // insert path.
         self.insert_edge(&edge)
     }
 
@@ -1848,26 +1937,19 @@ impl GraphDatabase {
     pub fn find_anchors(&self, limit: usize) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
         let mut sorted: Vec<_> = graph.node_weights().cloned().collect();
-        sorted.sort_by(|a, b| {
-            b.anchor_score
-                .unwrap_or(0.0)
-                .total_cmp(&a.anchor_score.unwrap_or(0.0))
-        });
+        sorted.sort_by(anchor_order);
         let mut by_name: std::collections::HashMap<String, GraphNode> =
             std::collections::HashMap::new();
         for n in sorted {
-            // Insert only the first (best-scoring) instance per name.
-            // `sorted` is already descending by score.
+            // Insert only the first (best-ranked) instance per name.
+            // `sorted` is already in `anchor_order`.
             by_name.entry(n.name.clone()).or_insert(n);
         }
-        // Re-sort the deduped set by score (the HashMap insert order
-        // is not guaranteed to be sorted).
+        // Re-sort the deduped set: HashMap iteration order is random per
+        // process, so sorting by score alone made which tied symbols
+        // survived `take(limit)` differ from one run to the next.
         let mut out: Vec<GraphNode> = by_name.into_values().collect();
-        out.sort_by(|a, b| {
-            b.anchor_score
-                .unwrap_or(0.0)
-                .total_cmp(&a.anchor_score.unwrap_or(0.0))
-        });
+        out.sort_by(anchor_order);
         Ok(out.into_iter().take(limit).collect())
     }
 
@@ -2130,16 +2212,85 @@ impl GraphDatabase {
     /// Without this, the only signal that the call graph is empty
     /// is "every impact query returns nothing," which is the exact
     /// failure the user reported as Bug 2.
+    ///
+    /// Every `EdgeType` variant from [`schema::EdgeType::all()`] is
+    /// seeded at 0 so an absent edge type shows up as
+    /// `Calls: 0` rather than missing. The "missing" case is the
+    /// silent-failure mode operators reported in the 2026-10-04
+    /// dogfood: `describe_schema` advertised `Calls` but the
+    /// health report never mentioned it, so the silent-absence was
+    /// invisible until an impact query returned empty.
     pub fn edge_counts_by_type(&self) -> std::collections::BTreeMap<String, usize> {
         use petgraph::visit::IntoEdgeReferences;
         use std::collections::BTreeMap;
         let graph = self.graph.read();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for variant in crate::schema::EdgeType::all() {
+            counts.insert(format!("{variant:?}"), 0);
+        }
         for edge in graph.edge_references() {
             let key = format!("{:?}", edge.weight().edge_type);
             *counts.entry(key).or_insert(0) += 1;
         }
         counts
+    }
+
+    /// How many files in the graph have at least one `Calls` or
+    /// `Uses` edge out of any symbol in them. Returns
+    /// `(covered, total)` where `total` is the number of `File`
+    /// nodes in the graph.
+    ///
+    /// This is the B4 metric for `get_health`: a repo with a
+    /// populated `Contains` tree but few files covered by calls
+    /// means the indexer's call-extraction phase didn't run on
+    /// those files (LSP missing, file is a script, etc.). The 198
+    /// of 224 files in the 2026-10-04 Lain-on-Lain dogfood were
+    /// uncovered — surfaced in `find_dead_code` as the "⚠ N files
+    /// have no call edges" warning. Surfacing the same number in
+    /// `get_health` makes the gap visible to anyone running
+    /// `lain doctor` or wiring a CI check.
+    pub fn call_graph_file_coverage(&self) -> (usize, usize) {
+        use petgraph::stable_graph::NodeIndex;
+        use petgraph::visit::EdgeRef;
+        use std::collections::HashSet;
+        let graph = self.graph.read();
+        let mut total_files = 0usize;
+        let mut file_ids: HashSet<NodeIndex> = HashSet::new();
+        for idx in graph.node_indices() {
+            if matches!(graph[idx].node_type, crate::schema::NodeType::File) {
+                total_files += 1;
+                file_ids.insert(idx);
+            }
+        }
+        let mut covered_files: HashSet<NodeIndex> = HashSet::new();
+        for edge in graph.edge_references() {
+            let kind = &edge.weight().edge_type;
+            if kind != &crate::schema::EdgeType::Calls && kind != &crate::schema::EdgeType::Uses {
+                continue;
+            }
+            // Map the source symbol back to the file it lives in via
+            // incoming `Contains` edges. The simplest pass is "does
+            // either endpoint have a File ancestor"; the cheaper one
+            // is to walk each endpoint's `Contains` predecessors
+            // once. The endpoint symbols have a `.path` already,
+            // so we go via that — no graph walk needed.
+            for &endpoint in &[edge.source(), edge.target()] {
+                let path_key = graph[endpoint].path.clone();
+                let mut file_idx: Option<NodeIndex> = None;
+                if let Some(indices) = self.path_index.get(&path_key) {
+                    for i in indices.iter() {
+                        if graph[*i].node_type == crate::schema::NodeType::File {
+                            file_idx = Some(*i);
+                            break;
+                        }
+                    }
+                }
+                if let Some(idx) = file_idx {
+                    covered_files.insert(idx);
+                }
+            }
+        }
+        (covered_files.len(), total_files)
     }
 
     pub fn get_node_at_location(&self, path: &str, line: u32) -> Option<GraphNode> {
@@ -2218,10 +2369,34 @@ impl GraphDatabase {
     }
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
+        let _one_checkpoint_at_a_time = self.checkpoint_lock.lock();
+        // Start the checkpoint under the graph write lock: every logging
+        // mutator appends under that same lock, so after this point all
+        // previously acknowledged ops live in the retired log and new ones go
+        // to a fresh WAL. (Serialising, writing, then truncating the live WAL
+        // dropped ops acknowledged in between: docs/formal/GraphWalCheckpoint.tla.)
+        let wal_path = wal::wal_path_for(&self.persistence_path);
+        let logging = self.wal_enabled();
+        if logging {
+            let _guard = self.graph.write();
+            // Release the append handle first (it would keep writing to the
+            // retired file, and Windows cannot rename an open one); everything
+            // acknowledged so far is synced into the retired log.
+            self.wal_writer
+                .lock()
+                .close()
+                .map_err(|e| LainError::Database(format!("wal close: {e}")))?;
+            wal::rotate(&wal_path).map_err(|e| LainError::Database(format!("wal rotate: {e}")))?;
+        }
         let data = persist::encode_state(&self.build_state())
             .map_err(|e| LainError::Database(e.to_string()))?;
         crate::cli::io::write_file_atomic(&self.persistence_path, &data)
             .map_err(|e| LainError::Database(e.to_string()))?;
+        // The snapshot is durable and covers the retired log.
+        if logging {
+            wal::discard_prev(&wal_path)
+                .map_err(|e| LainError::Database(format!("wal discard: {e}")))?;
+        }
         Ok(())
     }
 
@@ -2285,7 +2460,67 @@ impl GraphDatabase {
             return Ok(());
         }
 
-        self.apply_state_loaded(state)
+        self.apply_state_loaded(state)?;
+
+        // B5 (2026-10-04): replay the WAL on top of the snapshot.
+        // The snapshot is consistent up to some commit; ops in
+        // `graph.wal` were appended after the last checkpoint
+        // and represent post-snapshot state. Replay applies them
+        // in order. A torn frame (truncated tail or bad CRC)
+        // stops the replay; the snapshot is intact.
+        let wal_path = wal::wal_path_for(&self.persistence_path);
+        // Replayed ops go through the normal mutators; keep them out of the log.
+        self.wal_replaying
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut apply = |op: &wal::GraphOp| -> std::io::Result<()> {
+            let result = match op {
+                wal::GraphOp::UpsertNode(n) => self.upsert_node(n.clone()),
+                wal::GraphOp::UpsertEdge(e) => self.upsert_edge(e.clone()),
+                wal::GraphOp::RemoveNodesByIds(ids) => self.remove_nodes_by_ids(ids).map(|_| ()),
+                wal::GraphOp::RemoveEdges { endpoints } => {
+                    let edges: Vec<crate::schema::GraphEdge> = endpoints
+                        .iter()
+                        .map(|(s, t, ty)| {
+                            crate::schema::GraphEdge::new(ty.clone(), s.clone(), t.clone())
+                        })
+                        .collect();
+                    self.remove_edges(&edges).map(|_| ())
+                }
+                wal::GraphOp::CommitIndexMap { .. } => Ok(()),
+            };
+            match result {
+                Ok(()) => Ok(()),
+                // An op that refers to something the snapshot no longer has
+                // is stale, not fatal: skip it instead of failing startup.
+                Err(LainError::NotFound(_)) => Ok(()),
+                Err(e) => Err(std::io::Error::other(e.to_string())),
+            }
+        };
+        // The retired log of an interrupted checkpoint comes first, then the
+        // live one; each is repaired so later appends stay reachable.
+        let replayed = (|| -> std::io::Result<usize> {
+            let prev = wal::prev_path_for(&wal_path);
+            let a = wal::replay_and_repair(&prev, &mut apply)?;
+            let b = wal::replay_and_repair(&wal_path, &mut apply)?;
+            Ok(a + b)
+        })();
+        self.wal_replaying
+            .store(false, std::sync::atomic::Ordering::Release);
+        let replayed = replayed.map_err(|e| LainError::Database(format!("wal replay: {e}")))?;
+        if replayed > 0 {
+            tracing::info!(
+                "{} replayed {} WAL ops from {}",
+                self.persistence_path.display(),
+                replayed,
+                wal_path.display()
+            );
+            // Fold the replayed ops into a fresh snapshot so the log does not
+            // accumulate across restarts. Read-only views never write.
+            if !self.read_only {
+                self.save_to_disk_sync()?;
+            }
+        }
+        Ok(())
     }
 
     /// Apply an already-decoded `persist::GraphState` to this graph

@@ -436,7 +436,7 @@ impl ToolHandler for FindAnchorsHandler {
         "find_anchors",
         "Use this when asking 'what should I read first?': the most foundational, \
          stable components by corpus-wide anchor score.",
-        r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#,
+        r#"{"type":"object","properties":{"limit":{"type":"integer"},"include_tests":{"type":"boolean","description":"By default, anchors in `tests/` and `scripts/` are filtered out — those paths are heavily called by tests/scripts and inflate the score above real architectural pillars. Pass `true` to include them."}},"required":[]}"#,
         ReadOnly
     );
     async fn call(
@@ -445,7 +445,15 @@ impl ToolHandler for FindAnchorsHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let limit = usize_arg(args, "limit").unwrap_or(10);
-        handlers::metrics::find_anchors(&ctx.graph, &ctx.overlay, limit)
+        // B8 (2026-10-04): default to filtering test/script paths
+        // so the top anchors are real architectural pillars, not
+        // test fixtures whose score is inflated by being called
+        // from many other tests. Opt in with `include_tests=true`.
+        let include_tests = args
+            .get("include_tests")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        handlers::metrics::find_anchors(&ctx.graph, &ctx.overlay, limit, include_tests)
     }
 }
 inventory::submit!(ToolHandlerEntry(&FindAnchorsHandler));
