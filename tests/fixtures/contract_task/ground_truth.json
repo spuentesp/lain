@@ -1,0 +1,87 @@
+{
+  "_readme": "Oracle for the cross-repo contract task (test 3). Declared BEFORE any LAIN query — the runner asserts against this file, never against what the tools happened to answer. Evidence classes follow the product's own taxonomy (tests/fixtures/contracts/ground_truth.yaml: impact.class Verified | NeedsInvestigation, plus 'missing' for information the graph cannot have). Presenting inferred or absent evidence as verified is the serious failure; not finding something is not.",
+  "schema": 1,
+  "fixture": {
+    "base": "scripts/contracts-fixture.sh — deterministic 4-repo fixture: orders (Rust/axum + openapi.yaml), billing (Python/FastAPI+httpx), reports (TS/Express), platform (Python monorepo: shipping + inventory)",
+    "scenario_anchor": "tests/fixtures/contracts/ground_truth.yaml scenario 11 (FieldRenamed customer_id -> customerId, BreakingIfRead, impact Verified, affected billing Verified)",
+    "test_commands": {
+      "orders": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "billing": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+    },
+    "test_note": "orders' tests check the contract artifact (handler + openapi.yaml) — the fixture is source-only and is never compiled; billing's tests are behavioral (stdlib, framework stubbed). Both are the oracle: red before the change, green after. Nobody may edit tests/."
+  },
+  "change": {
+    "description": "orders renames the response field customer_id to customerId (same type) on its HTTP responses; billing's reads must follow. Endpoint paths and public function names unchanged; tests/ untouched. Committing is allowed if the tool's update path requires it.",
+    "provider": {
+      "repo": "orders",
+      "file": "src/orders/models.rs",
+      "openapi": "openapi.yaml",
+      "field_from": "customer_id",
+      "field_to": "customerId",
+      "scope": "response schemas only (Order); the request model CreateOrder keeps customer_id",
+      "endpoints_with_field": ["http:GET /api/orders/{}", "http:GET /api/orders/me", "http:POST /api/orders"]
+    },
+    "consumer": {
+      "repo": "billing",
+      "file": "src/main.py",
+      "symbol": "build_invoice",
+      "reads": ["customer_id"],
+      "via": "fetch_order -> http:GET /api/orders/{} (static Binds + ReadsField, provenance static confidence 1.0)"
+    }
+  },
+  "pre_edit": {
+    "affected": [
+      {
+        "repo": "billing", "file": "src/main.py", "symbol": "build_invoice",
+        "evidence": "verified",
+        "why": "static Binds + ReadsField: reads customer_id from http:GET /api/orders/{} (provenance static, confidence 1.0)"
+      }
+    ],
+    "false_positive_traps": [
+      {"repo": "billing", "file": "src/main.py", "symbol": "charge",
+       "why": "calls https://api.stripe.com — external host, never a consumer of orders and never unresolved"},
+      {"repo": "billing", "file": "src/main.py", "symbol": "fetch_me",
+       "why": "calls http:GET /api/orders/me but reads no fields (read_fields: []) — the renamed field is not read here"},
+      {"repo": "reports", "file": "src/index.ts", "symbol": "buildMonthlyReport",
+       "why": "consumes billing's http:GET /invoices/{} — a different hop; orders' field rename is not in its contract"},
+      {"repo": "platform", "file": "services/shipping/main.py", "symbol": "check_stock",
+       "why": "same-repo hop shipping -> inventory inside platform; unrelated to orders' response fields"}
+    ],
+    "missing_information": [
+      {"what": "coverage is configured_only — impact analysis may not claim exhaustiveness",
+       "tool": "get_coverage", "expect": {"complete": false}},
+      {"what": "api.stripe.com is external — visible as external, never as unresolved",
+       "tool": "list_unresolved", "expect_not_contains": ["api.stripe.com", "stripe"]}
+    ],
+    "contract_state": {
+      "tool": "get_contract",
+      "key": "http:GET /api/orders/{}",
+      "response_field": "customer_id"
+    }
+  },
+  "post_edit": {
+    "tests_must_pass": ["orders", "billing"],
+    "tool_reflects": {
+      "tool": "get_contract",
+      "key": "http:GET /api/orders/{}",
+      "response_field": "customerId",
+      "response_field_absent": "customer_id"
+    },
+    "diff_contract": {
+      "tool": "diff_contracts",
+      "must_include": ["FieldRenamed", "customer_id", "customerId"],
+      "impact_class": "Verified",
+      "affected_service": "billing"
+    },
+    "stale_would_look_like": "the old field still in the contract, or no diff at all — a FAIL, not 'no risk'"
+  },
+  "protocol": {
+    "affected_line": "AFFECTED: <repo>:<file>:<symbol>  EVIDENCE: verified|needs-investigation|missing",
+    "index_line": "INDEX-CHECK: <evidence>",
+    "classes": {
+      "verified": "the federation proves it (Binds/ReadsField static, or diff impact Verified)",
+      "needs-investigation": "the tool flags it but cannot prove it (impact NeedsInvestigation, reasons like unresolved_candidates/no_schema)",
+      "missing": "the information is not in the graph at all (e.g. coverage.complete=false) — say so instead of claiming 'no impact'"
+    }
+  }
+}
