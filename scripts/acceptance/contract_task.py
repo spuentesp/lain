@@ -443,8 +443,9 @@ def main():
     args = ap.parse_args()
 
     if args.mode == "agent" and args.dist == "dev":
-        ap.error("--mode agent tests what an outsider can install from public "
-                 "docs: use --dist npm or npm@X.Y.Z (--dist dev is graph mode only)")
+        # Task-only lane: a dev build is fine for feature runs; the report
+        # records that the outsider-onboarding path was not under test.
+        pass
 
     work = args.work or tempfile.mkdtemp(prefix="lain-contract-task-")
     os.makedirs(work, exist_ok=True)

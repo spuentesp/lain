@@ -703,9 +703,11 @@ def main():
                     help="work directory (default: fresh mktemp; always kept as evidence)")
     args = ap.parse_args()
 
-    if args.mode == "agent" and args.dist == "dev":
-        ap.error("--mode agent tests what an outsider can install from public "
-                 "docs: use --dist npm or npm@X.Y.Z (--dist dev is graph mode only)")
+    if args.mode == "agent" and args.dist == "dev" and args.stage in ("a", "all"):
+        ap.error("--mode agent's onboarding stage tests what an outsider can "
+                 "install from public docs: use --dist npm or npm@X.Y.Z there "
+                 "(--dist dev is fine for --stage b feature runs; the report "
+                 "records that the onboarding path was not under test)")
 
     import tempfile
     work = args.work or tempfile.mkdtemp(prefix="lain-onboarding-")
