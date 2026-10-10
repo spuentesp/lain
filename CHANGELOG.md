@@ -140,6 +140,25 @@ All notable changes to LAIN are documented here. Versions follow
   wording. Recovery is automatic: the next successful analysis pass
   clears the annotation.
 
+- **Scale/homonym acceptance fixture — the program's decisive
+  experiment** (`tests/fixtures/scale_task/`). Six deterministic repos
+  around one response-field rename (`customer_id` → `customer_ref`):
+  a Rust provider (orders), a TypeScript BFF that forwards the field
+  (gateway), an indirect Python consumer whose evidence chain runs
+  gateway → orders (billing), a same-named `build_invoice` in another
+  language touching no orders field (reporting — the homonym trap), a
+  near-miss that reads `total` from the same endpoint (catalog), and
+  an unresolvable consumer with a dynamic URL and dynamic field read
+  (analytics). Stdlib-only oracle tests in orders/gateway/billing are
+  red before the rename and green after (`make_task.py build` /
+  `apply-edit`); the pre-declared `ground_truth.json` grades harm —
+  consumers omitted and claims made without evidence — not recall.
+  `scripts/acceptance/contract_task.py` gained `--fixture
+  {contract,scale}`; agent-mode AFFECTED/EVIDENCE grading now reads
+  either fixture's schema (`must_find`/`must_not_claim`), and false
+  positives are matched on (repo, symbol) so the homonym can never be
+  confused with the real consumer of the same name.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

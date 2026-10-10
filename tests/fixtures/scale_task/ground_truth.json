@@ -1,0 +1,45 @@
+{
+  "_readme": "Oracle for the scale/homonym experiment (the 'real test 3'). Declared BEFORE any query. The metric that matters is HARM: consumers omitted from the affected list, and claims made without evidence. Grep-hostile by construction: same-named symbols across languages, an indirect consumer, an unresolvable consumer, and near-miss decoys.",
+  "schema": 1,
+  "fixture": {
+    "repos": {
+      "orders":   {"language": "rust",     "role": "provider — GET /api/orders/{} response field customer_id"},
+      "gateway":  {"language": "typescript", "role": "BFF — calls orders, forwards the field in its own API"},
+      "billing":  {"language": "python",   "role": "indirect consumer — reads the field through gateway's API"},
+      "reporting": {"language": "python",  "role": "HOMONYM TRAP — has build_invoice too, touches NO orders field"},
+      "catalog":  {"language": "python",   "role": "NEAR-MISS TRAP — reads `total` from the same endpoint, not customer_id"},
+      "analytics": {"language": "python",  "role": "UNRESOLVABLE consumer — reads resp[\"customer_\" + key] via a dynamic URL"}
+    },
+    "test_commands": {
+      "orders": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "gateway": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "billing": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+    }
+  },
+  "change": {
+    "description": "orders renames the RESPONSE field customer_id to customer_ref (same type). Consumers must follow. tests/ untouched anywhere; public function names unchanged.",
+    "field_from": "customer_id",
+    "field_to": "customer_ref"
+  },
+  "affected": {
+    "must_find": [
+      {"repo": "gateway", "symbol": "forward_order", "evidence": "verified", "why": "direct read of customer_id from orders' response (static bind)"},
+      {"repo": "billing", "symbol": "build_invoice", "evidence": "verified", "why": "reads the forwarded field through gateway's API — chain gateway->orders is static end to end"},
+      {"repo": "analytics", "symbol": "report", "evidence": "missing", "why": "dynamic URL + resp[\"customer_\" + key]: the graph cannot prove it; it must be DECLARED as unknown, not silently dropped"}
+    ],
+    "must_not_claim": [
+      {"repo": "reporting", "symbol": "build_invoice", "why": "homonym in another repo/language: same name, zero edges to orders"},
+      {"repo": "catalog", "symbol": "summarize", "why": "reads `total` from the same endpoint — related code, NOT affected by the customer_id rename"}
+    ],
+    "evidence_rules": [
+      "every must_find claim must carry its evidence class exactly as listed",
+      "a claim of 'verified' for must_not_claim entries is the serious failure",
+      "analytics may be 'missing' or 'needs-investigation' — never 'verified', never absent"
+    ]
+  },
+  "harm_metrics": {
+    "omissions": "must_find entries absent from the agent's AFFECTED lines",
+    "false_positives": "must_not_claim entries present as verified/affected",
+    "ungrounded_claims": "AFFECTED lines whose class overstates the evidence"
+  }
+}
