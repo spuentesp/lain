@@ -97,6 +97,33 @@ All notable changes to LAIN are documented here. Versions follow
   `proptest-regressions/server/git_verification.txt`, so every
   run replays the same op sequences and the verdict is
   reproducible.
+- **Load-sensitive capability-suite flake (spuentesp/lain#296)** —
+  `find_anchors` and `get_coupling_radar` could give confidently
+  wrong answers when a call landed while a reindex pass was
+  rewriting the live graph. A pass replaces nodes in place and only
+  restores anchor scores and git co-change edges at the very end, so
+  mid-pass readers saw an unscored graph: anchors came back
+  ranked alphabetically (`entry`/`helper_a` instead of the hub)
+  and coupling radar claimed "No co-change coupling found" for a
+  pair that exists. Two root causes, both fixed:
+  - the federation watcher ran **one full in-place rebuild per
+    queued event**, so a write storm inside the checkout
+    (rust-analyzer's `cargo check` filling an unignored `target/`)
+    kept the graph in continuous teardown/rebuild for minutes while
+    per-repo health stayed `ready`; the receiver now coalesces the
+    queued backlog into one reindex per batch
+    (`RepoIndex::drain_queued_events`).
+  - readers had no way to know a pass was in flight.
+    `GraphDatabase::begin_write_pass` now marks every mutating pass
+    (`build_core_memory`, `index_one_repo`, background enrichment);
+    `find_anchors` and `get_coupling_radar` wait for the pass to
+    finish (bounded by `LAIN_WRITE_QUIESCED_WAIT_MS`, default 10s)
+    and, if the budget expires, prefix their answer with a stable
+    `⚠ [degraded: indexing in progress …]` banner instead of
+    presenting the torn view as fact. `scripts/demo.sh` retries the
+    two affected checks only on those known transient signatures;
+    the asserted invariants (hub ranked first, co-change visible)
+    are unchanged.
 
 ## [0.9.0] - 2026-10-10
 

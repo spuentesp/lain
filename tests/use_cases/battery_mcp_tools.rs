@@ -66,7 +66,7 @@ fn find_anchors_works_on_known_fixture() {
     use lain::server::tools::handlers::metrics::find_anchors;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    assert!(find_anchors(&db, &overlay, 10, true).is_ok());
+    assert!(find_anchors(&db, &overlay, 10, true, true).is_ok());
 }
 #[test]
 fn find_anchors_handles_empty_graph() {
@@ -74,7 +74,7 @@ fn find_anchors_handles_empty_graph() {
     let dir = tempfile::tempdir().unwrap();
     let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
     let overlay = VolatileOverlay::new();
-    assert!(find_anchors(&db, &overlay, 10, true).is_ok());
+    assert!(find_anchors(&db, &overlay, 10, true, true).is_ok());
 }
 
 // ─── find_untested_functions ─────────────────────────────────────

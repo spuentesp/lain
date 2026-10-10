@@ -242,8 +242,13 @@ pub async fn find_related(
         };
 
     let coupling_section = if include_coupling {
+        let quiesced = crate::server::tools::utils::await_graph_quiesced(
+            graph,
+            crate::server::tools::utils::write_quiesced_wait(),
+        )
+        .await;
         match crate::server::tools::handlers::impact::get_coupling_radar(
-            graph, overlay, &symbol, ui_link,
+            graph, overlay, &symbol, ui_link, quiesced,
         )
         .await
         {

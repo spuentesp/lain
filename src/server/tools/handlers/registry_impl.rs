@@ -423,7 +423,19 @@ impl ToolHandler for GetCouplingRadarHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::impact::get_coupling_radar(&ctx.graph, &ctx.overlay, &symbol, ui_link(ctx)).await
+        let quiesced = crate::server::tools::utils::await_graph_quiesced(
+            &ctx.graph,
+            crate::server::tools::utils::write_quiesced_wait(),
+        )
+        .await;
+        handlers::impact::get_coupling_radar(
+            &ctx.graph,
+            &ctx.overlay,
+            &symbol,
+            ui_link(ctx),
+            quiesced,
+        )
+        .await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCouplingRadarHandler));
@@ -454,7 +466,12 @@ impl ToolHandler for FindAnchorsHandler {
             .get("include_tests")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        handlers::metrics::find_anchors(&ctx.graph, &ctx.overlay, limit, include_tests)
+        let quiesced = crate::server::tools::utils::await_graph_quiesced(
+            &ctx.graph,
+            crate::server::tools::utils::write_quiesced_wait(),
+        )
+        .await;
+        handlers::metrics::find_anchors(&ctx.graph, &ctx.overlay, limit, include_tests, quiesced)
     }
 }
 inventory::submit!(ToolHandlerEntry(&FindAnchorsHandler));

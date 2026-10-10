@@ -29,12 +29,26 @@ pub(crate) fn is_anchor_excluded_path(path: &str) -> bool {
     stem == "test" || stem == "tests" || stem.ends_with("_test") || stem.ends_with("_tests")
 }
 
+/// `quiesced` reports whether the caller was able to wait out any
+/// in-flight indexing pass (the MCP handler runs
+/// [`crate::server::tools::utils::await_graph_quiesced`] before
+/// dispatching here). This function stays sync so the domain logic
+/// is testable without a runtime dance.
 pub fn find_anchors(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     limit: usize,
     include_tests: bool,
+    quiesced: bool,
 ) -> Result<String, LainError> {
+    // A mutating indexing pass replaces nodes in place and restores
+    // anchor scores only at the end of the pass. A call landing
+    // mid-pass used to see every score missing and rank anchors
+    // alphabetically (`entry`, `helper_a`, … instead of the hub) —
+    // a load-sensitive wrong answer with nothing on screen to
+    // explain it (spuentesp/lain#296). The handler waits the pass
+    // out within reason; when the budget expires, `quiesced` is
+    // false and this answer is labelled instead of silent.
     let mut anchors = graph.find_anchors(limit)?;
 
     // Composition fix: callers do `find_anchors` → `get_blast_radius`
@@ -88,8 +102,18 @@ pub fn find_anchors(
     }
     anchors.sort_by(crate::server::graph::anchor_order);
 
+    // Honest degradation: when the wait budget expired with a pass
+    // still running, the list above may be mid-rebuild. Label it —
+    // the banner is a stable token clients can match, not prose to
+    // silently ignore (spuentesp/lain#296).
+    let degrade = if quiesced {
+        ""
+    } else {
+        crate::server::tools::utils::WRITE_PASS_DEGRADED_BANNER
+    };
+
     if anchors.is_empty() {
-        return Ok("No anchors found in Merged Brain.".to_string());
+        return Ok(format!("{degrade}No anchors found in Merged Brain."));
     }
 
     // Report the path, not just the name. `graph.find_anchors` dedups by
@@ -101,7 +125,7 @@ pub fn find_anchors(
     // answered `0.000`: two tools, same name, different nodes, flatly
     // contradictory answers with nothing on screen to explain it.
     Ok(format!(
-        "Top {} anchors (Merged Brain):\n{}",
+        "{degrade}Top {} anchors (Merged Brain):\n{}",
         anchors.len().min(limit),
         anchors
             .iter()

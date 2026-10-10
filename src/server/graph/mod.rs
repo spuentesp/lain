@@ -376,6 +376,34 @@ pub struct GraphDatabase {
     /// matches the other shared fields so `GraphDatabase::clone` is
     /// still cheap and points at the same accumulator.
     pending_external_edges: Arc<parking_lot::Mutex<Vec<GraphEdge>>>,
+    /// Count of in-flight mutating indexing passes (`build_core_memory`,
+    /// `index_one_repo`, background enrichment). Readers that must not
+    /// observe a torn mid-pass graph — the pass replaces nodes in
+    /// place and only restores anchor scores and co-change edges at
+    /// the very end — poll this via [`Self::write_pass_active`] and
+    /// wait it out (spuentesp/lain#296: tool calls landing mid-pass
+    /// ranked anchors alphabetically and claimed "no co-change").
+    /// Shared across clones so a pass begun on one handle is visible
+    /// to readers holding any other clone of the same database.
+    write_pass_active: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// RAII marker for "a mutating indexing pass is running on this graph".
+///
+/// Held for the duration of one indexing/enrichment pass; the counter
+/// it bumps is shared across `GraphDatabase` clones. Readers poll
+/// [`GraphDatabase::write_pass_active`] and wait for it to drop to
+/// zero before answering. Dropping the guard (including on an early
+/// return or a panic unwinding through the pass) clears the slot.
+pub struct WritePassGuard {
+    active: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Drop for WritePassGuard {
+    fn drop(&mut self) {
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// How current the graph is for one file.
@@ -477,6 +505,7 @@ impl GraphDatabase {
             // `insert_co_change_edges`.
             namespace: RepoNamespace::for_test(),
             pending_external_edges: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            write_pass_active: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -508,6 +537,26 @@ impl GraphDatabase {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Mark the start of a mutating indexing pass. The returned guard
+    /// must be held until the pass has fully finished writing (scores
+    /// recomputed, co-change edges inserted) so readers can wait out
+    /// the torn mid-pass window instead of answering from it
+    /// (spuentesp/lain#296).
+    pub fn begin_write_pass(&self) -> WritePassGuard {
+        self.write_pass_active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        WritePassGuard {
+            active: Arc::clone(&self.write_pass_active),
+        }
+    }
+
+    /// Whether at least one mutating indexing pass is in flight.
+    pub fn write_pass_active(&self) -> bool {
+        self.write_pass_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
     }
 
     fn check_writable(&self) -> Result<(), LainError> {
