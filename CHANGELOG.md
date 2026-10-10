@@ -3,6 +3,31 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`lain impact --format claims <symbol>` — machine-checkable
+  impact claims (#294).** Agents analyse impact correctly in prose
+  but never emit the `AFFECTED:` line format the acceptance
+  graders parse (prompting failed 5/5), so Lain now produces the
+  lines itself for agents to copy. `lain impact` (and a `##
+  Claims` block appended to the `trace_impact` and `diff_contracts`
+  text output) prints one exact line per affected place:
+  `AFFECTED: <repo>:<file>:<symbol>  EVIDENCE: <verified|needs-investigation|missing>`.
+  Evidence maps to what the product already knows: static
+  provenance chains (`Binds`/`ReadsField` grade, confidence 1.0)
+  and diff impact class `Verified` → `verified`; heuristic
+  (detector + confidence named), runtime-observed, provenance-less
+  edges and diff class `NeedsInvestigation` → `needs-investigation`
+  with the reason; coverage known-unknowns (unresolved consumers,
+  `coverage.complete=false`) and empty blast radii → `missing`,
+  said out loud instead of dressed up as "no impact".
+  False-positive discipline is structural: claims derive only from
+  real graph edges / impact paths / coverage entries, so a
+  similarly-named symbol with no edge to the seed cannot appear,
+  and evidence is never upgraded along a chain.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

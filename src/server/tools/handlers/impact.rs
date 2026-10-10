@@ -67,7 +67,7 @@ fn heuristic_min_confidence() -> f32 {
 /// static graph alone would miss. These are kept out of the main
 /// blast-radius list unless `include_weak_edges=true` or the
 /// per-edge confidence clears the env-var threshold.
-fn is_heuristic_edge(t: &crate::schema::EdgeType) -> bool {
+pub fn is_heuristic_edge(t: &crate::schema::EdgeType) -> bool {
     matches!(
         t,
         crate::schema::EdgeType::DynamicDispatch
