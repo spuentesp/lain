@@ -192,7 +192,7 @@ def open_market_feed():
 EOF
   # grpcio / websocket-client: the stub and the dials above are real
   # imports; keep requirements.txt coherent with the code.
-  sed -i 's/^aiokafka==0.10.0$/aiokafka==0.10.0\ngrpcio==1.60.0\nwebsocket-client==1.7.0/' requirements.txt
+  printf 'grpcio==1.60.0\nwebsocket-client==1.7.0\n' >> requirements.txt
   make_commit "t4: gRPC/GraphQL/WebSocket consumer sites" "$T4_OFFSET"
   git tag t4
   git checkout -q main
