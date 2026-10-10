@@ -18,11 +18,17 @@ dev → main is **release-only**, not a routine merge:
 
 1. Branch `release/v0.x.y` off `dev`.
 2. Bump every release-metadata file (`Cargo.toml`, `Cargo.lock`,
-   `server.json`, `npm-shim/package.json`, `Formula/lain.rb`).
+   `server.json`, `npm-shim/package.json`, `Formula/lain.rb`, and the
+   health-badge action's `lain-version` default — `version-drift`
+   enforces the latter).
    `scripts/check-release-version.py --tag v0.x.y` validates.
 3. PR against `main` (1 review + green agent-contract).
 4. After merge: `git push origin v0.x.y` triggers `release.yml`.
 5. Fast-forward dev: `git switch dev && git merge --ff-only main`.
+6. **After** the release assets are published, fill `Formula/lain.rb`'s
+   `sha256` values from the published `SHA256SUMS` file. The artifacts
+   are not bit-reproducible, so pre-filling them produces a formula
+   that fails verification (this is how v0.8.0 shipped broken).
 
 Full branching rules + protection settings: `docs/BRANCHING.md`.
 PR flow: `CONTRIBUTING.md`.

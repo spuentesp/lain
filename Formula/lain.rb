@@ -4,26 +4,26 @@
 class Lain < Formula
   desc "Structural code intelligence for AI agents"
   homepage "https://github.com/spuentesp/lain"
-  version "0.8.0"
+  version "0.9.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/spuentesp/lain/releases/download/v0.8.0/lain-0.8.0-aarch64-apple-darwin.tar.gz"
-      sha256 "1f55f308c1de6a9c941d8e9e95bb7cc95be0f33eb2aa7ed0c555714cbb2c0e83"
+      url "https://github.com/spuentesp/lain/releases/download/v0.9.0/lain-0.9.0-aarch64-apple-darwin.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"  # POST-PUBLISH: fill from the v0.9.0 SHA256SUMS
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/spuentesp/lain/releases/download/v0.8.0/lain-0.8.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "72dedbbf5f80297530262f2e6be5f0964d9f9e7cfd113199d3b298bd1a9bb6e8"
+      url "https://github.com/spuentesp/lain/releases/download/v0.9.0/lain-0.9.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"  # POST-PUBLISH: fill from the v0.9.0 SHA256SUMS
     end
   end
 
   on_windows do
     on_intel do
-      url "https://github.com/spuentesp/lain/releases/download/v0.8.0/lain-0.8.0-x86_64-pc-windows-msvc.tar.gz"
-      sha256 "47dc5d37922d91463d8fae0bcd4086515d2e0c4f07ce71f5964934b6bdfff097"
+      url "https://github.com/spuentesp/lain/releases/download/v0.9.0/lain-0.9.0-x86_64-pc-windows-msvc.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"  # POST-PUBLISH: fill from the v0.9.0 SHA256SUMS
     end
   end
 
