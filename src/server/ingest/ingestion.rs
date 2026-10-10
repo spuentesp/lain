@@ -55,6 +55,12 @@ impl LainServer {
             info!("build_core_memory: cancelled before discovering commit");
             return Err(LainError::Cancelled);
         }
+        // Readers that must not see a torn mid-pass graph (anchor
+        // scores and co-change edges are only restored at the end of
+        // the pass) wait on this marker — spuentesp/lain#296. The
+        // guard covers every early return below; dropping it (or a
+        // panic) clears the slot.
+        let _write_pass = self.ingest().graph().begin_write_pass();
         let scan_start = std::time::Instant::now();
         // AGENT_UX_ROADMAP.md M4 follow-up: the server-owned
         // cancellation token observes every phase boundary, including
@@ -1538,6 +1544,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     if cancel.is_cancelled() {
         return Err(LainError::Cancelled);
     }
+    // Same torn-window marker as `build_core_memory` (spuentesp/lain#296):
+    // this pass replaces nodes in place and restores anchor scores /
+    // co-change edges only at the end; readers wait on the guard.
+    let _write_pass = graph.begin_write_pass();
     let scan_start = std::time::Instant::now();
     // F2 — use the `try_*` variants so a wedged spawn_blocking thread
     // holding the parking_lot `GitSensor` mutex fails fast (the single-

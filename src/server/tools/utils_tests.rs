@@ -544,3 +544,30 @@ fn resolve_node_handles_bare_name_that_collides_with_cwd() {
     let resolved = resolve_node(&graph, &overlay, "target").unwrap();
     assert_eq!(resolved.id, n.id);
 }
+
+/// spuentesp/lain#296: the quiesce wait readers use before answering.
+/// True on an idle graph, false when a write pass occupies the whole
+/// budget, true again once the pass drops.
+#[tokio::test]
+async fn await_graph_quiesced_tracks_write_passes() {
+    let tmp = std::env::temp_dir().join("test_await_quiesced");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    assert!(
+        await_graph_quiesced(&graph, std::time::Duration::ZERO).await,
+        "an idle graph is quiesced immediately"
+    );
+
+    let pass = graph.begin_write_pass();
+    assert!(
+        !await_graph_quiesced(&graph, std::time::Duration::ZERO).await,
+        "a held pass must exhaust the budget"
+    );
+
+    drop(pass);
+    assert!(
+        await_graph_quiesced(&graph, std::time::Duration::from_millis(200)).await,
+        "once the pass drops the wait returns true"
+    );
+}

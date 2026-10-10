@@ -781,6 +781,31 @@ impl RepoIndex {
             .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Drain every event already queued on the watcher channel, keeping
+    /// the outstanding-event counter in sync (one `fetch_sub` per
+    /// event, matching the inotify thread's `fetch_add`). Returns
+    /// `(drained, batch_had_event)` — the second flag is true when at
+    /// least one drained item was a real event rather than a notify
+    /// backend error, so the caller can decide whether a pipeline run
+    /// is warranted. Coalescing keeps a write storm inside the
+    /// checkout (rust-analyzer's `cargo check` filling `target/`, a
+    /// `git checkout` touching hundreds of files) from running one
+    /// full in-place graph rebuild per queued event — see the call
+    /// site in [`Self::start_watcher`] and spuentesp/lain#296.
+    fn drain_queued_events(
+        rx: &mut tokio::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+        outstanding: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> (usize, bool) {
+        let mut drained = 0usize;
+        let mut batch_had_event = false;
+        while let Ok(ev) = rx.try_recv() {
+            outstanding.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            batch_had_event |= ev.is_ok();
+            drained += 1;
+        }
+        (drained, batch_had_event)
+    }
+
     pub async fn start_watcher(self: &Arc<Self>) -> Result<(), LainError> {
         let active = self.active.lock();
         if !*active || self.watcher.lock().is_some() {
@@ -844,7 +869,25 @@ impl RepoIndex {
                 let Some(me_for_task) = weak.upgrade() else {
                     break;
                 };
-                if res.is_ok() {
+                // Coalesce whatever else is queued into this cycle
+                // (spuentesp/lain#296). A write storm inside the
+                // checkout — rust-analyzer's `cargo check` filling
+                // `target/`, a `git checkout` touching hundreds of
+                // files — used to leave up to WATCHER_CHANNEL_DEPTH
+                // events queued; the loop then ran one full
+                // `index_forced` rebuild per event, tearing the live
+                // graph down and rebuilding it for minutes while
+                // health stayed `ready`. One pass per batch keeps the
+                // semantics (the newest state is indexed) without the
+                // backlog multiplying the work.
+                let (collapsed, batch_had_event) = Self::drain_queued_events(&mut rx, &outstanding);
+                if collapsed > 0 {
+                    tracing::debug!(
+                        "[federation] watcher coalesced {collapsed} queued event(s) into one reindex"
+                    );
+                }
+                let run_pipelines = res.is_ok() || batch_had_event;
+                if run_pipelines {
                     // `index_forced` (not `index`) — the watcher fires
                     // on a kernel `notify` event, which is independent
                     // evidence the worktree changed. The commit-hash
@@ -1712,5 +1755,55 @@ mod tests {
         // `SystemTime::now()` resolution is platform-dependent; the
         // monotonic `>` against `pre_second` is enough.
         let _ = AnyGitSensor::from_env; // silence unused import lint
+    }
+
+    /// spuentesp/lain#296: a watcher write storm used to queue up to
+    /// `WATCHER_CHANNEL_DEPTH` events and run one full in-place graph
+    /// rebuild per event. The drain collapses the backlog into the
+    /// current cycle: every queued event is consumed, the outstanding
+    /// counter stays consistent with the inotify thread's increments,
+    /// and the channel is left empty so the next `recv` blocks.
+    #[tokio::test]
+    async fn drain_queued_events_collapses_the_backlog_into_one_batch() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let outstanding = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        for _ in 0..5 {
+            outstanding.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tx.send(Ok(notify::Event::new(notify::EventKind::Any)))
+                .await
+                .unwrap();
+        }
+
+        let (drained, batch_had_event) = RepoIndex::drain_queued_events(&mut rx, &outstanding);
+        assert_eq!(drained, 5, "every queued event must be consumed");
+        assert!(batch_had_event, "real events must signal a pipeline run");
+        assert_eq!(
+            outstanding.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "each drained event must decrement the outstanding counter"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the channel must be empty so the next recv blocks"
+        );
+    }
+
+    /// Backend errors drain like any other item but must not be
+    /// mistaken for evidence the worktree changed.
+    #[tokio::test]
+    async fn drain_queued_events_reports_backend_errors_without_signalling_an_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let outstanding = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        tx.send(Err(notify::Error::generic("backend boom")))
+            .await
+            .unwrap();
+
+        let (drained, batch_had_event) = RepoIndex::drain_queued_events(&mut rx, &outstanding);
+        assert_eq!(drained, 1);
+        assert!(
+            !batch_had_event,
+            "a batch of only backend errors must not signal a pipeline run"
+        );
+        assert_eq!(outstanding.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }

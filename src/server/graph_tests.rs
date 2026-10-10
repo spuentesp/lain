@@ -693,3 +693,49 @@ fn co_change_namespace_mismatch_drops_edges() {
         "with matching namespaces the co-change edge must resolve; got {partners:?}",
     );
 }
+
+/// spuentesp/lain#296: `begin_write_pass` marks the torn mid-pass
+/// window so readers can wait it out; dropping the guard clears it,
+/// and clones of the same database share the marker.
+#[test]
+fn write_pass_guard_marks_and_clears_the_torn_window() {
+    let tmp = std::env::temp_dir().join("test_graph_write_pass");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    assert!(
+        !graph.write_pass_active(),
+        "fresh graph has no pass in flight"
+    );
+    {
+        let _pass = graph.begin_write_pass();
+        assert!(
+            graph.write_pass_active(),
+            "the guard must mark the graph as mid-pass"
+        );
+        // A reader holding another handle of the same database must
+        // see the marker — tool dispatch runs on clones.
+        let reader_view = graph.clone();
+        assert!(reader_view.write_pass_active());
+    }
+    assert!(
+        !graph.write_pass_active(),
+        "dropping the guard must clear the marker"
+    );
+}
+
+/// Nested passes (a watcher reindex overlapping background
+/// enrichment) stay visible until the last guard drops.
+#[test]
+fn nested_write_passes_stay_active_until_the_last_guard_drops() {
+    let tmp = std::env::temp_dir().join("test_graph_write_pass_nested");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    let outer = graph.begin_write_pass();
+    let inner = graph.begin_write_pass();
+    drop(inner);
+    assert!(graph.write_pass_active(), "outer pass still in flight");
+    drop(outer);
+    assert!(!graph.write_pass_active(), "all passes finished");
+}

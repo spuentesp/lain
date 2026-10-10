@@ -40,7 +40,10 @@ pub fn run_enrichment(
             (pairs, commit)
         };
 
-        // 2. Insert co-change edges into the graph
+        // 2. Insert co-change edges into the graph. Announce the
+        // mutating pass first so readers wait it out instead of
+        // answering from the mid-pass graph (spuentesp/lain#296).
+        let _write_pass = graph_clone.begin_write_pass();
         if !co_change_pairs.is_empty() {
             let pair_tuples: Vec<_> = co_change_pairs
                 .iter()
@@ -227,6 +230,9 @@ pub fn sync_state(
             .map(|((f1, f2), c)| (f1, f2, c))
             .collect();
 
+        // Mutating pass starts here (co-change edges + scores);
+        // readers wait it out (spuentesp/lain#296).
+        let _write_pass = graph_clone.begin_write_pass();
         if !pair_tuples.is_empty() {
             if let Err(e) = graph_clone.insert_co_change_edges(&pair_tuples) {
                 tracing::error!("Sync failed to insert edges: {}", e);

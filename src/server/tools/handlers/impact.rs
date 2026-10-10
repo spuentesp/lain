@@ -389,20 +389,34 @@ pub async fn get_coupling_radar(
     overlay: &VolatileOverlay,
     symbol: &str,
     ui_sessions: crate::server::tools::UiLink<'_>,
+    quiesced: bool,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
+
+    // The co-change edges are re-mined and re-inserted by every
+    // indexing pass; a call landing between the node replace and the
+    // co-change insert used to get a confident "No co-change coupling
+    // found" for a pair that plainly exists (spuentesp/lain#296). The
+    // handler waits the pass out within reason; when the budget
+    // expires `quiesced` is false and this answer is labelled instead
+    // of asserting a negative in silence.
+    let degrade = if quiesced {
+        ""
+    } else {
+        crate::server::tools::utils::WRITE_PASS_DEGRADED_BANNER
+    };
 
     let partners = graph.get_co_change_partners(&node.path)?;
 
     if partners.is_empty() {
         return Ok(format!(
-            "No co-change coupling found for '{}' ({})",
+            "{degrade}No co-change coupling found for '{}' ({})",
             symbol, node.path
         ));
     }
 
     let mut output = format!(
-        "Files that co-change with '{}' ({}) — top {} partners:\n{}",
+        "{degrade}Files that co-change with '{}' ({}) — top {} partners:\n{}",
         symbol,
         node.path,
         partners.len(),
@@ -468,6 +482,65 @@ mod tests {
         );
         n.id = id;
         n
+    }
+
+    /// spuentesp/lain#296: `get_coupling_radar` must label its answer
+    /// when a write pass is still running — the old behavior
+    /// presented the torn mid-pass view ("No co-change coupling
+    /// found") as fact. `quiesced=false` is what the handler passes
+    /// after its bounded wait expires.
+    #[tokio::test]
+    async fn coupling_radar_labels_answers_while_a_write_pass_runs() {
+        let (_dir, graph) = temp_graph();
+        let ns = RepoNamespace::for_test();
+        graph.upsert_node(file_node("src/core.rs", &ns)).unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let out = get_coupling_radar(&graph, &overlay, "src/core.rs", None, false)
+            .await
+            .unwrap();
+        assert!(
+            out.contains("degraded: indexing in progress"),
+            "a mid-pass answer must carry the degraded banner, got:\n{out}"
+        );
+        assert!(out.contains("No co-change coupling found"), "got:\n{out}");
+    }
+
+    /// And the other half: a quiesced graph with a real co-change
+    /// edge answers plainly, with no banner.
+    #[tokio::test]
+    async fn coupling_radar_is_silent_when_the_graph_is_quiesced() {
+        let (_dir, graph) = temp_graph();
+        let ns = RepoNamespace::for_test();
+        // File nodes must be minted with the basename as their name —
+        // that is what `insert_co_change_edges` derives when it mints
+        // the edge endpoint ids, and an id mismatch silently drops
+        // the edge (see the namespace test in `graph_tests.rs`).
+        let mut core_n = GraphNode::new(
+            NodeType::File,
+            "core.rs".to_string(),
+            "src/core.rs".to_string(),
+        );
+        core_n.id = GraphNode::generate_id(&NodeType::File, "src/core.rs", "core.rs", None, &ns);
+        graph.upsert_node(core_n).unwrap();
+        let mut helpers_n = GraphNode::new(
+            NodeType::File,
+            "helpers.rs".to_string(),
+            "src/helpers.rs".to_string(),
+        );
+        helpers_n.id =
+            GraphNode::generate_id(&NodeType::File, "src/helpers.rs", "helpers.rs", None, &ns);
+        graph.upsert_node(helpers_n).unwrap();
+        graph
+            .insert_co_change_edges(&[("src/core.rs".to_string(), "src/helpers.rs".to_string(), 2)])
+            .unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let out = get_coupling_radar(&graph, &overlay, "src/core.rs", None, true)
+            .await
+            .unwrap();
+        assert!(out.contains("helpers.rs"), "got:\n{out}");
+        assert!(!out.contains("degraded"), "got:\n{out}");
     }
 
     #[tokio::test]
