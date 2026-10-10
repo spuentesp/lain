@@ -228,7 +228,12 @@ impl RateLimit {
     /// Consume one token. Returns `Ok(())` if the request is allowed,
     /// `Err(retry_after_secs)` if the bucket is empty.
     pub fn try_consume(&self, key: &str) -> Result<(), u64> {
-        let now = Instant::now();
+        self.try_consume_at(key, Instant::now())
+    }
+
+    /// [`Self::try_consume`] with the clock injected, so the token-bucket
+    /// arithmetic can be verified deterministically (`auth_verification.rs`).
+    pub(crate) fn try_consume_at(&self, key: &str, now: Instant) -> Result<(), u64> {
         let capacity = self.rpm as f64;
         let refill_per_sec = self.rpm as f64 / 60.0;
         let mut guard = self.inner.lock();
@@ -409,3 +414,11 @@ mod tests {
         assert!(!constant_time_eq(b"", b"x"));
     }
 }
+
+#[cfg(kani)]
+#[path = "auth_kani.rs"]
+mod kani_proofs;
+
+#[cfg(test)]
+#[path = "auth_verification.rs"]
+mod verification;

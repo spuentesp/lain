@@ -89,13 +89,12 @@ pub struct RepoIndex {
     lsp: LspPool,
     git: Arc<AnyGitSensor>,
     index_lock: AsyncMutex<()>,
-    health: Arc<RwLock<RepoHealth>>,
+    health: crate::federation::health_gate::HealthGate,
     /// While set, a finished index pass leaves the repo `Indexing` rather
     /// than `Ready`. `lain server` holds every repo of a multi-repo
     /// federation until cross-repo links exist; a watcher-triggered pass
     /// (an uncommitted edit during startup) used to flip it to `Ready`
     /// early.
-    hold_ready: Arc<std::sync::atomic::AtomicBool>,
     /// Set when a watcher-triggered pass changed this repo's graph, so the
     /// federation re-projects it; the global backend otherwise kept the
     /// pre-edit symbols (search_org, cross-repo blast radius) until a
@@ -314,8 +313,7 @@ impl RepoIndex {
             lsp,
             git,
             index_lock: AsyncMutex::new(()),
-            health: Arc::new(RwLock::new(RepoHealth::Indexing)),
-            hold_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            health: crate::federation::health_gate::HealthGate::new(RepoHealth::Indexing),
             projection_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
             last_index_error: Arc::new(RwLock::new(None)),
@@ -448,7 +446,7 @@ impl RepoIndex {
     }
 
     pub fn health(&self) -> RepoHealth {
-        *self.health.read()
+        self.health.health()
     }
 
     /// The error text from the most recent failed indexing attempt, if
@@ -475,7 +473,7 @@ impl RepoIndex {
         self.server_overlay.lock().clone()
     }
     pub fn set_health(&self, health: RepoHealth) {
-        *self.health.write() = health;
+        self.health.set_health(health);
     }
 
     /// Install the federation's cross-repo symbol resolver. Called by
@@ -765,24 +763,15 @@ impl RepoIndex {
     /// overlay scan must pass the active gate before publishing any nodes.
     /// `Ready`, unless the startup hold is on (see `hold_ready`).
     fn mark_ready(&self) {
-        if self.hold_ready.load(std::sync::atomic::Ordering::SeqCst) {
-            self.set_health(RepoHealth::Indexing);
-        } else {
-            self.set_health(RepoHealth::Ready);
-        }
+        self.health.mark_ready();
     }
 
     /// Hold (`true`) or release (`false`) readiness. Releasing promotes a
-    /// repo whose pass finished while held.
+    /// repo whose pass finished while held. Decided atomically with
+    /// `mark_ready` (`HealthGate`, `docs/formal/HoldGate.tla`).
     pub fn hold_ready(&self, hold: bool) {
-        self.hold_ready
-            .store(hold, std::sync::atomic::Ordering::SeqCst);
-        if !hold
-            && self.health() == RepoHealth::Indexing
-            && self.last_indexed() != SystemTime::UNIX_EPOCH
-        {
-            self.set_health(RepoHealth::Ready);
-        }
+        self.health
+            .set_hold(hold, || self.last_indexed() != SystemTime::UNIX_EPOCH);
     }
 
     /// Whether the graph changed since the federation last projected it;

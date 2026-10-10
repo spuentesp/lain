@@ -16,7 +16,7 @@ use crate::server::federation::workspace::WorkspacesFile;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::sync::broadcast;
 
 /// Phase of the last reload attempt.
 ///
@@ -54,7 +54,7 @@ pub struct ReloadStatus {
 /// get a `ReloadSubscriber` that they can poll with `try_recv`.
 pub struct ReloadBus {
     tx: broadcast::Sender<()>,
-    status: Arc<AsyncMutex<ReloadStatus>>,
+    status: Arc<crate::sync::Mutex<ReloadStatus>>,
 }
 
 impl ReloadBus {
@@ -66,7 +66,7 @@ impl ReloadBus {
         let (tx, _) = broadcast::channel(16);
         Self {
             tx,
-            status: Arc::new(AsyncMutex::new(ReloadStatus {
+            status: Arc::new(crate::sync::Mutex::new(ReloadStatus {
                 state: ReloadState::Idle,
                 started_at: None,
                 last_reload_at: None,
@@ -96,28 +96,26 @@ impl ReloadBus {
     }
 
     /// Cheap clone of the current status snapshot.
+    ///
+    /// The lock is a plain (non-async) mutex and is never held across an
+    /// await, so blocking on it is bounded by a few field writes. It must
+    /// block rather than `try_lock`: a contended `try_lock` used to return a
+    /// fabricated `Idle` snapshot — wiping `Rebuilding`/`Failed` and the
+    /// error text — at exactly the moment a transition was being recorded.
     pub fn status(&self) -> ReloadStatus {
-        // `try_lock` is the right call here: callers (`get_reload_status`)
-        // are MCP handlers that should never park the executor. If the
-        // status is being written to right now, returning the previous
-        // snapshot is acceptable — the next call will see the update.
-        self.status
-            .try_lock()
-            .map(|s| s.clone())
-            .unwrap_or_else(|_| ReloadStatus {
-                state: ReloadState::Idle,
-                started_at: None,
-                last_reload_at: None,
-                last_error: None,
-                pending_changes: Vec::new(),
-            })
+        self.status.lock().clone()
     }
 
     /// Update the bus's recorded state. The rebuild task calls this on
     /// each phase transition so that observers (`get_reload_status`)
     /// can report progress.
     pub async fn set_state(&self, state: ReloadState) {
-        let mut s = self.status.lock().await;
+        self.apply_state(state);
+    }
+
+    /// Synchronous core of [`Self::set_state`] (the transition table).
+    pub(crate) fn apply_state(&self, state: ReloadState) {
+        let mut s = self.status.lock();
         s.state = state.clone();
         match state {
             ReloadState::Rebuilding => {
@@ -356,6 +354,10 @@ impl ReloadSubscriber {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "reload_verification.rs"]
+mod verification;
 
 #[cfg(test)]
 mod tests {

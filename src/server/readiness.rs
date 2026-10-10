@@ -112,92 +112,195 @@ fn unix_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// Problem code published by [`ReadinessHandle::cancelled`]. Terminal: once
+/// published, no later `ready()` / `failed()` may replace it.
+pub const INDEX_CANCELLED_CODE: &str = "index_cancelled";
+
+/// The publication rule for `ready`, on primitives so Kani can prove it
+/// exhaustively (`readiness_verification.rs`).
+pub(crate) const fn ready_allowed_for(in_flight: u32, cancelled: bool) -> bool {
+    in_flight == 0 && !cancelled
+}
+
+/// Lock-protected state behind a [`ReadinessHandle`]: the published snapshot
+/// plus the number of indexing passes currently mutating the graph.
+///
+/// The transitions live here, as plain `&mut self` methods, so the model
+/// checker's invariants (`docs/formal/ReadinessLifecycle.tla`) can be
+/// exercised directly by proptest, loom and Kani without a tokio runtime.
+#[derive(Debug)]
+pub(crate) struct LifecycleCore {
+    pub(crate) snapshot: IndexLifecycleSnapshot,
+    /// Passes between `begin_pass` and the drop of their [`PassGuard`].
+    pub(crate) in_flight: u32,
+}
+
+impl LifecycleCore {
+    pub(crate) fn new() -> Self {
+        Self {
+            snapshot: IndexLifecycleSnapshot::warming_up(),
+            in_flight: 0,
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.snapshot
+            .problem
+            .as_ref()
+            .is_some_and(|p| p.code == INDEX_CANCELLED_CODE)
+    }
+
+    /// `ready` may be published only when no pass is mutating the graph and
+    /// shutdown has not been published. See `GateOpenImpliesQuiescent` and
+    /// `CancelledIsTerminal` in `ReadinessLifecycle.tla`.
+    pub(crate) fn ready_allowed(&self) -> bool {
+        ready_allowed_for(self.in_flight, self.is_cancelled())
+    }
+
+    fn touch(&mut self) {
+        self.snapshot.sequence = self.snapshot.sequence.saturating_add(1);
+        self.snapshot
+            .warnings
+            .sort_by(|a, b| (&a.code, &a.message).cmp(&(&b.code, &b.message)));
+    }
+
+    pub(crate) fn begin_pass(&mut self) {
+        self.in_flight = self.in_flight.saturating_add(1);
+        if self.is_cancelled() {
+            // Shutdown is terminal: a pass that races the cancellation must
+            // not un-publish `index_cancelled` (CancelledIsTerminal).
+            return;
+        }
+        let s = &mut self.snapshot;
+        s.state = IndexState::WarmingUp;
+        s.attempt_id = s.attempt_id.saturating_add(1);
+        s.completed_at_unix_ms = None;
+        s.retry_after_ms = Some(WARMING_UP_RETRY_AFTER_MS);
+        s.problem = None;
+        self.touch();
+    }
+
+    pub(crate) fn end_pass(&mut self) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+    }
+
+    /// Returns whether `ready` was published.
+    pub(crate) fn publish_ready(&mut self, indexed_commit: Option<String>) -> bool {
+        if !self.ready_allowed() {
+            return false;
+        }
+        let s = &mut self.snapshot;
+        s.state = IndexState::Ready;
+        s.phase = IndexPhase::Overlay;
+        s.indexed_commit = indexed_commit;
+        s.completed_at_unix_ms = Some(unix_ms());
+        s.retry_after_ms = None;
+        s.problem = None;
+        self.touch();
+        true
+    }
+
+    pub(crate) fn publish_failed(&mut self, message: String) -> bool {
+        if self.is_cancelled() {
+            return false;
+        }
+        let s = &mut self.snapshot;
+        s.state = IndexState::UnavailableError;
+        s.completed_at_unix_ms = Some(unix_ms());
+        s.retry_after_ms = None;
+        s.problem = Some(Problem {
+            code: "index_failed".into(),
+            message,
+            remediation:
+                "Run `lain doctor --json` and retry indexing after correcting the reported problem."
+                    .into(),
+            retryable: true,
+        });
+        self.touch();
+        true
+    }
+
+    pub(crate) fn publish_cancelled(&mut self) {
+        let s = &mut self.snapshot;
+        s.state = IndexState::UnavailableError;
+        s.completed_at_unix_ms = Some(unix_ms());
+        s.retry_after_ms = None;
+        s.problem = Some(Problem {
+            code: INDEX_CANCELLED_CODE.into(),
+            message: "indexing cancelled by server shutdown".into(),
+            remediation: "Restart the server to begin a fresh indexing pass.".into(),
+            retryable: false,
+        });
+        self.touch();
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct ReadinessHandle(Arc<parking_lot::Mutex<IndexLifecycleSnapshot>>);
+pub struct ReadinessHandle(Arc<crate::sync::Mutex<LifecycleCore>>);
 
 impl Default for ReadinessHandle {
     fn default() -> Self {
-        Self(Arc::new(parking_lot::Mutex::new(
-            IndexLifecycleSnapshot::warming_up(),
-        )))
+        Self(Arc::new(crate::sync::Mutex::new(LifecycleCore::new())))
+    }
+}
+
+/// RAII marker for one indexing pass that is mutating the graph. While any
+/// guard is alive, [`ReadinessHandle::ready`] is a no-op: the pass that
+/// finishes last publishes `ready` for everyone.
+#[derive(Debug)]
+#[must_use = "dropping the guard immediately marks the pass as finished"]
+pub struct PassGuard(ReadinessHandle);
+
+impl Drop for PassGuard {
+    fn drop(&mut self) {
+        self.0 .0.lock().end_pass();
     }
 }
 
 impl ReadinessHandle {
     pub fn snapshot(&self) -> IndexLifecycleSnapshot {
-        self.0.lock().clone()
+        self.0.lock().snapshot.clone()
     }
 
     pub fn update(&self, update: impl FnOnce(&mut IndexLifecycleSnapshot)) {
-        let mut snapshot = self.0.lock();
-        update(&mut snapshot);
-        snapshot.sequence = snapshot.sequence.saturating_add(1);
-        snapshot
-            .warnings
-            .sort_by(|a, b| (&a.code, &a.message).cmp(&(&b.code, &b.message)));
+        let mut core = self.0.lock();
+        update(&mut core.snapshot);
+        core.touch();
     }
 
-    pub fn ready(&self, indexed_commit: Option<String>) {
-        self.update(|snapshot| {
-            snapshot.state = IndexState::Ready;
-            snapshot.phase = IndexPhase::Overlay;
-            snapshot.indexed_commit = indexed_commit;
-            snapshot.completed_at_unix_ms = Some(unix_ms());
-            snapshot.retry_after_ms = None;
-            snapshot.problem = None;
-        });
+    /// Publish `ready` for a finished pass. Returns `false` (and leaves the
+    /// snapshot untouched) when another pass is still mutating the graph, or
+    /// when shutdown was already published: publishing `ready` then would
+    /// open the gate over a half-built graph (the interleaving TLC found in
+    /// `ReadinessLifecycle.tla`).
+    pub fn ready(&self, indexed_commit: Option<String>) -> bool {
+        self.0.lock().publish_ready(indexed_commit)
     }
 
-    /// Transition a `Ready` snapshot back to `WarmingUp` for a real
-    /// re-index attempt (a commit-sync or watcher-triggered rebuild, not
-    /// the no-op "already up to date" fast path, which must never touch
-    /// this handle at all). Without this, a re-index after the first
-    /// successful pass left `state` at `Ready` the whole time it ran,
-    /// so the central gate kept dispatching `graph_required`/
-    /// `semantic_required` tools against a graph being actively
-    /// mutated instead of turning them back with `warming_up` until the
-    /// new pass publishes `ready` again.
-    pub fn resume_warming_up(&self) {
-        self.update(|snapshot| {
-            snapshot.state = IndexState::WarmingUp;
-            snapshot.attempt_id = snapshot.attempt_id.saturating_add(1);
-            snapshot.completed_at_unix_ms = None;
-            snapshot.retry_after_ms = Some(WARMING_UP_RETRY_AFTER_MS);
-            snapshot.problem = None;
-        });
+    /// Start a real re-index attempt (a commit-sync or watcher-triggered
+    /// rebuild, not the no-op "already up to date" fast path, which must
+    /// never touch this handle). Moves the gate back to `warming_up` so
+    /// graph-required tools are turned back while the graph is mutated, and
+    /// registers the pass so that a *different*, earlier-finishing pass cannot
+    /// publish `ready` underneath this one. Hold the guard until the pass
+    /// stops mutating the graph.
+    pub fn begin_pass(&self) -> PassGuard {
+        self.0.lock().begin_pass();
+        PassGuard(self.clone())
     }
 
-    pub fn failed(&self, message: String) {
-        self.update(|snapshot| {
-            snapshot.state = IndexState::UnavailableError;
-            snapshot.completed_at_unix_ms = Some(unix_ms());
-            snapshot.retry_after_ms = None;
-            snapshot.problem = Some(Problem {
-                code: "index_failed".into(), message,
-                remediation: "Run `lain doctor --json` and retry indexing after correcting the reported problem.".into(),
-                retryable: true,
-            });
-        });
+    /// Publish `unavailable_error`/`index_failed`. A no-op after shutdown was
+    /// published (`index_cancelled` is terminal). Returns whether it applied.
+    pub fn failed(&self, message: String) -> bool {
+        self.0.lock().publish_failed(message)
     }
 
-    /// AGENT_UX_ROADMAP.md M4 follow-up ("Cooperative
-    /// cancellation token"): publish `unavailable_error` with the
-    /// stable `index_cancelled` problem code. Distinct from
-    /// `failed()` because shutdown is not a failure: `retryable:
-    /// false` (the user explicitly asked for shutdown), and the
-    /// remediation is the empty message — there's nothing to fix.
+    /// AGENT_UX_ROADMAP.md M4 follow-up ("Cooperative cancellation token"):
+    /// publish `unavailable_error` with the stable `index_cancelled` problem
+    /// code. Distinct from `failed()` because shutdown is not a failure:
+    /// `retryable: false`, and nothing to fix.
     pub fn cancelled(&self) {
-        self.update(|snapshot| {
-            snapshot.state = IndexState::UnavailableError;
-            snapshot.completed_at_unix_ms = Some(unix_ms());
-            snapshot.retry_after_ms = None;
-            snapshot.problem = Some(Problem {
-                code: "index_cancelled".into(),
-                message: "indexing cancelled by server shutdown".into(),
-                remediation: "Restart the server to begin a fresh indexing pass.".into(),
-                retryable: false,
-            });
-        });
+        self.0.lock().publish_cancelled();
     }
 }
 
@@ -457,6 +560,14 @@ impl Capabilities {
         result
     }
 }
+
+#[cfg(test)]
+#[path = "readiness_verification.rs"]
+mod verification;
+
+#[cfg(kani)]
+#[path = "readiness_kani.rs"]
+mod kani_proofs;
 
 #[cfg(test)]
 mod tests {

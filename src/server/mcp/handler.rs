@@ -466,6 +466,41 @@ fn gate_for_dispatch(
     )
 }
 
+/// One `tools/call` through the exact pipeline stdio and HTTP use: readiness
+/// gate, then dispatch (inventory, federation and executor tools alike), then
+/// the result envelope. The shared Unix-socket server used to call the
+/// executor directly, which skipped the gate (tools answered from a graph
+/// that was still being built), could not reach presence/audit/status tools,
+/// and formatted results differently from every other transport.
+pub(crate) async fn call_tool_in_process(
+    server: &Arc<LainServer>,
+    name: &str,
+    args: Map<String, serde_json::Value>,
+) -> CallToolResult {
+    let executor = server.ingest().tool_executor();
+    let federation = server.federation().map(|f| f.as_ref());
+    let generation = server.static_graph_generation_unix();
+    if let Some(gated) = gate_for_dispatch(executor, federation, name, &args) {
+        return gated_tool_result(&gated, executor.overlay(), generation);
+    }
+    let status = HandlerStatus::in_process(federation.map(|f| f.list_repos().len()).unwrap_or(0));
+    let workspaces = server.workspaces_handle();
+    let reload_bus = server.reload_bus();
+    let (text, is_error, structured) = dispatch_tool_call(
+        executor,
+        federation,
+        workspaces.as_ref(),
+        &status,
+        Some(reload_bus.as_ref()),
+        Some(server.as_ref()),
+        None,
+        name,
+        args,
+    )
+    .await;
+    tool_result_with_structured(text, is_error, structured, executor.overlay(), generation)
+}
+
 fn is_loopback_host(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost")
@@ -579,6 +614,20 @@ impl HandlerStatus {
             last_sync_at: Arc::new(parking_lot::Mutex::new(SystemTime::now())),
             last_error: Arc::new(parking_lot::Mutex::new(None)),
             repo_count: 0,
+            workspaces_count: 0,
+        }
+    }
+
+    /// Status for calls arriving over the in-process Unix socket (stdio
+    /// framing, no port).
+    pub(crate) fn in_process(repo_count: usize) -> Self {
+        HandlerStatus {
+            transport: Some(crate::server::Transport::Stdio),
+            port: None,
+            started_at: std::time::SystemTime::now(),
+            last_sync_at: Arc::new(parking_lot::Mutex::new(std::time::SystemTime::now())),
+            last_error: Arc::new(parking_lot::Mutex::new(None)),
+            repo_count,
             workspaces_count: 0,
         }
     }

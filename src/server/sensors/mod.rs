@@ -459,3 +459,7 @@ mod run_all_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "pipeline_verification.rs"]
+mod pipeline_verification;

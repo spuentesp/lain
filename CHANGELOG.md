@@ -5,6 +5,71 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+### Added
+
+- **B5 design: graph WAL for torn-write recovery** -
+  `docs/formal/GraphWal.tla` + `.cfg` + `-impl.md`. The spec
+  models the on-disk state machine: `log` (the post-checkpoint
+  WAL tail) and `checkpoint` (the last atomic `graph.bin`
+  snapshot). The durable history is `checkpoint \o log`.
+  Steady-state actions: `AppendOp`, `Checkpoint` (truncate the
+  WAL), `SoftCheckpoint` (record without truncating);
+  recovery actions: `Crash`, `RecoveryComplete` (rebuild
+  in-memory state from durable history). TLC checks
+  3 ops, checkpoint size 2, log cap 4 - 85,672 states, 28,796
+  distinct, depth 11; all invariants hold. The Rust-side
+  implementation (a `GraphOp` enum, an fsync-after-write WAL,
+  CRC-checked frame decoding, periodic checkpoint task) is a
+  follow-up commit on this branch.
+
+- **B5 implementation: WAL writer + replay wired into the
+  mutation methods.** `upsert_node`, `upsert_edge`, and
+  `remove_nodes_by_ids` now append a `GraphOp` to
+  `.lain/graph.wal` (length-prefixed bincode frame, CRC32C
+  trailer, fsync) before mutating in-memory state.
+  `load_from_disk` now reads `graph.bin` (the snapshot) and
+  then replays `graph.wal` on top, so a torn snapshot
+  recovers from the WAL tail (CRC-verified, torn-frame
+  tolerant). `save_to_disk_sync` truncates the WAL after a
+  successful snapshot write. The full write path is wired
+  for single-mutation calls; `insert_edges_batch` and
+  `insert_nodes_batch` are follow-up work because they
+  bypass the WAL append on the batch fast path. Periodic
+  checkpoint task and `doctor` recovery message are
+  follow-up commits on this branch.
+
+- **B5 end-to-end test: torn-snapshot recovery** — the WAL
+  test suite now includes a test that proves the recovery
+  story (write a snapshot, append ops, corrupt the snapshot,
+  verify the WAL survives and the indexer can rebuild from
+  it). 8 tests pass.
+
+- **`lain doctor` recovery message updated** for the WAL
+  rollout. The existing "move `graph.bin` aside, run
+  `lain mcp`" recipe still works, but with the WAL landed
+  on `feat/graph-wal` the loader is also able to recover
+  automatically by replaying `.lain/graph.wal`; the doctor
+  hint now mentions the WAL as the future-friendly path.
+
+- **B5 periodic checkpoint task** — without this, a
+  long-running server with no explicit reload would grow
+  the WAL indefinitely (every mutation appends a frame,
+  but nothing truncated the file until `request_reload` or
+  graceful shutdown). `spawn_periodic_checkpoint` runs
+  every 60s by default, calling `save_to_disk_sync` to
+  write a fresh `graph.bin` and truncate the WAL. Override
+  with `LAIN_WAL_CHECKPOINT_SECS` or disable with
+  `LAIN_DISABLE_WAL_CHECKPOINT=1`. The save runs on
+  `spawn_blocking` to avoid stalling the runtime.
+
+- **B5 batch-method WAL appends** — `insert_nodes_batch` and
+  `insert_edges_batch` now also append to the WAL before
+  the in-memory mutation, so the batch fast path is also
+  recoverable across torn snapshots. The new
+  `batch_inserts_persist_to_wal` test verifies the
+  ordering: 3 nodes + 2 edges → 3 + 2 = 5 WAL frames in
+  order. 9 WAL tests in total now pass.
+
 ### Changed
 
 - **Schema bump.** `GraphNode.contract` is now a `Vec<ContractFact>`
@@ -29,6 +94,16 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **`install_language_server` works for rust and ruby again.** The
+  v0.8.0 LSP-install allowlist (security hardening: only curated
+  package managers may run at startup) omitted `rustup` and `gem`, so
+  the shipped recipes for rust-analyzer and solargraph were
+  unconditionally refused. Both are on the list now, guarded by a
+  property test that every registry recipe passes the gate.
+  **v0.8.0 as released is affected** — `install_language_server
+  "rust"` fails there until the next release. The health-badge
+  action's `lain-version` default is held at v0.7.4 until then; bump
+  it together with the release metadata.
 - **`workspace_dir` contract mirrors now track the checkout.** Two bugs
   froze contract snapshots of local repos at their clone-time commit
   while the symbol layer kept following HEAD:
@@ -43,6 +118,163 @@ All notable changes to LAIN are documented here. Versions follow
   `diff_contracts` and friends see new commits once they are made; the
   README now states the real contract (commits + a re-index pass, not
   uncommitted edits).
+
+- **`LAIN_ONESHOT_TIMEOUT` default bumped from 60s to 600s.** The
+  previous default was too short for a cold reindex on a non-trivial
+  repo (Lain-on-Lain in 2026-10-04: ~5 min for 41k LOC + LSP
+  prewarm), and the resulting "no tools/call response from `lain
+  mcp` within 60s" error didn't tell the user whether the server was
+  busy indexing or hung. The new default matches
+  `LAIN_REINDEX_TIMEOUT`. Override with
+  `LAIN_ONESHOT_TIMEOUT=<seconds>` for tighter pipelines. Found by
+  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B6).
+
+- **`get_coupling_radar` doc clarified** — the section heading
+  "Files that co-change with this one" suggested an arg named
+  `path`; the input schema actually requires `symbol`. The doc now
+  states the arg name explicitly and notes that the value is a file
+  path. New lint
+  `scripts/check-tool-doc-args.py` validates every JSON example in
+  `docs/quickstart-tools.md` against its tool's input schema, so
+  this class of drift can't recur without failing the build. Found
+  by dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B9).
+
+- **Quickstart now warns about the `head -N` pipe footgun.** A user
+  running `lain oneshot find_anchors | head -60` will see the
+  upstream `lain mcp` process aborted by `SIGPIPE` when `head` exits
+  on a cold graph, leaving a partial `graph.bin` on disk. The
+  symptom is "no tools/call response from `lain mcp`" plus a
+  corrupt on-disk graph; the fix is to pipe to a file or to a tool
+  that reads to EOF. The new Quickstart row links the reader to
+  `DOGFOODING_REPORT.md` (B7) for the full trace.
+
+- **`get_audit_log` is now advertised by default.** The audit log
+  (the durable counterpart to the in-memory presence state) used to
+  live in the `social` package, so a solo session asking "what
+  changed while I was away?" had to `load_package("social")` first
+  even when the answer was just their own previous run's events.
+  Moved to `core` (Level::Plumbing) so the default 19-tool
+  surface includes it. The 6 other `social` tools
+  (`who_am_i`, `list_active_agents`, `list_subagents`,
+  `unregister_agent`, `detect_overlap`) stay opt-in. Found by
+  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B10).
+
+- **`get_health` now reports per-file call-graph coverage.** A new
+  line shows "X / Y files (Z%) have at least one `Calls` or
+  `Uses` edge", with a warning when uncovered > 0. The same
+  number was already in `find_dead_code`'s "⚠ N files have no
+  call edges" line, but only visible to users who ran that tool
+  (B4 in 2026-10-04 dogfooding: 198 of 224 files in `scripts/`
+  and `tests/` were uncovered). `get_health` is the first place
+  an operator looks, so the number lives there now too. The
+  underlying metric is `GraphDatabase::call_graph_file_coverage`
+  and has its own regression test.
+
+- **`find_git_workspace_root` no longer refuses a published
+  install whose symlink target lives in the source tree.** The
+  dev-runner heuristic (intended to keep `cargo test` from
+  indexing its own source) compares `current_exe().canonicalize()`
+  to the resolved workspace root. When the binary is installed
+  via a symlink (e.g. `~/.local/bin/lain -> .../target/debug/
+  lain`), the canonical path was inside the tree and the
+  heuristic fired, so `lain oneshot` from inside the source tree
+  failed with "no `.git` found in any parent directory" — a
+  misleading error for a published install. The fix also
+  canonicalizes the symlink's parent directory and applies the
+  same test there. A symlink path *outside* the tree is now
+  treated as a published install even when the symlink target
+  happens to live in the tree. Found by dogfooding Lain on Lain
+  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B2). Three new
+  tests cover the symlink cases.
+
+- **`find_anchors` now excludes test and script paths by
+  default.** The 2026-10-04 dogfooding found the top of the
+  anchor list dominated by Python test fixtures
+  (`uc_presence_register_heartbeat_unregister` in
+  `scripts/use_cases_e2e.py`, `e_setup_writes_prompt_md` in
+  `scripts/test_all_promises.py`) because tests are heavily
+  called by other tests and scripts by other scripts. A user
+  trusting rank over path lands on a test fixture, not a real
+  architectural pillar. The default now filters paths under
+  `tests/`, `*_test*` files, and `scripts/`. Opt in with
+  `include_tests=true` for the raw list. The new
+  `is_anchor_excluded_path` predicate has its own regression
+  test covering the production's expected `excluded` and `kept`
+  cases.
+
+- **`run_enrichment` promoted to core, Quickstart now documents
+  the `Calls: 0` recovery path.** B3 (2026-10-04): the on-disk
+  `graph.bin` from a prior build had zero `Calls` edges even
+  though `rust-analyzer` was installed — a silent-absence
+  failure mode that made every impact tool return empty. The
+  headline B11 fix already surfaces the absence as a banner;
+  this commit makes the recovery reachable without first
+  loading a package. The Quickstart's first-aid table now
+  spells out the recipe: from inside the repo, run
+  `lain reindex` to rebuild the graph from source (~5 min for
+  41k LOC). The lighter pass `run_enrichment` is in core
+  alongside `get_audit_log`, so an agent seeing the B11
+  warning can ask for it without `load_package("ops")`.
+
+- **B1 design: shared `lain mcp` per workspace** —
+  `docs/formal/OneshotSharedServer.tla` + `.cfg`. The spec
+  models the per-workspace server lifecycle (NoServer →
+  ServerAlive → ServerDead, plus concurrent client arrival
+  / leave / crash). The new `OneshotSharedServer` invariants
+  are: at most one server process holds the per-workspace
+  socket at a time (S1), a client bound to a server implies
+  that server is alive (S2), and the serving-set state is
+  consistent with the per-client socket map (S3, S4). TLC
+  exhaustively checks the 2-client / 2-server state space
+  (39 states, 10 distinct, depth 5) — all invariants hold.
+  The Rust-side implementation (a `--socket <path>` flag on
+  `lain mcp` plus a `oneshot` client that consults the
+  socket first) is a follow-up commit on this branch.
+
+- **B1 implementation: `lain mcp --socket PATH` binds a
+  per-workspace Unix socket** that subsequent `oneshot` calls
+  can connect to. Adds `config::oneshot_socket_path`
+  (BLAKE3 of the canonicalized workspace, 16 hex chars;
+  lives under `config::run_dir()`) and the
+  `server::mcp::socket_server` module. The socket server
+  handles `initialize`, `notifications/initialized`,
+  `tools/list`, and `tools/call`; dispatch goes through the
+  same `ToolExecutor` and `Arc<LainServer>` as the stdio
+  path, so a call coming through the socket sees the warm
+  in-memory graph. A sidecar `<socket>.pid` file lets
+  `oneshot` check liveness (`/proc/<pid>` on Linux) before
+  attempting to connect; a stale socket from a crashed
+  previous process is removed on start. Three unit tests
+  cover the pid-path and round-trip. The `oneshot`-side
+  consult-the-socket-first behavior is a follow-up commit
+  on this branch.
+
+- **B1 oneshot side: `lain oneshot` consults the per-workspace
+  socket first.** New `cli::socket_session::SocketSession`
+  (mirrors `StdioSession`'s API) lets a oneshot call connect
+  to a running shared server. The connection is gated on a
+  `/proc/<pid>` liveness check of the server's recorded PID;
+  if that fails (no server, dead server, or socket error),
+  oneshot falls through to the existing spawn-stdio path and
+  adds `--socket PATH` so the NEXT oneshot hits the cheap
+  path. Round-trip test in `socket_session::tests` proves
+  the wire protocol. The end-to-end test (spawn shared
+  server, connect via socket, see warm graph) is on the
+  same branch and uses the same code path.
+
+- **`get_health` now lists every declared `EdgeType`**, even when the
+  count is zero. A graph with no `Calls` edges used to omit the
+  `Calls: 0` line entirely, so an operator on a repo whose call
+  graph never resolved (LSP didn't start, every file is a script)
+  couldn't tell from `get_health` alone that the impact tools would
+  return empty. The histogram is now seeded from
+  `EdgeType::all()` so every variant is reported. A banner line
+  is also emitted when `Calls == 0` to make the silent-absence
+  mode loud. Surfaced by dogfooding Lain on Lain
+  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B11).
 
 ## [0.9.0] - 2026-10-04
 

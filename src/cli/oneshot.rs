@@ -13,8 +13,10 @@
 //! current directory's graph.
 //!
 //! The server process is killed after a configurable timeout
-//! (default 60s, override with `LAIN_ONESHOT_TIMEOUT=<seconds>`)
-//! because `lain mcp`'s stdio loop doesn't exit on its own.
+//! (default 600s, override with `LAIN_ONESHOT_TIMEOUT=<seconds>`)
+//! because `lain mcp`'s stdio loop doesn't exit on its own. The
+//! 600s default matches `LAIN_REINDEX_TIMEOUT` so a cold reindex
+//! on a non-trivial repo doesn't time out silently.
 //!
 //! Two protocol details matter here, both learned from live hangs:
 //!
@@ -36,12 +38,69 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
 
 /// JSON-RPC id of the `initialize` request.
 const ID_INITIALIZE: i64 = 1;
 /// JSON-RPC id of the first `tools/call` request; a retry (see the
 /// warming-up handling below) increments from here.
 const ID_CALL: i64 = 2;
+
+/// Connect to a live shared `lain mcp` on `socket_path`, if one is serving.
+/// Liveness is whether the socket accepts a connection: a PID file is wrong
+/// after PID reuse, and the old `/proc` check made this path Linux-only.
+#[cfg(unix)]
+fn connect_shared(
+    socket_path: &std::path::Path,
+) -> Option<crate::cli::socket_session::SocketSession> {
+    match crate::cli::socket_session::connect(socket_path) {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    }
+}
+
+/// Start a detached daemon-mode `lain mcp` for `workspace` and wait until its
+/// socket accepts connections. The daemon outlives this process (own process
+/// group, no stdio) and exits by itself after an idle window, so the NEXT
+/// one-shot connects to the warm graph instead of cold-starting. Returns
+/// `None` if the daemon exits early or does not come up within `wait`; the
+/// caller then falls back to a private stdio server.
+#[cfg(unix)]
+fn start_shared_daemon(
+    workspace: &Path,
+    socket_path: &std::path::Path,
+    wait: Duration,
+) -> Option<crate::cli::socket_session::SocketSession> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let exe = std::env::current_exe().ok()?;
+    let mut child = Command::new(exe)
+        .arg("mcp")
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--socket")
+        .arg(socket_path)
+        .arg("--daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < deadline {
+        if let Some(session) = connect_shared(socket_path) {
+            return Some(session);
+        }
+        // The daemon died (e.g. another one won the start race and this one
+        // exited, or startup failed): stop waiting, the caller falls back.
+        if let Ok(Some(_)) = child.try_wait() {
+            return connect_shared(socket_path);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
 
 /// Shut the session down and build an error carrying whatever it
 /// printed to stderr, for the three give-up points in the wait loop
@@ -57,6 +116,117 @@ fn give_up(session: &mut StdioSession, message: String) -> anyhow::Error {
             stderr_text
         }
     )
+}
+
+/// Run the call loop using an already-connected `SocketSession`
+/// against a shared `lain mcp`. Mirrors the stdio call loop
+/// but with the simpler `&self` session API. Returns `Ok(())`
+/// after printing the tool's result.
+#[cfg(unix)]
+fn run_call_loop_via_socket(
+    session: crate::cli::socket_session::SocketSession,
+    tool: &str,
+    args_obj: Value,
+    timeout_secs: u64,
+) -> Result<()> {
+    let init = initialize_request(ID_INITIALIZE, "lain-oneshot");
+    let call_id = ID_CALL;
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": call_id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args_obj}
+    });
+    session.send(&init)?;
+    session.send(&call)?;
+
+    let overall_deadline = Duration::from_secs(timeout_secs);
+    let started = std::time::Instant::now();
+    let mut next_id = call_id;
+    let tool_response = loop {
+        let remaining = overall_deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(anyhow!(
+                "no tools/call response from shared `lain mcp` within {timeout_secs}s"
+            ));
+        }
+        let response = match session.recv_timeout(remaining) {
+            Ok(v) => v,
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(anyhow!(
+                    "no tools/call response from shared `lain mcp` within {timeout_secs}s"
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!(
+                    "shared `lain mcp` exited without answering tools/call"
+                ));
+            }
+        };
+        if response.get("id").and_then(|i| i.as_i64()) == Some(ID_INITIALIZE) {
+            continue;
+        }
+        let gate_envelope = response
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let partial = response
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t.contains(crate::server::mcp::handler::INDEXING_NOTE_MARKER));
+        let is_warming_up = partial
+            || gate_envelope
+                .as_ref()
+                .and_then(|v| v.get("state"))
+                .and_then(|s| s.as_str())
+                == Some("warming_up");
+        if !is_warming_up {
+            break response;
+        }
+        let retry_after_ms = gate_envelope
+            .as_ref()
+            .and_then(|v| v.get("retry_after_ms"))
+            .and_then(|r| r.as_u64())
+            .unwrap_or(1000);
+        let remaining_after_retry = overall_deadline.saturating_sub(started.elapsed());
+        if remaining_after_retry.is_zero() {
+            continue;
+        }
+        std::thread::sleep(Duration::from_millis(retry_after_ms).min(remaining_after_retry));
+        next_id += 1;
+        let retry_call = json!({
+            "jsonrpc": "2.0",
+            "id": next_id,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": args_obj}
+        });
+        session.send(&retry_call)?;
+    };
+
+    if let Some(err) = tool_response.get("error") {
+        return Err(anyhow!("tool error: {err}"));
+    }
+    let raw_text = tool_response
+        .pointer("/result/content/0/text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let is_tool_error = tool_response
+        .pointer("/result/isError")
+        .and_then(|v| v.as_bool())
+        == Some(true);
+    match serde_json::from_str::<Value>(raw_text) {
+        Ok(v) => println!(
+            "{}",
+            serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw_text.into())
+        ),
+        Err(_) => println!("{}", raw_text),
+    }
+    if is_tool_error {
+        return Err(anyhow!(
+            "tool {tool} returned isError=true (see output above)"
+        ));
+    }
+    Ok(())
 }
 
 /// Run `lain mcp` as a subprocess, send one `tools/call`, print the
@@ -133,8 +303,44 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
     let timeout_secs: u64 = std::env::var("LAIN_ONESHOT_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
+        // 60s is too short for a cold reindex on a non-trivial repo
+        // (Lain-on-Lain in 2026-10-04: ~5 min for 41k LOC + LSP
+        // prewarm). The error "no tools/call response from `lain
+        // mcp` within 60s" doesn't tell the user whether the server
+        // is busy indexing or hung, so they have no signal that 60s
+        // is a too-small budget. 600s is the same default the
+        // reindex path already uses (`LAIN_REINDEX_TIMEOUT`).
+        // Override with `LAIN_ONESHOT_TIMEOUT=<seconds>` for tighter
+        // pipelines.
+        .unwrap_or(600);
 
+    // B1 (2026-10-04): share one warm `lain mcp` across one-shot calls. Use a
+    // live shared server if there is one; otherwise start a detached daemon
+    // (it outlives this process and exits when idle) and talk to that. Any
+    // failure, a platform without Unix sockets, a socket path too long for
+    // the platform, or `LAIN_ONESHOT_NO_SHARE=1` falls back to the private
+    // stdio server below.
+    #[cfg(unix)]
+    {
+        let socket_path = crate::config::oneshot_socket_path(&workspace);
+        let sharing = std::env::var_os("LAIN_ONESHOT_NO_SHARE").is_none()
+            && crate::server::mcp::socket_server::path_fits(&socket_path);
+        if sharing {
+            let session = connect_shared(&socket_path).or_else(|| {
+                start_shared_daemon(
+                    &workspace,
+                    &socket_path,
+                    Duration::from_secs(timeout_secs.min(60)),
+                )
+            });
+            if let Some(session) = session {
+                return run_call_loop_via_socket(session, tool, args_obj, timeout_secs);
+            }
+            tracing::warn!("shared `lain mcp` unavailable; using a private server");
+        }
+    }
+
+    // Private server for this call only (stdio; it dies with this process).
     let exe = std::env::current_exe().context("locate current lain binary")?;
 
     let mut command = Command::new(exe);

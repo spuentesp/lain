@@ -629,8 +629,11 @@ async fn spawn_hot_reload(config_path: &Path, server: &LainServer) {
     // every signal.
     let server_for_loop = server.clone_for_background();
     let bus_for_loop = Arc::clone(&bus);
+    // Subscribe BEFORE spawning: the file watcher and socket listener are
+    // already live, and a `request_reload()` with zero receivers is dropped
+    // (docs/formal/ReloadBus.tla, `NoLostReload`).
+    let mut sub = bus_for_loop.subscribe();
     tokio::spawn(async move {
-        let mut sub = bus_for_loop.subscribe();
         loop {
             match sub.try_recv() {
                 Ok(()) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {

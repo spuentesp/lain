@@ -1,0 +1,53 @@
+# cargo-mutants configuration (see `make mutants`).
+#
+# Mutants that cannot change observable behaviour in a normal build are
+# excluded with the reason, so a "missed" mutant always means a real test gap.
+exclude_re = [
+    # Test-only helper module inside lsp.rs.
+    'test_support::',
+    # Only compiled under `--cfg lain_loom`; checked by `make loom`, not here.
+    'src/sync\.rs.*Mutex<T>::lock',
+    # Rolling an existing-file collision on a UUID v4 nonce: unreachable.
+    'AlreadyExists.* in try_lock_once_guarded',
+    'ErrorKind::AlreadyExists with .* in try_lock_once_guarded',
+    'presence_lock\.rs:349.*in try_lock_once_guarded',
+    # remove_file racing a concurrent remover between the exists() check and the
+    # unlink: needs an interleaving a sequential test cannot produce.
+    'NotFound with (true|false) in release_lock_if_holder_matches',
+    'presence_lock\.rs:596.*release_lock_if_holder_matches',
+    # Equality at an exact timestamp boundary (`>` vs `>=` on a Duration compared
+    # against a wall-clock reading): not observable without controlling the clock.
+    'presence_lock\.rs.*replace > with >= in (try_lock_once_guarded|AcquireGuard::take|current_holder)',
+    # Retry bound off-by-one (`>=` vs `<`): the 2nd attempt is a re-scan with no
+    # observable difference but timing.
+    'presence_lock\.rs.*replace >= with < in try_lock$',
+    # The mtime read-back drift guard: `set_modified(now)` then reading it back
+    # differs by far less than the TTL, so `>` vs `>=`/`==` cannot be told apart.
+    'presence_lock\.rs:666.*in FileLock::refresh_lock',
+    # Directory fsync after creating the WAL: protects against power loss only,
+    # not observable from a test.
+    'wal\.rs.*replace sync_parent_dir with',
+    # `created` only decides whether to fsync the parent directory (power-loss
+    # durability) and Drop's final fsync: neither is observable without a crash.
+    'wal\.rs:18[79].*delete ! in WalWriter::append',
+    # read_exact on a regular file fails only with UnexpectedEof; another kind
+    # cannot be produced by a test.
+    'wal\.rs.*UnexpectedEof with true in replay_inner',
+    # `on_disk > good_end` vs `>=`: equal lengths make set_len a no-op.
+    # Same wall-clock boundary as the presence lock guard.
+    'socket_server\.rs:97.*replace > with >= in StartGuard::take',
+    # `recursive(true)` create of an existing directory is a no-op.
+    'socket_server\.rs:137.*replace && with \|\| in bind_exclusive',
+    # Only changes WHEN the idle check wakes (within the documented 1-2 windows).
+    'socket_server\.rs:235.*replace == with != in accept_loop',
+    # A file entry has agents iff it has symbols (a file-level claim records the
+    # `__file_level__` scope), so `&&` and `||` agree.
+    'presence\.rs.*replace && with \|\| in OccupancyMap::release',
+    # The retain predicate's `&&` vs `||`: rows `||` would additionally drop are
+    # dropped by their own to_drop entry in the same pass.
+    # `now < claimed_at` vs `<=`: equality of two wall-clock readings.
+    'presence\.rs:1690.*replace < with <= in OccupancyMap::expire_by_ttl',
+    'presence\.rs:17(35|41).*replace && with \|\| in OccupancyMap::expire_by_ttl',
+    'wal\.rs:355.*replace > with >= in replay_inner',
+    'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
+]
