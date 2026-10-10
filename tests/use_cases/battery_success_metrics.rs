@@ -175,9 +175,17 @@ async fn get_blast_radius_actually_lists_known_callers() {
     use lain::server::tools::handlers::impact::get_blast_radius;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let text = get_blast_radius(&db, &overlay, "helper_a", false, false, None)
-        .await
-        .unwrap();
+    let text = get_blast_radius(
+        &db,
+        &overlay,
+        std::path::Path::new("/"),
+        "helper_a",
+        false,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
     // Success metric: response names the two known callers.
     assert!(
         text.contains("real_hub"),
@@ -194,9 +202,17 @@ async fn get_blast_radius_response_lists_callers_not_callees() {
     use lain::server::tools::handlers::impact::get_blast_radius;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let text = get_blast_radius(&db, &overlay, "helper_a", false, false, None)
-        .await
-        .unwrap();
+    let text = get_blast_radius(
+        &db,
+        &overlay,
+        std::path::Path::new("/"),
+        "helper_a",
+        false,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
     // Success metric: response is non-empty AND names the callers
     // AND does NOT name callees or non-callers. An empty stub
     // fails the first two; a stub that lists everything fails
@@ -221,9 +237,17 @@ async fn get_blast_radius_for_unused_function_is_empty_or_zero() {
     use lain::server::tools::handlers::impact::get_blast_radius;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let text = get_blast_radius(&db, &overlay, "caller_zero", false, false, None)
-        .await
-        .unwrap();
+    let text = get_blast_radius(
+        &db,
+        &overlay,
+        std::path::Path::new("/"),
+        "caller_zero",
+        false,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
     // Success metric: 0 callers — surface as "0" or "no callers".
     // Success metric: the response uses the documented "(no
     // dependents found)" wording for unused symbols. Pin the exact

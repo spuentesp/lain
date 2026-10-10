@@ -87,7 +87,13 @@ fn chain_search_to_anchors_to_blast_to_trace() {
 
     // Step 3: get_blast_radius(real_hub) — confirm callers are listed.
     let blast_text = tokio_test_run(get_blast_radius(
-        &db, &overlay, "real_hub", false, false, None,
+        &db,
+        &overlay,
+        std::path::Path::new("/"),
+        "real_hub",
+        false,
+        false,
+        None,
     ))
     .expect("blast radius step");
     assert!(
