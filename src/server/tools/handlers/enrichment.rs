@@ -196,9 +196,22 @@ pub fn sync_state(
         let (new_commits, latest_commit): (Vec<CommitInfo>, String) = {
             let new_commits = if let Some(ref last) = last_commit {
                 match git_clone.get_new_commits_since(last) {
-                    Ok(c) => c,
+                    Ok(c) => {
+                        graph_clone.clear_cochange_failure();
+                        c
+                    }
                     Err(e) => {
-                        tracing::warn!("Failed to get new commits: {}, doing full refresh", e);
+                        // The old code warned "doing full refresh" and then
+                        // analyzed NOTHING — a silent negative (spuentesp/lain#302
+                        // family). Record the failure so coupling answers say
+                        // the analysis is unavailable instead of "no coupling".
+                        tracing::warn!(
+                            "Failed to get new commits: {e}; co-change sync skipped \
+                             and recorded as unavailable"
+                        );
+                        graph_clone.record_cochange_failure(&format!(
+                            "new-commit listing failed during sync: {e}"
+                        ));
                         Vec::new()
                     }
                 }
