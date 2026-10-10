@@ -746,7 +746,8 @@ mod tests {
         graph.upsert_node(target).unwrap();
 
         let overlay = VolatileOverlay::new();
-        let output = get_blast_radius(&graph, &overlay, ws, "handle_order", false, false, None)            .await
+        let output = get_blast_radius(&graph, &overlay, ws, "handle_order", false, false, None)
+            .await
             .unwrap();
 
         assert!(
@@ -788,6 +789,8 @@ mod tests {
         assert!(
             !output.contains("Overlay freshness") && !output.contains("stale"),
             "the bare overlay-age marker must be gone, got:\n{output}"
+        );
+    }
 
     /// #302: a failed co-change analysis must surface as
     /// "unavailable", never as the bare negative "No co-change
@@ -805,7 +808,8 @@ mod tests {
         graph.record_cochange_failure("git sensor wedged: no such file or directory");
 
         let overlay = VolatileOverlay::new();
-        let output = get_coupling_radar(&graph, &overlay, "handle_order", None)            .await
+        let output = get_coupling_radar(&graph, &overlay, "handle_order", None, true)
+            .await
             .unwrap();
 
         assert!(
@@ -836,7 +840,7 @@ mod tests {
         graph.clear_cochange_failure();
 
         let overlay = VolatileOverlay::new();
-        let output = get_coupling_radar(&graph, &overlay, "handle_order", None)
+        let output = get_coupling_radar(&graph, &overlay, "handle_order", None, true)
             .await
             .unwrap();
 
@@ -845,6 +849,7 @@ mod tests {
             format!(
                 "No co-change coupling found for 'handle_order' ({})",
                 target.path
-            )        );
+            )
+        );
     }
 }

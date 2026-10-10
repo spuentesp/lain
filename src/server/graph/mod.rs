@@ -376,7 +376,6 @@ pub struct GraphDatabase {
     /// matches the other shared fields so `GraphDatabase::clone` is
     /// still cheap and points at the same accumulator.
     pending_external_edges: Arc<parking_lot::Mutex<Vec<GraphEdge>>>,
-    pending_external_edges: Arc<parking_lot::Mutex<Vec<GraphEdge>>>,
     /// Count of in-flight mutating indexing passes (`build_core_memory`,
     /// `index_one_repo`, background enrichment). Readers that must not
     /// observe a torn mid-pass graph — the pass replaces nodes in
