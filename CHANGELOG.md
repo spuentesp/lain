@@ -3,6 +3,29 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Tool schemas and the runtime now tell the same story about repo
+  scoping in multi-repo mode (#293).** `sync_state` genuinely requires
+  a repo scope on a multi-repo federation (the resolver rejects an
+  unscoped call), but its input schema declared no `repo_id` at all, so
+  an agent that trusted `docs/tool-schema.json` hit a
+  `requires scoping: multiple repos` config error it could not have
+  anticipated. The schema now declares `repo_id` — optional when the
+  server hosts a single repository, with a description stating exactly
+  when it becomes required — and the canonical dump is regenerated.
+  `get_job_status` reads the process-global job registry keyed by
+  `job_id` and never needed a repo scope; it is now excluded from the
+  federation repo resolver, so schema-shaped calls (`{job_id}` only)
+  work on multi-repo servers instead of being rejected. `get_contract`
+  was already dispatched ahead of the resolver (the contract-tool
+  inventory landed in v0.9.0; the acceptance evidence came from the
+  v0.8.0 binary) — regression tests now pin that schema-shaped
+  `get_contract` and `get_job_status` calls are not rejected for repo
+  resolution.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

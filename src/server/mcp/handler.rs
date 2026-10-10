@@ -160,9 +160,13 @@ fn requires_repo_scope(tool_name: &str) -> bool {
     // `get_capabilities` aggregates every repository's readiness itself;
     // requiring a repo id for it broke the `next_action` the warming-up
     // response points at.
+    // `get_job_status` reads the process-global job registry keyed by
+    // `job_id` (a UUID) — the answer does not depend on any repository,
+    // its schema never declared `repo_id`, and the resolver used to
+    // reject schema-conformant calls on multi-repo servers (#293).
     !matches!(
         tool_name,
-        "get_agent_strategy" | "describe_schema" | "get_capabilities"
+        "get_agent_strategy" | "describe_schema" | "get_capabilities" | "get_job_status"
     )
 }
 
@@ -4054,6 +4058,74 @@ mod tests {
         // it ran against the empty placeholder and always returned 0.
         assert!(requires_repo_scope("query_graph"));
         assert!(!requires_repo_scope("get_capabilities"));
+    }
+
+    /// #293: `get_job_status` answers from the process-global job registry
+    /// keyed by `job_id` — nothing about the call depends on which
+    /// repository. The resolver used to reject schema-conformant calls
+    /// (`{job_id}` only; the schema never declared `repo_id`) on
+    /// multi-repo servers. The exclusion keeps it dispatchable and stops
+    /// `advertise_repo_scope` from injecting a meaningless `repo_id`.
+    #[test]
+    fn get_job_status_is_not_repo_scoped() {
+        assert!(!requires_repo_scope("get_job_status"));
+    }
+
+    /// #293 end-to-end shape: on a two-repo federation, calls that follow
+    /// the declared schemas must not be rejected by the repo resolver.
+    /// `get_job_status` answers from the job registry (excluded above);
+    /// `get_contract` rides the contract-tool inventory, which dispatches
+    /// ahead of the federation scoping block. Neither may surface the
+    /// "requires scoping" Config error for a schema-shaped call.
+    #[tokio::test]
+    async fn schema_shaped_calls_are_not_rejected_for_repo_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for name in ["repo-a", "repo-b"] {
+            let _src = add_test_repo(&fed, tmp.path(), name).await;
+        }
+        let executor = test_executor();
+        let status = HandlerStatus::in_process(2);
+
+        let mut args = Map::new();
+        args.insert("job_id".into(), serde_json::json!("job-123"));
+        let (text, _is_err, _) = dispatch_tool_call(
+            &executor,
+            Some(&fed),
+            None,
+            &status,
+            None,
+            None,
+            None,
+            "get_job_status",
+            args,
+        )
+        .await;
+        assert!(
+            !text.contains("requires scoping"),
+            "get_job_status must not demand repo scoping, got: {text}"
+        );
+        assert!(text.contains("Job not found"), "got: {text}");
+
+        let mut args = Map::new();
+        args.insert("key".into(), serde_json::json!("http:GET /x"));
+        args.insert("snapshot".into(), serde_json::json!("live"));
+        let (text, _is_err, _) = dispatch_tool_call(
+            &executor,
+            Some(&fed),
+            None,
+            &status,
+            None,
+            None,
+            None,
+            "get_contract",
+            args,
+        )
+        .await;
+        assert!(
+            !text.contains("requires scoping"),
+            "get_contract rides the contract inventory ahead of the resolver, got: {text}"
+        );
     }
 
     /// Default is `true`: every tool that isn't explicitly classified must

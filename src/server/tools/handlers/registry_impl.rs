@@ -658,7 +658,7 @@ impl ToolHandler for SyncStateHandler {
     tool_meta!(
         "sync_state",
         "Forces a re-sync of the graph with the current Git HEAD state",
-        r#"{"type":"object","properties":{},"required":[]}"#,
+        r#"{"type":"object","properties":{"repo_id":{"type":"string","description":"Repository to re-sync. Required when the server hosts more than one repository — the server rejects an unscoped call with a `requires scoping` config error naming the registered repo ids. Optional when the server hosts a single repository."}},"required":[]}"#,
         StructuralWrite
     );
     async fn call(
