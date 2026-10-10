@@ -8,6 +8,20 @@
 npm install -g @spuentesp/lain-mcp
 ```
 
+If npm fails with `EEXIST: file already exists` for `lain`, an
+unrelated `lain` file already sits in npm's global bin directory (often
+an older manual copy). Move or remove it, or install under a different
+prefix:
+
+```bash
+npm install -g --prefix ~/.local/lain-npm @spuentesp/lain-mcp
+```
+
+When npm install scripts are disabled (`--ignore-scripts`, a
+locked-down CI), the binary is not downloaded at install time. The
+first `lain` run fetches and verifies it, so that first run needs
+network access; once cached, it works offline.
+
 Or with npx (downloads binary on first run):
 ```bash
 npx @spuentesp/lain-mcp mcp
@@ -42,7 +56,18 @@ Set `LAIN_VERSION` to run a different published version. Set
 
 ## Usage
 
-After installation, add Lain to your MCP configuration:
+From a repository you want Lain to index, the real path is the setup
+command — it writes this package's MCP registration into your agent's
+configuration and verifies the connection:
+
+```bash
+lain setup --agent claude-code   # also: codex, cursor, vscode, continue, generic
+```
+
+`lain setup` registers the absolute path of the verified cache binary
+(see "What this installs"), not the bare `lain` launcher — MCP hosts
+rarely inherit the shell `PATH` that would resolve it. A hand-written
+entry that calls the launcher works too when `PATH` reaches it:
 
 ```json
 {

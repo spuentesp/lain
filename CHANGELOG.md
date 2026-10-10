@@ -3,6 +3,31 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Onboarding documentation gaps found by a no-rescue agent run**
+  (#297, #298; `FINDINGS-2026-10-10.md` §10–14):
+  - README and the npm package README now follow the real onboarding
+    path (install → `lain setup --agent <your agent>` → first query →
+    what got written where). The npm README previously showed only a
+    hand-written `mcpServers` JSON and never mentioned `lain setup`.
+  - What `lain setup` writes is documented: the absolute path of the
+    binary that ran setup — the verified cache binary for npm installs
+    (e.g. `~/.cache/lain/<version>/<target>/lain`), not bare `lain` —
+    plus each adapter's target file and the interactive vs
+    non-interactive defaults (`generic` agent, no language servers).
+  - `lain setup --help` states the absolute-path registration and the
+    interactive/non-interactive defaults.
+  - The npm `EEXIST` conflict (an unrelated `lain` in npm's global bin
+    directory) and the `--prefix` workaround are documented in both
+    READMEs. The error itself cannot carry the hint: npm fails while
+    linking bins, before any package lifecycle script runs.
+  - The lazy platform-binary download when npm install scripts are
+    disabled (first `lain` run fetches and needs network) is
+    documented.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added
