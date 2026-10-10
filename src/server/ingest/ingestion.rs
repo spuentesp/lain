@@ -742,9 +742,24 @@ impl LainServer {
             )
             .await
             {
-                Ok(v) => v,
+                Ok(v) => {
+                    // #302: a successful pass is what makes an empty
+                    // partner list mean "nothing co-changes" — clear
+                    // any failure a previous pass left behind.
+                    self.ingest().graph().clear_cochange_failure();
+                    v
+                }
                 Err(LainError::Cancelled) => return Err(LainError::Cancelled),
-                Err(_) => Vec::new(),
+                Err(e) => {
+                    // #302: don't swallow the failure into an empty
+                    // edge set — `get_coupling_radar` would then report
+                    // "No co-change coupling found", presenting the
+                    // error as a fact. Record it so the coupling
+                    // answers can say "unavailable" instead.
+                    warn!("co-change analysis failed ({e}); coupling answers will report it as unavailable");
+                    self.ingest().graph().record_cochange_failure(&e);
+                    Vec::new()
+                }
             }
         };
         let co_change_tuples: Vec<_> = co_change_pairs
@@ -1890,13 +1905,26 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     // pass" is honored both by skipping the call and by not
     // inserting the result.
     if !mode.skips_lsp() {
-        let co_change_pairs = git
-            .try_analyze_co_changes(
-                COCHANGE_COMMIT_WINDOW,
-                COCHANGE_MIN_PAIR_COUNT,
-                COCHANGE_MAX_COMMIT_FILES,
-            )
-            .unwrap_or_default();
+        let co_change_pairs = match git.try_analyze_co_changes(
+            COCHANGE_COMMIT_WINDOW,
+            COCHANGE_MIN_PAIR_COUNT,
+            COCHANGE_MAX_COMMIT_FILES,
+        ) {
+            Ok(pairs) => {
+                graph.clear_cochange_failure();
+                pairs
+            }
+            Err(e) => {
+                // #302: record, don't swallow — an empty edge set from
+                // a failed analysis must not read as "no coupling".
+                warn!(
+                    "[federation] {:?}: co-change analysis failed ({e}); coupling answers will report it as unavailable",
+                    path
+                );
+                graph.record_cochange_failure(&e);
+                Vec::new()
+            }
+        };
         let co_change_tuples: Vec<_> = co_change_pairs
             .into_iter()
             .map(|p| (p.file1, p.file2, p.co_change_count))
