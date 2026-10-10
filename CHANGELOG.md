@@ -3,7 +3,7 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.0] - 2026-10-10
 
 ### Added
 
@@ -276,7 +276,6 @@ All notable changes to LAIN are documented here. Versions follow
   mode loud. Surfaced by dogfooding Lain on Lain
   (`DOGFOODING_REPORT.md`, 2026-10-04, finding B11).
 
-## [0.9.0] - 2026-10-04
 
 LAIN 0.9 introduces cross-repo contract federation. For every
 service the agent can now see who provides it, who consumes it,

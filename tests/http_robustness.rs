@@ -147,6 +147,8 @@ fn alive_and_healthy(s: &mut Server) {
     let r = request(&s.host, health(&s.host).as_bytes());
     assert!(
         matches!(r, Some((200, _))),
+        // This robustness test deliberately logs hostile input.
+        // lgtm[rust/log-injection]
         "/health no longer answers 200: {r:?}"
     );
 }
@@ -212,10 +214,14 @@ fn cross_origin_browser_requests_are_refused_before_any_tool_runs() {
             request(&s.host, raw.as_bytes()).expect("a refusal, not a silent close");
         assert!(
             (400..500).contains(&status),
+            // This robustness test deliberately logs hostile input.
+            // lgtm[rust/log-injection]
             "origin {origin}: expected a 4xx refusal, got {status}: {resp}"
         );
         assert!(
             !resp.contains("\"tools\"") && !resp.contains("nodes"),
+            // This robustness test deliberately logs hostile input.
+            // lgtm[rust/log-injection]
             "origin {origin}: a tool ran: {resp}"
         );
     }
@@ -227,6 +233,8 @@ fn cross_origin_browser_requests_are_refused_before_any_tool_runs() {
     if let Some((status, resp)) = request(&s.host, raw.as_bytes()) {
         assert!(
             (400..500).contains(&status),
+            // This robustness test deliberately logs hostile input.
+            // lgtm[rust/log-injection]
             "rebinding Host accepted: {status} {resp}"
         );
     }
@@ -243,6 +251,8 @@ fn a_same_origin_client_still_works_so_the_guard_is_not_a_blanket_refusal() {
         len = body.len()
     );
     let (status, resp) = request(&s.host, raw.as_bytes()).expect("response");
+    // This robustness test deliberately logs hostile input.
+    // lgtm[rust/log-injection]
     assert_eq!(status, 200, "{resp}");
     let v: serde_json::Value = serde_json::from_str(&resp).expect("json body");
     assert_eq!(v["id"], 7);
