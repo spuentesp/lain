@@ -3,6 +3,26 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Co-change analysis failures are visible instead of a false
+  "no coupling found" (#302).** `build_core_memory`, the federation
+  indexer, and background enrichment used to swallow a failed
+  `try_analyze_co_changes` into an empty edge set
+  (`unwrap_or_default()` / `Err(_) => Vec::new()`), and
+  `get_coupling_radar` then reported "No co-change coupling found" —
+  a silent negative presented as fact. The failure is now recorded on
+  the graph (`GraphDatabase::record_cochange_failure`, shared across
+  clones, cleared by a later successful pass and by `reset`) and
+  `get_coupling_radar` answers
+  "⚠ co-change analysis unavailable for '<symbol>' (<path>):
+  <error> — this is not evidence of no coupling." A successful pass
+  with no co-changes keeps the bare "No co-change coupling found"
+  wording. Recovery is automatic: the next successful analysis pass
+  clears the annotation.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

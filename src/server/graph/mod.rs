@@ -376,6 +376,18 @@ pub struct GraphDatabase {
     /// matches the other shared fields so `GraphDatabase::clone` is
     /// still cheap and points at the same accumulator.
     pending_external_edges: Arc<parking_lot::Mutex<Vec<GraphEdge>>>,
+    /// Why the most recent co-change analysis pass failed, when it did
+    /// (issue #302). An empty co-change edge set is ambiguous on its
+    /// own: it means "nothing co-changes" after a successful pass and
+    /// "unknown" after a failed one. The ingest pipeline records the
+    /// failure here instead of swallowing it into an empty edge set,
+    /// and `get_coupling_radar` reads it so a failed analysis is
+    /// reported as unavailable rather than as the false negative
+    /// "No co-change coupling found". In-memory only (not WAL-logged,
+    /// not persisted): it annotates the pass that just ran, not
+    /// durable graph state. Cleared by a later successful pass and by
+    /// [`Self::reset`].
+    cochange_failure: Arc<RwLock<Option<String>>>,
 }
 
 /// How current the graph is for one file.
@@ -477,6 +489,7 @@ impl GraphDatabase {
             // `insert_co_change_edges`.
             namespace: RepoNamespace::for_test(),
             pending_external_edges: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            cochange_failure: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -2152,6 +2165,26 @@ impl GraphDatabase {
         Ok(out)
     }
 
+    /// Record that the most recent co-change analysis failed (issue
+    /// #302), so readers can tell "unknown" apart from a genuine "no
+    /// co-changes". In-memory annotation; not persisted.
+    pub fn record_cochange_failure(&self, err: impl std::fmt::Display) {
+        *self.cochange_failure.write() = Some(err.to_string());
+    }
+
+    /// Forget any recorded co-change failure. Called when a co-change
+    /// pass completes successfully, so a fixed git repository stops
+    /// reporting the stale error.
+    pub fn clear_cochange_failure(&self) {
+        *self.cochange_failure.write() = None;
+    }
+
+    /// The recorded co-change analysis failure, if the most recent pass
+    /// failed. `None` means the last pass succeeded or none has run.
+    pub fn cochange_failure(&self) -> Option<String> {
+        self.cochange_failure.read().clone()
+    }
+
     pub fn get_last_commit(&self) -> Result<Option<String>, LainError> {
         Ok(self.last_commit.read().clone())
     }
@@ -2190,6 +2223,9 @@ impl GraphDatabase {
         self.path_index.clear();
         self.pending_external_edges.lock().clear();
         *self.last_commit.write() = None;
+        // A wiped graph will be rebuilt by a fresh analysis pass; a
+        // stale failure from before the reset must not outlive it.
+        self.clear_cochange_failure();
         Ok(())
     }
 
@@ -4405,6 +4441,60 @@ mod survivor_pin_tests {
         assert!(
             !g.has_references_from(&w_id),
             "a node with no outgoing edges has no references"
+        );
+    }
+}
+
+/// #302: the co-change failure annotation must survive clones (the tool
+/// context holds a clone taken at startup), be cleared by a later
+/// successful pass, and be forgotten by `reset` (which wipes the edges
+/// the next full build will regenerate).
+#[cfg(test)]
+mod cochange_failure_tests {
+    use super::*;
+
+    fn db(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    #[test]
+    fn failure_recorded_cleared_and_shared_across_clones() {
+        let g = db("lain_test_cochange_failure");
+        assert_eq!(g.cochange_failure(), None, "fresh graph has no failure");
+
+        g.record_cochange_failure("git sensor wedged");
+        assert_eq!(
+            g.cochange_failure().as_deref(),
+            Some("git sensor wedged"),
+            "recorded failure must be readable"
+        );
+
+        let clone = g.clone();
+        assert_eq!(
+            clone.cochange_failure().as_deref(),
+            Some("git sensor wedged"),
+            "clones share the annotation (tool context holds a clone)"
+        );
+
+        clone.clear_cochange_failure();
+        assert_eq!(
+            g.cochange_failure(),
+            None,
+            "a successful pass (clear) is visible from every handle"
+        );
+    }
+
+    #[test]
+    fn reset_forgets_a_stale_failure() {
+        let g = db("lain_test_cochange_failure_reset");
+        g.record_cochange_failure("git sensor wedged");
+        g.reset().unwrap();
+        assert_eq!(
+            g.cochange_failure(),
+            None,
+            "reset wipes edges and the stale failure with them"
         );
     }
 }

@@ -395,6 +395,16 @@ pub async fn get_coupling_radar(
     let partners = graph.get_co_change_partners(&node.path)?;
 
     if partners.is_empty() {
+        // #302: an empty partner list is ambiguous — "nothing
+        // co-changes" after a successful pass, "unknown" after a
+        // failed one. Never present the second as the first.
+        if let Some(failure) = graph.cochange_failure() {
+            return Ok(format!(
+                "⚠ co-change analysis unavailable for '{}' ({}): {failure} — \
+                 this is not evidence of no coupling.",
+                symbol, node.path
+            ));
+        }
         return Ok(format!(
             "No co-change coupling found for '{}' ({})",
             symbol, node.path
@@ -616,5 +626,66 @@ mod tests {
                 other.map(|s| s.chars().take(80).collect::<String>())
             ),
         }
+    }
+
+    /// #302: a failed co-change analysis must surface as
+    /// "unavailable", never as the bare negative "No co-change
+    /// coupling found" — the empty edge set from a swallowed error
+    /// used to be presented as fact.
+    #[tokio::test]
+    async fn coupling_radar_reports_analysis_failure_not_false_negative() {
+        let (_dir, graph) = temp_graph();
+        let ns = RepoNamespace::for_test();
+        let target = target_node("handle_order", &ns);
+        graph.upsert_node(target.clone()).unwrap();
+
+        // Injected failure, as the ingest pipeline records it after a
+        // `try_analyze_co_changes` error.
+        graph.record_cochange_failure("git sensor wedged: no such file or directory");
+
+        let overlay = VolatileOverlay::new();
+        let output = get_coupling_radar(&graph, &overlay, "handle_order", None)
+            .await
+            .unwrap();
+
+        assert!(
+            output.contains("co-change analysis unavailable"),
+            "expected the unavailable banner, got:\n{output}"
+        );
+        assert!(
+            output.contains("git sensor wedged: no such file or directory"),
+            "expected the recorded failure reason, got:\n{output}"
+        );
+        assert!(
+            !output.contains("No co-change coupling found"),
+            "a failed analysis must never read as a genuine empty, got:\n{output}"
+        );
+    }
+
+    /// #302: a successful pass with no co-changes keeps the bare
+    /// wording — the honest negative must not regress into a warning.
+    #[tokio::test]
+    async fn coupling_radar_genuine_empty_keeps_bare_wording() {
+        let (_dir, graph) = temp_graph();
+        let ns = RepoNamespace::for_test();
+        let target = target_node("handle_order", &ns);
+        graph.upsert_node(target.clone()).unwrap();
+
+        // No failure recorded (and an explicit clear for the case
+        // where an earlier failed pass was fixed by a successful one).
+        graph.clear_cochange_failure();
+
+        let overlay = VolatileOverlay::new();
+        let output = get_coupling_radar(&graph, &overlay, "handle_order", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output,
+            format!(
+                "No co-change coupling found for 'handle_order' ({})",
+                target.path
+            )
+        );
     }
 }

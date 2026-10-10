@@ -30,9 +30,16 @@ pub fn run_enrichment(
                 cochange_min_pair_count,
                 cochange_max_commit_files,
             ) {
-                Ok(pairs) => pairs,
+                Ok(pairs) => {
+                    graph_clone.clear_cochange_failure();
+                    pairs
+                }
                 Err(e) => {
+                    // #302: record the failure on the graph so
+                    // `get_coupling_radar` can report "analysis
+                    // unavailable" instead of a false "no coupling".
                     tracing::warn!("Co-change analysis failed: {}, skipping", e);
+                    graph_clone.record_cochange_failure(&e);
                     Vec::new()
                 }
             };
