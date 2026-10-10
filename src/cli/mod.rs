@@ -290,6 +290,18 @@ pub enum Commands {
     },
     /// Guided onboarding: detect the repository, optionally install the
     /// semantic model, configure one MCP client, and verify the result.
+    ///
+    /// The generated MCP entry runs the absolute path of the `lain`
+    /// binary that invoked this command — for npm installs that is the
+    /// verified platform binary in the user cache directory, not the
+    /// `lain` launcher on PATH — and setup verifies it with a real
+    /// `initialize` + `tools/list` round trip.
+    ///
+    /// Without `--agent`, a TTY asks which client to configure (Enter
+    /// picks Claude Code); non-interactive runs default to `generic`
+    /// (a project-level `.mcp.json`). Without `--lsp`, a TTY asks which
+    /// optional language servers to install (Enter installs none);
+    /// non-interactive runs install none.
     Setup {
         #[arg(long)]
         workspace: Option<PathBuf>,
