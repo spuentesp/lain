@@ -48,6 +48,10 @@ use crate::federation::contracts::snapshots::record::SnapshotRecord;
 use crate::federation::graph_backend::{GraphBackend, ImpactPath as GraphImpactPath, ImpactResult};
 use crate::federation::repo_id::GlobalId;
 use crate::schema::EdgeProvenance;
+use crate::server::claims::{
+    claim_from_diff_class, claims_from_coverage, claims_from_impact_paths, coverage_note,
+    missing_claim_for_node, render_claims_block, Claim,
+};
 use crate::server::mcp::handler::McpContext;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -358,6 +362,7 @@ async fn run_diff_contracts(
     }
 
     let min_class = min_impact.unwrap_or(Class::NoKnownImpact);
+    let mut claims: Vec<Claim> = Vec::new();
     let mut kept: Vec<Value> = Vec::new();
     let mut compatible_changes: u32 = 0;
     // A shared component (`$ref: Order`) fans one mutation out to
@@ -416,6 +421,7 @@ async fn run_diff_contracts(
             &head_label,
             started,
         )?;
+        claims.extend(claims_for_impact(&impact, &kind, head_fed.backend.as_ref()));
         kept.push(value);
     }
     kept.sort_by(|a, b| {
@@ -424,6 +430,13 @@ async fn run_diff_contracts(
         ka.cmp(&kb)
     });
 
+    // Known-unknowns from the coverage view: unresolved / ambiguous /
+    // unnormalized consumers become named `missing` claims, and
+    // `complete=false` attaches the exhaustiveness caveat — the block
+    // says "missing" instead of letting silence read as "no impact".
+    claims.extend(claims_from_coverage(&coverage));
+    let coverage_caveat = coverage_note(&coverage);
+
     let data = json!({
         "changes": kept,
         "compatible_changes": compatible_changes,
@@ -431,6 +444,7 @@ async fn run_diff_contracts(
     });
     let envelope = success_envelope(data.clone(), &head_label, true, started);
     let text = render_diff_contracts(&data);
+    let text = text + &render_claims_block(claims, coverage_caveat);
     Ok(outcome(envelope, &data, text))
 }
 
@@ -1655,6 +1669,55 @@ fn coverage_to_value(c: &DiffCoverage) -> Value {
     })
 }
 
+/// `## Claims` inputs for one evaluated change (§9.5/§9.6): every
+/// `affected` consumer, with its `repo` recovered through the
+/// `enclosing_sender` rule (the reader that consumes the response —
+/// `build_invoice` — not just the sending function `fetch_order`).
+/// Class `Verified` → `verified`, `NeedsInvestigation` →
+/// `needs-investigation` with its `Reason`, `NoKnownImpact` is not
+/// reported. A consumer-side change with no `affected` entry claims
+/// the consumer itself.
+fn claims_for_impact(impact: &Impact, kind: &ChangeKind, backend: &dyn GraphBackend) -> Vec<Claim> {
+    let mut out = Vec::new();
+    for a in &impact.affected {
+        let (file, symbol) = enclosing_sender(backend, &a.consumer.caller).unwrap_or_else(|| {
+            (
+                a.consumer.caller.path.clone(),
+                a.consumer.caller.name.clone(),
+            )
+        });
+        if let Some(claim) = claim_from_diff_class(
+            a.consumer.caller.repo.as_str(),
+            &file,
+            &symbol,
+            a.class,
+            Some(a.reason),
+        ) {
+            out.push(claim);
+        }
+    }
+    if out.is_empty() {
+        let consumer = match kind {
+            ChangeKind::ConsumerEndpointUnmatched { consumer }
+            | ChangeKind::ConsumerFieldUnmatched { consumer, .. }
+            | ChangeKind::ConsumerRebound { consumer, .. } => consumer,
+            _ => return out,
+        };
+        let (file, symbol) = enclosing_sender(backend, &consumer.caller)
+            .unwrap_or_else(|| (consumer.caller.path.clone(), consumer.caller.name.clone()));
+        if let Some(claim) = claim_from_diff_class(
+            consumer.caller.repo.as_str(),
+            &file,
+            &symbol,
+            impact.class,
+            impact.reason,
+        ) {
+            out.push(claim);
+        }
+    }
+    out
+}
+
 fn render_diff_contracts(data: &Value) -> String {
     let changes = data["changes"].as_array().cloned().unwrap_or_default();
     let compatible = data["compatible_changes"].as_u64().unwrap_or(0);
@@ -1963,7 +2026,43 @@ async fn run_trace_impact(
         started,
     );
     let text = render_trace_impact(&data);
+    let claims = trace_impact_claims(backend.as_ref(), &paths, &starts);
+    let text = text + &render_claims_block(claims.0, claims.1);
     Ok(outcome(envelope, &data, text))
+}
+
+/// The `## Claims` block for `trace_impact`: every node on an impact
+/// path is an affected place, classified by the weakest provenance
+/// along its chain (static → `verified`, heuristic/runtime/legacy →
+/// `needs-investigation` with the reason). When no path could be
+/// derived, say so with `missing` claims for the resolved seeds —
+/// never silence: an empty trace is not proof of no impact.
+fn trace_impact_claims(
+    backend: &dyn GraphBackend,
+    paths: &[GraphImpactPath],
+    starts: &[String],
+) -> (Vec<Claim>, Option<&'static str>) {
+    let mut claims = claims_from_impact_paths(paths, starts);
+    if !claims.is_empty() {
+        return (claims, None);
+    }
+    for s in starts {
+        if let Ok(Some(node)) = backend.get_node(s) {
+            if let Some(claim) = missing_claim_for_node(
+                &node,
+                "",
+                "no impact paths from this seed — absence is not proof of no impact",
+            ) {
+                claims.push(claim);
+            }
+        }
+    }
+    let note = if claims.is_empty() {
+        Some("no impact paths in this view — absence is not evidence of no impact")
+    } else {
+        None
+    };
+    (claims, note)
 }
 
 fn leaf_id(p: &GraphImpactPath) -> Option<&str> {

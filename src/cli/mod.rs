@@ -2,6 +2,7 @@ pub mod ask;
 pub mod dispatch;
 pub mod doctor;
 pub mod hooks;
+pub mod impact;
 pub mod init;
 pub mod io;
 pub mod mcp;
@@ -127,6 +128,32 @@ pub enum Commands {
         #[arg(long)]
         workspace: Option<PathBuf>,
         expression: String,
+    },
+    /// Derive machine-checkable impact claims for a symbol: who is
+    /// affected by changing it, classified by evidence. Prints lines
+    /// in the protocol format `tests/fixtures/contract_task` graders
+    /// parse:
+    ///
+    ///   AFFECTED: <repo>:<file>:<symbol>  EVIDENCE: <verified|needs-investigation|missing>
+    ///
+    /// `verified` = static-provenance chains (the `Binds`/`ReadsField`
+    /// grade, confidence 1.0); `needs-investigation` = heuristic /
+    /// runtime / provenance-less edges, with the reason named;
+    /// `missing` = known-unknowns (an empty blast radius, an edge from
+    /// a node the index cannot resolve) — said out loud instead of
+    /// dressed up as "no impact". Symbols with no edge to the seed
+    /// never appear. Reads `<workspace>/.lain/graph.bin` (walks up for
+    /// `.git` without `--workspace`), like `lain query`.
+    Impact {
+        /// Workspace root (default: walk up from cwd for `.git`).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// `claims` (default) prints the AFFECTED lines; `json` prints
+        /// the structured claims.
+        #[arg(long, default_value = "claims", value_parser = ["claims", "json"])]
+        format: String,
+        /// The symbol to assess (name, path, or node id).
+        symbol: String,
     },
     /// One-shot MCP query: boots a transient `lain mcp` server
     /// (stdin/stdout), sends a single `tools/call` for the named
