@@ -81,6 +81,22 @@ All notable changes to LAIN are documented here. Versions follow
   real graph edges / impact paths / coverage entries, so a
   similarly-named symbol with no edge to the seed cannot appear,
   and evidence is never upgraded along a chain.
+- **GitSensor differential test no longer flakes in CI (#295).**
+  `sensor_agrees_with_git_after_every_operation`'s `Added`-label
+  assertion ran `git diff --cached --diff-filter=D` without
+  `--no-renames`: whenever a staged deletion was content-identical
+  to a staged addition (the op generator writes same-shaped files
+  with only three possible contents), git's default rename
+  detection turned the `D` into an `R` and the filter dropped it,
+  so the assertion rejected the `INDEX_DELETED|WT_NEW` recreation
+  the sensor correctly labels `Added` (observed twice in ~9
+  full-battery CI rounds on 2026-10-10). The oracle now matches
+  the `git status --no-renames` used everywhere else in the test.
+  The proptest run is also pinned to a fixed `rng_seed`, and the
+  two CI-failing inputs are persisted in
+  `proptest-regressions/server/git_verification.txt`, so every
+  run replays the same op sequences and the verdict is
+  reproducible.
 
 ## [0.9.0] - 2026-10-10
 
