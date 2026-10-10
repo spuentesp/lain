@@ -1026,11 +1026,14 @@ impl LainServer {
             warn!("could not persist the graph ({e}); serving it from memory only");
         }
 
-        // Bump the overlay freshness so the indexer doesn't read as
-        // "stale" the moment the server comes up. The index path
-        // doesn't insert through the overlay (it writes the static
-        // graph), so without this touch every freshly-indexed server
-        // would start with `Overlay freshness: stale`.
+        // Record that a completed index pass is part of the overlay's
+        // timeline. The index path doesn't insert through the overlay
+        // (it writes the static graph), so without this the overlay's
+        // own age would claim "no activity ever" on a freshly-indexed
+        // server. The user-facing freshness marker no longer reads this
+        // age (spuentesp/lain#292: it warned on idle, not on real
+        // unindexed changes), but the touch keeps `last_update_age_secs`
+        // honest for diagnostics and tests.
         self.overlay().touch();
 
         let duration = scan_start.elapsed();

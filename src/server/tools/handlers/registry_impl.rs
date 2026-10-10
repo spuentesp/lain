@@ -393,6 +393,7 @@ impl ToolHandler for GetBlastRadiusHandler {
         let mut out = handlers::impact::get_blast_radius(
             &ctx.graph,
             &ctx.overlay,
+            &ctx.workspace,
             &symbol,
             include_coupling,
             include_weak_edges,

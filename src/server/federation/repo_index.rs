@@ -119,9 +119,10 @@ pub struct RepoIndex {
     /// the coarse health enum. Cleared on the next successful index.
     last_index_error: Arc<RwLock<Option<String>>>,
     /// Shared handle to the federation's `VolatileOverlay`. `index()`
-    /// touches it after a successful index pass so the `Overlay
-    /// freshness` banner doesn't read as "stale" the moment the
-    /// server comes up. Defaults to a fresh, unconnected overlay
+    /// touches it after a successful index pass so the overlay's own
+    /// age reflects "we just indexed" rather than "no edits ever"
+    /// (user-facing freshness no longer reads this age —
+    /// spuentesp/lain#292). Defaults to a fresh, unconnected overlay
     /// (tests); production wires the federation's overlay in via
     /// [`Self::set_overlay`] right after `add_repo`.
     server_overlay: parking_lot::Mutex<Arc<VolatileOverlay>>,
@@ -458,11 +459,10 @@ impl RepoIndex {
 
     /// Install the federation's shared `VolatileOverlay`. Called by
     /// [`crate::server::federation::federated_index::FederatedIndex::install_overlay`]
-    /// so a successful `index()` can touch the overlay and the
-    /// freshness banner stops reading as "stale" forever on a
-    /// freshly-indexed server. The Mutex<Arc> makes the swap atomic
-    /// w.r.t. concurrent `index()` calls (each one clones the Arc
-    /// inside the lock).
+    /// so a successful `index()` can touch the overlay and keep its
+    /// last-updated age honest on a freshly-indexed server. The
+    /// Mutex<Arc> makes the swap atomic w.r.t. concurrent `index()`
+    /// calls (each one clones the Arc inside the lock).
     pub fn set_overlay(&self, overlay: Arc<VolatileOverlay>) {
         *self.server_overlay.lock() = overlay;
     }

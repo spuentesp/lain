@@ -311,7 +311,7 @@ pub async fn assess_change(
         // built to prevent. Heuristic callers are tagged with `~`
         // and `[heuristic, conf=X.XX]` so the agent can tell them
         // apart from type-resolved calls.
-        graph, overlay, &symbol, true, true, ui_link,
+        graph, overlay, workspace, &symbol, true, true, ui_link,
     )
     .await?;
     let callsites =
@@ -702,7 +702,7 @@ fn count_bullets(section: &str) -> usize {
     // always zero and the risk verdict degenerated to `low` even
     // when callers existed. Match `- **` (the caller marker) AND
     // `  - ` (the indented depth marker); exclude header lines like
-    // `- leaf_helper (Function)` and `- Overlay freshness: live`
+    // `- leaf_helper (Function)` and `- Total transitively affected nodes: 5`
     // that aren't caller bullets.
     section
         .lines()

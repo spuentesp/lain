@@ -3,6 +3,25 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`get_blast_radius` no longer prints a bare `Overlay freshness:
+  stale`** (spuentesp/lain#292). That marker was derived solely from
+  how long the in-memory overlay had sat idle, so a fully-current
+  persisted graph (indexed commit == HEAD, symbols/call-graph ready)
+  still answered every blast-radius query with `stale` after a quiet
+  minute. Agents were misled: a real coding consumer had to reason
+  around the marker ("an age marker on the live-edit overlay, since
+  the persisted graph is current") and an acceptance run was marked
+  red on it. The freshness signal now means what it says — "this
+  answer may miss recent work": silent when the file backing the
+  answer is unchanged since its last scan, and the precise `⚠ <file>
+  was modified … after it was last indexed — this answer may be
+  missing recent changes` warning (the same wording as
+  `explain_symbol` / `get_call_sites`) when it isn't.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

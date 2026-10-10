@@ -79,6 +79,7 @@ fn is_heuristic_edge(t: &crate::schema::EdgeType) -> bool {
 pub async fn get_blast_radius(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
     symbol: &str,
     include_coupling: bool,
     include_weak_edges: bool,
@@ -87,20 +88,26 @@ pub async fn get_blast_radius(
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
 
-    // Overlay freshness indicator
-    let overlay_age = overlay.last_update_age_secs();
-    let freshness = if overlay_age < 5.0 {
-        format!("live ({:.1}s ago)", overlay_age)
-    } else if overlay_age < 60.0 {
-        format!("recent ({:.0}s ago)", overlay_age)
-    } else {
-        "stale".to_string()
-    };
-
     let mut output = crate::server::tools::utils::ambiguity_note(&node, &other_defs);
+    // The freshness signal must mean "this answer may miss recent work"
+    // (spuentesp/lain#292). The old `- Overlay freshness: live|recent|stale`
+    // ladder measured only how long the in-memory overlay had sat idle, so a
+    // quiet working tree printed "stale" while the persisted graph was fully
+    // current — an age marker agents reasonably read as "these answers may
+    // be wrong". An idle overlay is not a caveat; a file edited after its
+    // last scan is. Emit the same precise per-file warning the other handlers
+    // use (explain_symbol / get_call_sites), and say nothing when the file
+    // backing this answer is unchanged since it was indexed.
+    let file_freshness = graph.freshness(workspace, &node.path);
+    if let crate::graph::Freshness::Dirty { .. } = file_freshness {
+        if let Some(note) = file_freshness.note(&node.path) {
+            output.push_str(&note);
+            output.push('\n');
+        }
+    }
     output.push_str(&format!(
-        "Blast radius for '{}':\n- {} ({:?})\n- Overlay freshness: {}",
-        symbol, node.name, node.node_type, freshness
+        "Blast radius for '{}':\n- {} ({:?})",
+        symbol, node.name, node.node_type
     ));
 
     // Blast radius = BFS over INCOMING edges (who depends on this symbol)
@@ -516,9 +523,17 @@ mod tests {
         graph.insert_edges_batch(&[edge]).unwrap();
 
         let overlay = VolatileOverlay::new();
-        let output = get_blast_radius(&graph, &overlay, "handle_order", false, true, None)
-            .await
-            .unwrap();
+        let output = get_blast_radius(
+            &graph,
+            &overlay,
+            dir.path(),
+            "handle_order",
+            false,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
             output.contains("heuristic") || output.contains("[heuristic"),
@@ -573,9 +588,17 @@ mod tests {
             .unwrap();
 
         let overlay = VolatileOverlay::new();
-        let output = get_blast_radius(&graph, &overlay, "handle_order", false, false, None)
-            .await
-            .unwrap();
+        let output = get_blast_radius(
+            &graph,
+            &overlay,
+            dir.path(),
+            "handle_order",
+            false,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
             !output.contains("[heuristic"),
@@ -598,10 +621,10 @@ mod tests {
     #[tokio::test]
     async fn blast_radius_on_empty_graph_returns_not_found() {
         let (dir, graph) = temp_graph();
-        let _ = dir; // graph dropped at end of test
         let overlay = VolatileOverlay::new();
 
-        let result = get_blast_radius(&graph, &overlay, "anything", false, false, None).await;
+        let result =
+            get_blast_radius(&graph, &overlay, dir.path(), "anything", false, false, None).await;
 
         match result {
             Err(LainError::NotFound(msg)) => {
@@ -616,5 +639,73 @@ mod tests {
                 other.map(|s| s.chars().take(80).collect::<String>())
             ),
         }
+    }
+
+    /// spuentesp/lain#292: when the file backing the answer is unchanged
+    /// since its last scan, `get_blast_radius` must print no freshness
+    /// marker at all. The old ladder derived "live/recent/stale" from the
+    /// in-memory overlay's idle age, so a fully-current persisted graph
+    /// still answered with "stale" after a quiet minute — an age marker
+    /// agents read as "these answers may be wrong". Silence on a current
+    /// graph is the honest signal.
+    #[tokio::test]
+    async fn blast_radius_is_silent_when_the_file_is_current() {
+        let (dir, graph) = temp_graph();
+        let ws = dir.path();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/api.py"), "def handle_order():\n    pass\n").unwrap();
+
+        let ns = RepoNamespace::for_test();
+        let mut target = target_node("handle_order", &ns);
+        // Scanned "in the future" relative to the file's mtime, so the
+        // file is provably not newer than its last scan.
+        target.last_lsp_sync = Some(crate::server::time::now_unix() + 5);
+        graph.upsert_node(target).unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let output = get_blast_radius(&graph, &overlay, ws, "handle_order", false, false, None)
+            .await
+            .unwrap();
+
+        assert!(
+            !output.contains("freshness") && !output.contains("stale"),
+            "a current graph must get no freshness marker, got:\n{output}"
+        );
+    }
+
+    /// spuentesp/lain#292 contract, the other half: when the file really
+    /// was modified after its last scan, the marker stays — in the precise
+    /// per-file wording shared with explain_symbol / get_call_sites
+    /// ("this answer may be missing recent changes"), never a bare "stale".
+    #[tokio::test]
+    async fn blast_radius_warns_precisely_when_the_file_changed_after_scan() {
+        let (dir, graph) = temp_graph();
+        let ws = dir.path();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/api.py"), "def handle_order():\n    pass\n").unwrap();
+
+        let ns = RepoNamespace::for_test();
+        let mut target = target_node("handle_order", &ns);
+        // Last scanned two minutes before the file's (now) mtime.
+        target.last_lsp_sync = Some(crate::server::time::now_unix() - 120);
+        graph.upsert_node(target).unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let output = get_blast_radius(&graph, &overlay, ws, "handle_order", false, false, None)
+            .await
+            .unwrap();
+
+        assert!(
+            output.contains("was modified") && output.contains("after it was last indexed"),
+            "expected the precise modified-since-index warning, got:\n{output}"
+        );
+        assert!(
+            output.contains("src/api.py"),
+            "the warning must name the file, got:\n{output}"
+        );
+        assert!(
+            !output.contains("Overlay freshness") && !output.contains("stale"),
+            "the bare overlay-age marker must be gone, got:\n{output}"
+        );
     }
 }
