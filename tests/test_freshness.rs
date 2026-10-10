@@ -142,7 +142,14 @@ async fn freshness_reflects_the_last_update_not_construction() {
     .await
     .unwrap();
     assert!(
-        out.contains("live") || out.contains("recent"),
-        "a just-touched overlay reports live/recent: {out}"
+        out.contains("compute"),
+        "the answer should name the queried symbol: {out}"
+    );
+    // New contract (#292): blast radius is silent about freshness unless
+    // the file backing the answer really changed after its last scan. A
+    // just-touched overlay over unchanged files must NOT warn.
+    assert!(
+        !out.contains("after it was last indexed"),
+        "a just-touched overlay with unchanged files must not warn: {out}"
     );
 }
