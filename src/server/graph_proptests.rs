@@ -200,6 +200,10 @@ proptest! {
                 .block_on(get_blast_radius(
                     &graph,
                     &overlay,
+                    // Node paths are absolute (`/proppath_*/f.rs`) and don't
+                    // exist on disk, so the freshness check reads them as
+                    // current and adds no warning to the asserted output.
+                    std::path::Path::new("/"),
                     &node.id,
                     false,
                     false,

@@ -159,6 +159,36 @@ print(('__TOOL_ERROR__ ' if r.get('isError') else '')+t)
 }
 
 http_code() { curl -s -o /dev/null -w '%{http_code}' -m 20 "$1"; }
+
+# retry_call <tool> <json-args> <torn-pattern> [attempts] [sleep-secs]
+# Re-issue a tool call while its answer matches a known transient
+# "torn graph" signature, then return the last answer either way.
+#
+# Why this exists (spuentesp/lain#296): a watcher-driven reindex
+# replaces the live graph in place — the node swap lands first, the
+# anchor scores and git co-change edges are restored only at the end
+# of the pass — so a call landing mid-pass sees an unscored graph:
+# find_anchors ranks anchors alphabetically and get_coupling_radar
+# reports "No co-change coupling found" for a pair that exists. The
+# product now waits an in-flight pass out before answering (bounded,
+# with a `degraded: indexing in progress` banner when the budget
+# expires); this retry covers a pass that outlives that budget under
+# heavy machine load. The assertion afterwards is unchanged — the
+# exact same expected answer, never taken from a torn snapshot — so
+# a genuine regression still fails on every attempt.
+retry_call() {
+  local tool="$1" args="$2" torn="$3" attempts="${4:-5}" nap="${5:-2}" out="" i
+  for i in $(seq 1 "$attempts"); do
+    out=$(call "$tool" "$args")
+    if ! printf '%s' "$out" | grep -qE "$torn"; then
+      printf '%s' "$out"
+      return 0
+    fi
+    [ "$i" = "$attempts" ] && break
+    sleep "$nap"
+  done
+  printf '%s' "$out"
+}
 # `lain server` answers at once and indexes in the background; wait until
 # no repo in /health reports `"health":"indexing"`, as a client would.
 wait_indexed() {
@@ -410,7 +440,11 @@ check_absent  "find_dead_code excludes live helper_a" "helper_a"   "$DC"
 check_absent  "find_dead_code excludes the hub"       "orchestrate" "$DC"
 
 # The hub outranks the leaves: called by one, calls three, real body.
-AN=$(call find_anchors)
+# Retried on the torn-graph signatures only (see retry_call): a
+# mid-reindex snapshot has no anchor scores yet, and the list then
+# comes back alphabetically instead of by rank (spuentesp/lain#296).
+AN=$(retry_call find_anchors '' \
+      'degraded: indexing in progress|No anchors found in Merged Brain|^1\. .*score: N/A')
 TOP=$(printf '%s' "$AN" | sed -n 's/^1\. \([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' | head -1)
 check "find_anchors ranks the hub first" "orchestrate" "${TOP:-none}"
 
@@ -475,7 +509,11 @@ check_contains "describe_schema lists node types" "Function" "$DS"
 section "5. Git-backed views"
 
 # The fixture's second commit touches core.rs and helpers.rs together.
-CR=$(call get_coupling_radar '{"symbol":"src/core.rs"}')
+# Retried on the torn-graph signatures only (see retry_call): the
+# co-change edges are re-inserted at the end of each reindex pass, so
+# a mid-pass snapshot genuinely has none (spuentesp/lain#296).
+CR=$(retry_call get_coupling_radar '{"symbol":"src/core.rs"}' \
+      'degraded: indexing in progress|No co-change coupling found')
 check_contains "coupling radar sees the co-change" "helpers.rs" "$CR"
 
 CH=$(call get_commit_history '{"limit":10}')

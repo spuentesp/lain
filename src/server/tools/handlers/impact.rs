@@ -67,7 +67,7 @@ fn heuristic_min_confidence() -> f32 {
 /// static graph alone would miss. These are kept out of the main
 /// blast-radius list unless `include_weak_edges=true` or the
 /// per-edge confidence clears the env-var threshold.
-fn is_heuristic_edge(t: &crate::schema::EdgeType) -> bool {
+pub fn is_heuristic_edge(t: &crate::schema::EdgeType) -> bool {
     matches!(
         t,
         crate::schema::EdgeType::DynamicDispatch
@@ -79,6 +79,7 @@ fn is_heuristic_edge(t: &crate::schema::EdgeType) -> bool {
 pub async fn get_blast_radius(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
     symbol: &str,
     include_coupling: bool,
     include_weak_edges: bool,
@@ -87,20 +88,26 @@ pub async fn get_blast_radius(
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
 
-    // Overlay freshness indicator
-    let overlay_age = overlay.last_update_age_secs();
-    let freshness = if overlay_age < 5.0 {
-        format!("live ({:.1}s ago)", overlay_age)
-    } else if overlay_age < 60.0 {
-        format!("recent ({:.0}s ago)", overlay_age)
-    } else {
-        "stale".to_string()
-    };
-
     let mut output = crate::server::tools::utils::ambiguity_note(&node, &other_defs);
+    // The freshness signal must mean "this answer may miss recent work"
+    // (spuentesp/lain#292). The old `- Overlay freshness: live|recent|stale`
+    // ladder measured only how long the in-memory overlay had sat idle, so a
+    // quiet working tree printed "stale" while the persisted graph was fully
+    // current — an age marker agents reasonably read as "these answers may
+    // be wrong". An idle overlay is not a caveat; a file edited after its
+    // last scan is. Emit the same precise per-file warning the other handlers
+    // use (explain_symbol / get_call_sites), and say nothing when the file
+    // backing this answer is unchanged since it was indexed.
+    let file_freshness = graph.freshness(workspace, &node.path);
+    if let crate::graph::Freshness::Dirty { .. } = file_freshness {
+        if let Some(note) = file_freshness.note(&node.path) {
+            output.push_str(&note);
+            output.push('\n');
+        }
+    }
     output.push_str(&format!(
-        "Blast radius for '{}':\n- {} ({:?})\n- Overlay freshness: {}",
-        symbol, node.name, node.node_type, freshness
+        "Blast radius for '{}':\n- {} ({:?})",
+        symbol, node.name, node.node_type
     ));
 
     // Blast radius = BFS over INCOMING edges (who depends on this symbol)
@@ -389,20 +396,44 @@ pub async fn get_coupling_radar(
     overlay: &VolatileOverlay,
     symbol: &str,
     ui_sessions: crate::server::tools::UiLink<'_>,
+    quiesced: bool,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
+
+    // The co-change edges are re-mined and re-inserted by every
+    // indexing pass; a call landing between the node replace and the
+    // co-change insert used to get a confident "No co-change coupling
+    // found" for a pair that plainly exists (spuentesp/lain#296). The
+    // handler waits the pass out within reason; when the budget
+    // expires `quiesced` is false and this answer is labelled instead
+    // of asserting a negative in silence.
+    let degrade = if quiesced {
+        ""
+    } else {
+        crate::server::tools::utils::WRITE_PASS_DEGRADED_BANNER
+    };
 
     let partners = graph.get_co_change_partners(&node.path)?;
 
     if partners.is_empty() {
+        // #302: an empty partner list is ambiguous — "nothing
+        // co-changes" after a successful pass, "unknown" after a
+        // failed one. Never present the second as the first.
+        if let Some(failure) = graph.cochange_failure() {
+            return Ok(format!(
+                "⚠ co-change analysis unavailable for '{}' ({}): {failure} — \
+                 this is not evidence of no coupling.",
+                symbol, node.path
+            ));
+        }
         return Ok(format!(
-            "No co-change coupling found for '{}' ({})",
+            "{degrade}No co-change coupling found for '{}' ({})",
             symbol, node.path
         ));
     }
 
     let mut output = format!(
-        "Files that co-change with '{}' ({}) — top {} partners:\n{}",
+        "{degrade}Files that co-change with '{}' ({}) — top {} partners:\n{}",
         symbol,
         node.path,
         partners.len(),
@@ -470,6 +501,65 @@ mod tests {
         n
     }
 
+    /// spuentesp/lain#296: `get_coupling_radar` must label its answer
+    /// when a write pass is still running — the old behavior
+    /// presented the torn mid-pass view ("No co-change coupling
+    /// found") as fact. `quiesced=false` is what the handler passes
+    /// after its bounded wait expires.
+    #[tokio::test]
+    async fn coupling_radar_labels_answers_while_a_write_pass_runs() {
+        let (_dir, graph) = temp_graph();
+        let ns = RepoNamespace::for_test();
+        graph.upsert_node(file_node("src/core.rs", &ns)).unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let out = get_coupling_radar(&graph, &overlay, "src/core.rs", None, false)
+            .await
+            .unwrap();
+        assert!(
+            out.contains("degraded: indexing in progress"),
+            "a mid-pass answer must carry the degraded banner, got:\n{out}"
+        );
+        assert!(out.contains("No co-change coupling found"), "got:\n{out}");
+    }
+
+    /// And the other half: a quiesced graph with a real co-change
+    /// edge answers plainly, with no banner.
+    #[tokio::test]
+    async fn coupling_radar_is_silent_when_the_graph_is_quiesced() {
+        let (_dir, graph) = temp_graph();
+        let ns = RepoNamespace::for_test();
+        // File nodes must be minted with the basename as their name —
+        // that is what `insert_co_change_edges` derives when it mints
+        // the edge endpoint ids, and an id mismatch silently drops
+        // the edge (see the namespace test in `graph_tests.rs`).
+        let mut core_n = GraphNode::new(
+            NodeType::File,
+            "core.rs".to_string(),
+            "src/core.rs".to_string(),
+        );
+        core_n.id = GraphNode::generate_id(&NodeType::File, "src/core.rs", "core.rs", None, &ns);
+        graph.upsert_node(core_n).unwrap();
+        let mut helpers_n = GraphNode::new(
+            NodeType::File,
+            "helpers.rs".to_string(),
+            "src/helpers.rs".to_string(),
+        );
+        helpers_n.id =
+            GraphNode::generate_id(&NodeType::File, "src/helpers.rs", "helpers.rs", None, &ns);
+        graph.upsert_node(helpers_n).unwrap();
+        graph
+            .insert_co_change_edges(&[("src/core.rs".to_string(), "src/helpers.rs".to_string(), 2)])
+            .unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let out = get_coupling_radar(&graph, &overlay, "src/core.rs", None, true)
+            .await
+            .unwrap();
+        assert!(out.contains("helpers.rs"), "got:\n{out}");
+        assert!(!out.contains("degraded"), "got:\n{out}");
+    }
+
     #[tokio::test]
     async fn blast_radius_with_weak_edges_includes_heuristic_callers() {
         let (dir, graph) = temp_graph();
@@ -516,9 +606,17 @@ mod tests {
         graph.insert_edges_batch(&[edge]).unwrap();
 
         let overlay = VolatileOverlay::new();
-        let output = get_blast_radius(&graph, &overlay, "handle_order", false, true, None)
-            .await
-            .unwrap();
+        let output = get_blast_radius(
+            &graph,
+            &overlay,
+            dir.path(),
+            "handle_order",
+            false,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
             output.contains("heuristic") || output.contains("[heuristic"),
@@ -573,9 +671,17 @@ mod tests {
             .unwrap();
 
         let overlay = VolatileOverlay::new();
-        let output = get_blast_radius(&graph, &overlay, "handle_order", false, false, None)
-            .await
-            .unwrap();
+        let output = get_blast_radius(
+            &graph,
+            &overlay,
+            dir.path(),
+            "handle_order",
+            false,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
             !output.contains("[heuristic"),
@@ -598,10 +704,10 @@ mod tests {
     #[tokio::test]
     async fn blast_radius_on_empty_graph_returns_not_found() {
         let (dir, graph) = temp_graph();
-        let _ = dir; // graph dropped at end of test
         let overlay = VolatileOverlay::new();
 
-        let result = get_blast_radius(&graph, &overlay, "anything", false, false, None).await;
+        let result =
+            get_blast_radius(&graph, &overlay, dir.path(), "anything", false, false, None).await;
 
         match result {
             Err(LainError::NotFound(msg)) => {
@@ -616,5 +722,134 @@ mod tests {
                 other.map(|s| s.chars().take(80).collect::<String>())
             ),
         }
+    }
+
+    /// spuentesp/lain#292: when the file backing the answer is unchanged
+    /// since its last scan, `get_blast_radius` must print no freshness
+    /// marker at all. The old ladder derived "live/recent/stale" from the
+    /// in-memory overlay's idle age, so a fully-current persisted graph
+    /// still answered with "stale" after a quiet minute — an age marker
+    /// agents read as "these answers may be wrong". Silence on a current
+    /// graph is the honest signal.
+    #[tokio::test]
+    async fn blast_radius_is_silent_when_the_file_is_current() {
+        let (dir, graph) = temp_graph();
+        let ws = dir.path();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/api.py"), "def handle_order():\n    pass\n").unwrap();
+
+        let ns = RepoNamespace::for_test();
+        let mut target = target_node("handle_order", &ns);
+        // Scanned "in the future" relative to the file's mtime, so the
+        // file is provably not newer than its last scan.
+        target.last_lsp_sync = Some(crate::server::time::now_unix() + 5);
+        graph.upsert_node(target).unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let output = get_blast_radius(&graph, &overlay, ws, "handle_order", false, false, None)
+            .await
+            .unwrap();
+
+        assert!(
+            !output.contains("freshness") && !output.contains("stale"),
+            "a current graph must get no freshness marker, got:\n{output}"
+        );
+    }
+
+    /// spuentesp/lain#292 contract, the other half: when the file really
+    /// was modified after its last scan, the marker stays — in the precise
+    /// per-file wording shared with explain_symbol / get_call_sites
+    /// ("this answer may be missing recent changes"), never a bare "stale".
+    #[tokio::test]
+    async fn blast_radius_warns_precisely_when_the_file_changed_after_scan() {
+        let (dir, graph) = temp_graph();
+        let ws = dir.path();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/api.py"), "def handle_order():\n    pass\n").unwrap();
+
+        let ns = RepoNamespace::for_test();
+        let mut target = target_node("handle_order", &ns);
+        // Last scanned two minutes before the file's (now) mtime.
+        target.last_lsp_sync = Some(crate::server::time::now_unix() - 120);
+        graph.upsert_node(target).unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let output = get_blast_radius(&graph, &overlay, ws, "handle_order", false, false, None)
+            .await
+            .unwrap();
+
+        assert!(
+            output.contains("was modified") && output.contains("after it was last indexed"),
+            "expected the precise modified-since-index warning, got:\n{output}"
+        );
+        assert!(
+            output.contains("src/api.py"),
+            "the warning must name the file, got:\n{output}"
+        );
+        assert!(
+            !output.contains("Overlay freshness") && !output.contains("stale"),
+            "the bare overlay-age marker must be gone, got:\n{output}"
+        );
+    }
+
+    /// #302: a failed co-change analysis must surface as
+    /// "unavailable", never as the bare negative "No co-change
+    /// coupling found" — the empty edge set from a swallowed error
+    /// used to be presented as fact.
+    #[tokio::test]
+    async fn coupling_radar_reports_analysis_failure_not_false_negative() {
+        let (_dir, graph) = temp_graph();
+        let ns = RepoNamespace::for_test();
+        let target = target_node("handle_order", &ns);
+        graph.upsert_node(target.clone()).unwrap();
+
+        // Injected failure, as the ingest pipeline records it after a
+        // `try_analyze_co_changes` error.
+        graph.record_cochange_failure("git sensor wedged: no such file or directory");
+
+        let overlay = VolatileOverlay::new();
+        let output = get_coupling_radar(&graph, &overlay, "handle_order", None, true)
+            .await
+            .unwrap();
+
+        assert!(
+            output.contains("co-change analysis unavailable"),
+            "expected the unavailable banner, got:\n{output}"
+        );
+        assert!(
+            output.contains("git sensor wedged: no such file or directory"),
+            "expected the recorded failure reason, got:\n{output}"
+        );
+        assert!(
+            !output.contains("No co-change coupling found"),
+            "a failed analysis must never read as a genuine empty, got:\n{output}"
+        );
+    }
+
+    /// #302: a successful pass with no co-changes keeps the bare
+    /// wording — the honest negative must not regress into a warning.
+    #[tokio::test]
+    async fn coupling_radar_genuine_empty_keeps_bare_wording() {
+        let (_dir, graph) = temp_graph();
+        let ns = RepoNamespace::for_test();
+        let target = target_node("handle_order", &ns);
+        graph.upsert_node(target.clone()).unwrap();
+
+        // No failure recorded (and an explicit clear for the case
+        // where an earlier failed pass was fixed by a successful one).
+        graph.clear_cochange_failure();
+
+        let overlay = VolatileOverlay::new();
+        let output = get_coupling_radar(&graph, &overlay, "handle_order", None, true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output,
+            format!(
+                "No co-change coupling found for 'handle_order' ({})",
+                target.path
+            )
+        );
     }
 }

@@ -3,6 +3,143 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`get_blast_radius` no longer prints a bare `Overlay freshness:
+  stale`** (spuentesp/lain#292). That marker was derived solely from
+  how long the in-memory overlay had sat idle, so a fully-current
+  persisted graph (indexed commit == HEAD, symbols/call-graph ready)
+  still answered every blast-radius query with `stale` after a quiet
+  minute. Agents were misled: a real coding consumer had to reason
+  around the marker ("an age marker on the live-edit overlay, since
+  the persisted graph is current") and an acceptance run was marked
+  red on it. The freshness signal now means what it says — "this
+  answer may miss recent work": silent when the file backing the
+  answer is unchanged since its last scan, and the precise `⚠ <file>
+  was modified … after it was last indexed — this answer may be
+  missing recent changes` warning (the same wording as
+  `explain_symbol` / `get_call_sites`) when it isn't.
+- **Tool schemas and the runtime now tell the same story about repo
+  scoping in multi-repo mode (#293).** `sync_state` genuinely requires
+  a repo scope on a multi-repo federation (the resolver rejects an
+  unscoped call), but its input schema declared no `repo_id` at all, so
+  an agent that trusted `docs/tool-schema.json` hit a
+  `requires scoping: multiple repos` config error it could not have
+  anticipated. The schema now declares `repo_id` — optional when the
+  server hosts a single repository, with a description stating exactly
+  when it becomes required — and the canonical dump is regenerated.
+  `get_job_status` reads the process-global job registry keyed by
+  `job_id` and never needed a repo scope; it is now excluded from the
+  federation repo resolver, so schema-shaped calls (`{job_id}` only)
+  work on multi-repo servers instead of being rejected. `get_contract`
+  was already dispatched ahead of the resolver (the contract-tool
+  inventory landed in v0.9.0; the acceptance evidence came from the
+  v0.8.0 binary) — regression tests now pin that schema-shaped
+  `get_contract` and `get_job_status` calls are not rejected for repo
+  resolution.
+- **Onboarding documentation gaps found by a no-rescue agent run**
+  (#297, #298; `FINDINGS-2026-10-10.md` §10–14):
+  - README and the npm package README now follow the real onboarding
+    path (install → `lain setup --agent <your agent>` → first query →
+    what got written where). The npm README previously showed only a
+    hand-written `mcpServers` JSON and never mentioned `lain setup`.
+  - What `lain setup` writes is documented: the absolute path of the
+    binary that ran setup — the verified cache binary for npm installs
+    (e.g. `~/.cache/lain/<version>/<target>/lain`), not bare `lain` —
+    plus each adapter's target file and the interactive vs
+    non-interactive defaults (`generic` agent, no language servers).
+  - `lain setup --help` states the absolute-path registration and the
+    interactive/non-interactive defaults.
+  - The npm `EEXIST` conflict (an unrelated `lain` in npm's global bin
+    directory) and the `--prefix` workaround are documented in both
+    READMEs. The error itself cannot carry the hint: npm fails while
+    linking bins, before any package lifecycle script runs.
+  - The lazy platform-binary download when npm install scripts are
+    disabled (first `lain` run fetches and needs network) is
+    documented.
+### Added
+
+- **`lain impact --format claims <symbol>` — machine-checkable
+  impact claims (#294).** Agents analyse impact correctly in prose
+  but never emit the `AFFECTED:` line format the acceptance
+  graders parse (prompting failed 5/5), so Lain now produces the
+  lines itself for agents to copy. `lain impact` (and a `##
+  Claims` block appended to the `trace_impact` and `diff_contracts`
+  text output) prints one exact line per affected place:
+  `AFFECTED: <repo>:<file>:<symbol>  EVIDENCE: <verified|needs-investigation|missing>`.
+  Evidence maps to what the product already knows: static
+  provenance chains (`Binds`/`ReadsField` grade, confidence 1.0)
+  and diff impact class `Verified` → `verified`; heuristic
+  (detector + confidence named), runtime-observed, provenance-less
+  edges and diff class `NeedsInvestigation` → `needs-investigation`
+  with the reason; coverage known-unknowns (unresolved consumers,
+  `coverage.complete=false`) and empty blast radii → `missing`,
+  said out loud instead of dressed up as "no impact".
+  False-positive discipline is structural: claims derive only from
+  real graph edges / impact paths / coverage entries, so a
+  similarly-named symbol with no edge to the seed cannot appear,
+  and evidence is never upgraded along a chain.
+- **GitSensor differential test no longer flakes in CI (#295).**
+  `sensor_agrees_with_git_after_every_operation`'s `Added`-label
+  assertion ran `git diff --cached --diff-filter=D` without
+  `--no-renames`: whenever a staged deletion was content-identical
+  to a staged addition (the op generator writes same-shaped files
+  with only three possible contents), git's default rename
+  detection turned the `D` into an `R` and the filter dropped it,
+  so the assertion rejected the `INDEX_DELETED|WT_NEW` recreation
+  the sensor correctly labels `Added` (observed twice in ~9
+  full-battery CI rounds on 2026-10-10). The oracle now matches
+  the `git status --no-renames` used everywhere else in the test.
+  The proptest run is also pinned to a fixed `rng_seed`, and the
+  two CI-failing inputs are persisted in
+  `proptest-regressions/server/git_verification.txt`, so every
+  run replays the same op sequences and the verdict is
+  reproducible.
+- **Load-sensitive capability-suite flake (spuentesp/lain#296)** —
+  `find_anchors` and `get_coupling_radar` could give confidently
+  wrong answers when a call landed while a reindex pass was
+  rewriting the live graph. A pass replaces nodes in place and only
+  restores anchor scores and git co-change edges at the very end, so
+  mid-pass readers saw an unscored graph: anchors came back
+  ranked alphabetically (`entry`/`helper_a` instead of the hub)
+  and coupling radar claimed "No co-change coupling found" for a
+  pair that exists. Two root causes, both fixed:
+  - the federation watcher ran **one full in-place rebuild per
+    queued event**, so a write storm inside the checkout
+    (rust-analyzer's `cargo check` filling an unignored `target/`)
+    kept the graph in continuous teardown/rebuild for minutes while
+    per-repo health stayed `ready`; the receiver now coalesces the
+    queued backlog into one reindex per batch
+    (`RepoIndex::drain_queued_events`).
+  - readers had no way to know a pass was in flight.
+    `GraphDatabase::begin_write_pass` now marks every mutating pass
+    (`build_core_memory`, `index_one_repo`, background enrichment);
+    `find_anchors` and `get_coupling_radar` wait for the pass to
+    finish (bounded by `LAIN_WRITE_QUIESCED_WAIT_MS`, default 10s)
+    and, if the budget expires, prefix their answer with a stable
+    `⚠ [degraded: indexing in progress …]` banner instead of
+    presenting the torn view as fact. `scripts/demo.sh` retries the
+    two affected checks only on those known transient signatures;
+    the asserted invariants (hub ranked first, co-change visible)
+    are unchanged.
+- **Co-change analysis failures are visible instead of a false
+  "no coupling found" (#302).** `build_core_memory`, the federation
+  indexer, and background enrichment used to swallow a failed
+  `try_analyze_co_changes` into an empty edge set
+  (`unwrap_or_default()` / `Err(_) => Vec::new()`), and
+  `get_coupling_radar` then reported "No co-change coupling found" —
+  a silent negative presented as fact. The failure is now recorded on
+  the graph (`GraphDatabase::record_cochange_failure`, shared across
+  clones, cleared by a later successful pass and by `reset`) and
+  `get_coupling_radar` answers
+  "⚠ co-change analysis unavailable for '<symbol>' (<path>):
+  <error> — this is not evidence of no coupling." A successful pass
+  with no co-changes keeps the bare "No co-change coupling found"
+  wording. Recovery is automatic: the next successful analysis pass
+  clears the annotation.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

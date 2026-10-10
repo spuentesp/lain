@@ -611,7 +611,12 @@
   {
     "description": "Forces a re-sync of the graph with the current Git HEAD state",
     "inputSchema": {
-      "properties": {},
+      "properties": {
+        "repo_id": {
+          "description": "Repository to re-sync. Required when the server hosts more than one repository — the server rejects an unscoped call with a `requires scoping` config error naming the registered repo ids. Optional when the server hosts a single repository.",
+          "type": "string"
+        }
+      },
       "required": [],
       "type": "object"
     },

@@ -55,6 +55,12 @@ impl LainServer {
             info!("build_core_memory: cancelled before discovering commit");
             return Err(LainError::Cancelled);
         }
+        // Readers that must not see a torn mid-pass graph (anchor
+        // scores and co-change edges are only restored at the end of
+        // the pass) wait on this marker — spuentesp/lain#296. The
+        // guard covers every early return below; dropping it (or a
+        // panic) clears the slot.
+        let _write_pass = self.ingest().graph().begin_write_pass();
         let scan_start = std::time::Instant::now();
         // AGENT_UX_ROADMAP.md M4 follow-up: the server-owned
         // cancellation token observes every phase boundary, including
@@ -736,9 +742,24 @@ impl LainServer {
             )
             .await
             {
-                Ok(v) => v,
+                Ok(v) => {
+                    // #302: a successful pass is what makes an empty
+                    // partner list mean "nothing co-changes" — clear
+                    // any failure a previous pass left behind.
+                    self.ingest().graph().clear_cochange_failure();
+                    v
+                }
                 Err(LainError::Cancelled) => return Err(LainError::Cancelled),
-                Err(_) => Vec::new(),
+                Err(e) => {
+                    // #302: don't swallow the failure into an empty
+                    // edge set — `get_coupling_radar` would then report
+                    // "No co-change coupling found", presenting the
+                    // error as a fact. Record it so the coupling
+                    // answers can say "unavailable" instead.
+                    warn!("co-change analysis failed ({e}); coupling answers will report it as unavailable");
+                    self.ingest().graph().record_cochange_failure(&e);
+                    Vec::new()
+                }
             }
         };
         let co_change_tuples: Vec<_> = co_change_pairs
@@ -1026,11 +1047,14 @@ impl LainServer {
             warn!("could not persist the graph ({e}); serving it from memory only");
         }
 
-        // Bump the overlay freshness so the indexer doesn't read as
-        // "stale" the moment the server comes up. The index path
-        // doesn't insert through the overlay (it writes the static
-        // graph), so without this touch every freshly-indexed server
-        // would start with `Overlay freshness: stale`.
+        // Record that a completed index pass is part of the overlay's
+        // timeline. The index path doesn't insert through the overlay
+        // (it writes the static graph), so without this the overlay's
+        // own age would claim "no activity ever" on a freshly-indexed
+        // server. The user-facing freshness marker no longer reads this
+        // age (spuentesp/lain#292: it warned on idle, not on real
+        // unindexed changes), but the touch keeps `last_update_age_secs`
+        // honest for diagnostics and tests.
         self.overlay().touch();
 
         let duration = scan_start.elapsed();
@@ -1538,6 +1562,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     if cancel.is_cancelled() {
         return Err(LainError::Cancelled);
     }
+    // Same torn-window marker as `build_core_memory` (spuentesp/lain#296):
+    // this pass replaces nodes in place and restores anchor scores /
+    // co-change edges only at the end; readers wait on the guard.
+    let _write_pass = graph.begin_write_pass();
     let scan_start = std::time::Instant::now();
     // F2 — use the `try_*` variants so a wedged spawn_blocking thread
     // holding the parking_lot `GitSensor` mutex fails fast (the single-
@@ -1877,13 +1905,26 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     // pass" is honored both by skipping the call and by not
     // inserting the result.
     if !mode.skips_lsp() {
-        let co_change_pairs = git
-            .try_analyze_co_changes(
-                COCHANGE_COMMIT_WINDOW,
-                COCHANGE_MIN_PAIR_COUNT,
-                COCHANGE_MAX_COMMIT_FILES,
-            )
-            .unwrap_or_default();
+        let co_change_pairs = match git.try_analyze_co_changes(
+            COCHANGE_COMMIT_WINDOW,
+            COCHANGE_MIN_PAIR_COUNT,
+            COCHANGE_MAX_COMMIT_FILES,
+        ) {
+            Ok(pairs) => {
+                graph.clear_cochange_failure();
+                pairs
+            }
+            Err(e) => {
+                // #302: record, don't swallow — an empty edge set from
+                // a failed analysis must not read as "no coupling".
+                warn!(
+                    "[federation] {:?}: co-change analysis failed ({e}); coupling answers will report it as unavailable",
+                    path
+                );
+                graph.record_cochange_failure(&e);
+                Vec::new()
+            }
+        };
         let co_change_tuples: Vec<_> = co_change_pairs
             .into_iter()
             .map(|p| (p.file1, p.file2, p.co_change_count))
