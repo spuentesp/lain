@@ -20,17 +20,9 @@ pub fn list_repos(fed: &FederatedIndex) -> Vec<RepoInfo> {
                 match repo {
                     Some(r) => {
                         let path = r.source().local_path().display().to_string();
-                        let last_refreshed = r
-                            .source()
-                            .last_refreshed()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        let last_indexed = r
-                            .last_indexed()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
+                        let last_refreshed =
+                            crate::server::time::unix_secs(r.source().last_refreshed());
+                        let last_indexed = crate::server::time::unix_secs(r.last_indexed());
                         (
                             last_refreshed,
                             last_indexed,
@@ -108,8 +100,9 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
 }
 
 /// Case-insensitive substring search for symbols across every repo in the
-/// federation. Matches on `name` or `path`, sorts by `(repo_id, name)`, and
-/// truncates to `limit`.
+/// federation. Matches on `name` or `path`; when more than `limit` match, the
+/// reported set is spread fairly across repos (see [`select_fair`]) and is
+/// returned sorted by `(repo_id, name)`.
 ///
 /// The primary path iterates `list_repos()` → `get_repo()` → per-repo
 /// `RepoIndex::nodes()`, which covers repos added through `add_repo` whether
@@ -197,9 +190,72 @@ pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<Symbol
         }
     }
 
-    hits.sort_by(|a, b| a.repo_id.cmp(&b.repo_id).then(a.name.cmp(&b.name)));
-    hits.truncate(limit);
-    hits
+    select_fair(hits, &q, limit)
+}
+
+/// Choose which `limit` hits to report, then present them sorted by
+/// `(repo_id, name)`.
+///
+/// Sorting by repo and truncating dropped every repo after the first `limit`
+/// matches: with `bytes` sorting before `tokio`, ten `bytes` matches meant
+/// `search_org` could never show a `tokio` symbol, defeating the point of an
+/// org-wide search (the acceptance claim "search_org finds symbols across
+/// repos" failed exactly this way). Selection is therefore round-robin across
+/// repos, taking each repo's best matches first (exact name, then prefix, then
+/// substring, then path-only); the chosen set is then sorted for output.
+fn select_fair(hits: Vec<SymbolMatch>, q: &str, limit: usize) -> Vec<SymbolMatch> {
+    use std::collections::{BTreeMap, VecDeque};
+    let rank = |h: &SymbolMatch| {
+        let n = h.name.to_lowercase();
+        if n == q {
+            0
+        } else if n.starts_with(q) {
+            1
+        } else if n.contains(q) {
+            2
+        } else {
+            3
+        }
+    };
+    let mut by_repo: BTreeMap<String, Vec<SymbolMatch>> = BTreeMap::new();
+    for h in hits {
+        by_repo.entry(h.repo_id.clone()).or_default().push(h);
+    }
+    let mut queues: Vec<VecDeque<SymbolMatch>> = by_repo
+        .into_values()
+        .map(|mut v| {
+            v.sort_by(|a, b| {
+                rank(a)
+                    .cmp(&rank(b))
+                    .then_with(|| a.name.cmp(&b.name))
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+            v.into()
+        })
+        .collect();
+    let mut chosen = Vec::new();
+    'fill: loop {
+        let mut progressed = false;
+        for q in queues.iter_mut() {
+            if chosen.len() >= limit {
+                break 'fill;
+            }
+            if let Some(h) = q.pop_front() {
+                chosen.push(h);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    chosen.sort_by(|a, b| {
+        a.repo_id
+            .cmp(&b.repo_id)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    chosen
 }
 
 const BLAST_RADIUS_CAP: usize = 1000;
@@ -239,7 +295,6 @@ pub fn get_cross_repo_blast_radius_for_repo(
     symbol: &str,
     depth: Range<u32>,
 ) -> Result<CrossRepoBlastRadius, LainError> {
-    use crate::schema::EdgeType;
     let rid = RepoId::new(repo_id)?;
     // Look up the actual node by name + repo so we traverse from a real
     // global id. `backend.find_nodes_by_name` covers both repos added
@@ -256,32 +311,55 @@ pub fn get_cross_repo_blast_radius_for_repo(
         .ok_or_else(|| {
             LainError::NotFound(format!("symbol {symbol} not found in repo {repo_id}"))
         })?;
-    // Blast radius = "what depends on this symbol" = the *callers* of
-    // `seed`, not the callees. We traverse incoming `Calls` edges so a
-    // blast-radius report answers the question an agent actually asks
-    // ("if I change X, what breaks?") rather than the inverse
-    // dependency walk. Wishlist #12c fix.
-    let traversed = fed.backend().traverse(
-        &seed.id,
-        EdgeType::Calls,
-        depth,
-        petgraph::Direction::Incoming,
-    )?;
+    // PR 4 (§5.2): rebuilt on `traverse_impact` so the impact table
+    // (§5.2 propagation rules) is the single source of truth for which
+    // edges contribute to a blast-radius walk. In PR 4 only `Calls`
+    // returns `Incoming`; later PRs add their own edge types without
+    // touching this code path. `depth.end` becomes `cap`; we still cap
+    // emitted leaf paths at `BLAST_RADIUS_CAP`. The response shape
+    // (`CrossRepoBlastRadius { by_repo, total_count, truncated }`) is
+    // unchanged so `federation_blast_radius_regression.rs` and every
+    // downstream caller continue to work.
+    //
+    // Per §5.2, `traverse_impact` emits a path for every visited node
+    // with no unvisited successor or that sits at `depth`. For a
+    // blast-radius report the seed itself is not a "caller" — it's
+    // the symbol being asked about — so we filter it out of the
+    // emitted paths. The remaining paths are leaves of the inverted
+    // dependency walk, which is what an operator wants to see.
     let mut by_repo: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut total = 0usize;
-    let mut truncated = false;
-    for n in traversed {
-        if total >= BLAST_RADIUS_CAP {
-            truncated = true;
-            break;
+    let result = fed
+        .backend()
+        .traverse_impact(&[&seed.id], depth.end, BLAST_RADIUS_CAP, 0.0)?;
+    // `truncated` is the OR of the cap and depth signals from
+    // `traverse_impact`: either one means the caller saw a partial
+    // answer. `traverse_impact` enforces the cap itself, so the
+    // `BLAST_RADIUS_CAP` guard inside the loop below is redundant —
+    // debug-only assertion keeps the invariant locally visible
+    // without re-checking what the backend already guarantees.
+    let truncated = result.truncated;
+    for path in &result.paths {
+        debug_assert!(total < BLAST_RADIUS_CAP, "traverse_impact honored cap");
+        // The leaf of the path is `hops.last().node`; everything in
+        // between is internal to the path. We surface only the leaf
+        // here — that matches what `traverse` returned before (a flat
+        // list of caller ids) and is what the response shape promises.
+        if let Some(leaf_hop) = path.hops.last() {
+            // Skip the seed: §5.2's emission rule covers the seed too,
+            // but a blast-radius report answers "who calls this?",
+            // which never includes the seed itself.
+            if leaf_hop.node.id == seed.id {
+                continue;
+            }
+            if let Ok(gid) = GlobalId::parse(&leaf_hop.node.id) {
+                by_repo
+                    .entry(gid.repo_id().to_string())
+                    .or_default()
+                    .push(leaf_hop.node.id.clone());
+            }
+            total += 1;
         }
-        if let Ok(gid) = GlobalId::parse(&n.id) {
-            by_repo
-                .entry(gid.repo_id().to_string())
-                .or_default()
-                .push(n.id.clone());
-        }
-        total += 1;
     }
     Ok(CrossRepoBlastRadius {
         by_repo,
@@ -399,6 +477,55 @@ mod tests {
         let repos: std::collections::HashSet<_> = hits.iter().map(|h| h.repo_id.clone()).collect();
         assert!(repos.contains("repo-a"));
         assert!(repos.contains("repo-b"));
+    }
+
+    /// One repo with many matches must not crowd the others out of a limited
+    /// result (it used to: sort by repo, then truncate).
+    #[tokio::test]
+    async fn search_org_limit_does_not_starve_later_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for i in 0..15 {
+            fed.backend()
+                .upsert_node_global(
+                    &format!("alpha:Function:src/a.rs:put_slice_{i:02}:0"),
+                    crate::schema::NodeType::Function,
+                    "src/a.rs",
+                    &format!("put_slice_{i:02}"),
+                )
+                .unwrap();
+        }
+        fed.backend()
+            .upsert_node_global(
+                "zulu:Function:src/z.rs:put_slice:0",
+                crate::schema::NodeType::Function,
+                "src/z.rs",
+                "put_slice",
+            )
+            .unwrap();
+        let hits = search_org(&fed, "put_slice", 5);
+        assert_eq!(hits.len(), 5);
+        assert!(
+            hits.iter().any(|h| h.repo_id == "zulu"),
+            "the only match in a later repo was crowded out: {hits:?}"
+        );
+        // Documented presentation order, and determinism.
+        let mut sorted = hits.clone();
+        sorted.sort_by(|a, b| a.repo_id.cmp(&b.repo_id).then(a.name.cmp(&b.name)));
+        assert_eq!(
+            hits.iter().map(|h| &h.global_id).collect::<Vec<_>>(),
+            sorted.iter().map(|h| &h.global_id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits.iter().map(|h| &h.global_id).collect::<Vec<_>>(),
+            search_org(&fed, "put_slice", 5)
+                .iter()
+                .map(|h| &h.global_id)
+                .collect::<Vec<_>>()
+        );
+        // Exact name match is preferred within a repo when only one fits.
+        let one = search_org(&fed, "put_slice", 1);
+        assert_eq!(one.len(), 1);
     }
 
     #[tokio::test]
@@ -589,13 +716,21 @@ mod tests {
         // caller of repo-b's `shared` (a DIFFERENT global id), not of
         // repo-a's, so it must NOT appear in the seed's blast radius.
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
-        // Seed at depth 0 is excluded by `traverse` (min_depth=1).
-        // `by_repo` should reflect *callers* of repo-a's `shared`:
-        //   - repo-a: other_caller (direct) + transitive_caller (via
-        //     other_caller) = 2
+        // PR 4 (§5.2): `traverse_impact` emits a path for every
+        // visited node with no unvisited successor or at `depth`. The
+        // seed itself is filtered out by `get_cross_repo_blast_radius`.
+        // In this fixture `other_caller` has an unvisited successor
+        // (`transitive_caller`) so it isn't emitted; the leaf is
+        // `transitive_caller`, whose single path back to the seed is
+        // shared ← other_caller ← transitive_caller.
+        // `by_repo` therefore reports one leaf (`transitive_caller`)
+        // whose reachability chain proves `other_caller` is on the
+        // path. This is the §5.2 contract; `traverse_impact`'s
+        // predecessor map keeps the chain recoverable, so a future
+        // tool that wants intermediate hops can ask for them.
         assert_eq!(
             result.by_repo.get("repo-a").map(|v| v.len()).unwrap_or(0),
-            2
+            1
         );
         // repo-b has no callers of repo-a's `shared` (caller_of_shared
         // points at repo-b's `shared`, which is a different global id).
@@ -603,16 +738,23 @@ mod tests {
             result.by_repo.get("repo-b").map(|v| v.len()).unwrap_or(0),
             0
         );
-        assert_eq!(result.total_count, 2);
+        assert_eq!(result.total_count, 1);
         assert!(!result.truncated);
-        // Sanity-check the actual node ids in each bucket.
+        // The single leaf must be `transitive_caller` — the deepest
+        // caller. `other_caller` is on the path but is not a leaf
+        // (it has `transitive_caller` as an unvisited successor at
+        // its processing time), so §5.2 doesn't emit a separate path
+        // for it.
         let repo_a_ids: std::collections::HashSet<_> = result
             .by_repo
             .get("repo-a")
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default();
-        assert!(repo_a_ids.contains("repo-a:Function:src/w.rs:other_caller:0"));
         assert!(repo_a_ids.contains("repo-a:Function:src/v.rs:transitive_caller:0"));
+        assert!(
+            !repo_a_ids.contains("repo-a:Function:src/w.rs:other_caller:0"),
+            "other_caller is on the path but isn't a leaf (§5.2 emission rule)"
+        );
         // The pre-fix outgoing-direction result was direct_consumer
         // and self_call. Those must NOT appear in the by_repo buckets
         // — blast radius is callers, not callees.

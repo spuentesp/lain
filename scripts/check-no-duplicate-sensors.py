@@ -44,8 +44,18 @@ SENSORS_DIRNAME = os.path.join("src", "server", "sensors")
 WALKER_PATTERN = re.compile(
     r"ignore::WalkBuilder::new\(root\)\s*\.\s*hidden\(true\)",
 )
+# Phase 3.1 (walker extraction) + the register_sensor! macro
+# (Phase A): sensors register through either the literal
+# `inventory::submit!(SensorEntry(&XxxSensor))` form or the
+# `register_sensor!(XxxSensor, ...)` macro (which expands to
+# `inventory::submit!($crate::server::sensors::SensorEntry(&XxxSensor))`).
+# The check accepts both shapes; the macro is the canonical
+# post-Phase-A form per `sensors/mod.rs`.
 INVENTORY_SUBMIT_PATTERN = re.compile(
-    r"inventory::submit!\s*\(\s*SensorEntry\s*\(\s*&\s*([A-Za-z_][A-Za-z_0-9]*)",
+    r"inventory::submit!\s*\(\s*(?:\$\w+(?:::\w+)*\s*::\s*)?SensorEntry\s*\(\s*&\s*([A-Za-z_][A-Za-z_0-9]*)",
+)
+REGISTER_SENSOR_PATTERN = re.compile(
+    r"register_sensor!\s*\(\s*([A-Za-z_][A-Za-z_0-9]*)",
 )
 UNIT_STRUCT_PATTERN = re.compile(
     r"^\s*pub\s+struct\s+([A-Za-z_][A-Za-z_0-9]*)\s*;\s*$",
@@ -81,18 +91,29 @@ def violations(root: str) -> list[str]:
                 f"sensors/util.rs or the Sensor trait)"
             )
         submits = INVENTORY_SUBMIT_PATTERN.findall(text)
-        if not submits:
+        register_sensor_structs = REGISTER_SENSOR_PATTERN.findall(text)
+        # Either the literal inventory::submit! pattern OR the
+        # register_sensor! macro counts as a sensor registration.
+        # The first inventory submit takes priority when both are
+        # present (the macro also expands to one).
+        if not submits and not register_sensor_structs:
             out.append(
                 f"{path}: new sensor file is missing "
-                f"`inventory::submit!(SensorEntry(&XxxSensor))`. "
+                f"`inventory::submit!(SensorEntry(&XxxSensor))` or "
+                f"`register_sensor!(XxxSensor, ...)`. "
                 f"See src/server/sensors/AGENTS.md and "
                 f"docs/CONTRIBUTING_AGENTS.md#sensor-pattern."
             )
             continue
         struct_names = {m for m in UNIT_STRUCT_PATTERN.findall(text)}
-        if not submits[0] in struct_names:
+        if submits and not submits[0] in struct_names:
             out.append(
                 f"{path}: `inventory::submit!(SensorEntry(&{submits[0]}))` "
+                f"does not match any unit struct declared in the same file."
+            )
+        if register_sensor_structs and not register_sensor_structs[0] in struct_names:
+            out.append(
+                f"{path}: `register_sensor!({register_sensor_structs[0]}, ...)` "
                 f"does not match any unit struct declared in the same file."
             )
     return out

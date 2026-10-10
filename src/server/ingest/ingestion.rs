@@ -109,7 +109,9 @@ impl LainServer {
         // `warming_up` for the duration of this pass, or graph-required
         // tools keep dispatching against a graph this pass is actively
         // mutating.
-        self.readiness().resume_warming_up();
+        // Held to the end of the pass (any exit, incl. `?` and cancellation):
+        // an overlapping pass that finishes first must not publish `ready`.
+        let _pass = self.readiness().begin_pass();
 
         // 1. Parallel Map Phase: Scan files for structure and external references
         let files = if let Some(ref last) = last_commit {
@@ -160,10 +162,7 @@ impl LainServer {
             return Ok(());
         }
 
-        let lsp_sync_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let lsp_sync_time = crate::server::time::now_unix();
 
         // Batch files into chunks to reduce task spawning overhead
         let files_per_batch = self.ingest().tuning().ingestion.files_per_batch;
@@ -429,7 +428,7 @@ impl LainServer {
                 scan_file_batch(
                     chunk,
                     workspace,
-                    lsp,
+                    Some(lsp),
                     lsp_sync_time,
                     git_time,
                     commit_hash,
@@ -699,10 +698,21 @@ impl LainServer {
         // edge types it produces — `HttpRoute`, `CallsHttp`, `Implements`
         // — could never appear in a graph, while `describe_schema`
         // advertised them and `get_cross_runtime_callers` read them.
+        // Single workspace: there is no federation repo id, so the
+        // workspace directory name is the identity that `get_service`
+        // will later look up with.
+        let repo_label = self
+            .ingest()
+            .config()
+            .workspace
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let sensor_counts = crate::server::sensors::run_all(
             self.ingest().graph(),
             &self.ingest().config().workspace,
             self.ingest().id_namespace(),
+            &repo_label,
         );
         if sensor_counts.total() > 0 {
             info!("Protocol sensors contributed {:?}", sensor_counts);
@@ -1152,7 +1162,12 @@ impl LainServer {
             return Err(LainError::Cancelled);
         }
         let key = graph_path(&self.ingest().config().workspace, path);
-        if !path.is_file() {
+        // A file replaced by a symlink that leaves the workspace is treated as
+        // gone: it must not be (re)indexed, and anything already indexed under
+        // that path is retracted.
+        let escapes = path.is_file()
+            && !crate::server::path_util::resolves_inside(&self.ingest().config().workspace, path);
+        if !path.is_file() || escapes {
             self.remove_owned_overlay_path(&key);
             // The file is gone; drop its hash entry so a future
             // re-creation starts with a clean cache.
@@ -1419,12 +1434,30 @@ pub async fn relink_cross_repo(
 /// (`ToolContextDeps`, `ToolExecutorConfig`): `graph`, `lsp_pool`,
 /// `git`, `overlay`, `namespace`. The shorter `db`/`lsp` would have
 /// been a footgun for anyone matching the two-struct pattern.
+///
+/// `mode` (§8.2) chooses between the live federation path
+/// (`IndexMode::Live`, the default and the historical behavior)
+/// and the snapshot path (`IndexMode::Snapshot`). Snapshot mode
+/// makes `lsp_pool` and `overlay` optional: a snapshot index job
+/// constructs an `IndexRequest` with `lsp_pool: None` and
+/// `overlay: None`, and `index_one_repo` skips the LSP scan pass,
+/// the overlay touch, the cross-repo resolver, the co-change pass,
+/// and the embedding/NLP enrichment. The live callers
+/// (`RepoIndex::index`, `RepoIndex::index_forced`) keep the
+/// `Some(...)` references they already had, and the field type
+/// turning from `&LspPool` to `Option<&LspPool>` is a mechanical
+/// lift at every existing call site.
 pub struct IndexRequest<'a> {
     pub path: &'a Path,
     pub graph: &'a GraphDatabase,
-    pub lsp_pool: &'a LspPool,
+    /// LSP pool used by tree-sitter's LSP hydration step. `None`
+    /// in snapshot mode (the snapshot indexer is
+    /// LSP-independent; §8.2).
+    pub lsp_pool: Option<&'a LspPool>,
     pub git: &'a AnyGitSensor,
-    pub overlay: &'a VolatileOverlay,
+    /// Volatile overlay that mirrors per-server live symbols.
+    /// `None` in snapshot mode (§8.2).
+    pub overlay: Option<&'a VolatileOverlay>,
     pub resolver: Option<&'a dyn crate::federation::cross_repo::CrossRepoResolver>,
     pub source_repo: Option<&'a crate::federation::repo_id::RepoId>,
     pub namespace: &'a crate::schema::RepoNamespace,
@@ -1436,9 +1469,59 @@ pub struct IndexRequest<'a> {
     /// the LSP round-trip promptly instead of waiting for the
     /// child to answer.
     pub cancel: &'a tokio_util::sync::CancellationToken,
+    /// Live vs. snapshot mode (§8.2). Defaults to `Live` so the
+    /// existing call sites that don't care about the distinction
+    /// can ignore the field; snapshot index jobs (PR 11) construct
+    /// the request with `mode: IndexMode::Snapshot`.
+    pub mode: IndexMode,
 }
 
-pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> {
+/// Which variant of `index_one_repo` to run (§8.2).
+///
+/// `Live` is the federation path the server has run since the
+/// per-repo indexing was first extracted — full LSP hydration,
+/// cross-repo resolver, co-change pass, overlay mirror, NLP
+/// enrichment. `Snapshot` is the revision-pinned path the snapshot
+/// job runner (PR 11) uses to index a single commit into the
+/// `<data_dir>/index-cache/<repo>/<sha>-<analyzer_version>/`
+/// layout: tree-sitter symbols, static resolve, and the sensors,
+/// with everything else disabled. The brief is explicit that
+/// `Snapshot` mode forces `force = true` regardless of what the
+/// caller set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndexMode {
+    /// Default: full live indexing path.
+    #[default]
+    Live,
+    /// Revision-pinned snapshot path. Skips LSP, overlay, cross-
+    /// repo resolver, co-change pass, and embedding/NLP
+    /// enrichment; forces a full re-scan regardless of commit.
+    Snapshot,
+}
+
+impl IndexMode {
+    /// True iff this mode skips the LSP scan pass.
+    pub fn skips_lsp(self) -> bool {
+        matches!(self, IndexMode::Snapshot)
+    }
+
+    /// True iff this mode forces a full re-scan of the worktree,
+    /// bypassing the commit-hash short-circuit.
+    pub fn forces_full_rescan(self) -> bool {
+        matches!(self, IndexMode::Snapshot)
+    }
+}
+
+/// Sensor output from the exact indexing pass that populated a repository
+/// graph. Keeping reports with the aggregate counters lets snapshot jobs
+/// persist a conservative coverage ledger without re-running sensors.
+#[derive(Debug)]
+pub struct IndexOutcome {
+    pub sensor_counts: crate::server::sensors::SensorCounts,
+    pub sensor_reports: Vec<(&'static str, crate::server::sensors::ScanReport)>,
+}
+
+pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, LainError> {
     let IndexRequest {
         path,
         graph,
@@ -1450,6 +1533,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         namespace,
         force,
         cancel,
+        mode,
     } = request;
     if cancel.is_cancelled() {
         return Err(LainError::Cancelled);
@@ -1467,6 +1551,16 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     let (latest_commit, latest_time) = git.try_get_latest_commit_info()?;
     let last_commit = graph.get_last_commit()?;
 
+    // Snapshot mode (`§8.2`) forces a full re-scan regardless of
+    // `force` and regardless of the commit hash the DB has
+    // recorded. The contract is "index this exact commit from
+    // scratch" — a previous cache entry with the same sha+version
+    // is a cache hit (handled by the cache layer, not by
+    // `index_one_repo`), but inside `index_one_repo` the worktree
+    // is the source of truth and uncommitted state is what `Live`
+    // is for. A snapshot index never short-circuits.
+    let force = force || mode.forces_full_rescan();
+
     // The commit-hash short-circuit exists to skip an expensive full
     // re-scan when nothing has changed on disk. The file-watcher path
     // fires on every `notify` event though, including edits the user
@@ -1481,7 +1575,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         if let Some(ref last) = last_commit {
             if last == &latest_commit {
                 info!("[federation] {:?} already up to date at {}", path, last);
-                return Ok(());
+                return Ok(IndexOutcome {
+                    sensor_counts: crate::server::sensors::SensorCounts::default(),
+                    sensor_reports: Vec::new(),
+                });
             }
         }
     }
@@ -1530,13 +1627,13 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         if let Err(e) = graph.save_to_disk_sync() {
             warn!("could not persist the graph ({e}); serving it from memory only");
         }
-        return Ok(());
+        return Ok(IndexOutcome {
+            sensor_counts: crate::server::sensors::SensorCounts::default(),
+            sensor_reports: Vec::new(),
+        });
     }
 
-    let lsp_sync_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let lsp_sync_time = crate::server::time::now_unix();
 
     // Tighter batches than the default tuning for federation workloads —
     // repos are loaded concurrently and we want to keep each batch's wall
@@ -1558,7 +1655,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         if cancel.is_cancelled() {
             return Err(LainError::Cancelled);
         }
-        let lsp_mux = lsp_pool.next();
+        let lsp_mux = lsp_pool.map(|pool| pool.next());
         let workspace = path.to_path_buf();
         let commit_hash = latest_commit.clone();
         let git_time = latest_time;
@@ -1675,11 +1772,25 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     );
 
     // Resolve phase: link external references to internal nodes (CALLS)
+    //
+    // Snapshot mode (`§8.2`) skips the cross-repo resolver: the
+    // per-repo DB is built in isolation so cross-repo name-keyed
+    // resolution would always miss anyway. The empty-resolver
+    // `None` value also matches the brief's "no cross-repo resolver"
+    // requirement — `all_external_refs` is empty here because the
+    // LSP step is disabled above.
     if cancel.is_cancelled() {
         return Err(LainError::Cancelled);
     }
-    let call_edges =
-        super::resolve::resolve_call_edges(graph, path, &all_external_refs, resolver, source_repo);
+    let resolver_for_resolve: Option<&dyn crate::federation::cross_repo::CrossRepoResolver> =
+        if mode.skips_lsp() { None } else { resolver };
+    let call_edges = super::resolve::resolve_call_edges(
+        graph,
+        path,
+        &all_external_refs,
+        resolver_for_resolve,
+        source_repo,
+    );
     info!(
         "[federation] {:?}: ingesting {} call edges",
         path,
@@ -1698,8 +1809,12 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         let tracked = git.get_all_tracked_files().unwrap_or_default();
         all_static_refs.extend(refs_into_rescanned(path, graph, &files_to_scan, &tracked));
     }
-    let static_edges =
-        super::resolve::resolve_static_edges(graph, &all_static_refs, resolver, source_repo);
+    let static_edges = super::resolve::resolve_static_edges(
+        graph,
+        &all_static_refs,
+        resolver_for_resolve,
+        source_repo,
+    );
     info!(
         "[federation] {:?}: ingesting {} static tree-sitter edges",
         path,
@@ -1725,14 +1840,26 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
 
     // Refresh the federation's symbol index so the just-populated
     // per-repo DB is visible to subsequent cross-repo lookups in
-    // this same `index_one_repo` call.
-    if let Some(resolver) = resolver {
-        resolver.refresh();
+    // this same `index_one_repo` call. Snapshot mode skips the
+    // resolver entirely (`§8.2`), so there is nothing to refresh.
+    if !mode.skips_lsp() {
+        if let Some(resolver) = resolver {
+            resolver.refresh();
+        }
     }
 
     // Protocol sensors — same rationale as the single-workspace pipeline;
     // runs after symbol nodes exist so route->handler links resolve.
-    let sensor_counts = crate::server::sensors::run_all(graph, path, namespace);
+    // Snapshot mode (`§8.2`) runs the sensor pipeline: §8.2 is
+    // explicit that sensors are part of the snapshot-indexing
+    // surface ("tree-sitter symbols + static resolve + sensors
+    // only").
+    let (sensor_counts, sensor_reports) = crate::server::sensors::run_all_with_reports(
+        graph,
+        path,
+        namespace,
+        source_repo.as_ref().map(|r| r.as_str()).unwrap_or(""),
+    );
     if sensor_counts.total() > 0 {
         info!(
             "[federation] {:?}: protocol sensors contributed {:?}",
@@ -1743,19 +1870,26 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     // Co-change analysis — F2: use the `try_*` variant (same rationale
     // as the rest of this federation path: a wedged spawn_blocking
     // thread holding the GitSensor mutex would block forever
-    // otherwise).
-    let co_change_pairs = git
-        .try_analyze_co_changes(
-            COCHANGE_COMMIT_WINDOW,
-            COCHANGE_MIN_PAIR_COUNT,
-            COCHANGE_MAX_COMMIT_FILES,
-        )
-        .unwrap_or_default();
-    let co_change_tuples: Vec<_> = co_change_pairs
-        .into_iter()
-        .map(|p| (p.file1, p.file2, p.co_change_count))
-        .collect();
-    graph.insert_co_change_edges(&co_change_tuples)?;
+    // otherwise). Snapshot mode (`§8.2`) skips the co-change pass:
+    // a single-repo, single-commit graph has no cross-file commit
+    // history worth mining, and `try_analyze_co_changes` would walk
+    // the mirror's git log anyway, so the brief's "no co-change
+    // pass" is honored both by skipping the call and by not
+    // inserting the result.
+    if !mode.skips_lsp() {
+        let co_change_pairs = git
+            .try_analyze_co_changes(
+                COCHANGE_COMMIT_WINDOW,
+                COCHANGE_MIN_PAIR_COUNT,
+                COCHANGE_MAX_COMMIT_FILES,
+            )
+            .unwrap_or_default();
+        let co_change_tuples: Vec<_> = co_change_pairs
+            .into_iter()
+            .map(|p| (p.file1, p.file2, p.co_change_count))
+            .collect();
+        graph.insert_co_change_edges(&co_change_tuples)?;
+    }
 
     // Enrichment: anchor scores + depths
     graph.calculate_anchor_scores()?;
@@ -1784,8 +1918,13 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         path,
         scan_start.elapsed()
     );
-    overlay.touch();
-    Ok(())
+    if let Some(overlay) = overlay {
+        overlay.touch();
+    }
+    Ok(IndexOutcome {
+        sensor_counts,
+        sensor_reports,
+    })
 }
 
 /// References from files an incremental pass did *not* rescan to symbols

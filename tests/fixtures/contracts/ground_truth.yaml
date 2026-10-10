@@ -1,0 +1,969 @@
+# Ground truth for the LAIN 0.9 contract federation fixture.
+#
+# Source of truth for the assertions that later verification tests
+# run against this fixture. The fixture itself is built by
+# `scripts/contracts-fixture.sh` (PR 1); the scenarios below are the
+# exact ones listed in `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §15.2.
+#
+# Three things are asserted here:
+#
+# 1. Every endpoint, `Binds` edge, `ReadsField`, unresolved consumer
+#    and entry point that the contract sensors and the joiner must
+#    produce from the fixture at tag `base`.
+# 2. The scenario tags (`base`, `s1..s21` in orders; `base`, `s3`,
+#    `s5b`, `s20`, `s22` in billing) and which snapshot setup maps to
+#    each §15.2 scenario number.
+# 3. The expected result for every §15.2 scenario (1..22), in the
+#    shape the tools (`diff_contracts`, `list_unresolved`,
+#    `get_service`, `get_coverage`, `resolve_evidence`,
+#    `prepare_snapshot`) are required to return.
+#
+# Provenance: `static` = `Static{TreeSitter}` or `None`; `heuristic`
+#   carries `detector` and `confidence`. The §4.6 table fixes
+#   `static` and `Confirmed` as "certain".
+
+# ----------------------------------------------------------------------
+# Section 1 — Endpoints at tag `base`
+#
+# Every endpoint the joiner must expose, grouped by the service that
+# owns it. `sources` lists which provider nodes emitted it (Code,
+# OpenAPI), so a later test can assert `bound_consumers` and
+# `has_schema` against the right combination.
+
+endpoints:
+  orders:
+    - key: "http:GET /api/orders/{}"
+      sources: [code, openapi]
+      handler: get_order
+    - key: "http:GET /api/orders/me"
+      sources: [code, openapi]
+      handler: get_me
+    - key: "http:POST /api/orders"
+      sources: [code, openapi]
+      handler: create_order
+    - key: "http:GET /api/orders/{}/label"
+      sources: [code]
+      handler: get_order_label
+      in_openapi: false   # code-only route (§15.1)
+  billing:
+    - key: "http:GET /invoices/{}"
+      sources: [code]
+      handler: get_invoice
+  inventory:
+    - key: "http:GET /stock/{}"
+      sources: [code]
+      handler: get_stock
+  shipping:
+    - key: "http:GET /shipping/{}"
+      sources: [code]
+      handler: get_shipping
+
+# ----------------------------------------------------------------------
+# Section 2 — Schemas at tag `base`
+#
+# Per endpoint and direction (request | response | payload), the list
+# of fields the openapi_sensor must flatten. Field paths use the
+# §4.4 grammar (`items[].sku` for array element property, plain names
+# for object properties). `enum_values` is present iff the schema
+# declared an `enum`.
+
+schemas:
+  "http:GET /api/orders/{}":
+    response:
+      - { json_path: customer_id,       type: string,  required: true,  enum_values: null }
+      - { json_path: total,             type: integer, required: true,  enum_values: null }
+      - { json_path: status,            type: string,  required: true,  enum_values: [open, paid] }
+      - { json_path: "items[].sku",     type: string,  required: true,  enum_values: null }
+  "http:GET /api/orders/me":
+    response:
+      - { json_path: customer_id,       type: string,  required: true,  enum_values: null }
+      - { json_path: total,             type: integer, required: true,  enum_values: null }
+      - { json_path: status,            type: string,  required: true,  enum_values: [open, paid] }
+      - { json_path: "items[].sku",     type: string,  required: true,  enum_values: null }
+  "http:POST /api/orders":
+    request:
+      - { json_path: customer_id,       type: string,  required: true,  enum_values: null }
+      - { json_path: "items[].sku",     type: string,  required: true,  enum_values: null }
+      - { json_path: note,              type: string,  required: false, enum_values: null }
+    response:
+      - { json_path: customer_id,       type: string,  required: true,  enum_values: null }
+      - { json_path: total,             type: integer, required: true,  enum_values: null }
+      - { json_path: status,            type: string,  required: true,  enum_values: [open, paid] }
+      - { json_path: "items[].sku",     type: string,  required: true,  enum_values: null }
+
+# ----------------------------------------------------------------------
+# Section 3 — `Binds` edges at tag `base`
+#
+# Every cross-service edge the joiner must emit. `match` follows the
+# §7.4 enum (`exact`, `pattern`, `prefix_stripped`). `cross_repo`
+# is `false` only when both services live in the same repo
+# (`shipping` and `inventory` share `platform`, §15.2 scenario 16).
+# `read_fields` lists the `FieldRef`s the field_access_sensor must
+# bind under that consumer (for scenarios 1, 11, 20, 22).
+
+binds:
+  - consumer:
+      service: billing
+      repo: billing
+      caller: build_invoice
+      call_site: src/main.py
+    provider:
+      service: orders
+      key: "http:GET /api/orders/{}"
+    provenance: { kind: static, confidence: 1.0 }
+    match: exact
+    read_fields:
+      - "http:GET /api/orders/{}#response:customer_id"
+      - "http:GET /api/orders/{}#response:total"
+
+  - consumer:
+      service: billing
+      repo: billing
+      caller: fetch_me
+      call_site: src/main.py
+    provider:
+      service: orders
+      key: "http:GET /api/orders/me"
+    provenance: { kind: static, confidence: 1.0 }
+    match: exact
+    read_fields: []
+
+  - consumer:
+      service: billing
+      repo: billing
+      caller: print_label
+      call_site: src/main.py
+    provider:
+      service: orders
+      key: "http:GET /api/orders/{}/label"
+    provenance: { kind: static, confidence: 1.0 }
+    match: exact
+    read_fields: []
+
+  - consumer:
+      service: reports
+      repo: reports
+      caller: buildMonthlyReport
+      call_site: src/index.ts
+    provider:
+      service: billing
+      key: "http:GET /invoices/{}"
+    provenance: { kind: static, confidence: 1.0 }
+    match: exact
+    read_fields: []
+
+  - consumer:
+      service: shipping
+      repo: platform
+      caller: check_stock
+      call_site: services/shipping/main.py
+    provider:
+      service: inventory
+      key: "http:GET /stock/{}"
+    provenance: { kind: static, confidence: 1.0 }
+    match: exact
+    cross_repo: false   # §15.2 scenario 16 — same repo
+    read_fields: []
+
+# ----------------------------------------------------------------------
+# Section 4 — `ReadsField` edges at tag `base`
+#
+# Every `FieldRef` the field_access_sensor must record, with the
+# reading function's symbol key, the bound `HttpClientCall`, the
+# resolved JSON path, and the Field it binds to (§7.5 step 2).
+
+reads_field:
+  - caller:
+      service: billing
+      repo: billing
+      file: src/main.py
+      function: build_invoice
+    reads:
+      - { path: customer_id, binds_to: "http:GET /api/orders/{}#response:customer_id", provenance: { kind: static, confidence: 1.0 }, exact: true }
+      - { path: total,       binds_to: "http:GET /api/orders/{}#response:total",       provenance: { kind: static, confidence: 1.0 }, exact: true }
+
+# ----------------------------------------------------------------------
+# Section 5 — Unresolved consumers at tag `base`
+#
+# None at base: every reachable consumer resolves either by env var
+# (`ORDERS_URL`, `BILLING_URL`, `INVENTORY_URL`) or by host matching
+# the service registry. Scenarios 3 and 22 each surface an unresolved
+# or escape-condition consumer at the scenario tag, not at base.
+
+unresolved: []
+
+# ----------------------------------------------------------------------
+# Section 6 — External hosts at tag `base`
+#
+# `charge` calls `https://api.stripe.com/v1/charges`. The host has no
+# matching service and is not in the loopback exemption list, so the
+# joiner records it as external (§7.3 rule 4) — never as unresolved.
+
+external:
+  - { host: api.stripe.com, calls: 1, caller: { service: billing, repo: billing, function: charge } }
+
+# ----------------------------------------------------------------------
+# Section 7 — Entry points at tag `base`
+#
+# Per service, every entry point §6.6 must tag. `kind` follows the
+# `EntryKind` enum (`HttpHandler | Scheduled | Cli | Main`). Reports
+# has both a `Scheduled` (`scheduledMonthlyReport`, reached via
+# `cron.schedule(...)`) and an `HttpHandler` (`getMonthlyReport`,
+# reached via `app.get("/reports/monthly", ...)`); both call
+# `buildMonthlyReport`, the actual consumer of billing — §15.2
+# scenario 17.
+
+entry_points:
+  orders:
+    - { kind: HttpHandler, name: get_order,       route: "http:GET /api/orders/{}" }
+    - { kind: HttpHandler, name: get_me,          route: "http:GET /api/orders/me" }
+    - { kind: HttpHandler, name: create_order,    route: "http:POST /api/orders" }
+    - { kind: HttpHandler, name: get_order_label, route: "http:GET /api/orders/{}/label" }
+  billing:
+    - { kind: HttpHandler, name: get_invoice, route: "http:GET /invoices/{}" }
+  reports:
+    - { kind: HttpHandler, name: getMonthlyReport,         route: "http:GET /reports/monthly" }
+    - { kind: Scheduled,   name: scheduledMonthlyReport,   schedule: "0 0 1 * *" }
+  shipping:
+    - { kind: HttpHandler, name: get_shipping, route: "http:GET /shipping/{}" }
+  inventory:
+    - { kind: HttpHandler, name: get_stock, route: "http:GET /stock/{}" }
+
+# ----------------------------------------------------------------------
+# Section 8 — Per-scenario expected results
+#
+# Each scenario maps a snapshot setup (which tag per repo in `base`
+# vs `head`) to the expected tool response. Scenario numbers match
+# the §15.2 table verbatim.
+
+scenarios:
+  "1":
+    title: "orders removes customer_id from response"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: s1-remove-customer-id, billing: base }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
+          affected:
+            - service: orders
+              class: NeedsInvestigation
+              reasons: [unresolved_candidates]
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
+          affected:
+            - service: orders
+              class: NeedsInvestigation
+              reasons: [unresolved_candidates]
+      compatible_changes: 0
+      coverage:
+        complete: false
+        scope:
+          reviewed:    [orders, billing, reports, platform]
+          unreviewed:  []
+          configured_only: true
+
+  "2":
+    title: "orders adds optional currency to response"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: s2-add-currency, billing: base }
+    tool: diff_contracts
+    expected:
+      changes: []   # optional response field add: Compatible, not reported (§9.4)
+      compatible_changes: 1
+      coverage:
+        complete: false
+        scope:
+          reviewed:    [orders, billing, reports, platform]
+          unreviewed:  []
+          configured_only: true
+
+  "3":
+    title: "billing builds the URL from an unmapped variable"
+    setup:
+      base:  { orders: base, billing: base }
+      head:  { orders: base, billing: s3-dynamic-url }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: consumer
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: ConsumerEndpointUnmatched
+          compat: Breaking
+          impact:
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
+        - side: provider
+          endpoint: { service: billing, key: "http:GET /invoices/{}" }
+          kind: ChangedWithoutSchema
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [no_schema]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [no_schema]
+    tool_also: list_unresolved
+    expected_list_unresolved:
+      contains:
+        - consumer: { service: billing, repo: billing, file: src/main.py, symbol: build_invoice }
+          template: /v1/api/orders/{}
+          reason: no_match
+          candidates:
+            - endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+              # Plain §7.4 matching fails (3 vs 2 segments); prefix
+              # tolerance strips `/v1/` and matches, so orders is the
+              # §9.7 candidate.
+
+  "4":
+    title: "snapshot with exclude: [reports]; no reviewed repo consumes the change"
+    setup:
+      base:  { orders: base, billing: base, reports: base }
+      head:  { orders: s1-remove-customer-id, billing: base, reports: base }
+      exclude: [reports]
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+      compatible_changes: 0
+      coverage:
+        complete: false
+        scope:
+          reviewed:    [orders, billing, platform]
+          unreviewed:
+            - { repo: reports, reason: excluded }
+          configured_only: true
+      text_must_name: reports    # the §9.6 scope sentence must mention `reports`
+
+  "5":
+    title: "orders adds enum value `refunded` to status"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: s5-enum-value, billing: base }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
+            scope:
+              reviewed:    [orders, billing, reports, platform]
+              unreviewed:  []
+              configured_only: true
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
+            scope:
+              reviewed:    [orders, billing, reports, platform]
+              unreviewed:  []
+              configured_only: true
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
+            scope:
+              reviewed:    [orders, billing, reports, platform]
+              unreviewed:  []
+              configured_only: true
+    setup_with_billing_status:
+      base:  { orders: base,  billing: s5b-read-status }
+      head:  { orders: s5-enum-value, billing: s5b-read-status }
+    expected_with_billing_status:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [needs_review]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [needs_review]
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [needs_review]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [needs_review]
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: EnumValueAdded
+          direction: response
+          field: status
+          added: [refunded]
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [needs_review]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [needs_review]
+
+  "6":
+    title: "/api/orders/{} → /api/order/{}, same handler"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: s6-rename-path, billing: base }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/order/{}" }
+          kind: PathChanged
+          from: "http:GET /api/orders/{}"
+          to:   "http:GET /api/order/{}"
+          compat: Breaking
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: consumer
+          endpoint: { service: billing, key: "http:GET /api/orders/{}" }
+          kind: ConsumerEndpointUnmatched
+          compat: Breaking
+          impact:
+            class: NeedsInvestigation
+            reasons: [unresolved_candidates]
+
+  "7":
+    title: "resolve_evidence receives a forged ref"
+    setup:
+      # No commit change — only an invalid GlobalId argument.
+      snapshot: { orders: base, billing: base }
+    tool: resolve_evidence
+    args: { refs: ["orders@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef:src/main.rs:1"] }
+    expected:
+      items:
+        - ref: "orders@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef:src/main.rs:1"
+          exists: false
+          reason: no_such_node
+      is_error: false   # "no error" — unknown ref is a normal answer (§12)
+
+  "8":
+    title: "prepare_snapshot twice with the same inputs"
+    setup:
+      repos: { orders: base }
+    tool: prepare_snapshot
+    expected:
+      first_call:
+        returns: { snapshot_id: <id>, state: ready | indexing }
+      second_call:
+        returns: { snapshot_id: <id>, state: <same as first> }
+        # The snapshot id is the same, and only one indexing job ran.
+        indexing_jobs: 1
+
+  "9":
+    title: "head derived `from` base with one override"
+    setup:
+      base_snapshot: { orders: base, billing: base, reports: base, platform: base }
+      head:
+        from: <base_snapshot>
+        repos: { orders: <some head sha> }   # only orders moves
+    tool: prepare_snapshot
+    expected:
+      # Only the overridden repo is indexed. `prepare_snapshot` for
+      # the head records one cache miss, on orders; billing, reports
+      # and platform reuse the base's cache entries.
+      indexing_jobs: 1
+      repos_indexed: [orders]
+
+  "10":
+    title: "scenario 3's binding added to `bindings`, no commit moved"
+    setup:
+      base:  { orders: base, billing: base }
+      head:  { orders: base, billing: base }     # no commits moved
+      # config_hash changes because a new entry was added under
+      # `bindings:` for billing's fetch_order_v2-style call.
+      config_diff:
+        bindings_added:
+          - consumer: { repo: billing, path: src/main.py, symbol: build_invoice, key: "GET /v1/api/orders/{}" }
+            provider: { service: orders, key: "GET /api/orders/{}" }
+    tool: prepare_snapshot
+    expected:
+      new_snapshot_id_differs_from_base: true   # config_hash bumped the id
+      # the new entry is `Confirmed`, and the call that scenario 3
+      # surfaced as unresolved is now bound:
+      confirmed_bindings_in_head:
+        - consumer: { repo: billing, file: src/main.py, symbol: build_invoice }
+          provider: { service: orders, key: "http:GET /api/orders/{}" }
+          provenance: { kind: confirmed, source: "repos.yaml#bindings[<i>]", confidence: 1.0 }
+
+  "11":
+    title: "Response field customer_id → customerId, same type"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: s11-rename-field, billing: base }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: FieldRenamed
+          direction: response
+          from: customer_id
+          to:   customerId
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRenamed
+          direction: response
+          from: customer_id
+          to:   customerId
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRenamed
+          direction: response
+          from: customer_id
+          to:   customerId
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+
+  "12":
+    title: "Same rename with a type change"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: s12-rename-retype, billing: base }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: FieldAdded
+          direction: response
+          field: customerId
+          type: integer
+          required: true
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldAdded
+          direction: response
+          field: customerId
+          type: integer
+          required: true
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldAdded
+          direction: response
+          field: customerId
+          type: integer
+          required: true
+          compat: BreakingIfRead
+          impact:
+            class: Verified
+            reasons: []
+          affected:
+            - service: billing
+              class: Verified
+              reasons: []
+
+  "13":
+    title: "billing calls literal /api/orders/me"
+    setup:
+      snapshot: { orders: base, billing: base }
+    tool: list_unresolved
+    expected:
+      bind:
+        consumer: { service: billing, repo: billing, file: src/main.py, symbol: fetch_me }
+        endpoint: { service: orders, key: "http:GET /api/orders/me" }   # not /api/orders/{}
+        match: exact
+        provenance: { kind: static, confidence: 1.0 }
+      # And there is no Binds between this consumer and
+      # /api/orders/{} — the literal path is more specific than the
+      # parameterised one (§7.4 specificity).
+
+  "14":
+    title: "billing calls api.stripe.com"
+    setup:
+      snapshot: { orders: base, billing: base }
+    tool: get_coverage
+    expected:
+      coverage:
+        external:
+          - { host: api.stripe.com, calls: 1 }
+        unresolved_consumers: []    # NOT in unresolved list — rule 4
+        schemaless_endpoints: []
+        stale_bindings: []
+
+  "15":
+    title: "Lines inserted above a confirmed binding's call site"
+    setup:
+      # Bind billing's `fetch_order` to orders /api/orders/{} via
+      # `bindings:`, then insert blank lines (or comments) above the
+      # call site in src/main.py — the line number changes but the
+      # SymbolKey-based matching does not (§4.6 / §7.6).
+      base:  { orders: base, billing: <sha with confirmed binding> }
+      head:  { orders: base, billing: <sha with lines inserted above fetch_order> }
+      bindings_unchanged: true
+    tool: prepare_snapshot + get_coverage
+    expected:
+      # The binding still resolves; no `stale_bindings`.
+      coverage:
+        stale_bindings: []
+      bound_consumers:
+        - consumer: { repo: billing, file: src/main.py, symbol: build_invoice }
+          provider: { service: orders, key: "http:GET /api/orders/{}" }
+          provenance: { kind: confirmed, source: "repos.yaml#bindings[<i>]", confidence: 1.0 }
+
+  "16":
+    title: "shipping → inventory inside platform"
+    setup:
+      snapshot: { orders: base, billing: base, reports: base, platform: base }
+    tool: get_contract
+    args: { service: inventory, key: "http:GET /stock/{}" }
+    expected:
+      items:
+        - endpoint: { service: inventory, key: "http:GET /stock/{}" }
+          providers: 1
+          bound_consumers:
+            - service: shipping
+              repo: platform
+              cross_repo: false       # both services live in `platform`
+
+  "17":
+    title: "get_service(billing)"
+    setup:
+      snapshot: { orders: base, billing: base, reports: base, platform: base }
+    tool: get_service
+    args: { service: billing }
+    expected:
+      service: billing
+      consumer_services:
+        - service: reports
+          used_by:
+            - { kind: http_handler, name: getMonthlyReport,       route: "http:GET /reports/monthly" }
+            - { kind: scheduled,    name: scheduledMonthlyReport, schedule: "0 0 1 * *" }
+          used_by_truncated: false
+
+  "18":
+    title: "get_service(orders) on live with reports set to RepoHealth::Indexing"
+    setup:
+      view: live
+      reports_health: Indexing
+    tool: get_service
+    args: { service: orders, snapshot: live }
+    expected:
+      service: orders
+      provider_reviewed: true
+      scope:
+        reviewed: [orders, billing, platform]
+        unreviewed:
+          - { repo: reports, reason: not_ready }
+        configured_only: true
+
+  "19":
+    title: "Type change of optional request field `note`"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: s19-optional-request-type, billing: base }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldTypeChanged
+          direction: request
+          field: note
+          from: string
+          to:   integer
+          compat: BreakingIfSent
+          impact:
+            class: NeedsInvestigation
+            reasons: [sends_not_modeled]
+      # 0.9 has no `WritesField`; BreakingIfSent never reaches Verified.
+
+  "20":
+    title: "billing starts reading discount"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: base,  billing: s20-read-discount }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: consumer
+          consumer: { service: billing, repo: billing, file: src/main.py, symbol: build_invoice }
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: ConsumerFieldUnmatched
+          field: discount
+          compat: Breaking
+          impact:
+            class: Verified
+            reasons: []
+        - side: provider
+          endpoint: { service: billing, key: "http:GET /invoices/{}" }
+          kind: ChangedWithoutSchema
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [no_schema]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [no_schema]
+
+  "21":
+    title: "orders changes the handler of GET /api/orders/{}/label"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: s21-code-only-handler, billing: base }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}/label" }
+          kind: ChangedWithoutSchema
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [no_schema]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [no_schema]
+      # The OpenAPI is identical between base and head; only
+      # src/main.rs differs. Per §9.2 the source_files tree diff
+      # fires `ChangedWithoutSchema`.
+
+  "22":
+    title: "billing stores the response in a module-level cache, then scenario 1"
+    setup:
+      base:  { orders: base,  billing: base }
+      head:  { orders: s1-remove-customer-id, billing: s22-cache-response }
+    tool: diff_contracts
+    expected:
+      changes:
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/{}" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: NeedsInvestigation
+            reasons: [reads_not_fully_traced]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [reads_not_fully_traced]
+        - side: provider
+          endpoint: { service: orders, key: "http:GET /api/orders/me" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: NeedsInvestigation
+            reasons: [reads_not_fully_traced]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [reads_not_fully_traced]
+        - side: provider
+          endpoint: { service: orders, key: "http:POST /api/orders" }
+          kind: FieldRemoved
+          direction: response
+          field: customer_id
+          compat: BreakingIfRead
+          impact:
+            class: NeedsInvestigation
+            reasons: [reads_not_fully_traced]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [reads_not_fully_traced]
+        - side: provider
+          endpoint: { service: billing, key: "http:GET /invoices/{}" }
+          kind: ChangedWithoutSchema
+          compat: NeedsReview
+          impact:
+            class: NeedsInvestigation
+            reasons: [no_schema]
+          affected:
+            - service: billing
+              class: NeedsInvestigation
+              reasons: [no_schema]
+      # `_CACHE[order_id] = r.json()` is the §6.5 escape rule for
+      # "stored into a collection", which sets `reads_complete = false`
+      # on the consumer fact. BreakingIfRead + reads_complete=false
+      # → NeedsInvestigation (reads_not_fully_traced).

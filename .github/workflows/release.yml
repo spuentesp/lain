@@ -136,7 +136,7 @@ jobs:
           EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
           echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
           echo "epoch-debug=$EPOCH"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-gnu
@@ -200,7 +200,7 @@ jobs:
           cosign sign-blob --yes \
             --bundle release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cosign.bundle.json \
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
@@ -237,7 +237,7 @@ jobs:
           EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
           echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
           echo "epoch-debug=$EPOCH"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
           targets: aarch64-apple-darwin
@@ -288,7 +288,7 @@ jobs:
           cosign sign-blob --yes \
             --bundle release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cosign.bundle.json \
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
@@ -327,7 +327,7 @@ jobs:
           EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
           echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
           echo "epoch-debug=$EPOCH"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
@@ -379,7 +379,7 @@ jobs:
           cosign sign-blob --yes \
             --bundle release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cosign.bundle.json \
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
@@ -429,7 +429,7 @@ jobs:
           # file. The output above contains all tarball hashes.
           rm -f lain-*-*.tar.gz.sha256
           cat SHA256SUMS
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: artifacts/SHA256SUMS
           fail_on_unmatched_files: true
@@ -458,7 +458,7 @@ jobs:
       # docs/METADATA.toml.
       - name: Sync server.json from METADATA.toml
         run: python scripts/sync-server-json.py --version "${{ steps.version.outputs.VERSION }}"
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: server.json
           fail_on_unmatched_files: true

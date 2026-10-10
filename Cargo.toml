@@ -3,11 +3,15 @@ members = ["."]
 
 [package]
 name = "lain"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Lain - Structural code intelligence for AI agents"
 authors = ["spuentesp"]
 license = "MIT"
+# Build script lives next to the patterns data so the `build.rs` and
+# the `.scm` files it iterates move together. The git-SHA logic that
+# used to live at the package root is folded in here.
+build = "src/server/sensors/patterns/build.rs"
 
 [dependencies]
 # Core async runtime
@@ -88,14 +92,14 @@ regex = "1.10"
 ignore = "0.4"
 serde_yaml = "0.9"
 toml = "0.8"
-toml_edit = "0.22"
+toml_edit = "0.25"
 
 # Once cell for static initialization
 once_cell = "1.19"
 inventory = "0.2"
 
 # Directory management
-dirs = "5.0"
+dirs = "7.0"
 parking_lot = "0.12.5"
 which = "8.0.2"
 
@@ -135,7 +139,39 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 [dev-dependencies]
 tempfile = "3.8"
 proptest = { version = "1.5", features = ["std"] }
+proptest-state-machine = "0.3"
 inventory = "0.2"
+jsonschema = { version = "0.29", default-features = false }
+
+# Build-deps for the data-driven patterns infrastructure
+# (`src/server/sensors/patterns/build.rs`). Task 6 wires
+# build-time `tree_sitter::Query::new` validation so every bundled
+# `.scm` body is parsed against its real grammar before it ever
+# reaches the binary — a syntax error fails `cargo build` with the
+# filename + the tree-sitter parse error. The grammar crates match
+# the runtime mappings in `src/server/sensors/util.rs::grammar_for`,
+# and the `tree-sitter-cli` dep stays in place for its
+# `query_testing` / `highlight` helpers.
+[build-dependencies]
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-cli = "0.25"
+
+# `cfg(lain_loom)` (concurrency model checking, see docs/formal/README.md) and
+# `cfg(kani)` (bounded model checking) are set by those tools, not by cargo.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(lain_loom)", "cfg(kani)"] }
+
+[target.'cfg(lain_loom)'.dependencies]
+loom = "0.7"
 
 [lib]
 name = "lain"
@@ -154,6 +190,16 @@ path = "src/bin/lain-git-sidecar.rs"
 [[bin]]
 name = "sidecar_bench"
 path = "src/bin/sidecar_bench.rs"
+
+# Real-repos federation checks. Nested under `tests/real_federation/`
+# and therefore NOT auto-discovered: cargo only picks up `tests/*.rs`
+# and `tests/*/main.rs`. Declared explicitly so the file is compiled
+# (and thus type-checked and linted) and so the command in its header —
+# `cargo test --test metrics -- --ignored` — actually resolves. The
+# tests stay `#[ignore]`d because they clone from the network.
+[[test]]
+name = "metrics"
+path = "tests/real_federation/metrics.rs"
 
 [features]
 # No features defined yet. (The `test-utils` feature was removed in

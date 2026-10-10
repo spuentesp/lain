@@ -108,6 +108,30 @@ fn workspaces_file_for(config: &Path) -> PathBuf {
     }
 }
 
+/// Which config path should carry the reload signal.
+///
+/// Workspaces mutations live in `workspaces.yaml`, but `signal_reload`
+/// names the socket after the file it is given, so signal through the
+/// sibling `repos.yaml` when there is one; otherwise fall back to the
+/// given path so a standalone `workspaces.yaml` still works.
+///
+/// Limitation: the sibling is matched by the hardcoded `repos.yaml`
+/// basename. A server started with `--config myrepos.yaml` listens on a
+/// socket named after `myrepos`, so these commands dial a socket nobody
+/// owns and the reload is silently missed. The same trap applies to
+/// `--config myworkspaces.yaml` when a sibling `repos.yaml` exists:
+/// `reload_target` resolves to `repos.sock` (the sibling) while the
+/// server listens on the path-canonicalized socket for
+/// `myworkspaces.yaml`. Sockets are path-hashed, so the misfire cannot
+/// reach another project's server either.
+fn reload_target(workspaces_yaml: &Path) -> PathBuf {
+    let sibling = workspaces_yaml
+        .parent()
+        .map(|p| p.join("repos.yaml"))
+        .filter(|p| p.is_file());
+    sibling.unwrap_or_else(|| workspaces_yaml.to_path_buf())
+}
+
 /// Resolve a `workspaces.yaml` path. The CLI accepts an explicit `--config`
 /// flag; if absent, walk up from cwd looking for a `workspaces.yaml` next
 /// to a `repos.yaml`, then a standalone `workspaces.yaml`. Fall back to
@@ -139,12 +163,9 @@ fn load_or_default(path: &Path) -> Result<WorkspacesFile> {
 
 fn save(path: &Path, f: &WorkspacesFile) -> Result<()> {
     let text = serde_yaml::to_string(f).map_err(|e| anyhow!("serialize: {e}"))?;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    std::fs::write(path, text)?;
+    // Temp-then-rename, as `repos.yaml` is written: a watcher-triggered
+    // rebuild must never read a torn `workspaces.yaml`.
+    crate::cli::io::write_file_atomic(path, text.as_bytes())?;
     Ok(())
 }
 
@@ -212,7 +233,7 @@ pub fn run_create(
     });
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
-    crate::cli::signal::signal_reload(&path)
+    crate::cli::signal::signal_reload(&reload_target(&path))
         .map_err(|e| anyhow!("signal reload after creating '{name}': {e}"))?;
     println!("Created workspace '{name}' in {}", path.display());
     Ok(())
@@ -236,7 +257,7 @@ pub fn run_add(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
     }
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
-    crate::cli::signal::signal_reload(&path)
+    crate::cli::signal::signal_reload(&reload_target(&path))
         .map_err(|e| anyhow!("signal reload after adding '{repo}' to '{name}': {e}"))?;
     println!("Added repo '{repo}' to workspace '{name}'");
     Ok(())
@@ -259,9 +280,21 @@ pub fn run_remove(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
         );
     }
     ws.members.retain(|m| m != repo);
+    // `validate` lets a *sourced* workspace hold 0 members — `lain
+    // workspaces init` writes that transient state and `lain workspaces
+    // add` fills it — but this command must not drive a live workspace
+    // down to zero: the loader refuses to serve a 0-member workspace, so
+    // saving that state breaks the next reload.
+    if ws.members.is_empty() {
+        anyhow::bail!(
+            "workspace '{name}' must keep at least one repo — removing '{repo}' would leave it \
+             empty; run 'lain workspaces add {name} --repo <repo-id>' first, or 'lain workspaces \
+             forget {name}' to drop the workspace"
+        );
+    }
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
-    crate::cli::signal::signal_reload(&path)
+    crate::cli::signal::signal_reload(&reload_target(&path))
         .map_err(|e| anyhow!("signal reload after removing '{repo}' from '{name}': {e}"))?;
     println!("Removed repo '{repo}' from workspace '{name}'");
     Ok(())
@@ -286,7 +319,7 @@ pub fn run_import(name: &str, from: &Path, config: Option<&Path>) -> Result<()> 
     f.workspaces.push(imported);
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
-    crate::cli::signal::signal_reload(&path)
+    crate::cli::signal::signal_reload(&reload_target(&path))
         .map_err(|e| anyhow!("signal reload after importing '{name}': {e}"))?;
     println!("Imported workspace '{name}' into {}", path.display());
     Ok(())
@@ -346,6 +379,8 @@ pub async fn run_init(
     });
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
+    crate::cli::signal::signal_reload(&reload_target(&path))
+        .map_err(|e| anyhow!("signal reload after initializing '{name}': {e}"))?;
     println!("Initialized workspace '{name}' from {from_url}");
     Ok(())
 }
@@ -448,6 +483,20 @@ pub fn run_current() -> Result<()> {
     Ok(())
 }
 
+/// `lain workspaces forget` of the active workspace cannot resolve on a
+/// running `lain server` scoped to it: the rebuild goes `Failed` and the
+/// server keeps serving the forgotten workspace's repos until restart or
+/// re-creation. The command still succeeds, so surface the consequence on
+/// stderr. Returns the warning text when `name` is the active workspace.
+fn forgetting_active_workspace_warning(name: &str) -> Option<String> {
+    let active = ActiveWorkspace::load().ok().flatten()?;
+    (active.name == name).then(|| {
+        format!(
+            "warning: '{name}' is the active workspace; a running `lain server` will keep serving its repos until restart or re-creation"
+        )
+    })
+}
+
 /// `lain workspaces forget <name>` — remove a workspace from workspaces.yaml.
 pub fn run_forget(name: &str, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config);
@@ -459,6 +508,11 @@ pub fn run_forget(name: &str, config: Option<&Path>) -> Result<()> {
     }
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
+    if let Some(warning) = forgetting_active_workspace_warning(name) {
+        eprintln!("{warning}");
+    }
+    crate::cli::signal::signal_reload(&reload_target(&path))
+        .map_err(|e| anyhow!("signal reload after forgetting '{name}': {e}"))?;
     println!("Forgot workspace '{name}'");
     Ok(())
 }
@@ -526,6 +580,254 @@ mod tests {
         assert_eq!(
             workspaces_file_for(Path::new("./repos.yaml")),
             Path::new("./workspaces.yaml")
+        );
+    }
+
+    #[test]
+    fn reload_signal_targets_the_repos_socket_not_the_workspaces_one() {
+        // A server started with `--config repos.yaml` listens on
+        // `repos.sock`, named after the file stem. A workspaces command
+        // that signalled `workspaces.sock` would never reach it and the
+        // federation would silently go stale.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        let repos = dir.path().join("repos.yaml");
+        std::fs::write(&ws, "workspaces: []\n").unwrap();
+        std::fs::write(&repos, "repos: []\n").unwrap();
+
+        assert_eq!(reload_target(&ws), repos);
+    }
+
+    #[test]
+    fn reload_signal_falls_back_to_the_given_path_without_a_repos_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(&ws, "workspaces: []\n").unwrap();
+        assert_eq!(reload_target(&ws), ws);
+    }
+
+    /// Run `op` with the reload socket made observable: `XDG_RUNTIME_DIR`
+    /// points at a tempdir (so `run_dir()` is private to this call) and a
+    /// listener is bound at the socket `signal_reload` will dial. Returns
+    /// the bytes that arrived. The sequence runs under a process-wide lock
+    /// because the env override is process-wide state.
+    #[cfg(unix)]
+    fn capture_reload_signal<F>(workspaces_yaml: &Path, op: F) -> String
+    where
+        F: FnOnce(&Path) -> anyhow::Result<()>,
+    {
+        use std::io::Read;
+        use std::os::unix::net::UnixListener;
+        use std::sync::Mutex;
+
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let run_dir_owner = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", run_dir_owner.path());
+
+        let sock = crate::cli::signal::socket_path_for(&reload_target(workspaces_yaml));
+        let _ = std::fs::remove_file(&sock);
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&sock).expect("bind reload socket");
+        listener.set_nonblocking(true).unwrap();
+
+        let outcome = op(workspaces_yaml);
+        match prev {
+            Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+        outcome.expect("command under test");
+
+        // `signal_reload` connects and writes before the command returns,
+        // so a signalled connection is already queued here.
+        let (stream, _) = listener
+            .accept()
+            .unwrap_or_else(|e| panic!("no reload signal after the command: {e}"));
+        let mut stream = stream;
+        stream.set_nonblocking(false).unwrap();
+        let mut buf = String::new();
+        stream.read_to_string(&mut buf).unwrap();
+        buf
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_forget_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(
+            &ws,
+            "workspaces:\n  - name: doomed\n    members: [repo-a]\n",
+        )
+        .unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| run_forget("doomed", Some(ws_path)));
+        assert_eq!(received, "reload\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_forget_warns_when_active_workspace_is_forgotten() {
+        use std::process::Command;
+
+        // Capture stderr from `lain workspaces forget` by running it as a
+        // subprocess: the codebase has no in-process stderr capture helper
+        // and adding one would require `libc`/`nix` (forbidden by the
+        // Scorecard dep policy). Locating the binary from `current_exe()`
+        // works because `cargo test` lays the test runner and `lain`
+        // under the same `<target>/<profile>/`.
+        let lain_bin = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .and_then(|p| p.parent().map(|p| p.join("lain")))
+            .filter(|p| p.is_file());
+        let Some(lain_bin) = lain_bin else {
+            eprintln!(
+                "skip: `lain` binary not found; run `cargo build --bin lain` \
+                 before this test (or run `cargo test --workspace`, which \
+                 builds it for you)"
+            );
+            return;
+        };
+
+        let _g = crate::state::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let project = tempfile::tempdir().unwrap();
+        let ws = project.path().join("workspaces.yaml");
+        std::fs::write(
+            &ws,
+            "workspaces:\n  - name: doomed\n    members: [repo-a]\n",
+        )
+        .unwrap();
+        let cfg_home = tempfile::tempdir().unwrap();
+        let lain_cfg = cfg_home.path().join("lain");
+        std::fs::create_dir_all(&lain_cfg).unwrap();
+        std::fs::write(lain_cfg.join("active_workspace"), "doomed\n").unwrap();
+
+        let out = Command::new(&lain_bin)
+            .args(["workspaces", "--config"])
+            .arg(&ws)
+            .args(["forget", "doomed"])
+            .env("XDG_CONFIG_HOME", cfg_home.path())
+            .env_remove("LAIN_HOME")
+            .output()
+            .expect("spawn lain workspaces forget");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "lain workspaces forget failed: {stderr}"
+        );
+        assert!(
+            stderr.contains("doomed") && stderr.contains("serving"),
+            "forgetting the active workspace must warn on stderr, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn forgetting_the_active_workspace_warns_about_the_running_server() {
+        let _g = crate::state::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = crate::test_util::XdgGuard::new(tmp.path());
+        ActiveWorkspace {
+            name: "doomed".into(),
+            config_path: None,
+        }
+        .save()
+        .unwrap();
+        let warning = forgetting_active_workspace_warning("doomed")
+            .expect("forgetting the active workspace must warn");
+        assert!(warning.contains("doomed"), "{warning}");
+        assert!(warning.contains("serving"), "{warning}");
+        assert!(forgetting_active_workspace_warning("other").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_create_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(&ws, "workspaces: []\n").unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| {
+            run_create("new", None, vec!["r".into()], Some(ws_path))
+        });
+        assert_eq!(received, "reload\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_add_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(&ws, "workspaces:\n  - name: w\n    members: [r1]\n").unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| run_add("w", "r2", Some(ws_path)));
+        assert_eq!(received, "reload\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_remove_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        std::fs::write(&ws, "workspaces:\n  - name: w\n    members: [r1, r2]\n").unwrap();
+        let received = capture_reload_signal(&ws, |ws_path| run_remove("w", "r2", Some(ws_path)));
+        assert_eq!(received, "reload\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_init_signals_reload_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        let received = capture_reload_signal(&ws, |ws_path| {
+            // Keep the clone scratch dir inside the test's tempdir. The
+            // nonexistent URL makes the best-effort fetch fail instantly
+            // and offline; init must still save and signal afterwards.
+            let prev = std::env::var_os("LAIN_HOME");
+            std::env::set_var("LAIN_HOME", dir.path().join("lain-home"));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let outcome = rt.block_on(run_init(
+                "sig-init",
+                "/nonexistent/not-a-repo",
+                None,
+                Some(ws_path),
+            ));
+            match prev {
+                Some(v) => std::env::set_var("LAIN_HOME", v),
+                None => std::env::remove_var("LAIN_HOME"),
+            }
+            outcome
+        });
+        assert_eq!(received, "reload\n");
+    }
+
+    /// `lain workspaces init` writes a sourced workspace with 0 members
+    /// and `lain workspaces add` fills it in; `WorkspacesFile::validate`
+    /// keeps accepting that transient state so init can save. `run_remove`
+    /// must not drive a workspace back down to 0 members on the way: the
+    /// loader refuses to serve a 0-member workspace, so saving that state
+    /// breaks the next reload.
+    #[test]
+    fn removing_the_last_member_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        let before = "workspaces:\n  - name: pending\n    members: [only]\n    source:\n      type: workspace_clone\n      url: https://example.com/ws.git\n";
+        std::fs::write(&ws, before).unwrap();
+        let err = run_remove("pending", "only", Some(&ws)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must keep at least one repo"),
+            "error must name the invariant, got: {msg}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ws).unwrap(),
+            before,
+            "a refused removal must not rewrite workspaces.yaml"
         );
     }
 }

@@ -30,6 +30,15 @@ pub(crate) fn resolve_data_dir(
 
 pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, LainError> {
     let config = resolve_data_dir(FederationConfig::load(config_path)?, config_path);
+    // Symmetric with `repos_for_workspace`'s 0-member refusal: a config
+    // that declares no repos would come up as a silently empty
+    // federation (vacuous readiness, no error). Refuse before any state
+    // is created and name the remedy.
+    if config.repos.is_empty() {
+        return Err(LainError::Config(
+            "repos.yaml declares no repos — add one with 'lain repos add <id> <url>'".to_string(),
+        ));
+    }
     let manifest_path = config.data_dir.join("federation_manifest.bin");
     let _manifest = FederationManifest::load_or_default(&manifest_path)?;
 
@@ -40,6 +49,11 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     // / remove_repo persists its mutation. Without this, only the
     // end-of-load save_manifest below sees the file written.
     fed.set_manifest_path(Some(manifest_path.clone()));
+    // PR-7: install the contract config so the joiner has
+    // something to read. Validated by `FederationConfig::load`
+    // already; a hot-reload failure later keeps this one in
+    // place.
+    fed.set_contract_config(config.contract.clone());
 
     let sources = config.build_sources()?;
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
@@ -129,6 +143,17 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
         fed.project_edges(&repo_id).await?;
     }
 
+    // PR-7 (§5.3): every contract tool on `live` calls
+    // `rejoin_contracts_if_dirty` before reading, but the loader
+    // also kicks it once at the end of Phase 2 so any contract
+    // queries that land before the first user call see the
+    // already-joined state. Failures are non-fatal — the worst
+    // case is a tool sees a stale `Binds` set until the next
+    // dirty tick (which is no worse than the pre-PR-7 behavior).
+    if let Err(e) = fed.rejoin_contracts_if_dirty() {
+        tracing::warn!("federation: initial rejoin_contracts_if_dirty failed: {e}");
+    }
+
     // Persist the manifest on a best-effort basis: a save failure must not
     // tear down a federation that successfully loaded.
     //
@@ -148,10 +173,71 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     Ok(fed)
 }
 
+/// Policy for workspace members that `repos.yaml` does not define.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MissingMembers {
+    /// Cold start: a member id missing from `repos.yaml` is a config
+    /// error — refuse to come up.
+    Refuse,
+    /// Hot reload: `lain repos remove X` rewrites only `repos.yaml`, so
+    /// for a moment the workspace still lists `X`. Drop the dangling
+    /// member with a warning and let the rebuild converge; erroring here
+    /// left the rebuild `Failed` and `X` serving forever while the CLI
+    /// reported it removed.
+    Drop,
+}
+
+/// Resolve `workspace_name` against `workspaces` and pick its member repos
+/// from `all_repos`. Shared by the cold loader and `run_rebuild`: an
+/// unknown workspace and a 0-member workspace are refused by both, a
+/// member id missing from `repos.yaml` is decided by `missing`.
+///
+/// A 0-member workspace is legal on disk (`lain workspaces init` writes
+/// one before `lain workspaces add` populates it), but serving it would
+/// build a federation with zero repos — vacuous readiness and no error.
+/// Refuse to come up empty and name the remedy.
+pub(crate) fn repos_for_workspace<'a>(
+    all_repos: &'a [crate::federation::config::RepoConfig],
+    workspaces: &WorkspacesFile,
+    workspace_name: &str,
+    missing: MissingMembers,
+) -> Result<Vec<&'a crate::federation::config::RepoConfig>, LainError> {
+    let mut ws_spec = resolve_active_workspace(workspaces, workspace_name)?.clone();
+    if ws_spec.members.is_empty() {
+        return Err(LainError::Config(format!(
+            "workspace '{}' has no members yet — run 'lain workspaces add {} --repo <repo-id>'",
+            ws_spec.name, ws_spec.name
+        )));
+    }
+    if matches!(missing, MissingMembers::Drop) {
+        let (present, dangling): (Vec<String>, Vec<String>) = ws_spec
+            .members
+            .iter()
+            .cloned()
+            .partition(|m| all_repos.iter().any(|r| &r.id == m));
+        for id in &dangling {
+            tracing::warn!(
+                "workspace '{}' lists repo '{}' which is not in repos.yaml; dropping it from the reload — run 'lain workspaces remove {} --repo {}' to clean up",
+                ws_spec.name,
+                id,
+                ws_spec.name,
+                id
+            );
+        }
+        ws_spec.members = present;
+    }
+    let workspace = WorkspaceIndex::from_spec(ws_spec);
+    // If any member id is not in repos.yaml, fail with the missing ids listed.
+    filter_repos_by_workspace(all_repos, &workspace)
+}
+
 /// Load a federation scoped to a single workspace's repos. Same pattern as
 /// `load_federation` but filters `repos.yaml` to the workspace's members
 /// before adding them to the federation. Errors fast at config time if the
-/// workspace references a repo id not in `repos.yaml`.
+/// workspace references a repo id not in `repos.yaml`, or if the workspace
+/// has no members yet (a freshly-`init`ed workspace that `lain workspaces
+/// add` has not populated — coming up with zero repos would be a silently
+/// empty federation).
 ///
 /// `workspaces.yaml` is loaded from `<config_path parent>/workspaces.yaml`
 /// by default; pass an explicit path via the `workspaces_path` arg if it's
@@ -176,12 +262,12 @@ pub async fn load_federation_with_workspace(
     } else {
         WorkspacesFile::default()
     };
-    let ws_spec = resolve_active_workspace(&workspaces, workspace_name)?.clone();
-    let workspace = WorkspaceIndex::from_spec(ws_spec);
-
-    // Filter repos.yaml to the workspace's members. If any member id is
-    // not in repos.yaml, fail with the missing ids listed.
-    let picked = filter_repos_by_workspace(&config.repos, &workspace)?;
+    let picked = repos_for_workspace(
+        &config.repos,
+        &workspaces,
+        workspace_name,
+        MissingMembers::Refuse,
+    )?;
 
     // Build the federation.
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(&config.data_dir)?);
@@ -191,6 +277,11 @@ pub async fn load_federation_with_workspace(
     // / remove_repo persists its mutation. Without this, only the
     // end-of-load save_manifest below sees the file written.
     fed.set_manifest_path(Some(manifest_path.clone()));
+    // PR-7: install the contract config so the joiner has
+    // something to read. Validated by `FederationConfig::load`
+    // already; a hot-reload failure later keeps this one in
+    // place.
+    fed.set_contract_config(config.contract.clone());
 
     // Cold-start orchestration (Codex finding #4). Same Phase 0/1/2
     // split as `load_federation`: register every repo in parallel,
@@ -233,6 +324,12 @@ pub async fn load_federation_with_workspace(
     // Phase 2: project all edges.
     for (repo_id, _) in fed.list_repos() {
         fed.project_edges(&repo_id).await?;
+    }
+
+    // PR-7 (§5.3): kick the joiner once at the end of Phase 2. See
+    // the mirror call in `load_federation` for the rationale.
+    if let Err(e) = fed.rejoin_contracts_if_dirty() {
+        tracing::warn!("federation: initial rejoin_contracts_if_dirty failed: {e}");
     }
 
     // Discarding this hid a failed save entirely: the federation came up

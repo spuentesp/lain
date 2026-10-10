@@ -99,7 +99,7 @@ async fn lsp_wire_path_emits_caller_to_callee_edge() {
     let result = scan_file_structure(
         file.clone(),
         tmp.path().to_path_buf(),
-        lsp,
+        Some(lsp),
         0,
         0,
         "abc".to_string(),

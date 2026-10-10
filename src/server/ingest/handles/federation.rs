@@ -24,6 +24,16 @@ pub struct FederationHandle {
     pub(crate) federation_port: Option<u16>,
     pub(crate) federation_bind: Option<IpAddr>,
     pub(crate) repos_yaml: Option<PathBuf>,
+    /// Workspace this federation was loaded scoped to (`lain server
+    /// --workspace <name>` or `auto`). Hot reload re-scopes membership to
+    /// this workspace's members; `None` means every repo in `repos.yaml`.
+    workspace_scope: RwLock<Option<String>>,
+    /// Snapshot manager (set by `LainServer::serve` after the MCP
+    /// listener is built). Hot reload uses the `Arc` clone here to
+    /// push a fresh source resolver after every rebuild so
+    /// `prepare_snapshot` honors the active workspace scope and the
+    /// live membership of `repos.yaml`.
+    snapshots: RwLock<Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>>,
 }
 
 impl FederationHandle {
@@ -42,6 +52,8 @@ impl FederationHandle {
             federation_port,
             federation_bind,
             repos_yaml,
+            workspace_scope: RwLock::new(None),
+            snapshots: RwLock::new(None),
         }
     }
 
@@ -274,11 +286,79 @@ impl FederationHandle {
     pub fn workspaces_handle(&self) -> Option<Arc<RwLock<WorkspacesFile>>> {
         self.federation_workspaces.as_ref().map(Arc::clone)
     }
+
+    /// Record which workspace this federation serves. Called once at
+    /// startup with the name `--workspace` resolved to; `None` (the
+    /// default) means the server serves every repo in `repos.yaml`.
+    pub fn set_workspace_scope(&self, scope: Option<String>) {
+        *self.workspace_scope.write() = scope;
+    }
+
+    /// The workspace this federation was loaded scoped to, if any.
+    pub fn workspace_scope(&self) -> Option<String> {
+        self.workspace_scope.read().clone()
+    }
+
+    /// Install the snapshot manager. Called by `LainServer::serve`
+    /// after the manager is built and the source resolver is
+    /// installed. Hot reload uses [`Self::snapshot_manager`] to
+    /// push a fresh resolver after every rebuild.
+    pub fn set_snapshot_manager(
+        &self,
+        mgr: Arc<crate::federation::contracts::snapshots::SnapshotManager>,
+    ) {
+        *self.snapshots.write() = Some(mgr);
+    }
+
+    /// The snapshot manager, if the server has one wired.
+    pub fn snapshot_manager(
+        &self,
+    ) -> Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>> {
+        self.snapshots.read().clone()
+    }
+
+    /// Filter `config.repos` to the active workspace's members. When
+    /// the server has no workspace scope (or no workspaces file),
+    /// returns the config unchanged. `None` repo ids in the
+    /// workspace that aren't in `repos.yaml` are dropped with a
+    /// warning — the same `MissingMembers::Drop` semantics the
+    /// hot-reload path uses.
+    pub fn filter_config_by_workspace(
+        &self,
+        config: &crate::federation::config::FederationConfig,
+    ) -> crate::federation::config::FederationConfig {
+        let Some(scope) = self.workspace_scope() else {
+            return config.clone();
+        };
+        let Some(workspaces) = self
+            .federation_workspaces
+            .as_ref()
+            .map(|w| w.read().clone())
+        else {
+            return config.clone();
+        };
+        let mut filtered = config.clone();
+        let Ok(picked) = crate::server::federation::loader::repos_for_workspace(
+            &config.repos,
+            &workspaces,
+            &scope,
+            crate::server::federation::loader::MissingMembers::Drop,
+        ) else {
+            tracing::warn!(
+                "snapshot manager: workspace '{}' filter failed; serving all repos",
+                scope
+            );
+            return config.clone();
+        };
+        filtered.repos = picked.into_iter().cloned().collect();
+        filtered
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::federation::config::SourceConfig;
 
     #[test]
     fn single_workspace_construction_leaves_everything_none_or_zero() {
@@ -291,6 +371,80 @@ mod tests {
         assert_eq!(handle.workspace_count(), 0);
         assert!(handle.federation_repos().is_empty());
         assert!(handle.workspaces_handle().is_none());
+    }
+
+    #[test]
+    fn filter_config_by_workspace_returns_unchanged_without_scope() {
+        // No workspace scope set → full config is returned.
+        let handle = FederationHandle::new(None, None, None, None, None, None);
+        let cfg = crate::federation::config::FederationConfig {
+            repos: vec![
+                RepoConfig {
+                    id: "a".into(),
+                    source: SourceConfig::WorkspaceDir {
+                        path: PathBuf::from("/a"),
+                    },
+                },
+                RepoConfig {
+                    id: "b".into(),
+                    source: SourceConfig::WorkspaceDir {
+                        path: PathBuf::from("/b"),
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        let filtered = handle.filter_config_by_workspace(&cfg);
+        assert_eq!(filtered.repos.len(), 2);
+    }
+
+    #[test]
+    fn filter_config_by_workspace_restricts_to_scope_members() {
+        // Workspace "ws1" with members [a, b] filters out "c".
+        use crate::server::federation::workspace::{WorkspaceSpec, WorkspacesFile};
+        let handle = FederationHandle::new(None, None, None, None, None, None);
+        handle.set_workspace_scope(Some("ws1".into()));
+        let ws_file = Arc::new(RwLock::new(WorkspacesFile {
+            workspaces: vec![WorkspaceSpec {
+                name: "ws1".into(),
+                description: None,
+                source: None,
+                members: vec!["a".into(), "b".into()],
+            }],
+            default: None,
+        }));
+        // Install the workspaces lock by going through a path that
+        // accepts the public API. We use the `set_workspace` on the
+        // manager through a tiny shim, but the simplest way is to
+        // call `FederationHandle::new` with the lock. Re-construct.
+        let handle = FederationHandle::new(None, Some(ws_file), None, None, None, None);
+        handle.set_workspace_scope(Some("ws1".into()));
+        let cfg = crate::federation::config::FederationConfig {
+            repos: vec![
+                RepoConfig {
+                    id: "a".into(),
+                    source: SourceConfig::WorkspaceDir {
+                        path: PathBuf::from("/a"),
+                    },
+                },
+                RepoConfig {
+                    id: "b".into(),
+                    source: SourceConfig::WorkspaceDir {
+                        path: PathBuf::from("/b"),
+                    },
+                },
+                RepoConfig {
+                    id: "c".into(),
+                    source: SourceConfig::WorkspaceDir {
+                        path: PathBuf::from("/c"),
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        let filtered = handle.filter_config_by_workspace(&cfg);
+        let ids: Vec<&str> = filtered.repos.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
     }
 
     #[test]

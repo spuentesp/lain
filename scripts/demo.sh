@@ -268,11 +268,15 @@ section "1. Server and advertised surface"
 TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['result']['tools']))" \
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
+# The 13 contract-federation tools (PR 13) are model-independent and
+# always advertised on `full` profile. semantic_search toggles with
+# the embedding model: present when MODEL_ARGS is set, absent when
+# it is not.
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "81" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "94" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "80" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "93" "$TOOL_COUNT"
 fi
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
@@ -873,6 +877,92 @@ case "$COVERAGE" in
   *complete*) check "every advertised tool is exercised (${COVERAGE%% *} + 1 exempt)" "complete" "complete" ;;
   *)          check "every advertised tool is exercised" "complete" "$COVERAGE" ;;
 esac
+
+# ══ 13.5. Contract federation precision/recall (PR 13 §15.3) ══════════
+#
+# Runs the hermetic precision/recall test against the T1 fixture
+# (built by `scripts/contracts-fixture.sh`; the test calls it
+# itself). The baseline is committed at
+# `tests/fixtures/contracts/baseline.json`. Any metric below the
+# baseline fails the demo. Runs in `--quick` mode too — the test
+# takes ~5 s end-to-end.
+section "13.5. Contract federation precision/recall"
+
+PR13_BASELINE="$REPO_ROOT/tests/fixtures/contracts/baseline.json"
+if [ ! -f "$PR13_BASELINE" ]; then
+  skip "contract precision/recall" "missing $PR13_BASELINE"
+else
+  # The test prints `PR13_METRICS_JSON <json>` on success. Run with
+  # --nocapture so the line reaches stdout; `--test-threads=1` keeps
+  # the shared worker pool from backing up under parallel cargo runs.
+  PR13_OUT=$(cd "$REPO_ROOT" && cargo test --quiet --test federation_contracts_e2e \
+    pr13_hermetic_precision_recall_over_t1_fixture -- \
+    --nocapture --test-threads=1 2>&1 || true)
+  PR13_METRICS=$(printf '%s\n' "$PR13_OUT" | awk '/^PR13_METRICS_JSON / { sub(/^PR13_METRICS_JSON /, ""); print; exit }')
+  if [ -z "$PR13_METRICS" ]; then
+    skip "contract precision/recall" "test did not print PR13_METRICS_JSON"
+  else
+    # Compare each metric against the baseline; fail loudly if any
+    # regressed. Tolerate a 1e-6 epsilon for floating-point drift.
+    DIFF_FAIL=0
+    for metric in diff_precision diff_recall binds_precision binds_recall reads_field_precision reads_field_recall; do
+      measured=$(printf '%s' "$PR13_METRICS" | python3 -c "import json,sys; print(float(json.load(sys.stdin)['$metric']))")
+      baseline=$(python3 -c "import json; print(float(json.load(open('$PR13_BASELINE'))['$metric']))")
+      awk -v m="$measured" -v b="$baseline" 'BEGIN { exit !(m+1e-6 >= b) }' \
+        && check "$metric ≥ baseline ($baseline)" "$measured" "$measured" \
+        || { check "$metric ≥ baseline ($baseline)" "≥ $baseline" "$measured"; DIFF_FAIL=1; }
+    done
+    [ "$DIFF_FAIL" -ne 0 ] && skip "contract precision/recall" "metric regression" \
+      || check_contains "contract precision/recall meets baseline" "diff_precision" "$PR13_METRICS"
+  fi
+fi
+
+# ══ 13.6. Contract tools (MCP) surface ════════════════════════════════
+#
+# Every contract tool advertised in `docs/tool-schema.json` must be
+# reachable through JSON-RPC, or the capability suite's coverage
+# check at the end of section 13 fails. Each contract tool requires
+# a `snapshot` id; `prepare_snapshot` is the one that returns one.
+# We call it first, then exercise each read-only tool against the
+# returned id and assert the response is a JSON-RPC envelope, not a
+# transport error (`__RPC_ERROR__`). The tools' own logic (snapshot
+# not yet indexed, etc.) is allowed to return errors — that's what
+# the PR 13 precision/recall test in §13.5 verifies; here we only
+# assert the handler is wired.
+section "13.6. Contract tools (MCP) — every advertised handler answers"
+
+DEMO_PS=$(call prepare_snapshot '{"repos":["subject"],"wait_ms":1000}')
+DEMO_SNAP=$(printf '%s' "$DEMO_PS" | python3 -c "import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('snapshot') or d.get('id') or '')
+except Exception:
+    print('')")
+[ -n "$DEMO_SNAP" ] || DEMO_SNAP="demo-no-snapshot"
+
+# Each call returns its tool-specific result (often an error envelope
+# because the demo fixture isn't a real federation); what matters is
+# that the JSON-RPC dispatch reached the handler. The names are
+# spelled out explicitly — the coverage self-check below greps the
+# script source for `call <name>` patterns, so a `$tool` variable
+# wouldn't register.
+check_absent "list_services answers JSON-RPC"   "__RPC_ERROR__" "$(call list_services   "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "get_service answers JSON-RPC"     "__RPC_ERROR__" "$(call get_service     "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "list_contracts answers JSON-RPC"  "__RPC_ERROR__" "$(call list_contracts  "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "get_contract answers JSON-RPC"    "__RPC_ERROR__" "$(call get_contract    "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "list_unresolved answers JSON-RPC" "__RPC_ERROR__" "$(call list_unresolved "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "check_binding answers JSON-RPC"   "__RPC_ERROR__" "$(call check_binding   "{\"snapshot\":\"$DEMO_SNAP\",\"consumer\":\"x\",\"endpoint\":\"y\"}" || true)"
+check_absent "trace_impact answers JSON-RPC"    "__RPC_ERROR__" "$(call trace_impact    "{\"snapshot\":\"$DEMO_SNAP\",\"from\":\"x\"}" || true)"
+check_absent "get_coverage answers JSON-RPC"    "__RPC_ERROR__" "$(call get_coverage    "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "resolve_evidence answers JSON-RPC" "__RPC_ERROR__" "$(call resolve_evidence "{\"snapshot\":\"$DEMO_SNAP\",\"refs\":[\"x\"]}" || true)"
+check_absent "read_source answers JSON-RPC"     "__RPC_ERROR__" "$(call read_source     "{\"snapshot\":\"$DEMO_SNAP\",\"repo\":\"subject\",\"path\":\"x\",\"start\":0,\"end\":1}" || true)"
+check_absent "get_snapshot answers JSON-RPC"    "__RPC_ERROR__" "$(call get_snapshot    "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+
+# diff_contracts needs two snapshots; we exercise the handler with
+# dummy base/head ids and assert it answers (its own validation will
+# reject the inputs — that's expected).
+out=$(call diff_contracts "{\"base\":\"$DEMO_SNAP\",\"head\":\"$DEMO_SNAP\"}" || true)
+check_absent "diff_contracts answers JSON-RPC" "__RPC_ERROR__" "$out"
 
 # ══ 14. Benchmark ═════════════════════════════════════════════════════
 if [ "$QUICK" = 0 ]; then

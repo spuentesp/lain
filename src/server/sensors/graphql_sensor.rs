@@ -6,7 +6,7 @@
 //! Edges created: Uses (resolver -> GraphQL type)
 
 use crate::error::LainError;
-use crate::graph::GraphDatabase;
+use crate::graph::{GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::path::Path;
 
@@ -146,6 +146,8 @@ pub fn enrich_with_graphql(
     schema_path: &Path,
     root: &Path,
     namespace: &crate::schema::RepoNamespace,
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<GraphEdge>,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
@@ -177,13 +179,12 @@ pub fn enrich_with_graphql(
         );
         node.id = node_id.clone();
         node.signature = Some(op.type_name.clone());
-        graph.upsert_node(node)?;
+        nodes.push(node);
 
         if let Some(resolver) =
             crate::server::sensors::util::find_handler_in_graph(graph, &op.field_name)
         {
-            let edge = GraphEdge::new(EdgeType::Uses, resolver.id.clone(), node_id);
-            graph.insert_edge(&edge)?;
+            edges.push(GraphEdge::new(EdgeType::Uses, resolver.id.clone(), node_id));
             count += 1;
         }
     }
@@ -198,6 +199,8 @@ pub fn scan_workspace(
     namespace: &crate::schema::RepoNamespace,
 ) -> Result<usize, LainError> {
     let mut count = 0;
+    let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
@@ -206,7 +209,14 @@ pub fn scan_workspace(
             // extension, so every `.gql` file was skipped. Nothing caught it
             // because `scan_workspace` had no caller.
             if ext == "graphql" || ext == "gql" {
-                match enrich_with_graphql(graph, path, root, namespace) {
+                match enrich_with_graphql(
+                    graph,
+                    path,
+                    root,
+                    namespace,
+                    &mut all_nodes,
+                    &mut all_edges,
+                ) {
                     Ok(n) => count += n,
                     Err(e) => tracing::warn!("Failed to parse {:?}: {}", path, e),
                 }
@@ -214,6 +224,10 @@ pub fn scan_workspace(
         }
     }
 
+    // One replace for the whole scan, not per file: `replace_sensor_output`
+    // retracts every node this owner made and inserts only what it is
+    // handed, so calling it per file would delete the earlier files' nodes.
+    graph.replace_sensor_output(SensorOwner::GraphqlSensor, &all_nodes, &all_edges)?;
     Ok(count)
 }
 
@@ -222,21 +236,4 @@ pub fn scan_workspace(
 /// registry to edit.
 pub struct GraphQlSensor;
 
-impl crate::server::sensors::Sensor for GraphQlSensor {
-    fn name(&self) -> &'static str {
-        "graphql"
-    }
-    fn count_field(&self) -> crate::server::sensors::SensorCountField {
-        crate::server::sensors::SensorCountField::Graphql
-    }
-    fn scan(
-        &self,
-        graph: &GraphDatabase,
-        root: &std::path::Path,
-        namespace: &crate::schema::RepoNamespace,
-    ) -> Result<usize, LainError> {
-        scan_workspace(graph, root, namespace)
-    }
-}
-
-inventory::submit!(crate::server::sensors::SensorEntry(&GraphQlSensor));
+crate::server::sensors::register_sensor!(GraphQlSensor, "graphql", Graphql, scan_workspace);

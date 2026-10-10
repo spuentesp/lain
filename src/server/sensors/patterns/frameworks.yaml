@@ -1,0 +1,317 @@
+# Bundled Camp-A pattern registry for `src/server/sensors/`.
+#
+# Each entry is one framework the contract-federation sensors know
+# about. The walker in `http_sensor.rs` (regex-based) and
+# `http_client_sensor.rs` (tree-sitter-based) consume the per-lang
+# entries via `Patterns::route_patterns(lang)` /
+# `Patterns::outbound_patterns(lang)` /
+# `Patterns::deny_methods_for(lang, lib)`.
+#
+# Adding a new framework is a data change: append one entry here and
+# (for tree-sitter shapes) a matching `<lang>/<framework>.scm` file.
+# Tasks 2-4 wire the consumers to read this data instead of the
+# hardcoded tables in the sensors' source.
+#
+# Source-of-truth mappings (today's code, future-proofed as data):
+#   - Route regex strings: `http_sensor.rs::get_route_patterns`
+#     (lines 182-366).
+#   - Outbound `lib_match` regexes + `deny_methods`: per-language
+#     `detect_<lang>_call` in `http_client_sensor.rs`.
+#
+# BTreeMap iteration order follows YAML load order. Override files in
+# `<repo>/.lain/patterns/*.yaml` REPLACE entries with matching `id`.
+
+languages:
+
+  # ── Python ───────────────────────────────────────────────────────
+  python:
+    - id: fastapi-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '@[\w\.]+\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: '(?:async\s+)?def\s+(\w+)\s*\('
+    - id: flask-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '@[\w\.]+\.route\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: 'def\s+(\w+)\s*\('
+    - id: requests-outbound
+      kind: outbound
+      lib_match: '^requests$'
+      deny_methods: [json, text, data, body, content, encoding, raise_for_status, status_code, headers, url, ok, elapsed, is_redirect]
+    - id: httpx-outbound
+      kind: outbound
+      lib_match: '^httpx$'
+      deny_methods: [json, text, data, body, content, encoding, raise_for_status, status_code, headers, url, ok, elapsed, is_redirect]
+    - id: aiohttp-outbound
+      kind: outbound
+      lib_match: '^aiohttp$'
+    # Task 8 (data-driven sensor-patterns proof): Django's
+    # `path("foo/", handler)` / `re_path(r"^bar/$", handler)`
+    # constructor — a non-decorator route shape that's
+    # tree-sitter distinct from `fastapi-route` / `flask-route`
+    # (matches a `path` or `re_path` identifier function with a
+    # string literal + positional handler identifier). Pure data
+    # change: this YAML entry + the matching
+    # `python/django-route.scm`. No production code in
+    # `src/server/sensors/*.rs` is touched.
+    - id: django-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '\b(?:path|re_path)\s*\(\s*r?["'']([^"'']+)["'']'
+      handler_regex: '\b(?:path|re_path)\s*\(\s*r?["''][^"'']+["'']\s*,\s*(\w+)'
+    # Tier 1 (Task 8): kafkajs / aiokafka / Celery idioms. The
+    # walker consumes these via `topic_producer_patterns` /
+    # `topic_consumer_patterns` / `scheduled_patterns`. Capture
+    # group 1 is the topic name (or `celery:task` sentinel for
+    # `@app.task` / `@shared_task`).
+    - id: aiokafka-producer
+      kind: topic_producer
+      path_regex: '\b(?:AIOKafkaProducer|KafkaProducer)\s*\(\s*["'']([^"'']+)["'']'
+    - id: aiokafka-consumer
+      kind: topic_consumer
+      path_regex: '\b(?:AIOKafkaConsumer|KafkaConsumer)\s*\(\s*["'']([^"'']+)["'']'
+    - id: aiohttp-send
+      kind: topic_producer
+      # `.send_and_wait(...)` / `.send(...)` with first string
+      # arg. Group 1: string literal. Group 2: bare identifier
+      # (resolved against same-file constants).
+      path_regex: '(?:\.send_and_wait|\.send)\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: aiohttp-send-kwarg
+      kind: topic_producer
+      # `.send(topic="…", …)` / `.send_and_wait(topic="…", …)`.
+      # Group 1: literal. Group 2: bare identifier.
+      path_regex: '(?:\.send_and_wait|\.send)\s*\(\s*[^)]*?topic\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: celery-task
+      kind: scheduled
+      # `@app.task` / `@shared_task` — the walker performs a
+      # same-file lookahead for the next `def` line; the spec is a
+      # stable sentinel because Celery doesn't pass a spec string.
+      path_regex: '^@(?:\w+\.)?task\b|^@shared_task\b'
+
+  # ── TypeScript / JavaScript ─────────────────────────────────────
+  tsjs:
+    - id: express-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`]([^"''`]+)["''`]'
+      handler_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`][^"''`]+["''`]\s*,\s*(?:async\s*)?(\w+)'
+    - id: fastify-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`]([^"''`]+)["''`]'
+      handler_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`][^"''`]+["''`]\s*,\s*(?:async\s*)?(\w+)'
+    - id: fetch-outbound
+      kind: outbound
+      lib_match: '^(fetch|globalThis\.fetch)$'
+      deny_methods: [json, text, blob, arrayBuffer, formData, status, redirected, headers, ok, url]
+    - id: axios-outbound
+      kind: outbound
+      lib_match: '^axios$'
+      deny_methods: [json, text, data, body, status, statusText, headers, config]
+    - id: got-outbound
+      kind: outbound
+      lib_match: '^(got|ky)$'
+    # Tier 1 (Task 8): kafkajs / confluent-kafka produce /
+    # consume / NestJS `@Cron` scheduled sites. The walker
+    # consumes these via `topic_producer_patterns` /
+    # `topic_consumer_patterns` / `scheduled_patterns`. Capture
+    # group 1 is the topic name (or the cron spec).
+    - id: kafkajs-producer
+      kind: topic_producer
+      # Group 1: string-literal topic name. Group 2: bare
+      # identifier (resolved against same-file constants by the
+      # event_sensor). Either form yields a match.
+      path_regex: '\.send\s*\(\s*\{[^}]*?topic\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kafkajs-consumer
+      kind: topic_consumer
+      # Group 1: string-literal topic name in the topics array.
+      path_regex: '\.(?:run|subscribe)\s*\(\s*\{[^}]*?topics?\s*:\s*\[\s*["'']([^"'']+)["'']'
+    - id: nestjs-cron
+      kind: scheduled
+      path_regex: '@Cron\s*\(\s*["'']([^"'']+)["'']'
+    # Tier 1 (Task 8): WebSocket idioms. The walker in
+    # `src/server/sensors/util.rs::walk_websocket_idioms` consumes
+    # these through the `*_all` accessors (the pre-Tier-1
+    # websocket_sensor applied the same URL regexes to every
+    # line of every source file regardless of language).
+    - id: ws-url-literal
+      kind: websocket_client
+      path_regex: '["''](wss?://[^"'']+)["'']'
+    - id: ws-ctor
+      kind: websocket_client
+      path_regex: 'new\s+WebSocket\s*\(\s*["'']([^"'']+)["'']'
+    - id: ws-server-route
+      kind: websocket_server
+      path_regex: '(?:app\.ws|router\.ws|WebSocketGateway)\s*\(\s*["'']([^"'']+)["'']'
+    - id: ws-event-handler
+      kind: websocket_handler
+      # Group 1 is the event name; group 2 is the handler. The
+      # walker captures group 2 — keeping group 1 in the regex
+      # lets the alternation match the four `on{…}` shapes in a
+      # single non-optional branch.
+      path_regex: '(on(?:open|message|close|error))\s*[=:]\s*(\w+)'
+
+  # ── Rust ─────────────────────────────────────────────────────────
+  rust:
+    - id: axum-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '\.route\s*\(\s*"([^"]+)"'
+      handler_regex: '(?i:(?:get|post|put|delete|patch|head|options))\s*\(\s*(\w+)\s*[,)]'
+    - id: actix-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '#\[(?i:(?:get|post|put|delete|patch|head|options))\s*\(\s*(?:path\s*=\s*)?"([^"]+)"'
+      handler_regex: '(?:async\s+)?fn\s+(\w+)\s*[(<]'
+    - id: reqwest-outbound
+      kind: outbound
+      lib_match: '^(reqwest|.*reqwest::Client.*|ureq.*)$'
+      deny_methods: [json, text, bytes, status, headers, url, error_for_status]
+    - id: ureq-outbound
+      kind: outbound
+      lib_match: '^ureq$'
+      deny_methods: [json, text, bytes, status, headers, url, error_for_status]
+    - id: awc-outbound
+      kind: outbound
+      lib_match: '^awc$'
+    # Tier 1 (Task 8): rdkafka produce / consume idioms. Capture
+    # group 1 is the topic name.
+    - id: rdkafka-producer
+      kind: topic_producer
+      # Group 1: string literal. Group 2: bare identifier.
+      path_regex: 'FutureRecord::to\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: rdkafka-send
+      kind: topic_producer
+      # rdkafka `producer.send(record, …)` — the topic name
+      # appears as a string literal (or bare identifier) in the
+      # `FutureRecord` struct's `topic` field. Group 1: literal.
+      # Group 2: identifier.
+      path_regex: '(?:::|\.)send\s*\(\s*[^)]*?topic\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: rdkafka-consumer
+      kind: topic_consumer
+      path_regex: '(?:::|\.)subscribe\s*\(\s*&\[\s*["'']([^"'']+)["'']'
+
+  # ── Go ───────────────────────────────────────────────────────────
+  go:
+    - id: stdlib-http-route
+      kind: route
+      verbs: [any]
+      path_regex: 'HandleFunc\s*\(\s*"([^"]+)"'
+      handler_regex: 'HandleFunc\s*\(\s*"[^"]+"\s*,\s*(\w+)'
+    - id: gin-route
+      kind: route
+      verbs: [GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD]
+      path_regex: '\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"([^"]+)"'
+      handler_regex: '\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"[^"]+"\s*,\s*(\w+)'
+    - id: stdlib-http-outbound
+      kind: outbound
+      lib_match: '^http$'
+      deny_methods: [decode, Decode, Close, Body, StatusCode, Status, Header, Proto, Request, TLS, Trailer, ContentLength]
+    # Tier 1 (Task 8): kafka-go produce / consume idioms. Capture
+    # group 1 is the topic name.
+    - id: kafka-go-producer
+      kind: topic_producer
+      # Group 1: string literal. Group 2: bare identifier.
+      # The `[\s\S]*?` non-greedy "any character including newlines
+      # and parens" handles the `&kafka.Message{Topic: "...",
+      # Value: []byte("x")}` shape — the `Topic:` field is not
+      # guaranteed to be the first `{…}` block, and the `)`
+      # from `[]byte(...)` would close a `[^)]*` class too early.
+      # The `s?` after `SendMessage` matches the segmentio/kafka-go
+      # `SendMessages` (plural) sibling.
+      path_regex: '(?:SendMessages?|WriteMessages)\s*\([\s\S]*?Topic\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kafka-go-consumer
+      kind: topic_consumer
+      path_regex: 'SubscribeTopics\s*\(\s*["'']([^"'']+)["'']'
+
+  # ── Java ─────────────────────────────────────────────────────────
+  java:
+    - id: spring-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      annotation: '(GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\b'
+      path_regex: '@(?i:(?:GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping))\s*\(\s*(?:value\s*=\s*|path\s*=\s*)?["'']([^"'']+)["'']'
+      handler_regex: 'public\s+[\w<>,\s]+\s+(\w+)\s*\('
+    - id: jaxrs-route
+      kind: route
+      verbs: [GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS]
+      annotation: '@(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'
+      path_regex: '@Path\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: 'public\s+[\w<>,\s]+\s+(\w+)\s*\('
+    - id: okhttp-outbound
+      kind: outbound
+      display_name: okhttp
+      lib_match: '^(OkHttpClient|.*OkHttpClient.*|okhttp3\..*)$'
+      deny_methods: [getStatusCode, statusCode, getHeaders, headers, firstValue, getMessage, message, body, code]
+    - id: httpclient-outbound
+      kind: outbound
+      display_name: httpclient
+      lib_match: '^HttpClient$'
+      deny_methods: [getStatusCode, statusCode, getHeaders, headers, firstValue, getMessage, message, body, code]
+
+  # ── C# ───────────────────────────────────────────────────────────
+  csharp:
+    - id: aspnet-route
+      kind: route
+      verbs: [get, post, put, delete, head, options, patch]
+      annotation: '\[(HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch|HttpHead|HttpOptions|HttpRequest)\]'
+      path_regex: '\[(?i:(?:HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch|HttpHead|HttpOptions))\s*(?:\(\s*["'']([^"'']+)["'']\s*\))?'
+      handler_regex: '(?:public|private|internal|async|protected)\s+[\w<>,\s\[\]?]+\s+(\w+)\s*\('
+    - id: minimal-api-route
+      kind: route
+      verbs: [get, post, put, delete, patch]
+      annotation: 'MapGet|MapPost|MapPut|MapDelete|MapPatch'
+      path_regex: '\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: '\.(?:MapGet|MapPost|MapPut|MapDelete|MapPatch)\s*\(\s*["''][^"'']+["'']\s*,\s*(?:async\s*)?\([^)]*\)\s*=>'
+    - id: httpclient-outbound
+      kind: outbound
+      display_name: httpclient
+      lib_match: '^(HttpClient|.*HttpClient.*|WebClient.*)$'
+      deny_methods: [IsSuccessStatusCode, StatusCode, Headers, GetValues, DownloadString, DownloadStringTaskAsync]
+
+  # ── Ruby ─────────────────────────────────────────────────────────
+  ruby:
+    - id: sinatra-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '(?m)^[ \t]*(?:get|post|put|delete|patch|options|head)\s+["'']([^"'']+)["'']'
+      handler_regex: 'do\s*$'
+    - id: rails-route
+      kind: route
+      verbs: [get, post, put, patch, delete, options, head]
+      source: 'config/routes.rb'
+      path_regex: '(?m)^[ \t]*(?:get|post|put|patch|delete|options|head)\s+["'']([^"'']+)["'']'
+    - id: net-http-outbound
+      kind: outbound
+      lib_match: '^(Net::HTTP|HTTParty|Faraday|RestClient)$'
+      deny_methods: [body, code, message, read_body, back]
+    - id: httparty-outbound
+      kind: outbound
+      display_name: httparty
+      lib_match: '^HTTParty$'
+      deny_methods: [body, code, message, read_body, back]
+    - id: faraday-outbound
+      kind: outbound
+      lib_match: '^Faraday$'
+    - id: restclient-outbound
+      kind: outbound
+      lib_match: '^RestClient$'
+
+  # ── Kotlin ───────────────────────────────────────────────────────
+  kotlin:
+    - id: ktor-route
+      kind: route
+      verbs: [get, post, put, delete, patch, head, options]
+      path_regex: '(?m)(?:^|\W)(?:get|post|put|patch|delete|head|options)\s*\(\s*["'']([^"'']+)["'']'
+      handler_regex: '(get|post|put|patch|delete|head|options)\s*\(\s*"[^"]+"\s*\)'
+    - id: ktor-client-outbound
+      kind: outbound
+      display_name: ktor
+      lib_match: '^(HttpClient|OkHttpClient)$'
+      deny_methods: [statusCode, call, headers, body]
+    - id: okhttp-outbound
+      kind: outbound
+      display_name: okhttp
+      lib_match: '^OkHttpClient$'
+      deny_methods: [statusCode, call, headers, body]

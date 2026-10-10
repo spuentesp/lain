@@ -7,7 +7,7 @@ use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use crate::server::presence::OccupancyMap;
 use crate::server::tools::handlers::metrics::{
     explain_symbol, find_anchors, find_dead_code, get_anchor_score, get_context_depth,
-    suggest_refactor_targets,
+    is_anchor_excluded_path, suggest_refactor_targets,
 };
 use crate::server::tuning::TuningConfig;
 use parking_lot::Mutex;
@@ -50,7 +50,7 @@ fn make_test_graph_with_nodes() -> (GraphDatabase, VolatileOverlay) {
 fn test_find_anchors_basic() {
     let (graph, overlay) = make_test_graph_with_nodes();
 
-    let result = find_anchors(&graph, &overlay, 5);
+    let result = find_anchors(&graph, &overlay, 5, false);
     assert!(result.is_ok());
     let text = result.unwrap();
     // May be empty if no anchor scores calculated, or show anchors if calculate_anchor_scores was run
@@ -1196,4 +1196,38 @@ fn occupancy_ignores_edit_claims_on_other_files() {
         !text.contains("\"edit\""),
         "an Edit claim on billing.rs must not mark auth.rs as being edited:\n{text}"
     );
+}
+
+#[test]
+fn is_anchor_excluded_path_filters_test_and_script_paths() {
+    // B8 (2026-10-04) regression: the 2026-10-04 Lain-on-Lain
+    // dogfooding found `uc_presence_register_heartbeat_unregister`
+    // in `scripts/use_cases_e2e.py` at the top of the anchor list,
+    // above the real `bfs_traverse` in
+    // `src/server/query/executor.rs`. The path predicate below is
+    // what `find_anchors` now applies by default (opt out with
+    // `include_tests=true`).
+    let excluded = [
+        "src/tests/foo.rs",
+        "tests/integration.rs",
+        "src/foo_test.rs",
+        "src/foo_tests.rs",
+        "scripts/use_cases_e2e.py",
+        "scripts/test_all_promises.py",
+        "scripts/run.py",
+        "src/test.rs",
+        "src/tests.rs",
+    ];
+    for p in excluded {
+        assert!(is_anchor_excluded_path(p), "expected excluded: {p}");
+    }
+    let kept = [
+        "src/server/query/executor.rs",
+        "src/main.rs",
+        "src/server/graph/mod.rs",
+        "src/bin/lain-git-sidecar.rs",
+    ];
+    for p in kept {
+        assert!(!is_anchor_excluded_path(p), "expected kept: {p}");
+    }
 }

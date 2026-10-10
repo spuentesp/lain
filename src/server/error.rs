@@ -45,6 +45,9 @@ pub enum LainError {
     #[error("Unavailable: {0}")]
     Unavailable(String),
 
+    #[error("snapshot residency busy (retry after {retry_after_ms}ms)")]
+    SnapshotResidencyBusy { retry_after_ms: u64 },
+
     #[error("Invalid repo id: {0}")]
     InvalidRepoId(String),
 
@@ -120,6 +123,12 @@ impl From<bincode::error::EncodeError> for LainError {
 impl From<serde_yaml::Error> for LainError {
     fn from(err: serde_yaml::Error) -> Self {
         LainError::Serialization(format!("yaml: {err}"))
+    }
+}
+
+impl From<crate::server::sensors::patterns::PatternsError> for LainError {
+    fn from(err: crate::server::sensors::patterns::PatternsError) -> Self {
+        LainError::Serialization(format!("patterns override: {err}"))
     }
 }
 

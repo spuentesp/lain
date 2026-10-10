@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "diff_contracts input",
+  "description": "Input for `diff_contracts`. Both `base` and `head` must be `ready` snapshots; `live` is not allowed.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "base": {
+      "type": "string",
+      "description": "Snapshot id (`snap_<hex>`); must be `ready`."
+    },
+    "head": {
+      "type": "string",
+      "description": "Snapshot id (`snap_<hex>`); must be `ready`. `live` is invalid (`invalid_argument`, `live_not_supported`)."
+    },
+    "repo": { "type": "string" },
+    "service": { "type": "string" },
+    "min_impact": {
+      "type": "string",
+      "enum": ["NoKnownImpact", "NeedsInvestigation", "Verified"]
+    },
+    "cap": { "type": "integer", "minimum": 1, "maximum": 500 }
+  },
+  "required": ["base", "head"]
+}

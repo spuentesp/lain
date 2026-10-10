@@ -22,6 +22,64 @@ pub fn lain_git_sha() -> &'static str {
     option_env!("LAIN_GIT_SHA").unwrap_or("unknown")
 }
 
+/// Return the per-workspace Unix socket path that `lain mcp
+/// --socket` binds and `lain oneshot` consults before spawning a
+/// new server. The hash is the first 16 hex chars of BLAKE3 over
+/// the canonicalized workspace path, so the same checkout always
+/// maps to the same socket regardless of how the user typed the
+/// path.
+///
+/// B1 (2026-10-04): the `lain oneshot` cold-reindex-per-call
+/// bug is fixed by sharing a long-lived `lain mcp` across
+/// `oneshot` invocations. The shared server binds a per-workspace
+/// Unix socket; subsequent `oneshot` calls connect, share the
+/// warm in-memory graph, and only respawn when the previous
+/// process is dead. The TLA+ spec at
+/// `docs/formal/OneshotSharedServer.tla` defines the lifecycle.
+pub fn oneshot_socket_path(workspace: &std::path::Path) -> PathBuf {
+    use blake3::Hasher;
+    let canonical = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut hasher = Hasher::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let stem = digest.to_hex();
+    let stem = &stem[..16];
+    let safe_stem: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    run_dir().join(format!("lain-mcp-{safe_stem}.sock"))
+}
+
+#[cfg(test)]
+mod socket_path_tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_for_same_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p1 = oneshot_socket_path(tmp.path());
+        let p2 = oneshot_socket_path(tmp.path());
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn different_for_different_workspaces() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        assert_ne!(oneshot_socket_path(a.path()), oneshot_socket_path(b.path()));
+    }
+
+    #[test]
+    fn path_lives_under_run_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = oneshot_socket_path(tmp.path());
+        assert!(p.starts_with(run_dir()));
+    }
+}
+
 /// Return the path to the user config dir (`~/.config/lain`).
 pub fn config_dir() -> PathBuf {
     // XDG: $XDG_CONFIG_HOME or ~/.config. lain doesn't have other XDG-aware

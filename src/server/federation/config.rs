@@ -1,4 +1,5 @@
 use crate::error::LainError;
+use crate::federation::contracts::config::ContractFederationConfig;
 use crate::federation::repo_id::RepoId;
 use crate::federation::repo_source::{
     LocalCloneSource, RepoSource, ShallowCloneSource, WorkspaceDirSource,
@@ -19,6 +20,19 @@ pub struct FederationConfig {
     pub git_sensor: Option<crate::git::GitSensorMode>,
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
+    /// Contract-federation block (PR 7). The block is optional; an
+    /// absent block deserializes to `ContractFederationConfig::default()`
+    /// and the joiner runs over an empty config.
+    #[serde(default, skip_serializing_if = "is_contract_block_default")]
+    pub contract: ContractFederationConfig,
+}
+
+fn is_contract_block_default(c: &ContractFederationConfig) -> bool {
+    c.services.is_empty()
+        && c.http_clients.is_empty()
+        && c.generic_keys.is_empty()
+        && c.schemas.is_empty()
+        && c.bindings.is_empty()
 }
 
 impl Default for FederationConfig {
@@ -29,6 +43,7 @@ impl Default for FederationConfig {
             ready_threshold: default_ready_threshold(),
             git_sensor: None,
             repos: Vec::new(),
+            contract: ContractFederationConfig::default(),
         }
     }
 }
@@ -86,9 +101,31 @@ impl FederationConfig {
         Self::load_from_str(&s)
     }
     pub fn load_from_str(s: &str) -> Result<Self, LainError> {
-        let cfg: FederationConfig =
+        let mut cfg: FederationConfig =
             serde_yaml::from_str(s).map_err(|e| LainError::Config(format!("yaml: {e}")))?;
+        let top_level_contract = ContractFederationConfig::load_from_str(s)?;
+        if is_contract_block_default(&cfg.contract) {
+            cfg.contract = top_level_contract;
+        } else if !is_contract_block_default(&top_level_contract) {
+            if cfg.contract.services.is_empty() {
+                cfg.contract.services = top_level_contract.services;
+            }
+            if cfg.contract.http_clients.is_empty() {
+                cfg.contract.http_clients = top_level_contract.http_clients;
+            }
+            if cfg.contract.generic_keys.is_empty() {
+                cfg.contract.generic_keys = top_level_contract.generic_keys;
+            }
+            if cfg.contract.schemas.is_empty() {
+                cfg.contract.schemas = top_level_contract.schemas;
+            }
+            if cfg.contract.bindings.is_empty() {
+                cfg.contract.bindings = top_level_contract.bindings;
+            }
+        }
         cfg.validate_unique_repo_ids()?;
+        let repo_ids: Vec<String> = cfg.repos.iter().map(|r| r.id.clone()).collect();
+        cfg.contract.validate(&repo_ids)?;
         Ok(cfg)
     }
     /// Reject duplicate `id` entries. Two `RepoConfig`s with the same id
@@ -286,5 +323,30 @@ repos:
             err.to_string().contains("duplicate repo id 'same'"),
             "error should name the duplicate id: {err}"
         );
+    }
+
+    #[test]
+    fn load_from_str_loads_top_level_contract_fields() {
+        let yaml = r#"
+data_dir: /tmp
+repos:
+  - id: orders
+    source: { type: workspace_dir, path: /srv/orders }
+  - id: billing
+    source: { type: workspace_dir, path: /srv/billing }
+services:
+  - name: orders
+    repo: orders
+    paths: ["services/orders/"]
+    env: [ORDERS_URL]
+http_clients:
+  - call: "ordersClient.{method}"
+    service: orders
+"#;
+        let cfg = FederationConfig::load_from_str(yaml).unwrap();
+        assert_eq!(cfg.contract.services.len(), 1);
+        assert_eq!(cfg.contract.services[0].name, "orders");
+        assert_eq!(cfg.contract.services[0].paths, vec!["services/orders/"]);
+        assert_eq!(cfg.contract.http_clients.len(), 1);
     }
 }

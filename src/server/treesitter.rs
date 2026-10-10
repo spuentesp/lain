@@ -2719,3 +2719,7 @@ mod short_name_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "treesitter_verification.rs"]
+mod verification;

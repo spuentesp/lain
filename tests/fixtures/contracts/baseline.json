@@ -1,0 +1,8 @@
+{
+  "diff_precision": 1.0,
+  "diff_recall": 1.0,
+  "binds_precision": 1.0,
+  "binds_recall": 1.0,
+  "reads_field_precision": 1.0,
+  "reads_field_recall": 1.0
+}

@@ -560,23 +560,31 @@ async function renderStatusBar() {
 
 async function renderOverviewTab() {
   const tab = document.getElementById('tab-overview');
-  let health, status;
+  let health, status, healthText, statusText;
   try {
     const h = await mcpCall('get_federation_health');
     health = parseJson(h);
-  } catch (_) { health = null; }
+    healthText = unwrapText(h);
+  } catch (_) { health = null; healthText = null; }
   try {
     const s = await mcpCall('get_health');
     status = parseJson(s);
-  } catch (_) { status = null; }
+    statusText = unwrapText(s);
+  } catch (_) { status = null; statusText = null; }
   const lines = [];
   if (status) {
     lines.push(`<h3>Server health</h3>`);
     lines.push(`<pre>${escapeHtml(JSON.stringify(status, null, 2))}</pre>`);
+  } else if (statusText) {
+    lines.push(`<h3>Server health</h3>`);
+    lines.push(`<pre class="health-text">${escapeHtml(statusText)}</pre>`);
   }
   if (health) {
     lines.push(`<h3>Federation health</h3>`);
     lines.push(`<pre>${escapeHtml(JSON.stringify(health, null, 2))}</pre>`);
+  } else if (healthText) {
+    lines.push(`<h3>Federation health</h3>`);
+    lines.push(`<pre class="health-text">${escapeHtml(healthText)}</pre>`);
   }
   if (lines.length === 0) {
     lines.push('<p class="muted">No health data available.</p>');
@@ -621,6 +629,104 @@ async function renderReposTab() {
       <thead><tr><th>id</th><th>path</th><th>health</th><th>nodes</th><th>edges</th></tr></thead>
       <tbody>${rows.join('')}</tbody>
     </table>
+  `;
+}
+
+// ── Tab: services (PR 16, contract-federation) ──────────────────────────
+
+async function renderServicesTab() {
+  const tab = document.getElementById('tab-services');
+  tab.innerHTML = '<p class="muted">Loading services…</p>';
+  let listResult;
+  try {
+    listResult = await mcpCall('list_services', {snapshot: 'live'});
+  } catch (e) {
+    tab.innerHTML = `<p class="error">list_services failed: ${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  if (listResult && listResult.isError) {
+    const msg = unwrapText(listResult) || 'list_services error';
+    if (/unknown tool|no federation/i.test(msg)) {
+      tab.innerHTML = '<p class="muted">no services configured (enable the contracts package)</p>';
+      return;
+    }
+    tab.innerHTML = `<p class="error">${escapeHtml(msg)}</p>`;
+    return;
+  }
+  // New contract tools return an Envelope: read `structuredContent.data`
+  // when present, fall back to the legacy unwrapText + parseJson path.
+  let items;
+  let scope = null;
+  if (listResult && listResult.structuredContent && listResult.structuredContent.data) {
+    const data = listResult.structuredContent.data;
+    items = data.items || [];
+    scope = data.scope || null;
+  } else {
+    const text = unwrapText(listResult);
+    try { items = JSON.parse(text || '{}').items || []; } catch (_) { items = []; }
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    tab.innerHTML = '<p class="muted">No services declared.</p>';
+    return;
+  }
+  const rows = items.map(it => `
+    <tr data-service="${escapeHtml(it.service)}">
+      <td><button class="service-link" data-name="${escapeHtml(it.service)}">${escapeHtml(it.service)}</button></td>
+      <td><code>${escapeHtml(it.repo)}</code></td>
+      <td>${it.endpoints ?? 0}</td>
+      <td>${it.consumer_services ?? 0}</td>
+      <td>${it.unresolved_inbound ?? 0}</td>
+    </tr>
+  `).join('');
+  tab.innerHTML = `
+    <div class="services-layout">
+      <div class="services-list-panel">
+        <table class="services-table">
+          <thead><tr><th>service</th><th>repo</th><th>endpoints</th><th>consumers</th><th>unresolved</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div id="service-detail" class="service-detail"><p class="muted">Pick a service on the left.</p></div>
+    </div>
+  `;
+  tab.querySelectorAll('.service-link').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.name;
+      await renderServiceDetail(name);
+    });
+  });
+}
+
+async function renderServiceDetail(serviceName) {
+  const detail = document.getElementById('service-detail');
+  detail.innerHTML = '<p class="muted">Loading…</p>';
+  let result;
+  try {
+    result = await mcpCall('get_service', {snapshot: 'live', service: serviceName});
+  } catch (e) {
+    detail.innerHTML = `<p class="error">get_service failed: ${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  if (result && result.isError) {
+    detail.innerHTML = `<p class="error">${escapeHtml(unwrapText(result) || 'get_service error')}</p>`;
+    return;
+  }
+  let data;
+  if (result && result.structuredContent && result.structuredContent.data) {
+    data = result.structuredContent.data;
+  } else {
+    try { data = JSON.parse(unwrapText(result) || '{}'); } catch (_) { data = {}; }
+  }
+  const consumers = data.consumers || [];
+  const edges = consumers.map(c => `<li>${escapeHtml(c.service)} → ${escapeHtml(serviceName)} <span class="muted">(${c.uses ? c.uses.length : 0} sites)</span></li>`).join('');
+  const text = unwrapText(result) || '';
+  detail.innerHTML = `
+    <h3>${escapeHtml(data.service || serviceName)} <span class="muted">(${escapeHtml(data.repo || '?')})</span></h3>
+    <p class="muted">provider_reviewed: ${data.provider_reviewed === true ? 'yes' : 'no'}</p>
+    <h4>Consumer edges</h4>
+    <ul>${edges || '<li class="muted">(no consumers)</li>'}</ul>
+    <h4>Detail</h4>
+    <pre class="service-detail-text">${escapeHtml(text)}</pre>
   `;
 }
 
@@ -891,6 +997,39 @@ function nodeRadius(role) {
   return role === 'focus' ? 7 : role === 'neighbour' ? 6 : 5;
 }
 
+// Wire format: schema::GraphNode serialises the node kind as `node_type`.
+// Focal-search candidates and some test fixtures still use `kind`. Accept
+// both so a normalised node never stamps `graph-node--kind-undefined`.
+function nodeKind(node) {
+  if (!node || typeof node !== 'object') return '';
+  if (typeof node.node_type === 'string' && node.node_type) return node.node_type;
+  if (typeof node.kind === 'string') return node.kind;
+  return '';
+}
+
+// Map graph coordinates into minimap space. Returns null when no node has
+// finite numeric coordinates — without that guard the bounds stay at
+// ±Infinity, `s`/`tx`/`ty` go non-finite, and the minimap frame rect is
+// written with x="NaN" y="NaN". Pure; covered by tests/js/graph_tab.test.js.
+function computeMinimapTransform(coords, w, h) {
+  const pts = (Array.isArray(coords) ? coords : [])
+    .filter(p => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (!pts.length) return null;
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  for (const p of pts) {
+    if (p.x < xmin) xmin = p.x;
+    if (p.x > xmax) xmax = p.x;
+    if (p.y < ymin) ymin = p.y;
+    if (p.y > ymax) ymax = p.y;
+  }
+  const dx = (xmax - xmin) || 1;
+  const dy = (ymax - ymin) || 1;
+  const s = Math.min((w - 6) / dx, (h - 6) / dy);
+  const tx = (w - s * (xmin + xmax)) / 2;
+  const ty = (h - s * (ymin + ymax)) / 2;
+  return { s, tx, ty };
+}
+
 function applyFilters(graph, state) {
   const visibleNodes = [];
   const hiddenNodeIds = new Set();
@@ -898,9 +1037,7 @@ function applyFilters(graph, state) {
   const acceptedKinds = state.kinds;
   for (const n of graph.nodes) {
     const repoOk = acceptedRepos.has(n.repo_id);
-    // Read either field so the filter works on raw payloads (tests) and
-    // on payloads that have already been through normalizeGraphPayload.
-    const kindOk = acceptedKinds.has(n.node_type);
+    const kindOk = acceptedKinds.has(nodeKind(n));
     if (!repoOk || !kindOk) {
       hiddenNodeIds.add(n.id);
     } else {
@@ -1167,7 +1304,7 @@ function paintLegend(graph, palette, container) {
 
   for (const repo of repos) {
     for (const kind of kinds) {
-      const hasData = graph.nodes.some(n => n.repo_id === repo && n.node_type === kind);
+      const hasData = graph.nodes.some(n => n.repo_id === repo && nodeKind(n) === kind);
       const cell = document.createElement('div');
       cell.className = 'graph-legend-cell' + (hasData ? '' : ' is-empty');
       const repoCls = palette.get(repo) || 'graph-repo-fallback';
@@ -1297,15 +1434,11 @@ function paintMinimap(graph, minimapEl, viewportTransform, filterState) {
   minimapEl.setAttribute('viewBox', `0 0 ${w} ${h}`);
   minimapEl.innerHTML = '';
   if (!graph.nodes.length) return;
-  const bounds = graph.nodes.reduce((acc, n) => ({
-    xmin: Math.min(acc.xmin, n.x ?? acc.xmin), xmax: Math.max(acc.xmax, n.x ?? acc.xmax),
-    ymin: Math.min(acc.ymin, n.y ?? acc.ymin), ymax: Math.max(acc.ymax, n.y ?? acc.ymax),
-  }), { xmin: Infinity, xmax: -Infinity, ymin: Infinity, ymax: -Infinity });
-  const dx = bounds.xmax - bounds.xmin || 1;
-  const dy = bounds.ymax - bounds.ymin || 1;
-  const sx = (w - 6) / dx, sy = (h - 6) / dy, s = Math.min(sx, sy);
-  const tx = (w - s * (bounds.xmin + bounds.xmax)) / 2;
-  const ty = (h - s * (bounds.ymin + bounds.ymax)) / 2;
+  // No placed nodes yet (the simulation has not ticked): leave the minimap
+  // empty rather than writing a frame rect with x="NaN".
+  const transform = computeMinimapTransform(graph.nodes, w, h);
+  if (!transform) return;
+  const { s, tx, ty } = transform;
   const computed = applyFilters(graph, filterState);
   const visible = new Set(computed.visibleNodes.map(n => n.id));
   for (const n of graph.nodes) {
@@ -1422,12 +1555,13 @@ function drawGraphSvg(svgEl, graph) {
     .data(nodes)
     .join('path')
     .attr('class', d => {
-      const cls = ['graph-node', `graph-node--kind-${d.kind}`];
+      const kind = nodeKind(d);
+      const cls = ['graph-node', `graph-node--kind-${kind}`];
       cls.push(repoColour(d.repo_id, palette));
       return cls.join(' ');
     })
     .attr('data-node-id', d => d.id)
-    .attr('d', d => d3.symbol().size(64).type(d3[nodeShape(d.kind)])())
+    .attr('d', d => d3.symbol().size(64).type(d3[nodeShape(nodeKind(d))])())
     .call(d3.drag()
       .on('start', (event, d) => {
         if (!event.active) simulation.alphaTarget(0.3).restart();
@@ -1456,7 +1590,7 @@ function drawGraphSvg(svgEl, graph) {
   const updateTooltip = (d, evt) => {
     if (!d) { tooltipGroup.style('display', 'none'); return; }
     const deg = neighboursById.get(d.id)?.size ?? 0;
-    const text = `${d.name}\n${d.repo_id} · ${d.kind}\n${d.path}\ndegree: ${deg}`;
+    const text = `${d.name}\n${d.repo_id} · ${nodeKind(d)}\n${d.path}\ndegree: ${deg}`;
     tooltipText.selectAll('tspan').remove();
     text.split('\n').forEach((line, i) => {
       tooltipText.append('tspan').attr('x', 8).attr('dy', i === 0 ? 12 : 14).text(line);
@@ -1635,7 +1769,7 @@ function disambiguateFocalSearch(query, workspaceGraph, anchors) {
     for (const n of workspaceGraph.nodes) {
       if (!n || !n.name) continue;
       if (String(n.name).toLowerCase().includes(q)) {
-        addCandidate(n.name, n.repo_id, n.path, n.node_type || n.kind);
+        addCandidate(n.name, n.repo_id, n.path, nodeKind(n));
       }
     }
   }
@@ -1643,7 +1777,7 @@ function disambiguateFocalSearch(query, workspaceGraph, anchors) {
     for (const a of anchors) {
       if (!a || !a.name) continue;
       if (String(a.name).toLowerCase().includes(q)) {
-        addCandidate(a.name, a.repo_id, a.path, a.kind);
+        addCandidate(a.name, a.repo_id, a.path, nodeKind(a));
       }
     }
   }
@@ -2344,6 +2478,8 @@ const TOOL_CATEGORY_MAP = {
   get_call_chain: 'Impact',
   get_cross_runtime_callers: 'Impact',
   find_dead_code: 'Impact',
+  get_branch_status: 'Impact',
+  get_commit_history: 'Impact',
 
   // Context & Source
   get_code_snippet: 'Context',
@@ -2351,8 +2487,11 @@ const TOOL_CATEGORY_MAP = {
   get_context_for_prompt: 'Context',
   query_graph: 'Context',
   describe_schema: 'Context',
+  explain_dispatch: 'Context',
 
   // Multiplayer & Presence
+  register_agent: 'Multiplayer',
+  unregister_agent: 'Multiplayer',
   who_am_i: 'Multiplayer',
   list_active_agents: 'Multiplayer',
   claim_files: 'Multiplayer',
@@ -2361,6 +2500,9 @@ const TOOL_CATEGORY_MAP = {
   my_claims: 'Multiplayer',
   heartbeat: 'Multiplayer',
   list_subagents: 'Multiplayer',
+  lain_intent: 'Multiplayer',
+  list_active_intents: 'Multiplayer',
+  get_recent_activity: 'Multiplayer',
 
   // Annotations & Handoffs
   add_annotation: 'Annotations',
@@ -2379,6 +2521,22 @@ const TOOL_CATEGORY_MAP = {
   get_cross_repo_blast_radius_for_repo: 'Federation',
   get_active_workspace: 'Federation',
   list_workspaces: 'Federation',
+  get_workspace: 'Federation',
+
+  // Contracts (Contract Federation & Protocol Invariants)
+  list_services: 'Contracts',
+  get_service: 'Contracts',
+  prepare_snapshot: 'Contracts',
+  get_snapshot: 'Contracts',
+  list_contracts: 'Contracts',
+  get_contract: 'Contracts',
+  list_unresolved: 'Contracts',
+  check_binding: 'Contracts',
+  diff_contracts: 'Contracts',
+  trace_impact: 'Contracts',
+  get_coverage: 'Contracts',
+  resolve_evidence: 'Contracts',
+  read_source: 'Contracts',
 
   // Execution & Testing
   run_build: 'Execution',
@@ -2404,6 +2562,8 @@ const TOOL_CATEGORY_MAP = {
   get_job_status: 'System',
   install_language_server: 'System',
   debug_sleep: 'System',
+  list_packages: 'System',
+  load_package: 'System',
 };
 
 const CATEGORY_ORDER = [
@@ -2414,6 +2574,7 @@ const CATEGORY_ORDER = [
   'Multiplayer',
   'Annotations',
   'Federation',
+  'Contracts',
   'Execution',
   'System',
 ];
@@ -2444,7 +2605,7 @@ async function renderToolsTab() {
     <div class="tools-layout">
       <div class="tools-sidebar-panel">
         <div class="tools-filter-bar">
-          <input type="search" id="tools-search" class="tools-search" placeholder="Search 75+ tools…" aria-label="Search tools">
+          <input type="search" id="tools-search" class="tools-search" placeholder="Search 95+ tools…" aria-label="Search tools">
           <div id="tools-categories" class="tools-category-chips" role="tablist"></div>
         </div>
         <ul id="tools-list" class="tools-list"></ul>
@@ -2742,6 +2903,8 @@ if (typeof module !== 'undefined' && module.exports) {
     repoColour,
     nodeShape,
     nodeRadius,
+    nodeKind,
+    computeMinimapTransform,
     // SPA graph v2: anchors-first (2026-08-31):
     computeAnchorVisibleSet,
     parseGlobalId,

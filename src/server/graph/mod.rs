@@ -6,6 +6,7 @@
 //! in [`persist`].
 
 pub(crate) mod persist;
+pub(crate) mod wal;
 
 pub use persist::{inspect_persisted_graph, GraphInspectionError, PATH_FORMAT_VERSION};
 
@@ -19,7 +20,6 @@ use petgraph::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::warn;
 
 /// The canonical graph key for a file: workspace-relative, forward-slashed.
 ///
@@ -60,6 +60,262 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
     }
 }
 
+/// Which sensor "owns" a node — drives [`GraphDatabase::replace_sensor_output`]
+/// so a sensor's rescan replaces only its own previous output (§6.1).
+/// The mapping is fixed by node type and `ContractFact` variant:
+///
+/// - `HttpRoute` with `ProviderOrigin::Code` → [`SensorOwner::HttpSensor`]
+/// - `HttpRoute` with `ProviderOrigin::OpenApi` → [`SensorOwner::OpenApiSensor`]
+/// - `Schema`, `Field` → [`SensorOwner::GrpcProviderSensor`] for `.proto`,
+///   [`SensorOwner::GraphqlProviderSensor`] for `.graphql`/`.gql`,
+///   [`SensorOwner::EventSensor`] for `.avsc`, else
+///   [`SensorOwner::OpenApiSensor`] (which owns `openapi.json` too —
+///   never route `.json` to the event sensor)
+/// - Contract facts win over node-type catch-alls: `WebSocketConsumer`
+///   rides on `HttpClientCall`, `TopicConsumer` on `Function`
+/// - `HttpClientCall` → [`SensorOwner::HttpClientSensor`] (PR 6)
+/// - `FieldRef` → [`SensorOwner::FieldAccessSensor`] (PR 9)
+/// - `EntryPointSensor` is special: it clears every node's `entry`
+///   field on every run regardless of type, then re-applies its own
+///   (§6.6).
+///
+/// Nodes whose `contract` is `None` (pre-schema-v3) have no owner —
+/// they are left alone by `replace_sensor_output`. Sensor owners
+/// only govern nodes they themselves wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorOwner {
+    HttpSensor,
+    OpenApiSensor,
+    HttpClientSensor,
+    FieldAccessSensor,
+    EntryPointSensor,
+    /// §6.7 / §7.7 (stretch): the event sensor owns `Topic` nodes
+    /// plus `Produces` / `Consumes` edges. Its `replace_sensor_output`
+    /// call retracts only those.
+    EventSensor,
+    /// Phase D (spec §7): the sql sensor owns `Table` nodes, the
+    /// synthetic `sql-read:` consumer nodes, and `ReadsTable` /
+    /// `WritesTable` edges. A rescan replaces only its own previous
+    /// output.
+    SqlSensor,
+    /// Phase E (spec §8.2): the legacy `proto_sensor` emits bare
+    /// `Module` nodes with no contract fact. Those are owned here and
+    /// retracted on every `scan_workspace`, so a service renamed away
+    /// in a `.proto` does not leave its old node behind. The three gRPC
+    /// contract sensors each own their own output — see
+    /// `GrpcProviderSensor` / `GrpcConsumerSensor` /
+    /// `GrpcHandlerLinkSensor`; their `Module` nodes carry `RpcProvider`
+    /// / `RpcHandler` facts and are claimed by those arms first.
+    ProtoSensor,
+    /// Phase E (spec §8.3): legacy `graphql_sensor` output — bare
+    /// `Interface` nodes. Same rule as [`Self::ProtoSensor`]: owned
+    /// here and retracted per scan. The three GraphQL contract sensors
+    /// own their own output.
+    GraphqlSensor,
+    /// Each protocol sensor owns exactly what it emits. Splitting
+    /// these out of the family owners is what makes coexistence
+    /// work: `replace_sensor_output` retracts every node with the
+    /// given owner, so a shared owner means the sensor that runs
+    /// last deletes its peers' Schema / Field / FieldRef nodes.
+    GrpcProviderSensor,
+    GrpcConsumerSensor,
+    GrpcHandlerLinkSensor,
+    GraphqlProviderSensor,
+    GraphqlConsumerSensor,
+    GraphqlResolverLinkSensor,
+    /// Phase F (Gap 19): the WebSocket sensor family owns nodes
+    /// carrying WebSocketProvider / WebSocketConsumer / WebSocketHandler facts.
+    WebSocketSensor,
+}
+
+/// Map a node to its sensor owner (§6.1 derivation rules). Returns
+/// `None` for nodes that no sensor claims (pre-schema-v3 nodes,
+/// regular code symbols).
+///
+/// A node can carry several facts — two subscriptions on one line share
+/// a `topic-read:` node and each is a `TopicConsumer`. Owner derivation
+/// runs per fact and the results must agree. If they do not, the node is
+/// treated as unowned rather than retracted under one sensor, which
+/// would delete the other sensor's data with it: a node that lingers is
+/// the safe failure, a peer's lost edges are not.
+pub fn sensor_owner_of(node: &GraphNode) -> Option<SensorOwner> {
+    let mut owner: Option<SensorOwner> = None;
+    for fact in &node.contract {
+        let Some(o) = derive_owner(node, Some(fact)) else {
+            continue;
+        };
+        match owner {
+            None => owner = Some(o),
+            Some(prev) if prev == o => {}
+            Some(prev) => {
+                debug_assert!(
+                    false,
+                    "node {} carries facts with two owners ({prev:?} vs {o:?})",
+                    node.id
+                );
+                return None;
+            }
+        }
+    }
+    if node.contract.is_empty() {
+        // No facts: the node-type catch-alls and the legacy
+        // fact-less `Module` / `Interface` arms still apply.
+        owner = derive_owner(node, None);
+    }
+    owner
+}
+
+fn derive_owner(
+    node: &GraphNode,
+    fact: Option<&crate::federation::contracts::model::ContractFact>,
+) -> Option<SensorOwner> {
+    use crate::federation::contracts::model::{ContractFact, ProviderOrigin};
+    use crate::schema::NodeType;
+    match (node.node_type.clone(), fact) {
+        (NodeType::HttpRoute, Some(ContractFact::Provider(p))) => match p.origin {
+            ProviderOrigin::Code => Some(SensorOwner::HttpSensor),
+            ProviderOrigin::OpenApi => Some(SensorOwner::OpenApiSensor),
+        },
+        (NodeType::Schema, Some(ContractFact::Schema { .. })) => {
+            if node.path.ends_with(".proto") {
+                // `grpc_provider_sensor` is the sole emitter of `.proto`
+                // Schema/Field nodes, so it owns them and retracts them
+                // on rescan. Routing them to `ProtoSensor` (which never
+                // calls `replace_sensor_output`) left stale schemas in
+                // the graph forever when a message was deleted.
+                Some(SensorOwner::GrpcProviderSensor)
+            } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
+                // Same rule for the same reason: `graphql_provider_sensor`
+                // is the emitter, and `SensorOwner::GraphqlSensor` is
+                // never passed to `replace_sensor_output` — so those
+                // nodes were never retracted either.
+                Some(SensorOwner::GraphqlProviderSensor)
+            } else if node.path.ends_with(".avsc") {
+                // Avro payload schemas belong to the event/topic
+                // sensor. NOTE: `.json` is deliberately NOT here —
+                // `openapi_sensor` emits Schema/Field nodes for
+                // `openapi.json` / `swagger.json`, and routing those to
+                // EventSensor makes `event_sensor`'s
+                // `replace_sensor_output` retract them on every scan.
+                //
+                // NOTE: no sensor emits these today — `parse_payload_file`,
+                // which would have fed them, had no callers and was
+                // removed. The arm is kept because a future emitter is
+                // plausible and the routing is decided here; do not read
+                // it as live coverage.
+                Some(SensorOwner::EventSensor)
+            } else {
+                Some(SensorOwner::OpenApiSensor)
+            }
+        }
+        (NodeType::Field, Some(ContractFact::Field(_))) => {
+            if node.path.ends_with(".proto") {
+                Some(SensorOwner::GrpcProviderSensor)
+            } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
+                Some(SensorOwner::GraphqlProviderSensor)
+            } else if node.path.ends_with(".avsc") {
+                Some(SensorOwner::EventSensor)
+            } else {
+                Some(SensorOwner::OpenApiSensor)
+            }
+        }
+        // Contract-fact ownership must win over the node-type
+        // catch-alls below: several facts RIDE on a shared node type
+        // (`WebSocketConsumer` on `HttpClientCall`, `TopicConsumer` on
+        // `Function`). A catch-all listed first would claim those
+        // nodes, and the catch-all's sensor would then retract them on
+        // every rescan.
+        //
+        // §6.7 (stretch): the event sensor owns its synthetic
+        // `topic-read:` nodes. Ownership keys on the NAME PREFIX, not
+        // on the fact: the node is also the `Produces`/`Consumes` edge
+        // anchor for a producer site, which carries **no** fact at all
+        // (a producer is not a subscriber), and an unowned node is
+        // never retracted — it leaks when the site is deleted.
+        //
+        // The name guard doubles as the migration arm: pre-fix graphs
+        // carry `TopicConsumer` on the real symbol node (named after
+        // the function), and retracting those would delete real
+        // function nodes and their edges from an operator's graph.
+        (NodeType::Function, _)
+            if node
+                .name
+                .starts_with(crate::server::sensors::util::TOPIC_READ_PREFIX) =>
+        {
+            Some(SensorOwner::EventSensor)
+        }
+        // Phase D (spec §7): a `Table` node carries a `Table`
+        // contract fact (or at scan time a `name`-only payload).
+        // The sql sensor owns it — and its synthetic `sql-read:`
+        // consumer node, so a rescan retracts a reader whose SQL
+        // site was deleted (the stale-reader bug class). The name
+        // guard keeps pre-fix graphs working: their `TableConsumer`
+        // facts ride real symbol nodes, which this sensor no longer
+        // re-emits — retracting those would delete the symbol.
+        (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
+        (_, Some(ContractFact::TableConsumer(_)))
+            if node
+                .name
+                .starts_with(crate::server::sensors::util::SQL_READ_PREFIX) =>
+        {
+            Some(SensorOwner::SqlSensor)
+        }
+        // Phase E (spec §8.2): each gRPC contract sensor owns its own
+        // output. Sharing one owner meant `grpc_consumer`'s rescan
+        // retracted `grpc_provider`'s Schema/Field nodes and
+        // RequestSchema/ResponseSchema edges on every run.
+        (_, Some(ContractFact::RpcProvider(_))) => Some(SensorOwner::GrpcProviderSensor),
+        (_, Some(ContractFact::RpcHandler(_))) => Some(SensorOwner::GrpcHandlerLinkSensor),
+        (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::GrpcConsumerSensor),
+        // Phase E (spec §8.3): same split for the GraphQL family.
+        (_, Some(ContractFact::GraphqlProvider(_))) => Some(SensorOwner::GraphqlProviderSensor),
+        (_, Some(ContractFact::GraphqlHandler(_))) => Some(SensorOwner::GraphqlResolverLinkSensor),
+        (_, Some(ContractFact::GraphqlConsumer(_))) => Some(SensorOwner::GraphqlConsumerSensor),
+        // A `FieldRef` minted by the GraphQL consumer must not be owned
+        // by `field_access`, or the latter's rescan deletes it.
+        (NodeType::FieldRef, Some(ContractFact::FieldRead(r)))
+            if r.origin
+                == crate::federation::contracts::model::FieldReadOrigin::GraphqlConsumer =>
+        {
+            Some(SensorOwner::GraphqlConsumerSensor)
+        }
+        // Phase F (Gap 19): WebSocket facts are owned by WebSocketSensor.
+        (_, Some(ContractFact::WebSocketProvider(_)))
+        | (_, Some(ContractFact::WebSocketHandler(_)))
+        | (_, Some(ContractFact::WebSocketConsumer(_))) => Some(SensorOwner::WebSocketSensor),
+        // Legacy scanners emit bare `Module` / `Interface` nodes with no
+        // contract fact (`proto_sensor`, `graphql_sensor`). Placed after
+        // every fact arm on purpose: `grpc_provider_sensor` and
+        // `graphql_provider_sensor` also emit `Module`, but theirs carry
+        // `RpcProvider` / `GraphqlProvider` and are claimed above — a
+        // catch-all placed earlier would take retraction away from the
+        // sensor that emitted the node.
+        (NodeType::Module, None) if node.path.ends_with(".proto") => Some(SensorOwner::ProtoSensor),
+        (NodeType::Interface | NodeType::Module, None)
+            if node.path.ends_with(".graphql") || node.path.ends_with(".gql") =>
+        {
+            Some(SensorOwner::GraphqlSensor)
+        }
+        // Node-type catch-alls last.
+        (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
+        (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
+        (NodeType::Topic, _) => Some(SensorOwner::EventSensor),
+        _ => None,
+    }
+}
+
+/// Total order for ranking anchors: score descending, then name, path and id
+/// ascending, so equal scores rank the same way on every call and in every
+/// process (`find_anchors` returned different symbols for tied scores).
+pub(crate) fn anchor_order(a: &GraphNode, b: &GraphNode) -> std::cmp::Ordering {
+    b.anchor_score
+        .unwrap_or(0.0)
+        .total_cmp(&a.anchor_score.unwrap_or(0.0))
+        .then_with(|| a.name.cmp(&b.name))
+        .then_with(|| a.path.cmp(&b.path))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 #[derive(Clone)]
 pub struct GraphDatabase {
     graph: Arc<RwLock<StableGraph<GraphNode, GraphEdge>>>,
@@ -84,6 +340,16 @@ pub struct GraphDatabase {
     /// per ref.
     name_index: Arc<DashMap<String, Vec<NodeIndex>>>,
     last_commit: Arc<RwLock<Option<String>>>,
+    /// True while `load_from_disk` replays the WAL: replayed ops go through
+    /// the normal mutators and must not be logged again (doing so appended to
+    /// the very file being read, so replay never reached EOF).
+    wal_replaying: Arc<std::sync::atomic::AtomicBool>,
+    /// Open append handle for the WAL (see `wal::WalWriter`); shared by clones.
+    wal_writer: Arc<parking_lot::Mutex<wal::WalWriter>>,
+    /// One checkpoint at a time: rotate / snapshot / discard must not interleave
+    /// with another checkpoint's (a second saver merged into the first one's
+    /// retired log, then the first deleted it; both also shared one temp file).
+    checkpoint_lock: Arc<parking_lot::Mutex<()>>,
     persistence_path: PathBuf,
     /// When true, every public `insert_*` / `set_*` / `save_to_disk` returns
     /// `LainError::Other("graph is read-only")`. Set by `open_read_only`,
@@ -177,6 +443,17 @@ impl GraphDatabase {
         db
     }
 
+    /// A fresh in-memory, writable graph. Used by PR 11's snapshot
+    /// federations (`§8.5`) so `PetgraphBackend::ephemeral` can wrap
+    /// a graph it can `upsert_node` against without ever reaching
+    /// the disk. The `persistence_path` is empty (`""`) — the
+    /// snapshot backend's `save()` is overridden to be a no-op, so
+    /// `GraphDatabase::save_to_disk_sync` is never called on this
+    /// graph.
+    pub(crate) fn empty_writable() -> Self {
+        Self::empty(Path::new(""))
+    }
+
     fn empty(memory_path: &Path) -> Self {
         Self {
             graph: Arc::new(RwLock::new(StableGraph::new())),
@@ -184,6 +461,12 @@ impl GraphDatabase {
             path_index: Arc::new(DashMap::new()),
             name_index: Arc::new(DashMap::new()),
             last_commit: Arc::new(RwLock::new(None)),
+            wal_replaying: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            wal_writer: Arc::new(parking_lot::Mutex::new(wal::WalWriter::new(
+                wal::wal_path_for(memory_path),
+                wal::SyncPolicy::from_env(),
+            ))),
+            checkpoint_lock: Arc::new(parking_lot::Mutex::new(())),
             persistence_path: memory_path.to_path_buf(),
             read_only: false,
             // Default to the test namespace so existing callers
@@ -239,9 +522,38 @@ impl GraphDatabase {
         self.upsert_node(node.clone())
     }
 
+    /// Whether mutations are logged: only for graphs that persist to disk, and
+    /// never while the log itself is being replayed.
+    fn wal_enabled(&self) -> bool {
+        !self.persistence_path.as_os_str().is_empty()
+            && !self
+                .wal_replaying
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Log `ops` (one write, one fsync). **Callers must hold the graph write
+    /// lock**, so the log's order is exactly the order mutations take effect
+    /// and a checkpoint (which rotates under the same lock) cannot slip
+    /// between an op being logged and being applied.
+    fn log_ops(&self, ops: &[wal::GraphOp]) -> Result<(), LainError> {
+        if ops.is_empty() || !self.wal_enabled() {
+            return Ok(());
+        }
+        self.wal_writer
+            .lock()
+            .append(ops)
+            .map_err(|e| LainError::Database(format!("wal append: {e}")))
+    }
+
+    fn log_op(&self, op: wal::GraphOp) -> Result<(), LainError> {
+        self.log_ops(std::slice::from_ref(&op))
+    }
+
     pub fn upsert_node(&self, node: GraphNode) -> Result<(), LainError> {
         self.check_writable()?;
         let mut graph = self.graph.write();
+        // Logged under the write lock, before the mutation (see `log_ops`).
+        self.log_op(wal::GraphOp::UpsertNode(node.clone()))?;
 
         if let Some(idx) = self.index_map.get(&node.id).map(|r| *r.value()) {
             let existing_hydrated = graph[idx].is_hydrated;
@@ -263,6 +575,11 @@ impl GraphDatabase {
         self.check_writable()?;
         // Phase 1: Collect indices and path entries under graph lock
         let mut graph = self.graph.write();
+        let wal_ops: Vec<wal::GraphOp> = new_nodes
+            .iter()
+            .map(|n| wal::GraphOp::UpsertNode(n.clone()))
+            .collect();
+        self.log_ops(&wal_ops)?;
 
         // Collect work: also update the indexes inline (still holding
         // the graph write lock). The previous code released the graph
@@ -564,12 +881,12 @@ impl GraphDatabase {
     /// two repos can share a path, so path is not a usable key there.
     pub fn remove_nodes_by_ids(&self, ids: &[String]) -> Result<usize, LainError> {
         self.check_writable()?;
-
         let mut removed = 0usize;
         let mut cleared_paths: Vec<(String, NodeIndex)> = Vec::new();
         let mut cleared_names: Vec<(String, NodeIndex)> = Vec::new();
         {
             let mut graph = self.graph.write();
+            self.log_op(wal::GraphOp::RemoveNodesByIds(ids.to_vec()))?;
             for id in ids {
                 let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
                     continue;
@@ -630,7 +947,11 @@ impl GraphDatabase {
     pub fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
 
-        let targets: std::collections::HashSet<(String, String, EdgeType)> = edges
+        // B5 (2026-10-04): append a single batched
+        // `GraphOp::RemoveEdges` op to the WAL before mutating
+        // in-memory. The whole batch is one frame; replay
+        // reconstructs it atomically.
+        let endpoints: Vec<(String, String, EdgeType)> = edges
             .iter()
             .map(|e| {
                 (
@@ -640,10 +961,14 @@ impl GraphDatabase {
                 )
             })
             .collect();
-
         let mut removed = 0usize;
         {
             let mut graph = self.graph.write();
+            self.log_op(wal::GraphOp::RemoveEdges {
+                endpoints: endpoints.clone(),
+            })?;
+            let targets: std::collections::HashSet<(String, String, EdgeType)> =
+                endpoints.into_iter().collect();
             // Collect first, mutate after: `remove_edge` invalidates the
             // edge-index iterator (`edges_directed` / `edges_connecting`)
             // the moment a removal lands.
@@ -664,6 +989,120 @@ impl GraphDatabase {
                 }
             }
         }
+        Ok(removed)
+    }
+
+    /// Replace the per-sensor output for `owner`: drop every node the
+    /// same `owner` previously emitted, then insert `nodes` and
+    /// `edges` (§6.1).
+    ///
+    /// `run_all` rescans the whole repo on every index, but plain
+    /// upserts left nodes for deleted routes and calls behind
+    /// (upsert can only overwrite a node it sees again). Removing
+    /// every node the owner previously emitted first means a route
+    /// deleted from source is gone after the rescan — the stale
+    /// `HttpRoute` problem 0.8 had.
+    ///
+    /// `SensorOwner` is derived from a node's `node_type` and
+    /// `contract` variant: `HttpRoute + Code origin` → http_sensor,
+    /// `HttpRoute + OpenApi origin` (and `Schema` / `Field`) →
+    /// openapi_sensor, `HttpClientCall` → http_client_sensor,
+    /// `FieldRef` → field_access_sensor. Pre-schema-v3 nodes that
+    /// carry no `contract` cannot be assigned an owner and are left
+    /// alone — the §6.1 fix only governs sensor-owned nodes.
+    ///
+    /// `EntryPointSensor` is special: it clears every `GraphNode.entry`
+    /// field up front, then re-inserts its own set with the entries
+    /// re-applied.
+    ///
+    /// Returns the number of nodes removed.
+    pub fn replace_sensor_output(
+        &self,
+        owner: SensorOwner,
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+    ) -> Result<usize, LainError> {
+        self.check_writable()?;
+
+        let owner_for = |n: &GraphNode| sensor_owner_of(n);
+
+        let removed: usize = {
+            let mut graph = self.graph.write();
+
+            // 1. Collect ids of every node currently in the graph
+            //    that belongs to this owner.
+            let stale_ids: Vec<String> = graph
+                .node_references()
+                .filter_map(|(_, n)| {
+                    let o = owner_for(n);
+                    if o == Some(owner) {
+                        Some(n.id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // 2. Remove them (and their incident edges).
+            let mut removed_ids: Vec<String> = Vec::new();
+            for id in &stale_ids {
+                if let Some(idx) = self.index_map.get(id).map(|r| *r.value()) {
+                    if let Some(node) = graph.node_weight(idx) {
+                        let name = node.name.clone();
+                        let path = node.path.clone();
+                        if graph.remove_node(idx).is_some() {
+                            self.index_map.remove(id);
+                            let name_empty = self
+                                .name_index
+                                .get_mut(&name)
+                                .map(|mut e| {
+                                    e.retain(|i| *i != idx);
+                                    e.is_empty()
+                                })
+                                .unwrap_or(false);
+                            if name_empty {
+                                self.name_index.remove(&name);
+                            }
+                            let path_empty = self
+                                .path_index
+                                .get_mut(&path)
+                                .map(|mut e| {
+                                    e.retain(|i| *i != idx);
+                                    e.is_empty()
+                                })
+                                .unwrap_or(false);
+                            if path_empty {
+                                self.path_index.remove(&path);
+                            }
+                            removed_ids.push(id.clone());
+                        }
+                    }
+                }
+            }
+
+            // 3. Special case: EntryPointSensor wipes `entry` on
+            //    every node before re-applying its own.
+            if matches!(owner, SensorOwner::EntryPointSensor) {
+                for idx in 0..graph.node_count() {
+                    let nidx = petgraph::stable_graph::NodeIndex::new(idx);
+                    if let Some(n) = graph.node_weight_mut(nidx) {
+                        n.entry = None;
+                    }
+                }
+            }
+            removed_ids.len()
+        };
+
+        // 4. Insert the new nodes and edges (uses the existing
+        //    batch insert; edges whose endpoints aren't present are
+        //    dropped — same contract as `insert_edges_batch`).
+        for node in nodes {
+            self.upsert_node(node.clone())?;
+        }
+        if !edges.is_empty() {
+            self.insert_edges_batch(edges)?;
+        }
+
         Ok(removed)
     }
 
@@ -704,10 +1143,7 @@ impl GraphDatabase {
             // pass; until then say nothing rather than guess.
             return Freshness::Fresh;
         };
-        let mtime_secs = mtime
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let mtime_secs = crate::server::time::unix_secs(mtime);
 
         if mtime_secs > last_scan {
             Freshness::Dirty {
@@ -801,6 +1237,7 @@ impl GraphDatabase {
                 LainError::NotFound(format!("Target node {} not found", edge.target_id))
             })?;
 
+        self.log_op(wal::GraphOp::UpsertEdge(edge.clone()))?;
         graph.add_edge(source_idx, target_idx, edge.clone());
         Ok(())
     }
@@ -855,6 +1292,18 @@ impl GraphDatabase {
     pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
         let mut graph = self.graph.write();
+        // Log only the edges this call will actually add (both endpoints
+        // local). Logging every edge, including the ones dropped below, made
+        // replay hit "node not found" and fail the whole load.
+        let wal_ops: Vec<wal::GraphOp> = new_edges
+            .iter()
+            .filter(|e| {
+                self.index_map.get(&e.source_id).is_some()
+                    && self.index_map.get(&e.target_id).is_some()
+            })
+            .map(|e| wal::GraphOp::UpsertEdge(e.clone()))
+            .collect();
+        self.log_ops(&wal_ops)?;
         let mut external = self.pending_external_edges.lock();
 
         let mut dropped = 0usize;
@@ -932,6 +1381,11 @@ impl GraphDatabase {
             }
         }
         drop(graph);
+        // B5 (2026-10-04): write-ahead log. `insert_edge` is
+        // the actual mutator; the WAL append happens there
+        // too, but `upsert_edge` short-circuits above when the
+        // edge already exists, so we only append on the
+        // insert path.
         self.insert_edge(&edge)
     }
 
@@ -1483,26 +1937,19 @@ impl GraphDatabase {
     pub fn find_anchors(&self, limit: usize) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
         let mut sorted: Vec<_> = graph.node_weights().cloned().collect();
-        sorted.sort_by(|a, b| {
-            b.anchor_score
-                .unwrap_or(0.0)
-                .total_cmp(&a.anchor_score.unwrap_or(0.0))
-        });
+        sorted.sort_by(anchor_order);
         let mut by_name: std::collections::HashMap<String, GraphNode> =
             std::collections::HashMap::new();
         for n in sorted {
-            // Insert only the first (best-scoring) instance per name.
-            // `sorted` is already descending by score.
+            // Insert only the first (best-ranked) instance per name.
+            // `sorted` is already in `anchor_order`.
             by_name.entry(n.name.clone()).or_insert(n);
         }
-        // Re-sort the deduped set by score (the HashMap insert order
-        // is not guaranteed to be sorted).
+        // Re-sort the deduped set: HashMap iteration order is random per
+        // process, so sorting by score alone made which tied symbols
+        // survived `take(limit)` differ from one run to the next.
         let mut out: Vec<GraphNode> = by_name.into_values().collect();
-        out.sort_by(|a, b| {
-            b.anchor_score
-                .unwrap_or(0.0)
-                .total_cmp(&a.anchor_score.unwrap_or(0.0))
-        });
+        out.sort_by(anchor_order);
         Ok(out.into_iter().take(limit).collect())
     }
 
@@ -1561,6 +2008,65 @@ impl GraphDatabase {
             .filter(|n| n.name == "main" || n.name == "App")
             .cloned()
             .collect())
+    }
+
+    /// Set the `entry` field on an existing node, identified by `id`.
+    /// Returns `Ok(true)` if the node existed and was updated, `Ok(false)`
+    /// if the id is unknown (a regex-only detection whose function hasn't
+    /// been indexed yet — the sensor will retry on the next scan).
+    ///
+    /// Phase 1 (`§6.6`) of `entry_point_sensor` calls this for every
+    /// regex-detected entry-point after `replace_sensor_output` has wiped
+    /// every node's `entry` field. The mutation is a single field
+    /// assignment under the graph write lock so concurrent readers see
+    /// either the old or the new value, never a torn one.
+    pub fn set_entry(
+        &self,
+        id: &str,
+        kind: crate::federation::contracts::model::EntryKind,
+    ) -> Result<bool, LainError> {
+        self.check_writable()?;
+        let mut graph = self.graph.write();
+        let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
+            return Ok(false);
+        };
+        if let Some(node) = graph.node_weight_mut(idx) {
+            node.entry = Some(kind);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Ids of every node that has an incoming `Calls` edge into
+    /// `node_id`. Sorted for determinism (`§8.3`). Used by
+    /// `used_by` (`§10.9`) to walk callers up the call graph.
+    pub fn incoming_calls(&self, node_id: &str) -> Vec<String> {
+        let graph = self.graph.read();
+        let Some(idx) = self.index_map.get(node_id).map(|r| *r.value()) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = graph
+            .edges_directed(idx, petgraph::Direction::Incoming)
+            .filter(|e| e.weight().edge_type == EdgeType::Calls)
+            .map(|e| graph[e.source()].id.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// All `CallsHttp` edges in the graph: `(handler_id, route_id)` pairs.
+    /// Used by `entry_point_sensor` (`§6.6`) to tag handler functions as
+    /// `EntryKind::HttpHandler`.
+    pub fn calls_http_pairs(&self) -> Vec<(String, String)> {
+        let graph = self.graph.read();
+        let mut out: Vec<(String, String)> = graph
+            .edge_references()
+            .filter(|e| e.weight().edge_type == EdgeType::CallsHttp)
+            .map(|e| (graph[e.source()].id.clone(), graph[e.target()].id.clone()))
+            .collect();
+        out.sort();
+        out
     }
 
     pub fn insert_co_change_edges(
@@ -1706,16 +2212,85 @@ impl GraphDatabase {
     /// Without this, the only signal that the call graph is empty
     /// is "every impact query returns nothing," which is the exact
     /// failure the user reported as Bug 2.
+    ///
+    /// Every `EdgeType` variant from [`schema::EdgeType::all()`] is
+    /// seeded at 0 so an absent edge type shows up as
+    /// `Calls: 0` rather than missing. The "missing" case is the
+    /// silent-failure mode operators reported in the 2026-10-04
+    /// dogfood: `describe_schema` advertised `Calls` but the
+    /// health report never mentioned it, so the silent-absence was
+    /// invisible until an impact query returned empty.
     pub fn edge_counts_by_type(&self) -> std::collections::BTreeMap<String, usize> {
         use petgraph::visit::IntoEdgeReferences;
         use std::collections::BTreeMap;
         let graph = self.graph.read();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for variant in crate::schema::EdgeType::all() {
+            counts.insert(format!("{variant:?}"), 0);
+        }
         for edge in graph.edge_references() {
             let key = format!("{:?}", edge.weight().edge_type);
             *counts.entry(key).or_insert(0) += 1;
         }
         counts
+    }
+
+    /// How many files in the graph have at least one `Calls` or
+    /// `Uses` edge out of any symbol in them. Returns
+    /// `(covered, total)` where `total` is the number of `File`
+    /// nodes in the graph.
+    ///
+    /// This is the B4 metric for `get_health`: a repo with a
+    /// populated `Contains` tree but few files covered by calls
+    /// means the indexer's call-extraction phase didn't run on
+    /// those files (LSP missing, file is a script, etc.). The 198
+    /// of 224 files in the 2026-10-04 Lain-on-Lain dogfood were
+    /// uncovered — surfaced in `find_dead_code` as the "⚠ N files
+    /// have no call edges" warning. Surfacing the same number in
+    /// `get_health` makes the gap visible to anyone running
+    /// `lain doctor` or wiring a CI check.
+    pub fn call_graph_file_coverage(&self) -> (usize, usize) {
+        use petgraph::stable_graph::NodeIndex;
+        use petgraph::visit::EdgeRef;
+        use std::collections::HashSet;
+        let graph = self.graph.read();
+        let mut total_files = 0usize;
+        let mut file_ids: HashSet<NodeIndex> = HashSet::new();
+        for idx in graph.node_indices() {
+            if matches!(graph[idx].node_type, crate::schema::NodeType::File) {
+                total_files += 1;
+                file_ids.insert(idx);
+            }
+        }
+        let mut covered_files: HashSet<NodeIndex> = HashSet::new();
+        for edge in graph.edge_references() {
+            let kind = &edge.weight().edge_type;
+            if kind != &crate::schema::EdgeType::Calls && kind != &crate::schema::EdgeType::Uses {
+                continue;
+            }
+            // Map the source symbol back to the file it lives in via
+            // incoming `Contains` edges. The simplest pass is "does
+            // either endpoint have a File ancestor"; the cheaper one
+            // is to walk each endpoint's `Contains` predecessors
+            // once. The endpoint symbols have a `.path` already,
+            // so we go via that — no graph walk needed.
+            for &endpoint in &[edge.source(), edge.target()] {
+                let path_key = graph[endpoint].path.clone();
+                let mut file_idx: Option<NodeIndex> = None;
+                if let Some(indices) = self.path_index.get(&path_key) {
+                    for i in indices.iter() {
+                        if graph[*i].node_type == crate::schema::NodeType::File {
+                            file_idx = Some(*i);
+                            break;
+                        }
+                    }
+                }
+                if let Some(idx) = file_idx {
+                    covered_files.insert(idx);
+                }
+            }
+        }
+        (covered_files.len(), total_files)
     }
 
     pub fn get_node_at_location(&self, path: &str, line: u32) -> Option<GraphNode> {
@@ -1794,10 +2369,34 @@ impl GraphDatabase {
     }
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
+        let _one_checkpoint_at_a_time = self.checkpoint_lock.lock();
+        // Start the checkpoint under the graph write lock: every logging
+        // mutator appends under that same lock, so after this point all
+        // previously acknowledged ops live in the retired log and new ones go
+        // to a fresh WAL. (Serialising, writing, then truncating the live WAL
+        // dropped ops acknowledged in between: docs/formal/GraphWalCheckpoint.tla.)
+        let wal_path = wal::wal_path_for(&self.persistence_path);
+        let logging = self.wal_enabled();
+        if logging {
+            let _guard = self.graph.write();
+            // Release the append handle first (it would keep writing to the
+            // retired file, and Windows cannot rename an open one); everything
+            // acknowledged so far is synced into the retired log.
+            self.wal_writer
+                .lock()
+                .close()
+                .map_err(|e| LainError::Database(format!("wal close: {e}")))?;
+            wal::rotate(&wal_path).map_err(|e| LainError::Database(format!("wal rotate: {e}")))?;
+        }
         let data = persist::encode_state(&self.build_state())
             .map_err(|e| LainError::Database(e.to_string()))?;
         crate::cli::io::write_file_atomic(&self.persistence_path, &data)
             .map_err(|e| LainError::Database(e.to_string()))?;
+        // The snapshot is durable and covers the retired log.
+        if logging {
+            wal::discard_prev(&wal_path)
+                .map_err(|e| LainError::Database(format!("wal discard: {e}")))?;
+        }
         Ok(())
     }
 
@@ -1840,7 +2439,7 @@ impl GraphDatabase {
         let state = match persist::decode_state(&data) {
             Ok((state, _)) => state,
             Err(e) => {
-                warn!(
+                eprintln!(
                     "Ignoring unreadable graph at {}: {e}. Starting empty; \
                      the next index pass will rebuild it.",
                     self.persistence_path.display()
@@ -1850,7 +2449,7 @@ impl GraphDatabase {
         };
 
         if state.path_format_version != PATH_FORMAT_VERSION {
-            warn!(
+            eprintln!(
                 "Ignoring graph at {} written with path format v{} (this build expects v{}). \
                  Starting empty; the next index pass will rebuild it. Its node ids encode a \
                  different path convention, so merging would duplicate every node.",
@@ -1861,7 +2460,74 @@ impl GraphDatabase {
             return Ok(());
         }
 
-        let mut state = state;
+        self.apply_state_loaded(state)?;
+
+        // B5 (2026-10-04): replay the WAL on top of the snapshot.
+        // The snapshot is consistent up to some commit; ops in
+        // `graph.wal` were appended after the last checkpoint
+        // and represent post-snapshot state. Replay applies them
+        // in order. A torn frame (truncated tail or bad CRC)
+        // stops the replay; the snapshot is intact.
+        let wal_path = wal::wal_path_for(&self.persistence_path);
+        // Replayed ops go through the normal mutators; keep them out of the log.
+        self.wal_replaying
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut apply = |op: &wal::GraphOp| -> std::io::Result<()> {
+            let result = match op {
+                wal::GraphOp::UpsertNode(n) => self.upsert_node(n.clone()),
+                wal::GraphOp::UpsertEdge(e) => self.upsert_edge(e.clone()),
+                wal::GraphOp::RemoveNodesByIds(ids) => self.remove_nodes_by_ids(ids).map(|_| ()),
+                wal::GraphOp::RemoveEdges { endpoints } => {
+                    let edges: Vec<crate::schema::GraphEdge> = endpoints
+                        .iter()
+                        .map(|(s, t, ty)| {
+                            crate::schema::GraphEdge::new(ty.clone(), s.clone(), t.clone())
+                        })
+                        .collect();
+                    self.remove_edges(&edges).map(|_| ())
+                }
+                wal::GraphOp::CommitIndexMap { .. } => Ok(()),
+            };
+            match result {
+                Ok(()) => Ok(()),
+                // An op that refers to something the snapshot no longer has
+                // is stale, not fatal: skip it instead of failing startup.
+                Err(LainError::NotFound(_)) => Ok(()),
+                Err(e) => Err(std::io::Error::other(e.to_string())),
+            }
+        };
+        // The retired log of an interrupted checkpoint comes first, then the
+        // live one; each is repaired so later appends stay reachable.
+        let replayed = (|| -> std::io::Result<usize> {
+            let prev = wal::prev_path_for(&wal_path);
+            let a = wal::replay_and_repair(&prev, &mut apply)?;
+            let b = wal::replay_and_repair(&wal_path, &mut apply)?;
+            Ok(a + b)
+        })();
+        self.wal_replaying
+            .store(false, std::sync::atomic::Ordering::Release);
+        let replayed = replayed.map_err(|e| LainError::Database(format!("wal replay: {e}")))?;
+        if replayed > 0 {
+            tracing::info!(
+                "{} replayed {} WAL ops from {}",
+                self.persistence_path.display(),
+                replayed,
+                wal_path.display()
+            );
+            // Fold the replayed ops into a fresh snapshot so the log does not
+            // accumulate across restarts. Read-only views never write.
+            if !self.read_only {
+                self.save_to_disk_sync()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply an already-decoded `persist::GraphState` to this graph
+    /// in place. The petgraph + secondary indices + `last_commit`
+    /// are all swapped under one write lock so a concurrent
+    /// reader never sees a mismatched graph/index pair.
+    fn apply_state_loaded(&self, mut state: persist::GraphState) -> Result<(), LainError> {
         persist::heal_duplicate_ids(&mut state);
 
         let mut path_index = HashMap::new();
@@ -1875,10 +2541,6 @@ impl GraphDatabase {
             // loaded petgraph nodes so `find_indices_by_name` /
             // `find_all_nodes_by_name` work immediately after a cold
             // load, not just after the next indexing pass.
-            // `load_from_disk` previously went through
-            // `graph.node_weights()` for name lookups; post-fix the
-            // secondary index is authoritative. The on-disk format
-            // is unchanged — `name_index` is purely derived state.
             name_index
                 .entry(node.name.clone())
                 .or_insert_with(Vec::new)
@@ -1906,6 +2568,38 @@ impl GraphDatabase {
         drop(graph);
         *self.last_commit.write() = state.last_commit;
         Ok(())
+    }
+
+    /// Build a fresh `GraphDatabase` from a bincode-encoded
+    /// `persist::GraphState` payload without ever touching the
+    /// filesystem. PR 11's snapshot hydration uses this to honour
+    /// §8.5's "no disk writes from `from_snapshot`" — every prior
+    /// implementation round-tripped through a temp file, which
+    /// (a) violated §8.5 and (b) raced on the shared staging path
+    /// for concurrent builds of the same record.
+    ///
+    /// Returns the populated database plus the `last_commit` it
+    /// recorded (the manager logs it for diagnostics; tests use it
+    /// to assert the hydrate path round-trips).
+    pub fn from_bytes(data: &[u8]) -> Result<(Self, Option<String>), LainError> {
+        let db = Self::empty_read_only();
+        // Snapshot hydration only reads from the hydrated DB; the
+        // petgraph state is loaded into memory once and never
+        // mutated again. `read_only` does not gate the swap; the
+        // `read_only: true` flag still guards `save_to_disk` /
+        // `insert_*` so a future caller that accidentally tries to
+        // mutate through this DB gets a clean error.
+        let (state, _) = persist::decode_state(data)
+            .map_err(|e| LainError::Database(format!("graph state decode: {e}")))?;
+        if state.path_format_version != PATH_FORMAT_VERSION {
+            return Err(LainError::Database(format!(
+                "graph state path format v{} does not match v{}",
+                state.path_format_version, PATH_FORMAT_VERSION
+            )));
+        }
+        db.apply_state_loaded(state)?;
+        let last_commit = db.last_commit.read().clone();
+        Ok((db, last_commit))
     }
 
     pub fn export_to_json(&self) -> Result<String, LainError> {
@@ -2126,6 +2820,141 @@ mod replace_tests {
             "emptied directory's node is gone"
         );
         assert!(g.find_node_by_name("gone").is_none());
+    }
+
+    /// `replace_sensor_output` must retract the nodes a sensor
+    /// previously emitted and replace them with the new set — this
+    /// is the §6.1 fix for stale `HttpRoute` (and the joiner's
+    /// other sensor-owned nodes).
+    #[test]
+    fn replace_sensor_output_drops_stale_nodes_by_owner() {
+        use crate::federation::contracts::model::{
+            ContractFact, HttpMethod, ProviderFact, ProviderOrigin,
+        };
+
+        let g = db("lain_test_replace_sensor_stale");
+
+        let mut route_v1 = GraphNode::new(
+            NodeType::HttpRoute,
+            "GET /api/users".into(),
+            "openapi.yaml".into(),
+        );
+        route_v1.contract = vec![ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Get,
+            template: "/api/users".into(),
+            handler: None,
+            operation_id: Some("listUsers".into()),
+            origin: ProviderOrigin::OpenApi,
+        })];
+        g.insert_nodes_batch(&[route_v1]).unwrap();
+        assert!(g.find_node_by_name("GET /api/users").is_some());
+
+        // Rescan with no operations → route is gone.
+        let removed = g
+            .replace_sensor_output(SensorOwner::OpenApiSensor, &[], &[])
+            .unwrap();
+        assert_eq!(removed, 1, "the prior OpenApi route must be retracted");
+        assert!(
+            g.find_node_by_name("GET /api/users").is_none(),
+            "stale route must be gone"
+        );
+
+        // Rescan with a different operation → the prior route (now
+        // absent) is replaced by the new one.
+        let mut route_v2 = GraphNode::new(
+            NodeType::HttpRoute,
+            "POST /api/users".into(),
+            "openapi.yaml".into(),
+        );
+        route_v2.contract = vec![ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Post,
+            template: "/api/users".into(),
+            handler: None,
+            operation_id: Some("createUser".into()),
+            origin: ProviderOrigin::OpenApi,
+        })];
+        let removed = g
+            .replace_sensor_output(SensorOwner::OpenApiSensor, &[route_v2], &[])
+            .unwrap();
+        assert_eq!(removed, 0, "fresh insert: nothing to retract");
+        assert!(g.find_node_by_name("POST /api/users").is_some());
+        assert!(
+            g.find_node_by_name("GET /api/users").is_none(),
+            "the v1 route stays gone"
+        );
+    }
+
+    /// `replace_sensor_output` only retracts nodes whose owner
+    /// matches the one passed in. An `HttpRoute + Code` route (owned
+    /// by `HttpSensor`) must survive an `OpenApiSensor` rescan that
+    /// emits nothing.
+    #[test]
+    fn replace_sensor_output_leaves_other_owners_alone() {
+        use crate::federation::contracts::model::{
+            ContractFact, HttpMethod, ProviderFact, ProviderOrigin,
+        };
+
+        let g = db("lain_test_replace_sensor_owners");
+
+        let mut code_route = GraphNode::new(
+            NodeType::HttpRoute,
+            "GET /api/users".into(),
+            "routes.go".into(),
+        );
+        code_route.contract = vec![ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Get,
+            template: "/api/users".into(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        })];
+        g.insert_nodes_batch(&[code_route]).unwrap();
+
+        // OpenApiSensor rescan with no operations must not delete
+        // the Code-origin HttpRoute — it belongs to HttpSensor.
+        let removed = g
+            .replace_sensor_output(SensorOwner::OpenApiSensor, &[], &[])
+            .unwrap();
+        assert_eq!(
+            removed, 0,
+            "OpenApiSensor must not retract HttpSensor-owned nodes"
+        );
+        assert!(g.find_node_by_name("GET /api/users").is_some());
+    }
+
+    /// The `EntryPointSensor` owner wipes every node's `entry`
+    /// field on every rescan (§6.6) and then re-applies its own.
+    /// The wipe is the special-case branch in
+    /// `replace_sensor_output`.
+    #[test]
+    fn replace_sensor_output_clears_entry_fields_for_entry_point_sensor() {
+        let g = db("lain_test_replace_sensor_entry");
+        let mut handler = GraphNode::new(
+            NodeType::Function,
+            "scheduledMonthlyReport".into(),
+            "src/main.py".into(),
+        );
+        handler.entry = Some(crate::federation::contracts::model::EntryKind::Scheduled);
+        g.insert_nodes_batch(std::slice::from_ref(&handler))
+            .unwrap();
+
+        let removed = g
+            .replace_sensor_output(SensorOwner::EntryPointSensor, &[], &[])
+            .unwrap();
+        assert_eq!(removed, 0, "no nodes owned by EntryPointSensor yet");
+        let after = g.get_node(&handler.id).unwrap().unwrap();
+        assert!(
+            after.entry.is_none(),
+            "EntryPointSensor must clear every node's entry field"
+        );
+    }
+
+    /// `sensor_owner_of` maps node type and contract variant per
+    /// §6.1. Pre-schema-v3 nodes (no contract) have no owner.
+    #[test]
+    fn sensor_owner_of_returns_none_for_unowned_nodes() {
+        let plain = GraphNode::new(NodeType::Function, "parse".into(), "src/x.rs".into());
+        assert!(sensor_owner_of(&plain).is_none());
     }
 }
 
@@ -2932,6 +3761,650 @@ mod load_from_disk_name_index_tests {
         assert!(
             reader.find_node_by_name("missing").is_none(),
             "unknown names still return None"
+        );
+    }
+}
+
+// ─── Task 9 — BFS depth-gate regression tests
+//
+//     The mutation harness reports 4 survivors in
+//     `src/server/graph/mod.rs`, all on the same class:
+//     `if current_depth >= max_depth { continue; }` (and the
+//     `if next_depth >= min_depth` variant in `traverse`).
+//     A mutation `>=` → `>` walks one extra hop. The cases
+//     below pin a chain of length 3 and assert each BFS
+//     returns exactly the nodes the depth window allows —
+//     one more node would be a regression. The four BFS
+//     variants covered: `traverse`, `subgraph_around`,
+//     `bfs_from`, and the inner-`next_depth` check in
+//     `traverse`.
+
+#[cfg(test)]
+mod bfs_depth_gate_tests {
+    use super::*;
+    use crate::schema::{GraphNode, NodeType};
+    use std::collections::HashSet;
+
+    /// Build a fresh graph with a linear chain
+    ///   start -> a -> b -> c
+    /// of `Module` nodes connected by `EdgeType::Calls`. Returns
+    /// the `GraphDatabase` and the node ids in hop order. A
+    /// 4-hop chain lets the `>=` vs `>` distinction on a
+    /// `max_depth=2` cap actually matter (with a 3-hop chain
+    /// the cap never fires).
+    fn build_four_hop_chain(tag: &str) -> (GraphDatabase, [String; 4]) {
+        let dir = std::env::temp_dir().join(format!("lain_bfs_depth_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = GraphDatabase::new(&dir).expect("graph");
+        let mk = |name: &str, path: &str| {
+            let mut n = GraphNode::new(NodeType::Module, name.into(), path.into());
+            n.id = GraphNode::generate_id(
+                &NodeType::Module,
+                path,
+                name,
+                Some(1),
+                &RepoNamespace::for_test(),
+            );
+            n
+        };
+        let start = mk("start", "src/start.rs");
+        let a = mk("a", "src/a.rs");
+        let b = mk("b", "src/b.rs");
+        let c = mk("c", "src/c.rs");
+        let ids = [start.id.clone(), a.id.clone(), b.id.clone(), c.id.clone()];
+        g.insert_nodes_batch(&[start, a, b, c]).unwrap();
+        let state = g.build_state();
+        let s = state.index_map[&ids[0]];
+        let ai = state.index_map[&ids[1]];
+        let bi = state.index_map[&ids[2]];
+        let ci = state.index_map[&ids[3]];
+        let mut state = state;
+        state.graph.add_edge(
+            s,
+            ai,
+            GraphEdge::new(EdgeType::Calls, ids[0].clone(), ids[1].clone()),
+        );
+        state.graph.add_edge(
+            ai,
+            bi,
+            GraphEdge::new(EdgeType::Calls, ids[1].clone(), ids[2].clone()),
+        );
+        state.graph.add_edge(
+            bi,
+            ci,
+            GraphEdge::new(EdgeType::Calls, ids[2].clone(), ids[3].clone()),
+        );
+        std::fs::write(&g.persistence_path, persist::encode_state(&state).unwrap()).unwrap();
+        g.load_from_disk().unwrap();
+        (g, ids)
+    }
+
+    /// Shorter 3-hop chain for cases where the depth cap does
+    /// not need to fire — used by the success-side assertions
+    /// that pin the inclusion contract.
+    fn build_three_hop_chain(tag: &str) -> (GraphDatabase, [String; 3]) {
+        let dir = std::env::temp_dir().join(format!("lain_bfs_depth3_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = GraphDatabase::new(&dir).expect("graph");
+        let mk = |name: &str, path: &str| {
+            let mut n = GraphNode::new(NodeType::Module, name.into(), path.into());
+            n.id = GraphNode::generate_id(
+                &NodeType::Module,
+                path,
+                name,
+                Some(1),
+                &RepoNamespace::for_test(),
+            );
+            n
+        };
+        let start = mk("start", "src/start.rs");
+        let a = mk("a", "src/a.rs");
+        let b = mk("b", "src/b.rs");
+        let ids = [start.id.clone(), a.id.clone(), b.id.clone()];
+        g.insert_nodes_batch(&[start, a, b]).unwrap();
+        let state = g.build_state();
+        let s = state.index_map[&ids[0]];
+        let ai = state.index_map[&ids[1]];
+        let bi = state.index_map[&ids[2]];
+        let mut state = state;
+        state.graph.add_edge(
+            s,
+            ai,
+            GraphEdge::new(EdgeType::Calls, ids[0].clone(), ids[1].clone()),
+        );
+        state.graph.add_edge(
+            ai,
+            bi,
+            GraphEdge::new(EdgeType::Calls, ids[1].clone(), ids[2].clone()),
+        );
+        std::fs::write(&g.persistence_path, persist::encode_state(&state).unwrap()).unwrap();
+        g.load_from_disk().unwrap();
+        (g, ids)
+    }
+
+    #[test]
+    fn bfs_from_max_depth_one_returns_one_neighbor_not_two() {
+        // `bfs_from(start, 1)` should visit exactly the start's
+        // direct neighbor (depth 1). The 3-hop chain's `b` is at
+        // depth 2 and must NOT appear. A mutation `>=`→`>` would
+        // walk one extra hop and return both `a` and `b`.
+        let (g, ids) = build_three_hop_chain("bfs_from");
+        let results = g.bfs_from(&ids[0], 1);
+        let names: HashSet<String> = results.into_iter().map(|(n, _, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string()]),
+            "max_depth=1 must return exactly one neighbor, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn bfs_from_max_depth_two_returns_both_neighbors() {
+        // The positive counterpart: at max_depth=2 the BFS
+        // returns both `a` (depth 1) and `b` (depth 2). This
+        // pins the contract on the success side, so a future
+        // mutation that breaks the depth cap from the other
+        // direction (e.g. early termination) trips the test.
+        let (g, ids) = build_three_hop_chain("bfs_from_pos");
+        let results = g.bfs_from(&ids[0], 2);
+        let names: HashSet<String> = results.into_iter().map(|(n, _, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            "max_depth=2 must return both neighbors, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn traverse_with_range_one_two_does_not_walk_depth_three() {
+        // `traverse(start, Calls, 1..2, Outgoing)` returns the
+        // depth-1 and depth-2 nodes reachable from `start` —
+        // `a` and `b` in a 4-hop chain. The depth-3 node
+        // (`c`) must NOT appear. The relevant gate is line
+        // 1258 (`current_depth >= max_depth`); mutated to
+        // `>`, the BFS walks into `c` as well, and the
+        // result is {a, b, c} instead of {a, b}.
+        // (The start itself is never in the result because
+        // the BFS only adds nodes reached via an edge.)
+        let (g, ids) = build_four_hop_chain("traverse");
+        let nodes = g
+            .traverse(&ids[0], EdgeType::Calls, 1..2, Direction::Outgoing)
+            .expect("traverse");
+        let names: HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            "traverse 1..2 must yield depth-1 and depth-2 only, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn traverse_with_range_one_four_includes_depth_three_node() {
+        // Success side: range `1..4` returns all three
+        // reachable nodes from `start` (a, b, c). With a
+        // 4-hop chain, the depth cap (`max_depth = 4`)
+        // does not fire — `c` is at depth 3 and 3 < 4.
+        // This pins the inclusion contract so a
+        // regression that drops the depth-3 node is caught.
+        let (g, ids) = build_four_hop_chain("traverse_pos");
+        let nodes = g
+            .traverse(&ids[0], EdgeType::Calls, 1..4, Direction::Outgoing)
+            .expect("traverse");
+        let names: HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]),
+            "traverse 1..4 must yield all three reachable nodes, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn traverse_with_range_two_three_returns_exactly_the_window() {
+        // Min side of the window: `if next_depth >= min_depth`
+        // (line 1281). Window [2,3] on the 4-node chain
+        // start -> a -> b -> c must return exactly {b, c}.
+        // Mutated to `>`, the node at exactly min_depth is
+        // dropped and the walk returns one hop too few:
+        // {c} instead of {b, c}.
+        let (g, ids) = build_four_hop_chain("traverse_min");
+        let nodes = g
+            .traverse(&ids[0], EdgeType::Calls, 2..3, Direction::Outgoing)
+            .expect("traverse");
+        let names: HashSet<String> = nodes.into_iter().map(|n| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["b".to_string(), "c".to_string()]),
+            "traverse 2..3 must yield exactly the depth-2 and depth-3 nodes, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn subgraph_around_radius_one_includes_only_one_hop() {
+        // `subgraph_around(start, 1)` should include the center
+        // plus 1-hop neighbors (2 nodes total). The relevant
+        // gate is line 1343 (`current_depth >= radius`); mutated
+        // to `>`, the BFS walks into the 2-hop node and
+        // returns 3 nodes.
+        let (g, ids) = build_three_hop_chain("subgraph");
+        let sub = g.subgraph_around(&ids[0], 1).expect("subgraph");
+        let names: HashSet<String> = sub.into_iter().map(|(n, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["start".to_string(), "a".to_string()]),
+            "radius=1 must include center + 1-hop only, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn subgraph_around_radius_two_includes_two_hops() {
+        // Success side: radius=2 includes all 3 nodes. This
+        // pins the success contract so a regression that
+        // short-circuits early (e.g. on a different gate) is
+        // caught.
+        let (g, ids) = build_three_hop_chain("subgraph_pos");
+        let sub = g.subgraph_around(&ids[0], 2).expect("subgraph");
+        let names: HashSet<String> = sub.into_iter().map(|(n, _)| n.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["start".to_string(), "a".to_string(), "b".to_string()]),
+            "radius=2 must include center + 2 hops, got: {:?}",
+            names
+        );
+    }
+}
+
+#[cfg(test)]
+mod survivor_pin_tests {
+    //! Fixtures for the mutation survivors measured in
+    //! `scripts/mutation-baseline.json` — each test pins one
+    //! comparison so flipping its operator fails a test.
+
+    use super::*;
+    use crate::federation::contracts::model::{ContractFact, FieldReadFact, FieldReadOrigin};
+
+    fn db(tag: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(format!("lain_survivor_{tag}"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    /// Line-range lookup: both boundaries of a symbol's span are
+    /// inclusive, and a line outside the span matches nothing.
+    #[test]
+    fn location_range_boundaries_are_inclusive() {
+        let g = db("loc_range");
+        let mut span = GraphNode::new(NodeType::Function, "span".into(), "src/lines.rs".into());
+        span.line_start = Some(1);
+        span.line_end = Some(10);
+        g.insert_nodes_batch(std::slice::from_ref(&span)).unwrap();
+
+        assert!(
+            g.get_node_at_location("src/lines.rs", 1).is_some(),
+            "line_start == line must be inside the symbol"
+        );
+        assert!(
+            g.get_node_at_location("src/lines.rs", 10).is_some(),
+            "line_end == line must be inside the symbol"
+        );
+        assert!(
+            g.get_node_at_location("src/lines.rs", 50).is_none(),
+            "a symbol spanning 1..=10 must not match line 50"
+        );
+    }
+
+    /// Linear Contains chain of `hops` edges out of `main`.
+    /// Returns the database and the node ids in hop order.
+    fn build_deep_chain(tag: &str, hops: usize) -> (GraphDatabase, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("lain_survivor_chain_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = GraphDatabase::new(&dir).expect("graph");
+        let mut ids = Vec::with_capacity(hops + 1);
+        let mut nodes = Vec::with_capacity(hops + 1);
+        for i in 0..=hops {
+            let name = if i == 0 {
+                "main".to_string()
+            } else {
+                format!("h{i}")
+            };
+            let n = GraphNode::new(NodeType::Function, name, format!("src/h{i}.rs"));
+            ids.push(n.id.clone());
+            nodes.push(n);
+        }
+        g.insert_nodes_batch(&nodes).unwrap();
+        let edges: Vec<GraphEdge> = (0..hops)
+            .map(|i| GraphEdge::new(EdgeType::Contains, ids[i].clone(), ids[i + 1].clone()))
+            .collect();
+        g.insert_edges_batch(&edges).unwrap();
+        (g, ids)
+    }
+
+    /// The BFS walks `Contains` children from `main`/`App`, stops at
+    /// the depth-50 cap, and leaves anything past the cap unassigned.
+    #[test]
+    fn calculate_depths_caps_at_fifty_and_walks_contains_only() {
+        let (g, ids) = build_deep_chain("cap", 50);
+        g.calculate_depths().unwrap();
+        let depth = |i: usize| g.get_node(&ids[i]).unwrap().unwrap().depth_from_main;
+
+        assert_eq!(depth(0), Some(0), "the entry point seeds at depth 0");
+        assert_eq!(
+            depth(1),
+            Some(1),
+            "only Contains children are walked: the first hop is depth 1"
+        );
+        assert_eq!(depth(49), Some(49), "the chain walks up to the cap");
+        assert_eq!(
+            depth(50),
+            None,
+            "a node past the depth-50 cap stays unassigned"
+        );
+    }
+
+    /// `find_entry_points` returns exactly the nodes named `main`
+    /// or `App` — nothing else, neither name dropped.
+    #[test]
+    fn find_entry_points_is_exactly_main_and_app() {
+        let g = db("entry_points");
+        let nodes = ["main", "App", "other"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                GraphNode::new(NodeType::Function, (*name).into(), format!("src/f{i}.rs"))
+            })
+            .collect::<Vec<_>>();
+        g.insert_nodes_batch(&nodes).unwrap();
+
+        let mut found: Vec<String> = g
+            .find_entry_points()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec!["App".to_string(), "main".to_string()],
+            "only main and App are entry points"
+        );
+    }
+
+    /// A `FieldRef` whose `FieldRead` was minted by the GraphQL
+    /// consumer belongs to `GraphqlConsumerSensor`, not the
+    /// `FieldAccessSensor` catch-all (and vice versa).
+    #[test]
+    fn field_read_origin_decides_field_ref_ownership() {
+        let mk = |origin: FieldReadOrigin| {
+            let mut n = GraphNode::new(
+                NodeType::FieldRef,
+                "customer_id".into(),
+                "src/api.ts".into(),
+            );
+            n.contract = vec![ContractFact::FieldRead(FieldReadFact {
+                chain: "customer_id".parse().unwrap(),
+                exact: true,
+                origin,
+            })];
+            n
+        };
+
+        assert_eq!(
+            sensor_owner_of(&mk(FieldReadOrigin::GraphqlConsumer)),
+            Some(SensorOwner::GraphqlConsumerSensor),
+            "graphql_consumer's FieldRef must not fall through to field_access"
+        );
+        assert_eq!(
+            sensor_owner_of(&mk(FieldReadOrigin::FieldAccess)),
+            Some(SensorOwner::FieldAccessSensor),
+            "field_access's FieldRef keeps the catch-all owner"
+        );
+    }
+
+    /// Re-scanning a file must restore every incoming edge captured
+    /// from untouched files — one per edge type, not just the first.
+    #[test]
+    fn replace_restores_each_preserved_incoming_edge_type() {
+        let g = db("replace_incoming");
+        let caller = GraphNode::new(NodeType::Function, "caller".into(), "src/other.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "callee".into(), "src/probe.rs".into());
+        let (caller_id, callee_id) = (caller.id.clone(), callee.id.clone());
+        g.insert_nodes_batch(&[caller, callee.clone()]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::Calls, caller_id.clone(), callee_id.clone()),
+            GraphEdge::new(EdgeType::Uses, caller_id, callee_id.clone()),
+        ])
+        .unwrap();
+
+        g.replace_nodes_for_paths(&["src/probe.rs".to_string()], &[callee])
+            .unwrap();
+
+        let incoming = g.get_edges_to(&callee_id).unwrap();
+        assert_eq!(
+            incoming.len(),
+            2,
+            "both preserved incoming edge types must come back: {incoming:?}"
+        );
+        assert!(
+            incoming.iter().any(|e| e.edge_type == EdgeType::Calls),
+            "the Calls edge was not restored: {incoming:?}"
+        );
+        assert!(
+            incoming.iter().any(|e| e.edge_type == EdgeType::Uses),
+            "the Uses edge was not restored: {incoming:?}"
+        );
+    }
+
+    /// One edge per (source, target, type): re-inserting the same
+    /// triple is a no-op, a different type on the same pair is added.
+    #[test]
+    fn insert_edges_batch_dedups_by_edge_type_only() {
+        let g = db("batch_dedup");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/b.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone())])
+            .unwrap();
+        assert_eq!(g.edge_count(), 1);
+
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone())])
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            1,
+            "re-inserting the same (pair, type) must not duplicate"
+        );
+
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Contains, a_id, b_id)])
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "a different edge type on the same pair must be added"
+        );
+    }
+
+    /// `upsert_edge` is idempotent per (pair, type) and still admits
+    /// a different type between the same two nodes.
+    #[test]
+    fn upsert_edge_is_idempotent_per_type_and_admits_other_types() {
+        let g = db("upsert_types");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/b.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone()))
+            .unwrap();
+        assert_eq!(g.edge_count(), 1);
+
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone()))
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            1,
+            "the same upsert twice must stay one edge"
+        );
+
+        g.upsert_edge(GraphEdge::new(EdgeType::Contains, a_id, b_id))
+            .unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "a different edge type must not be treated as a duplicate"
+        );
+    }
+
+    /// `find_path` reports the path it actually walked.
+    #[test]
+    fn find_path_returns_the_route_it_walked() {
+        let g = db("find_path");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/b.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+        g.insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, a_id.clone(), b_id.clone())])
+            .unwrap();
+
+        let path = g.find_path(&a_id, &b_id).unwrap();
+        assert_eq!(path.len(), 2, "a direct call is a two-node path");
+        assert_eq!(path[0].id, a_id, "the path starts at `from`");
+        assert_eq!(path[1].id, b_id, "the path ends at `to`");
+    }
+
+    /// `calls_in` / `calls_out` count `Calls` edges only; the
+    /// parallel `Uses` / `Imports` / `Contains` edges on the same
+    /// nodes must not be counted.
+    #[test]
+    fn anchor_calls_counters_count_only_calls_edges() {
+        let g = db("anchor_calls");
+        let f = GraphNode::new(NodeType::Function, "f".into(), "src/f.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "g".into(), "src/g.rs".into());
+        let x = GraphNode::new(NodeType::Function, "x".into(), "src/x.rs".into());
+        let file = GraphNode::new(NodeType::File, "g.rs".into(), "src/g.rs".into());
+        let (f_id, g_id) = (f.id.clone(), callee.id.clone());
+        let (x_id, file_id) = (x.id.clone(), file.id.clone());
+        g.insert_nodes_batch(&[f, callee, x, file]).unwrap();
+        g.insert_edges_batch(&[
+            // g: one Calls incoming, two wrong-type incoming.
+            GraphEdge::new(EdgeType::Calls, f_id.clone(), g_id.clone()),
+            GraphEdge::new(EdgeType::Uses, x_id.clone(), g_id.clone()),
+            GraphEdge::new(EdgeType::Contains, file_id.clone(), g_id.clone()),
+            // f: one Calls outgoing, two wrong-type outgoing.
+            GraphEdge::new(EdgeType::Uses, f_id.clone(), x_id),
+            GraphEdge::new(EdgeType::Imports, f_id.clone(), file_id),
+        ])
+        .unwrap();
+
+        g.calculate_anchor_scores().unwrap();
+
+        let f_node = g.get_node(&f_id).unwrap().unwrap();
+        let g_node = g.get_node(&g_id).unwrap().unwrap();
+        assert_eq!(f_node.calls_out, Some(1), "f calls exactly one callee");
+        assert_eq!(g_node.calls_in, Some(1), "g has exactly one caller");
+        assert_eq!(
+            f_node.fan_out,
+            Some(3),
+            "fan_out counts every outgoing edge"
+        );
+        assert_eq!(g_node.fan_in, Some(3), "fan_in counts every incoming edge");
+    }
+
+    /// `incoming_calls` answers "who Calls this" — a non-Calls edge
+    /// into the same node must be ignored.
+    #[test]
+    fn incoming_calls_lists_only_calls_callers() {
+        let g = db("incoming_calls");
+        let caller = GraphNode::new(NodeType::Function, "caller".into(), "src/caller.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "callee".into(), "src/callee.rs".into());
+        let file = GraphNode::new(NodeType::File, "callee.rs".into(), "src/callee.rs".into());
+        let (caller_id, callee_id) = (caller.id.clone(), callee.id.clone());
+        let file_id = file.id.clone();
+        g.insert_nodes_batch(&[caller, callee, file]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::Calls, caller_id.clone(), callee_id.clone()),
+            GraphEdge::new(EdgeType::Contains, file_id, callee_id.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            g.incoming_calls(&callee_id),
+            vec![caller_id.clone()],
+            "only the Calls source counts as a caller (Contains must be ignored)"
+        );
+    }
+
+    /// `calls_http_pairs` reports `CallsHttp` edges only.
+    #[test]
+    fn calls_http_pairs_lists_only_callshttp_edges() {
+        let g = db("calls_http");
+        let route = GraphNode::new(NodeType::HttpRoute, "/users".into(), "src/r.rs".into());
+        let handler = GraphNode::new(NodeType::Function, "list".into(), "src/h.rs".into());
+        let (route_id, handler_id) = (route.id.clone(), handler.id.clone());
+        g.insert_nodes_batch(&[route, handler]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::CallsHttp, route_id.clone(), handler_id.clone()),
+            GraphEdge::new(EdgeType::Calls, handler_id.clone(), route_id.clone()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            g.calls_http_pairs(),
+            vec![(route_id, handler_id)],
+            "the plain Calls edge must not leak into the CallsHttp pair list"
+        );
+    }
+
+    /// `get_file_node` finds the `File` node even when other node
+    /// types share the path index entry.
+    #[test]
+    fn get_file_node_returns_the_file_node_among_siblings() {
+        let g = db("file_node");
+        let file = GraphNode::new(NodeType::File, "a.rs".into(), "src/a.rs".into());
+        let symbol = GraphNode::new(NodeType::Function, "thing".into(), "src/a.rs".into());
+        g.insert_nodes_batch(&[file, symbol]).unwrap();
+
+        let found = g
+            .get_file_node("src/a.rs")
+            .expect("the path has a File node");
+        assert_eq!(found.node_type, NodeType::File, "must be the File node");
+        assert_eq!(found.name, "a.rs");
+    }
+
+    /// `has_references_from` needs an outgoing `Calls` or `Uses`
+    /// edge — any other edge type is not a reference.
+    #[test]
+    fn has_references_from_requires_an_outgoing_calls_or_uses_edge() {
+        let g = db("has_refs");
+        let x = GraphNode::new(NodeType::Function, "x".into(), "src/x.rs".into());
+        let z = GraphNode::new(NodeType::Function, "z".into(), "src/z.rs".into());
+        let y = GraphNode::new(NodeType::Function, "y".into(), "src/y.rs".into());
+        let w = GraphNode::new(NodeType::Function, "w".into(), "src/w.rs".into());
+        let (x_id, z_id, y_id, w_id) = (x.id.clone(), z.id.clone(), y.id.clone(), w.id.clone());
+        g.insert_nodes_batch(&[x, z, y, w]).unwrap();
+        g.insert_edges_batch(&[
+            GraphEdge::new(EdgeType::Calls, x_id.clone(), y_id.clone()),
+            GraphEdge::new(EdgeType::Uses, z_id.clone(), y_id.clone()),
+        ])
+        .unwrap();
+
+        assert!(
+            g.has_references_from(&x_id),
+            "an outgoing Calls edge is a reference"
+        );
+        assert!(
+            g.has_references_from(&z_id),
+            "an outgoing Uses edge is a reference"
+        );
+        assert!(
+            !g.has_references_from(&w_id),
+            "a node with no outgoing edges has no references"
         );
     }
 }

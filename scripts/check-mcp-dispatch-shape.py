@@ -77,10 +77,11 @@ def dispatch_arm_names(body: str) -> set[str]:
 
 
 def inventory_tool_names(text: str) -> set[str]:
-    """Each `fn name(&self) -> &'static str { "<name>" }` in registry_impl.rs."""
+    """Each handler's name in registry_impl.rs: `tool_meta!("<name>", …)` or
+    a hand-written `fn name(&self) -> &'static str { "<name>" }`."""
     out: set[str] = set()
     for m in re.finditer(
-        r'fn\s+name\s*\(\s*&self\s*\)\s*->\s*&\'static\s*str\s*\{\s*"([^"]+)"',
+        r'(?:fn\s+name\s*\(\s*&self\s*\)\s*->\s*&\'static\s*str\s*\{|tool_meta!\s*\()\s*"([^"]+)"',
         text,
     ):
         out.add(m.group(1))

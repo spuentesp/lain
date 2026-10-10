@@ -475,9 +475,15 @@ pub fn format_open_annotations_section(
 /// the Markdown appendix and unit tests, both of which accept the
 /// zero-padded shape unconditionally.
 fn chrono_like_date(unix_secs: u64) -> String {
-    // Civil-from-days algorithm (Howard Hinnant). 1970-01-01 = day 0.
-    let z = (unix_secs / 86_400) as i64;
-    let z = z + 719_468;
+    let (y, m, d) = civil_from_days((unix_secs / 86_400) as i64);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Civil-from-days (Howard Hinnant): day 0 = 1970-01-01 → (year, month, day).
+/// Pure integer arithmetic so Kani can prove its ranges and day-successor
+/// property over every input (`annotation_tools_kani.rs`).
+pub(crate) fn civil_from_days(days: i64) -> (i64, u64, u64) {
+    let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64; // [0, 146096]
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -487,7 +493,7 @@ fn chrono_like_date(unix_secs: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}", y, m, d)
+    (y, m, d)
 }
 
 #[cfg(test)]
@@ -652,3 +658,7 @@ mod tests {
         assert_eq!(chrono_like_date(1_700_000_000), "2023-11-14");
     }
 }
+
+#[cfg(kani)]
+#[path = "annotation_tools_kani.rs"]
+mod kani_proofs;

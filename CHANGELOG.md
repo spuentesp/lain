@@ -3,6 +3,484 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-10-10
+
+### Added
+
+- **B5 design: graph WAL for torn-write recovery** -
+  `docs/formal/GraphWal.tla` + `.cfg` + `-impl.md`. The spec
+  models the on-disk state machine: `log` (the post-checkpoint
+  WAL tail) and `checkpoint` (the last atomic `graph.bin`
+  snapshot). The durable history is `checkpoint \o log`.
+  Steady-state actions: `AppendOp`, `Checkpoint` (truncate the
+  WAL), `SoftCheckpoint` (record without truncating);
+  recovery actions: `Crash`, `RecoveryComplete` (rebuild
+  in-memory state from durable history). TLC checks
+  3 ops, checkpoint size 2, log cap 4 - 85,672 states, 28,796
+  distinct, depth 11; all invariants hold. The Rust-side
+  implementation (a `GraphOp` enum, an fsync-after-write WAL,
+  CRC-checked frame decoding, periodic checkpoint task) is a
+  follow-up commit on this branch.
+
+- **B5 implementation: WAL writer + replay wired into the
+  mutation methods.** `upsert_node`, `upsert_edge`, and
+  `remove_nodes_by_ids` now append a `GraphOp` to
+  `.lain/graph.wal` (length-prefixed bincode frame, CRC32C
+  trailer, fsync) before mutating in-memory state.
+  `load_from_disk` now reads `graph.bin` (the snapshot) and
+  then replays `graph.wal` on top, so a torn snapshot
+  recovers from the WAL tail (CRC-verified, torn-frame
+  tolerant). `save_to_disk_sync` truncates the WAL after a
+  successful snapshot write. The full write path is wired
+  for single-mutation calls; `insert_edges_batch` and
+  `insert_nodes_batch` are follow-up work because they
+  bypass the WAL append on the batch fast path. Periodic
+  checkpoint task and `doctor` recovery message are
+  follow-up commits on this branch.
+
+- **B5 end-to-end test: torn-snapshot recovery** — the WAL
+  test suite now includes a test that proves the recovery
+  story (write a snapshot, append ops, corrupt the snapshot,
+  verify the WAL survives and the indexer can rebuild from
+  it). 8 tests pass.
+
+- **`lain doctor` recovery message updated** for the WAL
+  rollout. The existing "move `graph.bin` aside, run
+  `lain mcp`" recipe still works, but with the WAL landed
+  on `feat/graph-wal` the loader is also able to recover
+  automatically by replaying `.lain/graph.wal`; the doctor
+  hint now mentions the WAL as the future-friendly path.
+
+- **B5 periodic checkpoint task** — without this, a
+  long-running server with no explicit reload would grow
+  the WAL indefinitely (every mutation appends a frame,
+  but nothing truncated the file until `request_reload` or
+  graceful shutdown). `spawn_periodic_checkpoint` runs
+  every 60s by default, calling `save_to_disk_sync` to
+  write a fresh `graph.bin` and truncate the WAL. Override
+  with `LAIN_WAL_CHECKPOINT_SECS` or disable with
+  `LAIN_DISABLE_WAL_CHECKPOINT=1`. The save runs on
+  `spawn_blocking` to avoid stalling the runtime.
+
+- **B5 batch-method WAL appends** — `insert_nodes_batch` and
+  `insert_edges_batch` now also append to the WAL before
+  the in-memory mutation, so the batch fast path is also
+  recoverable across torn snapshots. The new
+  `batch_inserts_persist_to_wal` test verifies the
+  ordering: 3 nodes + 2 edges → 3 + 2 = 5 WAL frames in
+  order. 9 WAL tests in total now pass.
+
+### Changed
+
+- **Schema bump.** `GraphNode.contract` is now a `Vec<ContractFact>`
+  rather than a single `Option`, so one node can record several facts.
+  This closes a real gap: two subscriptions to different topics on one
+  physical line share the `topic-read:<path>:<line>` node, and with one
+  fact slot the second topic's consumer was silently dropped. The same
+  shape covers any two facts co-located on one node.
+  - `PATH_FORMAT_VERSION` 4 → 5 (`src/server/graph/persist.rs`).
+    Per-repo graphs written by an older lain are discarded and rebuilt
+    on load.
+  - `FEDERATION_GRAPH_VERSION` 3 → 4
+    (`src/server/federation/graph_backend.rs`). The loader refuses a
+    mismatched header with `FederationSchemaMismatch`.
+  - **Recovery: run `lain reindex`.** No silent migration — the
+    federated graph is regenerable from per-repo graphs, and a
+    hand-written transform risks hiding real corruption.
+
+  Read paths that expect one fact per node now say so explicitly
+  (`ContractIndex::consumer`); paths that must see every fact iterate
+  (`ContractIndex::consumer_resolutions`, `sensor_owner_of`).
+
+### Fixed
+
+- **`install_language_server` works for rust and ruby again.** The
+  v0.8.0 LSP-install allowlist (security hardening: only curated
+  package managers may run at startup) omitted `rustup` and `gem`, so
+  the shipped recipes for rust-analyzer and solargraph were
+  unconditionally refused. Both are on the list now, guarded by a
+  property test that every registry recipe passes the gate.
+  **v0.8.0 as released is affected** — `install_language_server
+  "rust"` fails there until the next release. The health-badge
+  action's `lain-version` default is held at v0.7.4 until then; bump
+  it together with the release metadata.
+- **`workspace_dir` contract mirrors now track the checkout.** Two bugs
+  froze contract snapshots of local repos at their clone-time commit
+  while the symbol layer kept following HEAD:
+  1. `git fetch --prune <source>` without a refspec only lands
+     `FETCH_HEAD`, so the mirror's ref tips never moved — including the
+     fetch-on-miss path used by `local_clone`/`shallow_clone` sources.
+     The mirror fetch now carries `+refs/*:refs/*`.
+  2. `resolve_ref` only fetched when a ref was missing, which a stale
+     branch tip never is. Mirrors of local sources are now refreshed
+     before every ref resolution.
+
+  `diff_contracts` and friends see new commits once they are made; the
+  README now states the real contract (commits + a re-index pass, not
+  uncommitted edits).
+
+- **`LAIN_ONESHOT_TIMEOUT` default bumped from 60s to 600s.** The
+  previous default was too short for a cold reindex on a non-trivial
+  repo (Lain-on-Lain in 2026-10-04: ~5 min for 41k LOC + LSP
+  prewarm), and the resulting "no tools/call response from `lain
+  mcp` within 60s" error didn't tell the user whether the server was
+  busy indexing or hung. The new default matches
+  `LAIN_REINDEX_TIMEOUT`. Override with
+  `LAIN_ONESHOT_TIMEOUT=<seconds>` for tighter pipelines. Found by
+  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B6).
+
+- **`get_coupling_radar` doc clarified** — the section heading
+  "Files that co-change with this one" suggested an arg named
+  `path`; the input schema actually requires `symbol`. The doc now
+  states the arg name explicitly and notes that the value is a file
+  path. New lint
+  `scripts/check-tool-doc-args.py` validates every JSON example in
+  `docs/quickstart-tools.md` against its tool's input schema, so
+  this class of drift can't recur without failing the build. Found
+  by dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B9).
+
+- **Quickstart now warns about the `head -N` pipe footgun.** A user
+  running `lain oneshot find_anchors | head -60` will see the
+  upstream `lain mcp` process aborted by `SIGPIPE` when `head` exits
+  on a cold graph, leaving a partial `graph.bin` on disk. The
+  symptom is "no tools/call response from `lain mcp`" plus a
+  corrupt on-disk graph; the fix is to pipe to a file or to a tool
+  that reads to EOF. The new Quickstart row links the reader to
+  `DOGFOODING_REPORT.md` (B7) for the full trace.
+
+- **`get_audit_log` is now advertised by default.** The audit log
+  (the durable counterpart to the in-memory presence state) used to
+  live in the `social` package, so a solo session asking "what
+  changed while I was away?" had to `load_package("social")` first
+  even when the answer was just their own previous run's events.
+  Moved to `core` (Level::Plumbing) so the default 19-tool
+  surface includes it. The 6 other `social` tools
+  (`who_am_i`, `list_active_agents`, `list_subagents`,
+  `unregister_agent`, `detect_overlap`) stay opt-in. Found by
+  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  finding B10).
+
+- **`get_health` now reports per-file call-graph coverage.** A new
+  line shows "X / Y files (Z%) have at least one `Calls` or
+  `Uses` edge", with a warning when uncovered > 0. The same
+  number was already in `find_dead_code`'s "⚠ N files have no
+  call edges" line, but only visible to users who ran that tool
+  (B4 in 2026-10-04 dogfooding: 198 of 224 files in `scripts/`
+  and `tests/` were uncovered). `get_health` is the first place
+  an operator looks, so the number lives there now too. The
+  underlying metric is `GraphDatabase::call_graph_file_coverage`
+  and has its own regression test.
+
+- **`find_git_workspace_root` no longer refuses a published
+  install whose symlink target lives in the source tree.** The
+  dev-runner heuristic (intended to keep `cargo test` from
+  indexing its own source) compares `current_exe().canonicalize()`
+  to the resolved workspace root. When the binary is installed
+  via a symlink (e.g. `~/.local/bin/lain -> .../target/debug/
+  lain`), the canonical path was inside the tree and the
+  heuristic fired, so `lain oneshot` from inside the source tree
+  failed with "no `.git` found in any parent directory" — a
+  misleading error for a published install. The fix also
+  canonicalizes the symlink's parent directory and applies the
+  same test there. A symlink path *outside* the tree is now
+  treated as a published install even when the symlink target
+  happens to live in the tree. Found by dogfooding Lain on Lain
+  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B2). Three new
+  tests cover the symlink cases.
+
+- **`find_anchors` now excludes test and script paths by
+  default.** The 2026-10-04 dogfooding found the top of the
+  anchor list dominated by Python test fixtures
+  (`uc_presence_register_heartbeat_unregister` in
+  `scripts/use_cases_e2e.py`, `e_setup_writes_prompt_md` in
+  `scripts/test_all_promises.py`) because tests are heavily
+  called by other tests and scripts by other scripts. A user
+  trusting rank over path lands on a test fixture, not a real
+  architectural pillar. The default now filters paths under
+  `tests/`, `*_test*` files, and `scripts/`. Opt in with
+  `include_tests=true` for the raw list. The new
+  `is_anchor_excluded_path` predicate has its own regression
+  test covering the production's expected `excluded` and `kept`
+  cases.
+
+- **`run_enrichment` promoted to core, Quickstart now documents
+  the `Calls: 0` recovery path.** B3 (2026-10-04): the on-disk
+  `graph.bin` from a prior build had zero `Calls` edges even
+  though `rust-analyzer` was installed — a silent-absence
+  failure mode that made every impact tool return empty. The
+  headline B11 fix already surfaces the absence as a banner;
+  this commit makes the recovery reachable without first
+  loading a package. The Quickstart's first-aid table now
+  spells out the recipe: from inside the repo, run
+  `lain reindex` to rebuild the graph from source (~5 min for
+  41k LOC). The lighter pass `run_enrichment` is in core
+  alongside `get_audit_log`, so an agent seeing the B11
+  warning can ask for it without `load_package("ops")`.
+
+- **B1 design: shared `lain mcp` per workspace** —
+  `docs/formal/OneshotSharedServer.tla` + `.cfg`. The spec
+  models the per-workspace server lifecycle (NoServer →
+  ServerAlive → ServerDead, plus concurrent client arrival
+  / leave / crash). The new `OneshotSharedServer` invariants
+  are: at most one server process holds the per-workspace
+  socket at a time (S1), a client bound to a server implies
+  that server is alive (S2), and the serving-set state is
+  consistent with the per-client socket map (S3, S4). TLC
+  exhaustively checks the 2-client / 2-server state space
+  (39 states, 10 distinct, depth 5) — all invariants hold.
+  The Rust-side implementation (a `--socket <path>` flag on
+  `lain mcp` plus a `oneshot` client that consults the
+  socket first) is a follow-up commit on this branch.
+
+- **B1 implementation: `lain mcp --socket PATH` binds a
+  per-workspace Unix socket** that subsequent `oneshot` calls
+  can connect to. Adds `config::oneshot_socket_path`
+  (BLAKE3 of the canonicalized workspace, 16 hex chars;
+  lives under `config::run_dir()`) and the
+  `server::mcp::socket_server` module. The socket server
+  handles `initialize`, `notifications/initialized`,
+  `tools/list`, and `tools/call`; dispatch goes through the
+  same `ToolExecutor` and `Arc<LainServer>` as the stdio
+  path, so a call coming through the socket sees the warm
+  in-memory graph. A sidecar `<socket>.pid` file lets
+  `oneshot` check liveness (`/proc/<pid>` on Linux) before
+  attempting to connect; a stale socket from a crashed
+  previous process is removed on start. Three unit tests
+  cover the pid-path and round-trip. The `oneshot`-side
+  consult-the-socket-first behavior is a follow-up commit
+  on this branch.
+
+- **B1 oneshot side: `lain oneshot` consults the per-workspace
+  socket first.** New `cli::socket_session::SocketSession`
+  (mirrors `StdioSession`'s API) lets a oneshot call connect
+  to a running shared server. The connection is gated on a
+  `/proc/<pid>` liveness check of the server's recorded PID;
+  if that fails (no server, dead server, or socket error),
+  oneshot falls through to the existing spawn-stdio path and
+  adds `--socket PATH` so the NEXT oneshot hits the cheap
+  path. Round-trip test in `socket_session::tests` proves
+  the wire protocol. The end-to-end test (spawn shared
+  server, connect via socket, see warm graph) is on the
+  same branch and uses the same code path.
+
+- **`get_health` now lists every declared `EdgeType`**, even when the
+  count is zero. A graph with no `Calls` edges used to omit the
+  `Calls: 0` line entirely, so an operator on a repo whose call
+  graph never resolved (LSP didn't start, every file is a script)
+  couldn't tell from `get_health` alone that the impact tools would
+  return empty. The histogram is now seeded from
+  `EdgeType::all()` so every variant is reported. A banner line
+  is also emitted when `Calls == 0` to make the silent-absence
+  mode loud. Surfaced by dogfooding Lain on Lain
+  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B11).
+
+
+LAIN 0.9 introduces cross-repo contract federation. For every
+service the agent can now see who provides it, who consumes it,
+which endpoints and fields they reach, and which of the
+consumer's own entry points land on each call. A proposed change
+returns `Verified`, `NeedsInvestigation`, or "no known impact"
+with the list of repos that could not be checked.
+
+The 13 read-only contract tools live in the new `contracts`
+package — opt in with `LAIN_TOOL_PROFILE=contracts` or
+`load_package("contracts")`. The full design is in
+`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`
+(supersedes the earlier `docs/CONTRACT_FEDERATION.md` design
+and its 15-PR tracker, both removed in this release).
+
+Sensors in each repo find routes, client calls, schema fields,
+and field reads; a join step links consumers to providers using
+`repos.yaml` (including several services in one repo);
+snapshots pin every repo to a commit so a contract diff is
+deterministic and reviewable. The verdict soundness gap that
+let `NoKnownImpact` be claimed for repos LAIN couldn't analyze
+is closed: incomplete coverage downgrades the verdict to
+`NeedsInvestigation` instead.
+
+Twelve TLA+ models in `docs/formal/` cover the coverage claim,
+the rejoin protocol, snapshot residency, install-resident
+eviction, snapshot in-flight slots, joining tier-2 plumbing,
+and the rejoin-mid-rejoin invariant. They found and verified
+fixes for issues that the Rust review caught second.
+
+### Migration required — schema v3
+
+- **Federation graph schema is now v3** (`FEDERATION_GRAPH_VERSION`
+  2 → 3 in `src/server/federation/graph_backend.rs`).
+  `federated_graph.bin` files written by 0.8 are refused at load
+  with `FederationSchemaMismatch` ("written by schema v2; this
+  build expects schema v3"). Per-repo `graph.bin` files are now on
+  `PATH_FORMAT_VERSION` 4 (was 3 in 0.8); old per-repo graphs are
+  discarded on load and rebuilt, as today.
+- **Recovery, in order:**
+  1. Install 0.9 (`brew upgrade lain` / `cargo install lain` /
+     download the release tarball).
+  2. Run **`lain reindex`** to rebuild `federated_graph.bin` and
+     every per-repo `graph.bin` under the new schema. The old
+     federation graph is backed up to `federated_graph.bin.bak`,
+     and stale `.payload` sidecars are removed before the rebuild
+     so the next startup hydrates from source.
+  3. Enable the new contract tools via the `contracts` package —
+     either set `LAIN_TOOL_PROFILE=contracts` (composes with the
+     defaults) or call `load_package("contracts")` from an active
+     session. The package is **off by default** because every
+     contract tool assumes the federation has been reindexed under
+     schema v3 and the `contracts` package is loaded.
+  4. Use the new tools: `describe_schema` now reports the
+     contract node and edge types (`HttpClientCall`, `Field`,
+     `FieldRef`, `SendsHttp`, `RequestSchema`, `ResponseSchema`,
+     `PayloadSchema`, `HasField`, `ReadsField`, `ReadsFrom`,
+     `Binds`) as "known but unindexed" until their sensors land
+     in subsequent 0.9.x releases.
+
+  There is no silent migration. A `graph.bin` whose schema does
+  not match the build is never loaded; the loader refuses, prints
+  the recovery command, and exits.
+
+### Contract-federation tool surface (PR 13)
+
+Thirteen read-only MCP tools in five groups, all carrying the
+§10.2 envelope (`api_version`, `analyzer_version`, `snapshot`,
+`reproducible`, `data` / `error`, `meta.elapsed_ms`). Paging
+follows §10.5; limits follow §10.5 (`list` limit ≤ 1000, `cap` ≤
+500, `trace_impact.depth` ≤ 12, `read_source` range ≤ 400 lines).
+
+| Group | Tool | Purpose |
+| --- | --- | --- |
+| Snapshots | `prepare_snapshot` | Pin every repo to a commit, index once, reuse. |
+| Snapshots | `get_snapshot` | State of a snapshot; on `live` returns a readiness-shaped answer per §8.7. |
+| Services | `list_services` | Every service with repo, paths, endpoint and consumer counts. |
+| Services | `get_service` | Consumers of one service with `used_by` (§10.9). |
+| Contracts | `list_contracts` | Endpoints, filterable by service/repo/kind. |
+| Contracts | `get_contract` | Providers, schema fields, bound consumers for one endpoint. |
+| Contracts | `list_unresolved` | Every ambiguous and unresolved consumer with candidates. |
+| Contracts | `check_binding` | Validate a proposed consumer→endpoint link; emits `bindings_entry` YAML. |
+| Analysis | `diff_contracts` | Provider + consumer changes between two snapshots, classified, with impact paths and coverage. `live` not allowed. |
+| Analysis | `trace_impact` | Impact paths from endpoint/field/symbol. |
+| Analysis | `get_coverage` | What a view saw and could not resolve; `complete` gates the could-match rule. |
+| Evidence | `resolve_evidence` | Check refs exist at their commit; bad refs are `exists: false` with a reason, never an error. |
+| Evidence | `read_source` | Bounded line range of a file at a view's commit; refuses secrets and binaries; reads snapshots from the mirror's git2 blob. |
+
+Errors follow §13 with the required `details` shape (15 codes:
+`unsupported_api_version`, `federation_disabled`,
+`invalid_argument`, `repo_not_registered`, `ref_not_found`,
+`snapshot_not_found`, `service_not_found`, `snapshot_not_ready`,
+`snapshot_failed`, `analyzer_mismatch`, `contract_not_found`,
+`invalid_id`, `range_too_large`, `path_rejected`, `busy`). Output
+JSON Schemas live at `docs/tool-schema.json` (regenerated by
+`make schema`); per-tool schema files at
+`src/server/mcp/contract_tools/schemas/<tool>.{in,out}.json`.
+
+### `read_source` threat model (§10.7)
+
+`read_source` reads only files the view's index walked: the cache
+entry's `files` for snapshots, the repo's indexed files for `live`.
+Secret files are refused by basename (case-insensitive): `.env`,
+`.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`,
+`*.jks`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`,
+`.npmrc`, `.pypirc`, `.netrc`, `credentials*.json`. Binaries (a NUL
+byte in the first 8 KiB) are refused. Snapshot content is read
+from the mirror's git2 object store at the snapshot commit, never
+a working tree. `live` reads the repo's `local_path` on disk and
+sets `dirty: true` when the overlay has uncommitted changes.
+
+Auth is the existing HTTP transport auth (`LAIN_API_KEYS`,
+`auth.rs`); stdio is a local process. 0.9 is a single trust
+domain: any client that passes auth can read every configured
+repo, including at old commits, where a secret deleted from the
+current tree may still exist. Per-repo access control is a
+non-goal.
+
+### Precision/recall baseline
+
+The hermetic precision/recall test (`scripts/demo.sh --quick`
+§13.5, `tests/fixtures/contracts/baseline.json`) reports the
+honest post-fix numbers for 0.9.0:
+
+```
+diff_precision        1.000
+diff_recall           1.000
+binds_precision       1.000
+binds_recall          1.000
+reads_field_precision 1.000
+reads_field_recall     1.000
+```
+
+All six metrics hit 1.000 after the fixture split (handlers per
+file: `orders/src/orders/{models, list, me, create, label}.rs` +
+thin `main.rs`), the ground-truth expansion (per-endpoint
+`expected.changes` for scenarios that affect multiple endpoints
+sharing Order's schema), and the final joiner/analysis fixes
+(`federation/contracts/joiner.rs` rule 6 now skips `PrefixStripped`
+matches so consumers in head-only resolve as unresolved;
+`mcp/contract_tools/analysis.rs` resolves the JSON `endpoint` for
+`UrlExpr`-keyed consumers via `template_matches_with_prefix`).
+
+Release-time call: `baseline.json` is the committed floor; the
+§13.5 phase fails when measured numbers drop below it. Any
+regression fails the §13.5 gate — the all-1.000 numbers above are
+the minimum acceptable contract for this release. Future work
+that touches the joiner, sensors, or fixture must keep
+`baseline.json` in sync.
+
+### Generated-client matching by `operationId` (PR 18)
+
+- The joiner now falls back to OpenAPI `operationId` matching when
+  a consumer's URL does not match any provider by plain or
+  prefix-stripped URL match. Generated SDK clients (e.g. a
+  TypeScript SDK generated from an OpenAPI spec) call a method
+  whose name corresponds to the `operationId`, not the URL —
+  `client.orders.getOrderById({id})` is the SDK's call into
+  `getOrderById`. The fallback fires only for `CallVia::Receiver`
+  consumers whose `fn_name` equals a provider's `operation_id`,
+  and emits a `Binds` edge with `Heuristic { detector:
+  "operation_id", confidence: 0.9 }`. URL matches still take
+  priority (Static 1.0). `diff::could_match` also surfaces the
+  operationId match as a `could_match` candidate for unresolved
+  consumers.
+- The hermetic precision/recall baseline is unchanged: all six
+  metrics remain at 1.000 because the T1 fixture does not exercise
+  the generated-client path.
+
+### Federation schema v3 (PR 3)
+
+- New `NodeType` variants: `HttpClientCall`, `Field`, `FieldRef`
+  (contract-federation surfaces; sensors land in subsequent
+  0.9.x releases).
+- New `EdgeType` variants: `SendsHttp`, `RequestSchema`,
+  `ResponseSchema`, `PayloadSchema`, `HasField`, `ReadsField`,
+  `ReadsFrom`, `Binds` (`Binds` is the federation-only consumer →
+  provider join).
+- `GraphNode` gains `contract: Option<ContractFact>` and
+  `entry: Option<EntryKind>`. `GraphEdge` gains
+  `site: Option<SourceSite>` and `detail: Option<EdgeDetail>`.
+  `EdgeProvenance` gains `Confirmed { source }` for
+  `repos.yaml#bindings[<i>]` joins.
+- New module `federation/contracts/model.rs` defines
+  `ContractFact`, `ProviderFact`, `ConsumerFact`, `NormalizedUrl`,
+  `FieldReadFact`, `FieldMeta`, `TypeDesc`, `HttpMethod`,
+  `MethodSpec`, `Direction`, `EntryKind`, `SourceSite`,
+  `SymbolKey`, `ContractKey`, `JsonPath`, `PathSegment`,
+  `ServiceName`, and the `EndpointId` alias. All enums are
+  externally tagged (bincode constraint; `#[serde(default)]` does
+  not make bincode files backward compatible — the version bumps
+  are the only path to forward compatibility).
+
+### SQL tables — schema folded into v3 (Phase D, spec §7)
+
+- New `NodeType::Table` and `EdgeType::{ReadsTable, WritesTable}`.
+  Folded into v3 — `FEDERATION_GRAPH_VERSION`, `PATH_FORMAT_VERSION`,
+  and `CONTRACT_ANALYZER_REV` are unchanged. `lain reindex` covers
+  the rollout.
+- `describe_schema` reports `Table`, `ReadsTable`, `WritesTable`
+  alongside the existing contract-federation types. Existing graphs
+  decode cleanly; an operator running 0.9 without reindexing sees
+  no new edges until `lain reindex` runs (the new sensor only
+  emits on the new build).
+
 ## [0.8.0] — 2026-09-28
 
 ### Migration required — read first

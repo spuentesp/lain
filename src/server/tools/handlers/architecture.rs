@@ -250,10 +250,7 @@ pub fn get_master_map(
     output.push_str("| Module | Files | Volatile | Last LSP Sync | Last Git Sync | Status |\n");
     output.push_str("| :--- | :---: | :---: | :--- | :--- | :---: |\n");
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now = crate::server::time::now_unix();
 
     for m in modules {
         // Fix: "False Positive" Prefix Bug. Use path separator.

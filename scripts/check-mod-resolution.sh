@@ -8,6 +8,16 @@
 
 set -e
 
+# ─────────────────────────────────────────────────────────────────────
+# Companion gates. This one finds untracked source files; the two below
+# cover the rest of the "the commit doesn't build" family. Run all three
+# before pushing:
+#   scripts/check-mod-resolution.sh   # untracked `mod` targets
+#   scripts/check-clean-build.sh      # tracked code referencing uncommitted
+#                                     # symbols (half-staged coupled change)
+#   scripts/check-no-duplicate-sensors.py
+# ─────────────────────────────────────────────────────────────────────
+
 # Find untracked .rs files via git status (mtime-based heuristics
 # lie after rebase / submodule updates).
 untracked=$(git status --porcelain -- src/ 2>/dev/null \
@@ -50,6 +60,16 @@ while IFS=: read -r file lineno stmt; do
     fi
     candidate_a="$mod_dir/$name.rs"
     candidate_b="$mod_dir/$name/mod.rs"
+    # An explicit `#[path = "x.rs"]` (within the three attribute lines above
+    # the declaration, e.g. next to a `#[cfg(...)]`) names the file directly,
+    # relative to the directory of the declaring file. The verification suites
+    # (`*_verification.rs`, `*_kani.rs`) use this.
+    explicit=$(sed -n "$(( lineno > 3 ? lineno - 3 : 1 )),$(( lineno - 1 ))p" "$file" \
+        | grep -oE '#\[path *= *"[^"]+"\]' | tail -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    if [ -n "$explicit" ]; then
+        candidate_a="$parent_dir/$explicit"
+        candidate_b="$candidate_a"
+    fi
     if [ ! -f "$candidate_a" ] && [ ! -f "$candidate_b" ]; then
         echo "mod declaration without matching file: $file: pub mod $name; (looked for $candidate_a or $candidate_b)" >&2
         fail=1

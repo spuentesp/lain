@@ -19,7 +19,7 @@ reference, tuning options, and day-to-day operating notes.
 |---|---|
 | `lain mcp` | Start a single-repository MCP server on stdio. It walks up from the current directory to find `.git`; no `repos.yaml` is required. |
 | `lain setup` | Configure an MCP client and verify the connection. `--dry-run` and `--print-config` don't write files. |
-| `lain oneshot` | Start a temporary MCP server, call one tool, print the answer, and exit. Example: `lain oneshot get_blast_radius validate_token`. |
+| `lain oneshot` | Call one tool, print the answer, and exit. The first call starts a background `lain mcp` for the repository (it exits on its own after 15 idle minutes, `LAIN_SHARED_IDLE_SECS`); later calls reuse its warm graph. `LAIN_ONESHOT_NO_SHARE=1` forces a private server. Example: `lain oneshot get_blast_radius validate_token`. |
 | `lain server` | Start the federation server and, with HTTP transport, the Command Center. |
 | `lain repos` | Add, list, or remove entries in `repos.yaml`. |
 | `lain workspaces` | Create and switch named groups of repositories. |
@@ -52,17 +52,18 @@ registry the server filters with.
 
 | Package | Tools | Skill |
 |---|---|---|
-| `core` | 18 | Orient, understand, assess impact (always on) |
+| `core` | 20 | Orient, understand, assess impact (always on) |
 | `arch` | 10 | Map the system: layered views, traces, module comparison |
 | `raw` | 8 | Low-level reads: graph queries, snippets, call sites |
 | `verify` | 9 | Build, test, lint, coverage, git state |
 | `session` | 7 | Multiplayer claiming: register, claim, heartbeat |
-| `social` | 6 | Agent roster, overlap detection, audit trail |
+| `social` | 5 | Agent roster, overlap detection, audit trail |
 | `notes` | 8 | Annotations, handoff notes, intents |
-| `ops` | 10 | Server health, reload, LSP install, re-enrichment |
+| `ops` | 9 | Server health, reload, LSP install, re-enrichment |
 | `federation` | 5 | Org-wide queries (shown automatically in federation mode) |
 | `workspace` | 4 | Workspace groups (shown automatically when configured) |
-| `full` | 84 | Every registered tool |
+| `contracts` | 13 | Service view across the federation (`list_services`, `get_service`); snapshot pinning (`prepare_snapshot`, `get_snapshot`); contract view (`list_contracts`, `get_contract`, `list_unresolved`, `check_binding`); analysis (`diff_contracts`, `trace_impact`, `get_coverage`); evidence (`resolve_evidence`, `read_source`) |
+| `full` | 97 | Every registered tool |
 
 ### Role recipes
 

@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "get_coverage input",
+  "description": "Input for `get_coverage`.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": { "type": "string" },
+    "endpoint": {
+      "type": "object",
+      "properties": {
+        "service": { "type": "string" },
+        "key": { "type": "string" }
+      }
+    }
+  },
+  "required": ["snapshot"]
+}

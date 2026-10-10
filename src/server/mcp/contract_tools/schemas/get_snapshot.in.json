@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "get_snapshot input",
+  "description": "Input for `get_snapshot`. Reads the on-disk record and refreshes `last_access_unix` per §8.4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["snapshot"],
+  "properties": {
+    "snapshot": {
+      "type": "string",
+      "description": "Snapshot id (`snap_` + 16 hex). Same shape as `prepare_snapshot` returns."
+    },
+    "wait_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 60000,
+      "description": "Maximum time to wait for a non-terminal state. Defaults to 5,000 ms; capped at 60,000 ms (§10.5)."
+    }
+  }
+}

@@ -91,16 +91,8 @@ pub fn get_reload_status(bus: &ReloadBus) -> serde_json::Value {
             ReloadState::Rebuilding => "rebuilding",
             ReloadState::Failed(_) => "failed",
         },
-        "started_at_unix": s.started_at.and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs() as i64)
-        }),
-        "last_reload_at_unix": s.last_reload_at.and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs() as i64)
-        }),
+        "started_at_unix": s.started_at.map(crate::server::time::unix_secs),
+        "last_reload_at_unix": s.last_reload_at.map(crate::server::time::unix_secs),
         "last_error": s.last_error,
         "pending_changes": s.pending_changes,
     })
@@ -115,10 +107,7 @@ pub fn request_reload(bus: &ReloadBus) -> Result<serde_json::Value, LainError> {
     Ok(serde_json::json!({
         "accepted": true,
         "message": "reload scheduled",
-        "queued_at_unix": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
+        "queued_at_unix": crate::server::time::now_unix(),
     }))
 }
 

@@ -42,7 +42,70 @@ pub trait RepoSource: Send + Sync {
     fn id_namespace(&self) -> &crate::schema::RepoNamespace;
     async fn fetch(&self) -> Result<(), LainError>;
     fn last_refreshed(&self) -> SystemTime;
-    fn is_stale(&self, max_age: Duration) -> bool;
+    /// Stale once `max_age` has passed since [`Self::last_refreshed`]
+    /// (or when the clock reads before it). Sources with nothing to
+    /// refresh override this.
+    fn is_stale(&self, max_age: Duration) -> bool {
+        self.last_refreshed()
+            .elapsed()
+            .map(|e| e > max_age)
+            .unwrap_or(true)
+    }
+}
+
+/// Run one `git` invocation, mapping a spawn failure or non-zero exit
+/// to `LainError::Git` with `what` as the human-readable action.
+fn run_git(cmd: &mut Command, what: &str) -> Result<(), LainError> {
+    let status = cmd
+        .status()
+        .map_err(|e| LainError::Git(format!("{what} failed to start: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(LainError::Git(format!("{what} failed")))
+    }
+}
+
+/// Clone `url` into `path` if there is no checkout yet, then (unless a
+/// fresh shallow clone already landed on `git_ref`) fetch `git_ref` and
+/// hard-reset to `FETCH_HEAD`. `FETCH_HEAD` rather than `origin/<ref>`
+/// because the latter fails for tags. `shallow` limits history to one
+/// commit. Blocking: call from `spawn_blocking`.
+pub(crate) fn git_sync(
+    path: &Path,
+    url: &str,
+    git_ref: &str,
+    shallow: bool,
+) -> Result<(), LainError> {
+    let depth: &[&str] = if shallow { &["--depth", "1"] } else { &[] };
+    if !path.join(".git").exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| LainError::Io(e.to_string()))?;
+        }
+        let mut clone = Command::new("git");
+        clone.args(["clone", "--quiet"]).args(depth);
+        if shallow {
+            clone.args(["--branch", git_ref]);
+        }
+        run_git(clone.arg(url).arg(path), &format!("git clone {url}"))?;
+        if shallow {
+            return Ok(());
+        }
+    }
+    run_git(
+        Command::new("git")
+            .current_dir(path)
+            .args(["fetch", "--quiet"])
+            .args(depth)
+            .args(["origin", git_ref]),
+        &format!("git fetch origin {git_ref}"),
+    )?;
+    run_git(
+        Command::new("git")
+            .current_dir(path)
+            .args(["reset", "--quiet", "--hard", "FETCH_HEAD"]),
+        &format!("git reset to {git_ref}"),
+    )
 }
 
 /// Run `git rev-parse HEAD` against `local_path`, returning the hash on
@@ -203,43 +266,7 @@ impl RepoSource for LocalCloneSource {
         let git_ref = self.git_ref.clone();
         let last_refreshed = self.last_refreshed.clone();
         tokio::task::spawn_blocking(move || -> Result<(), LainError> {
-            if !path.exists() {
-                let status = Command::new("git")
-                    .arg("clone")
-                    .arg("--quiet")
-                    .arg(&url)
-                    .arg(&path)
-                    .status()
-                    .map_err(|e| LainError::Git(format!("git clone failed to start: {e}")))?;
-                if !status.success() {
-                    return Err(LainError::Git(format!("git clone {} failed", url)));
-                }
-            }
-            // Fetch the configured ref itself and reset to what came back:
-            // a branch or a tag alike. Resetting to `origin/<ref>` failed
-            // for every tag (`--ref v1`), so the repo could never load.
-            let fetch = Command::new("git")
-                .current_dir(&path)
-                .arg("fetch")
-                .arg("--quiet")
-                .arg("origin")
-                .arg(&git_ref)
-                .status()
-                .map_err(|e| LainError::Git(format!("git fetch failed: {e}")))?;
-            if !fetch.success() {
-                return Err(LainError::Git(format!("git fetch origin {git_ref} failed")));
-            }
-            let reset = Command::new("git")
-                .current_dir(&path)
-                .arg("reset")
-                .arg("--quiet")
-                .arg("--hard")
-                .arg("FETCH_HEAD")
-                .status()
-                .map_err(|e| LainError::Git(format!("git reset failed: {e}")))?;
-            if !reset.success() {
-                return Err(LainError::Git(format!("git reset to {git_ref} failed")));
-            }
+            git_sync(&path, &url, &git_ref, false)?;
             *last_refreshed.write() = SystemTime::now();
             Ok(())
         })
@@ -248,12 +275,6 @@ impl RepoSource for LocalCloneSource {
     }
     fn last_refreshed(&self) -> SystemTime {
         *self.last_refreshed.read()
-    }
-    fn is_stale(&self, max_age: Duration) -> bool {
-        self.last_refreshed()
-            .elapsed()
-            .map(|e| e > max_age)
-            .unwrap_or(true)
     }
 }
 
@@ -333,53 +354,7 @@ impl RepoSource for ShallowCloneSource {
         let git_ref = self.inner.git_ref.clone();
         let last_refreshed = self.inner.last_refreshed.clone();
         tokio::task::spawn_blocking(move || -> Result<(), LainError> {
-            if !path.exists() {
-                let status = Command::new("git")
-                    .arg("clone")
-                    .arg("--quiet")
-                    .arg("--depth")
-                    .arg("1")
-                    .arg("--branch")
-                    .arg(&git_ref)
-                    .arg(&url)
-                    .arg(&path)
-                    .status()
-                    .map_err(|e| {
-                        LainError::Git(format!("git clone --depth 1 failed to start: {e}"))
-                    })?;
-                if !status.success() {
-                    return Err(LainError::Git(format!(
-                        "git clone --depth 1 {} failed",
-                        url
-                    )));
-                }
-            } else {
-                let fetch = Command::new("git")
-                    .current_dir(&path)
-                    .arg("fetch")
-                    .arg("--quiet")
-                    .arg("--depth")
-                    .arg("1")
-                    .arg("origin")
-                    .arg(&git_ref)
-                    .status()
-                    .map_err(|e| LainError::Git(format!("git fetch --depth 1 failed: {e}")))?;
-                if !fetch.success() {
-                    return Err(LainError::Git("git fetch --depth 1 failed".into()));
-                }
-                // FETCH_HEAD is the ref just fetched — a branch or a tag.
-                let reset = Command::new("git")
-                    .current_dir(&path)
-                    .arg("reset")
-                    .arg("--quiet")
-                    .arg("--hard")
-                    .arg("FETCH_HEAD")
-                    .status()
-                    .map_err(|e| LainError::Git(format!("git reset failed: {e}")))?;
-                if !reset.success() {
-                    return Err(LainError::Git(format!("git reset to {git_ref} failed")));
-                }
-            }
+            git_sync(&path, &url, &git_ref, true)?;
             *last_refreshed.write() = SystemTime::now();
             Ok(())
         })
@@ -389,14 +364,14 @@ impl RepoSource for ShallowCloneSource {
     fn last_refreshed(&self) -> SystemTime {
         self.inner.last_refreshed()
     }
-    fn is_stale(&self, max_age: Duration) -> bool {
-        self.inner.is_stale(max_age)
-    }
 }
 
 /// Back-compat source for today's single-workspace mode. The workspace
 /// directory already contains a checkout on disk; the file watcher handles
-/// live updates, so `fetch` is a no-op and the source is always fresh.
+/// live updates, so `fetch` is a no-op here. The contract layer does not
+/// read the working tree — it reads `<data_dir>/mirrors/<repo>.git`, and
+/// that mirror is refreshed at ref resolution (`contracts/mirrors.rs`),
+/// so workspace_dir sources track committed state there too.
 pub struct WorkspaceDirSource {
     repo_id: RepoId,
     local_path: PathBuf,

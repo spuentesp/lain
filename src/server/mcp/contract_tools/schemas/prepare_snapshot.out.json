@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "prepare_snapshot output",
+  "description": "Output for `prepare_snapshot`. The `data` field of the §10.2 envelope.",
+  "type": "object",
+  "required": ["snapshot", "state", "repos"],
+  "properties": {
+    "snapshot": { "type": "string", "description": "Snapshot id (`snap_` + 16 hex). Same inputs after ref resolution produce the same id." },
+    "state": {
+      "type": "string",
+      "enum": ["pending", "indexing", "ready", "failed"],
+      "description": "The §11 state machine's terminal-or-current state at the time the tool returned."
+    },
+    "repos": {
+      "type": "array",
+      "description": "Per-repo readiness (§8.4). `commit` is the resolved sha; omitted for `excluded`.",
+      "items": {
+        "type": "object",
+        "required": ["repo", "state"],
+        "properties": {
+          "repo": { "type": "string" },
+          "state": {
+            "type": "string",
+            "enum": ["cached", "queued", "indexing", "failed", "excluded"]
+          },
+          "commit": { "type": "string" },
+          "error": { "type": "string" }
+        }
+      }
+    },
+    "created_unix": { "type": "integer" },
+    "last_access_unix": { "type": "integer" }
+  }
+}

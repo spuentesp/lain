@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tool envelope",
+  "description": "Per-tool response envelope (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md` §10.2). Successful tools return `{api_version, analyzer_version, snapshot, reproducible, data, meta}`; errors return `{api_version, analyzer_version, snapshot, error: {code, message, retryable, details?}, meta}`.",
+  "type": "object",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["api_version", "analyzer_version", "snapshot", "reproducible", "data", "meta"],
+      "properties": {
+        "api_version": { "type": "integer", "enum": [1] },
+        "analyzer_version": { "type": "string" },
+        "snapshot": { "type": "string" },
+        "reproducible": { "type": "boolean" },
+        "view": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["live", "snapshot"] },
+            "snapshot_id": { "type": ["string", "null"] },
+            "git_commits": { "type": "object" }
+          }
+        },
+        "data": {},
+        "meta": {
+          "type": "object",
+          "required": ["elapsed_ms"],
+          "properties": {
+            "elapsed_ms": { "type": "integer", "minimum": 0 },
+            "view": {
+              "type": "object",
+              "properties": {
+                "kind": { "type": "string", "enum": ["live", "snapshot"] },
+                "snapshot_id": { "type": ["string", "null"] },
+                "git_commits": { "type": "object" }
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["api_version", "analyzer_version", "snapshot", "error", "meta"],
+      "properties": {
+        "api_version": { "type": "integer", "enum": [1] },
+        "analyzer_version": { "type": "string" },
+        "snapshot": { "type": "string" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message", "retryable"],
+          "properties": {
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "retryable": { "type": "boolean" },
+            "details": {}
+          },
+          "additionalProperties": false
+        },
+        "meta": {
+          "type": "object",
+          "required": ["elapsed_ms"],
+          "properties": {
+            "elapsed_ms": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

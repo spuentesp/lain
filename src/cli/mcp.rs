@@ -168,7 +168,16 @@ pub async fn run_mcp(
     argv_workspaces: &[PathBuf],
     embedding_model: Option<&Path>,
     reindex_timeout: Option<std::time::Duration>,
+    socket: Option<&Path>,
+    daemon: bool,
 ) -> Result<()> {
+    #[cfg(not(unix))]
+    if socket.is_some() || daemon {
+        return Err(anyhow!("`--socket` / `--daemon` require a Unix platform"));
+    }
+    if daemon && socket.is_none() {
+        return Err(anyhow!("`--daemon` requires `--socket PATH`"));
+    }
     let workspaces = resolve_workspaces_strict(argv_workspaces)?;
 
     if workspaces.len() > 1 {
@@ -225,6 +234,13 @@ pub async fn run_mcp(
     // graph never advances past the commit it was first built from.
     crate::server::ingest::background::spawn_commit_sync(server.clone());
 
+    // B5 (2026-10-04): periodic WAL checkpoint. The WAL grows on
+    // every mutation; without a periodic trigger, a
+    // long-running server with no explicit reload would never
+    // truncate the file. The default 60s is short enough to
+    // bound the WAL to a few minutes of mutations.
+    crate::server::ingest::background::spawn_periodic_checkpoint(server.clone());
+
     // Expire stale sessions and claim TTLs. Only the federation server
     // started this, so under `lain mcp` a crashed agent's edit claims — and
     // any `ttl_seconds` claim — were never dropped, blocking every other
@@ -236,19 +252,79 @@ pub async fn run_mcp(
         server.audit_handle().events_log().clone(),
     );
 
+    // B1 (2026-10-04): when `--socket PATH` is given, also bind a
+    // per-workspace Unix socket. `lain oneshot` consults this
+    // socket first; subsequent calls connect to the running
+    // server and skip the cold-reindex cost (~5 min for 41k
+    // LOC). The TLA+ spec at
+    // `docs/formal/OneshotSharedServer.tla` defines the
+    // lifecycle; the design notes are in
+    // `OneshotSharedServer-impl.md`. We spawn the socket
+    // accept loop as a sibling tokio task; both runtimes share
+    // the same `Arc<LainServer>` so a call coming through the
+    // socket sees the warm in-memory graph.
+    let server_arc = std::sync::Arc::new(server);
+    #[cfg(unix)]
+    if let Some(socket_path) = socket {
+        // Daemon mode serves the socket only and exits after an idle window;
+        // plain `--socket` serves it alongside stdio for as long as stdio runs.
+        let idle = daemon.then(shared_idle_window);
+        // Binds now: a live server already on this socket, or a path too long
+        // for the platform, fails the command instead of being logged away.
+        let socket_task = crate::server::mcp::socket_server::start(
+            socket_path.to_path_buf(),
+            server_arc.clone(),
+            idle,
+        )?;
+        if daemon {
+            // No stdio transport here, so nothing else would run the startup
+            // re-index that `run_stdio` normally starts. Calls arriving
+            // meanwhile are turned back by the readiness gate with
+            // `warming_up`, exactly as over stdio.
+            let cancel = server_arc.lifecycle_handle().cancel_token();
+            let startup = tokio::spawn(crate::server::mcp::handler::await_startup_reindex(
+                Some(server_arc.clone()),
+                reindex_timeout,
+                None,
+                cancel,
+            ));
+            server_arc.lifecycle_handle().install_startup_task(startup);
+            let result = socket_task
+                .await
+                .map_err(|e| anyhow!("socket server task failed: {e}"))?;
+            server_arc.lifecycle_handle().cancel();
+            return result;
+        }
+        // Held for the life of the process; the runtime reaps it on exit.
+        std::mem::forget(socket_task);
+    }
+
     // Hand the executor's tool surface to a federation-free
     // `LainMcpServer`. Single-workspace mode — per-repo tools run
     // against `server.tool_executor.graph` directly. The re-index
     // timeout is wired through to run_stdio so the spawn honors
     // it (or the env var if None).
-    let mcp =
-        crate::server::mcp::handler::LainMcpServer::new(server.ingest().tool_executor().clone())
-            .with_server(std::sync::Arc::new(server))
-            .with_reindex_timeout(reindex_timeout);
+    let mcp = crate::server::mcp::handler::LainMcpServer::new(
+        server_arc.ingest().tool_executor().clone(),
+    )
+    .with_server(server_arc)
+    .with_reindex_timeout(reindex_timeout);
     mcp.run_stdio()
         .await
         .map_err(|e| anyhow!("MCP stdio run failed: {e}"))?;
     Ok(())
+}
+
+/// How long a daemon-mode server waits with no connection before exiting.
+/// Override with `LAIN_SHARED_IDLE_SECS`.
+#[cfg(unix)]
+fn shared_idle_window() -> std::time::Duration {
+    let secs = std::env::var("LAIN_SHARED_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(900);
+    std::time::Duration::from_secs(secs)
 }
 
 /// Multi-workspace delegation path. Generates a `repos.yaml` with one

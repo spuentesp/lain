@@ -124,6 +124,8 @@ curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
 | Semantic search "unavailable" | Install the model (top of page) and set `LAIN_EMBEDDING_MODEL` |
 | Federation won't start | `lain doctor` |
 | Agents not seeing each other's claims | Check `list_active_agents`; they must share `~/.config/lain/state/` |
+| `lain oneshot ... \| head -N` killed the indexer | `head` closes the pipe when it exits, sending `SIGPIPE` upstream; on a cold graph the long-running `lain mcp` aborts mid-reindex and leaves a partial `graph.bin`. Either pipe to a file (`> /tmp/lain.log`) or to a tool that reads to EOF (`jq`, `tee`, `wc -l`). The footgun is logged in `DOGFOODING_REPORT.md` (2026-10-04, B7). |
+| `get_health` shows **⚠ call graph is empty — `Calls` is 0** | The persistent `graph.bin` was written by a build that didn't extract `Calls` edges, or by a partial reindex that timed out. Every `get_blast_radius` / `get_call_chain` / `assess_change` answer will be empty until this is fixed. **Recipe:** from inside the repo, run `lain reindex` to rebuild the graph from source. The first reindex takes ~5 min for a 41k-LOC repo (LSP prewarm is the dominant cost). See `DOGFOODING_REPORT.md` (2026-10-04, B3). |
 
 ## Next
 

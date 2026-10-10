@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "read_source input",
+  "description": "Input for `read_source`. Reads a bounded line range from a file the view's index walked. The §10.7 safety rules apply.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": { "type": "string" },
+    "repo": { "type": "string" },
+    "path": { "type": "string" },
+    "start": { "type": "integer", "minimum": 0 },
+    "end": { "type": "integer", "minimum": 0 }
+  },
+  "required": ["snapshot", "repo", "path", "start", "end"]
+}

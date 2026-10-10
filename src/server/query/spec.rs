@@ -413,12 +413,46 @@ impl NameSelector {
             NameSelector::Exact(s) => name == s,
             NameSelector::StartsWith(s) => name.starts_with(s),
             NameSelector::EndsWith(s) => name.ends_with(s),
-            NameSelector::Glob(pattern) => {
-                let pattern = pattern.replace('*', ".*").replace('?', ".");
-                regex::Regex::new(&format!("^{}$", pattern))
-                    .map(|r| r.is_match(name))
-                    .unwrap_or(false)
+            NameSelector::Glob(pattern) => glob_matches(pattern, name),
+        }
+    }
+}
+
+/// Glob matching for symbol names: `*` is any run of characters (including
+/// none), `?` is exactly one character, everything else is literal.
+///
+/// Iterative with single-star backtracking: O(|pattern| · |name|) time, no
+/// allocation per call. This used to splice the pattern into a regex with only
+/// `*` and `?` translated, so `.` matched any character (`foo.rs` selected
+/// `fooXrs`), a pattern such as `get(` or `a[` failed to compile and silently
+/// matched nothing, and the regex was recompiled for every node examined.
+pub(crate) fn glob_matches(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = name.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // (pattern index just after the last `*`, text index that `*` has reached)
+    let mut star: Option<(usize, usize)> = None;
+    loop {
+        if pi < p.len() && p[pi] == '*' {
+            pi += 1;
+            star = Some((pi, ti));
+            continue;
+        }
+        if pi == p.len() && ti == t.len() {
+            return true;
+        }
+        if pi < p.len() && ti < t.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+            continue;
+        }
+        match star {
+            Some((spi, sti)) if sti < t.len() => {
+                star = Some((spi, sti + 1));
+                pi = spi;
+                ti = sti + 1;
             }
+            _ => return false,
         }
     }
 }
@@ -861,3 +895,7 @@ mod named_query_validity_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "spec_verification.rs"]
+mod verification;

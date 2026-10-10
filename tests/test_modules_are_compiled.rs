@@ -32,12 +32,38 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
             // `lib.rs` and `main.rs` are crate roots and `mod.rs` declares
             // its own directory; none of them is declared from elsewhere.
+            // `build.rs` is a Cargo build script — cargo invokes it
+            // directly via the `build = "..."` manifest setting; it is
+            // not a regular lib module and is excluded here.
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !matches!(name, "lib.rs" | "main.rs" | "mod.rs") {
+            if !matches!(name, "lib.rs" | "main.rs" | "mod.rs" | "build.rs") {
                 out.push(p);
             }
         }
     }
+}
+
+/// True when `line` is a `mod <stem>;` declaration under any visibility:
+/// `mod x;`, `pub mod x;`, `pub(crate) mod x;`, `pub(super) mod x;`,
+/// `pub(in path) mod x;`.
+///
+/// The earlier check compared against three exact spellings, so a
+/// `pub(super) mod x;` — a perfectly good declaration — read as an
+/// orphan. Visibility form is not evidence of orphanhood; an absent
+/// declaration is.
+fn is_mod_decl(line: &str, stem: &str) -> bool {
+    let l = line.trim();
+    let Some(rest) = l.strip_suffix(';') else {
+        return false;
+    };
+    let Some((vis, name)) = rest.trim_end().split_once("mod ") else {
+        return false;
+    };
+    if name.trim() != stem {
+        return false;
+    }
+    let vis = vis.trim();
+    vis.is_empty() || vis == "pub" || (vis.starts_with("pub(") && vis.ends_with(')'))
 }
 
 #[test]
@@ -65,16 +91,27 @@ fn every_rust_file_under_src_is_declared_as_a_module() {
         parents.push(root.join("main.rs"));
         let declared = parents.iter().any(|p| {
             std::fs::read_to_string(p)
-                .map(|s| {
-                    s.lines().any(|l| {
-                        let l = l.trim();
-                        l == format!("mod {stem};")
-                            || l == format!("pub mod {stem};")
-                            || l == format!("pub(crate) mod {stem};")
-                    })
-                })
+                .map(|s| s.lines().any(|l| is_mod_decl(l, &stem)))
                 .unwrap_or(false)
         });
+        // ...or by an explicit `#[path = "<file>.rs"]` attribute in a sibling
+        // module file (the verification suites use this to keep a module's
+        // models and proofs next to it without growing the module itself).
+        let file_name = f.file_name().unwrap().to_string_lossy().to_string();
+        let path_attr = format!("#[path = \"{file_name}\"]");
+        let declared = declared
+            || std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries.flatten().any(|e| {
+                        let sib = e.path();
+                        sib != *f
+                            && sib.extension().is_some_and(|x| x == "rs")
+                            && std::fs::read_to_string(&sib)
+                                .map(|s| s.lines().any(|l| l.trim() == path_attr))
+                                .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
         if !declared {
             orphans.push(f.strip_prefix(&root).unwrap_or(f).display().to_string());
         }

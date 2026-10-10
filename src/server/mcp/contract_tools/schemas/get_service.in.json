@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "get_service input",
+  "description": "Input for `get_service`. Live only — PR 11/13 surfaces named snapshots.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": {
+      "type": "string",
+      "enum": ["live"]
+    },
+    "service": {
+      "type": "string",
+      "description": "Service name (`^[a-z0-9][a-z0-9_-]*$`)."
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8,
+      "description": "Max depth for the `used_by` walk (§10.9). Default 4, max 8."
+    },
+    "cursor": {
+      "type": "string",
+      "description": "Opaque paging cursor."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "Max consumer-service rows (default 100, max 1000)."
+    }
+  },
+  "required": ["snapshot", "service"]
+}

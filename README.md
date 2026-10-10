@@ -21,9 +21,11 @@ Is another agent already editing this code?
 ```
 
 Lain answers with symbol names and source paths from a local index. The index
-stays on disk between runs, updates when the code changes, and can cover more
-than one repository. Semantic search is optional; graph queries work without
-an embedding model.
+stays on disk between runs and can cover more than one repository. It follows
+commits, not uncommitted edits: after committing, a re-index pass (`lain
+reindex` or a fresh session) brings it current — and answers that may miss
+recent work say so instead of going quiet. Semantic search is optional; graph
+queries work without an embedding model.
 
 ## Install
 

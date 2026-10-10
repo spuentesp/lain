@@ -384,6 +384,68 @@ schema.
 
 ---
 
+## Contract federation (services, joins, snapshots)
+
+When `repos.yaml` declares `services:` / `http_clients:` / `bindings:`,
+the federation derives a per-federation `ContractIndex` (PR 7) and
+exposes the 13 `contracts`-package tools (PR 13). See
+[`docs/REPOS_YAML.md`](REPOS_YAML.md) for the config schema; the
+design lives in
+[`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`](superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md).
+
+### Services and monorepos
+
+A service is a join unit: every contract node (HTTP route, OpenAPI
+schema, HTTP client call, field read) is routed to its service by
+the longest matching `paths` prefix under the service's `repo`.
+Monorepos declare one service per `paths` entry — `platform` in the
+fixture carries `shipping` and `inventory` as separate services that
+share the same repo.
+
+### Contract joins
+
+The joiner runs once per `FederatedIndex` and produces both the
+desired `Binds` edge set and a fresh `ContractIndex`. It uses the
+`repos.yaml` `config_hash` (`blake3` of the canonical JSON of the
+join-relevant sections) so two snapshots with different `bindings:`
+entries have different ids and `diff_contracts` distinguishes them.
+
+### Scoped "no known impact"
+
+Every analysis result carries a `Scope` (§9.6) listing the
+`reviewed` and `unreviewed` repos. A `NoKnownImpact` verdict
+without an `unreviewed` list claiming the change is safe is the
+default; reports name every repo that could not be reviewed.
+An unresolved consumer in a reviewed repo is a concrete lead, so
+it makes the change `NeedsInvestigation` instead of being listed
+in the scope.
+
+### Snapshots — what they include and what they omit
+
+Snapshot views are built over `PetgraphBackend::ephemeral`:
+every `save()` is a no-op, the in-memory `GraphDatabase` is fresh,
+and `project_graph` is shared with the live path so both produce
+identical node and edge sets from the same per-repo graph. What
+snapshots do not contain: cross-repo `Calls` and
+`CrossRepoSameSymbol` edges (§8.6), since the cache entries are
+built without other repos. Contract impact does not need them
+because services talk through `Binds`. Tools that depend on
+symbol-level joins (`get_cross_repo_blast_radius` and friends) keep
+working on `live` only.
+
+### Tool surface
+
+The 13 tools (`list_services`, `get_service`, `prepare_snapshot`,
+`get_snapshot`, `list_contracts`, `get_contract`, `list_unresolved`,
+`check_binding`, `diff_contracts`, `trace_impact`, `get_coverage`,
+`resolve_evidence`, `read_source`) follow §10.2 envelope,
+§10.4 determinism (byte-identical `structuredContent` across stdio
+and HTTP for the same view), §10.5 paging/limits, and the §13 error
+codes. See
+[`docs/quickstart-tools.md`](quickstart-tools.md) for a walkthrough.
+
+---
+
 ## Tool resolution rules
 
 Federation tools that take a `repo_id` (currently `get_repo_info`,

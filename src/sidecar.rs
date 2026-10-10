@@ -421,9 +421,12 @@ impl SidecarInner {
             )));
         }
 
-        self.spawn_child_and_connect()?;
+        // Record the ATTEMPT before it is made. Counting only successful
+        // respawns meant a binary that dies on startup never reached this
+        // line, so the budget never tripped and every call paid two
+        // spawn-and-timeout cycles indefinitely.
         self.respawn_history.push_back(now);
-        Ok(())
+        self.spawn_child_and_connect()
     }
 
     fn spawn_child_and_connect(&mut self) -> Result<(), LainError> {
@@ -787,3 +790,7 @@ mod socket_path_tests {
         assert!(path.as_os_str().len() <= super::MAX_SOCKET_PATH, "{path:?}");
     }
 }
+
+#[cfg(test)]
+#[path = "sidecar_verification.rs"]
+mod verification;

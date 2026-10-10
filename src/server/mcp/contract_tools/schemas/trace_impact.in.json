@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "trace_impact input",
+  "description": "Input for `trace_impact`. Exactly one of endpoint/field/symbol is required.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": { "type": "string" },
+    "from": {
+      "type": "object",
+      "description": "Exactly one of `endpoint`, `field`, `symbol` must be set.",
+      "properties": {
+        "endpoint": {
+          "type": "object",
+          "properties": {
+            "service": { "type": "string" },
+            "key": { "type": "string" }
+          }
+        },
+        "field": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "type": "object",
+              "properties": {
+                "service": { "type": "string" },
+                "key": { "type": "string" }
+              }
+            },
+            "direction": { "type": "string", "enum": ["request", "response", "payload"] },
+            "json_path": { "type": "string" }
+          }
+        },
+        "symbol": { "type": "string" }
+      }
+    },
+    "depth": { "type": "integer", "minimum": 1, "maximum": 12 },
+    "min_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "cap": { "type": "integer", "minimum": 1, "maximum": 500 }
+  },
+  "required": ["snapshot", "from"]
+}

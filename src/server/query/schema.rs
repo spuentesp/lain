@@ -411,16 +411,54 @@ mod indexed_flag_tests {
     /// emitted by any indexer.
     #[test]
     fn the_known_fictions_stay_marked_unavailable() {
-        for t in [NodeType::Topic, NodeType::Resource, NodeType::Schema] {
-            assert!(!t.is_indexed(), "{t} has no producer in this codebase");
-        }
+        assert!(
+            !NodeType::Resource.is_indexed(),
+            "Resource has no producer in this codebase"
+        );
+        // `PayloadSchema` is parsed by `payload_schema.rs` but no sensor
+        // mints the Topic → Schema edge yet, so advertising it would make
+        // `describe_schema` promise an edge clients can never observe.
         for e in [
             EdgeType::Imports,
-            EdgeType::Produces,
-            EdgeType::Consumes,
             EdgeType::DeployedTo,
+            EdgeType::PayloadSchema,
         ] {
             assert!(!e.is_indexed(), "{e} has no producer in this codebase");
+        }
+    }
+
+    #[test]
+    fn the_sensor_emitted_types_stay_available() {
+        for t in [
+            NodeType::Topic,
+            NodeType::Schema,
+            NodeType::HttpClientCall,
+            NodeType::Field,
+            NodeType::FieldRef,
+            NodeType::Table,
+        ] {
+            assert!(
+                t.is_indexed(),
+                "{t} is emitted by registered sensors and must be marked indexed"
+            );
+        }
+        for e in [
+            EdgeType::Produces,
+            EdgeType::Consumes,
+            EdgeType::SendsHttp,
+            EdgeType::RequestSchema,
+            EdgeType::ResponseSchema,
+            EdgeType::HasField,
+            EdgeType::ReadsField,
+            EdgeType::ReadsFrom,
+            EdgeType::Binds,
+            EdgeType::ReadsTable,
+            EdgeType::WritesTable,
+        ] {
+            assert!(
+                e.is_indexed(),
+                "{e} is emitted by registered sensors and must be marked indexed"
+            );
         }
     }
 

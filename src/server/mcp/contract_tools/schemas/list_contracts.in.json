@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "list_contracts input",
+  "description": "Input for `list_contracts`. Filters endpoints by service, repo, and kind; supports paging via `cursor`/`limit`.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": {
+      "type": "string",
+      "description": "Snapshot id (`snap_<hex>`) or `live`."
+    },
+    "service": {
+      "type": "string",
+      "description": "Filter by service name."
+    },
+    "repo": {
+      "type": "string",
+      "description": "Filter by repo id."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["http", "topic", "rpc", "graphql", "websocket", "table"],
+      "description": "Filter by contract kind. Unknown values are rejected with `invalid_argument` rather than returning an empty page."
+    },
+    "cursor": {
+      "type": "string",
+      "description": "Opaque paging cursor."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "Max items per page (default 100, max 1000)."
+    }
+  },
+  "required": ["snapshot"]
+}

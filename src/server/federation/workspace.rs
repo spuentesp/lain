@@ -67,7 +67,10 @@ impl WorkspacesFile {
     }
 
     /// Validate structural invariants: unique workspace names, ≥1 member per
-    /// workspace, valid repo id characters, default workspace exists if set.
+    /// workspace (a workspace with a `source` may start empty — `lain
+    /// workspaces init` registers it and `lain workspaces add` fills in the
+    /// members; nothing merges members in from the source), valid repo id
+    /// characters, default workspace exists if set.
     pub fn validate(&self) -> Result<(), LainError> {
         let mut seen_names = std::collections::HashSet::new();
         for ws in &self.workspaces {
@@ -77,7 +80,7 @@ impl WorkspacesFile {
                     name = ws.name
                 )));
             }
-            if ws.members.is_empty() {
+            if ws.members.is_empty() && ws.source.is_none() {
                 return Err(LainError::Config(format!(
                     "workspace '{name}' must contain >= 1 repos; got 0",
                     name = ws.name,
@@ -176,7 +179,15 @@ pub trait WorkspaceSource: Send + Sync {
     fn kind(&self) -> WorkspaceSourceKind;
     async fn fetch(&self) -> Result<(), LainError>;
     fn last_refreshed(&self) -> SystemTime;
-    fn is_stale(&self, max_age: Duration) -> bool;
+    /// Stale once `max_age` has passed since [`Self::last_refreshed`]
+    /// (or when the clock reads before it). Sources with nothing to
+    /// refresh override this.
+    fn is_stale(&self, max_age: Duration) -> bool {
+        self.last_refreshed()
+            .elapsed()
+            .map(|e| e > max_age)
+            .unwrap_or(true)
+    }
 }
 
 /// Back-compat source: workspace definition lives on disk at a known path.
@@ -304,65 +315,12 @@ impl WorkspaceSource for WorkspaceCloneSource {
         WorkspaceSourceKind::WorkspaceClone
     }
     async fn fetch(&self) -> Result<(), LainError> {
-        use std::process::Command;
         let path = self.local_path.clone();
         let url = self.url.clone();
         let git_ref = self.git_ref.clone();
         let last_refreshed = self.last_refreshed.clone();
-        let git_dir = path.join(".git");
         tokio::task::spawn_blocking(move || -> Result<(), LainError> {
-            if !git_dir.exists() {
-                let parent = path.parent().ok_or_else(|| {
-                    LainError::Config("workspace_clone local_path has no parent".into())
-                })?;
-                std::fs::create_dir_all(parent).map_err(|e| LainError::Io(e.to_string()))?;
-                let status = Command::new("git")
-                    .arg("clone")
-                    .arg("--quiet")
-                    .arg("--depth")
-                    .arg("1")
-                    .arg("--branch")
-                    .arg(&git_ref)
-                    .arg(&url)
-                    .arg(&path)
-                    .status()
-                    .map_err(|e| {
-                        LainError::Git(format!("git clone --depth 1 failed to start: {e}"))
-                    })?;
-                if !status.success() {
-                    return Err(LainError::Git(format!(
-                        "git clone --depth 1 {} failed",
-                        url
-                    )));
-                }
-            } else {
-                let fetch = Command::new("git")
-                    .current_dir(&path)
-                    .arg("fetch")
-                    .arg("--quiet")
-                    .arg("--depth")
-                    .arg("1")
-                    .arg("origin")
-                    .arg(&git_ref)
-                    .status()
-                    .map_err(|e| LainError::Git(format!("git fetch --depth 1 failed: {e}")))?;
-                if !fetch.success() {
-                    return Err(LainError::Git("git fetch --depth 1 failed".into()));
-                }
-                let reset = Command::new("git")
-                    .current_dir(&path)
-                    .arg("reset")
-                    .arg("--hard")
-                    .arg(format!("origin/{}", git_ref))
-                    .status()
-                    .map_err(|e| LainError::Git(format!("git reset failed: {e}")))?;
-                if !reset.success() {
-                    return Err(LainError::Git(format!(
-                        "git reset to origin/{} failed",
-                        git_ref
-                    )));
-                }
-            }
+            super::repo_source::git_sync(&path, &url, &git_ref, true)?;
             *last_refreshed.write() = SystemTime::now();
             Ok(())
         })
@@ -371,12 +329,6 @@ impl WorkspaceSource for WorkspaceCloneSource {
     }
     fn last_refreshed(&self) -> SystemTime {
         *self.last_refreshed.read()
-    }
-    fn is_stale(&self, max_age: Duration) -> bool {
-        self.last_refreshed()
-            .elapsed()
-            .map(|e| e > max_age)
-            .unwrap_or(true)
     }
 }
 
@@ -463,6 +415,24 @@ workspaces:
 "#;
         let file: WorkspacesFile = serde_yaml::from_str(yaml).unwrap();
         assert!(file.validate().is_err());
+    }
+
+    #[test]
+    fn sourced_workspace_with_zero_members_is_allowed() {
+        // `lain workspaces init` registers a workspace_clone source first
+        // and fills members in via `lain workspaces add` afterwards, so the
+        // saved file must validate (and load) in that transient state.
+        let yaml = r#"
+workspaces:
+  - name: pending
+    members: []
+    source:
+      type: workspace_clone
+      url: https://example.com/ws.git
+"#;
+        let file: WorkspacesFile = serde_yaml::from_str(yaml).unwrap();
+        file.validate()
+            .expect("sourced workspace may start with 0 members");
     }
 
     #[test]

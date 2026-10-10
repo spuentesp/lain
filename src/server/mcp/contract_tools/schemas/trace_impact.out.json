@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "trace_impact data",
+  "description": "`data` field of the `trace_impact` envelope (§10.2). Paths sorted by `min_confidence` desc, length asc, leaf id.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "start": { "type": "string" },
+          "min_confidence": { "type": "number" },
+          "hops": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "edge": { "type": "string" },
+                "node": { "type": "string" },
+                "node_type": { "type": "string" },
+                "name": { "type": "string" },
+                "provenance": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "truncated": { "type": "boolean" },
+    "scope": { "type": "object" }
+  },
+  "required": ["paths", "truncated", "scope"]
+}

@@ -1,0 +1,14 @@
+{
+  "_comment": "Ground truth for the real-fixture built by scripts/demo-federation-fixture.sh: bytes + tokio (two independent Rust libraries that share a toolchain but no service contract in LAIN's model), plus the synthetic probe repo (one axum route) that the suite references explicitly for endpoint/verdict checks. ground_truth.sh snapshots only bytes+tokio. On that snapshot the ground truth is 'no contracts, no unresolved consumers' — i.e. precision=1.0 is the assertion. get_coverage.complete is FALSE, not true: tokio's coverage ledger carries unresolved dynamic-SQL records, so claiming completeness would be a false completeness claim (invariant I3).",
+  "fixture": {
+    "repos": ["bytes", "tokio", "probe"],
+    "builder": "scripts/demo-federation-fixture.sh",
+    "network_required": true
+  },
+  "invariants": {
+    "list_contracts_items": 0,
+    "list_unresolved_total": 0,
+    "get_coverage_complete": false,
+    "all_repos_state": "cached"
+  }
+}

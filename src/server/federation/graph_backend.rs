@@ -3,16 +3,25 @@ use crate::federation::repo_id::GlobalId;
 use crate::graph::GraphDatabase;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use dashmap::DashMap;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-/// On-disk envelope for `federated_graph.bin`: the `LNF2` magic followed
-/// by a little-endian `u32` schema version. Anything else — headerless
-/// bytes, an unknown magic, a version mismatch, or a corrupt body under a
-/// valid header — is rejected with `LainError::FederationSchemaMismatch`
-/// rather than loaded.
+/// On-disk envelope for `federated_graph.bin`: the `LNF2` magic, then a
+/// little-endian `u32` schema version, then the payload. There is no
+/// headerless legacy path — a file without the magic is rejected as a
+/// schema mismatch (`LainError::FederationSchemaMismatch`) rather than
+/// loaded as v1, a version mismatch is the same error, and a corrupt
+/// body under a valid header is `LainError::FederationPayloadCorrupt`.
+///
+/// Schema v3 adds contract-federation node/edge variants and
+/// `GraphNode.contract` / `GraphNode.entry` / `GraphEdge.site` /
+/// `GraphEdge.detail` fields. Per the repo's federation-schema policy
+/// (`AGENTS.md`), the version bump ships in the same commit as the
+/// layout change. Old v2 files are refused at load — recovery is
+/// `lain reindex`.
 pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
-pub const FEDERATION_GRAPH_VERSION: u32 = 2;
+pub const FEDERATION_GRAPH_VERSION: u32 = 4;
 pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
 
 /// Sibling file holding the validated payload (everything after the
@@ -92,6 +101,26 @@ pub trait GraphBackend: Send + Sync {
         depth: Range<u32>,
         direction: petgraph::Direction,
     ) -> Result<Vec<GraphNode>, LainError>;
+    /// F2 typed impact traversal (§5.2). BFS from every node in
+    /// `starts` at distance 0, following edges per the propagation
+    /// table (see [`impact_propagation`]). Each node is visited once
+    /// at its shortest distance; tie-breaks go to the predecessor
+    /// with higher `min_confidence` then lexicographically smaller
+    /// `GlobalId` so output is deterministic. Edges below
+    /// `min_confidence` are not followed. A path is emitted for every
+    /// visited node that has no unvisited successor or sits at
+    /// `depth`; `cap` limits emitted paths and `truncated` is set
+    /// when `cap` or `depth` cut the search. Output paths are sorted
+    /// by `min_confidence` desc, then length asc, then leaf
+    /// `GlobalId`. PR 4 ships the table with only `Calls` returning
+    /// `Incoming`; later PRs switch their own edge types on.
+    fn traverse_impact(
+        &self,
+        starts: &[&str],
+        depth: u32,
+        cap: usize,
+        min_confidence: f32,
+    ) -> Result<ImpactResult, LainError>;
     fn find_path(&self, from: &str, to: &str) -> Result<Vec<GraphNode>, LainError>;
     fn subgraph_around(
         &self,
@@ -107,6 +136,12 @@ pub struct PetgraphBackend {
     index: DashMap<String, GlobalId>,
     bin_path: PathBuf,
     payload_path: PathBuf,
+    /// When `true`, [`Self::save`] is a no-op and no file under
+    /// `data_dir` is ever written. Snapshot federations (`§8.5`) live
+    /// here: they need a real `GraphBackend` to walk, but every
+    /// snapshot is built from on-disk cache entries and never persists
+    /// itself.
+    ephemeral: bool,
 }
 
 impl PetgraphBackend {
@@ -168,13 +203,42 @@ impl PetgraphBackend {
             index,
             bin_path,
             payload_path,
+            ephemeral: false,
         })
+    }
+
+    /// Build a `PetgraphBackend` that never writes to disk (`§8.5`).
+    /// The wrapped `GraphDatabase` is a fresh in-memory graph; the
+    /// `save()` override skips every disk write.
+    ///
+    /// `data_dir` is used only as a diagnostic identifier — no file is
+    /// ever created or read at that path. The caller typically passes
+    /// `data_dir/<snapshot_id>` so logs identify the snapshot.
+    pub fn ephemeral(data_dir: &Path) -> Self {
+        let db = crate::graph::GraphDatabase::empty_writable();
+        Self {
+            db,
+            index: DashMap::new(),
+            bin_path: data_dir.to_path_buf(),
+            payload_path: data_dir.to_path_buf(),
+            ephemeral: true,
+        }
+    }
+
+    /// True iff [`Self::save`] is a no-op. Snapshot federations use
+    /// this so callers and tests can assert "no disk write happened".
+    pub fn is_ephemeral(&self) -> bool {
+        self.ephemeral
     }
 
     /// Save the federated graph to disk, prepending the schema envelope
     /// (magic + version) before the bincode payload so the canonical
-    /// file is always self-describing on the next load.
+    /// file is always self-describing on the next load. No-op for
+    /// ephemeral backends (`§8.5` snapshot federations).
     fn save(&self) -> Result<(), LainError> {
+        if self.ephemeral {
+            return Ok(());
+        }
         self.db.save_to_disk_sync()?;
         let payload = std::fs::read(&self.payload_path)?;
         let mut with_header = Vec::with_capacity(FEDERATION_GRAPH_HEADER_LEN + payload.len());
@@ -331,4 +395,301 @@ impl GraphBackend for PetgraphBackend {
     fn edge_count(&self) -> usize {
         self.db.edge_count()
     }
+
+    fn traverse_impact(
+        &self,
+        starts: &[&str],
+        depth: u32,
+        cap: usize,
+        min_confidence: f32,
+    ) -> Result<ImpactResult, LainError> {
+        // Snapshot the relevant data up front so the BFS walks a
+        // borrowed view rather than holding the graph lock across the
+        // whole traversal. `all_edges` is `O(E)` per call, but the
+        // federation's BFS hot path runs against a snapshot the
+        // server already keeps in memory; the per-call overhead is
+        // acceptable here, and `MemgraphBackend` (the deferred escape
+        // hatch called out in `federation/AGENTS.md`) can override this
+        // with index-only walks without changing the signature.
+        let mut nodes: std::collections::HashMap<String, GraphNode> = self
+            .list_nodes()?
+            .into_iter()
+            .map(|n| (n.id.clone(), n))
+            .collect();
+        let edges = self.all_edges()?;
+        let mut by_target: std::collections::HashMap<String, Vec<(f32, String, GraphEdge)>> =
+            std::collections::HashMap::new();
+        for e in edges {
+            // Confidence must be evidence-backed. Explicit weights win;
+            // otherwise derive it from provenance. A legacy edge with
+            // neither is unknown (0.0), not implicitly verified static data.
+            let conf = e.weight.unwrap_or(match e.provenance.as_ref() {
+                Some(crate::schema::EdgeProvenance::Static { .. })
+                | Some(crate::schema::EdgeProvenance::Confirmed { .. }) => 1.0,
+                Some(crate::schema::EdgeProvenance::Heuristic { confidence, .. }) => *confidence,
+                Some(crate::schema::EdgeProvenance::Runtime { .. }) => 0.9,
+                None => 0.0,
+            });
+            if conf < min_confidence {
+                continue;
+            }
+            match impact_propagation(&e.edge_type) {
+                Propagation::Incoming => by_target.entry(e.target_id.clone()).or_default().push((
+                    conf,
+                    e.source_id.clone(),
+                    e,
+                )),
+                Propagation::Outgoing => by_target.entry(e.source_id.clone()).or_default().push((
+                    conf,
+                    e.target_id.clone(),
+                    e,
+                )),
+                Propagation::Stop => {}
+            }
+        }
+        // Stable predecessor selection: each entry holds the
+        // candidate's confidence and source id; the BFS picks the
+        // highest-confidence, then lexicographically smallest id.
+        for entries in by_target.values_mut() {
+            entries.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+        }
+
+        // BFS from every start at distance 0. The brief: "an endpoint
+        // has one start per provider node" — every entry of `starts`
+        // is seeded independently.
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+        for s in starts {
+            if nodes.contains_key(*s) && visited.insert((*s).to_string()) {
+                queue.push_back(((*s).to_string(), 0));
+            }
+        }
+
+        let mut paths: Vec<ImpactPath> = Vec::new();
+        let mut truncated = false;
+
+        // For each visited node, remember (predecessor id, incoming
+        // edge, min_confidence so far). Used to reconstruct paths
+        // when a leaf is reached. The first predecessor to claim a
+        // node wins (already ordered by the sort above), so output
+        // is deterministic.
+        let mut pred: std::collections::HashMap<String, (String, GraphEdge, f32)> =
+            std::collections::HashMap::new();
+
+        while let Some((current, current_depth)) = queue.pop_front() {
+            let successors = by_target.get(&current);
+            let has_unvisited_successor = successors
+                .map(|v| v.iter().any(|(_, id, _)| !visited.contains(id)))
+                .unwrap_or(false);
+
+            // §5.2 emission rule: emit a path when (a) at `depth` or
+            // (b) no unvisited successor. The seed itself, when it
+            // has no edges, also satisfies (b).
+            let at_depth = current_depth >= depth;
+            if at_depth || !has_unvisited_successor {
+                if paths.len() >= cap {
+                    truncated = true;
+                } else {
+                    paths.push(reconstruct_path(&current, &pred, &mut nodes));
+                }
+            }
+
+            if at_depth {
+                truncated = true;
+                continue;
+            }
+
+            if let Some(successors) = successors {
+                for (conf, next_id, edge) in successors {
+                    if !visited.insert(next_id.clone()) {
+                        continue;
+                    }
+                    // Edge confidence already passed the floor at
+                    // indexing time. The `min_confidence` carried on
+                    // the path is the minimum of every edge on it,
+                    // updated here as we descend.
+                    let new_min_conf = if let Some((_, _, prev_conf)) = pred.get(&current) {
+                        conf.min(*prev_conf)
+                    } else {
+                        *conf
+                    };
+                    pred.insert(
+                        next_id.clone(),
+                        (current.clone(), edge.clone(), new_min_conf),
+                    );
+                    queue.push_back((next_id.clone(), current_depth + 1));
+                }
+            }
+        }
+
+        // Sort by min_confidence desc, then length asc, then leaf id.
+        paths.sort_by(|a, b| {
+            b.min_confidence
+                .partial_cmp(&a.min_confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.hops.len().cmp(&b.hops.len()))
+                .then_with(|| {
+                    let a_leaf = a.hops.last().map(|h| h.node.id.as_str()).unwrap_or("");
+                    let b_leaf = b.hops.last().map(|h| h.node.id.as_str()).unwrap_or("");
+                    a_leaf.cmp(b_leaf)
+                })
+        });
+
+        Ok(ImpactResult { paths, truncated })
+    }
+}
+
+fn reconstruct_path(
+    leaf: &str,
+    pred: &std::collections::HashMap<String, (String, GraphEdge, f32)>,
+    nodes: &mut std::collections::HashMap<String, GraphNode>,
+) -> ImpactPath {
+    // Walk back through `pred` from `leaf` to the seed. Hops are
+    // emitted in seed → leaf order so callers can read them as a
+    // story: "the seed, reached via edge E1, then node N1, via edge
+    // E2, then node N2, …".
+    let mut rev: Vec<ImpactHop> = Vec::new();
+    let mut current = leaf.to_string();
+    let mut min_conf = 1.0_f32;
+    while let Some((prev_id, edge, conf)) = pred.get(&current) {
+        // The hop carries the node we arrived AT (i.e. `current`),
+        // not the predecessor.
+        let node = nodes.get(&current).cloned().unwrap_or_else(|| {
+            // Defensive: an entry in `pred` whose node vanished
+            // between edge indexing and path emission would be a
+            // torn-write we cannot recover from. Surface an empty
+            // placeholder so the test still parses; the emit path is
+            // deterministic and the trace will point at this hop.
+            let mut n = GraphNode::new(NodeType::Function, String::new(), String::new());
+            n.id = current.clone();
+            n
+        });
+        rev.push(ImpactHop {
+            edge: edge.clone(),
+            node,
+        });
+        min_conf = min_conf.min(*conf);
+        current = prev_id.clone();
+    }
+    if rev.is_empty() {
+        // Degenerate path: the leaf IS a seed (or has no predecessors).
+        // Emit a single self-loop hop so callers can read the path's
+        // node without unwrapping an empty `hops` vec. The edge
+        // carries the same id as source and target so it doesn't
+        // masquerade as a real edge in any consumer.
+        let node = nodes.get(leaf).cloned().unwrap_or_else(|| {
+            let mut n = GraphNode::new(NodeType::Function, String::new(), String::new());
+            n.id = leaf.to_string();
+            n
+        });
+        let mut placeholder_edge =
+            GraphEdge::new(EdgeType::Calls, leaf.to_string(), leaf.to_string());
+        placeholder_edge.weight = Some(1.0);
+        rev.push(ImpactHop {
+            edge: placeholder_edge,
+            node,
+        });
+    } else {
+        rev.reverse();
+    }
+    ImpactPath {
+        hops: rev,
+        min_confidence: if pred.is_empty() { 1.0 } else { min_conf },
+    }
+}
+
+// ─── F2 typed impact traversal (§5.2) ─────────────────────────────────
+//
+// `Propagation` decides, for each `EdgeType`, which direction the BFS
+// walks from a visited node. `Incoming` follows edges whose target is
+// the node (so the BFS ascends to its callers / dependents).
+// `Outgoing` follows edges whose source is the node. `Stop` ignores
+// the edge type entirely.
+//
+// The per-PR carve-out is recorded in `.
+// The §5.2 code block describes the *final* propagation table; the
+// tracker checklist governs what actually ships. PR 4 turned on
+// `Calls`. PR 7 turned on `CallsHttp`, `SendsHttp`, `Binds`. PR 8
+// (this) turns on `RequestSchema`, `ResponseSchema`, `HasField`.
+// Future PRs: 9 adds `ReadsField`, 15 adds `PayloadSchema` /
+// `Produces` / `Consumes`. The match is exhaustive: a new
+// `EdgeType` variant will fail to compile until a propagation has
+// been decided for it.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Propagation {
+    Incoming,
+    Outgoing,
+    Stop,
+}
+
+pub fn impact_propagation(e: &EdgeType) -> Propagation {
+    match e {
+        EdgeType::Calls
+        | EdgeType::CallsHttp
+        | EdgeType::SendsHttp
+        | EdgeType::Binds
+        | EdgeType::RequestSchema
+        | EdgeType::ResponseSchema
+        | EdgeType::HasField
+        | EdgeType::ReadsField
+        // Phase D (spec §7): from the table, both reads and writes
+        // walk back to the function that touches it — the same
+        // direction as `SendsHttp` / `Calls`. An operator asking
+        // "what depends on the orders table?" gets the answering
+        // function; an operator asking "what does this function
+        // touch?" gets the table when they start at the function
+        // and follow forward (a separate traversal pass).
+        | EdgeType::ReadsTable
+        | EdgeType::WritesTable => Propagation::Incoming,
+        EdgeType::Consumes
+        | EdgeType::PayloadSchema
+        | EdgeType::Produces
+        | EdgeType::Contains
+        | EdgeType::Imports
+        | EdgeType::CoChangedWith
+        | EdgeType::Pattern
+        | EdgeType::Uses
+        | EdgeType::Implements
+        | EdgeType::DeployedTo
+        | EdgeType::CrossRepoSameSymbol
+        | EdgeType::DynamicDispatch
+        | EdgeType::BusTopic
+        | EdgeType::RouteMatches
+        | EdgeType::RuntimeCall
+        | EdgeType::ReadsFrom => Propagation::Stop,
+    }
+}
+
+/// One edge plus the node that edge reaches. `edge` points at the
+/// predecessor of `node`, so a path of `[H1, H2]` reads as "arrive at
+/// H1.node via H1.edge, then arrive at H2.node via H2.edge". The
+/// last hop's node is the path's leaf.
+#[derive(Debug, Clone)]
+pub struct ImpactHop {
+    pub edge: GraphEdge,
+    pub node: GraphNode,
+}
+
+/// One leaf-to-seed chain. `hops` is non-empty (the seed itself
+/// emits a path with one hop when it has no incoming edges).
+/// `min_confidence` is the minimum confidence across every edge on
+/// the path; ties between paths are broken by this value first.
+#[derive(Debug, Clone)]
+pub struct ImpactPath {
+    pub hops: Vec<ImpactHop>,
+    pub min_confidence: f32,
+}
+
+/// Result of a typed impact traversal. `paths` is sorted per §5.2
+/// (min_confidence desc, length asc, leaf GlobalId); `truncated` is
+/// `true` when `cap` or `depth` cut the search.
+#[derive(Debug, Clone)]
+pub struct ImpactResult {
+    pub paths: Vec<ImpactPath>,
+    pub truncated: bool,
 }

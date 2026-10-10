@@ -319,13 +319,55 @@ fn boot_default() -> (ServerGuard, String, tempfile::TempDir) {
 /// Issue a raw HTTP request and return the (status, body). Captures
 /// wall-clock time as the headline metric for the calling test.
 fn http_request(host: &str, raw: &str) -> (u16, String, Duration) {
-    let start = Instant::now();
-    let mut stream = TcpStream::connect(host).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    stream.write_all(raw.as_bytes()).expect("write");
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read");
-    let elapsed = start.elapsed();
+    // Windows reports an abrupt server close as `ConnectionReset` (10054),
+    // sometimes before any byte arrives and sometimes after the whole response
+    // did. Accept a reset once data has arrived; retry the (idempotent) request
+    // when it came first, timing only the attempt that succeeds.
+    let mut last_err = None;
+    let (response, elapsed) = 'attempts: {
+        for _ in 0..3 {
+            let start = Instant::now();
+            let mut stream = match TcpStream::connect(host) {
+                Ok(s) => s,
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+            stream.write_all(raw.as_bytes()).expect("write");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let outcome = loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break Ok(()),
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(e) => break Err(e),
+                }
+            };
+            match outcome {
+                Ok(()) => {
+                    break 'attempts (String::from_utf8_lossy(&buf).into_owned(), start.elapsed())
+                }
+                Err(e)
+                    if !buf.is_empty()
+                        && matches!(
+                            e.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        ) =>
+                {
+                    break 'attempts (String::from_utf8_lossy(&buf).into_owned(), start.elapsed())
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+        panic!("read: {:?}", last_err);
+    };
     let status_line = response.lines().next().unwrap_or("");
     let status: u16 = status_line
         .split_whitespace()

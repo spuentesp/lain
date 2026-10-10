@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "get_coverage data",
+  "description": "`data` field of the `get_coverage` envelope (§10.2). `complete` is true iff `scope.unreviewed` is empty and (with an endpoint) no unresolved consumer could match it.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "complete": { "type": "boolean" },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo": { "type": "string" },
+              "commit": { "type": ["string", "null"] },
+              "dirty": { "type": "boolean" }
+            }
+          }
+        },
+        "unreviewed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo": { "type": "string" },
+              "reason": { "type": "string", "enum": ["failed", "fetch_failed", "excluded", "not_ready"] },
+              "error": { "type": "string" }
+            }
+          }
+        },
+        "configured_only": { "type": "boolean" }
+      },
+      "required": ["reviewed", "unreviewed", "configured_only"]
+    },
+    "repos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": { "type": "string" },
+          "commit": { "type": ["string", "null"] },
+          "state": { "type": "string" },
+          "sensors": { "type": "object" },
+          "error": { "type": "string" }
+        }
+      }
+    },
+    "unresolved_consumers": { "type": "array", "items": { "type": "string" } },
+    "ambiguous": { "type": "array", "items": { "type": "string" } },
+    "unnormalized": { "type": "array", "items": { "type": "string" } },
+    "external": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "host": { "type": "string" },
+          "calls": { "type": "integer" }
+        }
+      }
+    },
+    "stale_bindings": { "type": "integer" },
+    "schemaless_endpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "service": { "type": "string" },
+          "key": { "type": "string" }
+        }
+      }
+    }
+  },
+  "required": ["complete", "scope", "repos"]
+}

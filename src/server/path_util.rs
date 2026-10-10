@@ -55,6 +55,46 @@ pub fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// True when `path` resolves, with every symlink followed, to a location
+/// inside `root`.
+///
+/// A repository is untrusted input and may contain a symlink to anything the
+/// user can read (`creds.rs -> ~/.ssh/id_rsa`). Judge by where the path really
+/// lands, never by how it is spelled. A path that does not exist (yet) is
+/// judged by its deepest existing ancestor plus the remaining components, so a
+/// file about to be created is checked too. A relative `path` is taken
+/// relative to `root`.
+pub fn resolves_inside(root: &Path, path: &Path) -> bool {
+    let root_real = dunce::canonicalize(root).unwrap_or_else(|_| lexical_normalize(root));
+    let mut existing = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match dunce::canonicalize(&existing) {
+            Ok(real) => {
+                let mut full = real;
+                for c in tail.iter().rev() {
+                    full.push(c);
+                }
+                return lexical_normalize(&full).starts_with(&root_real);
+            }
+            Err(_) => match (
+                existing.file_name().map(|n| n.to_os_string()),
+                existing.parent(),
+            ) {
+                (Some(name), Some(parent)) if !parent.as_os_str().is_empty() => {
+                    tail.push(name);
+                    existing = parent.to_path_buf();
+                }
+                _ => return false,
+            },
+        }
+    }
+}
+
 /// One canonical form for a path: symlinks resolved when the
 /// file/directory exists, otherwise lexically cleaned. Strips
 /// the Windows `\\?\` extended-length prefix that `fs::canonicalize`
@@ -210,6 +250,64 @@ mod tests {
         assert_eq!(
             via_link, direct,
             "canonical_form must resolve the symlink so an unborn path accessed through it collides with the same path accessed directly"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolves_inside_tests {
+    use super::*;
+
+    #[test]
+    fn plain_nested_and_missing_paths_inside_the_root() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("a/b")).unwrap();
+        std::fs::write(ws.path().join("a/b/f.rs"), "x").unwrap();
+        assert!(resolves_inside(ws.path(), &ws.path().join("a/b/f.rs")));
+        assert!(
+            resolves_inside(ws.path(), Path::new("a/b/f.rs")),
+            "relative = under root"
+        );
+        assert!(resolves_inside(ws.path(), ws.path()), "the root itself");
+        assert!(
+            resolves_inside(ws.path(), &ws.path().join("a/new/dir/file.rs")),
+            "not created yet"
+        );
+    }
+
+    #[test]
+    fn dotdot_and_absolute_escapes_are_outside() {
+        let ws = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        assert!(!resolves_inside(ws.path(), &ws.path().join("../x.rs")));
+        assert!(!resolves_inside(ws.path(), &ws.path().join("a/../../x.rs")));
+        assert!(!resolves_inside(ws.path(), &other.path().join("x.rs")));
+        assert!(!resolves_inside(ws.path(), Path::new("/")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_judged_by_where_they_land() {
+        let ws = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("secret.rs"), "s").unwrap();
+        std::fs::write(ws.path().join("real.rs"), "r").unwrap();
+        std::os::unix::fs::symlink(other.path().join("secret.rs"), ws.path().join("out.rs"))
+            .unwrap();
+        std::os::unix::fs::symlink(other.path(), ws.path().join("outdir")).unwrap();
+        std::os::unix::fs::symlink(ws.path().join("real.rs"), ws.path().join("in.rs")).unwrap();
+        assert!(!resolves_inside(ws.path(), &ws.path().join("out.rs")));
+        assert!(!resolves_inside(
+            ws.path(),
+            &ws.path().join("outdir/secret.rs")
+        ));
+        assert!(
+            !resolves_inside(ws.path(), &ws.path().join("outdir/not/yet.rs")),
+            "missing file under an escaping dir"
+        );
+        assert!(
+            resolves_inside(ws.path(), &ws.path().join("in.rs")),
+            "a symlink that stays inside is fine"
         );
     }
 }

@@ -184,6 +184,120 @@ fn test_get_stats() {
 }
 
 #[test]
+fn test_call_graph_file_coverage() {
+    // B4 regression: a graph with a populated Contains tree but
+    // only some files reached by Calls/Uses should report
+    // `covered < total`, not 100%. This is the number operators
+    // need in get_health to know whether the indexer's
+    // call-extraction phase actually ran on each file.
+    let tmp = std::env::temp_dir().join("test_call_graph_file_coverage");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    // File A: has a Calls edge.
+    let file_a = GraphNode::new(NodeType::File, "a.rs".to_string(), "src/a.rs".to_string());
+    let fn_a = GraphNode::new(
+        NodeType::Function,
+        "a_fn".to_string(),
+        "src/a.rs".to_string(),
+    );
+    graph.upsert_node(file_a.clone()).unwrap();
+    graph.upsert_node(fn_a.clone()).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Contains,
+            file_a.id.clone(),
+            fn_a.id.clone(),
+        ))
+        .unwrap();
+
+    // File B: same shape but no Calls/Uses edges.
+    let file_b = GraphNode::new(NodeType::File, "b.rs".to_string(), "src/b.rs".to_string());
+    let fn_b = GraphNode::new(
+        NodeType::Function,
+        "b_fn".to_string(),
+        "src/b.rs".to_string(),
+    );
+    graph.upsert_node(file_b.clone()).unwrap();
+    graph.upsert_node(fn_b.clone()).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Contains,
+            file_b.id.clone(),
+            fn_b.id.clone(),
+        ))
+        .unwrap();
+
+    // A self-call: a_fn -> a_fn, so file A is covered.
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            fn_a.id.clone(),
+            fn_a.id.clone(),
+        ))
+        .unwrap();
+
+    let (covered, total) = graph.call_graph_file_coverage();
+    assert_eq!(total, 2, "should count 2 file nodes");
+    assert_eq!(
+        covered, 1,
+        "only file A has a symbol with a Calls edge; file B is uncovered"
+    );
+}
+
+#[test]
+fn test_edge_counts_by_type_seeds_zero_for_unused_variants() {
+    // Regression: a graph with no `Calls` edges used to make
+    // `get_health` skip the entry entirely, so an operator on a
+    // repo whose call graph never resolved (LSP didn't start, or
+    // every file is a script) saw only the populated edge types.
+    // `describe_schema` still advertised `Calls`, so the silent
+    // absence looked like a tool bug. Seed every declared variant
+    // at 0 so the absence shows up as `Calls: 0` in the report.
+    //
+    // Build a graph that only has `Contains` edges (file ->
+    // symbol) and no `Calls`. The persistent `make_test_graph` is
+    // a call graph, which is the wrong fixture for this test.
+    let tmp = std::env::temp_dir().join("test_edge_counts_seed_zero");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    let file = GraphNode::new(
+        NodeType::File,
+        "script.py".to_string(),
+        "/src/script.py".to_string(),
+    );
+    let fn_node = GraphNode::new(
+        NodeType::Function,
+        "do_thing".to_string(),
+        "/src/script.py".to_string(),
+    );
+    graph.upsert_node(file.clone()).unwrap();
+    graph.upsert_node(fn_node.clone()).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Contains,
+            file.id.clone(),
+            fn_node.id.clone(),
+        ))
+        .unwrap();
+
+    let hist = graph.edge_counts_by_type();
+    let declared: HashSet<String> = EdgeType::all().iter().map(|v| format!("{v:?}")).collect();
+    let reported: HashSet<String> = hist.keys().cloned().collect();
+    let missing: Vec<&String> = declared.difference(&reported).collect();
+    assert!(
+        missing.is_empty(),
+        "edge_counts_by_type omitted declared variants: {missing:?}"
+    );
+    // The fixture has no `Calls` edges — the histogram must
+    // explicitly report zero rather than omitting the key.
+    assert_eq!(hist.get("Calls").copied(), Some(0));
+    // And it must still report the populated types accurately.
+    assert_eq!(hist.get("Contains").copied(), Some(1));
+}
+
+#[test]
 fn test_get_node_at_location() {
     let tmp = std::env::temp_dir().join("test_loc");
     let _ = std::fs::remove_dir_all(&tmp);

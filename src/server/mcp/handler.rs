@@ -64,9 +64,12 @@ fn cow_to_bytes(cow: std::borrow::Cow<'static, [u8]>) -> Bytes {
     }
 }
 use crate::server::mcp::definitions::{
-    defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS, WORKSPACE_TOOL_DEFS,
+    defs_to_tools, defs_to_value_tools, CONTRACT_TOOL_DEFS, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS,
+    WORKSPACE_TOOL_DEFS,
 };
-use crate::server::mcp::envelope::{gated_tool_result, tool_text_result};
+#[cfg(test)]
+use crate::server::mcp::envelope::tool_text_result;
+use crate::server::mcp::envelope::{gated_tool_result, tool_result_with_structured};
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 
 /// Parse a half-open `Range<u32>` from a string like `"1..3"`.
@@ -463,6 +466,41 @@ fn gate_for_dispatch(
     )
 }
 
+/// One `tools/call` through the exact pipeline stdio and HTTP use: readiness
+/// gate, then dispatch (inventory, federation and executor tools alike), then
+/// the result envelope. The shared Unix-socket server used to call the
+/// executor directly, which skipped the gate (tools answered from a graph
+/// that was still being built), could not reach presence/audit/status tools,
+/// and formatted results differently from every other transport.
+pub(crate) async fn call_tool_in_process(
+    server: &Arc<LainServer>,
+    name: &str,
+    args: Map<String, serde_json::Value>,
+) -> CallToolResult {
+    let executor = server.ingest().tool_executor();
+    let federation = server.federation().map(|f| f.as_ref());
+    let generation = server.static_graph_generation_unix();
+    if let Some(gated) = gate_for_dispatch(executor, federation, name, &args) {
+        return gated_tool_result(&gated, executor.overlay(), generation);
+    }
+    let status = HandlerStatus::in_process(federation.map(|f| f.list_repos().len()).unwrap_or(0));
+    let workspaces = server.workspaces_handle();
+    let reload_bus = server.reload_bus();
+    let (text, is_error, structured) = dispatch_tool_call(
+        executor,
+        federation,
+        workspaces.as_ref(),
+        &status,
+        Some(reload_bus.as_ref()),
+        Some(server.as_ref()),
+        None,
+        name,
+        args,
+    )
+    .await;
+    tool_result_with_structured(text, is_error, structured, executor.overlay(), generation)
+}
+
 fn is_loopback_host(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost")
@@ -560,6 +598,40 @@ pub struct HandlerStatus {
 }
 
 impl HandlerStatus {
+    /// Test-only constructor with all-zero state. Used by
+    /// `tests/federation_contracts_e2e.rs` to build an `McpContext`
+    /// for in-process handler invocations. Not on the production
+    /// path — `LainMcpServer` builds `HandlerStatus` from its real
+    /// state at boot.
+    #[doc(hidden)]
+    pub fn for_test() -> Self {
+        use std::sync::Arc;
+        use std::time::SystemTime;
+        HandlerStatus {
+            transport: None,
+            port: None,
+            started_at: SystemTime::now(),
+            last_sync_at: Arc::new(parking_lot::Mutex::new(SystemTime::now())),
+            last_error: Arc::new(parking_lot::Mutex::new(None)),
+            repo_count: 0,
+            workspaces_count: 0,
+        }
+    }
+
+    /// Status for calls arriving over the in-process Unix socket (stdio
+    /// framing, no port).
+    pub(crate) fn in_process(repo_count: usize) -> Self {
+        HandlerStatus {
+            transport: Some(crate::server::Transport::Stdio),
+            port: None,
+            started_at: std::time::SystemTime::now(),
+            last_sync_at: Arc::new(parking_lot::Mutex::new(std::time::SystemTime::now())),
+            last_error: Arc::new(parking_lot::Mutex::new(None)),
+            repo_count,
+            workspaces_count: 0,
+        }
+    }
+
     /// Render the `get_server_status` payload.
     ///
     /// Delegates to the one builder in
@@ -600,6 +672,10 @@ pub struct McpContext<'a> {
     pub workspaces: Option<&'a Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
     pub status: &'a HandlerStatus,
     pub reload_bus: Option<&'a crate::server::reload::ReloadBus>,
+    /// Snapshot manager (`PR 11`). Set when the server boots a
+    /// `SnapshotManager` against the same `data_dir` as the federation.
+    /// Tools in `mcp::contract_tools::snapshots` delegate here.
+    pub snapshots: Option<&'a Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
 }
 
 /// An inventory-registered MCP tool. `name` is the tool id; `handler`
@@ -652,9 +728,10 @@ async fn dispatch_tool_call(
     status: &HandlerStatus,
     reload_bus: Option<&crate::server::reload::ReloadBus>,
     server: Option<&LainServer>,
+    snapshots: Option<&Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     name: &str,
     mut args_map: Map<String, serde_json::Value>,
-) -> (String, bool) {
+) -> (String, bool, Option<serde_json::Value>) {
     // Phase 3.2: presence / audit / status / reload tools now go through
     // `inventory::iter::<McpToolEntry>()` instead of a 15-arm match ladder.
     // Federation / workspace tools stay on the second match arm below
@@ -666,9 +743,30 @@ async fn dispatch_tool_call(
         workspaces,
         status,
         reload_bus,
+        snapshots,
     };
     if let Some(result) = invoke_inventory(&ctx, name, args_map.clone()) {
-        return tool_result(name, result);
+        let (text, is_err) = tool_result(name, result);
+        return (text, is_err, None);
+    }
+
+    // Contract-federation tools (PR 16): `list_services`, `get_service`.
+    // `invoke_contract_inventory` returns the tool's `ToolOutcome`
+    // directly — the inventory entry holds the rendered envelope +
+    // text, so the call is a single `await` and `tool_result` boxes
+    // it the same way the inventory path does. Dispatched after the
+    // `McpToolEntry` inventory so the legacy surface stays
+    // unaffected, and before the federation scoping below so contract
+    // tools can answer before the repo-resolution gate.
+    if let Some(fut) = invoke_contract_inventory(&ctx, name, args_map.clone()) {
+        match fut.await {
+            Ok(outcome) => {
+                let serialized = serde_json::to_string(&outcome.structured)
+                    .unwrap_or_else(|e| format!("{name}: serialization error: {e}"));
+                return (serialized, outcome.is_error, Some(outcome.structured));
+            }
+            Err(text) => return (text, true, None),
+        }
     }
 
     if let Some(fed) = federation {
@@ -682,7 +780,7 @@ async fn dispatch_tool_call(
             && !args_map.contains_key("repo_id")
             && !args_map.contains_key("symbol")
         {
-            return (federation_health_report(fed), false);
+            return (federation_health_report(fed), false, None);
         }
         if requires_repo_scope(name) {
             match resolve_repo_or_error(fed, name, &args_map) {
@@ -692,7 +790,7 @@ async fn dispatch_tool_call(
                         serde_json::Value::String(rid.as_str().to_string()),
                     );
                 }
-                Err(text) => return (text, true),
+                Err(text) => return (text, true, None),
             }
         }
     }
@@ -717,9 +815,9 @@ async fn dispatch_tool_call(
             if let Some(note) = note {
                 text.push_str(&note);
             }
-            (text, false)
+            (text, false, None)
         }
-        Err(e) => (format!("Error: {e}"), true),
+        Err(e) => (format!("Error: {e}"), true, None),
     }
 }
 
@@ -810,6 +908,76 @@ struct LainHandler {
     /// layer; the tools return `presence layer not configured` in
     /// that case.
     server: Option<Arc<LainServer>>,
+    /// Snapshot manager (`PR 11`); set when the handler is wired
+    /// into a federation-mode server with a `SnapshotManager`.
+    snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
+}
+
+impl LainHandler {
+    async fn call_tool_inner(
+        &self,
+        params: CallToolRequestParams,
+    ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError>
+    {
+        let static_graph_generation_unix: Option<i64> = self
+            .server
+            .as_deref()
+            .and_then(|s| s.static_graph_generation_unix());
+        let empty: Map<String, serde_json::Value> = Map::new();
+        let args_owned: Map<String, serde_json::Value> =
+            params.arguments.as_ref().unwrap_or(&empty).clone();
+        let handler_status = HandlerStatus {
+            transport: self.status_transport,
+            port: self.status_port,
+            started_at: self.status_started_at,
+            last_sync_at: self.status_last_sync_at.clone(),
+            last_error: self.status_last_error.clone(),
+            repo_count: self
+                .federation
+                .as_ref()
+                .map(|f| f.list_repos().len())
+                .unwrap_or(0),
+            workspaces_count: self
+                .workspaces
+                .as_ref()
+                .map(|w| w.read().workspaces.len())
+                .unwrap_or(0),
+        };
+
+        if let Some(gated) = gate_for_dispatch(
+            &self.executor,
+            self.federation.as_deref(),
+            params.name.as_str(),
+            &args_owned,
+        ) {
+            return Ok(gated_tool_result(
+                &gated,
+                self.executor.overlay(),
+                static_graph_generation_unix,
+            ));
+        }
+
+        let (text, is_error, structured) = dispatch_tool_call(
+            &self.executor,
+            self.federation.as_deref(),
+            self.workspaces.as_ref(),
+            &handler_status,
+            self.reload_bus.as_deref(),
+            self.server.as_deref(),
+            self.snapshots.as_ref(),
+            params.name.as_str(),
+            args_owned,
+        )
+        .await;
+
+        Ok(tool_result_with_structured(
+            text,
+            is_error,
+            structured,
+            self.executor.overlay(),
+            static_graph_generation_unix,
+        ))
+    }
 }
 
 /// Tools that cannot answer in the current mode, and must therefore not
@@ -916,6 +1084,11 @@ impl ServerHandler for LainHandler {
         }
         if self.federation.is_some() {
             tools.extend(defs_to_tools(FEDERATION_TOOL_DEFS));
+            // Contract-federation service view (PR 16). Conditional on
+            // a federation being configured because the tools answer
+            // from it; without a federation they would error with
+            // `federation_disabled` on every call.
+            tools.extend(defs_to_tools(CONTRACT_TOOL_DEFS));
         }
         if self.workspaces.is_some() {
             tools.extend(defs_to_tools(WORKSPACE_TOOL_DEFS));
@@ -946,62 +1119,7 @@ impl ServerHandler for LainHandler {
         _runtime: Arc<dyn McpServer>,
     ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError>
     {
-        let static_graph_generation_unix: Option<i64> = self
-            .server
-            .as_deref()
-            .and_then(|s| s.static_graph_generation_unix());
-        let empty: Map<String, serde_json::Value> = Map::new();
-        let args_owned: Map<String, serde_json::Value> =
-            params.arguments.as_ref().unwrap_or(&empty).clone();
-        let handler_status = HandlerStatus {
-            transport: self.status_transport,
-            port: self.status_port,
-            started_at: self.status_started_at,
-            last_sync_at: self.status_last_sync_at.clone(),
-            last_error: self.status_last_error.clone(),
-            repo_count: self
-                .federation
-                .as_ref()
-                .map(|f| f.list_repos().len())
-                .unwrap_or(0),
-            workspaces_count: self
-                .workspaces
-                .as_ref()
-                .map(|w| w.read().workspaces.len())
-                .unwrap_or(0),
-        };
-
-        if let Some(gated) = gate_for_dispatch(
-            &self.executor,
-            self.federation.as_deref(),
-            params.name.as_str(),
-            &args_owned,
-        ) {
-            return Ok(gated_tool_result(
-                &gated,
-                self.executor.overlay(),
-                static_graph_generation_unix,
-            ));
-        }
-
-        let (text, is_error) = dispatch_tool_call(
-            &self.executor,
-            self.federation.as_deref(),
-            self.workspaces.as_ref(),
-            &handler_status,
-            self.reload_bus.as_deref(),
-            self.server.as_deref(),
-            params.name.as_str(),
-            args_owned,
-        )
-        .await;
-
-        Ok(tool_text_result(
-            text,
-            is_error,
-            self.executor.overlay(),
-            static_graph_generation_unix,
-        ))
+        self.call_tool_inner(params).await
     }
 }
 
@@ -1015,6 +1133,9 @@ pub struct LainMcpServer {
     /// server. The same `Arc` is handed to `LainHandler`; the handler
     /// reads through the lock on every dispatch.
     workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
+    /// Snapshot manager (`PR 11`). Set by `with_snapshots`; tools in
+    /// `mcp::contract_tools::snapshots` delegate here.
+    snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     /// Transport for the active server, surfaced via `get_server_status`.
     status_transport: Option<crate::server::Transport>,
     /// TCP port for HTTP transport; surfaced via `get_server_status`.
@@ -1197,12 +1318,62 @@ pub(crate) async fn await_startup_reindex(
 }
 
 impl LainMcpServer {
+    /// Invoke the same bounded dispatcher used by stdio and HTTP without
+    /// attaching a transport. This is useful for embedding LAIN and for
+    /// transport-parity tests; callers receive the canonical structured
+    /// payload before transport-specific JSON-RPC framing is applied.
+    pub async fn call_tool_embedded(
+        &self,
+        name: &str,
+        args: Map<String, Value>,
+    ) -> (String, bool, Option<Value>) {
+        if let Some(gated) =
+            gate_for_dispatch(&self.executor, self.federation.as_deref(), name, &args)
+        {
+            let is_error = gated.is_error();
+            let value = serde_json::to_value(&gated).unwrap_or_default();
+            let text = serde_json::to_string(&value).unwrap_or_default();
+            return (text, is_error, Some(value));
+        }
+
+        let status = HandlerStatus {
+            transport: self.status_transport,
+            port: self.status_port,
+            started_at: self.status_started_at,
+            last_sync_at: self.status_last_sync_at.clone(),
+            last_error: self.status_last_error.clone(),
+            repo_count: self
+                .federation
+                .as_ref()
+                .map(|f| f.list_repos().len())
+                .unwrap_or(0),
+            workspaces_count: self
+                .workspaces
+                .as_ref()
+                .map(|w| w.read().workspaces.len())
+                .unwrap_or(0),
+        };
+        dispatch_tool_call(
+            &self.executor,
+            self.federation.as_deref(),
+            self.workspaces.as_ref(),
+            &status,
+            self.reload_bus.as_deref(),
+            self.server.as_deref(),
+            self.snapshots.as_ref(),
+            name,
+            args,
+        )
+        .await
+    }
+
     pub fn new(executor: ToolExecutor) -> Self {
         let now = std::time::SystemTime::now();
         Self {
             executor,
             federation: None,
             workspaces: None,
+            snapshots: None,
             status_transport: None,
             status_port: None,
             status_started_at: now,
@@ -1224,6 +1395,7 @@ impl LainMcpServer {
             executor,
             federation: Some(federation),
             workspaces: None,
+            snapshots: None,
             status_transport: None,
             status_port: None,
             status_started_at: now,
@@ -1233,6 +1405,41 @@ impl LainMcpServer {
             server: None,
             reindex_timeout: None,
         }
+    }
+
+    /// Attach the snapshot manager (`PR 11`). Call this after
+    /// `with_federation` so `prepare_snapshot` and `get_snapshot`
+    /// are registered. The optional `source_config` is the parsed
+    /// `repos.yaml` block — when supplied, the server installs a
+    /// resolver that maps every configured repo to its source
+    /// URL/path (`workspace_dir`, `local_clone`, `shallow_clone`).
+    /// Without it, `prepare_snapshot` returns `repo_not_registered`
+    /// for every repo.
+    pub fn with_snapshots(
+        mut self,
+        snapshots: Arc<crate::federation::contracts::snapshots::SnapshotManager>,
+        source_config: Option<&crate::federation::config::FederationConfig>,
+    ) -> Self {
+        if let Some(cfg) = source_config {
+            let resolver =
+                crate::federation::contracts::snapshots::SnapshotManager::resolver_from_config(cfg);
+            snapshots.set_repo_source_resolver(resolver);
+            // The cold path's `SnapshotManager::new` already ran
+            // `recover_from_disk`, but with no resolver in place
+            // every record was silently skipped. Re-run now that
+            // the resolver is installed so pending/indexing records
+            // from a previous process get their jobs submitted.
+            snapshots.recover_from_disk();
+            // Codex P2: ensure the worker pool is running so the
+            // recovered jobs are actually picked up. Without this,
+            // a client polling an existing id through
+            // `get_snapshot` after a restart sees the jobs sit
+            // queued until an unrelated `prepare_snapshot` call
+            // happens to start the pool.
+            snapshots.ensure_workers_running();
+        }
+        self.snapshots = Some(snapshots);
+        self
     }
 
     /// Federation + workspace constructor. When workspaces is Some, the
@@ -1265,6 +1472,7 @@ impl LainMcpServer {
             executor,
             federation: Some(federation),
             workspaces: Some(workspaces),
+            snapshots: None,
             status_transport: None,
             status_port: None,
             status_started_at: now,
@@ -1406,6 +1614,7 @@ impl LainMcpServer {
                                 status,
                                 None,
                                 None,
+                                None,
                                 addr.ip().is_loopback(),
                             )
                         });
@@ -1437,6 +1646,7 @@ impl LainMcpServer {
             executor: Arc::new(self.executor),
             federation: self.federation,
             workspaces: self.workspaces,
+            snapshots: self.snapshots,
             status_transport: self.status_transport,
             status_port: self.status_port,
             status_started_at: self.status_started_at,
@@ -1551,39 +1761,14 @@ impl LainMcpServer {
     /// trusts that the caller has already validated it.
     #[allow(clippy::redundant_locals)]
     pub async fn run_http(self, addr: std::net::SocketAddr) -> SdkResult<()> {
-        info!("Starting Lain MCP HTTP server on {addr}");
-
-        // Bind the HTTP listener *before* spawning the background
-        // re-index. The original order spawned the startup task first
-        // and only then reached `TcpListener::bind`, which let the
-        // startup task starve the bind on the same runtime when the
-        // startup task itself hung — Bug #2 from the 2026-09-18 Tauri
-        // postmortem: the CLI server hung in `Dl` state, port 9999
-        // never opened, no log lines after the projection log.
-        // Binding first means the listener is up even if the re-index
-        // hangs; clients hitting the port then get the structured
-        // `warming_up` response from `dispatch_tool_call` (see the
-        // comment in `run_stdio`) instead of a connection refused, and
-        // operators can poll `/health` to observe the stuck state.
         let listener = TcpListener::bind(addr).await?;
+        self.run_http_listener(listener).await
+    }
 
-        // Same backgrounded re-index as `run_stdio`; see there for
-        // the full rationale. HTTP has no equivalent to stdio's
-        // "session ended" moment (the accept loop below runs until
-        // the process is killed), but unlike the pre-fix code we now
-        // retain the `JoinHandle` in `LifecycleInfo::startup_task` so
-        // a future `LainServer::shutdown` (or `Drop`) can cancel the
-        // server-owned token and bound-await the task. The
-        // transport's own loop keeps running until the runtime tears
-        // it down — the same shutdown story every other HTTP server
-        // in the project's stack uses — but the backgrounded indexer
-        // no longer races a teardown.
-        //
-        // No notifier: this transport is a plain request/response
-        // JSON-RPC loop with no persistent connection to push an
-        // unsolicited notification through. `get_capabilities`
-        // polling is the only freshness signal HTTP clients get
-        // today.
+    pub async fn run_http_listener(self, listener: TcpListener) -> SdkResult<()> {
+        let real_addr = listener.local_addr()?;
+        info!("Starting Lain MCP HTTP server on {real_addr}");
+
         let cancel = self
             .server
             .as_ref()
@@ -1601,10 +1786,11 @@ impl LainMcpServer {
 
         // Publish the real listener port so tool output can link to
         // `/ui/...` sessions; stdio mode leaves it at 0 (no links).
-        self.executor.set_diagnostics_port(addr.port());
+        self.executor.set_diagnostics_port(real_addr.port());
         let executor = Arc::new(self.executor);
         let federation = self.federation;
         let workspaces = self.workspaces;
+        let snapshots = self.snapshots;
         let status_transport = self.status_transport;
         let status_port = self.status_port;
         let status_started_at = self.status_started_at;
@@ -1612,7 +1798,7 @@ impl LainMcpServer {
         let status_last_error = self.status_last_error;
         let reload_bus = self.reload_bus;
         let server = self.server;
-        let loopback_bound = addr.ip().is_loopback();
+        let loopback_bound = real_addr.ip().is_loopback();
 
         loop {
             match listener.accept().await {
@@ -1620,20 +1806,18 @@ impl LainMcpServer {
                     let executor = executor.clone();
                     let federation = federation.clone();
                     let workspaces = workspaces.clone();
-                    let status_transport = status_transport;
-                    let status_port = status_port;
-                    let status_started_at = status_started_at;
+                    let snapshots = snapshots.clone();
                     let status_last_sync_at = status_last_sync_at.clone();
                     let status_last_error = status_last_error.clone();
                     let reload_bus = reload_bus.clone();
                     let server = server.clone();
-                    let loopback_bound = loopback_bound;
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
                             let federation = federation.clone();
                             let workspaces = workspaces.clone();
+                            let snapshots = snapshots.clone();
                             let handler_status = HandlerStatus {
                                 transport: status_transport,
                                 port: status_port,
@@ -1657,6 +1841,7 @@ impl LainMcpServer {
                                 handler_status,
                                 reload_bus.clone(),
                                 server.clone(),
+                                snapshots.clone(),
                                 loopback_bound,
                             )
                         });
@@ -1879,6 +2064,9 @@ async fn handle_request(
     // carry the presence layer. Presence-tool dispatches inside the
     // JSON-RPC branch see this as `None` and return a descriptive error.
     server: Option<Arc<LainServer>>,
+    // Snapshot manager (`PR 11`). Tools in
+    // `mcp::contract_tools::snapshots` delegate here.
+    snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     // Whether the HTTP listener is bound to a loopback address. Used by
     // the browser-guard to decide whether to block cross-origin requests.
     loopback_bound: bool,
@@ -1908,13 +2096,24 @@ async fn handle_request(
             let sgg = server
                 .as_deref()
                 .and_then(|s| s.static_graph_generation_unix());
+            let mut meta_map = serde_json::json!({
+                "revision": rev,
+                "static_graph_generation": sgg,
+            });
+            if let Some(ref st) = structured {
+                if let Some(view) = st
+                    .get("view")
+                    .or_else(|| st.get("meta").and_then(|m| m.get("view")))
+                {
+                    if let Some(m) = meta_map.as_object_mut() {
+                        m.insert("view".to_string(), view.clone());
+                    }
+                }
+            }
             let mut result = serde_json::json!({
                 "content": [{"type": "text", "text": text}],
                 "isError": is_error,
-                "_meta": {
-                    "revision": rev,
-                    "static_graph_generation": sgg,
-                }
+                "_meta": meta_map,
             });
             // Additive: only present for the gated warm-up/error envelope
             // today, so every existing response's shape is unchanged.
@@ -2224,6 +2423,8 @@ async fn handle_request(
                             .collect();
                         if federation.is_some() {
                             tools.extend(defs_to_value_tools(FEDERATION_TOOL_DEFS));
+                            // Contract-federation service view (PR 16).
+                            tools.extend(defs_to_value_tools(CONTRACT_TOOL_DEFS));
                         }
                         if workspaces.is_some() {
                             tools.extend(defs_to_value_tools(WORKSPACE_TOOL_DEFS));
@@ -2265,19 +2466,20 @@ async fn handle_request(
                             return Ok(jsonrpc_tool_result(id, &text, is_error, Some(value)));
                         }
 
-                        let (text, is_error) = dispatch_tool_call(
+                        let (text, is_error, structured) = dispatch_tool_call(
                             &executor,
                             federation.as_deref(),
                             workspaces.as_ref(),
                             &status,
                             reload_bus.as_deref(),
                             server.as_deref(),
+                            snapshots.as_ref(),
                             name,
                             args_map,
                         )
                         .await;
 
-                        return Ok(jsonrpc_tool_result(id, &text, is_error, None));
+                        return Ok(jsonrpc_tool_result(id, &text, is_error, structured));
                     }
                     _ => {
                         serde_json::json!({
@@ -4219,6 +4421,34 @@ fn invoke_inventory(
     let value = serde_json::Value::Object(args_map.into_iter().collect());
     for entry in inventory::iter::<McpToolEntry>() {
         if entry.name == name {
+            return Some((entry.handler)(ctx, value));
+        }
+    }
+    None
+}
+
+/// Look up a contract-federation tool (`docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`
+/// §10.1) by name. Returns the tool's `ToolOutcome` already rendered,
+/// or `None` when no contract tool matches. Used by
+/// `dispatch_tool_call` after `invoke_inventory`; contract tools
+/// ride the same call shape as the inventory-registered presence
+/// tools, so no new match arm is added.
+///
+/// The future is `+ Send` so it composes with the rest of the
+/// async dispatcher (`handle_call_tool_request` returns a `Send`
+/// future). Each registered handler must therefore be a `Send`
+/// future; the contract handlers (`services.rs`) hold only owned
+/// data plus the `&McpContext` borrow, so this is satisfied
+/// trivially.
+fn invoke_contract_inventory<'a>(
+    ctx: &'a McpContext<'a>,
+    name: &str,
+    args: Map<String, serde_json::Value>,
+) -> Option<crate::server::mcp::contract_tools::ContractToolFuture<'a>> {
+    use crate::server::mcp::contract_tools::ContractToolEntry;
+    for entry in inventory::iter::<ContractToolEntry>() {
+        if entry.name == name {
+            let value = serde_json::Value::Object(args.into_iter().collect());
             return Some((entry.handler)(ctx, value));
         }
     }

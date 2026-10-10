@@ -42,6 +42,7 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
@@ -172,7 +173,7 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config cmake git
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
 
@@ -210,6 +211,26 @@ jobs:
         shell: bash
         run: bash scripts/check-mod-resolution.sh
 
+      # Belt-and-braces for the same failure family: `check-mod-resolution`
+      # sees untracked source files, this sees tracked code whose *symbols*
+      # are in an uncommitted file (a half-staged coupled change). Note a
+      # CI checkout is already a clean export, so `cargo test --workspace`
+      # covers most of this; the gate earns its place as the documented
+      # pre-push check and as insurance against a partially-cached build.
+      - name: HEAD builds from a clean export
+        shell: bash
+        run: bash scripts/check-clean-build.sh
+
+      # Checks the *recorded* mutation baseline against its floors
+      # (85% for the parsers/joiner that turn source into contract
+      # facts, 70% global). The full mutation run stays a periodic job —
+      # it is minutes even parallelised — and the baseline is refreshed
+      # when the suite changes materially. A floor reduction is a diff
+      # in scripts/mutation-baseline.json, so it cannot happen silently.
+      - name: Mutation-score floors
+        shell: bash
+        run: python3 scripts/mutation-check.py --check-floor
+
       - name: Run JS tests
         shell: bash
         run: |
@@ -244,7 +265,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
 
@@ -278,6 +299,14 @@ jobs:
         shell: bash
         run: bash scripts/check-mod-resolution.sh
 
+      - name: HEAD builds from a clean export
+        shell: bash
+        run: bash scripts/check-clean-build.sh
+
+      - name: Mutation-score floors
+        shell: bash
+        run: python3 scripts/mutation-check.py --check-floor
+
   capability:
     name: Capability suite (demo.sh)
     needs: [changes]
@@ -295,7 +324,7 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config cmake git
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
 
@@ -408,7 +437,7 @@ jobs:
     # block merge regardless of the test matrix's color.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -465,7 +494,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config cmake git
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
       - name: Rust Cache
@@ -589,7 +618,7 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config cmake git
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
 
@@ -603,7 +632,7 @@ jobs:
           save-always: true
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
         with:
           tool: cargo-llvm-cov
 

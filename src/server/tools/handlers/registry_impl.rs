@@ -38,6 +38,27 @@ fn ui_link(ctx: &ToolContext) -> crate::server::tools::UiLink<'_> {
 
 // ─── Handler macros ────────────────────────────────────────────────────────────
 
+/// The four static-metadata methods of a `ToolHandler`, so an impl
+/// block holds only `call`. `$cap` is a `ToolCapability` variant, left
+/// explicit on every tool: a forgotten capability must not default to
+/// read-only.
+macro_rules! tool_meta {
+    ($name:expr, $description:expr, $schema:expr, $cap:ident) => {
+        fn name(&self) -> &'static str {
+            $name
+        }
+        fn description(&self) -> &'static str {
+            $description
+        }
+        fn input_schema(&self) -> &'static str {
+            $schema
+        }
+        fn capability(&self) -> ToolCapability {
+            ToolCapability::$cap
+        }
+    };
+}
+
 // Arg-extraction helpers (`str_arg`, `required_str_arg`, `usize_arg`,
 // `bool_arg`, `u32_arg`, `str_arg`) are imported from
 // `crate::server::tools::utils` so handler modules and integration
@@ -50,18 +71,12 @@ fn ui_link(ctx: &ToolContext) -> crate::server::tools::UiLink<'_> {
 pub struct ExploreArchitectureHandler;
 #[async_trait]
 impl ToolHandler for ExploreArchitectureHandler {
-    fn name(&self) -> &'static str {
-        "explore_architecture"
-    }
-    fn description(&self) -> &'static str {
-        "Returns a high-level tree of files and modules up to a specific depth"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"max_depth":{"type":"integer"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "explore_architecture",
+        "Returns a high-level tree of files and modules up to a specific depth",
+        r#"{"type":"object","properties":{"max_depth":{"type":"integer"}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -76,23 +91,17 @@ impl ToolHandler for ExploreArchitectureHandler {
 pub struct ExplainDispatchHandler;
 #[async_trait]
 impl ToolHandler for ExplainDispatchHandler {
-    fn name(&self) -> &'static str {
-        "explain_dispatch"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "explain_dispatch",
         "Synthesises static callers, heuristic edges, runtime edges, and co-change \
          partners for a symbol and returns a single verdict. Use this instead of \
          `get_blast_radius` when an empty blast radius might mean 'static graph \
          cannot see the dispatcher' rather than 'no callers'. The verdict field \
          is `insufficient_evidence` exactly when every signal is empty — that \
-         is the case Tier 1 teaches agents to refuse to treat as safe."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         is the case Tier 1 teaches agents to refuse to treat as safe.",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -109,19 +118,13 @@ inventory::submit!(ToolHandlerEntry(&ExploreArchitectureHandler));
 pub struct ListEntryPointsHandler;
 #[async_trait]
 impl ToolHandler for ListEntryPointsHandler {
-    fn name(&self) -> &'static str {
-        "list_entry_points"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "list_entry_points",
         "Use this when asking 'where does execution start?': main/App-style entry \
-         points and top-level routes."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         points and top-level routes.",
+        r#"{"type":"object","properties":{},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -135,18 +138,12 @@ inventory::submit!(ToolHandlerEntry(&ListEntryPointsHandler));
 pub struct CompareModulesHandler;
 #[async_trait]
 impl ToolHandler for CompareModulesHandler {
-    fn name(&self) -> &'static str {
-        "compare_modules"
-    }
-    fn description(&self) -> &'static str {
-        "Compares stability and coupling metrics between two modules"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"module_a":{"type":"string"},"module_b":{"type":"string"}},"required":["module_a","module_b"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "compare_modules",
+        "Compares stability and coupling metrics between two modules",
+        r#"{"type":"object","properties":{"module_a":{"type":"string"},"module_b":{"type":"string"}},"required":["module_a","module_b"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -162,18 +159,7 @@ inventory::submit!(ToolHandlerEntry(&CompareModulesHandler));
 pub struct ArchitecturalObservationsHandler;
 #[async_trait]
 impl ToolHandler for ArchitecturalObservationsHandler {
-    fn name(&self) -> &'static str {
-        "architectural_observations"
-    }
-    fn description(&self) -> &'static str {
-        "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"min_fan_out":{"type":"integer"},"min_pattern_files":{"type":"integer"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!("architectural_observations", "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules", r#"{"type":"object","properties":{"min_fan_out":{"type":"integer"},"min_pattern_files":{"type":"integer"}},"required":[]}"#, ReadOnly);
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -199,21 +185,15 @@ inventory::submit!(ToolHandlerEntry(&ArchitecturalObservationsHandler));
 pub struct UnderstandRepositoryHandler;
 #[async_trait]
 impl ToolHandler for UnderstandRepositoryHandler {
-    fn name(&self) -> &'static str {
-        "understand_repository"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "understand_repository",
         "One-call bootstrap context: repository identity, top anchors, entry points, \
          capability states, and the intent->tool mapping the agent should reach for \
          first. AGENT_UX_ROADMAP.md Milestone 5. Useful when an agent just connected and \
-         hasn't yet explored the codebase. Symbol-level detail is `get_context`."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"budget_tokens":{"type":"integer","description":"Soft token budget for the payload; default 3000."}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         hasn't yet explored the codebase. Symbol-level detail is `get_context`.",
+        r#"{"type":"object","properties":{"budget_tokens":{"type":"integer","description":"Soft token budget for the payload; default 3000."}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -238,18 +218,12 @@ inventory::submit!(ToolHandlerEntry(&UnderstandRepositoryHandler));
 pub struct TraceDependencyHandler;
 #[async_trait]
 impl ToolHandler for TraceDependencyHandler {
-    fn name(&self) -> &'static str {
-        "trace_dependency"
-    }
-    fn description(&self) -> &'static str {
-        "Recursively finds everything a symbol depends on"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "trace_dependency",
+        "Recursively finds everything a symbol depends on",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -264,20 +238,14 @@ inventory::submit!(ToolHandlerEntry(&TraceDependencyHandler));
 pub struct GetCallChainHandler;
 #[async_trait]
 impl ToolHandler for GetCallChainHandler {
-    fn name(&self) -> &'static str {
-        "get_call_chain"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "get_call_chain",
         "Use this when you need the exact call path between two symbols (`from` to \
          `to`). Traces within one repository — pass `repo_id` when a federation \
-         holds both ends. For what-breaks impact use `get_blast_radius`."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"from":{"type":"string","description":"symbol name the path starts at (the caller)"},"to":{"type":"string","description":"symbol name the path ends at (the callee)"}},"required":["from","to"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         holds both ends. For what-breaks impact use `get_blast_radius`.",
+        r#"{"type":"object","properties":{"from":{"type":"string","description":"symbol name the path starts at (the caller)"},"to":{"type":"string","description":"symbol name the path ends at (the callee)"}},"required":["from","to"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -301,18 +269,12 @@ inventory::submit!(ToolHandlerEntry(&GetCallChainHandler));
 pub struct NavigateToAnchorHandler;
 #[async_trait]
 impl ToolHandler for NavigateToAnchorHandler {
-    fn name(&self) -> &'static str {
-        "navigate_to_anchor"
-    }
-    fn description(&self) -> &'static str {
-        "Finds the most foundational 'Anchor' node that controls a given leaf function"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "navigate_to_anchor",
+        "Finds the most foundational 'Anchor' node that controls a given leaf function",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -327,18 +289,12 @@ inventory::submit!(ToolHandlerEntry(&NavigateToAnchorHandler));
 pub struct GetLayeredMapHandler;
 #[async_trait]
 impl ToolHandler for GetLayeredMapHandler {
-    fn name(&self) -> &'static str {
-        "get_layered_map"
-    }
-    fn description(&self) -> &'static str {
-        "Returns a 'slice' of the architecture at a specific depth from the entry point"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"layer":{"type":"integer"},"granularity":{"type":"string"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_layered_map",
+        "Returns a 'slice' of the architecture at a specific depth from the entry point",
+        r#"{"type":"object","properties":{"layer":{"type":"integer"},"granularity":{"type":"string"}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -354,18 +310,7 @@ inventory::submit!(ToolHandlerEntry(&GetLayeredMapHandler));
 pub struct GetMasterMapHandler;
 #[async_trait]
 impl ToolHandler for GetMasterMapHandler {
-    fn name(&self) -> &'static str {
-        "get_master_map"
-    }
-    fn description(&self) -> &'static str {
-        "Get a high-level Staleness Report showing when each module was last synced from LSP and Git"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!("get_master_map", "Get a high-level Staleness Report showing when each module was last synced from LSP and Git", r#"{"type":"object","properties":{},"required":[]}"#, ReadOnly);
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -381,18 +326,12 @@ inventory::submit!(ToolHandlerEntry(&GetMasterMapHandler));
 pub struct SemanticSearchHandler;
 #[async_trait]
 impl ToolHandler for SemanticSearchHandler {
-    fn name(&self) -> &'static str {
-        "semantic_search"
-    }
-    fn description(&self) -> &'static str {
-        "Find code by intent/concept using local NLP vectors (e.g., 'Where is auth handled?')"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "semantic_search",
+        "Find code by intent/concept using local NLP vectors (e.g., 'Where is auth handled?')",
+        r#"{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -434,21 +373,15 @@ inventory::submit!(ToolHandlerEntry(&SemanticSearchHandler));
 pub struct GetBlastRadiusHandler;
 #[async_trait]
 impl ToolHandler for GetBlastRadiusHandler {
-    fn name(&self) -> &'static str {
-        "get_blast_radius"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "get_blast_radius",
         "Use this when you want to know what breaks if you change a symbol: direct \
          and transitive dependents. For an exact A-to-B call path use \
          `get_call_chain`; for a pre-edit risk verdict use `assess_change`; for \
-         call-site dispatch honesty use `explain_dispatch`."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"},"include_weak_edges":{"type":"boolean","description":"Include heuristic callers (dynamic dispatch / bus / router) with confidence >= LAIN_HEURISTIC_MIN_CONFIDENCE. Default false."}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         call-site dispatch honesty use `explain_dispatch`.",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"},"include_weak_edges":{"type":"boolean","description":"Include heuristic callers (dynamic dispatch / bus / router) with confidence >= LAIN_HEURISTIC_MIN_CONFIDENCE. Default false."}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -475,20 +408,14 @@ inventory::submit!(ToolHandlerEntry(&GetBlastRadiusHandler));
 pub struct GetCouplingRadarHandler;
 #[async_trait]
 impl ToolHandler for GetCouplingRadarHandler {
-    fn name(&self) -> &'static str {
-        "get_coupling_radar"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "get_coupling_radar",
         "Use this when asking 'what changes together?': hidden coupling between files \
          from historical git co-change. `find_related` adds graph and semantic \
-         neighbours to the same question."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         neighbours to the same question.",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -505,26 +432,28 @@ inventory::submit!(ToolHandlerEntry(&GetCouplingRadarHandler));
 pub struct FindAnchorsHandler;
 #[async_trait]
 impl ToolHandler for FindAnchorsHandler {
-    fn name(&self) -> &'static str {
-        "find_anchors"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "find_anchors",
         "Use this when asking 'what should I read first?': the most foundational, \
-         stable components by corpus-wide anchor score."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         stable components by corpus-wide anchor score.",
+        r#"{"type":"object","properties":{"limit":{"type":"integer"},"include_tests":{"type":"boolean","description":"By default, anchors in `tests/` and `scripts/` are filtered out — those paths are heavily called by tests/scripts and inflate the score above real architectural pillars. Pass `true` to include them."}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let limit = usize_arg(args, "limit").unwrap_or(10);
-        handlers::metrics::find_anchors(&ctx.graph, &ctx.overlay, limit)
+        // B8 (2026-10-04): default to filtering test/script paths
+        // so the top anchors are real architectural pillars, not
+        // test fixtures whose score is inflated by being called
+        // from many other tests. Opt in with `include_tests=true`.
+        let include_tests = args
+            .get("include_tests")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        handlers::metrics::find_anchors(&ctx.graph, &ctx.overlay, limit, include_tests)
     }
 }
 inventory::submit!(ToolHandlerEntry(&FindAnchorsHandler));
@@ -532,18 +461,12 @@ inventory::submit!(ToolHandlerEntry(&FindAnchorsHandler));
 pub struct GetAnchorScoreHandler;
 #[async_trait]
 impl ToolHandler for GetAnchorScoreHandler {
-    fn name(&self) -> &'static str {
-        "get_anchor_score"
-    }
-    fn description(&self) -> &'static str {
-        "Returns the architectural stability score for a specific symbol"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_anchor_score",
+        "Returns the architectural stability score for a specific symbol",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -558,18 +481,12 @@ inventory::submit!(ToolHandlerEntry(&GetAnchorScoreHandler));
 pub struct GetContextDepthHandler;
 #[async_trait]
 impl ToolHandler for GetContextDepthHandler {
-    fn name(&self) -> &'static str {
-        "get_context_depth"
-    }
-    fn description(&self) -> &'static str {
-        "Calculates layers of abstraction from the entry point for a symbol"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_context_depth",
+        "Calculates layers of abstraction from the entry point for a symbol",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -584,19 +501,13 @@ inventory::submit!(ToolHandlerEntry(&GetContextDepthHandler));
 pub struct FindDeadCodeHandler;
 #[async_trait]
 impl ToolHandler for FindDeadCodeHandler {
-    fn name(&self) -> &'static str {
-        "find_dead_code"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "find_dead_code",
         "Use this when asking 'what is unused?': nodes with zero incoming callers, \
-         test code excluded."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"like":{"type":"string","description":"Filter dead code semantically (e.g., \"auth handler\")"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         test code excluded.",
+        r#"{"type":"object","properties":{"like":{"type":"string","description":"Filter dead code semantically (e.g., \"auth handler\")"}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -618,18 +529,12 @@ inventory::submit!(ToolHandlerEntry(&FindDeadCodeHandler));
 pub struct ExplainSymbolHandler;
 #[async_trait]
 impl ToolHandler for ExplainSymbolHandler {
-    fn name(&self) -> &'static str {
-        "explain_symbol"
-    }
-    fn description(&self) -> &'static str {
-        "Combines signatures, docstrings, and metrics into a human-readable architectural summary"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "explain_symbol",
+        "Combines signatures, docstrings, and metrics into a human-readable architectural summary",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -652,18 +557,12 @@ inventory::submit!(ToolHandlerEntry(&ExplainSymbolHandler));
 pub struct SuggestRefactorTargetsHandler;
 #[async_trait]
 impl ToolHandler for SuggestRefactorTargetsHandler {
-    fn name(&self) -> &'static str {
-        "suggest_refactor_targets"
-    }
-    fn description(&self) -> &'static str {
-        "Identifies 'God Objects' and high-debt refactor targets based on complexity and stability"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "suggest_refactor_targets",
+        "Identifies 'God Objects' and high-debt refactor targets based on complexity and stability",
+        r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -680,18 +579,12 @@ inventory::submit!(ToolHandlerEntry(&SuggestRefactorTargetsHandler));
 pub struct QueryGraphHandler;
 #[async_trait]
 impl ToolHandler for QueryGraphHandler {
-    fn name(&self) -> &'static str {
-        "query_graph"
-    }
-    fn description(&self) -> &'static str {
-        "Execute a query against the graph using a JSON ops array"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"query":{"type":"object"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "query_graph",
+        "Execute a query against the graph using a JSON ops array",
+        r#"{"type":"object","properties":{"query":{"type":"object"}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -714,18 +607,7 @@ inventory::submit!(ToolHandlerEntry(&QueryGraphHandler));
 pub struct DescribeSchemaHandler;
 #[async_trait]
 impl ToolHandler for DescribeSchemaHandler {
-    fn name(&self) -> &'static str {
-        "describe_schema"
-    }
-    fn description(&self) -> &'static str {
-        "Returns the graph schema (node types, edge types, example queries) for LLM session initialization"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!("describe_schema", "Returns the graph schema (node types, edge types, example queries) for LLM session initialization", r#"{"type":"object","properties":{},"required":[]}"#, ReadOnly);
     async fn call(
         &self,
         _ctx: &ToolContext,
@@ -739,18 +621,7 @@ inventory::submit!(ToolHandlerEntry(&DescribeSchemaHandler));
 pub struct GetCrossRuntimeCallersHandler;
 #[async_trait]
 impl ToolHandler for GetCrossRuntimeCallersHandler {
-    fn name(&self) -> &'static str {
-        "get_cross_runtime_callers"
-    }
-    fn description(&self) -> &'static str {
-        "Find all protocol-level callers for a symbol (HTTP routes, gRPC services, GraphQL resolvers)"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"node_id":{"type":"string"}},"required":["node_id"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!("get_cross_runtime_callers", "Find all protocol-level callers for a symbol (HTTP routes, gRPC services, GraphQL resolvers)", r#"{"type":"object","properties":{"node_id":{"type":"string"}},"required":["node_id"]}"#, ReadOnly);
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -765,18 +636,12 @@ inventory::submit!(ToolHandlerEntry(&GetCrossRuntimeCallersHandler));
 pub struct RunEnrichmentHandler;
 #[async_trait]
 impl ToolHandler for RunEnrichmentHandler {
-    fn name(&self) -> &'static str {
-        "run_enrichment"
-    }
-    fn description(&self) -> &'static str {
-        "Triggers a full architectural scan and enrichment pass"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::StructuralWrite
-    }
+    tool_meta!(
+        "run_enrichment",
+        "Triggers a full architectural scan and enrichment pass",
+        r#"{"type":"object","properties":{},"required":[]}"#,
+        StructuralWrite
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -790,18 +655,12 @@ inventory::submit!(ToolHandlerEntry(&RunEnrichmentHandler));
 pub struct SyncStateHandler;
 #[async_trait]
 impl ToolHandler for SyncStateHandler {
-    fn name(&self) -> &'static str {
-        "sync_state"
-    }
-    fn description(&self) -> &'static str {
-        "Forces a re-sync of the graph with the current Git HEAD state"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::StructuralWrite
-    }
+    tool_meta!(
+        "sync_state",
+        "Forces a re-sync of the graph with the current Git HEAD state",
+        r#"{"type":"object","properties":{},"required":[]}"#,
+        StructuralWrite
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -824,18 +683,12 @@ inventory::submit!(ToolHandlerEntry(&SyncStateHandler));
 pub struct RunBuildHandler;
 #[async_trait]
 impl ToolHandler for RunBuildHandler {
-    fn name(&self) -> &'static str {
-        "run_build"
-    }
-    fn description(&self) -> &'static str {
-        "Runs cargo build (optionally release) and returns build output and status"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"cwd":{"type":"string"},"release":{"type":"boolean"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::Mutating
-    }
+    tool_meta!(
+        "run_build",
+        "Runs cargo build (optionally release) and returns build output and status",
+        r#"{"type":"object","properties":{"cwd":{"type":"string"},"release":{"type":"boolean"}},"required":[]}"#,
+        Mutating
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -858,18 +711,12 @@ inventory::submit!(ToolHandlerEntry(&RunBuildHandler));
 pub struct RunTestsHandler;
 #[async_trait]
 impl ToolHandler for RunTestsHandler {
-    fn name(&self) -> &'static str {
-        "run_tests"
-    }
-    fn description(&self) -> &'static str {
-        "Runs cargo test with optional filter and returns test results"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"cwd":{"type":"string"},"filter":{"type":"string"},"timeout_secs":{"type":"integer"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::Mutating
-    }
+    tool_meta!(
+        "run_tests",
+        "Runs cargo test with optional filter and returns test results",
+        r#"{"type":"object","properties":{"cwd":{"type":"string"},"filter":{"type":"string"},"timeout_secs":{"type":"integer"}},"required":[]}"#,
+        Mutating
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -898,18 +745,7 @@ inventory::submit!(ToolHandlerEntry(&RunTestsHandler));
 pub struct RunClippyHandler;
 #[async_trait]
 impl ToolHandler for RunClippyHandler {
-    fn name(&self) -> &'static str {
-        "run_clippy"
-    }
-    fn description(&self) -> &'static str {
-        "Runs cargo clippy with optional auto-fix and returns lint results with architectural context on failure"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"cwd":{"type":"string"},"fix":{"type":"boolean"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::Mutating
-    }
+    tool_meta!("run_clippy", "Runs cargo clippy with optional auto-fix and returns lint results with architectural context on failure", r#"{"type":"object","properties":{"cwd":{"type":"string"},"fix":{"type":"boolean"}},"required":[]}"#, Mutating);
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -934,18 +770,12 @@ inventory::submit!(ToolHandlerEntry(&RunClippyHandler));
 pub struct GetContextForPromptHandler;
 #[async_trait]
 impl ToolHandler for GetContextForPromptHandler {
-    fn name(&self) -> &'static str {
-        "get_context_for_prompt"
-    }
-    fn description(&self) -> &'static str {
-        "Builds LLM-optimized context for a symbol with signature, docstring, and relationships"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"},"max_tokens":{"type":"integer"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_context_for_prompt",
+        "Builds LLM-optimized context for a symbol with signature, docstring, and relationships",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"max_tokens":{"type":"integer"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -961,18 +791,12 @@ inventory::submit!(ToolHandlerEntry(&GetContextForPromptHandler));
 pub struct GetCodeSnippetHandler;
 #[async_trait]
 impl ToolHandler for GetCodeSnippetHandler {
-    fn name(&self) -> &'static str {
-        "get_code_snippet"
-    }
-    fn description(&self) -> &'static str {
-        "Reads a file with surrounding context around a specific line"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer"},"context_lines":{"type":"integer"}},"required":["path"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_code_snippet",
+        "Reads a file with surrounding context around a specific line",
+        r#"{"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer"},"context_lines":{"type":"integer"}},"required":["path"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -996,18 +820,12 @@ inventory::submit!(ToolHandlerEntry(&GetCodeSnippetHandler));
 pub struct GetCallSitesHandler;
 #[async_trait]
 impl ToolHandler for GetCallSitesHandler {
-    fn name(&self) -> &'static str {
-        "get_call_sites"
-    }
-    fn description(&self) -> &'static str {
-        "Finds all callers of a given symbol"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_call_sites",
+        "Finds all callers of a given symbol",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1024,18 +842,12 @@ inventory::submit!(ToolHandlerEntry(&GetCallSitesHandler));
 pub struct GetFileDiffHandler;
 #[async_trait]
 impl ToolHandler for GetFileDiffHandler {
-    fn name(&self) -> &'static str {
-        "get_file_diff"
-    }
-    fn description(&self) -> &'static str {
-        "Shows uncommitted changes (staged and unstaged)"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"path":{"type":"string"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_file_diff",
+        "Shows uncommitted changes (staged and unstaged)",
+        r#"{"type":"object","properties":{"path":{"type":"string"}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1054,18 +866,12 @@ inventory::submit!(ToolHandlerEntry(&GetFileDiffHandler));
 pub struct GetCommitHistoryHandler;
 #[async_trait]
 impl ToolHandler for GetCommitHistoryHandler {
-    fn name(&self) -> &'static str {
-        "get_commit_history"
-    }
-    fn description(&self) -> &'static str {
-        "Shows recent commit history with author and message"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_commit_history",
+        "Shows recent commit history with author and message",
+        r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1080,18 +886,12 @@ inventory::submit!(ToolHandlerEntry(&GetCommitHistoryHandler));
 pub struct GetBranchStatusHandler;
 #[async_trait]
 impl ToolHandler for GetBranchStatusHandler {
-    fn name(&self) -> &'static str {
-        "get_branch_status"
-    }
-    fn description(&self) -> &'static str {
-        "Shows current branch and git status"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_branch_status",
+        "Shows current branch and git status",
+        r#"{"type":"object","properties":{},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1107,18 +907,12 @@ inventory::submit!(ToolHandlerEntry(&GetBranchStatusHandler));
 pub struct FindUntestedFunctionsHandler;
 #[async_trait]
 impl ToolHandler for FindUntestedFunctionsHandler {
-    fn name(&self) -> &'static str {
-        "find_untested_functions"
-    }
-    fn description(&self) -> &'static str {
-        "Identifies functions that may lack test coverage based on call graph analysis"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "find_untested_functions",
+        "Identifies functions that may lack test coverage based on call graph analysis",
+        r#"{"type":"object","properties":{"limit":{"type":"integer"}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1133,18 +927,12 @@ inventory::submit!(ToolHandlerEntry(&FindUntestedFunctionsHandler));
 pub struct GetTestTemplateHandler;
 #[async_trait]
 impl ToolHandler for GetTestTemplateHandler {
-    fn name(&self) -> &'static str {
-        "get_test_template"
-    }
-    fn description(&self) -> &'static str {
-        "Generates a test scaffold for a given function or type"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"function_name":{"type":"string"}},"required":["function_name"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_test_template",
+        "Generates a test scaffold for a given function or type",
+        r#"{"type":"object","properties":{"function_name":{"type":"string"}},"required":["function_name"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1159,18 +947,12 @@ inventory::submit!(ToolHandlerEntry(&GetTestTemplateHandler));
 pub struct GetCoverageSummaryHandler;
 #[async_trait]
 impl ToolHandler for GetCoverageSummaryHandler {
-    fn name(&self) -> &'static str {
-        "get_coverage_summary"
-    }
-    fn description(&self) -> &'static str {
-        "Provides a structural estimate of code coverage based on call graph connectivity"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"module_path":{"type":"string"}},"required":[]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+    tool_meta!(
+        "get_coverage_summary",
+        "Provides a structural estimate of code coverage based on call graph connectivity",
+        r#"{"type":"object","properties":{"module_path":{"type":"string"}},"required":[]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1198,22 +980,16 @@ inventory::submit!(ToolHandlerEntry(&GetCoverageSummaryHandler));
 pub struct FindSymbolHandler;
 #[async_trait]
 impl ToolHandler for FindSymbolHandler {
-    fn name(&self) -> &'static str {
-        "find_symbol"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "find_symbol",
         "Returns every graph node matching `name`, optionally narrowed \
          by `path_hint` (substring) and `type_filter` (function / \
          struct / trait / module / file). Use this when an agent says \
          'where is X?' and the low-level tools would otherwise force \
-         a per-name lookup per match. Cost: cheap (graph index hit)."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"path_hint":{"type":"string"},"type_filter":{"type":"string","enum":["function","method","class","struct","interface","trait","enum","module","file"]}},"required":["name"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         a per-name lookup per match. Cost: cheap (graph index hit).",
+        r#"{"type":"object","properties":{"name":{"type":"string"},"path_hint":{"type":"string"},"type_filter":{"type":"string","enum":["function","method","class","struct","interface","trait","enum","module","file"]}},"required":["name"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1233,10 +1009,8 @@ inventory::submit!(ToolHandlerEntry(&FindSymbolHandler));
 pub struct GetContextHandler;
 #[async_trait]
 impl ToolHandler for GetContextHandler {
-    fn name(&self) -> &'static str {
-        "get_context"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "get_context",
         "One-call dossier for a symbol: definition, callers, \
          callees, and source body excerpt. Use this when an agent \
          says 'explain X' or 'what is X?' and the goal is a single \
@@ -1244,14 +1018,10 @@ impl ToolHandler for GetContextHandler {
          scales with `depth`. Low-level alternative: call each of \
          explain_symbol / get_call_sites / trace_dependency \
          individually. Repo-level orientation is `understand_repository`; \
-         call-site dispatch honesty is `explain_dispatch`."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"integer","minimum":0,"maximum":3}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         call-site dispatch honesty is `explain_dispatch`.",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"integer","minimum":0,"maximum":3}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1278,24 +1048,18 @@ inventory::submit!(ToolHandlerEntry(&GetContextHandler));
 pub struct FindRelatedHandler;
 #[async_trait]
 impl ToolHandler for FindRelatedHandler {
-    fn name(&self) -> &'static str {
-        "find_related"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "find_related",
         "Graph neighbors, co-change partners, and (optional) \
          semantic neighbors for a symbol in one call. Use this when \
          an agent says 'what is connected to X?' or wants to \
          understand blast radius without committing to a single \
          change yet. The semantic section is omitted when no \
          embedding model is loaded; the co-change section is \
-         gated by `include_coupling=false`. Cost: medium."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"},"limit":{"type":"integer"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         gated by `include_coupling=false`. Cost: medium.",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"},"limit":{"type":"integer"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1326,23 +1090,17 @@ inventory::submit!(ToolHandlerEntry(&FindRelatedHandler));
 pub struct AssessChangeHandler;
 #[async_trait]
 impl ToolHandler for AssessChangeHandler {
-    fn name(&self) -> &'static str {
-        "assess_change"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "assess_change",
         "Pre-edit impact assessment: direct + transitive \
          dependents, untested dependents, co-change partners, and \
          a one-line risk verdict (low / medium / high). Use this \
          when an agent says 'what breaks if I change X?' or wants \
          to evaluate a change before editing. Cost: medium; scales \
-         with the depth of the call graph."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"string"},"include_tests":{"type":"boolean"},"limit":{"type":"integer"}},"required":["symbol"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         with the depth of the call graph.",
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"string"},"include_tests":{"type":"boolean"},"limit":{"type":"integer"}},"required":["symbol"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1368,10 +1126,8 @@ inventory::submit!(ToolHandlerEntry(&AssessChangeHandler));
 pub struct SearchCodeHandler;
 #[async_trait]
 impl ToolHandler for SearchCodeHandler {
-    fn name(&self) -> &'static str {
-        "search_code"
-    }
-    fn description(&self) -> &'static str {
+    tool_meta!(
+        "search_code",
         "Find code by name, intent, or pattern. `mode=lexical` \
          (default) uses the graph name index and works without an \
          embedding model; `mode=semantic` uses local ONNX \
@@ -1379,14 +1135,10 @@ impl ToolHandler for SearchCodeHandler {
          --download-model`). `mode=auto` (the default) tries \
          semantic first and falls back to lexical; the response \
          records `fell_back=true` so the agent can tell. Cost: \
-         cheap for lexical, medium for semantic."
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"query":{"type":"string"},"mode":{"type":"string","enum":["lexical","semantic","auto"]},"limit":{"type":"integer"}},"required":["query"]}"#
-    }
-    fn capability(&self) -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
+         cheap for lexical, medium for semantic.",
+        r#"{"type":"object","properties":{"query":{"type":"string"},"mode":{"type":"string","enum":["lexical","semantic","auto"]},"limit":{"type":"integer"}},"required":["query"]}"#,
+        ReadOnly
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
