@@ -9,21 +9,21 @@ class Lain < Formula
   on_macos do
     on_arm do
       url "https://github.com/spuentesp/lain/releases/download/v0.8.0/lain-0.8.0-aarch64-apple-darwin.tar.gz"
-      sha256 "d207e7f6bbabf2f266eb61021315695f54c0039a0adeef63ba047bfdfeed7b9d"
+      sha256 "1f55f308c1de6a9c941d8e9e95bb7cc95be0f33eb2aa7ed0c555714cbb2c0e83"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/spuentesp/lain/releases/download/v0.8.0/lain-0.8.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "4a0a34e7d0ee3cbe53299505450d718ba562ffed40e18ba955bae47b1a9679e0"
+      sha256 "72dedbbf5f80297530262f2e6be5f0964d9f9e7cfd113199d3b298bd1a9bb6e8"
     end
   end
 
   on_windows do
     on_intel do
       url "https://github.com/spuentesp/lain/releases/download/v0.8.0/lain-0.8.0-x86_64-pc-windows-msvc.tar.gz"
-      sha256 "c5f1008d1f2e965d64d6b15658357d81ac4e19d71dc38937eba19fbeb3fc2e26"
+      sha256 "47dc5d37922d91463d8fae0bcd4086515d2e0c4f07ce71f5964934b6bdfff097"
     end
   end
 
