@@ -141,6 +141,7 @@ def find_all_lains(work, path):
 
     add(shutil.which("lain", path=path))
     patterns = (os.path.join(work, "*", "bin", "lain"),
+                os.path.join(work, "*", "lain"),
                 os.path.join(work, "xdg-cache", "lain", "*", "*", "lain"),
                 os.path.join(work, "*", "lib", "node_modules", "*", "bin", "lain"))
     for pattern in patterns:
@@ -747,7 +748,10 @@ def main():
             prefix = os.path.join(work, "prefix")
             os.makedirs(os.path.join(prefix, "bin"), exist_ok=True)
             env["npm_config_prefix"] = prefix
-            env["PATH"] = os.path.join(prefix, "bin") + os.pathsep + env["PATH"]
+            # prefix/bin for npm installs; prefix itself for the install.sh
+            # (dev) layout, which drops `lain` directly into LAIN_INSTALL_DIR.
+            env["PATH"] = (os.path.join(prefix, "bin") + os.pathsep
+                           + prefix + os.pathsep + env["PATH"])
             # The agent CLI needs its own login (real HOME). LAIN's config and
             # state stay isolated: clean_env points XDG_CONFIG_HOME/XDG_STATE_HOME
             # at the scratch dirs, so no inherited LAIN state can leak in.

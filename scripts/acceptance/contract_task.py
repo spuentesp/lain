@@ -477,7 +477,8 @@ def main():
             prefix = os.path.join(work, "prefix")
             os.makedirs(os.path.join(prefix, "bin"), exist_ok=True)
             env["npm_config_prefix"] = prefix
-            env["PATH"] = os.path.join(prefix, "bin") + os.pathsep + env["PATH"]
+            env["PATH"] = (os.path.join(prefix, "bin") + os.pathsep
+                           + prefix + os.pathsep + env["PATH"])
             if args.arm == "lain":
                 # The task premise is "a code-graph tool is installed"; the
                 # agent's own onboarding is covered by onboarding.py stage a.
