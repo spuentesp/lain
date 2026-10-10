@@ -200,6 +200,8 @@ fn lock_paths_are_exactly_where_the_docs_say() {
         PathBuf::from("/w/.lain/locks/src%2Fa%2Ers.lock")
     );
     assert_eq!(
+        // Path-suffix label in a format test, not a crypto nonce (cfg(test) only).
+        // lgtm[rust/hard-coded-cryptographic-value]
         lock_path_for_with_nonce(ws, Path::new("src/a.rs"), "N"),
         PathBuf::from("/w/.lain/locks/src%2Fa%2Ers.lock-N")
     );
@@ -468,6 +470,8 @@ mod release_refresh {
     fn release_for_path_checks_the_nonce_too() {
         let ws = tempfile::tempdir().unwrap();
         let l = acquire(ws.path(), "a.rs", "alice");
+        // Path-suffix label in a format test, not a crypto nonce (cfg(test) only).
+        // lgtm[rust/hard-coded-cryptographic-value]
         assert!(release_lock_for_path(ws.path(), Path::new("a.rs"), "wrong").is_err());
         assert!(l.path.exists());
         release_lock_for_path(ws.path(), Path::new("a.rs"), &l.nonce).expect("right nonce");
