@@ -105,10 +105,10 @@ const LSP_INSTALL_BINARIES: &[&str] = &[
     "apk",    // macOS
     "brew", "port", // Node
     "npm", "yarn", "pnpm", // Python
-    "pip", "pip3",  // Go
-    "go",    // Rust (the recipe runs `rustup component add rust-analyzer`)
+    "pip", "pip3", // Go
+    "go",   // Rust (the recipe runs `rustup component add rust-analyzer`)
     "cargo", "rustup", // Ruby (the recipe runs `gem install solargraph`)
-    "gem", // Snap / Flatpak
+    "gem",    // Snap / Flatpak
     "snap", "flatpak", // openSUSE
     "zypper",  // Gentoo
     "emerge",
@@ -2328,7 +2328,8 @@ mod install_allowlist_tests {
     fn the_rust_recipe_installs_through_rustup() {
         let rust = language_server_for("rust").expect("rust has a language server");
         assert_eq!(
-            rust.install_argv().expect("rustup must be on the allowlist"),
+            rust.install_argv()
+                .expect("rustup must be on the allowlist"),
             vec!["rustup", "component", "add", "rust-analyzer"]
         );
     }
