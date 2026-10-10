@@ -18,7 +18,16 @@ inputs:
   lain-version:
     description: 'Lain release tag to install. The default must track the latest release; the version-drift job in ci.yml fails the build if it does not. Bump on every release.'
     required: false
-    default: 'v0.9.0'
+    # POST-PUBLISH bump (see AGENTS.md). At release time this must point
+    # at a release that EXISTS and whose LSP install works, or the badge
+    # job goes red and release.yml's "tagged commit passed CI" gate
+    # refuses to build — a deadlock (the release cannot publish itself
+    # to make the badge green). v0.8.0 exists but its LSP install
+    # allowlist omits `rustup`, so the badge's "auto" LSP install fails
+    # there; v0.7.4 is the newest release where it passes. Bump to the
+    # new version right after the tag is published, together with the
+    # Formula checksum fill.
+    default: 'v0.7.4'
   reindex-timeout:
     description: 'Seconds to wait for the cold-start re-index. Lain defaults to 300s; the action bumps to 600s because the first run on a repo pays the full cost.'
     required: false
