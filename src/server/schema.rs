@@ -407,13 +407,17 @@ impl EdgeType {
             | EdgeType::ReadsTable
             | EdgeType::WritesTable
             | EdgeType::Produces
-            | EdgeType::Consumes => true,
-            // Known-but-unindexed: nothing emits a `PayloadSchema` edge
-            // yet. `payload_schema.rs` parses Avro/JSON-Schema/protobuf
-            // payloads, but no sensor mints the Topic→Schema edge, so
-            // advertising it would make `describe_schema` lie to clients.
-            EdgeType::PayloadSchema
-            | EdgeType::Imports
+            | EdgeType::Consumes
+            // `event_sensor::scan_payload_schemas` mints the
+            // Topic → Schema edge for `*.avsc` / `*.schema.json`
+            // payload schemas that name an emitted topic.
+            | EdgeType::PayloadSchema => true,
+            // Known-but-unindexed: no producer in this codebase.
+            // `Imports` reads like a core relationship and has never
+            // been emitted by any indexer; `DeployedTo` awaits an
+            // IaC resource sensor. Advertising either would make
+            // `describe_schema` lie to clients.
+            EdgeType::Imports
             | EdgeType::DeployedTo => false,
         }
     }
@@ -465,8 +469,9 @@ impl EdgeType {
                  Emitted by `openapi_sensor`."
             }
             EdgeType::PayloadSchema => {
-                "Topic → Schema. Topic payload schema (stretch, §6.7). Emitted \
-                 by `event_sensor` once Kafka is wired up."
+                "Topic → Schema. Topic payload schema (stretch, §6.7), minted \
+                 by `event_sensor` from `*.avsc` / `*.schema.json` files that \
+                 name an emitted topic."
             }
             EdgeType::HasField => {
                 "Schema → Field. One flattened field of a schema, addressed by \

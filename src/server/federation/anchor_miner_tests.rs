@@ -185,6 +185,73 @@ fn field_name_literals_never_anchor() {
     );
 }
 
+/// Task 1 wires `*.avsc` / `*.schema.json` payload files into the
+/// event sensor — files whose quoted `customer_id` the miner's literal
+/// scan can see (`.schema.json` is a `.json`, an allowed scan
+/// extension). Field names are not structural anchors: the allowlist
+/// of anchor kinds admits no bare identifier, so the shared
+/// `customer_id` must mint nothing — inside or outside schema files.
+#[test]
+fn avro_schema_field_names_do_not_become_cross_repo_anchors() {
+    let orders_dir = tempfile::tempdir().unwrap();
+    let billing_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(orders_dir.path().join("schemas")).unwrap();
+    std::fs::create_dir_all(billing_dir.path().join("src")).unwrap();
+    std::fs::write(
+        orders_dir.path().join("schemas/order.avsc"),
+        r#"{"name": "Order", "fields": [{"name": "customer_id"}]}"#,
+    )
+    .unwrap();
+    // The `.schema.json` half matters most: extension `json` is in
+    // `SCAN_EXTS`, so unlike `.avsc` this file is actually read by the
+    // literal scan.
+    std::fs::write(
+        orders_dir.path().join("schemas/order.schema.json"),
+        r#"{"title": "Order", "properties": {"customer_id": {"type": "string"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        billing_dir.path().join("src/main.py"),
+        "row[\"customer_id\"]\n",
+    )
+    .unwrap();
+
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-task1-avro"));
+    let orders = repo("orders-svc");
+    let billing = repo("billing-svc");
+    backend
+        .upsert_node(file_node(&orders, "schemas/order.avsc"))
+        .unwrap();
+    backend
+        .upsert_node(file_node(&billing, "src/main.py"))
+        .unwrap();
+
+    let mut occ = scan_repo_occurrences(&orders, orders_dir.path());
+    occ.extend(scan_repo_occurrences(&billing, billing_dir.path()));
+    assert!(
+        !occ.iter().any(|o| o.key == "customer_id"),
+        "a schema field name must not classify as an anchor occurrence: {occ:?}"
+    );
+
+    let report = mint_cross_repo_observations(&backend, &occ, &[]).expect("mint succeeds");
+    let edges = backend.all_edges().unwrap();
+    let anchor_edges: Vec<_> = edges
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.provenance,
+                Some(EdgeProvenance::Heuristic { detector, .. })
+                    if detector.starts_with("anchor:")
+            )
+        })
+        .collect();
+    assert!(
+        anchor_edges.is_empty(),
+        "field names are not structural anchors, inside or outside schema files: \
+         occ={occ:?} minted={anchor_edges:?} report={report:?}"
+    );
+}
+
 /// TDD #3: an anchor present in one repo only mints nothing — an
 /// anchor is a coupling only when two repos share it.
 #[test]

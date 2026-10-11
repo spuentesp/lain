@@ -25,6 +25,13 @@
 //! (§6.7 "same-file constants"). Dynamic topic names are recorded but
 //! skipped from the graph so they surface in `coverage.unnormalized`.
 //!
+//! After site emission the sensor also walks payload schema files
+//! (`*.avsc`, `*.schema.json`): each parses into a `Schema` node with
+//! `Field` children (the same shape `grpc_provider_sensor` emits for
+//! proto messages), and a schema that names an already-emitted topic
+//! gets the `Topic → Schema` `PayloadSchema` edge that feeds the
+//! payload arm of the contract join (`field_join.rs`).
+//!
 //! The sensor runs at phase 2 so `Topic` nodes exist before the
 //! joiner binds consumer services to producer services (§7.7). It
 //! publishes through `replace_sensor_output(EventSensor, …)` so a
@@ -35,6 +42,7 @@ use crate::federation::contracts::model::SourceSite;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::patterns::Patterns;
+use crate::server::sensors::payload_schema::{parse_avro_schema, parse_json_schema};
 use crate::server::sensors::util::{self, Lang};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -110,8 +118,145 @@ pub fn scan_workspace_event(
         all_edges.extend(edges);
     }
 
+    // Payload schemas ride the same EventSensor batch, scanned after
+    // site emission so a schema's `topic` can bind to a `Topic` node
+    // minted in this very scan.
+    scan_payload_schemas(&mut all_nodes, &mut all_edges, root, namespace);
+
     graph.replace_sensor_output(SensorOwner::EventSensor, &all_nodes, &all_edges)?;
     Ok(all_nodes.len())
+}
+
+// ─── Payload schemas (Avro / JSON Schema → Topic → Schema) ───────────
+
+/// Walk the workspace for payload schema files (`*.avsc`,
+/// `*.schema.json`), parse them with the `payload_schema` parsers, and
+/// emit the node set `grpc_provider_sensor.rs:180-250` emits for proto
+/// messages: a `Schema` node carrying `ContractFact::Schema { direction:
+/// Payload }`, one `Field` child per parsed field carrying
+/// `ContractFact::Field`, and a `HasField` edge per field. When the
+/// schema names a topic whose `Topic` node was already emitted in this
+/// scan (`{DEFAULT_BROKER}/{topic}`), the `Topic → Schema`
+/// `PayloadSchema` edge is minted too — without a `Topic` endpoint
+/// there is no edge (`insert_edges_batch` would drop it silently,
+/// `graph/mod.rs:1156`).
+///
+/// Everything is pushed into the caller's batch, which goes to a single
+/// `replace_sensor_output(EventSensor, …)`: nodes are upserted before
+/// edges there, so both endpoints of every edge materialize first. The
+/// `Topic` lookup reads the pending batch (not the graph) because a
+/// previous scan's `Topic` nodes are retracted in that same call —
+/// binding to one would mint an edge toward a stale id.
+///
+/// Ownership: `derive_owner` routes `.avsc` / `*.schema.json`
+/// `Schema`/`Field` nodes to `SensorOwner::EventSensor`, so these
+/// nodes are retracted with the rest of this sensor's output and every
+/// `ContractFact` here stays single-owner (`sensors/AGENTS.md`).
+fn scan_payload_schemas(
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<GraphEdge>,
+    root: &Path,
+    namespace: &RepoNamespace,
+) -> usize {
+    use crate::federation::contracts::model::{ContractFact as CF, Direction};
+    use std::ffi::OsStr;
+
+    let is_payload_file = |p: &Path| {
+        let is_avsc = p.extension() == Some(OsStr::new("avsc"));
+        let is_schema_json = p
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(".schema.json"));
+        (is_avsc || is_schema_json).then_some(())
+    };
+
+    let mut minted = 0;
+    for (path, content, ()) in util::scan_files(root, is_payload_file) {
+        let parsed = if path.extension() == Some(OsStr::new("avsc")) {
+            parse_avro_schema(&content)
+        } else {
+            parse_json_schema(&content)
+        };
+        let Some(ps) = parsed else { continue };
+
+        let path_str = graph_path(root, &path);
+        let line = ps.fields.first().map_or(1, |f| f.line);
+        let schema_id = GraphNode::generate_id(
+            &NodeType::Schema,
+            &path_str,
+            &ps.name,
+            Some(line),
+            namespace,
+        );
+        let mut schema_node = GraphNode::new(NodeType::Schema, ps.name.clone(), path_str.clone());
+        schema_node.id = schema_id.clone();
+        schema_node.line_start = Some(line);
+        schema_node.line_end = Some(line);
+        schema_node.contract = vec![CF::Schema {
+            direction: Direction::Payload,
+        }];
+        nodes.push(schema_node);
+
+        for f in &ps.fields {
+            let field_name = f.path.to_string();
+            let field_id = GraphNode::generate_id(
+                &NodeType::Field,
+                &path_str,
+                &field_name,
+                Some(f.line),
+                namespace,
+            );
+            let mut field_node = GraphNode::new(NodeType::Field, field_name, path_str.clone());
+            field_node.id = field_id.clone();
+            field_node.line_start = Some(f.line);
+            field_node.line_end = Some(f.line);
+            field_node.contract = vec![CF::Field(f.meta.clone())];
+            nodes.push(field_node);
+            edges.push(GraphEdge {
+                edge_type: EdgeType::HasField,
+                source_id: schema_id.clone(),
+                target_id: field_id,
+                weight: Some(1.0),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Static {
+                    source: crate::schema::StaticSource::Regex,
+                }),
+                site: None,
+                detail: None,
+            });
+        }
+
+        if let Some(topic_name) = &ps.topic {
+            let topic_label = format!("{DEFAULT_BROKER}/{topic_name}");
+            // One edge per emitted `Topic` node with this name: the
+            // same topic can be declared in several files, and the
+            // joiner assigns a service only to nodes whose paths match
+            // a `ServiceDecl` — binding just the first (walk-order)
+            // node would silently drop the payload join when an
+            // unassigned file comes first. Both endpoints are in this
+            // batch, so no edge dangles either way.
+            let topic_ids: Vec<String> = nodes
+                .iter()
+                .filter(|n| n.node_type == NodeType::Topic && n.name == topic_label)
+                .map(|n| n.id.clone())
+                .collect();
+            for topic_id in topic_ids {
+                edges.push(GraphEdge {
+                    edge_type: EdgeType::PayloadSchema,
+                    source_id: topic_id,
+                    target_id: schema_id.clone(),
+                    weight: Some(1.0),
+                    cross_repo: false,
+                    provenance: Some(EdgeProvenance::Static {
+                        source: crate::schema::StaticSource::Regex,
+                    }),
+                    site: None,
+                    detail: None,
+                });
+            }
+        }
+        minted += 1;
+    }
+    minted
 }
 
 // ─── Detection (regex-first, language-dispatched) ────────────────────
@@ -1225,6 +1370,103 @@ mod tests {
             .filter(|n| n.node_type == NodeType::Topic)
             .count();
         assert_eq!(topics, 0, "commented-out code must not emit Topics");
+    }
+
+    /// An Avro schema that names a topic bound to an already-emitted
+    /// `Topic` must produce the full payload node set — `Schema` +
+    /// `Field` + `HasField` (mirroring `grpc_provider_sensor`'s proto
+    /// message output) — plus the `Topic → Schema` `PayloadSchema`
+    /// edge. The topic comes from a producer site in the same scan, so
+    /// the edge endpoint is materialized in the same sensor batch.
+    #[test]
+    fn avro_schema_with_topic_emits_payload_schema_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("schemas")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("schemas/order.avsc"),
+            r#"{
+        "type": "record", "name": "Order", "topic": "order.events",
+        "fields": [{"name": "customer_id", "type": "string"}]
+    }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/producer.py"),
+            "producer.send('order.events', msg)\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let schema = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Schema && n.name.contains("Order"))
+            .expect("schema node");
+        let topic = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Topic && n.name.ends_with("order.events"))
+            .expect("topic node");
+        assert!(
+            graph.all_edges().iter().any(|e| {
+                e.edge_type == EdgeType::PayloadSchema
+                    && e.source_id == topic.id
+                    && e.target_id == schema.id
+            }),
+            "Topic -> PayloadSchema edge missing"
+        );
+        let field = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Field && n.name == "customer_id")
+            .expect("field node");
+        assert!(
+            graph.all_edges().iter().any(|e| {
+                e.edge_type == EdgeType::HasField
+                    && e.source_id == schema.id
+                    && e.target_id == field.id
+            }),
+            "Schema -> HasField -> Field edge missing"
+        );
+    }
+
+    /// A schema with no `topic` still emits its `Schema` node — the
+    /// payload definition is real — but no `PayloadSchema` edge: with
+    /// no `Topic` node there is nothing to bind, and `insert_edges_batch`
+    /// would silently drop a dangling edge anyway (`graph/mod.rs:1156`).
+    #[test]
+    fn avro_schema_without_topic_emits_schema_but_no_payload_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("schemas")).unwrap();
+        std::fs::write(
+            dir.path().join("schemas/audit.avsc"),
+            r#"{
+        "type": "record", "name": "Audit",
+        "fields": [{"name": "actor", "type": "string"}]
+    }"#,
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        assert!(
+            graph
+                .get_all_nodes()
+                .into_iter()
+                .any(|n| n.node_type == NodeType::Schema && n.name.contains("Audit")),
+            "the Audit schema node must be emitted even without a topic"
+        );
+        assert!(
+            !graph
+                .all_edges()
+                .iter()
+                .any(|e| e.edge_type == EdgeType::PayloadSchema),
+            "no topic -> nothing to bind; a dangling PayloadSchema edge would lie"
+        );
     }
 
     // Silence unused-import warnings when the file is compiled in a

@@ -68,9 +68,10 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
 /// - `HttpRoute` with `ProviderOrigin::OpenApi` → [`SensorOwner::OpenApiSensor`]
 /// - `Schema`, `Field` → [`SensorOwner::GrpcProviderSensor`] for `.proto`,
 ///   [`SensorOwner::GraphqlProviderSensor`] for `.graphql`/`.gql`,
-///   [`SensorOwner::EventSensor`] for `.avsc`, else
+///   [`SensorOwner::EventSensor`] for `.avsc` / `*.schema.json` (the
+///   payload schemas `event_sensor::scan_payload_schemas` emits), else
 ///   [`SensorOwner::OpenApiSensor`] (which owns `openapi.json` too —
-///   never route `.json` to the event sensor)
+///   never route plain `.json` to the event sensor)
 /// - Contract facts win over node-type catch-alls: `WebSocketConsumer`
 ///   rides on `HttpClientCall`, `TopicConsumer` on `Function`
 /// - `HttpClientCall` → [`SensorOwner::HttpClientSensor`] (PR 6)
@@ -190,19 +191,18 @@ fn derive_owner(
                 // never passed to `replace_sensor_output` — so those
                 // nodes were never retracted either.
                 Some(SensorOwner::GraphqlProviderSensor)
-            } else if node.path.ends_with(".avsc") {
-                // Avro payload schemas belong to the event/topic
-                // sensor. NOTE: `.json` is deliberately NOT here —
+            } else if node.path.ends_with(".avsc") || node.path.ends_with(".schema.json") {
+                // Payload schemas (Avro / JSON-Schema) belong to the
+                // event/topic sensor: `event_sensor` walks `*.avsc`
+                // and `*.schema.json` and emits these nodes
+                // (`scan_payload_schemas`), so it is the one sensor
+                // entitled to retract them on rescan.
+                //
+                // NOTE: a plain `.json` path is deliberately NOT here —
                 // `openapi_sensor` emits Schema/Field nodes for
                 // `openapi.json` / `swagger.json`, and routing those to
                 // EventSensor makes `event_sensor`'s
                 // `replace_sensor_output` retract them on every scan.
-                //
-                // NOTE: no sensor emits these today — `parse_payload_file`,
-                // which would have fed them, had no callers and was
-                // removed. The arm is kept because a future emitter is
-                // plausible and the routing is decided here; do not read
-                // it as live coverage.
                 Some(SensorOwner::EventSensor)
             } else {
                 Some(SensorOwner::OpenApiSensor)
@@ -213,7 +213,9 @@ fn derive_owner(
                 Some(SensorOwner::GrpcProviderSensor)
             } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
                 Some(SensorOwner::GraphqlProviderSensor)
-            } else if node.path.ends_with(".avsc") {
+            } else if node.path.ends_with(".avsc") || node.path.ends_with(".schema.json") {
+                // Same routing as the `Schema` arm above: the emitter
+                // (`event_sensor` for payload schemas) owns its fields.
                 Some(SensorOwner::EventSensor)
             } else {
                 Some(SensorOwner::OpenApiSensor)
@@ -3040,6 +3042,53 @@ mod replace_tests {
     fn sensor_owner_of_returns_none_for_unowned_nodes() {
         let plain = GraphNode::new(NodeType::Function, "parse".into(), "src/x.rs".into());
         assert!(sensor_owner_of(&plain).is_none());
+    }
+
+    /// Payload schema files route to the sensor that emits them
+    /// (`event_sensor` scans `*.avsc` and `*.schema.json`), while a
+    /// plain `.json` OpenAPI spec stays with `OpenApiSensor`. Routing
+    /// `*.schema.json` to OpenApiSensor would strand its nodes — that
+    /// sensor never emits them, so `event_sensor`'s rescan could never
+    /// retract them — and routing plain `.json` the other way would
+    /// let `event_sensor`'s rescan retract `openapi.json` schemas.
+    #[test]
+    fn payload_schema_files_route_to_event_sensor_and_plain_json_stays_openapi() {
+        use crate::federation::contracts::model::{ContractFact, Direction, FieldMeta, TypeDesc};
+
+        let schema_at = |path: &str| {
+            let mut n = GraphNode::new(NodeType::Schema, "Order".into(), path.into());
+            n.contract = vec![ContractFact::Schema {
+                direction: Direction::Payload,
+            }];
+            n
+        };
+        let field_at = |path: &str| {
+            let mut n = GraphNode::new(NodeType::Field, "customer_id".into(), path.into());
+            n.contract = vec![ContractFact::Field(FieldMeta {
+                ty: TypeDesc::String,
+                required: true,
+                nullable: false,
+                enum_values: None,
+            })];
+            n
+        };
+
+        for (path, want) in [
+            ("schemas/order.avsc", Some(SensorOwner::EventSensor)),
+            ("schemas/order.schema.json", Some(SensorOwner::EventSensor)),
+            ("openapi.json", Some(SensorOwner::OpenApiSensor)),
+        ] {
+            assert_eq!(
+                sensor_owner_of(&schema_at(path)),
+                want,
+                "Schema ownership for {path}"
+            );
+            assert_eq!(
+                sensor_owner_of(&field_at(path)),
+                want,
+                "Field ownership for {path}"
+            );
+        }
     }
 }
 
