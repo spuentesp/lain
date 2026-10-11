@@ -18,7 +18,7 @@ Usage: ab_metrics.py <run-dir> [<run-dir> ...]
 """
 import json, os, re, subprocess, sys
 
-CLAIM_RE = re.compile(r'AFFECTED:\s+(.+?)\s+EVIDENCE:\s+([\w-]+)([^\n]*)')
+CLAIM_RE = re.compile(r'(?<!NOT )AFFECTED:\s+(.+?)\s+EVIDENCE:\s+([\w-]+)([^\n]*)')
 NEG_RE = re.compile(r"not affected|not edited|no orders call|never calls|-> not", re.I)
 GT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "..", "..", "tests", "fixtures", "scale_task",
@@ -231,6 +231,24 @@ def score_ground_truth(claims_fmt, gt=None, overrides=None):
     res["harm"] = {"omissions": len(res["omissions"]),
                    "serious_false_positives": len(res["serious_false_positives"]),
                    "misclassified": len(res["misclassified"])}
+    # Noise policy (scale fixtures): any asserted claim in a repo outside
+    # the declared set (seed / must_find / named traps) is a false positive
+    # the decoy volume is designed to provoke.
+    noise = []
+    if str(gt["affected"].get("noise_policy", "")).startswith("unlisted_repos_are_noise"):
+        allowed = {mf["repo"] for mf in gt["affected"]["must_find"]}
+        allowed |= {mn["repo"] for mn in gt["affected"]["must_not_claim"]}
+        allowed |= set(gt["affected"].get("seed_repos", []))
+        for c in claims_fmt:
+            if not c["asserts_affected"]:
+                continue
+            if re.search(r"partner-portal|outside|external", c["symbol"], re.I):
+                continue
+            repo = c["symbol"].split(":", 1)[0].strip()
+            if repo and repo not in allowed:
+                noise.append(f"{c['symbol']} [{c['evidence']}]")
+    res["noise_false_positives"] = noise
+    res["harm"]["noise_false_positives"] = len(noise)
     if any("class" in mf for mf in gt["affected"]["must_find"]):
         res["recall_by_class"] = _recall_by_class(gt, by, ov)
     return res
