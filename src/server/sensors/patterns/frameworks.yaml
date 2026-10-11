@@ -71,6 +71,13 @@ languages:
     - id: aiokafka-consumer
       kind: topic_consumer
       path_regex: '\b(?:AIOKafkaConsumer|KafkaConsumer)\s*\(\s*["'']([^"'']+)["'']'
+    - id: confluent-kafka-consumer
+      kind: topic_consumer
+      # confluent_kafka Python: `consumer.subscribe(["topic"])` —
+      # the literal topic list (the `Consumer({...})` ctor carries
+      # config only, never a topic). Group 1: string-literal topic
+      # name.
+      path_regex: '\.subscribe\s*\(\s*\[\s*["'']([^"'']+)["'']'
     - id: aiohttp-send
       kind: topic_producer
       # `.send_and_wait(...)` / `.send(...)` with first string

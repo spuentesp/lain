@@ -25,11 +25,16 @@
 //!    `grpc.NewClient("orders:50051")` /
 //!    `ManagedChannelBuilder.forAddress("orders", 50051)` /
 //!    `grpc.insecure_channel("orders:50051")` and captures the
-//!    host string. The channel host is the consumer's
-//!    `HostPart`; the joiner resolves it through the existing
-//!    `target_service_from_hosts` (Phase B/C). Unresolvable
-//!    channels land on the coverage ledger as
-//!    `Unresolved { reason: RpcStubUnknown }`.
+//!    host string. When the constructor's first argument is a
+//!    local bound from an env-get (`os.Getenv("X")` /
+//!    `os.getenv("X")` / `System.getenv("X")`), the channel host
+//!    is `HostPart::Env([X])` — the joiner resolves it through
+//!    `services[].env` the same way the HTTP ladder does. The
+//!    channel host is the consumer's `HostPart`; a literal host
+//!    resolves through the existing `target_service_from_hosts`
+//!    (Phase B/C). Unresolvable channels land on the coverage
+//!    ledger as `Unresolved { reason: RpcStubUnknown }`
+//!    (env-bound but unmapped channels land `EnvUnmapped`).
 //!
 //! The emitted `RpcConsumer` rides on the enclosing function
 //! (or method) so the joiner can attach it to the right
@@ -42,6 +47,7 @@ use crate::federation::contracts::model::{
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{GraphEdge, GraphNode, RepoNamespace};
 use crate::server::sensors::util::compose_service_name;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -61,9 +67,10 @@ pub struct GrpcStubCall {
     /// in the same function, when found.
     pub channel_target: Option<String>,
     /// `host` portion of the channel target, projected into the
-    /// joiner's `HostPart` shape. `HostPart::None` when no
-    /// channel is resolved (the joiner emits
-    /// `Unresolved { reason: RpcStubUnknown }`).
+    /// joiner's `HostPart` shape: `Literal` for a captured
+    /// `host:port`, `Env([var])` when the dial target comes from
+    /// an env-get, `HostPart::None` when no channel is resolved
+    /// (the joiner emits `Unresolved { reason: RpcStubUnknown }`).
     pub channel_host_part: HostPart,
     pub site: SourceSite,
 }
@@ -146,7 +153,7 @@ pub fn scan_workspace_grpc_consumer(
 /// through the graph emission path.
 pub fn detect_stub_calls(content: &str, ext: &str, graph_path: &str) -> Vec<GrpcStubCall> {
     let mut out: Vec<GrpcStubCall> = Vec::new();
-    let channel = detect_channel_host(content, ext);
+    let channel = detect_channel(content, ext);
     match ext {
         "go" => detect_go_stub_calls(content, graph_path, &channel, &mut out),
         "py" => detect_python_stub_calls(content, graph_path, &channel, &mut out),
@@ -157,6 +164,85 @@ pub fn detect_stub_calls(content: &str, ext: &str, graph_path: &str) -> Vec<Grpc
         _ => {}
     }
     out
+}
+
+/// What the channel-construction scan found: a literal `host:port`
+/// target, or the env var the target was assigned from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChannelTarget {
+    Literal(String),
+    Env(String),
+}
+
+/// The channel target for the file: a literal wins (the literal
+/// pass is the historical behaviour); an env-get assignment is the
+/// fallback when the constructor's first argument is not a string
+/// literal (`target := os.Getenv("ORDERS_GRPC_ADDR")`).
+fn detect_channel(content: &str, ext: &str) -> Option<ChannelTarget> {
+    detect_channel_host(content, ext)
+        .map(ChannelTarget::Literal)
+        .or_else(|| detect_channel_env(content, ext).map(ChannelTarget::Env))
+}
+
+/// Env-get locals in the file: `name := os.Getenv("X")` (Go),
+/// `name = os.getenv("X")` / `os.environ["X"]` (Python),
+/// `String name = System.getenv("X")` (Java). The right-hand side
+/// is recognised by the shared [`host_env_name`] grammar, so the
+/// three languages need no per-shape code here.
+fn collect_env_locals(content: &str) -> BTreeMap<String, String> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for line in content.lines() {
+        let Some(eq) = line.find('=') else { continue };
+        // Identifier before the `=`: the last token of the left
+        // side, so Go's `target := …` and Java's
+        // `String target = …` both yield `target`. `==` / `!=`
+        // comparisons fall out because the last token is an
+        // operator, not an identifier.
+        let lhs = line[..eq].trim().trim_end_matches(':').trim();
+        let name = lhs.split_whitespace().last().unwrap_or("");
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let rhs = line[eq + 1..].trim();
+        if let Some(var) = crate::server::sensors::util::host_env_name(rhs) {
+            out.insert(name.to_string(), var.to_string());
+        }
+    }
+    out
+}
+
+/// The channel constructor's first argument is an env var when it
+/// *is* an env call (`ManagedChannelBuilder.forAddress(System.getenv("X"), …)`)
+/// or a bare identifier bound from one in the same file.
+fn detect_channel_env(content: &str, ext: &str) -> Option<String> {
+    let ctor = match ext {
+        "go" => "grpc.NewClient(",
+        "py" => "grpc.insecure_channel(",
+        "java" => "ManagedChannelBuilder.forAddress(",
+        _ => return None,
+    };
+    let env_locals = collect_env_locals(content);
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let Some(pos) = trimmed.find(ctor) else {
+            continue;
+        };
+        let rest = &trimmed[pos + ctor.len()..];
+        // Direct env call as the argument (Java). The shared
+        // grammar cuts the name at the call's own `)`.
+        if let Some(var) = crate::server::sensors::util::host_env_name(rest) {
+            return Some(var.to_string());
+        }
+        // Bare identifier argument — resolve against the file's
+        // env-get locals.
+        let arg = rest.split([',', ')']).next().unwrap_or("").trim();
+        if !arg.is_empty() && arg.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            if let Some(var) = env_locals.get(arg) {
+                return Some(var.clone());
+            }
+        }
+    }
+    None
 }
 
 fn detect_channel_host(content: &str, ext: &str) -> Option<String> {
@@ -223,7 +309,7 @@ fn extract_host(target: &str) -> String {
 fn detect_go_stub_calls(
     content: &str,
     graph_path: &str,
-    channel: &Option<String>,
+    channel: &Option<ChannelTarget>,
     out: &mut Vec<GrpcStubCall>,
 ) {
     for det in crate::server::sensors::util_tokenize::detect_method_calls(
@@ -253,7 +339,7 @@ fn detect_go_stub_calls(
 fn detect_python_stub_calls(
     content: &str,
     graph_path: &str,
-    channel: &Option<String>,
+    channel: &Option<ChannelTarget>,
     out: &mut Vec<GrpcStubCall>,
 ) {
     for det in crate::server::sensors::util_tokenize::detect_method_calls(
@@ -283,7 +369,7 @@ fn detect_python_stub_calls(
 fn detect_java_stub_calls(
     content: &str,
     graph_path: &str,
-    channel: &Option<String>,
+    channel: &Option<ChannelTarget>,
     out: &mut Vec<GrpcStubCall>,
 ) {
     for det in crate::server::sensors::util_tokenize::detect_method_calls(
@@ -317,7 +403,7 @@ fn detect_java_stub_calls(
 fn detect_cpp_stub_calls(
     content: &str,
     graph_path: &str,
-    channel: &Option<String>,
+    channel: &Option<ChannelTarget>,
     out: &mut Vec<GrpcStubCall>,
 ) {
     for (line_no, line) in
@@ -388,15 +474,17 @@ fn strip_stub_suffix(name: &str) -> String {
         .unwrap_or_default()
 }
 
-fn host_parts_from_channel(channel: &Option<String>) -> (Option<String>, HostPart) {
-    // `channel` here is the *host* portion the channel-detection
-    // pass extracted from the channel constructor's first argument.
-    // We keep the host verbatim in `channel_target` (the joiner
-    // surfaces it on the ledger record) and project it into
-    // `HostPart::Literal` so the existing `target_service_from_hosts`
-    // dispatch (Phase B / C) can match it against `services[].hosts`.
+fn host_parts_from_channel(channel: &Option<ChannelTarget>) -> (Option<String>, HostPart) {
+    // `channel` is what the channel-detection pass extracted from
+    // the channel constructor's first argument. A literal host is
+    // kept verbatim in `channel_target` (the joiner surfaces it on
+    // the ledger record) and projected into `HostPart::Literal` so
+    // the existing `target_service_from_hosts` dispatch (Phase B /
+    // C) can match it against `services[].hosts`. An env-bound
+    // target carries no host:port literal — the var name rides on
+    // `HostPart::Env` for the joiner's `services[].env` dispatch.
     match channel {
-        Some(host) => {
+        Some(ChannelTarget::Literal(host)) => {
             let host_part = if host.is_empty() {
                 HostPart::None
             } else {
@@ -404,6 +492,7 @@ fn host_parts_from_channel(channel: &Option<String>) -> (Option<String>, HostPar
             };
             (Some(host.clone()), host_part)
         }
+        Some(ChannelTarget::Env(var)) => (None, HostPart::Env(vec![var.clone()])),
         None => (None, HostPart::None),
     }
 }
@@ -481,6 +570,73 @@ func main() {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].channel_target.is_none());
         assert!(matches!(calls[0].channel_host_part, HostPart::None));
+    }
+
+    /// Go gRPC whose dial target comes from `os.Getenv` — the
+    /// enterprise-mesh logistics-svc shape. The channel host must
+    /// surface as `HostPart::Env([var])` so the joiner can bind it
+    /// through `services[].env` (or land `EnvUnmapped` with the var
+    /// visible) instead of `RpcStubUnknown`.
+    #[test]
+    fn go_stub_call_resolves_env_channel() {
+        let src = "\
+package logistics
+
+import (
+\t\"context\"
+\t\"os\"
+
+\t\"google.golang.org/grpc\"
+\t\"logistics-svc/pb\"
+)
+
+func fetchOrder(ctx context.Context) (*pb.Order, error) {
+\ttarget := os.Getenv(\"ORDERS_GRPC_ADDR\")
+\tconn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tordersClient := pb.NewOrdersClient(conn)
+\treturn ordersClient.GetOrder(ctx, &pb.GetOrderRequest{Id: \"1\"})
+}
+";
+        let calls = detect_stub_calls(src, "go", "handler.go");
+        assert_eq!(calls.len(), 1, "expected one stub call: {calls:?}");
+        let c = &calls[0];
+        assert_eq!(c.service, "orders");
+        assert_eq!(c.method, "GetOrder");
+        assert!(
+            matches!(&c.channel_host_part, HostPart::Env(names) if names == &vec!["ORDERS_GRPC_ADDR".to_string()]),
+            "dial target from os.Getenv must surface as HostPart::Env; got {:?}",
+            c.channel_host_part
+        );
+        assert!(
+            c.channel_target.is_none(),
+            "an env dial target is not a host:port literal; got {:?}",
+            c.channel_target
+        );
+    }
+
+    /// A literal channel target keeps winning even when the file
+    /// also has env-get assignments — the literal pass runs first.
+    #[test]
+    fn go_stub_literal_channel_wins_over_env_assignment() {
+        let src = "\
+package main
+func main() {
+    addr := os.Getenv(\"ORDERS_GRPC_ADDR\")
+    client := grpc.NewClient(\"orders:50051\")
+    ordersClient := pb.NewOrdersClient(client)
+    resp, err := ordersClient.Get(ctx, &pb.GetRequest{Id: id})
+    _ = resp
+}
+";
+        let calls = detect_stub_calls(src, "go", "main.go");
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            calls[0].channel_host_part,
+            HostPart::Literal(ref h) if h == "orders"
+        ));
     }
 
     #[test]

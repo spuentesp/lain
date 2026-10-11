@@ -301,6 +301,7 @@ impl ContractJoiner {
                         fact,
                         &endpoint_table,
                         config,
+                        &mut unresolved_env_vars,
                         &mut binds,
                     );
                     consumers

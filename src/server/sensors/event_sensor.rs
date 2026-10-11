@@ -4,6 +4,8 @@
 //!
 //! - kafkajs / confluent-kafka (Node/TypeScript): `producer.send({ topic })`
 //!   and `consumer.run({ topic })` / `consumer.subscribe({ topics: [..] })`.
+//! - confluent_kafka (Python): `consumer.subscribe(["topic"])` — the
+//!   literal topic list on the `subscribe` call.
 //! - aiokafka (Python): `AIOKafkaProducer(...)`, `KafkaConsumer(...)`,
 //!   `.send(topic=..., ...)`.
 //! - rdkafka (Rust): `FutureProducer::send(record, ...)` where the
@@ -730,6 +732,56 @@ mod tests {
             topics.iter().any(|t| t.name == "kafka/orders.created"),
             "got {:?}",
             topics.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// confluent_kafka (Python) `consumer.subscribe(["order.events"])`
+    /// — the enterprise-mesh notify-worker shape. The constructor
+    /// `Consumer({...})` carries no topic; the literal topic list on
+    /// `subscribe` is the only evidence, and it must yield a
+    /// `Consumes` edge on `kafka/<topic>`.
+    #[test]
+    fn confluent_kafka_subscribe_emits_consumes_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("worker.py"),
+            "from confluent_kafka import Consumer\n\n\
+             CONSUMER_CONFIG = {\"group.id\": \"notify-worker\", \"bootstrap.servers\": \"kafka:9092\"}\n\n\
+             def build_consumer():\n\
+             \x20   consumer = Consumer(CONSUMER_CONFIG)\n\
+             \x20   consumer.subscribe([\"order.events\"])\n\
+             \x20   return consumer\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let topics: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .collect();
+        assert!(
+            topics.iter().any(|t| t.name == "kafka/order.events"),
+            "confluent_kafka subscribe([...]) must emit Topic kafka/order.events; \
+             got {:?}",
+            topics.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        let consumes = graph
+            .all_edges()
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::Consumes)
+            .count();
+        assert!(consumes >= 1, "expected at least one Consumes edge");
+        let fact_carrier = graph.get_all_nodes().into_iter().find(|n| {
+            n.contract
+                .iter()
+                .any(|f| matches!(f, ContractFact::TopicConsumer(t) if t.name == "order.events"))
+        });
+        assert!(
+            fact_carrier.is_some(),
+            "a TopicConsumer fact for order.events must be recorded"
         );
     }
 
