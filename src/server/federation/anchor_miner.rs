@@ -346,6 +346,51 @@ pub fn mint_cross_repo_observations(
             blocked.insert(pair_key(&e.source_id, &e.target_id));
         }
     }
+
+    // Second suppression layer (Task 2): the typed bus edge a sensor
+    // mints is fn/synthetic → Topic within ONE repo, so its pair key
+    // can never equal the cross-repo fn↔fn (or file↔file) pair the
+    // anchor mint would create — the exact-pair rule above is blind
+    // to it. Map each endpoint to the topic labels its
+    // static/confirmed BusTopic/Consumes/Produces edges reach; when
+    // BOTH endpoints of a would-be queue/topic anchor pair already
+    // carry a label ending in `/{anchor literal}` (the
+    // `{broker}/{name}` convention), the typed edges already cover
+    // the coupling and the heuristic twin is skipped.
+    let nodes = backend.list_nodes()?;
+    let topic_labels: BTreeMap<String, String> = nodes
+        .iter()
+        .filter(|n| n.node_type == NodeType::Topic)
+        .map(|n| (n.id.clone(), n.name.clone()))
+        .collect();
+    let mut bus_covered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for e in &existing {
+        if !matches!(
+            e.provenance,
+            Some(EdgeProvenance::Static { .. }) | Some(EdgeProvenance::Confirmed { .. })
+        ) {
+            continue;
+        }
+        if !matches!(
+            e.edge_type,
+            EdgeType::BusTopic | EdgeType::Consumes | EdgeType::Produces
+        ) {
+            continue;
+        }
+        if let Some(topic) = topic_labels.get(&e.source_id) {
+            bus_covered
+                .entry(e.target_id.clone())
+                .or_default()
+                .insert(topic.clone());
+        }
+        if let Some(topic) = topic_labels.get(&e.target_id) {
+            bus_covered
+                .entry(e.source_id.clone())
+                .or_default()
+                .insert(topic.clone());
+        }
+    }
+
     let mut minted: HashSet<(String, String, EdgeType)> = HashSet::new();
     for e in &existing {
         minted.insert((
@@ -355,7 +400,7 @@ pub fn mint_cross_repo_observations(
         ));
     }
 
-    let mut index = build_node_index(backend.list_nodes()?);
+    let mut index = build_node_index(nodes);
 
     // ── group occurrences by (kind, key) ────────────────────────────
     let mut groups: BTreeMap<(AnchorKind, String), Vec<&AnchorOccurrence>> = BTreeMap::new();
@@ -414,11 +459,19 @@ pub fn mint_cross_repo_observations(
             continue;
         }
         let edge_type = kind.edge_type();
+        // Only queue/topic anchors share a `{broker}/{name}` label
+        // convention with the typed bus edges; route/proto/env
+        // anchors have no Topic-node coverage semantics.
+        let typed_covered = matches!(kind, AnchorKind::Queue | AnchorKind::Topic);
+        let key_suffix = format!("/{key}");
         for i in 0..repos.len() {
             for j in (i + 1)..repos.len() {
                 for a in &per_repo[repos[i]] {
                     for b in &per_repo[repos[j]] {
                         if blocked.contains(&pair_key(a, b)) {
+                            continue;
+                        }
+                        if typed_covered && pair_bus_covered(a, b, &key_suffix, &bus_covered) {
                             continue;
                         }
                         for (s, t) in [(a.clone(), b.clone()), (b.clone(), a.clone())] {
@@ -553,6 +606,28 @@ fn pair_key(a: &str, b: &str) -> [String; 2] {
     } else {
         [b.to_string(), a.to_string()]
     }
+}
+
+/// Both endpoints of a would-be anchor pair already carry a
+/// static/confirmed bus edge to a Topic labelled `*/<key>` (the
+/// `{broker}/{name}` convention, e.g. `amqp/order-events` for the
+/// queue literal `order-events`) — the typed sensor edges already
+/// cover this coupling, so the heuristic twin is skipped. The
+/// per-endpoint label sets (`bus_covered`) are keyed by node id, so
+/// this works whether the two repos' endpoints bind the same Topic
+/// node or distinct per-repo Topic nodes sharing one name.
+fn pair_bus_covered(
+    a: &str,
+    b: &str,
+    key_suffix: &str,
+    covered: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    let covers = |id: &str| {
+        covered
+            .get(id)
+            .is_some_and(|labels| labels.iter().any(|l| l.ends_with(key_suffix)))
+    };
+    covers(a) && covers(b)
 }
 
 fn heuristic_edge(

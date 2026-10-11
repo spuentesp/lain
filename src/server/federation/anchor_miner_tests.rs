@@ -553,6 +553,121 @@ fn typed_amqp_consumes_edge_suppresses_queue_anchor_mint() {
     );
 }
 
+/// Task 2 fix: the REAL typed shape — each repo's fn carries a
+/// Static `Consumes`/`Produces` edge to an `amqp/order-events` Topic
+/// node (fn → Topic, within one repo) — suppresses the cross-repo
+/// `anchor:queue:order-events` twin. The exact-pair rule cannot see
+/// this (the fn→Topic pair key never equals the fn↔fn pair the mint
+/// would create); the topic-coverage rule does. Both topic-node
+/// layouts are pinned: one Topic node per repo (the federation
+/// projection keeps per-repo Topic nodes distinct) and one shared
+/// Topic node.
+#[test]
+fn typed_amqp_topic_edges_suppress_cross_repo_queue_anchor_mint() {
+    for shared_topic in [false, true] {
+        let label = if shared_topic {
+            "shared topic node"
+        } else {
+            "per-repo topic nodes"
+        };
+        let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-task2-amqp-typed"));
+        let ledger = repo("ledger-svc");
+        let orders = repo("orders-svc");
+        let consume = spanned_node(
+            &ledger,
+            NodeType::Function,
+            "src/ledger.py",
+            "consume_orders",
+            (1, 1),
+        );
+        let declare = spanned_node(
+            &orders,
+            NodeType::Function,
+            "src/legacy_amqp.rs",
+            "declare_queue",
+            (1, 1),
+        );
+        backend.upsert_node(consume.clone()).unwrap();
+        backend.upsert_node(declare.clone()).unwrap();
+
+        // The event sensor's Topic nodes: named `{broker}/{queue}`.
+        let ledger_topic = spanned_node(
+            &ledger,
+            NodeType::Topic,
+            "src/ledger.py",
+            "amqp/order-events",
+            (3, 3),
+        );
+        let orders_topic = if shared_topic {
+            ledger_topic.clone()
+        } else {
+            spanned_node(
+                &orders,
+                NodeType::Topic,
+                "src/legacy_amqp.rs",
+                "amqp/order-events",
+                (3, 3),
+            )
+        };
+        backend.upsert_node(ledger_topic.clone()).unwrap();
+        if !shared_topic {
+            backend.upsert_node(orders_topic.clone()).unwrap();
+        }
+
+        // The typed edges the event sensor mints: fn → Topic, Static
+        // provenance, within one repo — never fn ↔ fn.
+        let mut consume_edge = GraphEdge::new(
+            EdgeType::Consumes,
+            consume.id.clone(),
+            ledger_topic.id.clone(),
+        );
+        consume_edge.provenance = Some(EdgeProvenance::Static {
+            source: crate::schema::StaticSource::Regex,
+        });
+        backend.upsert_edge(consume_edge).unwrap();
+        let mut produce_edge = GraphEdge::new(
+            EdgeType::Produces,
+            declare.id.clone(),
+            orders_topic.id.clone(),
+        );
+        produce_edge.provenance = Some(EdgeProvenance::Static {
+            source: crate::schema::StaticSource::Regex,
+        });
+        backend.upsert_edge(produce_edge).unwrap();
+
+        let occ = [
+            occurrence(
+                "orders-svc",
+                "src/legacy_amqp.rs",
+                1,
+                AnchorKind::Queue,
+                "order-events",
+            ),
+            occurrence(
+                "ledger-svc",
+                "src/ledger.py",
+                1,
+                AnchorKind::Queue,
+                "order-events",
+            ),
+        ];
+        let report = mint_cross_repo_observations(&backend, &occ, &[]).unwrap();
+        assert_eq!(
+            report.anchor_edges, 0,
+            "{label}: the typed fn -> Topic edges already cover the coupling; \
+             the heuristic twin must not duplicate them: {report:?}"
+        );
+        let edges = backend.all_edges().unwrap();
+        assert!(
+            !edges.iter().any(|e| matches!(
+                &e.provenance,
+                Some(EdgeProvenance::Heuristic { detector, .. }) if detector.starts_with("anchor:queue")
+            )),
+            "{label}: heuristic twin must not duplicate the typed edges: {edges:?}"
+        );
+    }
+}
+
 /// TDD #6 (claims integration): a chain that crosses only a minted
 /// anchor edge classifies as `needs-investigation` with the detector
 /// named — never `verified`.
