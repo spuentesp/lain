@@ -215,6 +215,59 @@ fn capability_and_status_commands_project_the_same_readiness() {
     }
 }
 
+/// B2/B3 at a federation root: `lain doctor` must (a) say this looks
+/// like a federation root and name `lain server --config ./repos.yaml`
+/// as the fix — instead of only "run inside a Git repository", which
+/// sends agents in exactly the wrong direction — and (b) follow its
+/// documented exit contract (0 ready, 1 degraded, 2 unusable): with
+/// `Agent-ready: NO` it must exit 2, never 0.
+#[test]
+fn federation_root_doctor_names_the_federation_fix_and_exits_unusable() {
+    let fed = tempfile::tempdir().unwrap();
+    std::fs::write(
+        fed.path().join("repos.yaml"),
+        "data_dir: ./.lain-data\nrepos:\n  - id: fixture\n    source:\n      type: workspace_dir\n      path: ./fixture\n",
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_lain"))
+        .args(["doctor", "--workspace"])
+        .arg(fed.path())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join("config"))
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .env_remove("LAIN_URL")
+        .env_remove("LAIN_SERVER_URL")
+        .env_remove("LAIN_EMBEDDING_MODEL")
+        .env_remove("LAIN_WORKSPACE")
+        .output()
+        .expect("run lain doctor");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "Agent-ready: NO must exit 2 (documented: 0 ready, 1 degraded, 2 unusable):\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Agent-ready: NO"), "{stdout}");
+    assert!(
+        stdout.contains("repository_not_found"),
+        "the problem must still be reported: {stdout}"
+    );
+    assert!(
+        stdout.contains("federation root"),
+        "doctor must say this looks like a federation root: {stdout}"
+    );
+    assert!(
+        stdout.contains("run `lain server --config ./repos.yaml` (see docs/FEDERATION.md)"),
+        "doctor must name the federation fix verbatim: {stdout}"
+    );
+    assert!(
+        stdout.contains("`--workspace <repo-id>`") && stdout.contains("an entry in repos.yaml"),
+        "doctor must name the single-repo scoping fix: {stdout}"
+    );
+}
+
 /// Regression test for the doctor `tools/list` happy path.
 ///
 /// The pre-fix code sent `{"method": "tools/call", "params": {"name": "tools/list"}}`

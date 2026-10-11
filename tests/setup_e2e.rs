@@ -251,3 +251,66 @@ fn unknown_agent_fails_clearly_without_writing_anything() {
     );
     assert!(!fixture.path().join(".mcp.json").exists());
 }
+
+/// B1: at a federation root (`repos.yaml` present, no `.git` anywhere up
+/// the tree) `lain setup` must succeed and write an `.mcp.json` entry
+/// that serves the federation — `<abs lain> server --config <abs
+/// repos.yaml>` — because the single-repo `lain mcp` entry can never
+/// resolve a workspace here (it fails with "no workspace resolved", so
+/// the agent's client gets no MCP server at all).
+#[test]
+fn federation_root_setup_writes_server_config_entry_and_succeeds() {
+    let fed = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        fed.path().join("repos.yaml"),
+        "data_dir: ./.lain-data\nrepos:\n  - id: fixture\n    source:\n      type: workspace_dir\n      path: ./fixture\n",
+    )
+    .unwrap();
+
+    let out = Command::new(lain_bin())
+        .args(["setup", "--agent", "generic", "--json", "--no-model"])
+        .current_dir(fed.path())
+        .env_remove("LAIN_URL")
+        .env_remove("LAIN_SERVER_URL")
+        .env_remove("LAIN_WORKSPACE")
+        .output()
+        .expect("run lain setup");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let value: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("setup must print valid JSON: {e}\nstdout:\n{stdout}"));
+    assert!(
+        out.status.success(),
+        "setup at a federation root must exit 0: {value}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(value["ready"], true, "ready must be true: {value}");
+    assert_eq!(
+        value["configuration"]["state"], "configured",
+        "the generic adapter must have written the config: {value}"
+    );
+
+    let config_path = fed.path().join(".mcp.json");
+    assert!(
+        config_path.is_file(),
+        ".mcp.json must exist at the federation root"
+    );
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    // The config path in the entry must be absolute (agent clients may
+    // launch from any cwd); canonicalize for comparison because tempdir
+    // paths can sit behind symlinks (e.g. /tmp -> /private/tmp).
+    let repos_yaml = fed.path().join("repos.yaml");
+    let repos_yaml = repos_yaml.canonicalize().unwrap_or(repos_yaml);
+    assert_eq!(
+        written["mcpServers"]["lain"]["args"],
+        serde_json::json!(["server", "--config", repos_yaml.display().to_string()]),
+        "federation entry must serve `lain server --config <abs repos.yaml>`: {written}"
+    );
+    assert!(
+        written["mcpServers"]["lain"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("lain"),
+        "command must be the lain binary: {written}"
+    );
+}

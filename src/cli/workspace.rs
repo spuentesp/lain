@@ -154,6 +154,49 @@ pub fn walk_up_for_git(start: &Path) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+/// Walk up from `start` until a directory containing `repos.yaml` is
+/// found, or 16 levels are exhausted — the federation-root counterpart
+/// of [`walk_up_for_git`]. Returns the directory that holds the config.
+pub fn walk_up_for_repos_yaml(start: &Path) -> Option<PathBuf> {
+    let mut current = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    for _ in 0..16 {
+        if current.join("repos.yaml").is_file() {
+            return Some(current);
+        }
+        current = current.parent()?.to_path_buf();
+    }
+    None
+}
+
+/// Guidance to append to any "no git workspace resolved" error when a
+/// `repos.yaml` sits at `start` or above: the failure is really "you
+/// are standing at a federation root", so say that and name both
+/// fixes — serve the federation instead of a single repo, or scope the
+/// single-repo command to one `repos.yaml` entry. `None` when no
+/// `repos.yaml` is nearby; callers then keep their git-clone guidance
+/// untouched.
+pub fn federation_root_guidance(start: &Path) -> Option<String> {
+    let root = walk_up_for_repos_yaml(start)?;
+    Some(format!(
+        "this looks like a federation root ({}); run `lain server --config ./repos.yaml` \
+         (see docs/FEDERATION.md), or scope single-repo commands with `--workspace <repo-id>` \
+         where `<repo-id>` is an entry in repos.yaml",
+        root.join("repos.yaml").display()
+    ))
+}
+
+/// [`federation_root_guidance`] for the running process: the process's
+/// own cwd first, then the parent process's cwd — the same candidates
+/// [`find_git_workspace_root`] considers for no-argument resolution.
+pub fn federation_root_guidance_here() -> Option<String> {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(guidance) = federation_root_guidance(&cwd) {
+            return Some(guidance);
+        }
+    }
+    federation_root_guidance(&parent_process_cwd()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +222,47 @@ mod tests {
         // contain .git in practice; assert that explicitly.)
         let found = find_git_workspace_root(Some(tmp.path())).unwrap();
         assert!(found.is_none());
+    }
+
+    // --- federation-root detection (B2) ---
+
+    #[test]
+    fn walk_up_for_repos_yaml_finds_a_federation_root_in_an_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("repos.yaml"), "repos: []\n").unwrap();
+        let sub = tmp.path().join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let found = walk_up_for_repos_yaml(&sub).expect("walk-up finds the federation root");
+        assert!(found.join("repos.yaml").is_file());
+    }
+
+    #[test]
+    fn walk_up_for_repos_yaml_returns_none_without_a_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Same environmental assumption as `returns_none_when_no_dot_git_within_16`:
+        // nothing above a tempdir holds a repos.yaml.
+        assert!(walk_up_for_repos_yaml(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn federation_root_guidance_names_the_federation_fix_verbatim() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("repos.yaml"), "repos: []\n").unwrap();
+        let guidance =
+            federation_root_guidance(tmp.path()).expect("guidance when repos.yaml is present");
+        assert!(guidance.contains("federation root"), "{guidance}");
+        assert!(
+            guidance.contains("run `lain server --config ./repos.yaml` (see docs/FEDERATION.md)"),
+            "{guidance}"
+        );
+        assert!(guidance.contains("`--workspace <repo-id>`"), "{guidance}");
+        assert!(guidance.contains("an entry in repos.yaml"), "{guidance}");
+    }
+
+    #[test]
+    fn federation_root_guidance_is_none_without_repos_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(federation_root_guidance(tmp.path()).is_none());
     }
 
     #[test]

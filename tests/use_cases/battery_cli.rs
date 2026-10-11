@@ -268,3 +268,145 @@ fn lain_query_help_works() {
     let out = run(&["query", "--help"]);
     assert!(out.status.success(), "query --help must exit 0");
 }
+
+// ─── federation-root guidance (B2 / B3) ─────────────────────────
+//
+// At a federation root (repos.yaml present, no .git up the tree) the
+// single-repo commands cannot resolve a workspace. Their errors must
+// point at the federation path (`lain server --config ./repos.yaml`)
+// instead of only the git-clone advice agents already failed to act
+// on in the field, and any command that prints `Error:` must exit
+// nonzero.
+
+/// A fresh federation root: `repos.yaml`, no `.git` anywhere up the
+/// tree (tempdirs live under /tmp, whose ancestors hold no .git).
+fn federation_root() -> tempfile::TempDir {
+    let fed = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        fed.path().join("repos.yaml"),
+        "data_dir: ./.lain-data\nrepos:\n  - id: fixture\n    source:\n      type: workspace_dir\n      path: ./fixture\n",
+    )
+    .unwrap();
+    fed
+}
+
+/// Absolute path to the binary: these tests spawn with
+/// `current_dir(fed)`, and the relative `target/debug/lain` from
+/// `lain_bin()` would resolve against that directory instead of the
+/// package root. Falls back to the bare name when no local build
+/// exists (spawn then searches PATH).
+fn lain_bin_abs() -> PathBuf {
+    let bin = lain_bin();
+    bin.canonicalize().unwrap_or(bin)
+}
+
+/// The two verbatim pieces every federation-root error must carry.
+fn assert_federation_guidance(stream: &str, context: &str) {
+    assert!(
+        stream.contains("federation root"),
+        "{context}: error must say this is a federation root:\n{stream}"
+    );
+    assert!(
+        stream.contains("run `lain server --config ./repos.yaml` (see docs/FEDERATION.md)"),
+        "{context}: error must name the federation fix verbatim:\n{stream}"
+    );
+    assert!(
+        stream.contains("`--workspace <repo-id>`") && stream.contains("an entry in repos.yaml"),
+        "{context}: error must name the single-repo scoping fix:\n{stream}"
+    );
+}
+
+#[test]
+fn lain_mcp_at_federation_root_names_the_federation_fix() {
+    let fed = federation_root();
+    let out = Command::new(lain_bin_abs())
+        .arg("mcp")
+        .current_dir(fed.path())
+        .env_remove("LAIN_WORKSPACE")
+        .output()
+        .expect("spawn lain mcp");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "lain mcp at a federation root has no repo to serve and must fail:\n{stderr}"
+    );
+    assert_federation_guidance(&stderr, "lain mcp");
+}
+
+#[test]
+fn lain_query_at_federation_root_names_the_federation_fix() {
+    let fed = federation_root();
+    let out = Command::new(lain_bin_abs())
+        .args(["query", "find Function"])
+        .current_dir(fed.path())
+        .output()
+        .expect("spawn lain query");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "lain query at a federation root must fail:\n{stderr}"
+    );
+    assert_federation_guidance(&stderr, "lain query");
+}
+
+#[test]
+fn lain_impact_at_federation_root_names_the_federation_fix() {
+    let fed = federation_root();
+    let out = Command::new(lain_bin_abs())
+        .args(["impact", "some_symbol"])
+        .current_dir(fed.path())
+        .output()
+        .expect("spawn lain impact");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "lain impact at a federation root must fail:\n{stderr}"
+    );
+    assert_federation_guidance(&stderr, "lain impact");
+}
+
+/// B3(a): `lain oneshot` prints `Error: …` and must exit nonzero —
+/// and B2: the error must carry the federation guidance when the
+/// target is a federation root.
+#[test]
+fn lain_oneshot_at_federation_root_exits_nonzero_with_federation_guidance() {
+    let fed = federation_root();
+    let out = Command::new(lain_bin_abs())
+        .args(["oneshot", "--workspace"])
+        .arg(fed.path())
+        .args(["find_anchors"])
+        .output()
+        .expect("spawn lain oneshot");
+    assert!(
+        !out.status.success(),
+        "lain oneshot must exit nonzero after printing an error (stdout: {}, stderr: {})",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("has no .git"), "stderr: {stderr}");
+    assert_federation_guidance(&stderr, "lain oneshot");
+}
+
+/// B2, no-repos.yaml branch: outside a federation the git-clone
+/// guidance stays exactly as it was (no federation noise).
+#[test]
+fn lain_oneshot_without_repos_yaml_keeps_the_git_clone_guidance() {
+    let bare = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(lain_bin_abs())
+        .args(["oneshot", "--workspace"])
+        .arg(bare.path())
+        .args(["find_anchors"])
+        .output()
+        .expect("spawn lain oneshot");
+    assert!(!out.status.success(), "must fail without a .git");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("has no .git") && stderr.contains("run from inside a clone"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("federation root"),
+        "no repos.yaml nearby => no federation guidance: {stderr}"
+    );
+}

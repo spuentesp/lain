@@ -79,15 +79,21 @@ pub fn resolve_workspaces(argv_workspaces: &[PathBuf]) -> Vec<PathBuf> {
 /// Strict variant: errors when no workspace can be resolved, with a
 /// message that tells the caller how to fix it. Used by `run_mcp` /
 /// `run_sidecar` when they need at least one workspace to do anything
-/// useful.
+/// useful. When a `repos.yaml` sits at (or above) the cwd the caller
+/// is really standing at a federation root — the error then also names
+/// the federation fix instead of only the git-clone advice.
 pub fn resolve_workspaces_strict(argv_workspaces: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let resolved = resolve_workspaces(argv_workspaces);
     if resolved.is_empty() {
-        return Err(anyhow!(
-            "no workspace resolved — pass `--workspace PATH` (repeatable), \
+        let base = "no workspace resolved — pass `--workspace PATH` (repeatable), \
              set `LAIN_WORKSPACE=/path/to/repo[,/path/to/another]`, or run from \
-             inside a git clone"
-        ));
+             inside a git clone";
+        return Err(
+            match crate::cli::workspace::federation_root_guidance_here() {
+                Some(guidance) => anyhow!("{base}; {guidance}"),
+                None => anyhow!("{base}"),
+            },
+        );
     }
     Ok(resolved)
 }

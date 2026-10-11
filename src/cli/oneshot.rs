@@ -239,17 +239,25 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
     let workspace = match workspace {
         Some(p) => p.to_path_buf(),
         None => find_git_workspace_root(None)?.ok_or_else(|| {
-            anyhow!(
-                "no `.git` found in any parent directory and no --workspace given; \
-                 pass --workspace PATH or run from inside a clone"
-            )
+            let base = "no `.git` found in any parent directory and no --workspace given; \
+                 pass --workspace PATH or run from inside a clone";
+            match crate::cli::workspace::federation_root_guidance_here() {
+                Some(guidance) => anyhow!("{base}; {guidance}"),
+                None => anyhow!("{base}"),
+            }
         })?,
     };
     if !workspace.join(".git").exists() {
-        return Err(anyhow!(
+        let base = format!(
             "{} has no .git — pass --workspace PATH or run from inside a clone",
             workspace.display()
-        ));
+        );
+        return Err(
+            match crate::cli::workspace::federation_root_guidance(&workspace) {
+                Some(guidance) => anyhow!("{base}; {guidance}"),
+                None => anyhow!("{base}"),
+            },
+        );
     }
 
     // Build the tool's `arguments` object from the trailing positional
