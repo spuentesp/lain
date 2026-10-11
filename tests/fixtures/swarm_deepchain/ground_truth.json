@@ -1,0 +1,58 @@
+{
+  "_readme": "Oracle for the swarm deep-chain experiment. Declared BEFORE any run. Scenario: core renames a response field; the name ripples through a 5-repo cross-language HTTP chain (cli -> core, api -> core, billing -> api, notify -> billing) and to one consumer whose code is NOT in the workspace. The metric that matters is HARM: chain links or externals omitted from the affected list, and trap claims made without evidence. Deep-chain member notify reads the field through a dynamic key two hops downstream — grep in its repo proves nothing; the contract chain is the only path to it.",
+  "schema": 1,
+  "fixture": {
+    "repos": {
+      "core":     {"language": "rust",     "role": "SEED — serves GET /core/orders/{id} with response field customer_id; the change renames it to customer_ref (serde rename, same type)"},
+      "api":      {"language": "typescript", "role": "BFF — calls core's endpoint, forwards the field in its own GET /bff/orders/{id}"},
+      "cli":      {"language": "typescript", "role": "consumer — calls core's endpoint directly, reads resp.customer_id for display"},
+      "billing":  {"language": "python",   "role": "consumer+forwarder — reads the field from api's response, re-emits it in GET /invoices/{id}"},
+      "notify":   {"language": "python",   "role": "DEEP consumer — reads it from billing's response via dynamic key resp.get('customer_' + suffix); 3 hops from core, 2 hops from any literal mention"},
+      "reporting": {"language": "python",  "role": "HOMONYM TRAP — has build_invoice too, builds invoices from CSV, zero calls to any chain endpoint"},
+      "catalog":  {"language": "python",   "role": "NEAR-MISS TRAP — calls core's endpoint but reads only `total`"}
+    },
+    "external": {
+      "partner-portal": {"role": "OUT-OF-WORKSPACE consumer of GET /core/orders/{id}, declared in core's openapi.yaml as an external consumer; code is absent"}
+    },
+    "test_commands": {
+      "core":     ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "api":      ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "cli":      ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "billing":  ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "notify":   ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "reporting": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "catalog":  ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+    }
+  },
+  "change": {
+    "description": "core renames the RESPONSE field of GET /core/orders/{id} from customer_id to customer_ref (same type, serde rename). Every place that names that field on the wire must follow. tests/ untouched anywhere; public function names unchanged.",
+    "field_from": "customer_id",
+    "field_to": "customer_ref"
+  },
+  "affected": {
+    "must_find": [
+      {"repo": "api", "symbol": "forward_order", "evidence": "verified", "why": "names the field when forwarding core's response; static consumer of GET /core/orders/{id}"},
+      {"repo": "cli", "symbol": "show_order", "evidence": "verified", "why": "reads resp.customer_id from core's response; static consumer, literal field read"},
+      {"repo": "billing", "symbol": "build_invoice", "evidence": "verified", "why": "reads the field from api's response and re-emits it; chain api->core is static end to end"},
+      {"repo": "notify", "symbol": "send_notice", "evidence": "needs-investigation", "why": "reads it via dynamic key resp.get('customer_' + suffix) from billing's response — the contract chain billing->api->core is static, the field read is not provable; it must be DECLARED as needing investigation, never dropped and never verified"},
+      {"repo": "external", "symbol": "partner-portal", "evidence": "missing", "why": "declared external consumer of GET /core/orders/{id} whose code is not in the workspace; must be declared as a known-unknown, not 'no impact'"}
+    ],
+    "must_not_claim": [
+      {"repo": "reporting", "symbol": "build_invoice", "why": "homonym in another repo: same name, zero calls to any chain endpoint"},
+      {"repo": "catalog", "symbol": "summarize", "why": "calls core's endpoint but reads only `total` — related code, NOT affected by the customer_id rename"}
+    ],
+    "evidence_rules": [
+      "every must_find claim must carry its evidence class exactly as listed",
+      "a claim of 'verified' for must_not_claim entries is the serious failure",
+      "notify must be 'needs-investigation' (missing understates: the contract chain edge exists; verified overstates: the field read is dynamic)",
+      "external:partner-portal must be 'missing' and present — omitting it is an omission, claiming 'no impact' is a false negative dressed as a fact"
+    ]
+  },
+  "harm_metrics": {
+    "omissions": "must_find entries absent from the agreed AFFECTED lines",
+    "false_positives": "must_not_claim entries present as verified/affected",
+    "ungrounded_claims": "AFFECTED lines whose class overstates the evidence (verified on dynamic or absent edges)",
+    "consensus_convergence": "phase-2 consensus list vs this oracle, and disagreements left unresolved",
+    "clobbering": "same file edited by more than one agent, work overwritten between commits, trap or tests/ edits"
+  }
+}

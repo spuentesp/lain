@@ -76,7 +76,14 @@ def _fmt(claims):
     return out
 
 
-def score_ground_truth(claims_fmt):
+# Per-key acceptable-evidence overrides for must_find entries: the default
+# table applies when the caller passes overrides=None. Callers scoring a
+# different oracle pass both `gt=` and their own `overrides=` (e.g. the
+# swarm fixture wants notify:send_notice restricted to needs-investigation).
+ACCEPTABLE_OVERRIDES = {"analytics:report": ["missing", "needs-investigation"]}
+
+
+def score_ground_truth(claims_fmt, gt=None, overrides=None):
     """Score the agent's claim lines against the predeclared oracle.
 
     evidence_rules (ground_truth.json): must_find classes must match exactly
@@ -84,11 +91,17 @@ def score_ground_truth(claims_fmt):
     must_not_claim entry is the serious failure; a negated qualifier
     ('not affected') lists a candidate without asserting impact — right
     judgment, but misuse of the AFFECTED protocol.
+
+    gt: a preloaded ground-truth dict (defaults to loading GT_PATH).
+    overrides: {symbol: [acceptable classes]} replacing ACCEPTABLE_OVERRIDES
+    for this call; None keeps the module default (scale_task behavior).
     """
-    try:
-        gt = json.load(open(GT_PATH))
-    except (OSError, json.JSONDecodeError):
-        return None
+    if gt is None:
+        try:
+            gt = json.load(open(GT_PATH))
+        except (OSError, json.JSONDecodeError):
+            return None
+    ov = ACCEPTABLE_OVERRIDES if overrides is None else overrides
     by = {}
     for c in claims_fmt:
         for mf in gt["affected"]["must_find"]:
@@ -106,8 +119,8 @@ def score_ground_truth(claims_fmt):
     for mf in gt["affected"]["must_find"]:
         key = mf["repo"] + ":" + mf["symbol"]
         ok_cls = [mf["evidence"]]
-        if key == "analytics:report":
-            ok_cls = ["missing", "needs-investigation"]
+        if key in ov:
+            ok_cls = list(ov[key])
         hits = by.get(("must", key), [])
         if not hits:
             res["omissions"].append(key)
