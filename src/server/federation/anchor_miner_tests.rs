@@ -488,6 +488,71 @@ fn static_edge_between_pair_suppresses_anchor_mint() {
     assert!(!is_minted_edge(&edges[0]));
 }
 
+/// Task 2: a typed AMQP `Consumes` edge (the `Static{Regex}` shape
+/// the event sensor mints for `ch.basic_consume`) joining the same
+/// node pair suppresses the anchor miner's heuristic `anchor:queue:*`
+/// twin — same static-wins rule as TDD #7, exercised on the AMQP
+/// pair from the enterprise fixture's blind spot.
+#[test]
+fn typed_amqp_consumes_edge_suppresses_queue_anchor_mint() {
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-task2-amqp"));
+    let ledger = repo("ledger-svc");
+    let orders = repo("orders-svc");
+    let consume = spanned_node(
+        &ledger,
+        NodeType::Function,
+        "src/ledger.py",
+        "consume_orders",
+        (1, 1),
+    );
+    let declare = spanned_node(
+        &orders,
+        NodeType::Function,
+        "src/legacy_amqp.rs",
+        "declare_queue",
+        (1, 1),
+    );
+    backend.upsert_node(consume.clone()).unwrap();
+    backend.upsert_node(declare.clone()).unwrap();
+    // The typed edge the event sensor mints for the consumer side —
+    // Static provenance, same node pair the anchor would join.
+    let mut typed = GraphEdge::new(EdgeType::Consumes, consume.id.clone(), declare.id.clone());
+    typed.provenance = Some(EdgeProvenance::Static {
+        source: crate::schema::StaticSource::Regex,
+    });
+    backend.upsert_edge(typed).unwrap();
+
+    let occ = [
+        occurrence(
+            "orders-svc",
+            "src/legacy_amqp.rs",
+            1,
+            AnchorKind::Queue,
+            "order-events",
+        ),
+        occurrence(
+            "ledger-svc",
+            "src/ledger.py",
+            1,
+            AnchorKind::Queue,
+            "order-events",
+        ),
+    ];
+    let report = mint_cross_repo_observations(&backend, &occ, &[]).unwrap();
+    assert_eq!(
+        report.anchor_edges, 0,
+        "static evidence wins; the heuristic twin must not duplicate it: {report:?}"
+    );
+    let edges = backend.all_edges().unwrap();
+    assert!(
+        !edges.iter().any(|e| matches!(
+            &e.provenance,
+            Some(EdgeProvenance::Heuristic { detector, .. }) if detector.starts_with("anchor:queue")
+        )),
+        "static evidence wins; the heuristic twin must not duplicate it: {edges:?}"
+    );
+}
+
 /// TDD #6 (claims integration): a chain that crosses only a minted
 /// anchor edge classifies as `needs-investigation` with the detector
 /// named — never `verified`.

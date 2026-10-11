@@ -13,6 +13,11 @@
 //!   `StreamConsumer::subscribe(&[...])`.
 //! - kafka-go (Go): `producer.SendMessage(&kafka.Message{Topic: "..."})`
 //!   and `consumer.SubscribeTopics("...")`.
+//! - pika (Python): `basic_publish(routing_key=...)`,
+//!   `basic_consume(queue=...)`, `queue_declare(queue=...)` — mint
+//!   `amqp/<queue>` topics (broker derived from the framework id).
+//! - amqplib (Node/TS): `channel.publish(exchange, routingKey, ...)`
+//!   and `channel.consume(queue, ...)` — same `amqp/<queue>` shape.
 //! - Celery (Python): `@app.task` and `@shared_task` decorators make the
 //!   decorated function a scheduled topic named after its qualified
 //!   module path.
@@ -391,7 +396,7 @@ fn detect_sites(
                 out.push(DetectedSite {
                     kind: SiteKind::Produces,
                     topic: Some(value),
-                    broker: DEFAULT_BROKER.into(),
+                    broker: broker_for(&m).into(),
                     line: line_num,
                     owner_name: None,
                 });
@@ -402,7 +407,7 @@ fn detect_sites(
                 out.push(DetectedSite {
                     kind: SiteKind::Consumes,
                     topic: Some(value),
-                    broker: DEFAULT_BROKER.into(),
+                    broker: broker_for(&m).into(),
                     line: line_num,
                     owner_name: None,
                 });
@@ -423,6 +428,22 @@ fn detect_sites(
         }
     }
     out
+}
+
+/// Broker label for a produce/consume idiom match. The AMQP clients
+/// (`pika*` in Python, `amqplib*` in TS/JS) mint `amqp/<queue>`
+/// topics; every other framework keeps the `kafka/` default. Mirrors
+/// `schedule_value`'s framework→value mapping: the `framework_id`
+/// carries which YAML entry matched, so the broker follows the
+/// framework, never the filename. The joiner's `default_broker_for`
+/// parses the prefix back into `ContractKey::Topic { broker, .. }`
+/// (`joiner/endpoints.rs:224`), so no joiner change is needed.
+fn broker_for(m: &util::IdiomMatch) -> &'static str {
+    if m.framework_id.starts_with("pika") || m.framework_id.starts_with("amqplib") {
+        "amqp"
+    } else {
+        DEFAULT_BROKER
+    }
 }
 
 /// Map a file extension to the Tier-1 `Lang` the walker uses for
@@ -927,6 +948,74 @@ mod tests {
         assert!(
             fact_carrier.is_some(),
             "a TopicConsumer fact for order.events must be recorded"
+        );
+    }
+
+    /// pika (Python AMQP) `ch.basic_consume(queue=...)` must mint a
+    /// typed `amqp/<queue>` topic — NOT `kafka/<queue>`. Before the
+    /// AMQP patterns existed this shape produced zero sensor facts
+    /// (the enterprise fixture's ledger-svc blind spot); the anchor
+    /// miner's heuristic queue anchor is not a sensor edge.
+    #[test]
+    fn pika_basic_consume_emits_amqp_consumes_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ledger.py"),
+            "import pika\n\
+             ch = conn.channel()\n\
+             ch.queue_bind(queue=\"order-events\", exchange=\"x\")\n\
+             ch.basic_consume(queue=\"order-events\", on_message_callback=cb)\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let topic = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Topic && n.name == "amqp/order-events")
+            .expect("amqp topic node (NOT kafka/order-events)");
+        assert!(
+            graph
+                .all_edges()
+                .iter()
+                .any(|e| e.edge_type == EdgeType::Consumes && e.target_id == topic.id),
+            "pika basic_consume must emit a Consumes edge to the amqp topic"
+        );
+    }
+
+    /// The broker label comes from the matched framework id, not from
+    /// the filename or the DEFAULT_BROKER constant: a pika-shaped
+    /// Python file mints `amqp/<queue>` while the aiokafka idiom in a
+    /// sibling file still mints `kafka/<topic>`.
+    #[test]
+    fn broker_derives_from_framework_not_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/a.py"),
+            "ch.basic_publish(exchange='x', routing_key='q1', body=b)\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/b.py"), "producer.send('t1', msg)\n").unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let names: Vec<String> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .map(|n| n.name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "amqp/q1"),
+            "pika publish -> amqp/q1; got {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "kafka/t1"),
+            "kafka send -> kafka/t1; got {names:?}"
         );
     }
 
