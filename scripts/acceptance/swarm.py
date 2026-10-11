@@ -69,9 +69,11 @@ DEFAULT_AGENT_CMD = ("claude -p --verbose --dangerously-skip-permissions "
                      "--output-format stream-json")
 
 CLAIMS_INSTRUCTIONS = {
-    "lain": ("Lain is installed and configured here (`.mcp.json`): index the "
-             "workspace (`lain` CLI/MCP) and use `lain impact --format claims "
-             "<symbol>` for impact evidence. Register the files you are about "
+    "lain": ("Lain is configured here: `.mcp.json` launches "
+             "`lain server --config ./repos.yaml` (the federation server), so "
+             "the Lain MCP tools (trace_impact, get_contract, claim_files, ...) "
+             "are live. Use `lain impact --format claims <symbol>` or the MCP "
+             "impact tools for evidence, and register the files you are about "
              "to edit with the Lain `claim_files` MCP tool so the other agents "
              "can see the claim."),
     "no-lain": ("No code-graph tooling exists in this arm. Use grep, git and "
@@ -81,8 +83,10 @@ CLAIMS_INSTRUCTIONS = {
 
 TOOLING_NOTE = (
     "\n\nTooling note (this arm): lain is installed and configured in this "
-    "workspace via `.mcp.json` — index it and use `lain impact --format "
-    "claims <symbol>` (and the lain MCP tools) for impact evidence, and "
+    "workspace via `.mcp.json` — it launches `lain server --config "
+    "./repos.yaml`, the federation server over all repos in `repos.yaml`. "
+    "Use the lain MCP tools (trace_impact, get_contract, claim_files, ...) "
+    "and `lain impact --format claims <symbol>` for impact evidence, and "
     "register file claims with the `claim_files` MCP tool so your claim is "
     "visible to the other agents.\n")
 
@@ -241,8 +245,11 @@ def _configure(lain, fixture, env, ev, label):
     res = onboarding.configure_client(lain, fixture, env, ev)
     onboarding.record_only(ev, f"configure_client({label}): {res}")
     if not res.get("config_written"):
-        print(f"WARN: .mcp.json not written for {label}: {res}",
-              file=sys.stderr, flush=True)
+        # Without .mcp.json the LAIN arm silently degrades to a control arm
+        # (observed 2026-10-11: agents then report 'CONNECTION_CLOSED' and
+        # fall back to grep). That is an INVALID run, not a warning.
+        raise RuntimeError(
+            f"INVALID RUN: .mcp.json not written for {label}: {res}")
     return res
 
 

@@ -18,7 +18,7 @@ Usage: ab_metrics.py <run-dir> [<run-dir> ...]
 """
 import json, os, re, subprocess, sys
 
-CLAIM_RE = re.compile(r'AFFECTED: ([^\s"]+?)\s+EVIDENCE: ([\w-]+)([^\n]*)')
+CLAIM_RE = re.compile(r'AFFECTED:\s+(.+?)\s+EVIDENCE:\s+([\w-]+)([^\n]*)')
 NEG_RE = re.compile(r"not affected|not edited|no orders call|never calls|-> not", re.I)
 GT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "..", "..", "tests", "fixtures", "scale_task",
@@ -105,9 +105,16 @@ def score_ground_truth(claims_fmt, gt=None, overrides=None):
     by = {}
     for c in claims_fmt:
         for mf in gt["affected"]["must_find"]:
-            if c["symbol"].startswith(mf["repo"] + ":") and \
-               c["symbol"].endswith(":" + mf["symbol"]):
-                by.setdefault(("must", mf["repo"] + ":" + mf["symbol"]), []).append(c)
+            key = mf["repo"] + ":" + mf["symbol"]
+            hit = (c["symbol"].startswith(mf["repo"] + ":") and
+                   c["symbol"].endswith(":" + mf["symbol"]))
+            if mf["repo"] == "external":
+                # agents phrase out-of-workspace claims variously
+                # (external:..., partner-portal:..., outside-workspace:...)
+                hit = bool(re.search(r"partner-portal|outside|external",
+                                     c["symbol"], re.I))
+            if hit:
+                by.setdefault(("must", key), []).append(c)
         for mn in gt["affected"]["must_not_claim"]:
             if c["symbol"].startswith(mn["repo"] + ":") and \
                c["symbol"].endswith(":" + mn["symbol"]):

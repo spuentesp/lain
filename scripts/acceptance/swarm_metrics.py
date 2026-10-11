@@ -100,18 +100,29 @@ def p1_scores(work):
 # ── phase 2: consensus ──────────────────────────────────────────────────────
 
 def _disagreements_count(text):
-    """Non-empty lines under a `disagreements:` heading (closes at the next
-    markdown heading)."""
+    """Dispute entries under a `disagreements:` marker (heading or bullet).
+    A declaration of 'none ...' closes immediately; list items count as one
+    dispute each; indented continuation lines don't."""
     in_dis, count = False, 0
     for line in text.splitlines():
-        if re.match(r"^\s*#*\s*disagreements\s*:", line, re.I):
-            in_dis = True
+        m = re.match(r"^\s*#*\s*disagreements\b\s*:?\s*(.*)$", line, re.I)
+        if m:
+            rest = m.group(1).strip()
+            if rest and re.match(r"^(none|no\b)", rest, re.I):
+                in_dis = False
+            elif rest:
+                count += 1
+                in_dis = False
+            else:
+                in_dis = True
             continue
         if in_dis and line.startswith("#"):
             in_dis = False
             continue
-        if in_dis and line.strip():
-            count += 1
+        if in_dis:
+            s = line.strip()
+            if s and re.match(r"^[-*]\s", s):
+                count += 1
     return count
 
 
