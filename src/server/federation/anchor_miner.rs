@@ -200,7 +200,9 @@ pub struct AnchorOccurrence {
     pub line: u32,
     pub kind: AnchorKind,
     /// Normalized key: route stem, topic/queue name, `pkg.Service`
-    /// (or `pkg.Service/Method`), or env var name.
+    /// (or `pkg.Service/Method`), a generated-code service segment
+    /// (`Orders` — joins its declared `pkg.Service` at mint time), or
+    /// env var name.
     pub key: String,
 }
 
@@ -410,6 +412,14 @@ pub fn mint_cross_repo_observations(
             .or_default()
             .push(occ);
     }
+    // Generated-code proto keys (bare service segments like `Orders`
+    // from `pb.NewOrdersClient` / `OrdersStub`) join the declared
+    // `pkg.Service` / `pkg.Service/Method` groups whose service
+    // segment matches ASCII-case-insensitively. A generated name with
+    // no declared service anchors nothing — the group keeps the
+    // declared key, so the detector label stays
+    // `anchor:proto:<pkg.Service>`.
+    fold_generated_proto_keys(&mut groups);
     report.anchors_indexed = groups.len();
 
     // Resolve endpoints per (group, repo). `anchor_endpoints` is also
@@ -598,6 +608,56 @@ pub fn mint_cross_repo_observations(
         backend.upsert_edges_batch(&new_edges)?;
     }
     Ok(report)
+}
+
+/// A generated-code proto key is a bare service segment (`Orders`,
+/// minted from a `pb.NewOrdersClient` / `OrdersStub` type name);
+/// declared proto keys are always `pkg.Service` or
+/// `pkg.Service/Method`.
+fn is_generated_proto_key(key: &str) -> bool {
+    !key.contains('.') && !key.contains('/')
+}
+
+/// The service segment of a proto anchor key: the last dot-segment of
+/// the part before any `/Method` — `orders.Orders` and
+/// `orders.Orders/GetOrder` both yield `Orders`.
+fn proto_service_segment(key: &str) -> &str {
+    let svc_part = key.split_once('/').map_or(key, |(s, _)| s);
+    svc_part.rsplit('.').next().unwrap_or(svc_part)
+}
+
+/// Fold generated-code proto occurrences into the declared proto
+/// groups whose service segment equals theirs ASCII-case-insensitively
+/// (`Orders` joins `orders.Orders` and `orders.Orders/GetOrder`). A
+/// generated name with no matching declared service anchors nothing:
+/// only real proto service keys form minting groups, so a
+/// `TicketsClient` can never reach `orders.Orders`.
+fn fold_generated_proto_keys(groups: &mut BTreeMap<(AnchorKind, String), Vec<&AnchorOccurrence>>) {
+    let generated: Vec<(String, Vec<&AnchorOccurrence>)> = groups
+        .iter()
+        .filter(|((kind, key), _)| *kind == AnchorKind::Proto && is_generated_proto_key(key))
+        .map(|((_, key), occs)| (key.clone(), occs.clone()))
+        .collect();
+    if generated.is_empty() {
+        return;
+    }
+    let declared: Vec<String> = groups
+        .keys()
+        .filter(|(kind, key)| *kind == AnchorKind::Proto && !is_generated_proto_key(key))
+        .map(|(_, key)| key.clone())
+        .collect();
+    for (gen_key, occs) in generated {
+        groups.remove(&(AnchorKind::Proto, gen_key.clone()));
+        let seg = proto_service_segment(&gen_key);
+        for dkey in &declared {
+            if proto_service_segment(dkey).eq_ignore_ascii_case(seg) {
+                groups
+                    .entry((AnchorKind::Proto, dkey.clone()))
+                    .or_default()
+                    .extend(occs.iter().copied());
+            }
+        }
+    }
 }
 
 fn pair_key(a: &str, b: &str) -> [String; 2] {
@@ -986,6 +1046,35 @@ fn extract_from_line(repo: &str, path: &str, line_no: u32, line: &str) -> Vec<An
             push(AnchorKind::Route, stem, &mut out);
         }
     }
+
+    // Generated gRPC client/stub type names — an identifier pass
+    // beyond the quoted literals. The consumer side carries no proto
+    // literals, only codegen names (`pb.NewOrdersClient`,
+    // `OrdersStub`, `FooGrpc.FooBlockingStub`), keyed here by their
+    // bare service segment (`Orders`). These keys join a declared
+    // `pkg.Service` group at mint time; with no declared service they
+    // anchor nothing. Quoted/env spans stay owned by the passes above.
+    //
+    // `generated_service_key` already applies the `>= 3` service
+    // floor (same as `proto_ident_key`), so these keys skip the
+    // queue/topic `MIN_NAME_LEN` gate. The keys are bare segments,
+    // which the literal pass can never produce (its proto keys always
+    // carry a `pkg.` prefix), so a local dedupe set is sufficient.
+    let mut gen_seen: HashSet<String> = HashSet::new();
+    for (span, token) in identifier_tokens(line) {
+        if quoted_spans
+            .iter()
+            .any(|(s, e)| span.0 >= *s && span.1 <= *e)
+            || consumed.iter().any(|(s, e)| span.0 >= *s && span.1 <= *e)
+        {
+            continue;
+        }
+        if let Some(svc) = generated_service_key(&token) {
+            if gen_seen.insert(svc.clone()) {
+                out.push(anchor(repo, path, line_no, AnchorKind::Proto, svc));
+            }
+        }
+    }
     out
 }
 
@@ -1148,6 +1237,60 @@ fn proto_ident_key(c: &str) -> Option<String> {
         }
         None => Some(format!("{pkg}.{svc}")),
     }
+}
+
+/// The service segment a generated gRPC client/stub type name belongs
+/// to — `NewOrdersClient` / `OrdersClient` / `OrdersStub` /
+/// `OrdersBlockingStub` / `FooGrpc.FooBlockingStub` yield `Orders` /
+/// `Foo`. The segment must look like a type name (uppercase-initial,
+/// len ≥ 3 — the same service gate as `proto_ident_key`); a lowercase
+/// var like `ordersClient` is covered by the constructor/type name at
+/// its binding site instead of by its own identifier.
+fn generated_service_key(ident: &str) -> Option<String> {
+    let base = ident.rsplit('.').next().unwrap_or(ident);
+    let base = base.strip_prefix("New").unwrap_or(base);
+    for suffix in ["BlockingStub", "Client", "Stub"] {
+        if let Some(s) = base.strip_suffix(suffix) {
+            if s.len() >= 3 && s.chars().next().map_or(false, |c| c.is_uppercase()) {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Identifier tokens of one line, dot-joined qualifiers included
+/// (`pb.NewOrdersClient`, `OrdersGrpc.OrdersBlockingStub`) — the
+/// shapes `generated_service_key` strips its suffixes from.
+fn identifier_tokens(line: &str) -> Vec<((usize, usize), String)> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        loop {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            // `.Name` continues the token (a dotted qualifier), but
+            // `f()` or `x.` at end of line does not.
+            if i + 1 < bytes.len()
+                && bytes[i] == b'.'
+                && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_')
+            {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        out.push(((start, i), line[start..i].to_string()));
+    }
+    out
 }
 
 /// Normalize a URL-path literal to its anchor stem: id-like segments

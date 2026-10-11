@@ -927,6 +927,122 @@ fn proto_identifiers_extract() {
     );
 }
 
+/// Task 3: a gRPC consumer that references only GENERATED code —
+/// `pb.NewOrdersClient` / `OrdersClient`, no proto literals — must
+/// still anchor to the proto service it belongs to. The miner keys
+/// the generated type names by their bare service segment (`Orders`)
+/// and joins it ASCII-case-insensitively to the declared
+/// `orders.Orders` key; the edge keeps the declared key as its
+/// detector label, heuristic 0.6 on `Calls` like every other anchor.
+#[test]
+fn generated_stub_names_anchor_to_proto_service() {
+    // orders-svc declares service Orders in protos/orders.proto;
+    // logistics-svc references only generated code — no proto literals.
+    let orders_dir = tempfile::tempdir().unwrap();
+    let logistics_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(orders_dir.path().join("protos")).unwrap();
+    std::fs::create_dir_all(logistics_dir.path().join("src")).unwrap();
+    std::fs::write(
+        orders_dir.path().join("protos/orders.proto"),
+        "package orders;\nservice Orders {\n  rpc GetOrder(GetOrderRequest) returns (Order);\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        logistics_dir.path().join("src/handler.go"),
+        "c := pb.NewOrdersClient(conn)\nresp, err := c.GetOrder(ctx, req)\nvar s pb.OrdersClient\n",
+    )
+    .unwrap();
+
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-task3-generated"));
+    let orders = repo("orders-svc");
+    let logistics = repo("logistics-svc");
+    backend
+        .upsert_node(file_node(&orders, "protos/orders.proto"))
+        .unwrap();
+    backend
+        .upsert_node(file_node(&logistics, "src/handler.go"))
+        .unwrap();
+
+    let mut occ = scan_repo_occurrences(&orders, orders_dir.path());
+    occ.extend(scan_repo_occurrences(&logistics, logistics_dir.path()));
+    mint_cross_repo_observations(&backend, &occ, &[]).expect("mint succeeds");
+
+    let edges = backend.all_edges().unwrap();
+    assert!(
+        edges.iter().any(|e| {
+            matches!(
+                &e.provenance,
+                Some(EdgeProvenance::Heuristic { detector, .. })
+                    if detector.starts_with("anchor:proto")
+            ) && e.source_id.contains("orders-svc")
+                && e.target_id.contains("logistics-svc")
+        }),
+        "OrdersClient/NewOrdersClient must anchor to the Orders service: {edges:?}"
+    );
+    // Edge shape unchanged: the detector keeps the DECLARED proto key,
+    // both directions, heuristic 0.6 on Calls — never verified.
+    let minted = heuristic_edges(&edges, "anchor:proto:orders.Orders");
+    assert_eq!(minted.len(), 2, "both directions, got {edges:?}");
+    for e in &minted {
+        assert_eq!(e.edge_type, EdgeType::Calls, "proto anchors ride Calls");
+        assert!(e.cross_repo, "anchor edges are cross-repo");
+        let Some(EdgeProvenance::Heuristic { confidence, .. }) = &e.provenance else {
+            panic!(
+                "proto anchor must be Heuristic-grade, got {:?}",
+                e.provenance
+            );
+        };
+        assert!((*confidence - 0.6).abs() < 1e-6, "route-like rung 0.6");
+    }
+}
+
+/// Task 3 (Review Focus 3): a generated stub name anchors only to a
+/// REAL declared proto service — support-portal's own `TicketsClient`
+/// must NOT link to `orders.Orders`. With no `service Tickets`
+/// anywhere, the generated key forms no minting group and nothing is
+/// produced.
+#[test]
+fn generated_stub_never_crosses_unrelated_proto_services() {
+    // support-portal's own TicketsClient must NOT link to orders.Orders.
+    let orders_dir = tempfile::tempdir().unwrap();
+    let portal_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(orders_dir.path().join("protos")).unwrap();
+    std::fs::create_dir_all(portal_dir.path().join("src")).unwrap();
+    std::fs::write(
+        orders_dir.path().join("protos/orders.proto"),
+        "package orders;\nservice Orders {\n  rpc GetOrder(..) returns (Order);\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        portal_dir.path().join("src/show.ts"),
+        "const c = new TicketsClient(channel);\nc.showTicket(id);\n",
+    )
+    .unwrap();
+
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-task3-collision"));
+    let orders = repo("orders-svc");
+    let portal = repo("support-portal");
+    backend
+        .upsert_node(file_node(&orders, "protos/orders.proto"))
+        .unwrap();
+    backend
+        .upsert_node(file_node(&portal, "src/show.ts"))
+        .unwrap();
+
+    let mut occ = scan_repo_occurrences(&orders, orders_dir.path());
+    occ.extend(scan_repo_occurrences(&portal, portal_dir.path()));
+    mint_cross_repo_observations(&backend, &occ, &[]).expect("mint succeeds");
+
+    let edges = backend.all_edges().unwrap();
+    assert!(
+        !edges.iter().any(|e| matches!(
+            &e.provenance,
+            Some(EdgeProvenance::Heuristic { detector, .. }) if detector.starts_with("anchor:proto")
+        )),
+        "TicketsClient has no Orders service segment: {edges:?}"
+    );
+}
+
 /// The full exclusion: `customer_id` and friends never become anchors
 /// regardless of file type.
 #[test]
