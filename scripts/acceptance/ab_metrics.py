@@ -154,11 +154,26 @@ def score_ground_truth(claims_fmt, gt=None, overrides=None):
             return None
     ov = ACCEPTABLE_OVERRIDES if overrides is None else overrides
     by = {}
+    # Repo-level fallback: a claim may cite a field-access site instead of
+    # the function name (e.g. `billing-svc:src/main.py:data["customer_id"]`
+    # vs `...:build_invoice`) — both identify the same affected code. When a
+    # repo hosts exactly one entry in a list, any claim in that repo counts.
+    from collections import Counter
+    mf_repos = Counter(e["repo"] for e in gt["affected"]["must_find"])
+    mn_repos = Counter(e["repo"] for e in gt["affected"]["must_not_claim"])
+
+    def _hit(c, entry, uniq):
+        if c["symbol"].startswith(entry["repo"] + ":"):
+            if c["symbol"].endswith(":" + entry["symbol"]):
+                return True
+            if uniq.get(entry["repo"], 0) == 1:
+                return True
+        return False
+
     for c in claims_fmt:
         for mf in gt["affected"]["must_find"]:
             key = mf["repo"] + ":" + mf["symbol"]
-            hit = (c["symbol"].startswith(mf["repo"] + ":") and
-                   c["symbol"].endswith(":" + mf["symbol"]))
+            hit = _hit(c, mf, mf_repos)
             if mf["repo"] == "external":
                 # agents phrase out-of-workspace claims variously
                 # (external:..., partner-portal:..., outside-workspace:...)
@@ -167,8 +182,7 @@ def score_ground_truth(claims_fmt, gt=None, overrides=None):
             if hit:
                 by.setdefault(("must", key), []).append(c)
         for mn in gt["affected"]["must_not_claim"]:
-            if c["symbol"].startswith(mn["repo"] + ":") and \
-               c["symbol"].endswith(":" + mn["symbol"]):
+            if _hit(c, mn, mn_repos):
                 by.setdefault(("mustnot", mn["repo"] + ":" + mn["symbol"]), []).append(c)
 
     res = {"must_find": [], "must_not_claim": [], "omissions": [],
