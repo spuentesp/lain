@@ -859,6 +859,12 @@ impl FederatedIndex {
             // (legitimate when two services share a repo,
             // §4.1) silently disappear.
             .filter(|e| e.edge_type != crate::schema::EdgeType::Binds)
+            // The anchor miner's edges are federation-only too
+            // (`anchor:*` / `cochange` / `commit-ref` heuristic
+            // provenance). The per-repo projection never reproduces
+            // them, so reconciliation must not retract them as
+            // stale; the next full index build re-mints fresh.
+            .filter(|e| !crate::federation::anchor_miner::is_minted_edge(e))
             .filter(|e| {
                 !new_keys.contains(&(
                     e.edge_type.clone(),
@@ -1307,6 +1313,51 @@ impl FederatedIndex {
         // after the start-clear would be overwritten by a trailing
         // clear, so we deliberately do NOT clear here.
         Ok(())
+    }
+
+    /// Mint cross-repo heuristic edges (the anchor miner — see
+    /// [`crate::federation::anchor_miner`]). Runs when the federated
+    /// index is built: every repo must be indexed and projected
+    /// first, so callers invoke it after the per-repo index/project
+    /// loop (`lain reindex`, the server's `index_federation`). The
+    /// pass scans each repo's checkout for structural anchors, reads
+    /// its git history for co-change / commit-ref signals, and writes
+    /// `EdgeProvenance::Heuristic` edges into the backend. Failures
+    /// are non-fatal for the caller — the federation is still usable
+    /// without the heuristic layer, so the CLI logs and continues.
+    pub fn mint_cross_repo_anchors(
+        &self,
+    ) -> Result<crate::federation::anchor_miner::MintReport, LainError> {
+        let mut occurrences = Vec::new();
+        let mut commits = Vec::new();
+        for (id, _) in self.list_repos() {
+            let Some(repo) = self.get_repo(&id) else {
+                continue;
+            };
+            occurrences.extend(crate::federation::anchor_miner::scan_repo_occurrences(
+                &id,
+                repo.local_path(),
+            ));
+            commits.extend(crate::federation::anchor_miner::collect_commit_records(
+                &id,
+                &repo.git(),
+                crate::federation::anchor_miner::COCHANGE_HISTORY_LIMIT,
+            ));
+        }
+        let report = crate::federation::anchor_miner::mint_cross_repo_observations(
+            self.backend.as_ref(),
+            &occurrences,
+            &commits,
+        )?;
+        tracing::info!(
+            "[federation] anchor miner: {} anchors, {} anchor edge(s), {} cochange, {} commit-ref, {} crowd(s) skipped",
+            report.anchors_indexed,
+            report.anchor_edges,
+            report.cochange_edges,
+            report.commit_ref_edges,
+            report.crowds_skipped
+        );
+        Ok(report)
     }
 
     fn rebuild_symbol_index(&self) {

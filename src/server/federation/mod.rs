@@ -2,6 +2,7 @@
 //!
 //! Moved from src/federation/ in PR 1 of the consolidation plan.
 
+pub mod anchor_miner;
 pub mod config;
 pub mod contracts;
 pub mod cross_repo;
@@ -18,6 +19,8 @@ pub mod repo_index;
 pub mod repo_source;
 pub mod workspace;
 
+#[cfg(test)]
+mod anchor_miner_tests;
 #[cfg(test)]
 mod federated_index_tests;
 #[cfg(test)]

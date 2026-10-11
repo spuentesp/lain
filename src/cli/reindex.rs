@@ -123,6 +123,29 @@ pub async fn run_reindex(config: PathBuf, workspace: Option<String>, verbose: bo
         }
     }
 
+    // Step 4: mint cross-repo heuristic edges (the anchor miner).
+    // Every repo is indexed and projected, so the federation view is
+    // complete enough to mine structural anchors, co-change, and
+    // commit-ref couplings across repos. A miner failure is logged
+    // but does not fail the reindex — the per-repo graphs and the
+    // projected federation are already fresh, and the heuristic
+    // layer is additive.
+    match fed.mint_cross_repo_anchors() {
+        Ok(report) => {
+            if verbose {
+                eprintln!(
+                    "anchor miner: {} anchors, {} anchor edge(s), {} cochange, {} commit-ref, {} crowd(s) skipped",
+                    report.anchors_indexed,
+                    report.anchor_edges,
+                    report.cochange_edges,
+                    report.commit_ref_edges,
+                    report.crowds_skipped
+                );
+            }
+        }
+        Err(e) => tracing::warn!("anchor miner after reindex failed: {e}"),
+    }
+
     if verbose {
         eprintln!("re-index complete");
     }

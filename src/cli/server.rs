@@ -373,6 +373,14 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
             }
         }
     }
+    // Mint cross-repo heuristic edges (anchor miner) now that every
+    // repo is indexed, relinked, and projected — the federated index
+    // is complete enough to mine structural anchors, co-change, and
+    // commit-ref couplings. Non-fatal: the static federation is
+    // usable without the heuristic layer.
+    if let Err(e) = fed.mint_cross_repo_anchors() {
+        tracing::warn!("lain server: anchor miner failed: {e}");
+    }
     for (id, _) in fed.list_repos() {
         if let Some(repo) = fed.get_repo(&id) {
             repo.hold_ready(false);

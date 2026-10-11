@@ -792,19 +792,29 @@ pub(super) fn parse_contract_key(s: &str) -> Result<ContractKey, String> {
 
 /// Provenance for the §7.3 rule-6 heuristic Binds. One hit
 /// means the joiner selected a single service via the
-/// unbound-host path (`"unbound_host"`, 0.6); several hits means
-/// the same path returned multiple services and the joiner
-/// bound them all as ambiguous (`"ambiguous"`, 0.3). Single
-/// source of truth so the per-edge `EdgeProvenance::Heuristic`
-/// and the `ConsumerTarget::Binds` provenance can't drift
-/// apart (Phase B-D review §S7, §D17).
+/// unbound-host path (`"unbound_host"`, [`UNBOUND_HOST_CONFIDENCE`]);
+/// several hits means the same path returned multiple services and
+/// the joiner bound them all as ambiguous (`"ambiguous"`,
+/// [`AMBIGUOUS_CONFIDENCE`]). Single source of truth so the
+/// per-edge `EdgeProvenance::Heuristic` and the
+/// `ConsumerTarget::Binds` provenance can't drift apart (Phase B-D
+/// review §S7, §D17). The anchor miner reuses the same two rungs
+/// (`federation::anchor_miner`) so every heuristic confidence in the
+/// federation sits on one ladder.
 pub(super) fn heuristic_provenance_for(hit_count: usize) -> (&'static str, f32) {
     if hit_count > 1 {
-        ("ambiguous", 0.3)
+        ("ambiguous", AMBIGUOUS_CONFIDENCE)
     } else {
-        ("unbound_host", 0.6)
+        ("unbound_host", UNBOUND_HOST_CONFIDENCE)
     }
 }
+
+/// Route-like single-match rung of the §7.3 rule-6 heuristic ladder.
+pub const UNBOUND_HOST_CONFIDENCE: f32 = 0.6;
+
+/// Ambiguous multi-match (and other weak temporal/name signals —
+/// cross-repo co-change, commit-ref) rung of the same ladder.
+pub const AMBIGUOUS_CONFIDENCE: f32 = 0.3;
 
 impl GlobalId {
     pub fn from_string(s: &str) -> Self {
