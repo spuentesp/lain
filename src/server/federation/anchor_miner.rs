@@ -201,9 +201,15 @@ pub struct AnchorOccurrence {
     pub kind: AnchorKind,
     /// Normalized key: route stem, topic/queue name, `pkg.Service`
     /// (or `pkg.Service/Method`), a generated-code service segment
-    /// (`Orders` — joins its declared `pkg.Service` at mint time), or
-    /// env var name.
+    /// (the primary name its type spells — `NewOrders` for
+    /// `NewOrdersClient` — joined to its declared `pkg.Service` at
+    /// mint time), or env var name.
     pub key: String,
+    /// Generated-code proto keys only: the `New`-stripped constructor
+    /// alternative (`NewOrdersClient` → key `NewOrders`, fallback
+    /// `Orders`). At fold time it is consulted only when `key` matches
+    /// no declared service segment — the primary name always wins.
+    pub constructor_fallback: Option<String>,
 }
 
 impl AnchorOccurrence {
@@ -412,13 +418,14 @@ pub fn mint_cross_repo_observations(
             .or_default()
             .push(occ);
     }
-    // Generated-code proto keys (bare service segments like `Orders`
-    // from `pb.NewOrdersClient` / `OrdersStub`) join the declared
-    // `pkg.Service` / `pkg.Service/Method` groups whose service
-    // segment matches ASCII-case-insensitively. A generated name with
-    // no declared service anchors nothing — the group keeps the
-    // declared key, so the detector label stays
-    // `anchor:proto:<pkg.Service>`.
+    // Generated-code proto keys (bare service segments spelled by
+    // client/stub type names — `NewOrders` / `Orders` from
+    // `pb.NewOrdersClient`) join the declared `pkg.Service` /
+    // `pkg.Service/Method` groups whose service segment matches
+    // ASCII-case-insensitively; the `New`-stripped constructor
+    // candidate is fallback only. A generated name with no declared
+    // service anchors nothing — the group keeps the declared key, so
+    // the detector label stays `anchor:proto:<pkg.Service>`.
     fold_generated_proto_keys(&mut groups);
     report.anchors_indexed = groups.len();
 
@@ -628,16 +635,27 @@ fn proto_service_segment(key: &str) -> &str {
 
 /// Fold generated-code proto occurrences into the declared proto
 /// groups whose service segment equals theirs ASCII-case-insensitively
-/// (`Orders` joins `orders.Orders` and `orders.Orders/GetOrder`). A
-/// generated name with no matching declared service anchors nothing:
-/// only real proto service keys form minting groups, so a
+/// (`Orders` joins `orders.Orders` and `orders.Orders/GetOrder`). The
+/// occurrence's PRIMARY name — the one its type spells — is used when
+/// any declared service matches it; the `New`-stripped constructor
+/// fallback gets its chance only when the primary matches nothing, so
+/// `NewOrdersClient` prefers a declared `v2.NewOrders` and can never
+/// pair onto `orders.Orders` while its true service exists. A
+/// generated name whose candidates match no declared service anchors
+/// nothing — only real proto service keys form minting groups, so a
 /// `TicketsClient` can never reach `orders.Orders`.
 fn fold_generated_proto_keys(groups: &mut BTreeMap<(AnchorKind, String), Vec<&AnchorOccurrence>>) {
-    let generated: Vec<(String, Vec<&AnchorOccurrence>)> = groups
-        .iter()
-        .filter(|((kind, key), _)| *kind == AnchorKind::Proto && is_generated_proto_key(key))
-        .map(|((_, key), occs)| (key.clone(), occs.clone()))
-        .collect();
+    let mut generated: Vec<&AnchorOccurrence> = Vec::new();
+    for key in groups
+        .keys()
+        .filter(|(kind, key)| *kind == AnchorKind::Proto && is_generated_proto_key(key))
+        .map(|(_, key)| key.clone())
+        .collect::<Vec<_>>()
+    {
+        if let Some(occs) = groups.remove(&(AnchorKind::Proto, key)) {
+            generated.extend(occs);
+        }
+    }
     if generated.is_empty() {
         return;
     }
@@ -646,16 +664,27 @@ fn fold_generated_proto_keys(groups: &mut BTreeMap<(AnchorKind, String), Vec<&An
         .filter(|(kind, key)| *kind == AnchorKind::Proto && !is_generated_proto_key(key))
         .map(|(_, key)| key.clone())
         .collect();
-    for (gen_key, occs) in generated {
-        groups.remove(&(AnchorKind::Proto, gen_key.clone()));
-        let seg = proto_service_segment(&gen_key);
-        for dkey in &declared {
-            if proto_service_segment(dkey).eq_ignore_ascii_case(seg) {
-                groups
-                    .entry((AnchorKind::Proto, dkey.clone()))
-                    .or_default()
-                    .extend(occs.iter().copied());
-            }
+    let matching = |seg: &str| -> Vec<String> {
+        declared
+            .iter()
+            .filter(|d| proto_service_segment(d).eq_ignore_ascii_case(seg))
+            .cloned()
+            .collect()
+    };
+    for occ in generated {
+        let primary = matching(&occ.key);
+        let targets = if primary.is_empty() {
+            occ.constructor_fallback
+                .as_deref()
+                .map_or(Vec::new(), |fb| matching(fb))
+        } else {
+            primary
+        };
+        for dkey in targets {
+            groups
+                .entry((AnchorKind::Proto, dkey))
+                .or_default()
+                .push(occ);
         }
     }
 }
@@ -995,6 +1024,7 @@ fn anchor(repo: &str, path: &str, line: u32, kind: AnchorKind, key: String) -> A
         line,
         kind,
         key,
+        constructor_fallback: None,
     }
 }
 
@@ -1050,8 +1080,10 @@ fn extract_from_line(repo: &str, path: &str, line_no: u32, line: &str) -> Vec<An
     // Generated gRPC client/stub type names — an identifier pass
     // beyond the quoted literals. The consumer side carries no proto
     // literals, only codegen names (`pb.NewOrdersClient`,
-    // `OrdersStub`, `FooGrpc.FooBlockingStub`), keyed here by their
-    // bare service segment (`Orders`). These keys join a declared
+    // `OrdersStub`, `FooGrpc.FooBlockingStub`), keyed here by the
+    // service name their type spells (`Orders` for `OrdersClient`,
+    // `NewOrders` for `NewOrdersClient`), with the `New`-stripped
+    // constructor candidate as fallback. These keys join a declared
     // `pkg.Service` group at mint time; with no declared service they
     // anchor nothing. Quoted/env spans stay owned by the passes above.
     //
@@ -1069,9 +1101,11 @@ fn extract_from_line(repo: &str, path: &str, line_no: u32, line: &str) -> Vec<An
         {
             continue;
         }
-        if let Some(svc) = generated_service_key(&token) {
-            if gen_seen.insert(svc.clone()) {
-                out.push(anchor(repo, path, line_no, AnchorKind::Proto, svc));
+        if let Some(cand) = generated_service_key(&token) {
+            if gen_seen.insert(cand.primary.clone()) {
+                let mut occ = anchor(repo, path, line_no, AnchorKind::Proto, cand.primary);
+                occ.constructor_fallback = cand.constructor_fallback;
+                out.push(occ);
             }
         }
     }
@@ -1239,16 +1273,46 @@ fn proto_ident_key(c: &str) -> Option<String> {
     }
 }
 
+/// Both service-name candidates a generated gRPC client/stub type
+/// name yields. `primary` is the name the type SPELLS
+/// (`NewOrdersClient` → `NewOrders`, `NewsClient` → `News`); the
+/// `New`-stripped constructor alternative (`NewOrdersClient` →
+/// `Orders`) rides along as a FALLBACK, consulted at fold time only
+/// when the primary matches no declared service — so a `News` service
+/// never falls into the `New`-strip hole, and a `NewOrders` client
+/// can never pair onto `Orders` while its true service exists.
+struct GeneratedCandidate {
+    primary: String,
+    constructor_fallback: Option<String>,
+}
+
 /// The service segment a generated gRPC client/stub type name belongs
 /// to — `NewOrdersClient` / `OrdersClient` / `OrdersStub` /
-/// `OrdersBlockingStub` / `FooGrpc.FooBlockingStub` yield `Orders` /
-/// `Foo`. The segment must look like a type name (uppercase-initial,
-/// len ≥ 3 — the same service gate as `proto_ident_key`); a lowercase
-/// var like `ordersClient` is covered by the constructor/type name at
-/// its binding site instead of by its own identifier.
-fn generated_service_key(ident: &str) -> Option<String> {
+/// `OrdersBlockingStub` / `FooGrpc.FooBlockingStub` yield
+/// `NewOrders` / `Orders` / `Foo` as their primary candidate. The
+/// segment must look like a type name (uppercase-initial, len ≥ 3 —
+/// the same service gate as `proto_ident_key`); a lowercase var like
+/// `ordersClient` is covered by the constructor/type name at its
+/// binding site instead of by its own identifier.
+fn generated_service_key(ident: &str) -> Option<GeneratedCandidate> {
     let base = ident.rsplit('.').next().unwrap_or(ident);
-    let base = base.strip_prefix("New").unwrap_or(base);
+    let primary = service_segment_from(base)?;
+    // `NewXxxClient` may be a Go constructor for service `Xxx` — kept
+    // as fallback only, for the case no `NewXxx` service is declared.
+    let constructor_fallback = base
+        .strip_prefix("New")
+        .and_then(service_segment_from)
+        .filter(|fb| fb != &primary);
+    Some(GeneratedCandidate {
+        primary,
+        constructor_fallback,
+    })
+}
+
+/// The service segment of a generated type name's base
+/// (`OrdersClient`, `OrdersStub`, `OrdersBlockingStub`), gated like a
+/// type name.
+fn service_segment_from(base: &str) -> Option<String> {
     for suffix in ["BlockingStub", "Client", "Stub"] {
         if let Some(s) = base.strip_suffix(suffix) {
             if s.len() >= 3 && s.chars().next().map_or(false, |c| c.is_uppercase()) {

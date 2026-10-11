@@ -77,6 +77,7 @@ fn occurrence(
         line,
         kind,
         key: key.to_string(),
+        constructor_fallback: None,
     }
 }
 
@@ -1040,6 +1041,141 @@ fn generated_stub_never_crosses_unrelated_proto_services() {
             Some(EdgeProvenance::Heuristic { detector, .. }) if detector.starts_with("anchor:proto")
         )),
         "TicketsClient has no Orders service segment: {edges:?}"
+    );
+}
+
+/// Fix round 1: a service whose name STARTS with `New` — the `News`
+/// service's generated names (`NewsClient`, `news_pb2_grpc.NewsStub`)
+/// must anchor to `news.News`. The unconditional `New`-prefix strip
+/// used to reduce them to `sClient`/`sStub` and anchor nothing.
+#[test]
+fn generated_name_for_new_prefixed_service_anchors_true_service() {
+    // news-svc declares service News in protos/news.proto;
+    // news-portal references only generated code.
+    let news_dir = tempfile::tempdir().unwrap();
+    let portal_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(news_dir.path().join("protos")).unwrap();
+    std::fs::create_dir_all(portal_dir.path().join("src")).unwrap();
+    std::fs::write(
+        news_dir.path().join("protos/news.proto"),
+        "package news;\nservice News {\n  rpc GetFeed(FeedRequest) returns (Feed);\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        portal_dir.path().join("src/client.py"),
+        "stub = news_pb2_grpc.NewsStub(channel)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        portal_dir.path().join("src/app.ts"),
+        "const c = new NewsClient(channel);\n",
+    )
+    .unwrap();
+
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-task3-fix1-news"));
+    let news = repo("news-svc");
+    let portal = repo("news-portal");
+    backend
+        .upsert_node(file_node(&news, "protos/news.proto"))
+        .unwrap();
+    backend
+        .upsert_node(file_node(&portal, "src/client.py"))
+        .unwrap();
+    backend
+        .upsert_node(file_node(&portal, "src/app.ts"))
+        .unwrap();
+
+    let mut occ = scan_repo_occurrences(&news, news_dir.path());
+    occ.extend(scan_repo_occurrences(&portal, portal_dir.path()));
+    mint_cross_repo_observations(&backend, &occ, &[]).expect("mint succeeds");
+
+    let edges = backend.all_edges().unwrap();
+    let minted = heuristic_edges(&edges, "anchor:proto:news.News");
+    assert!(
+        !minted.is_empty(),
+        "NewsClient/NewsStub must anchor to the News service: {edges:?}"
+    );
+    for e in &minted {
+        let ends = [e.source_id.as_str(), e.target_id.as_str()];
+        assert!(
+            ends.iter().any(|id| id.contains("news-svc"))
+                && ends.iter().any(|id| id.contains("news-portal")),
+            "anchor must join news-svc and news-portal, got {e:?}"
+        );
+    }
+}
+
+/// Fix round 1: `NewOrdersClient` SPELLS service `NewOrders`. When
+/// both `v2.NewOrders` and `orders.Orders` are declared it must anchor
+/// to its true service and never pair onto `orders.Orders` — the
+/// `New`-strip is a constructor fallback only, used when the primary
+/// name matches no declared service.
+#[test]
+fn new_orders_client_prefers_new_orders_service_over_orders() {
+    let v2_dir = tempfile::tempdir().unwrap();
+    let orders_dir = tempfile::tempdir().unwrap();
+    let logistics_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(v2_dir.path().join("protos")).unwrap();
+    std::fs::create_dir_all(orders_dir.path().join("protos")).unwrap();
+    std::fs::create_dir_all(logistics_dir.path().join("src")).unwrap();
+    std::fs::write(
+        v2_dir.path().join("protos/new_orders.proto"),
+        "package v2;\nservice NewOrders {\n  rpc Get(GetRequest) returns (Resp);\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        orders_dir.path().join("protos/orders.proto"),
+        "package orders;\nservice Orders {\n  rpc GetOrder(GetOrderRequest) returns (Order);\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        logistics_dir.path().join("src/handler.go"),
+        "c := pb.NewOrdersClient(conn)\nresp, err := c.GetOrder(ctx, req)\n",
+    )
+    .unwrap();
+
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-task3-fix1-neworders"));
+    let v2 = repo("v2-svc");
+    let orders = repo("orders-svc");
+    let logistics = repo("logistics-svc");
+    backend
+        .upsert_node(file_node(&v2, "protos/new_orders.proto"))
+        .unwrap();
+    backend
+        .upsert_node(file_node(&orders, "protos/orders.proto"))
+        .unwrap();
+    backend
+        .upsert_node(file_node(&logistics, "src/handler.go"))
+        .unwrap();
+
+    let mut occ = scan_repo_occurrences(&v2, v2_dir.path());
+    occ.extend(scan_repo_occurrences(&orders, orders_dir.path()));
+    occ.extend(scan_repo_occurrences(&logistics, logistics_dir.path()));
+    mint_cross_repo_observations(&backend, &occ, &[]).expect("mint succeeds");
+
+    let edges = backend.all_edges().unwrap();
+    // The true service: v2.NewOrders (its method-key twin dedupes).
+    let preferred = heuristic_edges(&edges, "anchor:proto:v2.NewOrders");
+    assert!(
+        !preferred.is_empty(),
+        "NewOrdersClient must anchor to v2.NewOrders: {edges:?}"
+    );
+    for e in &preferred {
+        let ends = [e.source_id.as_str(), e.target_id.as_str()];
+        assert!(
+            ends.iter().any(|id| id.contains("v2-svc"))
+                && ends.iter().any(|id| id.contains("logistics-svc")),
+            "v2.NewOrders anchor must join v2-svc and logistics-svc, got {e:?}"
+        );
+    }
+    // Never the OTHER declared service: the New-strip is fallback only.
+    assert!(
+        !edges.iter().any(|e| matches!(
+            &e.provenance,
+            Some(EdgeProvenance::Heuristic { detector, .. })
+                if detector.starts_with("anchor:proto:orders.Orders")
+        )),
+        "NewOrdersClient must never pair onto orders.Orders: {edges:?}"
     );
 }
 
