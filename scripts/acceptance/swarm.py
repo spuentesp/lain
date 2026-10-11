@@ -6,7 +6,11 @@ Runs ONE ARM per invocation; the experiment runs this script twice:
     python3 scripts/acceptance/swarm.py --arm lain   --work /tmp/swarm-lain
     python3 scripts/acceptance/swarm.py --arm no-lain --work /tmp/swarm-nolain
 
-Phases (briefs in tests/fixtures/swarm_deepchain/briefs/):
+`--fixture <name>` (default swarm_deepchain) selects the fixture under
+tests/fixtures/: its briefs/, make_task.py and ground_truth.json all follow
+the selection (e.g. --fixture enterprise_mesh).
+
+Phases (briefs in tests/fixtures/<fixture>/briefs/):
   1  ISOLATION — alpha/beta/gamma each get a FRESH fixture build in
      <work>/p1/<agent>/fx and analyse independently (00-scenario + 01-analysis).
   2  SHARED    — all three work concurrently in <work>/shared/fx
@@ -58,7 +62,9 @@ sys.path.insert(0, HERE)
 import onboarding  # noqa: E402
 import swarm_metrics  # noqa: E402
 
-FIXTURE_DIR = os.path.join(REPO_ROOT, "tests", "fixtures", "swarm_deepchain")
+FIXTURES_ROOT = os.path.join(REPO_ROOT, "tests", "fixtures")
+DEFAULT_FIXTURE = "swarm_deepchain"
+FIXTURE_DIR = os.path.join(FIXTURES_ROOT, DEFAULT_FIXTURE)
 MAKE_TASK = os.path.join(FIXTURE_DIR, "make_task.py")
 BRIEFS = os.path.join(FIXTURE_DIR, "briefs")
 
@@ -103,7 +109,8 @@ performs the minimal scripted actions swarm_metrics expects:
   phase 2  consensus/positions-<agent>.md; consensus/consensus.md written
            exactly once (O_CREAT|O_EXCL, so only one stub wins); one source
            edit in the assigned repo (alpha->core, beta->api, gamma->billing)
-           committed with git commit --author "<agent> <agent>@swarm.local"
+           — skipped when the fixture has no such repo — committed with
+           git commit --author "<agent> <agent>@swarm.local"
   phase 3  consensus/review-<agent>.md    (verdict lines + DONE)
 Prints one compact stream-json-like event so token/turn metrics are real.
 """
@@ -163,17 +170,26 @@ elif phase == 2:
                     "beta says needs-investigation (stub)\n"
                     "## done\nDONE\n")
     repo, rel, comment = EDITS[agent]
-    with open(os.path.join(repo, rel), "a") as f:
-        f.write("%sstub edit by %s (swarm dry-run)\n" % (comment, agent))
-    env = dict(os.environ)
-    env.update(GIT_AUTHOR_NAME=agent, GIT_AUTHOR_EMAIL="%s@swarm.local" % agent,
-               GIT_COMMITTER_NAME=agent,
-               GIT_COMMITTER_EMAIL="%s@swarm.local" % agent)
-    subprocess.run(["git", "-C", repo, "add", rel], check=True, env=env)
-    subprocess.run(["git", "-C", repo, "-c", "commit.gpgsign=false",
-                    "commit", "--author", "%s <%s@swarm.local>" % (agent, agent),
-                    "-m", "%s: stub dry-run edit" % agent],
-                   check=True, env=env)
+    # The canned edit targets swarm_deepchain's repos; a fixture without
+    # them (enterprise_mesh) skips it — the consensus claims are still
+    # written and scored.
+    if os.path.isdir(repo):
+        with open(os.path.join(repo, rel), "a") as f:
+            f.write("%sstub edit by %s (swarm dry-run)\n" % (comment, agent))
+        env = dict(os.environ)
+        env.update(GIT_AUTHOR_NAME=agent,
+                   GIT_AUTHOR_EMAIL="%s@swarm.local" % agent,
+                   GIT_COMMITTER_NAME=agent,
+                   GIT_COMMITTER_EMAIL="%s@swarm.local" % agent)
+        subprocess.run(["git", "-C", repo, "add", rel], check=True, env=env)
+        subprocess.run(["git", "-C", repo, "-c", "commit.gpgsign=false",
+                        "commit", "--author",
+                        "%s <%s@swarm.local>" % (agent, agent),
+                        "-m", "%s: stub dry-run edit" % agent],
+                       check=True, env=env)
+    else:
+        print("stub: repo %s absent in this fixture — edit skipped" % repo,
+              file=sys.stderr)
 else:  # phase 3
     m2 = re.search(r"Review the work of agent \*\*(\w+)\*\*", prompt)
     reviewee = m2.group(1) if m2 else "?"
@@ -388,10 +404,15 @@ def print_summary(report):
 # ── main ────────────────────────────────────────────────────────────────────
 
 def main():
+    global FIXTURE_DIR, MAKE_TASK, BRIEFS
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--arm", choices=["lain", "no-lain"], required=True,
                     help="one arm per run; the experiment runs this script twice")
+    ap.add_argument("--fixture", default=DEFAULT_FIXTURE,
+                    help="fixture directory under tests/fixtures/ supplying "
+                         "briefs/, make_task.py and the scoring ground truth "
+                         "(default %(default)s)")
     ap.add_argument("--work", required=True,
                     help="work directory (report.json + all workspace copies)")
     ap.add_argument("--dist", default="dev",
@@ -405,6 +426,19 @@ def main():
     ap.add_argument("--phases", default="1,2,3",
                     help="comma-separated subset of waves to run (default 1,2,3)")
     args = ap.parse_args()
+
+    fixture_dir = os.path.join(FIXTURES_ROOT, args.fixture)
+    make_task = os.path.join(fixture_dir, "make_task.py")
+    briefs = os.path.join(fixture_dir, "briefs")
+    if not os.path.isdir(fixture_dir):
+        ap.error(f"--fixture {args.fixture!r}: no such directory {fixture_dir}")
+    if not os.path.isfile(make_task):
+        ap.error(f"--fixture {args.fixture!r}: missing {make_task}")
+    for name in ("00-scenario.md", "01-analysis.md",
+                 "02-consensus.md", "03-review.md"):
+        if not os.path.isfile(os.path.join(briefs, name)):
+            ap.error(f"--fixture {args.fixture!r}: missing brief {name}")
+    FIXTURE_DIR, MAKE_TASK, BRIEFS = fixture_dir, make_task, briefs
 
     try:
         phases = {int(x) for x in args.phases.split(",") if x.strip()}
@@ -422,8 +456,9 @@ def main():
     if args.dry_run:
         agent_cmd = write_stub(work)
 
-    print(f"swarm: arm={args.arm} work={work} dist={args.dist} "
-          f"phases={sorted(phases)} dry_run={args.dry_run}", flush=True)
+    print(f"swarm: arm={args.arm} fixture={args.fixture} work={work} "
+          f"dist={args.dist} phases={sorted(phases)} dry_run={args.dry_run}",
+          flush=True)
 
     invocations = []
     exit_code = 0
@@ -485,7 +520,8 @@ def main():
     metrics = {}
     try:
         metrics = swarm_metrics.collect(work, invocations=invocations,
-                                        arm=args.arm)
+                                        arm=args.arm,
+                                        fixture=args.fixture)
     except Exception:
         traceback.print_exc()
         print("SWARM METRICS FAILED", file=sys.stderr, flush=True)

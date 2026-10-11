@@ -13,9 +13,12 @@ Reads the layout produced by swarm.py:
 Prints one JSON object:
 
   p1_scores        per agent: AFFECTED claims from private-<agent>.md,
-                   scored against swarm_deepchain/ground_truth.json
+                   scored against the fixture's ground_truth.json (default
+                   swarm_deepchain) + recall_by_class when the oracle
+                   declares per-entry coupling classes
   p2_scores        consensus.md claims scored the same way + disagreement
                    count + whether the three positions claim sets match
+                   + recall_by_class over the consensus list
   clobbering       per-repo files-by-agent, overlapping (edited by >1 agent),
                    unattributed commits, trap/tests edits, uncommitted work
   p3_reviews       verdict-marker counts, misses, scope violations per review
@@ -25,12 +28,24 @@ Prints one JSON object:
 
 Claim extraction and ground-truth scoring REUSE ab_metrics (CLAIM_RE, _fmt,
 score_ground_truth) so this oracle and the scale_task A/B score share one
-implementation. swarm scoring passes the swarm ground truth plus the
-evidence-class overrides its evidence_rules require.
+implementation. swarm scoring passes the selected fixture's ground truth
+(swarm_deepchain's evidence_rules overrides apply only to that fixture);
+an oracle whose must_find entries declare `class`/`acceptable` also gets
+the per-class recall block — entries without those fields score exactly
+as before (swarm_deepchain output is unchanged).
 
-Usage: swarm_metrics.py <work-dir>
-  (or as a library: swarm_metrics.collect(work, invocations=..., arm=...))
+Usage: swarm_metrics.py <work-dir> [--fixture NAME] [--gt PATH]
+  --fixture NAME   score against tests/fixtures/<NAME>/ground_truth.json
+                   (default swarm_deepchain). report.json does NOT record
+                   the fixture, so re-scoring an enterprise_mesh run after
+                   the fact needs this flag (swarm.py passes fixture= at
+                   run time).
+  --gt PATH        explicit ground_truth.json path (wins over --fixture
+                   for content; alone it implies no evidence overrides)
+  (or as a library:
+   swarm_metrics.collect(work, invocations=..., arm=..., fixture=...))
 """
+import argparse
 import json
 import os
 import re
@@ -44,9 +59,12 @@ import ab_metrics  # noqa: E402
 
 SWARM_GT_PATH = os.path.join(REPO_ROOT, "tests", "fixtures", "swarm_deepchain",
                              "ground_truth.json")
+FIXTURES_DIR = os.path.join(REPO_ROOT, "tests", "fixtures")
 # evidence_rules of swarm_deepchain/ground_truth.json: notify must be
 # exactly needs-investigation (missing understates, verified overstates);
-# the external consumer must be exactly missing AND present.
+# the external consumer must be exactly missing AND present. These keys
+# belong to that fixture; other fixtures score with no overrides table
+# (their oracle declares `acceptable` inline where a class is tolerated).
 SWARM_OVERRIDES = {
     "notify:send_notice": ["needs-investigation"],
     "external:partner-portal": ["missing"],
@@ -57,15 +75,39 @@ TRAP_REPOS = ("reporting", "catalog")
 git = ab_metrics.git  # git(dir, *args) -> stdout
 
 
-def _swarm_gt():
-    with open(SWARM_GT_PATH) as f:
-        return json.load(f)
+def _oracle(fixture=None, gt=None):
+    """(ground_truth dict, evidence overrides) for the selected fixture.
+
+    Both None defaults to swarm_deepchain — identical to the original
+    behavior. fixture=<name> loads tests/fixtures/<name>/ground_truth.json;
+    a preloaded gt= (e.g. from --gt) skips the load, and a custom oracle
+    gets no overrides table unless fixture= names swarm_deepchain.
+    """
+    if fixture is None and gt is None:
+        fixture = "swarm_deepchain"
+    if gt is None:
+        path = (SWARM_GT_PATH if fixture == "swarm_deepchain"
+                else os.path.join(FIXTURES_DIR, fixture, "ground_truth.json"))
+        with open(path) as f:
+            gt = json.load(f)
+    return gt, (SWARM_OVERRIDES if fixture == "swarm_deepchain" else {})
 
 
-def _score(claims_fmt):
-    """score_ground_truth against the swarm oracle, with its overrides."""
-    return ab_metrics.score_ground_truth(claims_fmt, gt=_swarm_gt(),
-                                         overrides=SWARM_OVERRIDES)
+def _resolve(gt, overrides):
+    """Defaults for callers (p1_scores/p2_scores) that pass nothing."""
+    if gt is None:
+        gt, d_ov = _oracle()
+        if overrides is None:
+            overrides = d_ov
+    elif overrides is None:
+        overrides = {}
+    return gt, overrides
+
+
+def _score(claims_fmt, gt, overrides):
+    """score_ground_truth against the selected fixture oracle."""
+    return ab_metrics.score_ground_truth(claims_fmt, gt=gt,
+                                         overrides=overrides)
 
 
 def _claim_triples(text):
@@ -82,7 +124,8 @@ def _read(path):
 
 # ── phase 1: independent analyses ───────────────────────────────────────────
 
-def p1_scores(work):
+def p1_scores(work, gt=None, overrides=None):
+    gt, overrides = _resolve(gt, overrides)
     out = {}
     for agent in AGENTS:
         path = os.path.join(work, "p1", agent, "fx", "consensus",
@@ -92,7 +135,10 @@ def p1_scores(work):
             claims = ab_metrics._fmt(sorted(set(_claim_triples(_read(path)))))
             rec["claim_count"] = len(claims)
             rec["claims"] = claims
-            rec["ground_truth_score"] = _score(claims)
+            rec["ground_truth_score"] = _score(claims, gt, overrides)
+            rbc = (rec["ground_truth_score"] or {}).get("recall_by_class")
+            if rbc is not None:
+                rec["recall_by_class"] = rbc
         out[agent] = rec
     return out
 
@@ -126,7 +172,8 @@ def _disagreements_count(text):
     return count
 
 
-def p2_scores(shared_fx):
+def p2_scores(shared_fx, gt=None, overrides=None):
+    gt, overrides = _resolve(gt, overrides)
     cons = os.path.join(shared_fx, "consensus", "consensus.md")
     out = {"exists": os.path.isfile(cons), "claim_count": 0, "claims": [],
            "ground_truth_score": None, "disagreements_count": 0,
@@ -137,7 +184,10 @@ def p2_scores(shared_fx):
         claims = ab_metrics._fmt(sorted(set(_claim_triples(text))))
         out["claim_count"] = len(claims)
         out["claims"] = claims
-        out["ground_truth_score"] = _score(claims)
+        out["ground_truth_score"] = _score(claims, gt, overrides)
+        rbc = (out["ground_truth_score"] or {}).get("recall_by_class")
+        if rbc is not None:
+            out["recall_by_class"] = rbc
         out["disagreements_count"] = _disagreements_count(text)
 
     # Do the three positions files carry the SAME claim set (symbol+evidence)?
@@ -324,7 +374,7 @@ def cost(work, invocations, arm):
 
 # ── entry points ────────────────────────────────────────────────────────────
 
-def collect(work, invocations=None, arm=None):
+def collect(work, invocations=None, arm=None, fixture=None, gt=None):
     if invocations is None:
         rep = {}
         rp = os.path.join(work, "report.json")
@@ -332,10 +382,11 @@ def collect(work, invocations=None, arm=None):
             rep = json.load(open(rp))
         invocations = rep.get("invocations") or []
         arm = arm or rep.get("arm")
+    gt_d, ov = _oracle(fixture, gt)
     shared = os.path.join(work, "shared", "fx")
     return {
-        "p1_scores": p1_scores(work),
-        "p2_scores": p2_scores(shared),
+        "p1_scores": p1_scores(work, gt=gt_d, overrides=ov),
+        "p2_scores": p2_scores(shared, gt=gt_d, overrides=ov),
         "clobbering": clobbering(shared),
         "p3_reviews": p3_reviews(shared),
         "cost": cost(work, invocations, arm),
@@ -343,10 +394,27 @@ def collect(work, invocations=None, arm=None):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print(__doc__, file=sys.stderr)
-        return 2
-    print(json.dumps(collect(sys.argv[1]), indent=2))
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("work", help="work directory produced by swarm.py")
+    ap.add_argument("--fixture", default=None,
+                    help="fixture under tests/fixtures/ to score against "
+                         "(default swarm_deepchain)")
+    ap.add_argument("--gt", default=None,
+                    help="explicit ground_truth.json path (wins over "
+                         "--fixture for content; alone implies no "
+                         "evidence overrides)")
+    args = ap.parse_args()
+    if args.fixture:
+        p = os.path.join(FIXTURES_DIR, args.fixture, "ground_truth.json")
+        if not os.path.isfile(p):
+            ap.error(f"--fixture {args.fixture!r}: no ground_truth.json at {p}")
+    gt = None
+    if args.gt:
+        with open(args.gt) as f:
+            gt = json.load(f)
+    print(json.dumps(collect(args.work, fixture=args.fixture, gt=gt),
+                     indent=2))
     return 0
 
 

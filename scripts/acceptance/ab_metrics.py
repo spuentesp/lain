@@ -83,6 +83,51 @@ def _fmt(claims):
 ACCEPTABLE_OVERRIDES = {"analytics:report": ["missing", "needs-investigation"]}
 
 
+def _ok_classes(mf, ov):
+    """Evidence classes that score this must_find entry correct.
+
+    Default is exactly the entry's `evidence`; the caller's overrides table
+    (ov) replaces it per key; a fixture-declared `acceptable` list (the
+    enterprise_mesh oracle's inline tolerance) wins over both.
+    """
+    ok = [mf["evidence"]]
+    key = mf["repo"] + ":" + mf["symbol"]
+    if key in ov:
+        ok = list(ov[key])
+    if mf.get("acceptable") is not None:
+        ok = list(mf["acceptable"])
+    return ok
+
+
+def _recall_by_class(gt, by, ov):
+    """Per-coupling-class recall over gt's must_find entries.
+
+    Only called when the oracle declares `class` on its entries; entries
+    without one land in an `unclassified` bucket. found = claimed at all,
+    correct_class = at least one claim carries a class in ok_cls, omitted =
+    never claimed, misclassified = claimed but never with an ok class.
+    """
+    recall = {}
+    for mf in gt["affected"]["must_find"]:
+        cls = mf.get("class") or "unclassified"
+        b = recall.setdefault(cls, {"found": 0, "total": 0,
+                                    "correct_class": 0, "omitted": [],
+                                    "misclassified": []})
+        b["total"] += 1
+        key = mf["repo"] + ":" + mf["symbol"]
+        hits = by.get(("must", key), [])
+        if not hits:
+            b["omitted"].append(key)
+            continue
+        b["found"] += 1
+        if any(c["evidence"] in _ok_classes(mf, ov) for c in hits):
+            b["correct_class"] += 1
+        else:
+            evs = "/".join(sorted({c["evidence"] for c in hits}))
+            b["misclassified"].append(f"{key} -> {evs}")
+    return recall
+
+
 def score_ground_truth(claims_fmt, gt=None, overrides=None):
     """Score the agent's claim lines against the predeclared oracle.
 
@@ -95,6 +140,12 @@ def score_ground_truth(claims_fmt, gt=None, overrides=None):
     gt: a preloaded ground-truth dict (defaults to loading GT_PATH).
     overrides: {symbol: [acceptable classes]} replacing ACCEPTABLE_OVERRIDES
     for this call; None keeps the module default (scale_task behavior).
+    A must_find entry may declare its own `acceptable` list (it wins over
+    both `[evidence]` and the overrides table) and a coupling `class`
+    (A/B/C/external); per-entry scoring is unchanged, but when any entry
+    declares `class` the result additionally carries `recall_by_class`
+    keyed by class. Oracles with neither field (scale_task,
+    swarm_deepchain) score byte-identically to before.
     """
     if gt is None:
         try:
@@ -125,9 +176,7 @@ def score_ground_truth(claims_fmt, gt=None, overrides=None):
            "protocol_misuse": []}
     for mf in gt["affected"]["must_find"]:
         key = mf["repo"] + ":" + mf["symbol"]
-        ok_cls = [mf["evidence"]]
-        if key in ov:
-            ok_cls = list(ov[key])
+        ok_cls = _ok_classes(mf, ov)
         hits = by.get(("must", key), [])
         if not hits:
             res["omissions"].append(key)
@@ -168,6 +217,8 @@ def score_ground_truth(claims_fmt, gt=None, overrides=None):
     res["harm"] = {"omissions": len(res["omissions"]),
                    "serious_false_positives": len(res["serious_false_positives"]),
                    "misclassified": len(res["misclassified"])}
+    if any("class" in mf for mf in gt["affected"]["must_find"]):
+        res["recall_by_class"] = _recall_by_class(gt, by, ov)
     return res
 
 

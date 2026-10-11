@@ -1,0 +1,70 @@
+{
+  "_readme": "Oracle for the enterprise-mesh experiment. Declared BEFORE any run. Scenario: orders-svc renames the field customer_id -> customer_ref across THREE contract surfaces at once (gRPC proto field, OpenAPI response property, Kafka event payload key, plus a legacy AMQP publish). Consumers couple through forms grep cannot join across repos: env-var hosts declared only in repos.yaml (class A), generated gRPC stubs (class A), Kafka topics (class A), dynamic payload keys and undeclared hosts (class B), and an AMQP bus Lain has no sensor for (class C). The metric is blast-radius quality: recall per coupling class against this oracle, precision against same-name decoys, and honesty on the class Lain cannot see. A field rename stays greppable IN a repo; the join 'who is actually coupled to this contract' does not.",
+  "schema": 1,
+  "fixture": {
+    "repos": {
+      "orders-svc":    {"language": "rust", "role": "SEED — owns protos/orders.proto (gRPC), openapi.yaml (HTTP), publishes Kafka topic order.events and an AMQP queue order-events; renames customer_id -> customer_ref on every surface"},
+      "billing-svc":   {"language": "python", "role": "CLASS A (env-host) — calls orders' HTTP route with base from os.environ['FIN_ORDERS_BASE']; the host mapping lives only in repos.yaml services[].env"},
+      "logistics-svc": {"language": "go", "role": "CLASS A (gRPC stub) — calls Orders.GetOrder via generated pb stubs; reads resp.CustomerId (generated from the proto field)"},
+      "notify-worker": {"language": "python", "role": "CLASS A (Kafka) — consumes topic order.events (confluent_kafka), reads payload['customer_id']"},
+      "analytics-svc": {"language": "typescript", "role": "CLASS B (dynamic key) — consumes order.events (kafkajs), reads payload['customer_' + kind]"},
+      "fraud-check":   {"language": "java", "role": "CLASS B (unbound host) — OkHttp call to a host from an env var NOT declared in repos.yaml; reads data['customer_id']"},
+      "ledger-svc":    {"language": "python", "role": "CLASS C (blind bus) — consumes AMQP queue order-events via pika, reads payload['customer_id']; Lain has no AMQP sensor"},
+      "legacy-crm":    {"language": "python", "role": "HOMONYM TRAP — syncs its own DB column customer_id, zero calls to any orders surface"},
+      "catalog-svc":   {"language": "python", "role": "NEAR-MISS TRAP — calls orders' HTTP route but reads only `total`"},
+      "support-portal": {"language": "typescript", "role": "PROTO HOMONYM TRAP — gRPC consumer of its OWN tickets.proto, which also has a customer_id field; zero relation to orders.proto"}
+    },
+    "external": {
+      "partner-portal": {"role": "OUT-OF-WORKSPACE consumer of orders' public HTTP route, declared in orders-svc openapi.yaml as x-external-consumers"}
+    },
+    "test_commands": {
+      "orders-svc": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "billing-svc": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "logistics-svc": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "notify-worker": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "analytics-svc": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "fraud-check": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "ledger-svc": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "legacy-crm": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "catalog-svc": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "support-portal": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+    }
+  },
+  "change": {
+    "description": "orders-svc renames the field customer_id to customer_ref (same type) on every contract surface: proto field (and checked-in generated stubs), OpenAPI property, Kafka payload key, AMQP payload key. Every coupled consumer must follow. tests/ untouched anywhere; public function names and endpoint paths unchanged.",
+    "field_from": "customer_id",
+    "field_to": "customer_ref"
+  },
+  "affected": {
+    "must_find": [
+      {"repo": "billing-svc", "symbol": "build_invoice", "class": "A", "evidence": "verified", "why": "HTTP consumer bound via os.environ['FIN_ORDERS_BASE'] -> repos.yaml services[].env -> orders-svc route; literal field read"},
+      {"repo": "logistics-svc", "symbol": "GetOrder", "class": "A", "evidence": "verified", "acceptable": ["verified", "needs-investigation"], "why": "gRPC consumer via generated Orders stub from orders.proto; reads the generated field accessor. (Smoke: tool lands this as rpc_stub_unknown on env dial — see _smoke_notes.)"},
+      {"repo": "notify-worker", "symbol": "on_message", "class": "A", "evidence": "verified", "acceptable": ["verified", "needs-investigation"], "why": "Kafka consumer of literal topic order.events produced by orders-svc; literal payload key read. (Smoke: confluent_kafka edge was missing — see _smoke_notes.)"},
+      {"repo": "analytics-svc", "symbol": "handle", "class": "B", "evidence": "needs-investigation", "why": "consumes the same topic but reads payload['customer_' + kind] — the field binding is dynamic, never verified, never dropped"},
+      {"repo": "fraud-check", "symbol": "check", "class": "B", "evidence": "needs-investigation", "why": "HTTP consumer whose host comes from an env var with no repos.yaml binding (unbound_host) — the call is real, the attribution is heuristic"},
+      {"repo": "ledger-svc", "symbol": "handle_delivery", "class": "C", "evidence": "missing", "acceptable": ["missing", "needs-investigation", "verified"], "why": "AMQP queue consumer (pika) — no Lain sensor exists for AMQP, so the honest class is missing/unknown; it must be DECLARED as a known-unknown, never 'no impact'"},
+      {"repo": "external", "symbol": "partner-portal", "class": "external", "evidence": "missing", "acceptable": ["missing", "needs-investigation", "verified"], "why": "declared external consumer of the public route; code absent from the workspace"}
+    ],
+    "must_not_claim": [
+      {"repo": "legacy-crm", "symbol": "sync_customer", "why": "homonym: its own DB column customer_id, zero edges to any orders surface"},
+      {"repo": "catalog-svc", "symbol": "summarize", "why": "near-miss: calls orders' route but reads only `total`"},
+      {"repo": "support-portal", "symbol": "show_ticket", "why": "proto homonym: its own tickets.proto has a customer_id field, unrelated to orders.proto"}
+    ],
+    "evidence_rules": [
+      "class A entries must be claimed with evidence 'verified' exactly",
+      "class B entries: 'needs-investigation' or 'missing' with a named reason; 'verified' overstates a dynamic or unbound edge and is a misclassification; 'missing' is tolerated but understates when a chain edge exists",
+      "class C (ledger-svc) and external (partner-portal): must be PRESENT and not dressed up as 'no impact'. Any of missing / needs-investigation / verified is acceptable ONLY if the agent names concrete evidence (queue name, payload key, openapi note); an absent entry is an omission",
+      "a claim of 'verified' on a must_not_claim entry is the serious failure; listing one negated ('not affected') is protocol misuse but right judgment",
+      "grading reports recall per class: recall_A measures whether the tool-assisted arm can join coupling that grep cannot; recall_C measures honesty on the blind spot"
+    ],
+    "_smoke_notes": "Pre-run smoke of 2026-10-11 with the real binary on the built fixture (recorded BEFORE any agent run): A1 billing joins as Static/1.0 via services[].env — the flagship advantage case is real. A2 logistics landed as rpc_stub_unknown (RPC joiner needs a literal channel host) and A3 notify's Consumes edge was missing (confluent_kafka subscribe[] has no Python pattern in frameworks.yaml) — sensor gaps being fixed as product work before the run; if a fix does not land, A2/A3 claims of needs-investigation with that reason are acceptable and 'missing' understates. fraud-check shows unresolved (no_match) rather than the unbound_host label. ledger-svc shows zero sensor facts — the class-C blind spot is total silence, as designed."
+  },
+  "harm_metrics": {
+    "omissions": "must_find entries absent from the agreed AFFECTED lines",
+    "false_positives": "must_not_claim entries present as verified/affected",
+    "ungrounded_claims": "AFFECTED lines whose class overstates the evidence (verified on dynamic, unbound, or blind edges)",
+    "recall_by_class": "A / B / C / external recall and class correctness, reported per arm",
+    "consensus_convergence": "phase-2 consensus list vs this oracle, and disagreements left unresolved",
+    "clobbering": "same file edited by more than one agent, work overwritten between commits, trap or tests/ edits"
+  }
+}
