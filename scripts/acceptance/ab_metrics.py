@@ -244,6 +244,8 @@ def score_ground_truth(claims_fmt, gt=None, overrides=None):
                 continue
             if re.search(r"partner-portal|outside|external", c["symbol"], re.I):
                 continue
+            if re.search(r"unknown|unseen|other consumers|beyond ", c["symbol"], re.I):
+                continue  # free-text known-unknown declarations, not decoys
             repo = c["symbol"].split(":", 1)[0].strip()
             if repo and repo not in allowed:
                 noise.append(f"{c['symbol']} [{c['evidence']}]")
