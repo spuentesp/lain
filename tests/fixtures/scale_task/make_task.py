@@ -185,8 +185,23 @@ def _write(path, body):
         f.write(body)
 
 
+_GITIGNORE = """\
+target/
+Cargo.lock
+__pycache__/
+*.pyc
+node_modules/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+"""
+
+
 def _init_repo(path):
     os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, ".gitignore"), "w") as f:
+        f.write(_GITIGNORE)
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True,
                    capture_output=True)
     return path

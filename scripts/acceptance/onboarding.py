@@ -411,9 +411,12 @@ def pump(src, dst, tag):
         dst.close()
     except Exception:
         pass
-threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, b">>>"), daemon=True).start()
+t_out = threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, b">>>"))
+t_out.start()
 threading.Thread(target=pump, args=(sys.stdin.buffer, proc.stdin, b"<<<"), daemon=True).start()
-sys.exit(proc.wait())
+rc = proc.wait()
+t_out.join(timeout=5)
+os._exit(rc)
 '''
 
 

@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Extract A/B comparison metrics from acceptance run directories.
+
+Reads report.json + transcript-b.txt (claude --output-format stream-json)
++ the fixture repos' git state. Metrics per run:
+  tokens (input/output/cache), wall-clock, agent duration, turns,
+  tool calls, files touched, scope violations (tests/ or trap repos),
+  committed?, AFFECTED claims, sync activity (index verification calls).
+
+Claims are split into what the AGENT asserted (assistant text and tool
+inputs) vs what a TOOL printed (tool results — raw `lain impact` output
+is LAIN's claim, not the agent's). Agent claims are then scored against
+the predeclared oracle in tests/fixtures/scale_task/ground_truth.json:
+omissions (must_find absent), serious false positives (must_not_claim
+claimed affected/verified) and misclassifications (wrong evidence class).
+
+Usage: ab_metrics.py <run-dir> [<run-dir> ...]
+"""
+import json, os, re, subprocess, sys
+
+CLAIM_RE = re.compile(r'AFFECTED: ([^\s"]+?)\s+EVIDENCE: ([\w-]+)([^\n]*)')
+NEG_RE = re.compile(r"not affected|not edited|no orders call|never calls|-> not", re.I)
+GT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "..", "tests", "fixtures", "scale_task",
+                       "ground_truth.json")
+
+
+def git(dir_, *a):
+    return subprocess.run(["git", "-C", dir_, *a], capture_output=True, text=True).stdout
+
+
+def _strings(obj, out):
+    if isinstance(obj, str):
+        out.append(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _strings(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _strings(v, out)
+
+
+def extract_claims(tr):
+    """Split AFFECTED claims into agent-asserted vs tool-printed. A claim
+    echoed in both (agent heredoc echoed by its own tool_result) keeps only
+    the agent attribution; tool_only is therefore pure tool output."""
+    agent, tool = [], []
+    for ln in tr.splitlines():
+        ln = ln.strip()
+        if not ln.startswith("{"):
+            continue
+        try:
+            r = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        typ = r.get("type")
+        if typ not in ("assistant", "user"):
+            continue
+        strs = []
+        _strings(r.get("message", {}).get("content", []), strs)
+        found = [(a, e, q.strip()) for a, e, q in CLAIM_RE.findall("\n".join(strs))
+                 if "<" not in a and "<" not in e]
+        if not found:
+            continue
+        (agent if typ == "assistant" else tool).extend(found)
+    agent_u = sorted(set(agent))
+    tool_only = sorted(set(tool) - set(agent))
+    return agent_u, tool_only
+
+
+def _fmt(claims):
+    out = []
+    for a, e, q in claims:
+        out.append({"symbol": a, "evidence": e, "qualifier": q or None,
+                    "asserts_affected": not bool(NEG_RE.search(q))})
+    return out
+
+
+def score_ground_truth(claims_fmt):
+    """Score the agent's claim lines against the predeclared oracle.
+
+    evidence_rules (ground_truth.json): must_find classes must match exactly
+    (analytics may be missing|needs-investigation); a `verified` claim on a
+    must_not_claim entry is the serious failure; a negated qualifier
+    ('not affected') lists a candidate without asserting impact — right
+    judgment, but misuse of the AFFECTED protocol.
+    """
+    try:
+        gt = json.load(open(GT_PATH))
+    except (OSError, json.JSONDecodeError):
+        return None
+    by = {}
+    for c in claims_fmt:
+        for mf in gt["affected"]["must_find"]:
+            if c["symbol"].startswith(mf["repo"] + ":") and \
+               c["symbol"].endswith(":" + mf["symbol"]):
+                by.setdefault(("must", mf["repo"] + ":" + mf["symbol"]), []).append(c)
+        for mn in gt["affected"]["must_not_claim"]:
+            if c["symbol"].startswith(mn["repo"] + ":") and \
+               c["symbol"].endswith(":" + mn["symbol"]):
+                by.setdefault(("mustnot", mn["repo"] + ":" + mn["symbol"]), []).append(c)
+
+    res = {"must_find": [], "must_not_claim": [], "omissions": [],
+           "serious_false_positives": [], "misclassified": [],
+           "protocol_misuse": []}
+    for mf in gt["affected"]["must_find"]:
+        key = mf["repo"] + ":" + mf["symbol"]
+        ok_cls = [mf["evidence"]]
+        if key == "analytics:report":
+            ok_cls = ["missing", "needs-investigation"]
+        hits = by.get(("must", key), [])
+        if not hits:
+            res["omissions"].append(key)
+            res["must_find"].append({"symbol": key, "status": "omitted"})
+            continue
+        st = "omitted"
+        for c in hits:
+            if not c["asserts_affected"]:
+                st = "contradicted"
+            elif c["evidence"] in ok_cls:
+                st = "ok"
+                break
+            else:
+                st = "misclassified:" + c["evidence"]
+        if st.startswith("misclassified"):
+            res["misclassified"].append(f"{key} -> {st.split(':', 1)[1]}")
+        res["must_find"].append({"symbol": key, "status": st,
+                                 "claimed": [c["evidence"] for c in hits]})
+    for mn in gt["affected"]["must_not_claim"]:
+        key = mn["repo"] + ":" + mn["symbol"]
+        hits = by.get(("mustnot", key), [])
+        if not hits:
+            res["must_not_claim"].append({"symbol": key, "status": "not_claimed"})
+            continue
+        st = "not_claimed"
+        for c in hits:
+            if not c["asserts_affected"]:
+                st = "listed_negated"
+                res["protocol_misuse"].append(key)
+            elif c["evidence"] == "verified":
+                st = "SERIOUS-FP"
+                res["serious_false_positives"].append(key)
+            else:
+                st = "fp:" + c["evidence"]
+                res["serious_false_positives"].append(f"{key} [{c['evidence']}]")
+        res["must_not_claim"].append({"symbol": key, "status": st,
+                                      "claimed": [c["evidence"] for c in hits]})
+    res["harm"] = {"omissions": len(res["omissions"]),
+                   "serious_false_positives": len(res["serious_false_positives"]),
+                   "misclassified": len(res["misclassified"])}
+    return res
+
+
+def metrics(path):
+    m = {"run": os.path.basename(path)}
+    rep = json.load(open(os.path.join(path, "report.json")))
+    tr = open(os.path.join(path, "transcript-b.txt"), errors="replace").read()
+
+    # tokens + durations from the stream-json result event and messages
+    tok = {"input": 0, "output": 0, "cache_read": 0}
+    for u in re.findall(r'"usage":\{([^}]*)\}', tr):
+        g = dict(re.findall(r'"(\w+)":(\d+)', u))
+        tok["input"] += int(g.get("input_tokens", 0))
+        tok["output"] += int(g.get("output_tokens", 0))
+        tok["cache_read"] += int(g.get("cache_read_input_tokens", 0))
+    m["tokens"] = tok
+    dur = re.findall(r'"duration_ms":(\d+)', tr)
+    m["agent_duration_s"] = round(max(map(int, dur)) / 1000, 1) if dur else None
+    ts = re.findall(r'"timestamp":"([^"]+)"', tr)
+    m["first_to_last_s"] = None
+    if len(ts) >= 2:
+        from datetime import datetime
+        f = lambda s: datetime.fromisoformat(s.replace("Z", "+00:00"))
+        m["first_to_last_s"] = round((f(ts[-1]) - f(ts[0])).total_seconds(), 1)
+
+    # activity counts
+    m["turns"] = len(re.findall(r'"type":"assistant"', tr))
+    m["tool_calls_total"] = len(re.findall(r'"name":"(Bash|Edit|Write|Read|Glob|Grep|MultiEdit)"', tr))
+    m["bash_calls"] = len(re.findall(r'"name":"Bash"', tr))
+    notes = " ".join(rep.get("notes", []))
+    mcp = re.search(r"via MCP: \[([^\]]*)\]", notes)
+    cli = re.search(r"via CLI: \[([^\]]*)\]", notes)
+    m["lain_tools_mcp"] = [x.strip(" '\"") for x in (mcp.group(1).split(",") if mcp else []) if x.strip(" '\"")]
+    m["lain_tools_cli"] = [x.strip(" '\"") for x in (cli.group(1).split(",") if cli else []) if x.strip(" '\"")]
+
+    # sync activity: how much of the agent's bash work was index sync/verify
+    sync_calls = len(re.findall(r'\b(reindex|status|doctor|oneshot)\b', tr))
+    m["sync_mentions"] = sync_calls
+
+    # claims: agent-asserted vs tool-printed, then oracle score
+    agent_c, tool_c = extract_claims(tr)
+    m["claims_agent"] = _fmt(agent_c)
+    m["claims_tool_only"] = _fmt(tool_c)
+    m["claim_count_agent"] = len(agent_c)
+    m["claim_count_tool_only"] = len(tool_c)
+    m["claims"] = [f"{a} [{e}]" for a, e, _ in agent_c]
+    m["claim_count"] = len(agent_c)
+    m["ground_truth_score"] = score_ground_truth(m["claims_agent"])
+
+    # clobbering: fixture repo file scope
+    fx = os.path.join(path, "fx")
+    touched, violations, uncommitted = [], [], []
+    repos = (sorted(d for d in os.listdir(fx) if os.path.isdir(os.path.join(fx, d, ".git")) if os.path.isdir(os.path.join(fx, d)))
+             if os.path.isdir(fx) else [])
+    for repo in repos:
+        rdir = os.path.join(fx, repo)
+        # files the AGENT changed = the diff from the fixture's final setup
+        # commit to HEAD (the agent may modify files the fixture created),
+        # plus anything still dirty. Artifact paths (target/, __pycache__...)
+        # are ignored here — a built fixture repo now ships a .gitignore, so
+        # they no longer appear in git status at all.
+        fx_sha = git(rdir, "log", "--author=fixture@lain.local", "-1",
+                     "--format=%H").strip()
+        files = [f for f in git(rdir, "diff", "--name-only", fx_sha, "HEAD").splitlines()
+                 if f.strip()] if fx_sha else []
+        dirty = [l[3:] for l in git(rdir, "status", "--short").splitlines()
+                 if l.strip() and "__pycache__" not in l and "target/" not in l
+                 and not l.endswith("Cargo.lock")]
+        for f in files + dirty:
+            touched.append(f"{repo}:{f}")
+            if f.startswith("tests/") and "test_" not in f:  # oracle tests must not change
+                violations.append(f"{repo}:{f}")
+            if repo in ("reporting", "catalog", "analytics"):
+                violations.append(f"TRAP-REPO touched: {repo}:{f}")
+        if dirty:
+            uncommitted.append(repo)
+    incidental = [f for f in touched if re.search(r"target/|__pycache__|Cargo.lock|\.pyc$", f)]
+    m["files_touched"] = [f for f in touched if f not in incidental]
+    m["incidental_files_committed"] = len(incidental)
+    m["scope_violations"] = violations
+    if os.path.isdir(fx):
+        m["repos_with_uncommitted_work"] = uncommitted
+        m["all_changes_committed"] = not uncommitted
+    else:
+        m["repos_with_uncommitted_work"] = None
+        m["all_changes_committed"] = None  # fx/ gone: unknown, not clean
+    return m
+
+
+if __name__ == "__main__":
+    out = [metrics(p) for p in sys.argv[1:]]
+    print(json.dumps(out, indent=2))
