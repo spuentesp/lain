@@ -939,27 +939,32 @@ def _write_repos_yaml(root):
     # Roles copied verbatim from ground_truth.json. Built line-by-line
     # (not one f-string) because several roles contain braces.
     lines = ["data_dir: %s\nrepos:\n" % os.path.join(root, ".lain-data")]
+    # Neutral service-registry role lines only — the kind a real catalog
+    # carries. Never describe coupling, protocols, env vars or field names
+    # here: a roles column that explains the joins hands the agent the
+    # analysis (lesson of 2026-10-11 — the first mesh runs were contaminated
+    # by answer-key roles in this file).
     for rid, lang, role in (
             ("orders-svc", "rust",
-             "SEED — owns protos/orders.proto (gRPC), openapi.yaml (HTTP GET /v1/orders/{id}), publishes Kafka topic order.events and AMQP queue order-events; the change renames customer_id -> customer_ref on every surface"),
+             "order management service"),
             ("billing-svc", "python",
-             "CLASS A (env-host) — calls orders-svc\'s HTTP route with the base from os.environ[\'FIN_ORDERS_BASE\']; the env->host mapping lives only in this file\'s services[].env"),
+             "billing and invoicing"),
             ("logistics-svc", "go",
-             "CLASS A (gRPC stub) — calls Orders.GetOrder via checked-in generated pb stubs, reads resp.CustomerId; dial target from ORDERS_GRPC_ADDR"),
+             "logistics routing and dispatch"),
             ("notify-worker", "python",
-             "CLASS A (Kafka) — consumes topic order.events (confluent_kafka), reads payload[\'customer_id\']"),
+             "customer notification worker"),
             ("analytics-svc", "typescript",
-             "CLASS B (dynamic key) — consumes order.events (kafkajs), reads payload[\'customer_\' + kind]"),
+             "product analytics pipeline"),
             ("fraud-check", "java",
-             "CLASS B (unbound host) — OkHttp call whose host comes from RISK_ORDERS_URL, deliberately NOT declared under services[].env; reads data.getString(\'customer_id\')"),
+             "fraud scoring service"),
             ("ledger-svc", "python",
-             "CLASS C (blind bus) — consumes AMQP queue order-events via pika, reads payload[\'customer_id\']; no AMQP sensor exists"),
+             "financial ledger recording"),
             ("legacy-crm", "python",
-             "HOMONYM TRAP — syncs its own DB column customer_id, zero calls to any orders surface"),
+             "legacy CRM synchronization"),
             ("catalog-svc", "python",
-             "NEAR-MISS TRAP — calls orders-svc\'s HTTP route via its OWN CATALOG_ORDERS_BASE env, reads only `total`"),
+             "product catalog service"),
             ("support-portal", "typescript",
-             "PROTO HOMONYM TRAP — gRPC consumer of its OWN tickets.proto (which has a customer_id field); zero relation to orders.proto")):
+             "customer support portal")):
         lines.append("  - id: %s\n" % rid)
         lines.append("    language: %s\n" % lang)
         lines.append('    role: "%s"\n' % role)

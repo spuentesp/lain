@@ -535,21 +535,23 @@ def _write_repos_yaml(root):
     # Roles copied verbatim from ground_truth.json. Built line-by-line
     # (not one f-string) because several roles contain braces.
     lines = ["data_dir: %s\nrepos:\n" % os.path.join(root, ".lain-data")]
+    # Neutral registry roles only — see the 2026-10-11 lesson in
+    # enterprise_mesh/make_task.py: descriptive roles were an answer key.
     for rid, lang, role in (
             ("core", "rust",
-             "SEED — serves GET /core/orders/{id} with response field customer_id; the change renames it to customer_ref (serde rename, same type)"),
+             "core orders domain"),
             ("api", "typescript",
-             "BFF — calls core's endpoint, forwards the field in its own GET /bff/orders/{id}"),
+             "orders BFF"),
             ("cli", "typescript",
-             "consumer — calls core's endpoint directly, reads resp.customer_id for display"),
+             "orders CLI client"),
             ("billing", "python",
-             "consumer+forwarder — reads the field from api's response, re-emits it in GET /invoices/{id}"),
+             "billing and invoicing"),
             ("notify", "python",
-             "DEEP consumer — reads it from billing's response via dynamic key resp.get('customer_' + suffix); 3 hops from core, 2 hops from any literal mention"),
+             "customer notifications"),
             ("reporting", "python",
-             "HOMONYM TRAP — has build_invoice too, builds invoices from CSV, zero calls to any chain endpoint"),
+             "reporting exports"),
             ("catalog", "python",
-             "NEAR-MISS TRAP — calls core's endpoint but reads only `total`")):
+             "product catalog")):
         lines.append("  - id: %s\n" % rid)
         lines.append("    language: %s\n" % lang)
         lines.append('    role: "%s"\n' % role)
