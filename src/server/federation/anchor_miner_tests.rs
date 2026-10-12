@@ -52,6 +52,22 @@ fn http_route_node(r: &RepoId, path: &str, name: &str) -> GraphNode {
     n
 }
 
+/// The event sensor's synthetic site node (`topic-read:<path>:<line>`
+/// — `util::synthetic_site_node`): `line_end` is deliberately `None`,
+/// so `build_node_index` never indexes it as a symbol span and
+/// `resolve_endpoint`'s `by_line` can never resolve an occurrence to
+/// it. The federated id is the projected `GlobalId` shape.
+fn synthetic_site_node(r: &RepoId, path: &str, line: u32) -> GraphNode {
+    let id_name = format!("topic-read:{path}:{line}");
+    let id = GlobalId::new(r, NodeType::Function, path, &id_name, Some(line));
+    let ns = RepoNamespace::for_test();
+    let mut n = GraphNode::new_in(NodeType::Function, id_name, path.to_string(), &ns);
+    n.id = id.as_str().to_string();
+    n.line_start = Some(line);
+    n.line_end = None;
+    n
+}
+
 fn file_id(r: &RepoId, path: &str) -> String {
     GlobalId::new(
         r,
@@ -731,6 +747,114 @@ fn typed_amqp_topic_edges_suppress_cross_repo_queue_anchor_mint() {
         assert_eq!(
             report.anchor_edges, 0,
             "{label}: the typed fn -> Topic edges already cover the coupling; \
+             the heuristic twin must not duplicate them: {report:?}"
+        );
+        let edges = backend.all_edges().unwrap();
+        assert!(
+            !edges.iter().any(|e| matches!(
+                &e.provenance,
+                Some(EdgeProvenance::Heuristic { detector, .. }) if detector.starts_with("anchor:queue")
+            )),
+            "{label}: heuristic twin must not duplicate the typed edges: {edges:?}"
+        );
+    }
+}
+
+/// Task 2 fix residual (top-level bus calls): when the call site has
+/// no indexed Function/Method the typed edge rides the synthetic
+/// `topic-read:<path>:<line>` node (`line_end: None`, so it is never
+/// a `symbols` span) while `resolve_endpoint` falls back to the File
+/// node. The id-keyed `bus_covered` map then never sees coverage and
+/// the heuristic twin mints despite full typed coverage. Coverage
+/// must also key on `(repo, path)`, which both endpoints share.
+#[test]
+fn typed_amqp_topic_edges_suppress_top_level_queue_anchor_mint() {
+    for shared_topic in [false, true] {
+        let label = if shared_topic {
+            "shared topic node"
+        } else {
+            "per-repo topic nodes"
+        };
+        let backend =
+            PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-task2-amqp-top-level"));
+        let ledger = repo("ledger-svc");
+        let orders = repo("orders-svc");
+        // Top-level sites: no Function/Method spans cover these
+        // lines, so the anchor endpoints resolve to File nodes.
+        let ledger_site = synthetic_site_node(&ledger, "src/ledger.py", 9);
+        let orders_site = synthetic_site_node(&orders, "src/legacy_amqp.rs", 3);
+        let ledger_file = file_node(&ledger, "src/ledger.py");
+        let orders_file = file_node(&orders, "src/legacy_amqp.rs");
+        backend.upsert_node(ledger_site.clone()).unwrap();
+        backend.upsert_node(orders_site.clone()).unwrap();
+        backend.upsert_node(ledger_file.clone()).unwrap();
+        backend.upsert_node(orders_file.clone()).unwrap();
+
+        let ledger_topic = spanned_node(
+            &ledger,
+            NodeType::Topic,
+            "src/ledger.py",
+            "amqp/order-events",
+            (1, 1),
+        );
+        let orders_topic = if shared_topic {
+            ledger_topic.clone()
+        } else {
+            spanned_node(
+                &orders,
+                NodeType::Topic,
+                "src/legacy_amqp.rs",
+                "amqp/order-events",
+                (1, 1),
+            )
+        };
+        backend.upsert_node(ledger_topic.clone()).unwrap();
+        if !shared_topic {
+            backend.upsert_node(orders_topic.clone()).unwrap();
+        }
+
+        // The typed edges the event sensor mints for top-level sites:
+        // synthetic site node → Topic, Static{Regex}, within one repo.
+        let mut consume_edge = GraphEdge::new(
+            EdgeType::Consumes,
+            ledger_site.id.clone(),
+            ledger_topic.id.clone(),
+        );
+        consume_edge.provenance = Some(EdgeProvenance::Static {
+            source: crate::schema::StaticSource::Regex,
+        });
+        backend.upsert_edge(consume_edge).unwrap();
+        let mut produce_edge = GraphEdge::new(
+            EdgeType::Produces,
+            orders_site.id.clone(),
+            orders_topic.id.clone(),
+        );
+        produce_edge.provenance = Some(EdgeProvenance::Static {
+            source: crate::schema::StaticSource::Regex,
+        });
+        backend.upsert_edge(produce_edge).unwrap();
+
+        let occ = [
+            occurrence(
+                "orders-svc",
+                "src/legacy_amqp.rs",
+                3,
+                AnchorKind::Queue,
+                "order-events",
+            ),
+            occurrence(
+                "ledger-svc",
+                "src/ledger.py",
+                9,
+                AnchorKind::Queue,
+                "order-events",
+            ),
+        ];
+        let report = mint_cross_repo_observations(&backend, &occ, &[]).unwrap();
+        assert_eq!(
+            report.anchor_edges, 0,
+            "{label}: the typed synthetic-site -> Topic edges already cover the \
+             coupling even though the anchor pair resolves to File nodes; \
              the heuristic twin must not duplicate them: {report:?}"
         );
         let edges = backend.all_edges().unwrap();

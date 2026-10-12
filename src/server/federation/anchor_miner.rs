@@ -376,6 +376,12 @@ pub fn mint_cross_repo_observations(
         .map(|n| (n.id.clone(), n.name.clone()))
         .collect();
     let mut bus_covered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Fallback key: `(repo, path)` → topic labels. The typed edge's
+    // endpoint may be a synthetic site node (`line_end: None`, never
+    // a `symbols` span) while the anchor occurrence resolves to the
+    // File node — same file, different node id. Coverage recorded
+    // under the shared `(repo, path)` still owns the coupling.
+    let mut bus_covered_by_path: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     for e in &existing {
         if !matches!(
             e.provenance,
@@ -389,17 +395,26 @@ pub fn mint_cross_repo_observations(
         ) {
             continue;
         }
-        if let Some(topic) = topic_labels.get(&e.source_id) {
+        let mut cover = |participant: &str, topic: &str| {
             bus_covered
-                .entry(e.target_id.clone())
+                .entry(participant.to_string())
                 .or_default()
-                .insert(topic.clone());
+                .insert(topic.to_string());
+            if let Some(path) = GlobalId::parse(participant)
+                .ok()
+                .and_then(|gid| gid.path().map(|p| (gid.repo_id().to_string(), p)))
+            {
+                bus_covered_by_path
+                    .entry(path)
+                    .or_default()
+                    .insert(topic.to_string());
+            }
+        };
+        if let Some(topic) = topic_labels.get(&e.source_id) {
+            cover(&e.target_id, topic);
         }
         if let Some(topic) = topic_labels.get(&e.target_id) {
-            bus_covered
-                .entry(e.source_id.clone())
-                .or_default()
-                .insert(topic.clone());
+            cover(&e.source_id, topic);
         }
     }
 
@@ -492,7 +507,15 @@ pub fn mint_cross_repo_observations(
                         if blocked.contains(&pair_key(a, b)) {
                             continue;
                         }
-                        if typed_covered && pair_bus_covered(a, b, &key_suffix, &bus_covered) {
+                        if typed_covered
+                            && pair_bus_covered(
+                                a,
+                                b,
+                                &key_suffix,
+                                &bus_covered,
+                                &bus_covered_by_path,
+                            )
+                        {
                             continue;
                         }
                         for (s, t) in [(a.clone(), b.clone()), (b.clone(), a.clone())] {
@@ -709,16 +732,30 @@ fn pair_key(a: &str, b: &str) -> [String; 2] {
 /// per-endpoint label sets (`bus_covered`) are keyed by node id, so
 /// this works whether the two repos' endpoints bind the same Topic
 /// node or distinct per-repo Topic nodes sharing one name.
+///
+/// `covered_by_path` is the fallback for endpoints the id key can
+/// never reach: a top-level bus call has no indexed symbol, so its
+/// typed edge rides the synthetic `topic-read:<path>:<line>` node
+/// (`line_end: None`, never a `symbols` span) while the anchor pair
+/// resolves to the File node — same `(repo, path)`, different id. A
+/// label set found under either key counts as coverage.
 fn pair_bus_covered(
     a: &str,
     b: &str,
     key_suffix: &str,
     covered: &BTreeMap<String, BTreeSet<String>>,
+    covered_by_path: &BTreeMap<(String, String), BTreeSet<String>>,
 ) -> bool {
     let covers = |id: &str| {
-        covered
-            .get(id)
-            .is_some_and(|labels| labels.iter().any(|l| l.ends_with(key_suffix)))
+        let labeled = |labels: &BTreeSet<String>| labels.iter().any(|l| l.ends_with(key_suffix));
+        if covered.get(id).is_some_and(labeled) {
+            return true;
+        }
+        GlobalId::parse(id)
+            .ok()
+            .and_then(|gid| gid.path().map(|p| (gid.repo_id().to_string(), p)))
+            .and_then(|k| covered_by_path.get(&k))
+            .is_some_and(labeled)
     };
     covers(a) && covers(b)
 }
