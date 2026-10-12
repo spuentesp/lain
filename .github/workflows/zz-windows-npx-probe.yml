@@ -1,0 +1,58 @@
+name: zz-windows-npx-probe
+# TEMPORARY diagnostic (delete before merge): distribution-acceptance's
+# Windows npx lanes exit 1 with zero output. Capture where.
+on:
+  pull_request:
+    paths: ['.github/workflows/zz-windows-npx-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: npx via bash, verbose
+        shell: bash
+        continue-on-error: true
+        env:
+          CI: ''
+          LAIN_CACHE_DIR: ${{ runner.temp }}/probe-cache
+        run: |
+          set +e
+          npx -y --loglevel=verbose @spuentesp/lain-mcp --version 2>&1 | tail -60
+          echo "pipe-status=${PIPESTATUS[0]}"
+          ls -laR "$LAIN_CACHE_DIR" 2>&1 | head -40
+      - name: npx via pwsh
+        shell: pwsh
+        continue-on-error: true
+        env:
+          CI: ''
+          LAIN_CACHE_DIR: ${{ runner.temp }}\probe-cache2
+        run: |
+          npx -y @spuentesp/lain-mcp --version
+          "exit=$LASTEXITCODE (0x{0:x})" -f ([uint32]$LASTEXITCODE)
+      - name: installed shim run directly with node
+        shell: bash
+        continue-on-error: true
+        env:
+          CI: ''
+          LAIN_CACHE_DIR: ${{ runner.temp }}/probe-cache3
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/pkg" && cd "$RUNNER_TEMP/pkg"
+          npm init -y >/dev/null && npm i @spuentesp/lain-mcp@0.9.0 2>&1 | tail -5
+          node node_modules/@spuentesp/lain-mcp/bin/lain.js --version
+          echo "node-exit=$?"
+      - name: published binary run directly
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'bin'; New-Item -ItemType Directory $d | Out-Null; Set-Location $d
+          curl.exe -sSL -o a.tar.gz https://github.com/spuentesp/lain/releases/download/v0.9.0/lain-0.9.0-x86_64-pc-windows-msvc.tar.gz
+          tar xzf a.tar.gz; Get-ChildItem | Format-Table Name,Length
+          & .\lain.exe --version
+          "lain.exe exit=$LASTEXITCODE (0x{0:x})" -f ([uint32]$LASTEXITCODE)
+          & .\lain-git-sidecar.exe --version
+          "sidecar exit=$LASTEXITCODE (0x{0:x})" -f ([uint32]$LASTEXITCODE)
