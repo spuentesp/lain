@@ -182,6 +182,130 @@ fn queue_anchor_shared_across_two_repos_mints_heuristic_edges() {
     assert!(backend.get_node(&orders_file).unwrap().is_some());
 }
 
+/// P1-a: a mint pass owns its full edge set — add/remove symmetric.
+/// When the queue literal disappears from one repo, re-running the
+/// mint pass must retract the previously-minted pair. Before this
+/// reconcile, `project_edges` exempted the minted edges from its own
+/// reconciliation and the mint pass only deduplicated/upserted, so an
+/// obsolete coupling survived every reload and restart until the
+/// operator ran the destructive `lain reindex`.
+#[test]
+fn mint_pass_retracts_obsolete_anchor_edges_without_reindex() {
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-reconcile"));
+    let ledger = repo("ledger-svc");
+    let orders = repo("orders-svc");
+    let bind_queue = spanned_node(
+        &ledger,
+        NodeType::Function,
+        "src/ledger.py",
+        "bind_queue",
+        (8, 10),
+    );
+    backend.upsert_node(bind_queue.clone()).unwrap();
+
+    let shared = [
+        occurrence(
+            "ledger-svc",
+            "src/ledger.py",
+            9,
+            AnchorKind::Queue,
+            "order-events",
+        ),
+        occurrence(
+            "orders-svc",
+            "amqp.toml",
+            2,
+            AnchorKind::Queue,
+            "order-events",
+        ),
+    ];
+    mint_cross_repo_observations(&backend, &shared, &[]).expect("mint succeeds");
+    let orders_file = file_id(&orders, "amqp.toml");
+    {
+        let edges = backend.all_edges().unwrap();
+        assert_eq!(
+            heuristic_edges(&edges, "anchor:queue:order-events").len(),
+            2,
+            "sanity: the shared pair mints both directions, got {edges:?}"
+        );
+    }
+
+    // A re-run over the same observations must not flap: the pair is
+    // still real, so nothing is retracted (or duplicated).
+    mint_cross_repo_observations(&backend, &shared, &[]).expect("re-mint succeeds");
+    {
+        let edges = backend.all_edges().unwrap();
+        assert_eq!(
+            heuristic_edges(&edges, "anchor:queue:order-events").len(),
+            2,
+            "idempotent re-mint must keep exactly the pair, got {edges:?}"
+        );
+    }
+
+    // The anchor literal is removed from orders-svc's config. The
+    // next miner run sees a single-repo group (no pair) and must
+    // retract the obsolete edges — no `reindex`, no node removals.
+    let after = [occurrence(
+        "ledger-svc",
+        "src/ledger.py",
+        9,
+        AnchorKind::Queue,
+        "order-events",
+    )];
+    mint_cross_repo_observations(&backend, &after, &[]).expect("re-mint succeeds");
+    let edges = backend.all_edges().unwrap();
+    assert!(
+        heuristic_edges(&edges, "anchor:queue:order-events").is_empty(),
+        "obsolete anchor edges must be retracted by the mint pass, got {edges:?}"
+    );
+    // Edge reconcile only: the endpoints themselves stay.
+    assert!(backend.get_node(&bind_queue.id).unwrap().is_some());
+    assert!(backend.get_node(&orders_file).unwrap().is_some());
+}
+
+/// P1-a (temporal side): the same reconcile owns `cochange` and
+/// `commit-ref` edges — when the commits that justified them are no
+/// longer in the observation set, the edges go too.
+#[test]
+fn mint_pass_retracts_obsolete_cochange_and_commit_ref_edges() {
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-reconcile-temporal"));
+    let a = repo("a-svc");
+    let b = repo("b-svc");
+    backend.upsert_node(file_node(&a, "src/a.py")).unwrap();
+    backend.upsert_node(file_node(&b, "src/b.py")).unwrap();
+
+    let commits = [
+        CommitRecord {
+            repo: "a-svc".to_string(),
+            files: vec!["src/a.py".to_string()],
+            message: "shared bump".to_string(),
+            time: 1_000,
+            author: "dev".to_string(),
+        },
+        CommitRecord {
+            repo: "b-svc".to_string(),
+            files: vec!["src/b.py".to_string()],
+            message: "shared bump".to_string(),
+            time: 1_100,
+            author: "dev".to_string(),
+        },
+    ];
+    mint_cross_repo_observations(&backend, &[], &commits).expect("mint succeeds");
+    {
+        let edges = backend.all_edges().unwrap();
+        assert_eq!(heuristic_edges(&edges, "cochange").len(), 1, "{edges:?}");
+    }
+
+    // Re-run without the commits: the cochange signal is gone, so the
+    // edge is retracted.
+    mint_cross_repo_observations(&backend, &[], &[]).expect("re-mint succeeds");
+    let edges = backend.all_edges().unwrap();
+    assert!(
+        heuristic_edges(&edges, "cochange").is_empty(),
+        "obsolete cochange edges must be retracted by the mint pass, got {edges:?}"
+    );
+}
+
 /// TDD #2 (the CRITICAL exclusion): a shared field/property literal
 /// like `customer_id` — the allowlist of anchor KINDS never admits a
 /// bare identifier, so nothing is minted.

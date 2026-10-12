@@ -206,12 +206,16 @@ pub struct MintReport {
     pub crowds_skipped: usize,
     /// File nodes the miner had to materialize as endpoints.
     pub synthesized_file_nodes: usize,
+    /// Previously-minted edges this pass retracted because the
+    /// current observation set no longer reproduces them.
+    pub retracted_edges: usize,
 }
 
 /// True for edges minted by this pass (recognized by detector name).
 /// The projection reconciliation in `project_edges` skips these so a
-/// watcher-triggered reproject never retracts them; the next full
-/// index build re-mints fresh.
+/// watcher-triggered reproject never retracts them. The mint pass
+/// itself owns the full minted set — [`mint_cross_repo_observations_with`]
+/// retracts the ones its current observation set no longer reproduces.
 pub fn is_minted_edge(edge: &GraphEdge) -> bool {
     match &edge.provenance {
         Some(EdgeProvenance::Heuristic { detector, .. }) => {
@@ -402,6 +406,11 @@ pub fn mint_cross_repo_observations_with(
             e.edge_type.clone(),
         ));
     }
+    // Edges this pass believes must exist. The reconcile at the end
+    // retracts previously-minted edges missing from this set, so every
+    // mint site records here — including the pairs skipped above as
+    // already-present (dedupe must not turn into a silent retraction).
+    let mut desired: HashSet<(String, String, EdgeType)> = HashSet::new();
 
     let mut index = build_node_index(nodes);
 
@@ -495,6 +504,7 @@ pub fn mint_cross_repo_observations_with(
                             continue;
                         }
                         for (s, t) in [(a.clone(), b.clone()), (b.clone(), a.clone())] {
+                            desired.insert((s.clone(), t.clone(), edge_type.clone()));
                             if !minted.insert((s.clone(), t.clone(), edge_type.clone())) {
                                 continue;
                             }
@@ -544,6 +554,7 @@ pub fn mint_cross_repo_observations_with(
                     &index,
                     &blocked,
                     &mut minted,
+                    &mut desired,
                     &mut new_edges,
                     &cluster,
                 );
@@ -559,6 +570,7 @@ pub fn mint_cross_repo_observations_with(
                 &index,
                 &blocked,
                 &mut minted,
+                &mut desired,
                 &mut new_edges,
                 &cluster,
             );
@@ -590,6 +602,7 @@ pub fn mint_cross_repo_observations_with(
                     if blocked.contains(&pair_key(&source, target)) {
                         continue;
                     }
+                    desired.insert((source.clone(), target.clone(), EdgeType::CoChangedWith));
                     if !minted.insert((source.clone(), target.clone(), EdgeType::CoChangedWith)) {
                         continue;
                     }
@@ -609,6 +622,28 @@ pub fn mint_cross_repo_observations_with(
         }
     }
 
+    // Reconcile: this mint pass owns its full edge set — add and
+    // remove symmetric. A previously-minted heuristic edge whose pair
+    // the current observation set no longer reproduces (anchor
+    // literal gone, commit dropped out of the window, pair now
+    // suppressed by a static edge) is retracted here. Without this,
+    // the projection reconciliation deliberately leaves minted edges
+    // alone and the obsolete coupling survived every reload and
+    // restart until the operator ran `lain reindex`.
+    let obsolete: Vec<GraphEdge> = existing
+        .iter()
+        .filter(|e| is_minted_edge(e))
+        .filter(|e| {
+            !desired.contains(&(
+                e.source_id.clone(),
+                e.target_id.clone(),
+                e.edge_type.clone(),
+            ))
+        })
+        .cloned()
+        .collect();
+    report.retracted_edges = obsolete.len();
+
     // Materialize synthesized file endpoints before the edges that
     // point at them — the backend drops edges with missing endpoints.
     for (gid, path, name) in new_file_nodes {
@@ -616,6 +651,9 @@ pub fn mint_cross_repo_observations_with(
     }
     if !new_edges.is_empty() {
         backend.upsert_edges_batch(&new_edges)?;
+    }
+    if !obsolete.is_empty() {
+        backend.remove_edges(&obsolete)?;
     }
     Ok(report)
 }
@@ -770,6 +808,7 @@ fn process_cochange_cluster(
     index: &NodeIndex,
     blocked: &BTreeSet<[String; 2]>,
     minted: &mut HashSet<(String, String, EdgeType)>,
+    desired: &mut HashSet<(String, String, EdgeType)>,
     new_edges: &mut Vec<GraphEdge>,
     cluster: &[&CommitRecord],
 ) {
@@ -810,6 +849,7 @@ fn process_cochange_cluster(
                     if blocked.contains(&pair_key(&s, &t)) {
                         continue;
                     }
+                    desired.insert((s.clone(), t.clone(), EdgeType::CoChangedWith));
                     if !minted.insert((s.clone(), t.clone(), EdgeType::CoChangedWith)) {
                         continue;
                     }

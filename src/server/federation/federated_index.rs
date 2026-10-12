@@ -863,7 +863,9 @@ impl FederatedIndex {
             // (`anchor:*` / `cochange` / `commit-ref` heuristic
             // provenance). The per-repo projection never reproduces
             // them, so reconciliation must not retract them as
-            // stale; the next full index build re-mints fresh.
+            // stale — a watcher-triggered reproject owns none of
+            // them. The mint pass reconciles its own set (adds and
+            // retracts) when it runs.
             .filter(|e| !crate::federation::anchor_miner::is_minted_edge(e))
             .filter(|e| {
                 !new_keys.contains(&(
@@ -1365,11 +1367,12 @@ impl FederatedIndex {
             shapes,
         )?;
         tracing::info!(
-            "[federation] anchor miner: {} anchors, {} anchor edge(s), {} cochange, {} commit-ref, {} crowd(s) skipped",
+            "[federation] anchor miner: {} anchors, {} anchor edge(s), {} cochange, {} commit-ref, {} retracted, {} crowd(s) skipped",
             report.anchors_indexed,
             report.anchor_edges,
             report.cochange_edges,
             report.commit_ref_edges,
+            report.retracted_edges,
             report.crowds_skipped
         );
         Ok(report)
