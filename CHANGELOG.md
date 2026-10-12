@@ -7,6 +7,14 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **`assess_change` no longer reads a zero-dependent result as a safety
+  verdict.** The risk line is computed from detected dependents, so a
+  symbol with none got a bare `low`, which agents took as "safe to
+  change". It still says `verdict: **low**` (the token is unchanged for
+  clients), but now adds that no dependents were found in the indexed
+  graph, that this is detected reach and not proof of safety, and what the
+  index cannot see: dynamic dispatch, reflection, config wiring and repos
+  outside the index. Heuristic-only and counted tiers are unchanged.
 - **`npx @spuentesp/lain-mcp` no longer fails on Windows under Git
   Bash** (distribution acceptance, red on every run since at least
   2026-09-19). The installer extracted the release archive with whatever

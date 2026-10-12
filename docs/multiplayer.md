@@ -152,8 +152,8 @@ Each occupancy entry carries `holders`:
                { "agent_id": "…", "name": "bob",   "intent": "read", "inferred": false } ] }
 ```
 
-Read `intent` before concluding anything: `edit` blocks other edits,
-`read` never blocks. Without it a surveying agent cannot tell a
+Read `intent` before concluding anything: an `edit` claim makes other
+agents' edit claims on that file conflict, a `read` claim never does. Without it a surveying agent cannot tell a
 blocking hold from a harmless one — two agents on a live server drew
 exactly the wrong conclusion from a bare list of ids.
 
@@ -381,9 +381,9 @@ If `world_state.note` is set, the agent must resync:
 
 Above the claim layer sits an *intent* layer: an explicit declaration
 of what the agent is trying to accomplish. The claim layer is the
-authoritative primitive for ownership (the file-lock fail-closed
-invariant). The
-intent layer is advisory; it gives the agent — and its peers — a
+registry of who holds what: a competing edit claim is refused, but
+only for callers that go through `claim_files`. The intent layer is
+advisory; it gives the agent — and its peers — a
 richer picture than a list of file paths.
 
 ### Three-level coordination
@@ -396,16 +396,24 @@ of three levels:
 - **YELLOW** — proceed with caution. The reason is surfaced
   alongside related activity (`OutsideDeclaredScope`,
   `PeerIntentNearby`, `PeerIsReading`).
-- **RED** — another agent holds an exclusive lease
-  (`ExclusiveClaimHeld`). The agent must release the lease or wait
-  for expiry before editing.
+- **RED** — another agent holds a live exclusive claim
+  (`ExclusiveClaimHeld`). Wait for it to be released or to expire,
+  or pick another scope. Lain reports this; it does not stop a
+  write.
 
 The split between presence and ownership is the load-bearing
 distinction: presence (registration, activity feed) is
 eventually-consistent and fail-open. Ownership (`claim_files`,
-`RED` evaluation) is strong-consistent and fail-closed. The
-coordination engine never downgrades a RED — the file-lock
-coordination primitive is the source of truth, not the in-memory registry.
+`RED` evaluation) is answered from the in-memory registry, shared
+across `lain mcp` processes through the state file (re-read under
+lock): a competing edit claim is refused, and the coordination
+engine never downgrades a RED.
+
+This is coordination between cooperating agents, not isolation.
+Claims expire (TTL and heartbeat), inferred claims are guesses, and
+the `.lain/locks/` files are written best-effort: a filesystem
+conflict does not roll back an in-memory claim. An agent that skips
+`claim_files` or ignores a refusal can still write the file.
 
 ### Graph-distance refinement
 

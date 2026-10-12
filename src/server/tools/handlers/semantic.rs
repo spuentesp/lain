@@ -379,12 +379,23 @@ pub async fn assess_change(
         "high"
     };
 
+    // Zero is what the index detected, not a safety result: dynamic
+    // dispatch, reflection, config/framework wiring and repositories
+    // outside this index are invisible to it.
+    let caveat = if risk == "low" {
+        " No dependents found in the indexed graph; this is detected reach, \
+         not proof of safety (dynamic dispatch, reflection, config wiring and \
+         repos outside this index are not visible)."
+    } else {
+        ""
+    };
+
     Ok(format!(
         "## assess_change: {symbol}\n\n\
          ## Direct dependents\n\n{}\n\n\
          ## Transitive reach\n\n{}\n\
          {untested_section}\n\
-         ## Risk summary\n\nDirect: {direct_count}; transitive: {transitive_count}; verdict: **{risk}**.\n",
+         ## Risk summary\n\nDirect: {direct_count}; transitive: {transitive_count}; verdict: **{risk}**.{caveat}\n",
         trim_for_section(&direct, 20),
         trim_for_section(&transitive, 12),
     ))
@@ -1291,13 +1302,13 @@ mod m6_tests {
     }
 
     /// Truly-empty blast radius (no static callers AND no heuristic
-    /// callers) reports `risk=low` cleanly — no asterisk, no
-    /// heuristic marker. This is the third vertex of the risk-tier
+    /// callers) reports `risk=low` with the detected-reach caveat — no
+    /// asterisk, no heuristic marker. This is the third vertex of the risk-tier
     /// contract:
     ///
     ///   1. N static callers → risk tier from count (medium / high)
     ///   2. 0 static + N heuristic → `risk=low* — heuristic-only`
-    ///   3. 0 static + 0 heuristic → bare `risk=low`
+    ///   3. 0 static + 0 heuristic → `risk=low` plus the detected-reach caveat
     ///
     /// Without this third case pinned, the iter-21 `low*` heuristic
     /// could leak into the truly-safe path and confuse an agent into
@@ -1369,11 +1380,19 @@ mod m6_tests {
             .await
             .expect("assess_change on a known symbol must succeed");
 
-        // Pin the third vertex of the contract: bare `risk=low`,
-        // no asterisk, no heuristic-only marker.
+        // Pin the third vertex of the contract: `risk=low` with the
+        // detected-reach caveat, no asterisk, no heuristic-only marker.
         assert!(
             out.contains("verdict: **low**"),
             "truly-empty blast radius must say bare risk=low, got:\n{out}"
+        );
+        // `low` here is detected reach, not proof of safety: it must say
+        // so, and name what the index cannot see.
+        assert!(
+            out.contains("No dependents found in the indexed graph")
+                && out.contains("not proof of safety")
+                && out.contains("dynamic dispatch"),
+            "zero-dependent verdict must carry the coverage caveat, got:\n{out}"
         );
         assert!(
             !out.contains("heuristic-only"),
