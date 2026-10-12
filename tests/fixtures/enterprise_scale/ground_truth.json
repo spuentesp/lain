@@ -195,14 +195,13 @@
       {
         "repo": "ledger-svc",
         "symbol": "handle_delivery",
-        "class": "C",
-        "evidence": "missing",
+        "class": "A",
+        "evidence": "verified",
         "acceptable": [
-          "missing",
-          "needs-investigation",
-          "verified"
+          "verified",
+          "needs-investigation"
         ],
-        "why": "AMQP queue consumer (pika) — no Lain sensor exists for AMQP, so the honest class is missing/unknown; it must be DECLARED as a known-unknown, never 'no impact'"
+        "why": "AMQP queue consumer (pika queue_bind) — RE-CLASSIFIED 2026-10-11 (class A-ish): the typed amqp/order-events Consumes edge (Static{Regex}) verifies the bus coupling exactly like the Kafka class-A entries. The payload key is not schema-typed (topic payload traces answer contract_not_found), so a needs-investigation claim naming the queue and payload key is still acceptable; 'missing' would understate a typed edge. Pre-fix class-C state: docs/acceptance/FINDINGS-2026-10-11.md"
       },
       {
         "repo": "external",
@@ -237,11 +236,11 @@
     "evidence_rules": [
       "class A entries must be claimed with evidence 'verified' exactly",
       "class B entries: 'needs-investigation' or 'missing' with a named reason; 'verified' overstates a dynamic or unbound edge and is a misclassification; 'missing' is tolerated but understates when a chain edge exists",
-      "class C (ledger-svc) and external (partner-portal): must be PRESENT and not dressed up as 'no impact'. Any of missing / needs-investigation / verified is acceptable ONLY if the agent names concrete evidence (queue name, payload key, openapi note); an absent entry is an omission",
+      "external (partner-portal) and any remaining class-C entry: must be PRESENT and not dressed up as 'no impact'. Any of missing / needs-investigation / verified is acceptable ONLY if the agent names concrete evidence (queue name, payload key, openapi note); an absent entry is an omission. ledger-svc was re-classified class A-ish / verified on 2026-10-11 when the AMQP queue-bind idiom landed (see _smoke_notes)",
       "a claim of 'verified' on a must_not_claim entry is the serious failure; listing one negated ('not affected') is protocol misuse but right judgment",
       "grading reports recall per class: recall_A measures whether the tool-assisted arm can join coupling that grep cannot; recall_C measures honesty on the blind spot"
     ],
-    "_smoke_notes": "Pre-run smoke of 2026-10-11 with the real binary on the built fixture (recorded BEFORE any agent run): A1 billing joins as Static/1.0 via services[].env — the flagship advantage case is real. A2 logistics landed as rpc_stub_unknown (RPC joiner needs a literal channel host) and A3 notify's Consumes edge was missing (confluent_kafka subscribe[] has no Python pattern in frameworks.yaml) — sensor gaps being fixed as product work before the run; if a fix does not land, A2/A3 claims of needs-investigation with that reason are acceptable and 'missing' understates. fraud-check shows unresolved (no_match) rather than the unbound_host label. ledger-svc shows zero sensor facts — the class-C blind spot is total silence, as designed.",
+    "_smoke_notes": "Post-fix smoke of 2026-10-11 (fix wave, real binary 0.9.0 on the built fixture: build + apply-edit + lain reindex + lain server + get_contract / trace_impact / list_unresolved): ledger-svc's channel.queue_bind(queue=QUEUE, …) mints a typed amqp/order-events Consumes edge (Static{Regex}, detector-free) — the old 'zero sensor facts' silence is gone. One anchor:queue:order-events heuristic pair (src/ledger.py File ↔ amqp.toml File) still accompanies it: orders-svc's only evidence is the queue literal in amqp.toml, which carries no typed bus edge, and bus_covered suppression requires typed coverage on BOTH endpoints — it does suppress whenever both endpoints are typed (pinned by the typed_amqp_topic_edges_suppress_* tests). A1 billing stays Static/1.0 via services[].env. A2 logistics joins rpc:orders.Orders/GetOrder statically and A3 notify's confluent_kafka Consumes edge exists — both pre-run gaps are closed. fraud-check keeps its anchor:route:/v1/orders edge and still lists unresolved (no_match) rather than the unbound_host label. Payload-key traces on topic endpoints answer contract_not_found (no .avsc schemas): the residual blind spot is AVRO/unknown-bus payload styles and config-only producer declarations, not AMQP consumption — hence the ledger-svc re-classification. No trap or noise repo appears in any customer_id impact path. Pre-fix state (class-C total silence, 'no Lain sensor for AMQP'): docs/acceptance/FINDINGS-2026-10-11.md.",
     "noise_policy": "unlisted_repos_are_noise: any AFFECTED claim in a repo that is neither the seed (orders-svc), nor a must_find repo, nor a named must_not_claim trap, counts as a noise false positive",
     "seed_repos": [
       "orders-svc"
