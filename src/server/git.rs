@@ -256,6 +256,7 @@ impl GitSensor {
                 message: message.split('\n').next().unwrap_or("").to_string(),
                 files,
                 time: commit.time().seconds(),
+                author: commit.author().name().unwrap_or_default().to_string(),
             });
         }
 
@@ -384,6 +385,7 @@ impl GitSensor {
                 message: message.split('\n').next().unwrap_or("").to_string(),
                 files,
                 time: commit.time().seconds(),
+                author: commit.author().name().unwrap_or_default().to_string(),
             });
         }
 
@@ -437,6 +439,10 @@ pub struct CommitInfo {
     pub message: String,
     pub files: Vec<String>,
     pub time: i64,
+    /// Author name as git reports it; empty when the source cannot
+    /// provide one — the sidecar wire `CommitInfo` predates this field
+    /// and does not carry it (no protocol bump).
+    pub author: String,
 }
 
 /// A pair of files that were changed together

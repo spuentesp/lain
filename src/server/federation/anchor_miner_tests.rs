@@ -316,12 +316,14 @@ fn cross_repo_same_message_commits_mint_cochange_at_point_three() {
             message: "tune the orders pipeline".into(),
             time: 1_736_140_800,
             files: vec!["src/x.py".into()],
+            author: String::new(),
         },
         CommitRecord {
             repo: "repo-b".into(),
             message: "tune the orders pipeline".into(),
             time: 1_736_140_810, // same changeset, 10s apart
             files: vec!["src/y.py".into()],
+            author: String::new(),
         },
     ];
     let report = mint_cross_repo_observations(&backend, &[], &commits).unwrap();
@@ -341,6 +343,75 @@ fn cross_repo_same_message_commits_mint_cochange_at_point_three() {
     assert!(ends.contains(&file_id(&b, "src/y.py").as_str()));
 }
 
+/// Author-aware co-change: same subject inside the window, but known
+/// to two DIFFERENT authors — bot coincidence, not coupling. Author
+/// refines the match only when both sides know one.
+#[test]
+fn cochange_requires_same_author_when_both_known() {
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-t5d"));
+    let a = repo("a");
+    let b = repo("b");
+    backend.upsert_node(file_node(&a, "Cargo.toml")).unwrap();
+    backend.upsert_node(file_node(&b, "Cargo.toml")).unwrap();
+    let commits = vec![
+        CommitRecord {
+            repo: "a".into(),
+            message: "bump dep".into(),
+            time: 1000,
+            files: vec!["Cargo.toml".into()],
+            author: "bot".into(),
+        },
+        CommitRecord {
+            repo: "b".into(),
+            message: "bump dep".into(),
+            time: 1005,
+            files: vec!["Cargo.toml".into()],
+            author: "human".into(),
+        },
+    ];
+    let report = mint_cross_repo_observations(&backend, &[], &commits).unwrap();
+    let edges = backend.all_edges().unwrap();
+    assert!(
+        heuristic_edges(&edges, "cochange").is_empty(),
+        "two authors bumping the same message in the same minute is coincidence, not coupling"
+    );
+    assert_eq!(report.cochange_edges, 0, "{report:?}");
+}
+
+/// Author-less history (sidecar mode: the wire protocol predates the
+/// author field) must behave exactly as before — no regression.
+#[test]
+fn cochange_falls_back_when_author_unknown() {
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-t5e"));
+    let a = repo("a");
+    let b = repo("b");
+    backend.upsert_node(file_node(&a, "Cargo.toml")).unwrap();
+    backend.upsert_node(file_node(&b, "Cargo.toml")).unwrap();
+    let commits = vec![
+        CommitRecord {
+            repo: "a".into(),
+            message: "bump dep".into(),
+            time: 1000,
+            files: vec!["Cargo.toml".into()],
+            author: String::new(),
+        },
+        CommitRecord {
+            repo: "b".into(),
+            message: "bump dep".into(),
+            time: 1005,
+            files: vec!["Cargo.toml".into()],
+            author: String::new(),
+        },
+    ];
+    let report = mint_cross_repo_observations(&backend, &[], &commits).unwrap();
+    let edges = backend.all_edges().unwrap();
+    assert!(
+        !heuristic_edges(&edges, "cochange").is_empty(),
+        "sidecar-mode history has no author; behavior must not regress"
+    );
+    assert_eq!(report.cochange_edges, 1, "{report:?}");
+}
+
 /// A commit pair that only shares a message but sits far apart in
 /// time is not a changeset — no edge.
 #[test]
@@ -356,12 +427,14 @@ fn cochange_requires_timestamp_proximity() {
             message: "wip".into(),
             time: 1_736_140_800,
             files: vec!["src/x.py".into()],
+            author: String::new(),
         },
         CommitRecord {
             repo: "repo-b".into(),
             message: "wip".into(),
             time: 1_746_140_800, // 100 days later
             files: vec!["src/y.py".into()],
+            author: String::new(),
         },
     ];
     let report = mint_cross_repo_observations(&backend, &[], &commits).unwrap();
@@ -383,6 +456,7 @@ fn cochange_bulk_changeset_is_a_crowd() {
             message: "import everything at once".into(),
             time: 1_736_140_800,
             files: vec!["test.py".into()],
+            author: String::new(),
         });
     }
     let report = mint_cross_repo_observations(&backend, &[], &commits).unwrap();
@@ -417,6 +491,7 @@ fn commit_subject_mentioning_shared_anchor_mints_commit_ref() {
         message: "harden the order-events consumer".into(),
         time: 1_736_140_800,
         files: vec!["consumer.py".into()],
+        author: String::new(),
     }];
     let report = mint_cross_repo_observations(&backend, &occ, &commits).unwrap();
     assert_eq!(report.commit_ref_edges, 1, "{report:?}");

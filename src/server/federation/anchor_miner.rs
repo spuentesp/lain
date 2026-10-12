@@ -228,6 +228,10 @@ pub struct CommitRecord {
     pub message: String,
     pub time: i64,
     pub files: Vec<String>,
+    /// Author name — empty when the source cannot provide it (the
+    /// sidecar wire protocol carries no author, so sidecar-mode
+    /// history behaves as if the field did not exist).
+    pub author: String,
 }
 
 /// What one mint pass did. Logged by the CLI callers.
@@ -744,7 +748,10 @@ fn heuristic_edge(
 /// Mint co-change edges for one time-cluster of same-subject commits.
 /// A cluster touching more repos than [`ANCHOR_MAX_REPOS`] is a bulk
 /// sweep (fixture-style identical commits, mass imports) — a crowd,
-/// not a coupling — and is skipped.
+/// not a coupling — and is skipped. A pair mints only when both
+/// commits' authors are known and equal; author-less history
+/// (sidecar mode carries no author on the wire) matches on subject
+/// and time alone, as before.
 fn process_cochange_cluster(
     report: &mut MintReport,
     index: &NodeIndex,
@@ -765,6 +772,9 @@ fn process_cochange_cluster(
                 continue;
             }
             if (a.time - b.time).abs() > COCHANGE_TIME_WINDOW_SECS {
+                continue;
+            }
+            if !a.author.is_empty() && !b.author.is_empty() && a.author != b.author {
                 continue;
             }
             for fa in a.files.iter().take(MAX_FILES_PER_COCHANGE_COMMIT) {
@@ -955,6 +965,7 @@ pub fn collect_commit_records(
                 message: c.message,
                 time: c.time,
                 files: c.files,
+                author: c.author,
             })
             .collect(),
         Err(e) => {
