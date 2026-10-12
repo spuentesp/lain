@@ -7,6 +7,15 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **`npx @spuentesp/lain-mcp` no longer fails on Windows under Git
+  Bash** (distribution acceptance, red on every run since at least
+  2026-09-19). The installer extracted the release archive with whatever
+  `tar` came first on `PATH`; under Git Bash that is Git's GNU tar, which
+  aborts with `gzip: stdin: unexpected end of file` on an archive whose
+  checksum had already verified, so the install died with no usable
+  output. On Windows the installer now uses `System32\tar.exe` (bsdtar)
+  when present. The fix ships in the npm shim, so it reaches users with
+  the next release.
 - **`get_blast_radius` no longer prints a bare `Overlay freshness:
   stale`** (spuentesp/lain#292). That marker was derived solely from
   how long the in-memory overlay had sat idle, so a fully-current
