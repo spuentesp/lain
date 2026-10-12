@@ -985,6 +985,41 @@ mod tests {
         );
     }
 
+    /// pika `channel.queue_bind(queue=..., exchange=..., routing_key=...)`
+    /// alone must mint a typed `amqp/<queue>` topic + Consumes edge.
+    /// This is the acceptance fixtures' ONLY AMQP idiom (enterprise_
+    /// {scale,mesh}'s ledger-svc binds its queue and never calls
+    /// `basic_consume` / `basic_publish` / `queue_declare`), so an
+    /// unrecognised `queue_bind` leaves the repo with zero sensor
+    /// facts.
+    #[test]
+    fn pika_queue_bind_emits_amqp_consumes_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ledger.py"),
+            "import pika\n\
+             ch = conn.channel()\n\
+             ch.queue_bind(queue=\"order-events\", exchange=\"platform\", routing_key=\"order-events\")\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let topic = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Topic && n.name == "amqp/order-events")
+            .expect("queue_bind must mint the amqp topic node (NOT kafka/order-events)");
+        assert!(
+            graph
+                .all_edges()
+                .iter()
+                .any(|e| e.edge_type == EdgeType::Consumes && e.target_id == topic.id),
+            "pika queue_bind must emit a Consumes edge to the amqp topic"
+        );
+    }
+
     /// The broker label comes from the matched framework id, not from
     /// the filename or the DEFAULT_BROKER constant: a pika-shaped
     /// Python file mints `amqp/<queue>` while the aiokafka idiom in a

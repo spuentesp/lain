@@ -394,7 +394,7 @@ fn a_new_idiom_is_a_data_change() {
     assert_eq!(hits[0].literal.as_deref(), Some("orders.created"));
 }
 
-// ── 4c. Task 2: the five AMQP idiom entries are bundled data.
+// ── 4c. Task 2: the AMQP idiom entries are bundled data.
 //
 // pika (Python) and amqplib (TS/JS) mint `amqp/<queue>` topics; the
 // entries live in frameworks.yaml and are recognised by the same
@@ -421,24 +421,34 @@ fn amqp_idioms_are_bundled_and_yield_literals() {
         .map(|f| f.id.clone())
         .collect();
     assert!(
-        python_consumer_ids.iter().any(|id| id == "pika-consume"),
-        "topic_consumer_patterns(Python) must include pika-consume; got {python_consumer_ids:?}"
+        python_consumer_ids.iter().any(|id| id == "pika-consume")
+            && python_consumer_ids.iter().any(|id| id == "pika-queue-bind"),
+        "topic_consumer_patterns(Python) must include pika-consume and the \
+         queue_bind consumer idiom; got {python_consumer_ids:?}"
     );
     let tsjs_producer_ids: Vec<String> = p
         .topic_producer_patterns(Lang::TsJs)
         .map(|f| f.id.clone())
         .collect();
     assert!(
-        tsjs_producer_ids.iter().any(|id| id == "amqplib-publish"),
-        "topic_producer_patterns(TsJs) must include amqplib-publish; got {tsjs_producer_ids:?}"
+        tsjs_producer_ids.iter().any(|id| id == "amqplib-publish")
+            && tsjs_producer_ids
+                .iter()
+                .any(|id| id == "amqplib-queue-declare"),
+        "topic_producer_patterns(TsJs) must include amqplib-publish and \
+         amqplib-queue-declare; got {tsjs_producer_ids:?}"
     );
     let tsjs_consumer_ids: Vec<String> = p
         .topic_consumer_patterns(Lang::TsJs)
         .map(|f| f.id.clone())
         .collect();
     assert!(
-        tsjs_consumer_ids.iter().any(|id| id == "amqplib-consume"),
-        "topic_consumer_patterns(TsJs) must include amqplib-consume; got {tsjs_consumer_ids:?}"
+        tsjs_consumer_ids.iter().any(|id| id == "amqplib-consume")
+            && tsjs_consumer_ids
+                .iter()
+                .any(|id| id == "amqplib-queue-bind"),
+        "topic_consumer_patterns(TsJs) must include amqplib-consume and \
+         amqplib-queue-bind; got {tsjs_consumer_ids:?}"
     );
 
     // The walker yields the queue/routing-key literal for each idiom.
@@ -472,6 +482,31 @@ fn amqp_idioms_are_bundled_and_yield_literals() {
         .expect("pika-consume must match the queue kwarg");
     assert_eq!(m.literal.as_deref(), Some("order-events"));
 
+    // The acceptance fixtures' ONLY AMQP idiom: `queue_bind` with the
+    // queue as a kwarg — literal form and bare-identifier form (the
+    // event sensor resolves group 2 against same-file constants).
+    let py_bind_hits = walk_idioms(
+        &py_consumers,
+        "channel.queue_bind(queue='order-events', exchange='platform', routing_key='order-events')",
+        1,
+    );
+    let m = py_bind_hits
+        .iter()
+        .find(|m| m.framework_id == "pika-queue-bind")
+        .expect("pika-queue-bind must match the queue kwarg");
+    assert_eq!(m.literal.as_deref(), Some("order-events"));
+
+    let py_bind_ident_hits = walk_idioms(
+        &py_consumers,
+        "channel.queue_bind(queue=QUEUE, exchange='platform', routing_key=QUEUE)",
+        1,
+    );
+    let m = py_bind_ident_hits
+        .iter()
+        .find(|m| m.framework_id == "pika-queue-bind")
+        .expect("pika-queue-bind must match the bare-identifier queue kwarg");
+    assert_eq!(m.identifier.as_deref(), Some("QUEUE"));
+
     let (ts_producers, ts_consumers, _) = util::topic_idioms_for(p, Lang::TsJs);
     // Real amqplib shape: routing key is argument 2, content is the
     // mandatory argument 3.
@@ -497,6 +532,26 @@ fn amqp_idioms_are_bundled_and_yield_literals() {
         .iter()
         .find(|m| m.framework_id == "amqplib-consume")
         .expect("amqplib-consume must match the queue position");
+    assert_eq!(m.literal.as_deref(), Some("order-events"));
+
+    // amqplib queue declare/bind siblings: the queue is argument 1
+    // (argument 2 is the options object / source exchange).
+    let ts_declare_hits = walk_idioms(&ts_producers, "await channel.assertQueue('jobs', opts)", 1);
+    let m = ts_declare_hits
+        .iter()
+        .find(|m| m.framework_id == "amqplib-queue-declare")
+        .expect("amqplib-queue-declare must match the queue position");
+    assert_eq!(m.literal.as_deref(), Some("jobs"));
+
+    let ts_bind_hits = walk_idioms(
+        &ts_consumers,
+        "channel.bindQueue('order-events', 'platform', 'order-events')",
+        1,
+    );
+    let m = ts_bind_hits
+        .iter()
+        .find(|m| m.framework_id == "amqplib-queue-bind")
+        .expect("amqplib-queue-bind must match the queue position");
     assert_eq!(m.literal.as_deref(), Some("order-events"));
 
     // compile_idioms must not silently drop the new entries (a

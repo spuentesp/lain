@@ -110,6 +110,14 @@ languages:
     - id: pika-queue-declare
       kind: topic_producer
       path_regex: '\.queue_declare\s*\([^)]*?queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pika-queue-bind
+      kind: topic_consumer
+      # `channel.queue_bind(queue=..., exchange=..., routing_key=...)`
+      # declares the repo's use of the queue — the acceptance
+      # fixtures' ONLY AMQP consumer idiom (no basic_consume /
+      # basic_publish / queue_declare anywhere). Queue is the `queue`
+      # kwarg. Group 1: string literal. Group 2: bare identifier.
+      path_regex: '\.queue_bind\s*\([^)]*?queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
 
   # ── TypeScript / JavaScript ─────────────────────────────────────
   tsjs:
@@ -166,6 +174,17 @@ languages:
       # argument 1; argument 2 is the callback and is never a queue
       # name. Group 1: string literal. Group 2: bare identifier.
       path_regex: '\.consume\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: amqplib-queue-declare
+      kind: topic_producer
+      # amqplib `channel.assertQueue(queue, options)` — the queue is
+      # argument 1 (the queue.declare sibling of pika's queue_declare).
+      path_regex: '\.assertQueue\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: amqplib-queue-bind
+      kind: topic_consumer
+      # amqplib `channel.bindQueue(queue, source, pattern, args)` —
+      # binding the queue declares the repo's use of it (the sibling
+      # of pika's queue_bind); the queue is argument 1.
+      path_regex: '\.bindQueue\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
     - id: nestjs-cron
       kind: scheduled
       path_regex: '@Cron\s*\(\s*["'']([^"'']+)["'']'
