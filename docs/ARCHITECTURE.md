@@ -238,11 +238,14 @@ GREEN / YELLOW / RED coordination engine (see
 — layers a *strong-consistency* advisory on top of the same data.
 GREEN means the agent's declared scope is fine to edit; YELLOW
 warns of a peer's declared intent or current activity in the
-same scope; RED blocks when a peer holds an exclusive edit
-claim on the target. RED is authoritative because the underlying
-claim primitive is the file-lock fail-closed coordinator;
-the other two levels remain advisory so an agent can choose to
-proceed under caution. The YELLOW level now consults the static
+same scope; RED reports that a peer holds a live exclusive edit
+claim on the target, and `claim_files(edit)` refuses a competing
+claim. Both are answers given to a cooperating caller. The
+in-memory registry (`OccupancyMap`) is the source of truth; the
+`.lain/locks/` files are a best-effort hint for operators and
+non-`lain` tooling, and nothing in Lain stops a write by an agent
+that never asks or that ignores the answer. GREEN and YELLOW are
+advisory in the same way. The YELLOW level now consults the static
 graph for symbol-scope distance (BFS over `Calls` edges, 32-hop
 cap), so sibling symbols that share a call graph edge are
 treated as YELLOW even when their file paths differ.
