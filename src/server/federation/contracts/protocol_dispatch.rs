@@ -53,6 +53,10 @@ pub trait ProtocolDispatch: sealed::Sealed {
     /// `unreachable!()` on a non-matching fact (or the type
     /// system could enforce it — we keep the trait method
     /// signature simple for now).
+    ///
+    /// `unresolved_env_vars` is the joiner's env-var ledger (the
+    /// same map the HTTP ladder bumps); only resolvers that can
+    /// produce an `EnvUnmapped` verdict write to it.
     fn dispatch(
         &self,
         call_id: &GlobalId,
@@ -66,6 +70,7 @@ pub trait ProtocolDispatch: sealed::Sealed {
             Vec<EndpointProviderRecord>,
         >,
         config: &ContractFederationConfig,
+        unresolved_env_vars: &mut BTreeMap<String, u32>,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution;
 }
@@ -97,6 +102,7 @@ impl ProtocolDispatch for TopicDispatch {
             Vec<EndpointProviderRecord>,
         >,
         _config: &ContractFederationConfig,
+        _unresolved_env_vars: &mut BTreeMap<String, u32>,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution {
         let ContractFact::TopicConsumer(topic_consumer) = fact else {
@@ -111,8 +117,10 @@ impl ProtocolDispatch for TopicDispatch {
 /// Phase E (spec §8.2): resolves an `RpcConsumer` (a generated
 /// stub call site) to its `RpcProvider` by exact
 /// `(package.Service, method)` match. The channel host is
-/// resolved to candidate services first; an unknown channel
-/// lands in `Unresolved { reason: RpcStubUnknown }`.
+/// resolved to candidate services first — a literal via
+/// `services[].hosts`, an env var via `services[].env`; an
+/// unknown channel lands in `Unresolved { reason:
+/// RpcStubUnknown }`, an unmapped env var in `EnvUnmapped`.
 pub struct RpcDispatch;
 
 impl sealed::Sealed for RpcDispatch {}
@@ -135,12 +143,21 @@ impl ProtocolDispatch for RpcDispatch {
             Vec<EndpointProviderRecord>,
         >,
         config: &ContractFederationConfig,
+        unresolved_env_vars: &mut BTreeMap<String, u32>,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution {
         let ContractFact::RpcConsumer(rpc_consumer) = fact else {
             unreachable!("RpcDispatch::dispatch called with non-RpcConsumer fact")
         };
-        resolve_rpc_consumer(call_id, rpc_consumer, own_service, endpoints, config, binds)
+        resolve_rpc_consumer(
+            call_id,
+            rpc_consumer,
+            own_service,
+            endpoints,
+            config,
+            unresolved_env_vars,
+            binds,
+        )
     }
 }
 
@@ -172,6 +189,7 @@ impl ProtocolDispatch for GraphqlDispatch {
             Vec<EndpointProviderRecord>,
         >,
         _config: &ContractFederationConfig,
+        _unresolved_env_vars: &mut BTreeMap<String, u32>,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution {
         let ContractFact::GraphqlConsumer(graphql_consumer) = fact else {
@@ -207,6 +225,7 @@ impl ProtocolDispatch for WebSocketDispatch {
             Vec<EndpointProviderRecord>,
         >,
         config: &ContractFederationConfig,
+        _unresolved_env_vars: &mut BTreeMap<String, u32>,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution {
         let ContractFact::WebSocketConsumer(ws_consumer) = fact else {
@@ -247,6 +266,7 @@ impl ProtocolDispatch for TableDispatch {
             Vec<EndpointProviderRecord>,
         >,
         _config: &ContractFederationConfig,
+        _unresolved_env_vars: &mut BTreeMap<String, u32>,
         binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
     ) -> ConsumerResolution {
         let ContractFact::TableConsumer(table_consumer) = fact else {

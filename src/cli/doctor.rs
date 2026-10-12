@@ -508,13 +508,26 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
         problems: Vec::new(),
     };
     // Interactive CLI diagnosis follows its own cwd, not an agent parent's cwd.
-    let root = workspace
+    let start = workspace
         .map(Path::to_path_buf)
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)
-        .map_err(anyhow::Error::from)
+        .map_err(anyhow::Error::from);
+    // A `repos.yaml` at (or above) the start directory means this is a
+    // federation root, not a misplaced single-repo invocation — every
+    // message below must say so and name the federation fix.
+    let federation = start
+        .as_ref()
+        .ok()
+        .and_then(|start| crate::cli::workspace::federation_root_guidance(start));
+    let root = start
         .and_then(|start| crate::cli::workspace::walk_up_for_git(&start))
-        .and_then(|root| root.ok_or_else(|| anyhow!("No Git repository found.")));
+        .and_then(|found| {
+            found.ok_or_else(|| match &federation {
+                Some(guidance) => anyhow!("No Git repository found; {guidance}"),
+                None => anyhow!("No Git repository found."),
+            })
+        });
     // Once `root` is known, recompute the advertised count with
     // the actual federation / workspace signals read from disk.
     // The count may grow by `FEDERATION.len()` (if repos.yaml
@@ -534,7 +547,10 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
         Err(error) => report.problem(
             "repository_not_found",
             error.to_string(),
-            "Run inside a Git repository or pass `--workspace PATH`.",
+            &match &federation {
+                Some(guidance) => guidance.clone(),
+                None => "Run inside a Git repository or pass `--workspace PATH`.".to_string(),
+            },
             false,
         ),
         Ok(root) => {

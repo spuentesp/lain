@@ -642,14 +642,40 @@ pub struct ConfigurationOutcome {
     pub detail: Option<String>,
 }
 
+/// The `args` every MCP adapter writes for the entry at `root`:
+/// `["mcp"]` when `root` is a git checkout (the single-repo target —
+/// unchanged), or `["server", "--config", <abs repos.yaml>]` when it
+/// is a federation root (no `.git`, a `repos.yaml` up the tree) —
+/// `lain mcp` could never resolve a workspace there, so the entry has
+/// to serve the federation instead.
+fn mcp_server_args(root: &Path) -> Vec<String> {
+    if root.join(".git").exists() {
+        return vec!["mcp".to_string()];
+    }
+    match crate::cli::workspace::walk_up_for_repos_yaml(root) {
+        Some(fed_root) => {
+            let config = fed_root.join("repos.yaml");
+            let config = dunce::canonicalize(&config).unwrap_or(config);
+            vec![
+                "server".to_string(),
+                "--config".to_string(),
+                config.display().to_string(),
+            ]
+        }
+        None => vec!["mcp".to_string()],
+    }
+}
+
 /// Build the `.mcp.json` / `claude mcp add` server entry. Both adapters
 /// describe the exact same command: the current binary's own absolute
 /// path (not the bare name `lain`, which may not be what a
-/// generic-MCP-writing caller has on `PATH`) invoked with `mcp`.
-fn build_mcp_server_entry(exe: &Path, model: Option<&Path>) -> Value {
+/// generic-MCP-writing caller has on `PATH`) invoked with the args
+/// [`mcp_server_args`] derives from the target root — `mcp` for a git
+/// checkout, `server --config <repos.yaml>` at a federation root.
+fn build_mcp_server_entry(root: &Path, exe: &Path, model: Option<&Path>) -> Value {
     let mut entry = json!({
         "command": exe.display().to_string(),
-        "args": ["mcp"],
+        "args": mcp_server_args(root),
     });
     if let Some(model) = model {
         entry["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
@@ -821,8 +847,12 @@ fn configure_generic(
     opts: &SetupOptions,
 ) -> ConfigurationOutcome {
     let config_path = root.join(".mcp.json");
-    let rendered = merge_mcp_json(&config_path, "lain", build_mcp_server_entry(exe, model))
-        .map(|v| render_json(&v));
+    let rendered = merge_mcp_json(
+        &config_path,
+        "lain",
+        build_mcp_server_entry(root, exe, model),
+    )
+    .map(|v| render_json(&v));
     apply_config("generic", &config_path, rendered, None, opts)
 }
 
@@ -924,7 +954,7 @@ fn configure_claude_code(
     }
     add_args.push("--".into());
     add_args.push(exe.display().to_string());
-    add_args.push("mcp".into());
+    add_args.extend(mcp_server_args(root));
     let command_line = format!("claude {}", add_args.join(" "));
 
     if opts.print_config {
@@ -1085,10 +1115,10 @@ fn codex_config_path() -> PathBuf {
 }
 
 /// Build the `[mcp_servers.lain]` table entry Codex expects.
-fn build_codex_entry(exe: &Path, model: Option<&Path>) -> Value {
+fn build_codex_entry(root: &Path, exe: &Path, model: Option<&Path>) -> Value {
     let mut entry = json!({
         "command": exe.display().to_string(),
-        "args": ["mcp"],
+        "args": mcp_server_args(root),
     });
     if let Some(model) = model {
         entry["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
@@ -1145,7 +1175,7 @@ fn merge_codex_toml(path: &Path, server_name: &str, entry: Value) -> Result<Stri
 }
 
 fn configure_codex(
-    _root: &Path,
+    root: &Path,
     exe: &Path,
     model: Option<&Path>,
     opts: &SetupOptions,
@@ -1161,7 +1191,9 @@ fn configure_codex(
             add_args.push("--env".into());
             add_args.push(format!("LAIN_EMBEDDING_MODEL={}", m.display()));
         }
-        add_args.extend(["--".into(), exe.display().to_string(), "mcp".into()]);
+        add_args.push("--".into());
+        add_args.push(exe.display().to_string());
+        add_args.extend(mcp_server_args(root));
         let command_line = format!("codex {}", add_args.join(" "));
 
         let outcome =
@@ -1184,7 +1216,7 @@ fn configure_codex(
     }
 
     // Fallback: direct TOML edit.
-    let rendered = merge_codex_toml(&config_path, "lain", build_codex_entry(exe, model));
+    let rendered = merge_codex_toml(&config_path, "lain", build_codex_entry(root, exe, model));
     apply_config("codex", &config_path, rendered, None, opts)
 }
 
@@ -1202,14 +1234,18 @@ fn cursor_config_path() -> PathBuf {
 }
 
 fn configure_cursor(
-    _root: &Path,
+    root: &Path,
     exe: &Path,
     model: Option<&Path>,
     opts: &SetupOptions,
 ) -> ConfigurationOutcome {
     let config_path = cursor_config_path();
-    let rendered = merge_mcp_json(&config_path, "lain", build_mcp_server_entry(exe, model))
-        .map(|v| render_json(&v));
+    let rendered = merge_mcp_json(
+        &config_path,
+        "lain",
+        build_mcp_server_entry(root, exe, model),
+    )
+    .map(|v| render_json(&v));
     apply_config("cursor", &config_path, rendered, None, opts)
 }
 
@@ -1261,7 +1297,7 @@ fn configure_vscode(
     let mut entry = json!({
         "type": "stdio",
         "command": exe.display().to_string(),
-        "args": ["mcp"],
+        "args": mcp_server_args(root),
     });
     if let Some(model) = model {
         entry["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
@@ -1373,11 +1409,16 @@ fn continue_block_path(root: &Path) -> PathBuf {
 
 /// The workspace block file. Strings are JSON-quoted, which YAML reads
 /// as double-quoted scalars, so paths with spaces or colons are safe.
-fn build_continue_block(exe: &Path, model: Option<&Path>) -> String {
+/// The `args` array is JSON too — JSON is valid YAML, so a federation
+/// entry (`["server", "--config", …]`) serializes the same way the
+/// single-repo `["mcp"]` always did.
+fn build_continue_block(root: &Path, exe: &Path, model: Option<&Path>) -> String {
     let q = |s: String| serde_json::to_string(&s).unwrap_or_default();
+    let args = serde_json::to_string(&mcp_server_args(root)).unwrap_or_default();
     let mut out = format!(
-        "name: Lain\nversion: 0.0.1\nschema: v1\nmcpServers:\n  - name: lain\n    command: {}\n    args: [\"mcp\"]\n",
-        q(exe.display().to_string())
+        "name: Lain\nversion: 0.0.1\nschema: v1\nmcpServers:\n  - name: lain\n    command: {}\n    args: {}\n",
+        q(exe.display().to_string()),
+        args
     );
     if let Some(model) = model {
         out.push_str(&format!(
@@ -1423,11 +1464,11 @@ fn merge_continue_json(path: &Path, server_name: &str, entry: Value) -> Result<V
     Ok(Value::Object(root))
 }
 
-fn build_continue_entry(exe: &Path, model: Option<&Path>) -> Value {
+fn build_continue_entry(root: &Path, exe: &Path, model: Option<&Path>) -> Value {
     let mut transport = json!({
         "type": "stdio",
         "command": exe.display().to_string(),
-        "args": ["mcp"],
+        "args": mcp_server_args(root),
     });
     if let Some(model) = model {
         transport["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
@@ -1445,8 +1486,9 @@ fn configure_continue(
     if continue_yaml_path().is_file() || !config_path.is_file() {
         return configure_continue_block(root, exe, model, opts);
     }
-    let rendered = merge_continue_json(&config_path, "lain", build_continue_entry(exe, model))
-        .map(|v| render_json(&v));
+    let rendered =
+        merge_continue_json(&config_path, "lain", build_continue_entry(root, exe, model))
+            .map(|v| render_json(&v));
     apply_config("continue", &config_path, rendered, None, opts)
 }
 
@@ -1458,7 +1500,7 @@ fn configure_continue_block(
 ) -> ConfigurationOutcome {
     let path = continue_block_path(root);
     let target = path.display().to_string();
-    let block = build_continue_block(exe, model);
+    let block = build_continue_block(root, exe, model);
     let outcome = |state, detail| ConfigurationOutcome {
         agent: "continue".into(),
         state,
@@ -1616,18 +1658,23 @@ pub struct SetupReport {
 }
 
 pub fn run_setup(opts: SetupOptions) -> Result<i32> {
-    let root = opts
+    let start = opts
         .workspace
         .clone()
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)
-        .map_err(anyhow::Error::from)
-        .and_then(|start| crate::cli::workspace::walk_up_for_git(&start))
-        .and_then(|found| {
-            found.ok_or_else(|| {
-                anyhow!("No Git repository found; pass --workspace PATH or run inside a clone.")
-            })
-        })?;
+        .map_err(anyhow::Error::from)?;
+    // A `.git` walk-up wins: that is the single-repo target. Without
+    // one, a `repos.yaml` at (or above) the start directory makes this
+    // a federation root — setup proceeds there too, writing an entry
+    // that serves `lain server --config …`. Only when neither exists
+    // is running setup here a misuse.
+    let root = match crate::cli::workspace::walk_up_for_git(&start)? {
+        Some(git_root) => git_root,
+        None => crate::cli::workspace::walk_up_for_repos_yaml(&start).ok_or_else(|| {
+            anyhow!("No Git repository found; pass --workspace PATH or run inside a clone.")
+        })?,
+    };
 
     // Settle the agent first: an unknown `--agent` used to fail only after
     // language servers were installed and the model download started.
@@ -1674,16 +1721,25 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
         _ => configure_generic(&root, &exe, semantic.model_path.as_deref(), &opts),
     };
 
-    let verification =
-        if opts.dry_run || opts.print_config || configuration.state == ConfigurationState::Failed {
-            None
-        } else {
-            Some(verify_mcp_command(
-                &exe,
-                &root,
-                semantic.model_path.as_deref(),
-            ))
-        };
+    // Verification round-trips the entry setup just wrote — except at
+    // a federation root, where that entry boots the whole federation
+    // server (config load, hot-reload watchers, per-repo indexing):
+    // too heavy and too side-effectful for setup's 15s stdio probe.
+    // The entry's shape there is pinned by tests instead.
+    let federation_target = !root.join(".git").exists();
+    let verification = if opts.dry_run
+        || opts.print_config
+        || configuration.state == ConfigurationState::Failed
+        || federation_target
+    {
+        None
+    } else {
+        Some(verify_mcp_command(
+            &exe,
+            &root,
+            semantic.model_path.as_deref(),
+        ))
+    };
 
     let ready = configuration.state != ConfigurationState::Failed
         && verification.as_ref().map(|v| v.healthy).unwrap_or(true);
@@ -1891,7 +1947,11 @@ mod tests {
             "# my settings\nmodel = \"o3\" # inline\n\n[mcp_servers.other]\ncommand = \"x\"\n",
         )
         .unwrap();
-        let entry = build_codex_entry(Path::new("/usr/bin/lain"), Some(Path::new("/m.onnx")));
+        let entry = build_codex_entry(
+            tmp.path(),
+            Path::new("/usr/bin/lain"),
+            Some(Path::new("/m.onnx")),
+        );
         let text = merge_codex_toml(&path, "lain", entry).unwrap();
         assert!(
             text.starts_with("# my settings\nmodel = \"o3\" # inline"),
@@ -1909,8 +1969,12 @@ mod tests {
         );
         // Re-running replaces the entry instead of duplicating it.
         std::fs::write(&path, &text).unwrap();
-        let again =
-            merge_codex_toml(&path, "lain", build_codex_entry(Path::new("/b/lain"), None)).unwrap();
+        let again = merge_codex_toml(
+            &path,
+            "lain",
+            build_codex_entry(tmp.path(), Path::new("/b/lain"), None),
+        )
+        .unwrap();
         let v: toml::Value = again.parse().unwrap();
         assert_eq!(
             v["mcp_servers"]["lain"]["command"].as_str(),
@@ -2005,15 +2069,41 @@ mod tests {
 
     #[test]
     fn build_mcp_server_entry_omits_env_when_no_model() {
-        let entry = build_mcp_server_entry(Path::new("/usr/bin/lain"), None);
+        // A `.git` root keeps the unchanged single-repo entry.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        let entry = build_mcp_server_entry(root.path(), Path::new("/usr/bin/lain"), None);
         assert!(entry.get("env").is_none());
         assert_eq!(entry["command"], "/usr/bin/lain");
         assert_eq!(entry["args"], json!(["mcp"]));
     }
 
+    /// B1: at a federation root (no `.git`, `repos.yaml` present) the
+    /// entry must serve the federation — `lain server --config <abs
+    /// repos.yaml>` — not the single-repo `lain mcp`, which can never
+    /// resolve a workspace there.
+    #[test]
+    fn build_mcp_server_entry_serves_the_federation_config_when_given() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("repos.yaml"), "repos: []\n").unwrap();
+        let entry = build_mcp_server_entry(root.path(), Path::new("/usr/bin/lain"), None);
+        assert_eq!(entry["command"], "/usr/bin/lain");
+        // Absolute path: agent clients may launch the entry from any cwd.
+        let repos_yaml = root.path().join("repos.yaml");
+        let repos_yaml = dunce::canonicalize(&repos_yaml).unwrap_or(repos_yaml);
+        assert_eq!(
+            entry["args"],
+            json!(["server", "--config", repos_yaml.display().to_string()])
+        );
+        assert!(entry.get("env").is_none());
+    }
+
     #[test]
     fn build_mcp_server_entry_sets_embedding_model_env_when_present() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
         let entry = build_mcp_server_entry(
+            root.path(),
             Path::new("/usr/bin/lain"),
             Some(Path::new(
                 "/home/u/.local/lain/models/all-MiniLM-L6-v2.onnx",

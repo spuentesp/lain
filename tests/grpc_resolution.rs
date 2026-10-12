@@ -653,3 +653,136 @@ service Orders {
     );
     assert_eq!(field_res.bound_fields[0].field_path.to_string(), "status");
 }
+
+// ─── E2-env — env dial target binds via services[].env ─────────────
+
+fn config_with_orders_env(env_var: &str) -> ContractFederationConfig {
+    ContractFederationConfig {
+        services: vec![ServiceDecl {
+            name: "orders".into(),
+            repo: "orders".into(),
+            paths: Vec::new(),
+            hosts: vec!["orders.internal".to_string()],
+            env: vec![env_var.to_string()],
+            base_path: None,
+            route_prefixes: Vec::new(),
+        }],
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![],
+        databases: vec![],
+    }
+}
+
+/// The consumer sensor strips `Client` off `ordersClient`, so the
+/// fact's service is the lowercase `orders` while the proto provider
+/// is package-qualified `orders.Orders`. The joiner's
+/// package-qualified second pass must bridge that (case-insensitive
+/// suffix), driven by the `HostPart::Env` channel resolving through
+/// `services[].env` — the logistics-svc shape.
+#[test]
+fn e2_env_channel_binds_via_services_env() {
+    let provider = rpc_provider_node(
+        "orders",
+        "protos/orders.proto",
+        "GetOrder",
+        12,
+        "orders.Orders",
+    );
+    let consumer = rpc_consumer_node(
+        "logistics-svc",
+        "src/handler.go",
+        "GetOrder",
+        19,
+        "orders",
+        None,
+        HostPart::Env(vec!["ORDERS_GRPC_ADDR".to_string()]),
+    );
+    let config = config_with_orders_env("ORDERS_GRPC_ADDR");
+    let out = run(vec![provider, consumer], config);
+    let consumer_id = gid(
+        "logistics-svc",
+        NodeType::Function,
+        "src/handler.go",
+        "rpc-call:orders:GetOrder",
+        19,
+    );
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
+        panic!(
+            "consumer must resolve: binds={:?} endpoints={:?}",
+            out.binds, out.index.endpoints
+        );
+    };
+    assert!(
+        !resolution.bound_endpoints.is_empty(),
+        "env-channel consumer must bind through services[].env: {:?}",
+        resolution
+    );
+    let bound = &resolution.bound_endpoints[0];
+    assert_eq!(bound.0.to_string(), "orders");
+    assert!(matches!(
+        bound.1,
+        ContractKey::Rpc { ref method, .. } if method == "GetOrder"
+    ));
+    let Some(ConsumerTarget::Binds { confidence, .. }) = resolution.target.as_ref() else {
+        panic!("target must be Binds, got {:?}", resolution.target);
+    };
+    assert!((confidence - 1.0).abs() < f32::EPSILON);
+    assert_eq!(
+        out.binds.len(),
+        1,
+        "exactly one Binds edge: {:?}",
+        out.binds
+    );
+}
+
+/// An env-bound channel that no `services[].env` entry claims lands
+/// `Unresolved { reason: EnvUnmapped }` with the var counted in
+/// `JoinOutput::unresolved_env_vars` — NOT a bare `RpcStubUnknown`.
+#[test]
+fn e_env_channel_unmapped_is_env_unmapped() {
+    let provider = rpc_provider_node(
+        "orders",
+        "protos/orders.proto",
+        "GetOrder",
+        12,
+        "orders.Orders",
+    );
+    let consumer = rpc_consumer_node(
+        "logistics-svc",
+        "src/handler.go",
+        "GetOrder",
+        19,
+        "orders",
+        None,
+        HostPart::Env(vec!["ORDERS_GRPC_ADDR".to_string()]),
+    );
+    let config = config_with_orders_host("orders.internal");
+    let out = run(vec![provider, consumer], config);
+    let consumer_id = gid(
+        "logistics-svc",
+        NodeType::Function,
+        "src/handler.go",
+        "rpc-call:orders:GetOrder",
+        19,
+    );
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
+        panic!("consumer must be recorded (even when unresolved)");
+    };
+    let Some(ConsumerTarget::Unresolved { reason, .. }) = resolution.target.as_ref() else {
+        panic!("target must be Unresolved, got {:?}", resolution.target);
+    };
+    assert!(
+        matches!(reason, UnresolvedReason::EnvUnmapped),
+        "expected EnvUnmapped, got {reason:?}"
+    );
+    assert!(resolution.bound_endpoints.is_empty());
+    assert!(out.binds.is_empty());
+    assert_eq!(
+        out.unresolved_env_vars.get("ORDERS_GRPC_ADDR"),
+        Some(&1),
+        "the unmapped env var must be counted for the coverage ledger: {:?}",
+        out.unresolved_env_vars
+    );
+}

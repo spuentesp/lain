@@ -31,7 +31,8 @@
 //! **Host resolution** (config-free). A hole before the path whose
 //! resolved expression matches `os.environ["X"]`,
 //! `os.environ.get("X", …)`, `os.getenv("X", …)`, `settings.X`,
-//! `config.X`, `process.env.X`, or `process.env["X"]` becomes
+//! `config.X`, `process.env.X`, `process.env["X"]`,
+//! `System.getenv("X")`, or `os.Getenv("X")` becomes
 //! [`HostPart::Env`]; anything else stays [`HostPart::Expr`].
 //!
 //! **`httpx.Client(base_url=…)`** contributes its `base_url` as the
@@ -284,9 +285,9 @@ fn lang_yaml_key(lang: Lang) -> &'static str {
 
 /// Recursive AST walk used by the file-context pre-pass (Python
 /// `httpx.Client(base_url=…)` bindings + TS/JS module-level
-/// assignments). The post-context outbound walker uses tree-sitter
-/// queries, not this.
-fn walk<F: FnMut(Node)>(root: Node, f: &mut F) {
+/// assignments + Java local declarations). The post-context
+/// outbound walker uses tree-sitter queries, not this.
+fn walk<'a, F: FnMut(Node<'a>)>(root: Node<'a>, f: &mut F) {
     f(root);
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
@@ -942,13 +943,14 @@ impl FileContext {
         match lang {
             Lang::Python => collect_python_context(root, src, &mut ctx),
             Lang::TsJs => collect_tsjs_context(root, src, &mut ctx),
+            Lang::Java => collect_java_context(root, src, &mut ctx),
             // Rust + Go don't currently support client-base_url
             // resolution; pass through an empty context.
             Lang::Rust | Lang::Go => {}
-            // Workstream 5: the four new languages don't carry
+            // Workstream 5: C# / Ruby / Kotlin don't carry
             // ctor-base_url resolution either; the receiver-side
             // detection fires at the call site.
-            Lang::Java | Lang::CSharp | Lang::Ruby | Lang::Kotlin => {}
+            Lang::CSharp | Lang::Ruby | Lang::Kotlin => {}
             // `Ts` / `Tsx` share the `tsjs` bucket — the
             // existing parser uses `tree_sitter_javascript` for both,
             // and `lang_for_path` routes .ts/.tsx to `Lang::Ts` /
@@ -1197,6 +1199,71 @@ fn read_var_declarator(node: Node, src: &[u8]) -> Option<(String, String)> {
     Some((name_text, value_text))
 }
 
+// ─── Java context collection ──────────────────────────────────────────
+
+/// Java `local_variable_declaration` → [`FileContext`] bindings, so
+/// an identifier URL argument resolves to its assigned expression
+/// the same way Python / TS locals do. When the declarator's value
+/// is an OkHttp builder chain (`new Request.Builder().url(x)
+/// .build()`), the binding records the `url()` argument's text —
+/// the chain itself is not a URL, and the stringified chain is
+/// dead end for the host resolver. Java has no module-level
+/// statements; a declaration with no enclosing method (field
+/// initializer) falls back to the module bucket so it is still
+/// resolvable once.
+fn collect_java_context(root: Node, src: &[u8], ctx: &mut FileContext) {
+    walk(root, &mut |node| {
+        if node.kind() != "local_variable_declaration" {
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() != "variable_declarator" {
+                continue;
+            }
+            let Some((name, value)) = read_var_declarator(child, src) else {
+                continue;
+            };
+            let value = find_builder_url_arg(child, src)
+                .and_then(|arg| text_of(arg, src))
+                .unwrap_or(value);
+            if let Some(fn_line) = enclosing_function_line(node) {
+                let key = (fn_line, name.clone());
+                ctx.fn_assignments
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+                *ctx.fn_assign_counts.entry(key).or_insert(0) += 1;
+            } else {
+                ctx.module_assignments.insert(name.clone(), value.clone());
+                *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
+            }
+        }
+    });
+}
+
+/// The first `.url(<expr>)` argument found depth-first inside
+/// `node` — OkHttp's `Request.Builder().url(x)` chain. Used both
+/// by the Java context collector (to bind the request variable to
+/// its URL expression) and by [`parts_from_node_inner`] (to drill
+/// an inline builder chain passed straight to `newCall`).
+fn find_builder_url_arg<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
+    let mut found: Option<Node<'a>> = None;
+    walk(node, &mut |n| {
+        if found.is_some() || n.kind() != "method_invocation" {
+            return;
+        }
+        let is_url = n
+            .child_by_field_name("name")
+            .and_then(|name| text_of(name, src))
+            .as_deref()
+            == Some("url");
+        if is_url {
+            found = args_of(n).first().copied();
+        }
+    });
+    found
+}
+
 // ─── AST helpers ──────────────────────────────────────────────────────
 
 fn is_module_level(node: Node) -> bool {
@@ -1222,6 +1289,11 @@ fn enclosing_function_line(node: Node) -> Option<u32> {
     while let Some(p) = cur {
         match p.kind() {
             "function_definition" | "async_function_definition" => {
+                return Some(p.start_position().row as u32);
+            }
+            // Java: locals live inside a `method_declaration`; the
+            // per-function assignment table is keyed by this line.
+            "method_declaration" => {
                 return Some(p.start_position().row as u32);
             }
             _ => {}
@@ -1557,6 +1629,17 @@ fn parts_from_node_inner(
             } else {
                 out
             }
+        }
+        // Java / Kotlin builder chains: `new Request.Builder().url(x)`
+        // and the `.build()` / `.newCall(...)` wrappers around it.
+        // Drill the chain for the first `.url(<expr>)` call and take
+        // its argument as the URL; a chain without `url(` is opaque
+        // and stays a hole carrying the whole text.
+        "method_invocation" | "object_creation_expression" => {
+            if let Some(arg) = find_builder_url_arg(node, src) {
+                return parts_from_node_inner(arg, src, ctx, enclosing_fn_line);
+            }
+            vec![UrlPart::Hole(text_of(node, src).unwrap_or_default())]
         }
         // Catch-all: drop the node, emit no parts.
         _ => Vec::new(),
@@ -1932,6 +2015,37 @@ mod tests {
         assert_eq!(
             crate::server::sensors::util::host_env_name("os.getenv(\"BASE_URL\", \"\")"),
             Some("BASE_URL")
+        );
+    }
+
+    #[test]
+    fn host_env_name_matches_java_system_getenv() {
+        assert_eq!(
+            crate::server::sensors::util::host_env_name("System.getenv(\"RISK_ORDERS_URL\")"),
+            Some("RISK_ORDERS_URL")
+        );
+        // Concatenation form (the fixture's fraud-check shape): the
+        // env call is a prefix of a larger expression — the var must
+        // still be recognised.
+        assert_eq!(
+            crate::server::sensors::util::host_env_name(
+                "System.getenv(\"RISK_ORDERS_URL\") + \"/v1/orders/\" + id"
+            ),
+            Some("RISK_ORDERS_URL")
+        );
+        // No-arg `System.getenv()` returns the whole environment
+        // map — not a host binding.
+        assert_eq!(
+            crate::server::sensors::util::host_env_name("System.getenv()"),
+            None
+        );
+    }
+
+    #[test]
+    fn host_env_name_matches_go_os_getenv() {
+        assert_eq!(
+            crate::server::sensors::util::host_env_name("os.Getenv(\"ORDERS_GRPC_ADDR\")"),
+            Some("ORDERS_GRPC_ADDR")
         );
     }
 
@@ -2997,6 +3111,45 @@ fun foo() {
             calls[0].via,
             CallVia::Library { ref name } if name == "okhttp"
         ));
+    }
+
+    /// Java OkHttp whose URL comes from `System.getenv(...)` through
+    /// two locals — the enterprise-mesh fraud-check shape. The
+    /// `execute()` site must carry the resolved env host
+    /// (`HostPart::Env(["RISK_ORDERS_URL"])`), not the synthetic
+    /// `okhttp://dynamic` URL.
+    #[test]
+    fn java_okhttp_execute_binds_env_url() {
+        let src = "\
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+
+public class FraudCheck {
+    private final OkHttpClient client = new OkHttpClient();
+
+    public boolean check(String id) throws IOException {
+        String url = System.getenv(\"RISK_ORDERS_URL\") + \"/v1/orders/\" + id;
+        Request request = new Request.Builder().url(url).build();
+        try (Response response = client.newCall(request).execute()) {
+            return true;
+        }
+    }
+}
+";
+        let calls = java_calls(src);
+        assert_eq!(calls.len(), 1, "exactly one outbound call site: {calls:?}");
+        let c = &calls[0];
+        assert!(
+            matches!(&c.via, CallVia::Library { name } if name == "okhttp"),
+            "via must stay okhttp; got {:?}",
+            c.via
+        );
+        assert!(
+            matches!(&c.url.host, HostPart::Env(names) if names == &vec!["RISK_ORDERS_URL".to_string()]),
+            "the execute() site must resolve to HostPart::Env([\"RISK_ORDERS_URL\"]), \
+             got {:?}",
+            c.url.host
+        );
     }
 
     #[test]

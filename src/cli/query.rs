@@ -21,9 +21,12 @@ pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Resul
             .ok()
             .flatten()
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no `.git` found in any parent directory — pass `--workspace PATH` to override"
-                )
+                let base = "no `.git` found in any parent directory — pass `--workspace PATH` \
+                     to override";
+                match crate::cli::workspace::federation_root_guidance_here() {
+                    Some(guidance) => anyhow::anyhow!("{base}; {guidance}"),
+                    None => anyhow::anyhow!("{base}"),
+                }
             })?,
     };
     let memory_path = root.join(".lain/graph.bin");

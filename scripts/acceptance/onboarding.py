@@ -164,12 +164,13 @@ def package_dev(work, ev):
     for name in ("lain", "lain-git-sidecar"):
         path = os.path.join(REPO_ROOT, "target", "release", name)
         bins[name] = path
-    if not all(os.path.isfile(p) for p in bins.values()) or \
-            os.environ.get("LAIN_REBUILD") == "1":
-        p = ev.cmd(["cargo", "build", "--release", "--bin", "lain",
-                    "--bin", "lain-git-sidecar"], cwd=REPO_ROOT)
-        if p.returncode != 0:
-            raise RuntimeError(f"cargo build failed:\n{p.stderr[-2000:]}")
+    # Always build: cargo is incremental, and skipping when the binaries
+    # exist silently ships a STALE build (observed 2026-10-11: the swarm
+    # re-run packaged a pre-fix binary because target/release was warm).
+    p = ev.cmd(["cargo", "build", "--release", "--bin", "lain",
+                "--bin", "lain-git-sidecar"], cwd=REPO_ROOT)
+    if p.returncode != 0:
+        raise RuntimeError(f"cargo build failed:\n{p.stderr[-2000:]}")
 
     version = package_version()
     platform_triple = detect_platform(ev)
@@ -411,9 +412,12 @@ def pump(src, dst, tag):
         dst.close()
     except Exception:
         pass
-threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, b">>>"), daemon=True).start()
+t_out = threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, b">>>"))
+t_out.start()
 threading.Thread(target=pump, args=(sys.stdin.buffer, proc.stdin, b"<<<"), daemon=True).start()
-sys.exit(proc.wait())
+rc = proc.wait()
+t_out.join(timeout=5)
+os._exit(rc)
 '''
 
 

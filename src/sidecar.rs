@@ -714,6 +714,9 @@ fn proto_to_commitinfo(c: ProtoCommitInfo) -> CommitInfo {
         message: c.message,
         files: c.files,
         time: c.time,
+        // The wire `CommitInfo` carries no author (no protocol bump);
+        // an empty author keeps co-change behaving as before.
+        author: String::new(),
     }
 }
 

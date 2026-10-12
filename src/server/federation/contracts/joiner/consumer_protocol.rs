@@ -30,7 +30,7 @@ use crate::federation::contracts::model::{
 use crate::federation::contracts::url_resolution::host_matches_pattern;
 use crate::federation::repo_id::GlobalId;
 use crate::schema::{EdgeProvenance, RouteMatch};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How [`resolve_by_key`] turns an N-candidate match into a
 /// [`ConsumerTarget`]. The three protocol resolvers share the
@@ -272,16 +272,25 @@ pub fn resolve_graphql_consumer(
 /// consumer's `channel_host_part` is `HostPart::Literal(host)`,
 /// the joiner restricts the candidate set to the services
 /// whose `hosts` list matches `host`. When the channel host
-/// is `HostPart::None`, the consumer has no resolvable
-/// channel address and lands in `Unresolved { reason:
-/// RpcStubUnknown }` (E4). When the channel host matches no
-/// service, the consumer is similarly unresolved.
+/// is `HostPart::Env([var])`, the same `services[].env`
+/// dispatch the HTTP ladder uses (`target_service_from_env`)
+/// picks the service that declares the var; an unmapped var
+/// lands `Unresolved { reason: EnvUnmapped }` with the var
+/// counted in `unresolved_env_vars` (the var name is the only
+/// channel evidence an env dial carries — hiding it behind
+/// `RpcStubUnknown` made the coverage ledger mute on exactly
+/// the cases an operator can fix by declaring the mapping).
+/// When the channel host is `HostPart::None`, the consumer has
+/// no resolvable channel address and lands in `Unresolved {
+/// reason: RpcStubUnknown }` (E4). When a literal channel host
+/// matches no service, the consumer is similarly unresolved.
 pub fn resolve_rpc_consumer(
     call_id: &GlobalId,
     consumer: &RpcConsumerFact,
     own_service: &ServiceName,
     endpoints: &EndpointTable,
     config: &ContractFederationConfig,
+    unresolved_env_vars: &mut BTreeMap<String, u32>,
     binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
 ) -> ConsumerResolution {
     let candidate_services: Vec<ServiceName> = match &consumer.channel_host_part {
@@ -301,7 +310,50 @@ pub fn resolve_rpc_consumer(
             svcs.sort();
             svcs
         }
-        HostPart::Env(_) | HostPart::Expr(_) => {
+        HostPart::Env(var) if var.is_empty() => {
+            return rpc_stub_unknown(call_id, own_service);
+        }
+        HostPart::Env(vars) => {
+            // services[].env dispatch — the same match
+            // `url_resolution::target_service_from_env` performs
+            // for HTTP consumers. Every var must be declared by
+            // some service, or the whole consumer is
+            // `EnvUnmapped` (mirroring the HTTP ladder's
+            // all-or-nothing `resolve_env_consumer` verdict).
+            let mut svcs: Vec<ServiceName> = Vec::new();
+            let mut unmapped = false;
+            for var in vars {
+                let mut declared = false;
+                for s in &config.services {
+                    if s.env.iter().any(|e| e == var) {
+                        declared = true;
+                        let name = ServiceName(s.name.clone());
+                        if !svcs.contains(&name) {
+                            svcs.push(name);
+                        }
+                    }
+                }
+                if !declared {
+                    unmapped = true;
+                    *unresolved_env_vars.entry(var.clone()).or_insert(0) += 1;
+                }
+            }
+            if unmapped {
+                return ConsumerResolution {
+                    call_id: call_id.clone(),
+                    service: own_service.clone(),
+                    target: Some(ConsumerTarget::Unresolved {
+                        reason: UnresolvedReason::EnvUnmapped,
+                        target_service: None,
+                    }),
+                    bound_endpoints: Vec::new(),
+                    reads_complete: true,
+                };
+            }
+            svcs.sort();
+            svcs
+        }
+        HostPart::Expr(_) => {
             return rpc_stub_unknown(call_id, own_service);
         }
     };
@@ -326,7 +378,14 @@ pub fn resolve_rpc_consumer(
     if !res.bound_endpoints.is_empty() {
         return res;
     }
-    let bare = format!(".{}", consumer.service);
+    // Package-qualified fallback. The consumer sensor strips the
+    // codegen suffix off the receiver identifier (`ordersClient` →
+    // `orders`), so the fact's service is commonly the lowercase
+    // bare name while the proto provider is `package.Service`. The
+    // suffix compare is ASCII-case-insensitive for the same reason
+    // `to_snake_case` unification exists elsewhere: `orders` must
+    // match `orders.Orders`, not only `orders.orders`.
+    let bare = format!(".{}", consumer.service).to_ascii_lowercase();
     let bare_ref = &bare;
     let method_ref = &consumer.method;
     let candidate_services_ref2 = &candidate_services;
@@ -339,7 +398,8 @@ pub fn resolve_rpc_consumer(
                 && matches!(
                     key,
                     ContractKey::Rpc { ref service, method, .. }
-                    if service.ends_with(bare_ref) && method == method_ref
+                    if service.to_ascii_lowercase().ends_with(bare_ref)
+                        && method == method_ref
                 )
         },
         AmbiguityPolicy::RpcStubUnknown,

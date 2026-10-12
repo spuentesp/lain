@@ -1,0 +1,67 @@
+# Bundled anchor-shape registry for the cross-repo anchor miner
+# (`src/server/federation/anchor_miner.rs`).
+#
+# This is the miner's coupling-shape knowledge as DATA, on the same
+# mechanics as `frameworks.yaml`: the entries here are the bundled
+# defaults, and `<repo>/.lain/patterns/*.yaml` files layer on top via
+# `Patterns::load_overrides` so an org can extend the miner's coupling
+# vocabulary without rebuilding LAIN. The canonical override file name
+# is `anchors.yaml`, but any `*.yaml` in the override directory may
+# carry an `anchors:` section — the loader concatenates all of them.
+#
+# Merge semantics are ADDITIVE: override entries join the bundled
+# lists (deduplicated, bundled order first — the generated-suffix
+# order is semantic, `BlockingStub` must strip before `Stub`); a
+# context name the bundled file does not define appends as a fresh
+# list. An override can therefore ADD keywords / suffixes / call
+# shapes / scan extensions; it cannot shrink the bundled coverage
+# (removing a keyword only disables detections — a change of the
+# defaults belongs in a PR against this file).
+#
+# A missing or malformed override degrades to these defaults with a
+# warning — indexing never crashes on override data.
+#
+# Source-of-truth mappings (the pre-registry hardcoded tables in
+# `anchor_miner.rs`):
+#   - `line_has_queue_context` / `line_has_topic_context` KEYS
+#   - `generated_service_key` / `service_segment_from` suffixes and
+#     constructor strip-prefixes
+#   - `extract_env_from_line` call-shape prefixes (the env-name
+#     grammar itself stays with `sensors::util::host_env_name`)
+#   - `scan_repo_occurrences` walk policy (`SCAN_EXTS` / `SKIP_DIRS`)
+
+anchors:
+
+  # Context keywords consulted against the lowercased source line.
+  # A quoted literal that looks like a name anchors as Queue/Topic
+  # only when its line carries the matching context — never bare.
+  contexts:
+    queue: [queue, amqp, pika, routing_key, basic_consume, basic_publish, rabbit]
+    topic: [topic, kafka, kafkajs, rdkafka, confluent, pubsub, publish, subscribe, producer, consumer, firehose, futurerecord, nats, sns, sqs]
+
+  # Generated gRPC client/stub type names (`pb.NewOrdersClient`,
+  # `OrdersGrpc.OrdersBlockingStub`) spell their service as a bare
+  # segment. `suffixes` is stripped first-match-wins, so long
+  # composite suffixes must precede their own tails.
+  generated_names:
+    suffixes: [BlockingStub, Client, Stub]
+    strip_prefixes: [New]
+
+  # Env-access call shapes the env anchor extractor locates. The
+  # name grammar (`os.getenv("X", …)` argument handling, …) is owned
+  # by `host_env_name`; a prefix an override adds that
+  # `host_env_name` does not know falls back to the first quoted
+  # literal of the call (or the trailing identifier for dot shapes).
+  env_access:
+    paren_prefixes: ["os.environ.get(", "os.getenv(", "os.Getenv(", "System.getenv("]
+    bracket_prefixes: ["os.environ[", "process.env["]
+    ident_prefixes: ["process.env."]
+
+  # Scanner walk policy: which files the miner reads (source + the
+  # config formats structural names live in: `amqp.toml`,
+  # `openapi.yaml`, `.env`) and which directory names it never
+  # descends into. Hidden directories are always skipped, override
+  # or not.
+  scan:
+    exts: [rs, py, ts, tsx, js, jsx, mjs, go, java, kt, kts, rb, cs, php, proto, toml, yaml, yml, json, env, properties, cfg, ini, tf, scala]
+    skip_dirs: [.git, .hg, .svn, node_modules, target, dist, build, vendor, third_party, __pycache__, .venv, venv, .tox, .lain, .lain-data, coverage, .next]

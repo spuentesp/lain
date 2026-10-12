@@ -5,7 +5,10 @@
 //! [`frameworks.yaml`]. Camp-B patterns (Tree-sitter structural queries)
 // live as `<lang>/<framework>.scm` files compiled by `patterns/build.rs`
 // into a static map exposed via [`generated::queries`]. The sensor
-//! walkers consume both via [`Patterns`].
+//! walkers consume both via [`Patterns`]. The cross-repo anchor
+//! miner's coupling-shape knowledge (queue/topic context keywords,
+//! generated-name shapes, env-access call shapes, scan policy) comes
+//! from `anchors.yaml` via [`AnchorShapes`].
 //!
 //! ## Lifecycle
 //!
@@ -167,13 +170,46 @@ pub enum FrameworkKind {
 ///       path_regex: "<regex>"
 ///       handler_regex: "<regex>"
 ///       annotation: "<regex>"
+/// anchors:
+///   contexts:
+///     <queue|topic>: [...]
+///   generated_names:
+///     suffixes: [...]
+///     strip_prefixes: [...]
+///   env_access:
+///     paren_prefixes: [...]
+///     bracket_prefixes: [...]
+///     ident_prefixes: [...]
+///   scan:
+///     exts: [...]
+///     skip_dirs: [...]
 /// ```
+///
+/// Both keys default to empty so a document only spells out the
+/// section it carries: an override `anchors.yaml` has no `languages:`
+/// block, and a framework-only override has no `anchors:` block.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct YamlFile {
+    #[serde(default)]
     pub languages: BTreeMap<String, Vec<FrameworkDef>>,
+    /// Anchor-shape registry for the cross-repo anchor miner
+    /// (`crate::federation::anchor_miner`) — see [`AnchorShapes`].
+    #[serde(default)]
+    pub anchors: AnchorShapes,
 }
 
 impl YamlFile {
+    /// Concatenate `doc` onto `self`: framework entries extend their
+    /// language bucket, anchor shapes merge additively (see
+    /// [`AnchorShapes::merge`]).
+    fn merge_from(&mut self, doc: YamlFile) {
+        let YamlFile { languages, anchors } = doc;
+        for (lang, list) in languages {
+            self.languages.entry(lang).or_default().extend(list);
+        }
+        self.anchors.merge(&anchors);
+    }
+
     /// Load every `*.yaml` in `dir` and concatenate the entries.
     /// Bundled YAML and runtime overrides use the same schema; the
     /// override path uses this to merge per-repo additions.
@@ -193,11 +229,227 @@ impl YamlFile {
                 source: e,
             })?;
             let doc: YamlFile = serde_yaml::from_str(&text)?;
-            for (lang, list) in doc.languages {
-                out.languages.entry(lang).or_default().extend(list);
-            }
+            out.merge_from(doc);
         }
         Ok(out)
+    }
+}
+
+// ─── Anchor shapes (cross-repo anchor miner) ─────────────────────────
+
+/// One shape list in the YAML: nested named lists of strings. All the
+/// fields default to empty so a document (or one override file) only
+/// spells out the lists it extends.
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct GeneratedNamesDef {
+    /// Suffixes stripped from a generated gRPC client/stub type name
+    /// to yield its service segment. Order is semantic — the first
+    /// suffix that strips wins (`BlockingStub` must precede `Stub`).
+    #[serde(default)]
+    pub suffixes: Vec<String>,
+    /// Constructor prefixes stripped as a FALLBACK service candidate
+    /// (`NewOrdersClient` → `Orders`), consulted only when the
+    /// primary candidate joins no declared proto service.
+    #[serde(default)]
+    pub strip_prefixes: Vec<String>,
+}
+
+/// Env-access call shapes the env anchor extractor locates. The
+/// name grammar itself is owned by `sensors::util::host_env_name`
+/// (single source of truth with the sensors).
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct EnvAccessDef {
+    /// Call shapes taking `( … )` — `os.environ.get(`, `os.getenv(`.
+    #[serde(default)]
+    pub paren_prefixes: Vec<String>,
+    /// Subscript shapes taking `[ … ]` — `os.environ[`, `process.env[`.
+    #[serde(default)]
+    pub bracket_prefixes: Vec<String>,
+    /// Dot-identifier shapes — `process.env.`.
+    #[serde(default)]
+    pub ident_prefixes: Vec<String>,
+}
+
+/// The anchor scanner's walk policy: which files the miner reads and
+/// which directory names it never descends into. Hidden directories
+/// are skipped regardless (that rule is structural, not data).
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct ScanPolicyDef {
+    /// File extensions the scanner reads (no leading dot).
+    #[serde(default)]
+    pub exts: Vec<String>,
+    /// Directory base names the scanner never descends into.
+    #[serde(default)]
+    pub skip_dirs: Vec<String>,
+}
+
+/// Coupling-shape knowledge for the cross-repo anchor miner
+/// (`crate::federation::anchor_miner`): the queue/topic context
+/// keywords that classify a quoted literal, the generated-code name
+/// shapes that join a declared proto service, the env-access call
+/// shapes an env anchor rides, and the scanner's walk policy.
+///
+/// Lives in the pattern registry — bundled `anchors.yaml` layered
+/// with per-repo `<root>/.lain/patterns/*.yaml` overrides via
+/// [`Patterns::load_overrides`], the same mechanics as
+/// `frameworks.yaml` — so an org can extend the miner's coupling
+/// vocabulary without recompiling. Every list merges ADDITIVELY
+/// ([`Self::merge`]): an override adds keywords/suffixes, it cannot
+/// shrink the bundled coverage.
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct AnchorShapes {
+    /// Context-keyword lists keyed by context name (`queue`,
+    /// `topic`). Consulted as substrings of the lowercased line; a
+    /// plausible name literal anchors as the matching `AnchorKind`
+    /// only inside its context.
+    #[serde(default)]
+    pub contexts: BTreeMap<String, Vec<String>>,
+    /// Generated-code type-name shapes (`OrdersClient` → `Orders`).
+    #[serde(default)]
+    pub generated_names: GeneratedNamesDef,
+    /// Env-access call shapes.
+    #[serde(default)]
+    pub env_access: EnvAccessDef,
+    /// Scanner walk policy.
+    #[serde(default)]
+    pub scan: ScanPolicyDef,
+}
+
+/// [`AnchorShapes`] plus non-fatal degradation warnings. A missing or
+/// malformed override never fails a load — the shapes fall back to
+/// the given base (normally the bundled defaults) and the caller
+/// gets the reason here (it is also `tracing::warn!`ed).
+#[derive(Debug, Clone)]
+pub struct AnchorShapesLoad {
+    pub shapes: AnchorShapes,
+    pub warnings: Vec<String>,
+}
+
+/// Append `add` onto `target`, skipping duplicates. First-occurrence
+/// order wins so the bundled generated-suffix precedence
+/// (`BlockingStub` before `Stub`) survives every override layer.
+fn extend_list(target: &mut Vec<String>, add: &[String]) {
+    for s in add {
+        if !target.iter().any(|t| t == s) {
+            target.push(s.clone());
+        }
+    }
+}
+
+impl AnchorShapes {
+    /// Keyword list of the named context (`queue` / `topic`).
+    pub fn context_keys(&self, name: &str) -> &[String] {
+        self.contexts.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn generated_suffixes(&self) -> &[String] {
+        &self.generated_names.suffixes
+    }
+
+    pub fn generated_strip_prefixes(&self) -> &[String] {
+        &self.generated_names.strip_prefixes
+    }
+
+    pub fn env_paren_prefixes(&self) -> &[String] {
+        &self.env_access.paren_prefixes
+    }
+
+    pub fn env_bracket_prefixes(&self) -> &[String] {
+        &self.env_access.bracket_prefixes
+    }
+
+    pub fn env_ident_prefixes(&self) -> &[String] {
+        &self.env_access.ident_prefixes
+    }
+
+    pub fn scan_exts(&self) -> &[String] {
+        &self.scan.exts
+    }
+
+    pub fn scan_skip_dirs(&self) -> &[String] {
+        &self.scan.skip_dirs
+    }
+
+    /// Additive merge: every list in `other` extends the matching
+    /// list here (dedup, order-preserving); a context name this
+    /// shape set does not define appends as a fresh list. The
+    /// framework loader's replace-by-id has no analogue for
+    /// anonymous keyword lists — extension is the org-facing
+    /// contract, and it can only widen detection coverage.
+    pub fn merge(&mut self, other: &Self) {
+        for (name, keys) in &other.contexts {
+            extend_list(self.contexts.entry(name.clone()).or_default(), keys);
+        }
+        extend_list(
+            &mut self.generated_names.suffixes,
+            &other.generated_names.suffixes,
+        );
+        extend_list(
+            &mut self.generated_names.strip_prefixes,
+            &other.generated_names.strip_prefixes,
+        );
+        extend_list(
+            &mut self.env_access.paren_prefixes,
+            &other.env_access.paren_prefixes,
+        );
+        extend_list(
+            &mut self.env_access.bracket_prefixes,
+            &other.env_access.bracket_prefixes,
+        );
+        extend_list(
+            &mut self.env_access.ident_prefixes,
+            &other.env_access.ident_prefixes,
+        );
+        extend_list(&mut self.scan.exts, &other.scan.exts);
+        extend_list(&mut self.scan.skip_dirs, &other.scan.skip_dirs);
+    }
+
+    /// The bundled registry — `anchors.yaml`, parsed once by the
+    /// [`Patterns`] singleton. Reuses the pattern system's one load
+    /// path; there is no second loader.
+    pub fn bundled() -> &'static Self {
+        Patterns::patterns().anchor_shapes()
+    }
+
+    /// Bundled defaults + `<root>/.lain/patterns/` overrides.
+    /// Alias for [`Self::with_base`] against the bundled base.
+    pub fn for_repo(root: &Path) -> AnchorShapesLoad {
+        Self::with_base(root, Self::bundled())
+    }
+
+    /// `base` + `<root>/.lain/patterns/` overrides, layered through
+    /// the pattern registry's [`Patterns::load_overrides`] (one entry
+    /// point — the same function the sensors' walkers use). Never
+    /// fails: a missing override directory is a no-op, and a
+    /// malformed override file degrades to `base` with a warning
+    /// instead of crashing indexing.
+    pub fn with_base(root: &Path, base: &Self) -> AnchorShapesLoad {
+        let dir = root.join(".lain").join("patterns");
+        if !dir.exists() {
+            return AnchorShapesLoad {
+                shapes: base.clone(),
+                warnings: Vec::new(),
+            };
+        }
+        let mut p = Patterns::clone_default();
+        *p.anchor_shapes_mut() = base.clone();
+        match p.load_overrides(root) {
+            Ok(()) => AnchorShapesLoad {
+                shapes: p.anchor_shapes().clone(),
+                warnings: Vec::new(),
+            },
+            Err(e) => {
+                let warning = format!(
+                    "anchor shapes: {}: override load failed ({e}); using base shapes",
+                    root.display()
+                );
+                tracing::warn!("{warning}");
+                AnchorShapesLoad {
+                    shapes: base.clone(),
+                    warnings: vec![warning],
+                }
+            }
+        }
     }
 }
 
@@ -357,15 +609,21 @@ impl Patterns {
     }
 
     /// Return the bundled singleton. First call parses
-    /// `frameworks.yaml`; every later call shares the same instance
-    /// (the underlying YAML is `include_str!`'d so the parsed data
-    /// lives in static storage).
+    /// `frameworks.yaml` and `anchors.yaml`; every later call shares
+    /// the same instance (the underlying YAML is `include_str!`'d so
+    /// the parsed data lives in static storage). Both files travel
+    /// the same parse path — `anchors.yaml` is just another YAML
+    /// document of this schema merged through [`YamlFile::merge_from`].
     #[allow(clippy::self_named_constructors)]
     pub fn patterns() -> &'static Self {
         static DEFAULT: OnceLock<Patterns> = OnceLock::new();
         DEFAULT.get_or_init(|| {
-            Self::from_yaml_str(include_str!("frameworks.yaml"))
-                .expect("bundled frameworks.yaml must parse")
+            let mut p = Self::from_yaml_str(include_str!("frameworks.yaml"))
+                .expect("bundled frameworks.yaml must parse");
+            let anchors_doc: YamlFile = serde_yaml::from_str(include_str!("anchors.yaml"))
+                .expect("bundled anchors.yaml must parse");
+            p.yaml.merge_from(anchors_doc);
+            p
         })
     }
 
@@ -556,6 +814,19 @@ impl Patterns {
         let mut p = Patterns::clone_default();
         p.load_overrides(root)?;
         Ok(Cow::Owned(p))
+    }
+
+    /// The anchor-shape registry (bundled + any loaded overrides) —
+    /// the cross-repo anchor miner's coupling-shape knowledge.
+    pub fn anchor_shapes(&self) -> &AnchorShapes {
+        &self.yaml.anchors
+    }
+
+    /// Mutable version of [`Self::anchor_shapes`]. Used by
+    /// [`AnchorShapes::with_base`] to install a caller-supplied base
+    /// before layering overrides through [`Self::load_overrides`].
+    fn anchor_shapes_mut(&mut self) -> &mut AnchorShapes {
+        &mut self.yaml.anchors
     }
 
     /// Look up a framework by `id` across every language.
@@ -808,6 +1079,10 @@ impl Patterns {
     /// - YAML entry with an existing `id` is **replaced** in-place.
     /// - YAML entry with a fresh `id` is **appended** to the
     ///   language's list (creating the language bucket if needed).
+    /// - An `anchors:` section merges **additively** into the
+    ///   anchor-shape registry ([`AnchorShapes::merge`]) — new
+    ///   context keywords / generated suffixes / call shapes join
+    ///   the bundled lists.
     /// - `<root>/.lain/patterns/<lang>/*.scm` are layered on top of
     ///   the bundled query map: each body is validated via
     ///   `tree_sitter::Query::new` up front. A malformed body fails
@@ -872,7 +1147,11 @@ impl Patterns {
         // Step 2: parse + apply. Validation here only catches YAML
         // structure errors; the `.scm` validation already ran above.
         let overrides = YamlFile::load_from_dir(&dir)?;
-        for (lang, list) in overrides.languages {
+        let YamlFile {
+            languages: override_langs,
+            anchors: override_anchors,
+        } = overrides;
+        for (lang, list) in override_langs {
             for new_def in list {
                 if let Some(existing) = self.framework_mut(&new_def.id) {
                     *existing = new_def;
@@ -885,6 +1164,11 @@ impl Patterns {
                 }
             }
         }
+        // Anchor shapes layer on additively (fresh context names and
+        // new keywords join the bundled lists) — see
+        // [`AnchorShapes::merge`]. The framework replace-by-id rule
+        // has no analogue for anonymous keyword lists.
+        self.yaml.anchors.merge(&override_anchors);
         // Populate the override cache. Bodies were validated above
         // (Step 1); the cache is a plain `Vec` so the second-call
         // behaviour is **all-or-nothing**: a subsequent

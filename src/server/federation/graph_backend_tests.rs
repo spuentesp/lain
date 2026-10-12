@@ -488,18 +488,25 @@ fn impact_propagation_table_pr9_state() {
             | EdgeType::RequestSchema
             | EdgeType::ResponseSchema
             | EdgeType::HasField
-            | EdgeType::ReadsField => Propagation::Incoming,
+            | EdgeType::ReadsField
+            // Anchor-miner stage: heuristic BusTopic / RouteMatches
+            // hops now flow through impact paths (their confidence
+            // keeps them filterable; claims grade them
+            // needs-investigation).
+            | EdgeType::BusTopic
+            | EdgeType::RouteMatches => Propagation::Incoming,
             _ => Propagation::Stop,
         };
         assert_eq!(got, expected, "propagation mismatch for {e:?}");
     }
-    // PR 9 actual state: 8 Incoming, 0 Outgoing, 16 Stop.
+    // PR 9 actual state, plus the BusTopic/RouteMatches anchor-miner
+    // flip: 10 Incoming, 0 Outgoing, 14 Stop.
     assert_eq!(cases.len(), 24, "every EdgeType variant must be listed");
     let incoming_count = cases
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Incoming)
         .count();
-    assert_eq!(incoming_count, 8);
+    assert_eq!(incoming_count, 10);
     let outgoing_count = cases
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Outgoing)
@@ -509,7 +516,7 @@ fn impact_propagation_table_pr9_state() {
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Stop)
         .count();
-    assert_eq!(stop_count, 16);
+    assert_eq!(stop_count, 14);
 }
 
 /// `traverse_impact` should ignore start ids that don't exist and

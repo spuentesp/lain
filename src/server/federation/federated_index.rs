@@ -567,13 +567,33 @@ impl FederatedIndex {
         // graph had dropped it. Scoped by the repo's global-id prefix, which is
         // unambiguous because `RepoId` forbids `:`.
         let prefix = format!("{}:", id.as_str());
-        let stale: Vec<String> = self
+        let mut stale: Vec<String> = self
             .backend
             .list_nodes()?
             .into_iter()
             .map(|n| n.id)
             .filter(|gid| gid.starts_with(&prefix) && !live.contains(gid))
             .collect();
+        if !stale.is_empty() {
+            // Federation-only nodes the anchor miner materialized as
+            // edge endpoints (config-only anchors whose files have no
+            // per-repo graph node) are not in `live` by construction,
+            // and `remove_nodes` takes the incident minted edges with
+            // it — a routine reload, which reprojects without
+            // re-running the miner, would silently lose valid
+            // config-based couplings. Any node a minted edge still
+            // reaches stays; the next mint pass retracts obsolete
+            // edges (its own reconcile) and the pass after that
+            // retracts the node here.
+            let mut anchored: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for e in self.backend.all_edges()? {
+                if crate::federation::anchor_miner::is_minted_edge(&e) {
+                    anchored.insert(e.source_id);
+                    anchored.insert(e.target_id);
+                }
+            }
+            stale.retain(|gid| !anchored.contains(gid));
+        }
         if !stale.is_empty() {
             let removed = self.backend.remove_nodes(&stale)?;
             tracing::info!(
@@ -859,6 +879,14 @@ impl FederatedIndex {
             // (legitimate when two services share a repo,
             // §4.1) silently disappear.
             .filter(|e| e.edge_type != crate::schema::EdgeType::Binds)
+            // The anchor miner's edges are federation-only too
+            // (`anchor:*` / `cochange` / `commit-ref` heuristic
+            // provenance). The per-repo projection never reproduces
+            // them, so reconciliation must not retract them as
+            // stale — a watcher-triggered reproject owns none of
+            // them. The mint pass reconciles its own set (adds and
+            // retracts) when it runs.
+            .filter(|e| !crate::federation::anchor_miner::is_minted_edge(e))
             .filter(|e| {
                 !new_keys.contains(&(
                     e.edge_type.clone(),
@@ -1307,6 +1335,67 @@ impl FederatedIndex {
         // after the start-clear would be overwritten by a trailing
         // clear, so we deliberately do NOT clear here.
         Ok(())
+    }
+
+    /// Mint cross-repo heuristic edges (the anchor miner — see
+    /// [`crate::federation::anchor_miner`]). Runs when the federated
+    /// index is built: every repo must be indexed and projected
+    /// first, so callers invoke it after the per-repo index/project
+    /// loop (`lain reindex`, the server's `index_federation`). The
+    /// pass scans each repo's checkout for structural anchors, reads
+    /// its git history for co-change / commit-ref signals, and writes
+    /// `EdgeProvenance::Heuristic` edges into the backend. Failures
+    /// are non-fatal for the caller — the federation is still usable
+    /// without the heuristic layer, so the CLI logs and continues.
+    ///
+    /// `shapes` is the anchor-shape base the call site loaded through
+    /// the pattern registry (the CLI passes the bundled
+    /// `AnchorShapes::bundled()`). Each repo's
+    /// `<root>/.lain/patterns/*.yaml` anchor overrides layer on top
+    /// per scan via `AnchorShapes::with_base` — the same
+    /// `load_overrides` entry point the sensors use; a missing or
+    /// malformed override degrades to `shapes` with a logged warning.
+    pub fn mint_cross_repo_anchors(
+        &self,
+        shapes: &crate::server::sensors::patterns::AnchorShapes,
+    ) -> Result<crate::federation::anchor_miner::MintReport, LainError> {
+        let mut occurrences = Vec::new();
+        let mut commits = Vec::new();
+        for (id, _) in self.list_repos() {
+            let Some(repo) = self.get_repo(&id) else {
+                continue;
+            };
+            let load = crate::server::sensors::patterns::AnchorShapes::with_base(
+                repo.local_path(),
+                shapes,
+            );
+            occurrences.extend(crate::federation::anchor_miner::scan_repo_occurrences_with(
+                &id,
+                repo.local_path(),
+                &load.shapes,
+            ));
+            commits.extend(crate::federation::anchor_miner::collect_commit_records(
+                &id,
+                &repo.git(),
+                crate::federation::anchor_miner::COCHANGE_HISTORY_LIMIT,
+            ));
+        }
+        let report = crate::federation::anchor_miner::mint_cross_repo_observations_with(
+            self.backend.as_ref(),
+            &occurrences,
+            &commits,
+            shapes,
+        )?;
+        tracing::info!(
+            "[federation] anchor miner: {} anchors, {} anchor edge(s), {} cochange, {} commit-ref, {} retracted, {} crowd(s) skipped",
+            report.anchors_indexed,
+            report.anchor_edges,
+            report.cochange_edges,
+            report.commit_ref_edges,
+            report.retracted_edges,
+            report.crowds_skipped
+        );
+        Ok(report)
     }
 
     fn rebuild_symbol_index(&self) {

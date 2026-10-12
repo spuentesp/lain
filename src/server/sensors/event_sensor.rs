@@ -4,6 +4,8 @@
 //!
 //! - kafkajs / confluent-kafka (Node/TypeScript): `producer.send({ topic })`
 //!   and `consumer.run({ topic })` / `consumer.subscribe({ topics: [..] })`.
+//! - confluent_kafka (Python): `consumer.subscribe(["topic"])` — the
+//!   literal topic list on the `subscribe` call.
 //! - aiokafka (Python): `AIOKafkaProducer(...)`, `KafkaConsumer(...)`,
 //!   `.send(topic=..., ...)`.
 //! - rdkafka (Rust): `FutureProducer::send(record, ...)` where the
@@ -11,6 +13,11 @@
 //!   `StreamConsumer::subscribe(&[...])`.
 //! - kafka-go (Go): `producer.SendMessage(&kafka.Message{Topic: "..."})`
 //!   and `consumer.SubscribeTopics("...")`.
+//! - pika (Python): `basic_publish(routing_key=...)`,
+//!   `basic_consume(queue=...)`, `queue_declare(queue=...)` — mint
+//!   `amqp/<queue>` topics (broker derived from the framework id).
+//! - amqplib (Node/TS): `channel.publish(exchange, routingKey, ...)`
+//!   and `channel.consume(queue, ...)` — same `amqp/<queue>` shape.
 //! - Celery (Python): `@app.task` and `@shared_task` decorators make the
 //!   decorated function a scheduled topic named after its qualified
 //!   module path.
@@ -23,6 +30,13 @@
 //! (§6.7 "same-file constants"). Dynamic topic names are recorded but
 //! skipped from the graph so they surface in `coverage.unnormalized`.
 //!
+//! After site emission the sensor also walks payload schema files
+//! (`*.avsc`, `*.schema.json`): each parses into a `Schema` node with
+//! `Field` children (the same shape `grpc_provider_sensor` emits for
+//! proto messages), and a schema that names an already-emitted topic
+//! gets the `Topic → Schema` `PayloadSchema` edge that feeds the
+//! payload arm of the contract join (`field_join.rs`).
+//!
 //! The sensor runs at phase 2 so `Topic` nodes exist before the
 //! joiner binds consumer services to producer services (§7.7). It
 //! publishes through `replace_sensor_output(EventSensor, …)` so a
@@ -33,6 +47,7 @@ use crate::federation::contracts::model::SourceSite;
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::patterns::Patterns;
+use crate::server::sensors::payload_schema::{parse_avro_schema, parse_json_schema};
 use crate::server::sensors::util::{self, Lang};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -108,8 +123,145 @@ pub fn scan_workspace_event(
         all_edges.extend(edges);
     }
 
+    // Payload schemas ride the same EventSensor batch, scanned after
+    // site emission so a schema's `topic` can bind to a `Topic` node
+    // minted in this very scan.
+    scan_payload_schemas(&mut all_nodes, &mut all_edges, root, namespace);
+
     graph.replace_sensor_output(SensorOwner::EventSensor, &all_nodes, &all_edges)?;
     Ok(all_nodes.len())
+}
+
+// ─── Payload schemas (Avro / JSON Schema → Topic → Schema) ───────────
+
+/// Walk the workspace for payload schema files (`*.avsc`,
+/// `*.schema.json`), parse them with the `payload_schema` parsers, and
+/// emit the node set `grpc_provider_sensor.rs:180-250` emits for proto
+/// messages: a `Schema` node carrying `ContractFact::Schema { direction:
+/// Payload }`, one `Field` child per parsed field carrying
+/// `ContractFact::Field`, and a `HasField` edge per field. When the
+/// schema names a topic whose `Topic` node was already emitted in this
+/// scan (`{DEFAULT_BROKER}/{topic}`), the `Topic → Schema`
+/// `PayloadSchema` edge is minted too — without a `Topic` endpoint
+/// there is no edge (`insert_edges_batch` would drop it silently,
+/// `graph/mod.rs:1156`).
+///
+/// Everything is pushed into the caller's batch, which goes to a single
+/// `replace_sensor_output(EventSensor, …)`: nodes are upserted before
+/// edges there, so both endpoints of every edge materialize first. The
+/// `Topic` lookup reads the pending batch (not the graph) because a
+/// previous scan's `Topic` nodes are retracted in that same call —
+/// binding to one would mint an edge toward a stale id.
+///
+/// Ownership: `derive_owner` routes `.avsc` / `*.schema.json`
+/// `Schema`/`Field` nodes to `SensorOwner::EventSensor`, so these
+/// nodes are retracted with the rest of this sensor's output and every
+/// `ContractFact` here stays single-owner (`sensors/AGENTS.md`).
+fn scan_payload_schemas(
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<GraphEdge>,
+    root: &Path,
+    namespace: &RepoNamespace,
+) -> usize {
+    use crate::federation::contracts::model::{ContractFact as CF, Direction};
+    use std::ffi::OsStr;
+
+    let is_payload_file = |p: &Path| {
+        let is_avsc = p.extension() == Some(OsStr::new("avsc"));
+        let is_schema_json = p
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(".schema.json"));
+        (is_avsc || is_schema_json).then_some(())
+    };
+
+    let mut minted = 0;
+    for (path, content, ()) in util::scan_files(root, is_payload_file) {
+        let parsed = if path.extension() == Some(OsStr::new("avsc")) {
+            parse_avro_schema(&content)
+        } else {
+            parse_json_schema(&content)
+        };
+        let Some(ps) = parsed else { continue };
+
+        let path_str = graph_path(root, &path);
+        let line = ps.fields.first().map_or(1, |f| f.line);
+        let schema_id = GraphNode::generate_id(
+            &NodeType::Schema,
+            &path_str,
+            &ps.name,
+            Some(line),
+            namespace,
+        );
+        let mut schema_node = GraphNode::new(NodeType::Schema, ps.name.clone(), path_str.clone());
+        schema_node.id = schema_id.clone();
+        schema_node.line_start = Some(line);
+        schema_node.line_end = Some(line);
+        schema_node.contract = vec![CF::Schema {
+            direction: Direction::Payload,
+        }];
+        nodes.push(schema_node);
+
+        for f in &ps.fields {
+            let field_name = f.path.to_string();
+            let field_id = GraphNode::generate_id(
+                &NodeType::Field,
+                &path_str,
+                &field_name,
+                Some(f.line),
+                namespace,
+            );
+            let mut field_node = GraphNode::new(NodeType::Field, field_name, path_str.clone());
+            field_node.id = field_id.clone();
+            field_node.line_start = Some(f.line);
+            field_node.line_end = Some(f.line);
+            field_node.contract = vec![CF::Field(f.meta.clone())];
+            nodes.push(field_node);
+            edges.push(GraphEdge {
+                edge_type: EdgeType::HasField,
+                source_id: schema_id.clone(),
+                target_id: field_id,
+                weight: Some(1.0),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Static {
+                    source: crate::schema::StaticSource::Regex,
+                }),
+                site: None,
+                detail: None,
+            });
+        }
+
+        if let Some(topic_name) = &ps.topic {
+            let topic_label = format!("{DEFAULT_BROKER}/{topic_name}");
+            // One edge per emitted `Topic` node with this name: the
+            // same topic can be declared in several files, and the
+            // joiner assigns a service only to nodes whose paths match
+            // a `ServiceDecl` — binding just the first (walk-order)
+            // node would silently drop the payload join when an
+            // unassigned file comes first. Both endpoints are in this
+            // batch, so no edge dangles either way.
+            let topic_ids: Vec<String> = nodes
+                .iter()
+                .filter(|n| n.node_type == NodeType::Topic && n.name == topic_label)
+                .map(|n| n.id.clone())
+                .collect();
+            for topic_id in topic_ids {
+                edges.push(GraphEdge {
+                    edge_type: EdgeType::PayloadSchema,
+                    source_id: topic_id,
+                    target_id: schema_id.clone(),
+                    weight: Some(1.0),
+                    cross_repo: false,
+                    provenance: Some(EdgeProvenance::Static {
+                        source: crate::schema::StaticSource::Regex,
+                    }),
+                    site: None,
+                    detail: None,
+                });
+            }
+        }
+        minted += 1;
+    }
+    minted
 }
 
 // ─── Detection (regex-first, language-dispatched) ────────────────────
@@ -244,7 +396,7 @@ fn detect_sites(
                 out.push(DetectedSite {
                     kind: SiteKind::Produces,
                     topic: Some(value),
-                    broker: DEFAULT_BROKER.into(),
+                    broker: broker_for(&m).into(),
                     line: line_num,
                     owner_name: None,
                 });
@@ -255,7 +407,7 @@ fn detect_sites(
                 out.push(DetectedSite {
                     kind: SiteKind::Consumes,
                     topic: Some(value),
-                    broker: DEFAULT_BROKER.into(),
+                    broker: broker_for(&m).into(),
                     line: line_num,
                     owner_name: None,
                 });
@@ -276,6 +428,22 @@ fn detect_sites(
         }
     }
     out
+}
+
+/// Broker label for a produce/consume idiom match. The AMQP clients
+/// (`pika*` in Python, `amqplib*` in TS/JS) mint `amqp/<queue>`
+/// topics; every other framework keeps the `kafka/` default. Mirrors
+/// `schedule_value`'s framework→value mapping: the `framework_id`
+/// carries which YAML entry matched, so the broker follows the
+/// framework, never the filename. The joiner's `default_broker_for`
+/// parses the prefix back into `ContractKey::Topic { broker, .. }`
+/// (`joiner/endpoints.rs:224`), so no joiner change is needed.
+fn broker_for(m: &util::IdiomMatch) -> &'static str {
+    if m.framework_id.starts_with("pika") || m.framework_id.starts_with("amqplib") {
+        "amqp"
+    } else {
+        DEFAULT_BROKER
+    }
 }
 
 /// Map a file extension to the Tier-1 `Lang` the walker uses for
@@ -733,6 +901,159 @@ mod tests {
         );
     }
 
+    /// confluent_kafka (Python) `consumer.subscribe(["order.events"])`
+    /// — the enterprise-mesh notify-worker shape. The constructor
+    /// `Consumer({...})` carries no topic; the literal topic list on
+    /// `subscribe` is the only evidence, and it must yield a
+    /// `Consumes` edge on `kafka/<topic>`.
+    #[test]
+    fn confluent_kafka_subscribe_emits_consumes_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("worker.py"),
+            "from confluent_kafka import Consumer\n\n\
+             CONSUMER_CONFIG = {\"group.id\": \"notify-worker\", \"bootstrap.servers\": \"kafka:9092\"}\n\n\
+             def build_consumer():\n\
+             \x20   consumer = Consumer(CONSUMER_CONFIG)\n\
+             \x20   consumer.subscribe([\"order.events\"])\n\
+             \x20   return consumer\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let topics: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .collect();
+        assert!(
+            topics.iter().any(|t| t.name == "kafka/order.events"),
+            "confluent_kafka subscribe([...]) must emit Topic kafka/order.events; \
+             got {:?}",
+            topics.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        let consumes = graph
+            .all_edges()
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::Consumes)
+            .count();
+        assert!(consumes >= 1, "expected at least one Consumes edge");
+        let fact_carrier = graph.get_all_nodes().into_iter().find(|n| {
+            n.contract
+                .iter()
+                .any(|f| matches!(f, ContractFact::TopicConsumer(t) if t.name == "order.events"))
+        });
+        assert!(
+            fact_carrier.is_some(),
+            "a TopicConsumer fact for order.events must be recorded"
+        );
+    }
+
+    /// pika (Python AMQP) `ch.basic_consume(queue=...)` must mint a
+    /// typed `amqp/<queue>` topic — NOT `kafka/<queue>`. Before the
+    /// AMQP patterns existed this shape produced zero sensor facts
+    /// (the enterprise fixture's ledger-svc blind spot); the anchor
+    /// miner's heuristic queue anchor is not a sensor edge.
+    #[test]
+    fn pika_basic_consume_emits_amqp_consumes_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ledger.py"),
+            "import pika\n\
+             ch = conn.channel()\n\
+             ch.queue_bind(queue=\"order-events\", exchange=\"x\")\n\
+             ch.basic_consume(queue=\"order-events\", on_message_callback=cb)\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let topic = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Topic && n.name == "amqp/order-events")
+            .expect("amqp topic node (NOT kafka/order-events)");
+        assert!(
+            graph
+                .all_edges()
+                .iter()
+                .any(|e| e.edge_type == EdgeType::Consumes && e.target_id == topic.id),
+            "pika basic_consume must emit a Consumes edge to the amqp topic"
+        );
+    }
+
+    /// pika `channel.queue_bind(queue=..., exchange=..., routing_key=...)`
+    /// alone must mint a typed `amqp/<queue>` topic + Consumes edge.
+    /// This is the acceptance fixtures' ONLY AMQP idiom (enterprise_
+    /// {scale,mesh}'s ledger-svc binds its queue and never calls
+    /// `basic_consume` / `basic_publish` / `queue_declare`), so an
+    /// unrecognised `queue_bind` leaves the repo with zero sensor
+    /// facts.
+    #[test]
+    fn pika_queue_bind_emits_amqp_consumes_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ledger.py"),
+            "import pika\n\
+             ch = conn.channel()\n\
+             ch.queue_bind(queue=\"order-events\", exchange=\"platform\", routing_key=\"order-events\")\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let topic = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Topic && n.name == "amqp/order-events")
+            .expect("queue_bind must mint the amqp topic node (NOT kafka/order-events)");
+        assert!(
+            graph
+                .all_edges()
+                .iter()
+                .any(|e| e.edge_type == EdgeType::Consumes && e.target_id == topic.id),
+            "pika queue_bind must emit a Consumes edge to the amqp topic"
+        );
+    }
+
+    /// The broker label comes from the matched framework id, not from
+    /// the filename or the DEFAULT_BROKER constant: a pika-shaped
+    /// Python file mints `amqp/<queue>` while the aiokafka idiom in a
+    /// sibling file still mints `kafka/<topic>`.
+    #[test]
+    fn broker_derives_from_framework_not_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/a.py"),
+            "ch.basic_publish(exchange='x', routing_key='q1', body=b)\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/b.py"), "producer.send('t1', msg)\n").unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let names: Vec<String> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .map(|n| n.name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "amqp/q1"),
+            "pika publish -> amqp/q1; got {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "kafka/t1"),
+            "kafka send -> kafka/t1; got {names:?}"
+        );
+    }
+
     /// aiokafka `KafkaConsumer('orders.created')` constructor pattern.
     #[test]
     fn aiokafka_consumer_constructor_emits_consumes_edge() {
@@ -1173,6 +1494,103 @@ mod tests {
             .filter(|n| n.node_type == NodeType::Topic)
             .count();
         assert_eq!(topics, 0, "commented-out code must not emit Topics");
+    }
+
+    /// An Avro schema that names a topic bound to an already-emitted
+    /// `Topic` must produce the full payload node set — `Schema` +
+    /// `Field` + `HasField` (mirroring `grpc_provider_sensor`'s proto
+    /// message output) — plus the `Topic → Schema` `PayloadSchema`
+    /// edge. The topic comes from a producer site in the same scan, so
+    /// the edge endpoint is materialized in the same sensor batch.
+    #[test]
+    fn avro_schema_with_topic_emits_payload_schema_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("schemas")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("schemas/order.avsc"),
+            r#"{
+        "type": "record", "name": "Order", "topic": "order.events",
+        "fields": [{"name": "customer_id", "type": "string"}]
+    }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/producer.py"),
+            "producer.send('order.events', msg)\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let schema = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Schema && n.name.contains("Order"))
+            .expect("schema node");
+        let topic = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Topic && n.name.ends_with("order.events"))
+            .expect("topic node");
+        assert!(
+            graph.all_edges().iter().any(|e| {
+                e.edge_type == EdgeType::PayloadSchema
+                    && e.source_id == topic.id
+                    && e.target_id == schema.id
+            }),
+            "Topic -> PayloadSchema edge missing"
+        );
+        let field = graph
+            .get_all_nodes()
+            .into_iter()
+            .find(|n| n.node_type == NodeType::Field && n.name == "customer_id")
+            .expect("field node");
+        assert!(
+            graph.all_edges().iter().any(|e| {
+                e.edge_type == EdgeType::HasField
+                    && e.source_id == schema.id
+                    && e.target_id == field.id
+            }),
+            "Schema -> HasField -> Field edge missing"
+        );
+    }
+
+    /// A schema with no `topic` still emits its `Schema` node — the
+    /// payload definition is real — but no `PayloadSchema` edge: with
+    /// no `Topic` node there is nothing to bind, and `insert_edges_batch`
+    /// would silently drop a dangling edge anyway (`graph/mod.rs:1156`).
+    #[test]
+    fn avro_schema_without_topic_emits_schema_but_no_payload_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("schemas")).unwrap();
+        std::fs::write(
+            dir.path().join("schemas/audit.avsc"),
+            r#"{
+        "type": "record", "name": "Audit",
+        "fields": [{"name": "actor", "type": "string"}]
+    }"#,
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        assert!(
+            graph
+                .get_all_nodes()
+                .into_iter()
+                .any(|n| n.node_type == NodeType::Schema && n.name.contains("Audit")),
+            "the Audit schema node must be emitted even without a topic"
+        );
+        assert!(
+            !graph
+                .all_edges()
+                .iter()
+                .any(|e| e.edge_type == EdgeType::PayloadSchema),
+            "no topic -> nothing to bind; a dangling PayloadSchema edge would lie"
+        );
     }
 
     // Silence unused-import warnings when the file is compiled in a

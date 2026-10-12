@@ -212,6 +212,104 @@ async fn project_repo_cross_repo_match_does_not_strip_already_published_peer_dat
     );
 }
 
+/// P1-b: the anchor miner materializes federation-only `File` nodes
+/// for config-only anchors (files with no per-repo graph node). A
+/// later `project_repo` recomputes its live node set from the per-repo
+/// graph alone and used to retract every other repo-prefixed node —
+/// including those synthesized endpoints — and petgraph's
+/// `remove_node` takes the incident anchor edges with it. Reload paths
+/// reproject without re-running the miner, so a routine federation
+/// reload silently lost otherwise valid config-based couplings. Nodes
+/// carrying minted edges must survive reprojection.
+#[tokio::test]
+async fn project_repo_preserves_synthesized_anchor_endpoints_and_their_edges() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+
+    // Both repos are config-only: the anchor literal lives in a file
+    // the per-repo scanner indexes nothing from, so their per-repo
+    // graphs are empty and nothing can satisfy `project_nodes`' live
+    // set but the miner's synthesized endpoints.
+    let id_a = RepoId::new("cfg-a").unwrap();
+    let id_b = RepoId::new("cfg-b").unwrap();
+    let repo_a = add_repo_with_id(&fed, tmp.path(), id_a.as_str()).await;
+    let repo_b = add_repo_with_id(&fed, tmp.path(), id_b.as_str()).await;
+    assert!(repo_a.nodes().is_empty() && repo_b.nodes().is_empty());
+    fed.project_repo(&id_a).await.unwrap();
+    fed.project_repo(&id_b).await.unwrap();
+
+    let occ = [
+        crate::federation::anchor_miner::AnchorOccurrence {
+            repo: id_a.as_str().to_string(),
+            path: "deploy/amqp.toml".to_string(),
+            line: 2,
+            kind: crate::federation::anchor_miner::AnchorKind::Queue,
+            key: "order-events".to_string(),
+            constructor_fallback: None,
+        },
+        crate::federation::anchor_miner::AnchorOccurrence {
+            repo: id_b.as_str().to_string(),
+            path: "config/queues.toml".to_string(),
+            line: 3,
+            kind: crate::federation::anchor_miner::AnchorKind::Queue,
+            key: "order-events".to_string(),
+            constructor_fallback: None,
+        },
+    ];
+    let report = crate::federation::anchor_miner::mint_cross_repo_observations(
+        fed.backend().as_ref(),
+        &occ,
+        &[],
+    )
+    .expect("mint succeeds");
+    assert_eq!(
+        report.synthesized_file_nodes, 2,
+        "both endpoints are config-only: {report:?}"
+    );
+
+    let synth_a = format!("{}:File:deploy/amqp.toml:amqp.toml:0", id_a.as_str());
+    let synth_b = format!("{}:File:config/queues.toml:queues.toml:0", id_b.as_str());
+    let minted_before: Vec<_> = fed
+        .backend()
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(crate::federation::anchor_miner::is_minted_edge)
+        .collect();
+    assert_eq!(
+        minted_before.len(),
+        2,
+        "both directions of the pair: {minted_before:?}"
+    );
+
+    // Reload shape: `project_repo` reprojects both repos without a
+    // miner run. The live-set recomputation must leave the synthesized
+    // endpoints and their anchor edges intact.
+    fed.project_repo(&id_a).await.unwrap();
+    fed.project_repo(&id_b).await.unwrap();
+
+    assert!(
+        fed.backend().get_node(&synth_a).unwrap().is_some(),
+        "synthesized endpoint {synth_a} must survive reprojection"
+    );
+    assert!(
+        fed.backend().get_node(&synth_b).unwrap().is_some(),
+        "synthesized endpoint {synth_b} must survive reprojection"
+    );
+    let minted_after: Vec<_> = fed
+        .backend()
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(crate::federation::anchor_miner::is_minted_edge)
+        .collect();
+    assert_eq!(
+        minted_after.len(),
+        2,
+        "anchor edges must survive the reproject untouched: {minted_after:?}"
+    );
+}
+
 #[test]
 fn distinct_repos_keeps_genuine_cross_repo_ambiguity() {
     use crate::federation::federated_index::distinct_repos;

@@ -389,12 +389,12 @@ fn test_edge_type_all_includes_contract_variants() {
 }
 
 /// `is_indexed()` is the "does any sensor actually emit this today?"
-/// flag. The contract-edge types that the wired pipeline now emits
-/// (`ReadsField`, `ReadsFrom`, `Binds` — PR 13 owns this flip) must
-/// report `true`. The node types and the schema-bearing edges still
-/// report `false` because their producer graph is not wired into
-/// the default ingest pipeline (the schema/edge information is
-/// reconstructed at joiner time, not at sensor time).
+/// flag. The contract-edge types that the wired pipeline emits must
+/// report `true` — including `PayloadSchema`, which
+/// `event_sensor::scan_payload_schemas` mints from Avro/JSON-Schema
+/// payload files. The flag is the honesty gate: `describe_schema`
+/// publishes it, so a type that is flagged `indexed` must have a
+/// producer somewhere in the sensors pipeline.
 #[test]
 fn test_contract_nodes_and_edges_are_marked_indexed() {
     assert!(NodeType::HttpClientCall.is_indexed());
@@ -412,16 +412,10 @@ fn test_contract_nodes_and_edges_are_marked_indexed() {
         EdgeType::Binds,
         EdgeType::Produces,
         EdgeType::Consumes,
+        EdgeType::PayloadSchema,
     ] {
         assert!(e.is_indexed(), "{e} is wired and must be marked indexed");
     }
-    // `PayloadSchema` has no producer yet — `payload_schema.rs` parses
-    // payload files but no sensor mints the Topic → Schema edge. It must
-    // stay in the "known fiction" set or `describe_schema` lies.
-    assert!(
-        !EdgeType::PayloadSchema.is_indexed(),
-        "PayloadSchema has no producer and must not be advertised as indexed"
-    );
 }
 
 /// `source_types` / `target_types` for each new edge — `describe_schema`
