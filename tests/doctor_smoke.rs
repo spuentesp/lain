@@ -216,11 +216,12 @@ fn capability_and_status_commands_project_the_same_readiness() {
 }
 
 /// B2/B3 at a federation root: `lain doctor` must (a) say this looks
-/// like a federation root and name `lain server --config ./repos.yaml`
-/// as the fix — instead of only "run inside a Git repository", which
-/// sends agents in exactly the wrong direction — and (b) follow its
-/// documented exit contract (0 ready, 1 degraded, 2 unusable): with
-/// `Agent-ready: NO` it must exit 2, never 0.
+/// like a federation root and name `lain server --config <abs>/repos.yaml`
+/// (the discovered absolute config path) as the fix — instead of only
+/// "run inside a Git repository", which sends agents in exactly the
+/// wrong direction — and (b) follow its documented exit contract
+/// (0 ready, 1 degraded, 2 unusable): with `Agent-ready: NO` it must
+/// exit 2, never 0.
 #[test]
 fn federation_root_doctor_names_the_federation_fix_and_exits_unusable() {
     let fed = tempfile::tempdir().unwrap();
@@ -258,12 +259,17 @@ fn federation_root_doctor_names_the_federation_fix_and_exits_unusable() {
         stdout.contains("federation root"),
         "doctor must say this looks like a federation root: {stdout}"
     );
+    let config = fed.path().canonicalize().unwrap().join("repos.yaml");
     assert!(
-        stdout.contains("run `lain server --config ./repos.yaml` (see docs/FEDERATION.md)"),
-        "doctor must name the federation fix verbatim: {stdout}"
+        stdout.contains(&format!(
+            "run `lain server --config {}` (see docs/FEDERATION.md)",
+            config.display()
+        )),
+        "doctor must name the federation fix verbatim (absolute config path): {stdout}"
     );
     assert!(
-        stdout.contains("`--workspace <repo-id>`") && stdout.contains("an entry in repos.yaml"),
+        stdout.contains("`--workspace <path-to-repo>`")
+            && stdout.contains("repository's directory path from repos.yaml"),
         "doctor must name the single-repo scoping fix: {stdout}"
     );
 }

@@ -175,13 +175,22 @@ pub fn walk_up_for_repos_yaml(start: &Path) -> Option<PathBuf> {
 /// single-repo command to one `repos.yaml` entry. `None` when no
 /// `repos.yaml` is nearby; callers then keep their git-clone guidance
 /// untouched.
+///
+/// `--workspace` takes a filesystem path (the repository's directory
+/// as configured in `repos.yaml`), not a repo id — the commands this
+/// guidance rides take a `PathBuf`. The `lain server --config` form
+/// carries the absolute discovered config path: when this fires the
+/// cwd is usually below the federation root, where a relative
+/// `./repos.yaml` would not resolve.
 pub fn federation_root_guidance(start: &Path) -> Option<String> {
     let root = walk_up_for_repos_yaml(start)?;
+    let config = root.join("repos.yaml");
     Some(format!(
-        "this looks like a federation root ({}); run `lain server --config ./repos.yaml` \
-         (see docs/FEDERATION.md), or scope single-repo commands with `--workspace <repo-id>` \
-         where `<repo-id>` is an entry in repos.yaml",
-        root.join("repos.yaml").display()
+        "this looks like a federation root ({}); run `lain server --config {}` \
+         (see docs/FEDERATION.md), or scope single-repo commands with `--workspace <path-to-repo>` \
+         where `<path-to-repo>` is the repository's directory path from repos.yaml (e.g. `orders-svc/`)",
+        config.display(),
+        config.display(),
     ))
 }
 
@@ -250,13 +259,28 @@ mod tests {
         std::fs::write(tmp.path().join("repos.yaml"), "repos: []\n").unwrap();
         let guidance =
             federation_root_guidance(tmp.path()).expect("guidance when repos.yaml is present");
+        let config = tmp.path().canonicalize().unwrap().join("repos.yaml");
         assert!(guidance.contains("federation root"), "{guidance}");
+        // The server command must carry the discovered absolute config
+        // path: `./repos.yaml` resolves against the caller's cwd, which
+        // is below the federation root exactly when this fires.
         assert!(
-            guidance.contains("run `lain server --config ./repos.yaml` (see docs/FEDERATION.md)"),
+            guidance.contains(&format!(
+                "run `lain server --config {}` (see docs/FEDERATION.md)",
+                config.display()
+            )),
             "{guidance}"
         );
-        assert!(guidance.contains("`--workspace <repo-id>`"), "{guidance}");
-        assert!(guidance.contains("an entry in repos.yaml"), "{guidance}");
+        // `--workspace` is a filesystem path (PathBuf), not a
+        // repos.yaml id.
+        assert!(
+            guidance.contains("`--workspace <path-to-repo>`"),
+            "{guidance}"
+        );
+        assert!(
+            guidance.contains("repository's directory path from repos.yaml"),
+            "{guidance}"
+        );
     }
 
     #[test]
