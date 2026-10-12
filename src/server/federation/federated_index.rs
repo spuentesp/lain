@@ -1325,8 +1325,17 @@ impl FederatedIndex {
     /// `EdgeProvenance::Heuristic` edges into the backend. Failures
     /// are non-fatal for the caller — the federation is still usable
     /// without the heuristic layer, so the CLI logs and continues.
+    ///
+    /// `shapes` is the anchor-shape base the call site loaded through
+    /// the pattern registry (the CLI passes the bundled
+    /// `AnchorShapes::bundled()`). Each repo's
+    /// `<root>/.lain/patterns/*.yaml` anchor overrides layer on top
+    /// per scan via `AnchorShapes::with_base` — the same
+    /// `load_overrides` entry point the sensors use; a missing or
+    /// malformed override degrades to `shapes` with a logged warning.
     pub fn mint_cross_repo_anchors(
         &self,
+        shapes: &crate::server::sensors::patterns::AnchorShapes,
     ) -> Result<crate::federation::anchor_miner::MintReport, LainError> {
         let mut occurrences = Vec::new();
         let mut commits = Vec::new();
@@ -1334,9 +1343,14 @@ impl FederatedIndex {
             let Some(repo) = self.get_repo(&id) else {
                 continue;
             };
-            occurrences.extend(crate::federation::anchor_miner::scan_repo_occurrences(
+            let load = crate::server::sensors::patterns::AnchorShapes::with_base(
+                repo.local_path(),
+                shapes,
+            );
+            occurrences.extend(crate::federation::anchor_miner::scan_repo_occurrences_with(
                 &id,
                 repo.local_path(),
+                &load.shapes,
             ));
             commits.extend(crate::federation::anchor_miner::collect_commit_records(
                 &id,
@@ -1344,10 +1358,11 @@ impl FederatedIndex {
                 crate::federation::anchor_miner::COCHANGE_HISTORY_LIMIT,
             ));
         }
-        let report = crate::federation::anchor_miner::mint_cross_repo_observations(
+        let report = crate::federation::anchor_miner::mint_cross_repo_observations_with(
             self.backend.as_ref(),
             &occurrences,
             &commits,
+            shapes,
         )?;
         tracing::info!(
             "[federation] anchor miner: {} anchors, {} anchor edge(s), {} cochange, {} commit-ref, {} crowd(s) skipped",

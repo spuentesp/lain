@@ -50,6 +50,14 @@ use crate::server::sensors::util::host_env_name;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+// The coupling-shape knowledge this miner consults (queue/topic
+// context keywords, generated-name suffixes, env-access call shapes,
+// scan policy) is data: bundled `patterns/anchors.yaml` layered with
+// per-repo `<root>/.lain/patterns/*.yaml` overrides via the pattern
+// registry. Re-exported here so miner callers find the injected
+// parameter type next to the functions that take it.
+pub use crate::server::sensors::patterns::{AnchorShapes, AnchorShapesLoad};
+
 // ─── ladder constants (joiner §7.3 rule 6) ──────────────────────────
 
 /// Route-like single-match rung of the existing heuristic ladder —
@@ -98,57 +106,6 @@ const MIN_NAME_LEN: usize = 4;
 
 /// Minimum length for a route literal before normalization.
 const MIN_ROUTE_LEN: usize = 4;
-
-/// Directories the scanner never descends into.
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    ".hg",
-    ".svn",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    "vendor",
-    "third_party",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".tox",
-    ".lain",
-    ".lain-data",
-    "coverage",
-    ".next",
-];
-
-/// File extensions the scanner reads (source + the config formats
-/// structural names live in: `amqp.toml`, `openapi.yaml`, `.env`).
-const SCAN_EXTS: &[&str] = &[
-    "rs",
-    "py",
-    "ts",
-    "tsx",
-    "js",
-    "jsx",
-    "mjs",
-    "go",
-    "java",
-    "kt",
-    "kts",
-    "rb",
-    "cs",
-    "php",
-    "proto",
-    "toml",
-    "yaml",
-    "yml",
-    "json",
-    "env",
-    "properties",
-    "cfg",
-    "ini",
-    "tf",
-    "scala",
-];
 
 // ─── public data types ───────────────────────────────────────────────
 
@@ -339,10 +296,29 @@ fn build_node_index(nodes: Vec<GraphNode>) -> NodeIndex {
 /// directly; the [`FederatedIndex`](crate::federation::federated_index::FederatedIndex)
 /// wiring collects the inputs from the repos' checkouts and git
 /// history.
+///
+/// Commit-subject anchors classify against the bundled shapes (this
+/// fold takes no shapes parameter and stays pure of I/O — no
+/// filesystem load); [`mint_cross_repo_observations_with`] is the
+/// injected variant the miner drives with its loaded shapes.
 pub fn mint_cross_repo_observations(
     backend: &dyn GraphBackend,
     occurrences: &[AnchorOccurrence],
     commits: &[CommitRecord],
+) -> Result<MintReport, LainError> {
+    mint_cross_repo_observations_with(backend, occurrences, commits, AnchorShapes::bundled())
+}
+
+/// [`mint_cross_repo_observations`] with caller-supplied shapes for
+/// the commit-subject pass (the occurrence side is already
+/// extracted). `shapes` classifies free-text subject mentions —
+/// env-access call shapes and name gates; queue/topic context
+/// keywords do not apply to subjects.
+pub fn mint_cross_repo_observations_with(
+    backend: &dyn GraphBackend,
+    occurrences: &[AnchorOccurrence],
+    commits: &[CommitRecord],
+    shapes: &AnchorShapes,
 ) -> Result<MintReport, LainError> {
     let mut report = MintReport::default();
 
@@ -591,7 +567,7 @@ pub fn mint_cross_repo_observations(
 
     // ── Detector 3: commit-message references ───────────────────────
     for c in commits {
-        let subject_anchors = extract_subject_anchors(&c.message);
+        let subject_anchors = extract_subject_anchors(&c.message, shapes);
         if subject_anchors.is_empty() {
             continue;
         }
@@ -936,7 +912,26 @@ fn resolve_endpoint(
 /// Scan a repo checkout for structural anchor occurrences. Walks the
 /// tree directly (skipping VCS/build/vendor directories), so tests
 /// can drive it with a plain tempdir.
+/// Scan one repo's checkout for anchor occurrences. Shapes come from
+/// the pattern registry for `local_path` — per-repo
+/// `<root>/.lain/patterns/*.yaml` overrides layered on the bundled
+/// defaults via `Patterns::load_overrides`; a missing or malformed
+/// override degrades to the bundled defaults with a logged warning
+/// ([`AnchorShapes::for_repo`]). The injected core is
+/// [`scan_repo_occurrences_with`].
 pub fn scan_repo_occurrences(repo: &RepoId, local_path: &Path) -> Vec<AnchorOccurrence> {
+    let load = AnchorShapes::for_repo(local_path);
+    scan_repo_occurrences_with(repo, local_path, &load.shapes)
+}
+
+/// [`scan_repo_occurrences`] with caller-supplied shapes: the miner
+/// injects the per-repo shapes it loaded through the pattern
+/// registry; callers with their own `AnchorShapes` inject directly.
+pub fn scan_repo_occurrences_with(
+    repo: &RepoId,
+    local_path: &Path,
+    shapes: &AnchorShapes,
+) -> Vec<AnchorOccurrence> {
     let mut out = Vec::new();
     let mut stack = vec![local_path.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -950,7 +945,7 @@ pub fn scan_repo_occurrences(repo: &RepoId, local_path: &Path) -> Vec<AnchorOccu
             };
             if file_type.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if SKIP_DIRS.contains(&name.as_str()) || name.starts_with('.') {
+                if shapes.scan_skip_dirs().iter().any(|d| d == &name) || name.starts_with('.') {
                     continue;
                 }
                 stack.push(path);
@@ -964,7 +959,7 @@ pub fn scan_repo_occurrences(repo: &RepoId, local_path: &Path) -> Vec<AnchorOccu
                 .unwrap_or_default()
                 .to_str()
                 .unwrap_or_default();
-            if !SCAN_EXTS.contains(&ext) {
+            if !shapes.scan_exts().iter().any(|e| e == ext) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else {
@@ -980,7 +975,7 @@ pub fn scan_repo_occurrences(repo: &RepoId, local_path: &Path) -> Vec<AnchorOccu
                 continue;
             };
             let rel = rel.to_string_lossy().replace('\\', "/");
-            out.extend(extract_from_text(repo.as_str(), &rel, &content));
+            out.extend(extract_from_text(repo.as_str(), &rel, &content, shapes));
         }
     }
     out.sort_by(|a, b| (a.kind, &a.key, &a.path, a.line).cmp(&(b.kind, &b.key, &b.path, b.line)));
@@ -1020,7 +1015,12 @@ pub fn collect_commit_records(
 /// One file's worth of extraction. `path` is repo-relative; the
 /// extension decides whether the `.proto` structure lines are parsed
 /// in addition to the generic literal pass.
-fn extract_from_text(repo: &str, path: &str, content: &str) -> Vec<AnchorOccurrence> {
+fn extract_from_text(
+    repo: &str,
+    path: &str,
+    content: &str,
+    shapes: &AnchorShapes,
+) -> Vec<AnchorOccurrence> {
     let mut out = Vec::new();
     let is_proto = path.ends_with(".proto");
     let mut proto_package: Option<String> = None;
@@ -1058,7 +1058,7 @@ fn extract_from_text(repo: &str, path: &str, content: &str) -> Vec<AnchorOccurre
                 continue;
             }
         }
-        out.extend(extract_from_line(repo, path, line_no, line));
+        out.extend(extract_from_line(repo, path, line_no, line, shapes));
     }
     out.sort_by(|a, b| (a.kind, &a.key, a.line).cmp(&(b.kind, &b.key, b.line)));
     out.dedup_by(|a, b| a.kind == b.kind && a.key == b.key && a.line == b.line);
@@ -1077,7 +1077,13 @@ fn anchor(repo: &str, path: &str, line: u32, kind: AnchorKind, key: String) -> A
 }
 
 /// Extract every anchor from one line of any supported language.
-fn extract_from_line(repo: &str, path: &str, line_no: u32, line: &str) -> Vec<AnchorOccurrence> {
+fn extract_from_line(
+    repo: &str,
+    path: &str,
+    line_no: u32,
+    line: &str,
+    shapes: &AnchorShapes,
+) -> Vec<AnchorOccurrence> {
     let mut out = Vec::new();
     let mut seen: HashSet<(AnchorKind, String)> = HashSet::new();
     let mut push = |kind: AnchorKind, key: String, out: &mut Vec<AnchorOccurrence>| {
@@ -1090,14 +1096,14 @@ fn extract_from_line(repo: &str, path: &str, line_no: u32, line: &str) -> Vec<An
     // literal pass skips their spans so `"RISK_ORDERS_URL"` is never
     // re-classified as a bare name.
     let mut consumed: Vec<(usize, usize)> = Vec::new();
-    for (range, name) in extract_env_from_line(line) {
+    for (range, name) in extract_env_from_line(line, shapes) {
         consumed.push(range);
         push(AnchorKind::Env, name.to_string(), &mut out);
     }
 
     let low = line.to_lowercase();
-    let queue_ctx = line_has_queue_context(&low);
-    let topic_ctx = line_has_topic_context(&low);
+    let queue_ctx = line_has_queue_context(&low, shapes);
+    let topic_ctx = line_has_topic_context(&low, shapes);
 
     let mut quoted_spans: Vec<(usize, usize)> = Vec::new();
     for (span, content) in quoted_strings(line) {
@@ -1149,7 +1155,7 @@ fn extract_from_line(repo: &str, path: &str, line_no: u32, line: &str) -> Vec<An
         {
             continue;
         }
-        if let Some(cand) = generated_service_key(&token) {
+        if let Some(cand) = generated_service_key(&token, shapes) {
             if gen_seen.insert(cand.primary.clone()) {
                 let mut occ = anchor(repo, path, line_no, AnchorKind::Proto, cand.primary);
                 occ.constructor_fallback = cand.constructor_fallback;
@@ -1164,7 +1170,7 @@ fn extract_from_line(repo: &str, path: &str, line_no: u32, line: &str) -> Vec<An
 /// the shape gates run without line context: a bare `order-events`
 /// counts as a queue-or-topic mention (whichever group exists
 /// decides at mint time).
-fn extract_subject_anchors(subject: &str) -> Vec<(AnchorKind, String)> {
+fn extract_subject_anchors(subject: &str, shapes: &AnchorShapes) -> Vec<(AnchorKind, String)> {
     let mut out: Vec<(AnchorKind, String)> = Vec::new();
     let mut seen: HashSet<(AnchorKind, String)> = HashSet::new();
     let mut push = |kind: AnchorKind, key: String| {
@@ -1172,7 +1178,10 @@ fn extract_subject_anchors(subject: &str) -> Vec<(AnchorKind, String)> {
             out.push((kind, key));
         }
     };
-    for name in extract_env_from_line(subject).into_iter().map(|(_, n)| n) {
+    for name in extract_env_from_line(subject, shapes)
+        .into_iter()
+        .map(|(_, n)| n)
+    {
         push(AnchorKind::Env, name.to_string());
     }
     let mut tokens: Vec<String> = Vec::new();
@@ -1342,14 +1351,19 @@ struct GeneratedCandidate {
 /// the same service gate as `proto_ident_key`); a lowercase var like
 /// `ordersClient` is covered by the constructor/type name at its
 /// binding site instead of by its own identifier.
-fn generated_service_key(ident: &str) -> Option<GeneratedCandidate> {
+fn generated_service_key(ident: &str, shapes: &AnchorShapes) -> Option<GeneratedCandidate> {
     let base = ident.rsplit('.').next().unwrap_or(ident);
-    let primary = service_segment_from(base)?;
+    let primary = service_segment_from(base, shapes)?;
     // `NewXxxClient` may be a Go constructor for service `Xxx` — kept
     // as fallback only, for the case no `NewXxx` service is declared.
-    let constructor_fallback = base
-        .strip_prefix("New")
-        .and_then(service_segment_from)
+    // The strip-prefix list is shape data (`generated_names.
+    // strip_prefixes`); with the bundled `New` this is the historical
+    // single-prefix rule.
+    let constructor_fallback = shapes
+        .generated_strip_prefixes()
+        .iter()
+        .filter_map(|p| base.strip_prefix(p.as_str()))
+        .find_map(|stripped| service_segment_from(stripped, shapes))
         .filter(|fb| fb != &primary);
     Some(GeneratedCandidate {
         primary,
@@ -1359,10 +1373,12 @@ fn generated_service_key(ident: &str) -> Option<GeneratedCandidate> {
 
 /// The service segment of a generated type name's base
 /// (`OrdersClient`, `OrdersStub`, `OrdersBlockingStub`), gated like a
-/// type name.
-fn service_segment_from(base: &str) -> Option<String> {
-    for suffix in ["BlockingStub", "Client", "Stub"] {
-        if let Some(s) = base.strip_suffix(suffix) {
+/// type name. Suffixes come from shape data
+/// (`generated_names.suffixes`) and are tried in order — the first
+/// that strips wins, so `BlockingStub` precedes `Stub`.
+fn service_segment_from(base: &str, shapes: &AnchorShapes) -> Option<String> {
+    for suffix in shapes.generated_suffixes() {
+        if let Some(s) = base.strip_suffix(suffix.as_str()) {
             if s.len() >= 3 && s.chars().next().map_or(false, |c| c.is_uppercase()) {
                 return Some(s.to_string());
             }
@@ -1482,38 +1498,23 @@ fn is_env_shape(s: &str) -> bool {
         && s.contains('_')
 }
 
-fn line_has_queue_context(low: &str) -> bool {
-    const KEYS: &[&str] = &[
-        "queue",
-        "amqp",
-        "pika",
-        "routing_key",
-        "basic_consume",
-        "basic_publish",
-        "rabbit",
-    ];
-    KEYS.iter().any(|k| low.contains(k))
+/// Whether the lowercased line carries queue context. The keyword
+/// list is shape data (`anchors.contexts.queue`) — an org override
+/// adds keywords without recompiling.
+fn line_has_queue_context(low: &str, shapes: &AnchorShapes) -> bool {
+    shapes
+        .context_keys("queue")
+        .iter()
+        .any(|k| low.contains(k.as_str()))
 }
 
-fn line_has_topic_context(low: &str) -> bool {
-    const KEYS: &[&str] = &[
-        "topic",
-        "kafka",
-        "kafkajs",
-        "rdkafka",
-        "confluent",
-        "pubsub",
-        "publish",
-        "subscribe",
-        "producer",
-        "consumer",
-        "firehose",
-        "futurerecord",
-        "nats",
-        "sns",
-        "sqs",
-    ];
-    KEYS.iter().any(|k| low.contains(k))
+/// Whether the lowercased line carries topic context (`anchors.
+/// contexts.topic`).
+fn line_has_topic_context(low: &str, shapes: &AnchorShapes) -> bool {
+    shapes
+        .context_keys("topic")
+        .iter()
+        .any(|k| low.contains(k.as_str()))
 }
 
 /// Byte ranges + contents of every single-quoted / double-quoted
@@ -1645,17 +1646,16 @@ fn ident_like(s: &str) -> bool {
 /// grammar on the line and hand the full call expression back to
 /// `host_env_name` — single source of truth with the sensors.
 /// Returns `(byte span, env var name)` pairs.
-fn extract_env_from_line(line: &str) -> Vec<((usize, usize), String)> {
-    const PAREN_PREFIXES: &[&str] = &[
-        "os.environ.get(",
-        "os.getenv(",
-        "os.Getenv(",
-        "System.getenv(",
-    ];
+///
+/// The call-shape prefixes are shape data (`anchors.env_access`);
+/// a prefix an org added via `<root>/.lain/patterns/anchors.yaml`
+/// that `host_env_name`'s grammar does not know still extracts via
+/// [`env_name_from_call`]'s generic fallback.
+fn extract_env_from_line(line: &str, shapes: &AnchorShapes) -> Vec<((usize, usize), String)> {
     let mut out = Vec::new();
-    for prefix in PAREN_PREFIXES {
+    for prefix in shapes.env_paren_prefixes() {
         let mut from = 0usize;
-        while let Some(rel) = line[from..].find(prefix) {
+        while let Some(rel) = line[from..].find(prefix.as_str()) {
             let start = from + rel;
             let open_end = start + prefix.len();
             let Some(close_rel) = line[open_end..].find(')') else {
@@ -1663,15 +1663,15 @@ fn extract_env_from_line(line: &str) -> Vec<((usize, usize), String)> {
             };
             let end = open_end + close_rel + 1;
             let call = &line[start..end];
-            if let Some(name) = host_env_name(call) {
-                out.push(((start, end), name.to_string()));
+            if let Some(name) = env_name_from_call(call) {
+                out.push(((start, end), name));
             }
             from = end.max(start + 1);
         }
     }
-    for prefix in ["os.environ[", "process.env["] {
+    for prefix in shapes.env_bracket_prefixes() {
         let mut from = 0usize;
-        while let Some(rel) = line[from..].find(prefix) {
+        while let Some(rel) = line[from..].find(prefix.as_str()) {
             let start = from + rel;
             let open_end = start + prefix.len();
             let Some(close_rel) = line[open_end..].find(']') else {
@@ -1679,30 +1679,52 @@ fn extract_env_from_line(line: &str) -> Vec<((usize, usize), String)> {
             };
             let end = open_end + close_rel + 1;
             let call = &line[start..end];
-            if let Some(name) = host_env_name(call) {
-                out.push(((start, end), name.to_string()));
+            if let Some(name) = env_name_from_call(call) {
+                out.push(((start, end), name));
             }
             from = end.max(start + 1);
         }
     }
-    // `process.env.X` — identifier form, no brackets.
-    let prefix = "process.env.";
-    let mut from = 0usize;
-    while let Some(rel) = line[from..].find(prefix) {
-        let start = from + rel;
-        let id_start = start + prefix.len();
-        let id_end = line[id_start..]
-            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map(|n| id_start + n)
-            .unwrap_or(line.len());
-        if id_end > id_start {
-            let call = &line[start..id_end];
-            if let Some(name) = host_env_name(call) {
-                out.push(((start, id_end), name.to_string()));
+    // Dot-identifier forms (`process.env.X`) — no brackets.
+    for prefix in shapes.env_ident_prefixes() {
+        let mut from = 0usize;
+        while let Some(rel) = line[from..].find(prefix.as_str()) {
+            let start = from + rel;
+            let id_start = start + prefix.len();
+            let id_end = line[id_start..]
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map(|n| id_start + n)
+                .unwrap_or(line.len());
+            if id_end > id_start {
+                let call = &line[start..id_end];
+                if let Some(name) = env_name_from_call(call) {
+                    out.push(((start, id_end), name));
+                }
             }
+            from = id_end.max(start + 1);
         }
-        from = id_end.max(start + 1);
     }
     out.retain(|(_, name)| is_env_shape(name));
     out
+}
+
+/// The env-var name one call-shaped span expresses. `host_env_name`
+/// owns the grammar of the bundled idioms (single source of truth
+/// with the sensors and returns `Some` for every bundled shape, so
+/// the fallback below is unreachable for them); a call shape an org
+/// added through anchor-shape data falls back to its first quoted
+/// literal (`env.require("X")`), or the trailing identifier for
+/// dot shapes (`app.config.X`).
+fn env_name_from_call(call: &str) -> Option<String> {
+    if let Some(name) = host_env_name(call) {
+        return Some(name.to_string());
+    }
+    if let Some((_, quoted)) = quoted_strings(call).into_iter().next() {
+        return Some(quoted);
+    }
+    let ident = call.rsplit('.').next().unwrap_or(call);
+    if !ident.is_empty() && ident.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Some(ident.to_string());
+    }
+    None
 }

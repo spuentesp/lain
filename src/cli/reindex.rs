@@ -130,7 +130,11 @@ pub async fn run_reindex(config: PathBuf, workspace: Option<String>, verbose: bo
     // but does not fail the reindex — the per-repo graphs and the
     // projected federation are already fresh, and the heuristic
     // layer is additive.
-    match fed.mint_cross_repo_anchors() {
+    //
+    // Anchor shapes load through the pattern registry (bundled
+    // `anchors.yaml`; each repo layers its own
+    // `<root>/.lain/patterns/` overrides on top inside the miner).
+    match fed.mint_cross_repo_anchors(crate::server::sensors::patterns::AnchorShapes::bundled()) {
         Ok(report) => {
             if verbose {
                 eprintln!(

@@ -1423,3 +1423,181 @@ fn commit_records_carry_subject_and_files() {
     assert_eq!(records[0].files, vec!["a.py".to_string()]);
     assert_eq!(records[0].repo, "inline-svc");
 }
+
+// ─── Data-driven anchor shapes (pattern registry) ────────────────────
+//
+// The anchor shape knowledge (queue/topic context keywords, generated
+// name suffixes / constructor prefixes, env-access call shapes, scan
+// policy) lives in the pattern registry — a bundled `anchors.yaml`
+// layered with per-repo `<root>/.lain/patterns/anchors.yaml` overrides
+// via the same `load_overrides` mechanism the sensors use — not as
+// hardcoded Rust tables. These tests pin the three contract points:
+// bundled defaults reproduce the historical classification, a repo
+// override extends it without recompiling, and a malformed override
+// degrades to the bundled defaults with a warning instead of crashing
+// indexing.
+
+/// Write `body` as the repo root's `.lain/patterns/anchors.yaml`.
+fn write_anchor_override(root: &Path, body: &str) {
+    let dir = root.join(".lain").join("patterns");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("anchors.yaml"), body).unwrap();
+}
+
+/// `scan_text` for a whole repo root, so per-repo overrides at
+/// `<root>/.lain/patterns/` load through the pattern registry.
+fn scan_root_text(root: &Path, name: &str, text: &str) -> Vec<(AnchorKind, String)> {
+    std::fs::write(root.join(name), text).unwrap();
+    let mut out: Vec<(AnchorKind, String)> = scan_repo_occurrences(&repo("scan-svc"), root)
+        .into_iter()
+        .map(|o| (o.kind, o.key))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Default load: the bundled shapes classify the known idioms — one
+/// positive per context kind (queue + topic) plus one generated-name
+/// proto key — exactly as the pre-registry hardcoded tables did. This
+/// is the behavior-preservation pin for the bundled `anchors.yaml`.
+#[test]
+fn bundled_anchor_shapes_classify_known_idioms() {
+    let queue_dir = tempfile::tempdir().unwrap();
+    let queue = scan_root_text(
+        queue_dir.path(),
+        "ledger.py",
+        "channel.queue_bind(queue=\"order-events\", exchange=\"orders\")\n",
+    );
+    assert!(
+        queue.contains(&(AnchorKind::Queue, "order-events".into())),
+        "{queue:?}"
+    );
+    let topic_dir = tempfile::tempdir().unwrap();
+    let topic = scan_root_text(
+        topic_dir.path(),
+        "worker.py",
+        "consumer.subscribe([\"order.events\"])  # kafka topic\n",
+    );
+    assert!(
+        topic.contains(&(AnchorKind::Topic, "order.events".into())),
+        "{topic:?}"
+    );
+    let gen_dir = tempfile::tempdir().unwrap();
+    let gen = scan_root_text(
+        gen_dir.path(),
+        "handler.go",
+        "c := pb.NewOrdersClient(conn)\n",
+    );
+    assert!(
+        gen.contains(&(AnchorKind::Proto, "NewOrders".into())),
+        "{gen:?}"
+    );
+}
+
+/// Org extension: a repo-level override ADDS a queue-context keyword
+/// (`queuify`) and a generated suffix (`Handler`) without recompiling.
+/// `channel.queuify("jobs")` — which the bundled defaults do NOT
+/// classify — mints `anchor:queue:jobs`, and `JobsHandler` joins the
+/// declared proto service `Jobs`.
+#[test]
+fn repo_override_extends_queue_context_and_generated_suffixes() {
+    // Bundled baseline: the same idioms anchor nothing.
+    let base_dir = tempfile::tempdir().unwrap();
+    let bundled = scan_root_text(base_dir.path(), "app.py", "channel.queuify(\"jobs\")\n");
+    assert!(
+        !bundled
+            .iter()
+            .any(|(k, key)| *k == AnchorKind::Queue && key == "jobs"),
+        "bundled defaults must NOT classify queuify: {bundled:?}"
+    );
+    let base_gen_dir = tempfile::tempdir().unwrap();
+    let base_gen = scan_root_text(base_gen_dir.path(), "handler.go", "var s pb.JobsHandler\n");
+    assert!(
+        !base_gen.iter().any(|(k, _)| *k == AnchorKind::Proto),
+        "bundled suffixes must NOT classify JobsHandler: {base_gen:?}"
+    );
+
+    // Override: `queuify` joins the queue context, `Handler` joins the
+    // generated-name suffixes — both ADDITIVE on top of the bundled
+    // lists.
+    let over_dir = tempfile::tempdir().unwrap();
+    write_anchor_override(
+        over_dir.path(),
+        "anchors:\n  contexts:\n    queue: [queuify]\n  generated_names:\n    suffixes: [Handler]\n",
+    );
+    let got = scan_root_text(over_dir.path(), "app.py", "channel.queuify(\"jobs\")\n");
+    assert!(
+        got.contains(&(AnchorKind::Queue, "jobs".into())),
+        "override keyword must classify queuify literals: {got:?}"
+    );
+
+    // Generated suffix: `JobsHandler` spells service `Jobs` and joins
+    // the declared `orders.Jobs` at fold time (same shape as the
+    // bundled `OrdersClient` → `orders.Orders` idiom).
+    let decl_dir = tempfile::tempdir().unwrap();
+    let gen_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(decl_dir.path().join("protos")).unwrap();
+    std::fs::create_dir_all(gen_dir.path().join("src")).unwrap();
+    write_anchor_override(
+        gen_dir.path(),
+        "anchors:\n  generated_names:\n    suffixes: [Handler]\n",
+    );
+    std::fs::write(
+        decl_dir.path().join("protos/jobs.proto"),
+        "package orders;\nservice Jobs {\n  rpc GetJob(GetJobRequest) returns (Job);\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        gen_dir.path().join("src/handler.go"),
+        "var s pb.JobsHandler\n",
+    )
+    .unwrap();
+
+    let backend = PetgraphBackend::ephemeral(Path::new("/tmp/anchor-miner-shapes-ext"));
+    let decl = repo("jobs-decl-svc");
+    let consumer = repo("jobs-consumer-svc");
+    backend
+        .upsert_node(file_node(&decl, "protos/jobs.proto"))
+        .unwrap();
+    backend
+        .upsert_node(file_node(&consumer, "src/handler.go"))
+        .unwrap();
+    let mut occ = scan_repo_occurrences(&decl, decl_dir.path());
+    occ.extend(scan_repo_occurrences(&consumer, gen_dir.path()));
+    mint_cross_repo_observations(&backend, &occ, &[]).expect("mint succeeds");
+    let edges = backend.all_edges().unwrap();
+    let minted = heuristic_edges(&edges, "anchor:proto:orders.Jobs");
+    assert_eq!(
+        minted.len(),
+        2,
+        "JobsHandler must join declared orders.Jobs, both directions: {edges:?}"
+    );
+}
+
+/// Broken override degrades: a malformed `anchors.yaml` falls back to
+/// the bundled defaults (classification still works) and reports a
+/// warning — never a panic mid-index.
+#[test]
+fn malformed_anchor_override_degrades_to_bundled_with_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    // Unclosed flow sequence — serde_yaml rejects the whole document.
+    write_anchor_override(
+        dir.path(),
+        "anchors:\n  contexts:\n    queue: [\"unclosed\n",
+    );
+    let load = crate::server::sensors::patterns::AnchorShapes::for_repo(dir.path());
+    assert!(
+        !load.warnings.is_empty(),
+        "malformed override must report a warning, got none"
+    );
+    let got = scan_root_text(
+        dir.path(),
+        "ledger.py",
+        "channel.queue_bind(queue=\"order-events\", exchange=\"orders\")\n",
+    );
+    assert!(
+        got.contains(&(AnchorKind::Queue, "order-events".into())),
+        "bundled fallback must keep classifying queue literals: {got:?}"
+    );
+}
