@@ -567,13 +567,33 @@ impl FederatedIndex {
         // graph had dropped it. Scoped by the repo's global-id prefix, which is
         // unambiguous because `RepoId` forbids `:`.
         let prefix = format!("{}:", id.as_str());
-        let stale: Vec<String> = self
+        let mut stale: Vec<String> = self
             .backend
             .list_nodes()?
             .into_iter()
             .map(|n| n.id)
             .filter(|gid| gid.starts_with(&prefix) && !live.contains(gid))
             .collect();
+        if !stale.is_empty() {
+            // Federation-only nodes the anchor miner materialized as
+            // edge endpoints (config-only anchors whose files have no
+            // per-repo graph node) are not in `live` by construction,
+            // and `remove_nodes` takes the incident minted edges with
+            // it — a routine reload, which reprojects without
+            // re-running the miner, would silently lose valid
+            // config-based couplings. Any node a minted edge still
+            // reaches stays; the next mint pass retracts obsolete
+            // edges (its own reconcile) and the pass after that
+            // retracts the node here.
+            let mut anchored: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for e in self.backend.all_edges()? {
+                if crate::federation::anchor_miner::is_minted_edge(&e) {
+                    anchored.insert(e.source_id);
+                    anchored.insert(e.target_id);
+                }
+            }
+            stale.retain(|gid| !anchored.contains(gid));
+        }
         if !stale.is_empty() {
             let removed = self.backend.remove_nodes(&stale)?;
             tracing::info!(
