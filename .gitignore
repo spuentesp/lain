@@ -21,6 +21,9 @@ Thumbs.db
 # ONNX models (download at runtime)
 models/
 .lain/
+# zoanthrope coordination state (`.zoanthrope/state.json` + locks) —
+# workspace-local runtime state, like `.lain/`. Never committed.
+.zoanthrope/
 .venv/
 
 # Python
