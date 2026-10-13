@@ -33,6 +33,8 @@ All notable changes to LAIN are documented here. Versions follow
   `docs/formal/` for zoanthrope's `formal/` — see
   `docs/formal/COORDINATION.md`.
 
+## [0.9.1] - 2026-10-10
+
 ### Fixed
 
 - **`assess_change` no longer reads a zero-dependent result as a safety
