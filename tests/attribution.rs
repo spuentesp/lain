@@ -1,13 +1,17 @@
 use lain::server::attribution::{
     AttributionBackend, AttributionWatcher, NoopBackend, ProcFsBackend,
 };
-use lain::server::presence::{AgentKind, AgentMode, OccupancyMap, PresenceRegistry};
+use lain::server::coordination::CoordinationProxy;
+use lain::server::presence::{AgentKind, AgentMode, PresenceRegistry};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]
 fn attribution_auto_claims_via_pid_on_linux() {
+    if !require_zoanthrope() {
+        return;
+    }
     if !cfg!(target_os = "linux") {
         return;
     }
@@ -16,7 +20,7 @@ fn attribution_auto_claims_via_pid_on_linux() {
     std::fs::write(&file, "fn login() {}").unwrap();
 
     let presence = Arc::new(PresenceRegistry::new());
-    let occupancy = Arc::new(OccupancyMap::new());
+    let occupancy = Arc::new(CoordinationProxy::new(std::env::temp_dir()));
     let s = presence.register(
         "test-agent".into(),
         AgentKind::ClaudeCode,
@@ -107,4 +111,17 @@ fn noop_backend_always_returns_none() {
     let backend = NoopBackend;
     let pid = backend.lookup_writer_pid(std::path::Path::new("/nonexistent"));
     assert_eq!(pid, None);
+}
+
+/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
+/// on PATH the proxy is degraded (advisory: claims always grant and
+/// never conflict), so the coordination assertions below are
+/// meaningless — skip loudly rather than fail against an uncoordinated
+/// workspace. CI installs zoanthrope and runs these for real.
+fn require_zoanthrope() -> bool {
+    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
+        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
+        return false;
+    }
+    true
 }

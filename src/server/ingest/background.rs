@@ -8,7 +8,8 @@ use crate::server::attribution::{
     AttributionBackend, AttributionWatcher, LsofBackend, NoopBackend, ProcFsBackend,
 };
 use crate::server::events_log::EventsLog;
-use crate::server::presence::{OccupancyMap, PresenceEvent, PresenceRegistry};
+use crate::server::coordination::CoordinationProxy;
+use crate::server::presence::{PresenceEvent, PresenceRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -36,7 +37,7 @@ pub fn default_attribution_backend() -> Arc<dyn AttributionBackend> {
 /// the handle and abort it; not needed for MVP.)
 pub fn spawn_presence_expiry_loop(
     presence: Arc<PresenceRegistry>,
-    occupancy: Arc<OccupancyMap>,
+    occupancy: Arc<CoordinationProxy>,
     tx: broadcast::Sender<(u64, PresenceEvent)>,
     events_log: Arc<EventsLog>,
 ) {
@@ -60,7 +61,7 @@ pub fn spawn_presence_expiry_loop(
 /// `ClaimReleased` per released path, all with durable events-log ids.
 pub fn expiry_tick(
     presence: &PresenceRegistry,
-    occupancy: &OccupancyMap,
+    occupancy: &CoordinationProxy,
     tx: &broadcast::Sender<(u64, PresenceEvent)>,
     events_log: &EventsLog,
 ) {
@@ -102,7 +103,7 @@ pub fn expiry_tick(
 pub fn start_attribution_watcher(
     attribution: Arc<dyn AttributionBackend>,
     presence: Arc<PresenceRegistry>,
-    occupancy: Arc<OccupancyMap>,
+    occupancy: Arc<CoordinationProxy>,
     tx: broadcast::Sender<(u64, PresenceEvent)>,
     events_log: Arc<EventsLog>,
     repo_roots: Vec<PathBuf>,
@@ -350,9 +351,9 @@ mod expiry_tests {
     #[test]
     fn expiry_tick_releases_claims_of_expired_sessions() {
         let presence = PresenceRegistry::with_expiry(std::time::Duration::from_millis(20));
-        let occupancy = OccupancyMap::new();
-        let (tx, _rx) = broadcast::channel(16);
         let tmp = tempfile::tempdir().unwrap();
+        let occupancy = CoordinationProxy::new(tmp.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(16);
         let log = EventsLog::open(tmp.path()).unwrap();
 
         let sess = presence.register(
@@ -390,9 +391,9 @@ mod expiry_tests {
     #[test]
     fn expiry_tick_keeps_ttl_claim_path() {
         let presence = PresenceRegistry::new();
-        let occupancy = OccupancyMap::new();
-        let (tx, _rx) = broadcast::channel(16);
         let tmp = tempfile::tempdir().unwrap();
+        let occupancy = CoordinationProxy::new(tmp.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(16);
         let log = EventsLog::open(tmp.path()).unwrap();
 
         let sess = presence.register(

@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Codex CLI pre-edit hook for file write/edit tools.
-# Reads the file path from stdin (Codex passes JSON) and claims it via lain.
-# Always exits 0 — failure must NEVER block Codex. Stderr is for diagnostics.
+# Claude Code PreToolUse hook for Edit/Write/MultiEdit.
+# Reads the file path from stdin (Claude Code passes JSON) and claims it
+# via zoanthrope — the coordination core this hook family guards for.
+# Always exits 0 — failure must NEVER block Claude Code. Stderr is for diagnostics.
 #
 # Identity resolution order:
-#   1. $LAIN_AGENT_NAME (explicit lain override)
+#   1. $ZOANTHROPE_AGENT_NAME (explicit override) / $LAIN_AGENT_NAME (legacy)
 #   2. Generic agent env vars any framework may set:
 #      CLAUDE_AGENT_NAME, MCP_CLIENT_NAME, AGENT_NAME (and per-kind if set)
 #   3. Fallback: "<kind>-<ppid>-<hostname-short>" (stable for parent process)
+#
+# Porting to another agent framework = two strings: the comment header
+# and the identity prefix (see hooks/README.md).
 
 set +e  # disable errexit for the rest of the script — must exit 0
 trap 'exit 0' ERR  # any error → silent exit 0
@@ -22,13 +26,13 @@ fi
 
 if [ -z "$FILE_PATH" ]; then exit 0; fi
 
-LAIN_URL="${LAIN_URL:-http://localhost:9999}"
-
 # Identity resolution.
-if [ -n "$LAIN_AGENT_NAME" ]; then
+if [ -n "$ZOANTHROPE_AGENT_NAME" ]; then
+    AGENT_NAME="$ZOANTHROPE_AGENT_NAME"
+elif [ -n "$LAIN_AGENT_NAME" ]; then
     AGENT_NAME="$LAIN_AGENT_NAME"
 elif [ -n "$CLAUDE_AGENT_NAME" ]; then
-    AGENT_NAME="claude-code-$CLAUDE_AGENT_NAME"
+    AGENT_NAME="codex-$CLAUDE_AGENT_NAME"
 elif [ -n "$MCP_CLIENT_NAME" ]; then
     AGENT_NAME="$MCP_CLIENT_NAME"
 elif [ -n "$AGENT_NAME" ]; then
@@ -38,32 +42,13 @@ else
     AGENT_NAME="codex-${PPID:-?}-${SHORT_HOST}"
 fi
 
-# Parent session ID forwarded by subagent orchestrators.
-if [ -n "$LAIN_PARENT_AGENT_ID" ]; then
-    PARENT_SESSION_ID="$LAIN_PARENT_AGENT_ID"
-else
-    PARENT_SESSION_ID=""
-fi
-
-if ! command -v lain >/dev/null 2>&1; then
-    echo "lain not on PATH; skipping claim" >&2
+if ! command -v zoanthrope >/dev/null 2>&1; then
+    echo "zoanthrope not on PATH; claim skipped (advisory, non-blocking)" >&2
     exit 0
 fi
 
-# Always exit 0 — capture stderr for diagnostics but never propagate.
-CLAIM_ARGS=(
-    --url "$LAIN_URL"
-    --path "$FILE_PATH"
-    --agent-name "$AGENT_NAME"
-    --agent-kind "codex"
-    --intent edit
-)
-if [ -n "$PARENT_SESSION_ID" ]; then
-    CLAIM_ARGS+=(--parent-session-id "$PARENT_SESSION_ID")
-fi
-# Pipe the full output (summary line + conflict JSON) to stderr.
-# Wishlist #5 fix: `| head -1` was discarding the conflict payload
-# (intent, last_touched_unix, holder id), so the agent only ever saw
-# "lain hook: 0 granted, 1 conflict(s)" with no detail to act on.
-lain hooks claim "${CLAIM_ARGS[@]}" >&2
+# Always exit 0 — claim conflicts are reported, never enforced here.
+# zoanthrope prints the grant shape on success and the conflict shape
+# (naming the holder) on refusal; pipe it to stderr for diagnostics.
+zoanthrope claim --files "$FILE_PATH" --agent "$AGENT_NAME" --intent edit >&2
 exit 0

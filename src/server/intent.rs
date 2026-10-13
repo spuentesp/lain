@@ -1,43 +1,50 @@
-//! Intent registry — per-agent goal + scope declarations.
+//! Intent declarations — the `lain_intent` surface, backed by
+//! zoanthrope's **postboard**.
 //!
 //! The intent layer sits *above* the claim layer. An agent declares a
 //! goal and the symbols it intends to modify via `lain_intent`; the
-//! pre-edit hook evaluator (in `server::evaluation`, PR 3) compares
-//! the declared scope against peer intents and against the static
-//! graph, returning GREEN / YELLOW / RED. This file is PR 1's scope:
-//! the in-memory registry, the `Intent` type, and the persistence
-//! shape. The MCP tool surface (`run_lain_intent`,
-//! `run_list_active_intents`) lives in `src/server/mcp/intent_tools.rs`
-//! and the hook ingestion endpoint is in PR 2.
+//! pre-edit hook evaluator (in `server::evaluation`) compares the
+//! declared scope against peer intents and against the static graph,
+//! returning GREEN / YELLOW / RED.
 //!
-//! ## Why one intent per agent
+//! Storage and arbitration moved to zoanthrope (`post_intention` /
+//! `update_post` / `list_posts` / `remove_post` — its public postboard
+//! of intentions). This file is the adapter: [`IntentBoard`] keeps the
+//! `IntentRegistry` method names and the `Intent` wire shape lain's
+//! clients already consume, and maps them onto posts.
 //!
-//! Each agent has at most one active intent at a time. Two intents
-//! would force the agent (and the evaluator) to reason about which
-//! one a given tool call belongs to; one intent per agent keeps the
-//! model simple and matches how agents actually work — one task per
-//! session. A second `declare` call replaces the first; the previous
-//! intent is dropped without ceremony.
+//! ## Field mapping (adapters, not rewrites)
+//!
+//! | lain `Intent` | zoanthrope post |
+//! |---|---|
+//! | `goal` | `title` |
+//! | `status` | trailing `LAIN-INTENT …` note trailer (verbatim), mirrored coarsely into post `status` |
+//! | `scopes` | note trailer (percent-encoded), path-shaped scopes also in `files` |
+//! | `id` | `post_id` |
+//!
+//! The trailer carries the exact lain status (`investigating` /
+//! `planning` / `editing` / `reviewing` / `done`) because the
+//! postboard status vocabulary is coarser (`open`/`taken`/`done`/
+//! `dropped`); without it a `reviewing` intent would round-trip as
+//! `editing`. Posts with no trailer (written by non-lain agents) map
+//! `open → planning`, `taken → editing`, `done|dropped → done`.
+//!
+//! One intent per agent is preserved: a second `declare` updates the
+//! agent's existing post instead of opening a second one.
 //!
 //! ## Persistence
 //!
-//! `IntentRegistry` and `ActivityTracker` ride alongside the existing
-//! presence + occupancy snapshot via `PersistedState`. Old state files
-//! load with empty intent/activity maps via `#[serde(default)]` — no
-//! migration. See `server::presence::save_pair` / `load_pair` for the
-//! round-trip path.
+//! None. zoanthrope persists the board in `.zoanthrope/state.json`.
 
+use crate::server::coordination::CoordinationProxy;
 use crate::server::presence::{unix_secs, AgentId};
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-/// Opaque identifier for an intent declaration. Currently a UUIDv4
-/// string; the planner originally called for ULID, but the project
-/// already pulls `uuid` for `AgentId`, so reusing the same generator
-/// keeps the dep tree slim. The wire shape is just an opaque string
-/// to callers — never parse it.
+/// Marker prefix of the adapter trailer stored in a post's `note`.
+const TRAILER_PREFIX: &str = "LAIN-INTENT ";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct IntentId(pub String);
@@ -57,9 +64,10 @@ impl Default for IntentId {
     }
 }
 
-/// Lifecycle phase the agent reports. Stored verbatim — the evaluator
-/// does not gate any tool on `status`. Other agents reading
-/// `list_active_intents` use it to render the activity feed.
+/// Lifecycle phase the agent reports. Stored verbatim in the note
+/// trailer — the evaluator does not gate any tool on `status`. Other
+/// agents reading `list_active_intents` use it to render the activity
+/// feed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IntentStatus {
@@ -73,7 +81,7 @@ pub enum IntentStatus {
     /// Patches applied; reviewing the diff.
     Reviewing,
     /// Intent retired; entry is kept until the agent unregisters or
-    /// the registry is pruned.
+    /// the board post is removed.
     Done,
 }
 
@@ -106,6 +114,28 @@ impl IntentStatus {
             _ => IntentStatus::Planning,
         }
     }
+
+    /// Coarse zoanthrope post status for this phase. The postboard
+    /// vocabulary is `open|taken|done|dropped`; the exact phase
+    /// survives in the note trailer.
+    pub fn post_status(self) -> &'static str {
+        match self {
+            IntentStatus::Investigating | IntentStatus::Planning => "open",
+            IntentStatus::Editing | IntentStatus::Reviewing => "taken",
+            IntentStatus::Done => "done",
+        }
+    }
+
+    /// Inverse of [`Self::post_status`] for posts without a trailer.
+    pub fn from_post_status(s: &str) -> Self {
+        match s {
+            "open" => IntentStatus::Planning,
+            "taken" => IntentStatus::Editing,
+            // "done" and "dropped" are both terminal for lain's
+            // vocabulary.
+            _ => IntentStatus::Done,
+        }
+    }
 }
 
 /// One agent's declared intent. The agent calls `lain_intent` to
@@ -134,101 +164,201 @@ fn epoch_secs() -> SystemTime {
     SystemTime::UNIX_EPOCH
 }
 
-/// Callback type fired on every mutation that should be persisted.
-/// Same shape as `PresenceRegistry::PersistFn`; stored as an
-/// `Option<Arc<...>>` so a registry constructed without persistence
-/// pays only an `Arc` + `None` slot.
-type PersistFn = std::sync::Arc<dyn Fn() + Send + Sync>;
+// ── note trailer encode / decode ─────────────────────────────────────
 
-#[derive(Default)]
-struct IntentState {
-    /// Intent id → Intent. One entry per active declaration.
-    by_id: HashMap<IntentId, Intent>,
-    /// Agent → intent id. Used for the "one intent per agent" rule.
-    by_agent: HashMap<AgentId, IntentId>,
-}
-
-#[derive(Clone)]
-pub struct IntentRegistry {
-    inner: std::sync::Arc<Mutex<IntentState>>,
-    persist_cb: std::sync::Arc<parking_lot::Mutex<Option<PersistFn>>>,
-}
-
-impl std::fmt::Debug for IntentRegistry {
-    // Manual Debug: `dyn Fn() + Send + Sync` doesn't implement Debug.
-    // Surface a counter so `{:?}` is still useful in logs / tests.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = self.inner.lock();
-        f.debug_struct("IntentRegistry")
-            .field("count", &s.by_id.len())
-            .finish()
-    }
-}
-
-impl IntentRegistry {
-    pub fn new() -> Self {
-        Self {
-            inner: std::sync::Arc::new(Mutex::new(IntentState::default())),
-            persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(b as char),
+            other => out.push_str(&format!("%{other:02X}")),
         }
     }
+    out
+}
 
-    pub fn set_persist_callback<F>(&self, cb: F)
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        let mut slot = self.persist_cb.lock();
-        *slot = Some(std::sync::Arc::new(cb));
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Pack lain's exact status + scopes into a post note, keeping the
+/// human-readable goal text as the note body.
+pub fn encode_note(note_text: &str, status: IntentStatus, scopes: &[String]) -> String {
+    let scopes_enc: Vec<String> = scopes.iter().map(|s| percent_encode(s)).collect();
+    let trailer = format!(
+        "{TRAILER_PREFIX}status={} scopes={}",
+        status.as_str(),
+        scopes_enc.join(",")
+    );
+    if note_text.is_empty() {
+        trailer
+    } else {
+        format!("{note_text}\n{trailer}")
+    }
+}
+
+/// Recover `(note_text, status, scopes)` from a post note. Posts
+/// without a trailer (non-lain authors) yield `None` status and empty
+/// scopes.
+pub fn decode_note(note: &str) -> (String, Option<IntentStatus>, Vec<String>) {
+    let Some(idx) = note.rfind(TRAILER_PREFIX) else {
+        return (note.to_string(), None, Vec::new());
+    };
+    let body = note[..idx].trim_end_matches('\n').to_string();
+    let trailer = &note[idx + TRAILER_PREFIX.len()..];
+    let mut status = None;
+    let mut scopes = Vec::new();
+    for part in trailer.split_whitespace() {
+        if let Some(v) = part.strip_prefix("status=") {
+            status = Some(IntentStatus::parse(v));
+        } else if let Some(v) = part.strip_prefix("scopes=") {
+            scopes = v
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(percent_decode)
+                .collect();
+        }
+    }
+    (body, status, scopes)
+}
+
+/// Path-shaped scopes (the ones zoanthrope's `files` field can carry
+/// without being mangled by its path canonicalisation). Symbol scopes
+/// live only in the trailer.
+fn path_scopes(scopes: &[String]) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|s| s.contains('/') || s.contains('\\'))
+        .cloned()
+        .collect()
+}
+
+fn post_to_intent(post: &serde_json::Value) -> Option<Intent> {
+    let post_id = post.get("post_id")?.as_str()?.to_string();
+    let agent = post.get("agent_id")?.as_str()?.to_string();
+    let title = post.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let note = post.get("note").and_then(|t| t.as_str()).unwrap_or("");
+    let (body, trailer_status, scopes) = decode_note(note);
+    let goal = if body.is_empty() { title } else { body };
+    let status = trailer_status.unwrap_or_else(|| {
+        IntentStatus::from_post_status(post.get("status").and_then(|s| s.as_str()).unwrap_or("open"))
+    });
+    let at = |key: &str| {
+        post.get(key)
+            .and_then(serde_json::Value::as_f64)
+            .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs_f64(s.max(0.0)))
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    };
+    Some(Intent {
+        id: IntentId(post_id),
+        agent_id: AgentId(agent),
+        goal,
+        scopes,
+        status,
+        created_at: at("created_at"),
+        updated_at: at("updated_at"),
+    })
+}
+
+/// Postboard adapter — the `IntentRegistry` method surface, delegated
+/// to zoanthrope. Degraded (no binary): declarations return a locally
+/// minted [`Intent`] and are logged, never block; listings are empty.
+#[derive(Clone)]
+pub struct IntentBoard {
+    proxy: Arc<CoordinationProxy>,
+}
+
+impl std::fmt::Debug for IntentBoard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IntentBoard").finish_non_exhaustive()
+    }
+}
+
+impl IntentBoard {
+    pub fn new(proxy: Arc<CoordinationProxy>) -> Self {
+        Self { proxy }
     }
 
-    fn cloned_persist_cb(&self) -> Option<PersistFn> {
-        self.persist_cb.lock().clone()
-    }
-
-    /// Declare (or replace) the agent's current intent. A second
-    /// call for the same `agent_id` retires the previous intent: its
-    /// `id` is dropped from `by_id`. The replacement path bumps
-    /// `updated_at`; a brand-new declaration also sets `created_at`.
-    /// Returns the `IntentId` of the (now-current) entry.
+    /// Declare (or replace) the agent's intent. zoanthrope mints the
+    /// post id; a degraded proxy returns a locally minted intent that
+    /// exists only in the response.
     pub fn declare(
         &self,
         agent_id: AgentId,
         goal: String,
         scopes: Vec<String>,
         status: IntentStatus,
-    ) -> IntentId {
-        let id = IntentId::new();
-        let now = SystemTime::now();
-        let intent = Intent {
-            id: id.clone(),
+    ) -> Result<Intent, String> {
+        let note = encode_note("", status, &scopes);
+        // One intent per agent: reuse the agent's existing post when
+        // there is one (a second declare replaces the first).
+        if let Some(existing) = self.get(&agent_id) {
+            return self.update(
+                agent_id,
+                existing.id,
+                Vec::new(),
+                Vec::new(),
+                Some(goal),
+                Some(status),
+                Some(scopes),
+            );
+        }
+        match self.proxy.post_intention(
+            agent_id.as_str(),
+            &goal,
+            &note,
+            &path_scopes(&scopes),
+        ) {
+            Ok(body) => {
+                let post = body.get("post").cloned().unwrap_or(body.clone());
+                post_to_intent(&post).ok_or_else(|| "post_intention: bad post body".to_string())
+            }
+            Err(_e) if self.proxy.is_degraded() => {
+                Ok(self.degraded_intent(&agent_id, goal, scopes, status))
+            }
+            Err(e) => {
+                tracing::warn!("post_intention failed, returning local intent: {e}");
+                Ok(self.degraded_intent(&agent_id, goal, scopes, status))
+            }
+        }
+    }
+
+    fn degraded_intent(
+        &self,
+        agent_id: &AgentId,
+        goal: String,
+        scopes: Vec<String>,
+        status: IntentStatus,
+    ) -> Intent {
+        Intent {
+            id: IntentId::new(),
             agent_id: agent_id.clone(),
             goal,
             scopes,
             status,
-            created_at: now,
-            updated_at: now,
-        };
-        {
-            let mut s = self.inner.lock();
-            // Retire the agent's previous intent, if any.
-            if let Some(prev_id) = s.by_agent.get(&agent_id).cloned() {
-                s.by_id.remove(&prev_id);
-            }
-            s.by_id.insert(id.clone(), intent);
-            s.by_agent.insert(agent_id, id.clone());
+            created_at: SystemTime::now(),
+            updated_at: SystemTime::now(),
         }
-        if let Some(cb) = self.cloned_persist_cb() {
-            cb();
-        }
-        id
     }
 
-    /// Apply a partial update to an existing intent. Fields set to
-    /// `None` are left untouched. Returns the updated `Intent` on
-    /// success; `Err` with a stable message on `UnknownIntent` or
-    /// `WrongAgent`. The auth check (token resolves to the agent)
-    /// is the caller's responsibility — the registry trusts the
-    /// `agent_id` it is given.
+    /// Partial update of an existing intent. `None` fields leave the
+    /// stored value alone. `add_scopes` appends without duplicates;
+    /// `remove_scopes` filters by exact match.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &self,
         agent_id: AgentId,
@@ -237,169 +367,111 @@ impl IntentRegistry {
         remove_scopes: Vec<String>,
         goal: Option<String>,
         status: Option<IntentStatus>,
+        scopes: Option<Vec<String>>,
     ) -> Result<Intent, String> {
-        let mut s = self.inner.lock();
-        let intent = s.by_id.get_mut(&intent_id).ok_or("unknown_intent")?;
-        if intent.agent_id != agent_id {
-            return Err("wrong_agent".into());
-        }
-        let remove_set: std::collections::HashSet<&str> =
-            remove_scopes.iter().map(String::as_str).collect();
-        let mut scopes: Vec<String> = intent
-            .scopes
-            .iter()
-            .filter(|s| !remove_set.contains(s.as_str()))
-            .cloned()
-            .collect();
-        for new in add_scopes {
-            if !scopes.contains(&new) {
-                scopes.push(new);
+        let current = self.get(&agent_id).unwrap_or(Intent {
+            id: intent_id.clone(),
+            agent_id: agent_id.clone(),
+            goal: String::new(),
+            scopes: Vec::new(),
+            status: IntentStatus::Planning,
+            created_at: SystemTime::now(),
+            updated_at: SystemTime::now(),
+        });
+        let mut new_scopes = scopes.unwrap_or(current.scopes.clone());
+        for s in add_scopes {
+            if !new_scopes.contains(&s) {
+                new_scopes.push(s);
             }
         }
-        intent.scopes = scopes;
-        if let Some(g) = goal {
-            intent.goal = g;
-        }
-        if let Some(st) = status {
-            intent.status = st;
-        }
-        intent.updated_at = SystemTime::now();
-        let snapshot = intent.clone();
-        drop(s);
-        if let Some(cb) = self.cloned_persist_cb() {
-            cb();
-        }
-        Ok(snapshot)
+        new_scopes.retain(|s| !remove_scopes.contains(s));
+        let new_goal = goal.unwrap_or(current.goal.clone());
+        let new_status = status.unwrap_or(current.status);
+        let note = encode_note("", new_status, &new_scopes);
+        let body = self
+            .proxy
+            .update_post(
+                agent_id.as_str(),
+                intent_id.as_str(),
+                Some(new_status.post_status()),
+                Some(&new_goal),
+                Some(&note),
+                Some(&path_scopes(&new_scopes)),
+            )
+            .map_err(|e| e.to_string())?;
+        let post = body.get("post").cloned().unwrap_or(body);
+        post_to_intent(&post).ok_or_else(|| "update_post: bad post body".to_string())
     }
 
-    /// Look up the agent's current intent. `None` when the agent has
-    /// never declared (or the previous intent was retired via a
-    /// second declare).
+    /// The agent's current intent, if any (newest post for the agent).
     pub fn get(&self, agent_id: &AgentId) -> Option<Intent> {
-        let s = self.inner.lock();
-        let id = s.by_agent.get(agent_id)?;
-        s.by_id.get(id).cloned()
+        let body = self.proxy.list_posts(Some(agent_id.as_str()), None).ok()?;
+        let posts = body.get("posts")?.as_array()?;
+        posts.iter().filter_map(post_to_intent).next()
     }
 
-    /// Look up an intent by its id. Used by the MCP layer when an
-    /// agent wants to update a specific intent.
     pub fn get_by_id(&self, intent_id: &IntentId) -> Option<Intent> {
-        self.inner.lock().by_id.get(intent_id).cloned()
-    }
-
-    /// Snapshot of every active intent, ordered by `updated_at`
-    /// descending — most recently changed first. The activity feed
-    /// surface (`list_active_intents`) renders this verbatim.
-    pub fn list_active(&self) -> Vec<Intent> {
-        let s = self.inner.lock();
-        let mut out: Vec<Intent> = s.by_id.values().cloned().collect();
-        out.sort_by_key(|i| std::cmp::Reverse(i.updated_at));
-        out
-    }
-
-    /// Flat `(agent_id, intent)` snapshot used by `presence::save_pair`
-    /// to flatten the registry into the JSON state file. Unlike
-    /// `list_active`, this preserves the by-agent lookup so the loader
-    /// can rebuild the inverse map on hydration. The on-disk shape
-    /// is a flat list, not a HashMap, because serde_json's HashMap
-    /// representation is non-deterministic across runs — tuples keep
-    /// the file stable to hand-inspection.
-    pub fn snapshot(&self) -> Vec<(AgentId, Intent)> {
-        let s = self.inner.lock();
-        s.by_agent
+        let body = self.proxy.list_posts(None, None).ok()?;
+        let posts = body.get("posts")?.as_array()?;
+        posts
             .iter()
-            .filter_map(|(agent_id, intent_id)| {
-                s.by_id
-                    .get(intent_id)
-                    .map(|i| (agent_id.clone(), i.clone()))
-            })
+            .filter_map(post_to_intent)
+            .find(|i| i.id == *intent_id)
+    }
+
+    /// Active intents — posts still open or taken on the board.
+    pub fn list_active(&self) -> Vec<Intent> {
+        self.snapshot()
+            .into_iter()
+            .map(|(_, i)| i)
+            .filter(|i| !matches!(i.status, IntentStatus::Done))
             .collect()
     }
 
-    /// Drop the agent's current intent. Called on `unregister_agent`
-    /// so the activity feed doesn't show a ghost intent after the
-    /// agent's session ends.
+    /// Every intent on the board, newest-updated first (zoanthrope's
+    /// ordering).
+    pub fn snapshot(&self) -> Vec<(AgentId, Intent)> {
+        let Ok(body) = self.proxy.list_posts(None, None) else {
+            return Vec::new();
+        };
+        body.get("posts")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(post_to_intent)
+                    .map(|i| (i.agent_id.clone(), i))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Retire the agent's intent on unregister: drop its posts.
     pub fn retire(&self, agent_id: &AgentId) {
-        let mut s = self.inner.lock();
-        if let Some(prev_id) = s.by_agent.remove(agent_id) {
-            s.by_id.remove(&prev_id);
-        }
-        drop(s);
-        if let Some(cb) = self.cloned_persist_cb() {
-            cb();
-        }
-    }
-
-    /// Drop every intent whose `updated_at` is older than `older_than`.
-    /// Used by the expiry loop to retire stale intents from background
-    /// (cron / CI) agents that crashed without `unregister_agent`.
-    /// Active agents are unaffected; this only catches `Done` or
-    /// never-updated stale entries.
-    pub fn prune_older_than(&self, older_than: Duration) {
-        let now = SystemTime::now();
-        let mut dropped = false;
-        {
-            let mut s = self.inner.lock();
-            let stale_ids: Vec<IntentId> = s
-                .by_id
-                .iter()
-                .filter_map(|(id, intent)| {
-                    now.duration_since(intent.updated_at)
-                        .ok()
-                        .filter(|age| *age >= older_than)
-                        .map(|_| id.clone())
-                })
-                .collect();
-            for id in &stale_ids {
-                if let Some(intent) = s.by_id.remove(id) {
-                    s.by_agent.remove(&intent.agent_id);
-                    dropped = true;
+        if let Ok(body) = self.proxy.list_posts(Some(agent_id.as_str()), None) {
+            if let Some(posts) = body.get("posts").and_then(serde_json::Value::as_array) {
+                for post in posts {
+                    if let Some(pid) = post.get("post_id").and_then(|p| p.as_str()) {
+                        let _ = self.proxy.remove_post(agent_id.as_str(), pid);
+                    }
                 }
             }
         }
-        if dropped {
-            if let Some(cb) = self.cloned_persist_cb() {
-                cb();
-            }
-        }
     }
 
-    /// Replace every intent in the registry with `entries`. Used by
-    /// the persistence loader — `presence::load_pair` builds a flat
-    /// list from the JSON snapshot. Duplicate entries for the same
-    /// agent are reconciled by keeping the most recent
-    /// `updated_at`; this defends against a stale state file that
-    /// somehow accumulated two intents for one agent (it shouldn't,
-    /// but the loader is the only place that runs without the
-    /// "one intent per agent" invariant enforced). No persist
-    /// callback fires: hydration is a load operation, not a
-    /// mutation the user needs to know about.
-    pub fn replace_all(&self, entries: Vec<Intent>) {
-        // Pick the most-recently-updated intent per agent before
-        // mutating the registry, so the rest of the function holds
-        // a single lock.
-        let mut by_agent: HashMap<AgentId, Intent> = HashMap::new();
-        for i in entries {
-            match by_agent.get(&i.agent_id) {
-                Some(existing) if existing.updated_at >= i.updated_at => {}
-                _ => {
-                    by_agent.insert(i.agent_id.clone(), i);
-                }
-            }
-        }
-        let mut s = self.inner.lock();
-        s.by_id.clear();
-        s.by_agent.clear();
-        for (agent_id, i) in by_agent {
-            s.by_agent.insert(agent_id, i.id.clone());
-            s.by_id.insert(i.id.clone(), i);
-        }
-    }
-}
+    /// No-op: board hygiene is zoanthrope's (presence TTL + its own
+    /// state file). Kept so expiry call sites stay uniform.
+    pub fn prune_older_than(&self, _older_than: Duration) {}
 
-impl Default for IntentRegistry {
-    fn default() -> Self {
-        Self::new()
+    /// No-op: the board is not persisted by lain. Kept so
+    /// construction call sites stay uniform.
+    pub fn replace_all(&self, _intents: Vec<Intent>) {}
+
+    /// No-op: zoanthrope persists the board. Kept so construction
+    /// call sites stay uniform.
+    pub fn set_persist_callback<F>(&self, _cb: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
     }
 }
 
@@ -407,172 +479,61 @@ impl Default for IntentRegistry {
 mod tests {
     use super::*;
 
-    fn agent(s: &str) -> AgentId {
-        AgentId(s.to_string())
+    #[test]
+    fn note_round_trips_status_and_scopes() {
+        let scopes = vec!["auth::validate_token".to_string(), "src/a.rs".to_string()];
+        let note = encode_note("fix the parser", IntentStatus::Reviewing, &scopes);
+        let (body, status, decoded) = decode_note(&note);
+        assert_eq!(body, "fix the parser");
+        assert_eq!(status, Some(IntentStatus::Reviewing));
+        assert_eq!(decoded, scopes);
     }
 
     #[test]
-    fn declare_creates_intent_and_returns_id() {
-        let r = IntentRegistry::new();
-        let id = r.declare(
-            agent("a"),
-            "add refresh-token validation".into(),
-            vec!["auth::validate_token".into()],
-            IntentStatus::Editing,
-        );
-        let got = r.get(&agent("a")).expect("intent must exist");
-        assert_eq!(got.id, id);
-        assert_eq!(got.goal, "add refresh-token validation");
-        assert_eq!(got.scopes, vec!["auth::validate_token".to_string()]);
-        assert_eq!(got.status, IntentStatus::Editing);
-        assert_eq!(got.created_at, got.updated_at);
+    fn note_handles_commas_and_spaces_in_scopes() {
+        let scopes = vec!["GET /api/orders/{}".to_string(), "a, b".to_string()];
+        let note = encode_note("", IntentStatus::Editing, &scopes);
+        let (body, status, decoded) = decode_note(&note);
+        assert_eq!(body, "");
+        assert_eq!(status, Some(IntentStatus::Editing));
+        assert_eq!(decoded, scopes);
     }
 
     #[test]
-    fn second_declare_replaces_first() {
-        let r = IntentRegistry::new();
-        let id1 = r.declare(agent("a"), "first".into(), vec![], IntentStatus::Planning);
-        // A second declare retires id1 — the registry holds exactly
-        // one intent per agent at any time.
-        let id2 = r.declare(
-            agent("a"),
-            "second".into(),
-            vec!["x".into()],
-            IntentStatus::Editing,
-        );
-        assert_ne!(id1, id2);
-        assert!(r.get_by_id(&id1).is_none(), "first intent must be retired");
-        let current = r.get(&agent("a")).unwrap();
-        assert_eq!(current.id, id2);
-        assert_eq!(current.goal, "second");
+    fn foreign_posts_without_trailer_map_coarsely() {
+        let (body, status, scopes) = decode_note("a human wrote this note");
+        assert_eq!(body, "a human wrote this note");
+        assert_eq!(status, None, "no trailer → caller maps post status");
+        assert!(scopes.is_empty());
+        assert_eq!(IntentStatus::from_post_status("open"), IntentStatus::Planning);
+        assert_eq!(IntentStatus::from_post_status("taken"), IntentStatus::Editing);
+        assert_eq!(IntentStatus::from_post_status("dropped"), IntentStatus::Done);
     }
 
     #[test]
-    fn update_applies_partial_changes_and_bumps_updated_at() {
-        let r = IntentRegistry::new();
-        let id = r.declare(
-            agent("a"),
-            "initial".into(),
-            vec!["a::x".into(), "a::y".into()],
+    fn post_status_vocabulary_covers_all_lain_phases() {
+        for s in [
+            IntentStatus::Investigating,
             IntentStatus::Planning,
-        );
-        let before = r.get(&agent("a")).unwrap().updated_at;
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let updated = r
-            .update(
-                agent("a"),
-                id.clone(),
-                vec!["a::z".into()],
-                vec!["a::x".into()],
-                Some("refined".into()),
-                Some(IntentStatus::Editing),
-            )
-            .expect("update must succeed for the owning agent");
-        assert_eq!(updated.goal, "refined");
-        assert_eq!(updated.status, IntentStatus::Editing);
-        assert_eq!(
-            updated.scopes,
-            vec!["a::y".to_string(), "a::z".to_string()],
-            "removed scope gone, added scope appended without duplicates"
-        );
-        assert!(
-            updated.updated_at > before,
-            "updated_at must advance: before={:?} after={:?}",
-            before,
-            updated.updated_at
-        );
-    }
-
-    #[test]
-    fn update_rejects_unknown_intent() {
-        let r = IntentRegistry::new();
-        r.declare(agent("a"), "g".into(), vec![], IntentStatus::Planning);
-        let err = r
-            .update(
-                agent("a"),
-                IntentId("not-a-real-id".into()),
-                vec![],
-                vec![],
-                None,
-                None,
-            )
-            .unwrap_err();
-        assert_eq!(err, "unknown_intent");
-    }
-
-    #[test]
-    fn update_rejects_wrong_agent() {
-        let r = IntentRegistry::new();
-        let id = r.declare(agent("a"), "g".into(), vec![], IntentStatus::Planning);
-        // Bob cannot mutate Alice's intent.
-        let err = r
-            .update(agent("b"), id, vec![], vec![], Some("hijack".into()), None)
-            .unwrap_err();
-        assert_eq!(err, "wrong_agent");
-    }
-
-    #[test]
-    fn retire_removes_intent_and_keeps_other_agents_intact() {
-        let r = IntentRegistry::new();
-        r.declare(agent("a"), "a-goal".into(), vec![], IntentStatus::Editing);
-        r.declare(agent("b"), "b-goal".into(), vec![], IntentStatus::Planning);
-        r.retire(&agent("a"));
-        assert!(r.get(&agent("a")).is_none());
-        assert!(
-            r.get(&agent("b")).is_some(),
-            "retiring one agent must not touch another"
-        );
-    }
-
-    #[test]
-    fn list_active_orders_by_most_recently_updated() {
-        let r = IntentRegistry::new();
-        r.declare(agent("a"), "a".into(), vec![], IntentStatus::Planning);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        r.declare(agent("b"), "b".into(), vec![], IntentStatus::Planning);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let id_c = r.declare(agent("c"), "c".into(), vec![], IntentStatus::Planning);
-        let active = r.list_active();
-        assert_eq!(active.len(), 3);
-        assert_eq!(
-            active[0].id, id_c,
-            "most recent declaration must sort first"
-        );
-    }
-
-    #[test]
-    fn persist_callback_fires_on_declare_and_update_and_retire() {
-        let r = IntentRegistry::new();
-        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter_cb = std::sync::Arc::clone(&counter);
-        r.set_persist_callback(move || {
-            counter_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        });
-
-        let id = r.declare(agent("a"), "g".into(), vec![], IntentStatus::Planning);
-        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 1);
-        r.update(agent("a"), id, vec!["x".into()], vec![], None, None)
-            .unwrap();
-        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
-        r.retire(&agent("a"));
-        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 3);
-    }
-
-    #[test]
-    fn parse_status_round_trips() {
-        for (s, expected) in [
-            ("investigating", IntentStatus::Investigating),
-            ("planning", IntentStatus::Planning),
-            ("editing", IntentStatus::Editing),
-            ("reviewing", IntentStatus::Reviewing),
-            ("done", IntentStatus::Done),
+            IntentStatus::Editing,
+            IntentStatus::Reviewing,
+            IntentStatus::Done,
         ] {
-            assert_eq!(IntentStatus::parse(s), expected);
-            assert_eq!(expected.as_str(), s);
+            let post = s.post_status();
+            assert!(matches!(post, "open" | "taken" | "done"));
         }
-        // Unknown strings fall back to Planning rather than erroring
-        // — a mistyped status from the agent must never drop the
-        // entire declaration.
-        assert_eq!(IntentStatus::parse("frobnicate"), IntentStatus::Planning);
+        // Round-trip: the trailer carries the exact phase, so the
+        // coarse mirror never has to reconstruct it.
+        for s in [
+            IntentStatus::Investigating,
+            IntentStatus::Planning,
+            IntentStatus::Editing,
+            IntentStatus::Reviewing,
+            IntentStatus::Done,
+        ] {
+            let note = encode_note("", s, &[]);
+            let (_, back, _) = decode_note(&note);
+            assert_eq!(back, Some(s), "phase must round-trip via trailer");
+        }
     }
 }

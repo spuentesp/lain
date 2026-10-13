@@ -8,12 +8,9 @@
 
 use crate::cli::mcp_client::{mcp_endpoint, post_tool_call};
 use crate::config::hooks_dir;
-use crate::server::presence::{AgentId, AgentKind, ClaimIntent};
-use crate::server::presence_lock;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -206,16 +203,6 @@ struct HookSession {
     agent_id: String,
     session_token: String,
     registered_at_unix: u64,
-    /// Per-path nonces returned by `presence_lock::try_lock` via the
-    /// zero-daemon `lock` CLI. Keyed by the canonical lock file path
-    /// (the same path `presence_lock::lock_path_for` returns) so the
-    /// matching `unlock` call can echo the nonce back into
-    /// `release_lock_for_path` and prove it still owns the claim.
-    /// Empty / missing on a session file written before the nonce
-    /// check existed; `unlock` falls back to a no-op when its lookup
-    /// misses, so older hook installations keep working.
-    #[serde(default)]
-    lock_nonces: std::collections::HashMap<String, String>,
 }
 
 /// Sanitize an agent name so it can be used as a single path segment
@@ -349,66 +336,11 @@ fn register_if_needed(
             .context("no session_token")?
             .to_string(),
         registered_at_unix: crate::server::time::unix_secs_u64(std::time::SystemTime::now()),
-        lock_nonces: HashMap::new(),
     };
     write_session(name, &sess)?;
     Ok(sess)
 }
 
-/// Read or create the per-agent hooks session file with a fresh empty
-/// `lock_nonces` map. Used by the zero-daemon `lock` / `unlock` CLI
-/// subcommands, which don't have an MCP server to hand them a session
-/// but still need somewhere to persist the per-acquire lock nonce so
-/// the matching `unlock` can prove ownership.
-fn read_or_init_nonce_session(agent_name: &str) -> Result<HookSession> {
-    if let Some(s) = read_session(agent_name) {
-        return Ok(s);
-    }
-    let sess = HookSession {
-        agent_id: String::new(),
-        session_token: String::new(),
-        registered_at_unix: crate::server::time::unix_secs_u64(std::time::SystemTime::now()),
-        lock_nonces: HashMap::new(),
-    };
-    write_session(agent_name, &sess)?;
-    Ok(sess)
-}
-
-fn record_lock_nonce(agent_name: &str, lock_path: &Path, nonce: &str) -> Result<()> {
-    let mut sess = read_or_init_nonce_session(agent_name)?;
-    sess.lock_nonces
-        .insert(lock_path.to_string_lossy().into_owned(), nonce.to_string());
-    write_session(agent_name, &sess)
-}
-
-/// Read the recorded nonce for `lock_path` from the hooks session
-/// without removing it. Used by the release flow to look up the
-/// credential before attempting the actual `release_lock_for_path`
-/// call; the nonce is only removed once release succeeds. The Codex
-/// re-check called this out as M1: the previous flow removed and
-/// persisted the nonce before attempting release, so an I/O failure
-/// left no nonce for a safe retry.
-fn read_lock_nonce(agent_name: &str, lock_path: &Path) -> Result<Option<String>> {
-    let Some(sess) = read_session(agent_name) else {
-        return Ok(None);
-    };
-    let key = lock_path.to_string_lossy().into_owned();
-    Ok(sess.lock_nonces.get(&key).cloned())
-}
-
-/// Remove the recorded nonce for `lock_path` from the hooks session
-/// and persist the change. Called only after a successful release;
-/// failures keep the nonce in place so the caller can retry.
-fn remove_lock_nonce(agent_name: &str, lock_path: &Path) -> Result<()> {
-    let Some(mut sess) = read_session(agent_name) else {
-        return Ok(());
-    };
-    let key = lock_path.to_string_lossy().into_owned();
-    if sess.lock_nonces.remove(&key).is_some() {
-        write_session(agent_name, &sess)?;
-    }
-    Ok(())
-}
 /// `lain hooks claim --url … --path … [--symbol …] [--intent …] [--parent-session-id …]`
 /// Falls back to the filesystem lock layer when no lain server is reachable
 /// at `--url`. The wishlist calls this out as the zero-daemon path:
@@ -567,128 +499,117 @@ fn server_reachable(url: &str, timeout: Duration) -> bool {
 /// stale `.lain` directories in system temp dirs that break later
 /// test runs. `.git` is the right anchor: it's never created by
 /// lain itself, so the walk-up can't be confused by our own state.
-/// Filesystem-only counterpart to the in-memory `claim_files` MCP tool.
-/// No server round trip, no `register_agent` heartbeat — just an
-/// `O_EXCL` write under `<workspace>/.lain/locks/`. The wishlist (#3,
-/// #4) wants subagents and one-shot edits to be able to coordinate
-/// without a running daemon; this is the path that makes that work.
+/// Zero-daemon claim path: forward to `zoanthrope claim`. The
+/// coordination core (claims registry, exclusive leases) lives in
+/// zoanthrope now; this forwards so hook wirings keep working without
+/// a running lain server. Relays zoanthrope's grant/conflict JSON
+/// (conflict shape carries `holder` naming) to stderr so the agent
+/// can see who is in the way. When `zoanthrope` is absent the claim
+/// fails soft to advisory semantics: logged, never blocks, and the
+/// printed body carries `"degraded": "zoanthrope-missing"`.
 fn claim_filesystem(
     path: &str,
-    _symbol: &str,
+    symbol: &str,
     intent: &str,
     agent_name: &str,
-    agent_kind: &str,
+    _agent_kind: &str,
 ) -> Result<()> {
-    let file_path = Path::new(path);
-    // Walk up from `file_path` for `.git`; if none is found within 16
-    // levels (or the walk itself errors), fall back to the file's parent
-    // directory so the lock sentinel still works locally.
-    let workspace_root = crate::cli::workspace::find_git_workspace_root(Some(file_path))
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| {
-            file_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| file_path.to_path_buf())
-        });
-    let agent_id = AgentId(format!("{agent_name}@{}", std::process::id()));
-    let kind = AgentKind::parse(agent_kind);
-    let parsed_intent = match intent {
-        "read" => ClaimIntent::Read,
-        _ => ClaimIntent::Edit,
-    };
-    match presence_lock::try_lock(&workspace_root, file_path, &agent_id, kind, parsed_intent) {
-        Ok(lock) => {
-            let session_key = presence_lock::lock_path_for(&workspace_root, file_path);
-            record_lock_nonce(agent_name, &session_key, &lock.nonce)?;
-            println!(
-                "lain hook: filesystem claim granted at {}",
-                lock.path.display()
-            );
-            Ok(())
-        }
-        Err(conflict) => {
-            let mtime_unix = crate::server::time::unix_secs_u64(conflict.mtime());
-            let body = serde_json::json!({
-                "holder": conflict.agent_id().as_str(),
-                "kind": conflict.kind().as_str(),
-                "intent": match conflict.intent() {
-                    ClaimIntent::Read => "read",
-                    ClaimIntent::Edit => "edit",
-                },
-                "mtime_unix": mtime_unix,
+    zoanthrope_claim(path, symbol, intent, agent_name, None)
+}
+
+/// Shared by the `claim` fallback and the `lock` subcommand. When
+/// `workspace` is given it is passed as `--workspace` (the `lock`
+/// contract names its root explicitly); otherwise zoanthrope walks up
+/// from the file for `.git` itself.
+fn zoanthrope_claim(
+    path: &str,
+    symbol: &str,
+    intent: &str,
+    agent_name: &str,
+    workspace: Option<&str>,
+) -> Result<()> {
+    let Some(bin) = crate::server::coordination::resolve_zoanthrope_bin() else {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "degraded": crate::server::coordination::DEGRADED_MARKER,
                 "path": path,
-            });
-            eprintln!("{}", serde_json::to_string(&body)?);
-            Err(anyhow::anyhow!(
-                "filesystem claim for {} held by {}",
-                path,
-                conflict.agent_id().as_str()
-            ))
+                "agent": agent_name,
+                "note": "advisory: no zoanthrope on PATH; claim logged locally, not enforced",
+            })
+        );
+        return Ok(());
+    };
+    let mut cmd = Command::new(bin);
+    cmd.arg("claim")
+        .arg("--files")
+        .arg(path)
+        .arg("--agent")
+        .arg(agent_name)
+        .arg("--intent")
+        .arg(intent);
+    if let Some(ws) = workspace {
+        cmd.arg("--workspace").arg(ws);
+    }
+    if !symbol.is_empty() {
+        // Symbol pins ride as zoanthrope caller_stamps — same
+        // `symbol:<name>` pins the MCP `claim_files` path computes.
+        let stamps =
+            crate::server::coordination::symbol_stamps(Path::new(path), &[symbol.to_string()]);
+        for s in stamps {
+            cmd.arg("--stamp").arg(s.cli_arg());
         }
+    }
+    let out = cmd.output()?;
+    let body = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !body.is_empty() {
+        // Grant shape on success, conflict shape (`holder` naming) on
+        // refusal — either way the caller gets zoanthrope's own JSON.
+        eprintln!("{body}");
+    }
+    if out.status.success() {
+        println!("lain hook: claim for {path} granted (zoanthrope)");
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "zoanthrope claim for {} refused",
+            path
+        ))
     }
 }
 
-/// Filesystem-only counterpart to the in-memory `release_files` MCP
-/// tool. Idempotent — ENOENT is treated as success. Uses the per-agent
-/// nonce recorded at `claim` time so a stale handle can't remove a
-/// replacement owner's claim; see the Codex contract
-/// `expired_holder_cannot_release_replacement_holder` and the
-/// `release_lock_for_path` ownership check.
-///
-/// The nonce is read from the session BEFORE release is attempted and
-/// is only removed from the session once release returns `Ok`. An
-/// I/O failure therefore preserves the nonce in the session, so the
-/// caller can retry with the same credential — the Codex re-check
-/// called this out as M1.
+/// Zero-daemon release path: forward to `zoanthrope release`.
+/// Idempotent — a missing claim is success. Degraded (no binary):
+/// logged as advisory and treated as released.
 fn release_filesystem(path: &str, agent_name: &str) -> Result<()> {
-    let file_path = Path::new(path);
-    // Walk up from `file_path` for `.git`; if none is found within 16
-    // levels (or the walk itself errors), fall back to the file's parent
-    // directory so the lock sentinel still works locally.
-    let workspace_root = crate::cli::workspace::find_git_workspace_root(Some(file_path))
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| {
-            file_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| file_path.to_path_buf())
-        });
-    let lock_path = presence_lock::lock_path_for(&workspace_root, file_path);
-    let nonce = read_lock_nonce(agent_name, &lock_path)?;
-    match nonce {
-        None => {
-            println!(
-                "no recorded nonce for {}; sentinel left in place",
-                lock_path.display()
-            );
-            Ok(())
-        }
-        Some(n) => match presence_lock::release_lock_for_path(&workspace_root, file_path, &n) {
-            Ok(()) => {
-                remove_lock_nonce(agent_name, &lock_path)?;
-                println!("released {}", lock_path.display());
-                Ok(())
-            }
-            Err(presence_lock::ReleaseError::NotOwner {
-                expected, found, ..
-            }) => Err(anyhow::anyhow!(
-                "not the owner of {}: expected nonce {}, found {}",
-                lock_path.display(),
-                expected,
-                if found.is_empty() {
-                    "<none>".to_string()
-                } else {
-                    found
-                }
-            )),
-            Err(presence_lock::ReleaseError::Io(e)) => {
-                // Nonce is intentionally NOT removed; retry can use it.
-                Err(anyhow::anyhow!("remove {}: {e}", lock_path.display()))
-            }
-        },
+    let Some(bin) = crate::server::coordination::resolve_zoanthrope_bin() else {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "degraded": crate::server::coordination::DEGRADED_MARKER,
+                "path": path,
+                "agent": agent_name,
+                "note": "advisory: no zoanthrope on PATH; nothing to release",
+            })
+        );
+        return Ok(());
+    };
+    let out = Command::new(bin)
+        .arg("release")
+        .arg("--files")
+        .arg(path)
+        .arg("--agent")
+        .arg(agent_name)
+        .output()?;
+    let body = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !body.is_empty() {
+        eprintln!("{body}");
+    }
+    if out.status.success() {
+        println!("released {path} (zoanthrope)");
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("zoanthrope release for {path} failed"))
     }
 }
 
@@ -819,116 +740,61 @@ pub fn overlap_check(url: &str, base: &str, head: Option<&str>, workspace: &str)
 }
 
 /// `lain hooks lock --workspace-root … --path … --agent-name … …`
-/// Direct, filesystem-only counterpart to `Claim`. Does NOT contact
-/// the lain server: it just writes
-/// `<root>/.lain/locks/<sanitized>.lock-<nonce>` via
-/// `presence_lock::try_lock`. Used by automation that needs the
-/// hint layer (operator-readable sentinel, no-daemon coordination)
-/// without paying for a full `register_agent` + `claim_files` round
-/// trip.
-/// On success: prints the lock file path to stdout, exits 0.
-/// On conflict: prints holder / kind / intent / mtime as JSON to
-/// stderr and returns Err so the caller sees a non-zero exit code.
-/// The lock TTL is fixed at 5 seconds by `presence_lock::LOCK_TTL`;
-/// stale locks (mtime older than that) can be taken by another agent.
+/// Zero-daemon claim alias: forwards to `zoanthrope claim --workspace`.
+/// Kept as a thin alias so existing automation keeps its CLI surface.
+/// On success: prints a summary to stdout, exits 0. On conflict: prints
+/// zoanthrope's conflict JSON (with `holder` naming) to stderr and
+/// returns Err so the caller sees a non-zero exit code. Degraded (no
+/// zoanthrope): advisory, never blocks.
 pub fn lock(
     workspace_root: &str,
     path: &str,
     agent_name: &str,
-    agent_kind: &str,
+    _agent_kind: &str,
     intent: &str,
 ) -> Result<()> {
-    let workspace = Path::new(workspace_root);
-    let file_path = Path::new(path);
-    let agent_id = AgentId(format!("{agent_name}@{}", std::process::id()));
-    let kind = AgentKind::parse(agent_kind);
-    let parsed_intent = match intent {
-        "read" => ClaimIntent::Read,
-        _ => ClaimIntent::Edit,
-    };
-    match presence_lock::try_lock(workspace, file_path, &agent_id, kind, parsed_intent) {
-        Ok(lock) => {
-            let session_key = presence_lock::lock_path_for(workspace, file_path);
-            record_lock_nonce(agent_name, &session_key, &lock.nonce)?;
-            println!("{}", lock.path.display());
-            Ok(())
-        }
-        Err(conflict) => {
-            let mtime_unix = conflict
-                .mtime()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let body = serde_json::json!({
-                "holder": conflict.agent_id().as_str(),
-                "kind": conflict.kind().as_str(),
-                "intent": match conflict.intent() {
-                    ClaimIntent::Read => "read",
-                    ClaimIntent::Edit => "edit",
-                },
-                "mtime_unix": mtime_unix,
-                "path": file_path,
-            });
-            // Print to stderr and return Err so the dispatcher exits
-            // non-zero. The pre-commit hook treats any non-zero exit
-            // as "infrastructure failure — pass through"; humans
-            // running the CLI by hand get a clear conflict message.
-            eprintln!("{}", serde_json::to_string(&body)?);
-            Err(anyhow::anyhow!(
-                "lock for {} already held by {}",
-                file_path.display(),
-                conflict.agent_id().as_str()
-            ))
-        }
-    }
+    zoanthrope_claim(path, "", intent, agent_name, Some(workspace_root))
 }
 
 /// `lain hooks unlock --workspace-root … --path … [--agent-name …]`
-/// Removes the filesystem sentinel for `path`.
-/// If `agent_name` is non-empty, uses the per-agent nonce recorded at
-/// `claim`/`lock` time so a stale handle can't remove a replacement
-/// owner's claim. If `agent_name` is empty, acts as an administrative
-/// force-unlock and removes the sentinel unconditionally.
+/// Zero-daemon release alias: forwards to
+/// `zoanthrope release --workspace`. Idempotent; `agent_name` is kept
+/// for CLI compatibility and used as the releasing agent identity.
 pub fn unlock(workspace_root: &str, path: &str, agent_name: &str) -> Result<()> {
-    let workspace = Path::new(workspace_root);
-    let file_path = Path::new(path);
-    let lock_path = presence_lock::lock_path_for(workspace, file_path);
-    let nonce = read_lock_nonce(agent_name, &lock_path)?;
-    match nonce {
-        None => {
-            // No recorded nonce: the matching `lock` was never issued
-            // by this CLI, or the session file is too old. Surface
-            // the sentinel as-is (still operator-readable) and let
-            // the operator remove it by hand if they really mean it.
-            println!(
-                "no recorded nonce for {}; sentinel left in place",
-                lock_path.display()
-            );
-            Ok(())
-        }
-        Some(n) => match presence_lock::release_lock_for_path(workspace, file_path, &n) {
-            Ok(()) => {
-                remove_lock_nonce(agent_name, &lock_path)?;
-                println!("released {}", lock_path.display());
-                Ok(())
-            }
-            Err(presence_lock::ReleaseError::NotOwner {
-                expected, found, ..
-            }) => Err(anyhow::anyhow!(
-                "not the owner of {}: expected nonce {}, found {}",
-                lock_path.display(),
-                expected,
-                if found.is_empty() {
-                    "<none>".to_string()
-                } else {
-                    found
-                }
-            )),
-            Err(presence_lock::ReleaseError::Io(e)) => {
-                // Nonce is intentionally NOT removed; retry can use it.
-                Err(anyhow::anyhow!("remove {}: {e}", lock_path.display()))
-            }
-        },
+    let Some(bin) = crate::server::coordination::resolve_zoanthrope_bin() else {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "degraded": crate::server::coordination::DEGRADED_MARKER,
+                "path": path,
+                "note": "advisory: no zoanthrope on PATH; nothing to release",
+            })
+        );
+        return Ok(());
+    };
+    let agent = if agent_name.is_empty() {
+        "lain-admin"
+    } else {
+        agent_name
+    };
+    let out = Command::new(bin)
+        .arg("release")
+        .arg("--files")
+        .arg(path)
+        .arg("--agent")
+        .arg(agent)
+        .arg("--workspace")
+        .arg(workspace_root)
+        .output()?;
+    let body = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !body.is_empty() {
+        eprintln!("{body}");
+    }
+    if out.status.success() {
+        println!("released {path} (zoanthrope)");
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("zoanthrope release for {path} failed"))
     }
 }
 

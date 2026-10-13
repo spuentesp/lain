@@ -3,7 +3,8 @@
 use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
-use crate::server::presence::{OccupancyMap, PresenceRegistry};
+use crate::server::coordination::CoordinationProxy;
+use crate::server::presence::PresenceRegistry;
 use crate::server::tools::handlers::query::{describe_schema, query_graph};
 use parking_lot::Mutex;
 use serde_json::Map;
@@ -55,8 +56,8 @@ fn test_embedder_and_cache() -> (NlpEmbedder, EmbeddingCache) {
 /// Empty multiplayer registries for the existing tests — none of them
 /// assert against the `occupancy` payload, they only care that the
 /// `query_graph` JSON result is well-formed.
-fn empty_presence() -> (PresenceRegistry, OccupancyMap) {
-    (PresenceRegistry::new(), OccupancyMap::new())
+fn empty_presence() -> (PresenceRegistry, CoordinationProxy) {
+    (PresenceRegistry::new(), CoordinationProxy::new(std::env::temp_dir()))
 }
 
 #[test]

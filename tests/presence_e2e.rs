@@ -1,5 +1,6 @@
 use lain::server::attribution::AttributionWatcher;
-use lain::server::presence::{AgentKind, AgentMode, OccupancyMap, PresenceRegistry};
+use lain::server::coordination::CoordinationProxy;
+use lain::server::presence::{AgentKind, AgentMode, PresenceRegistry};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,6 +8,9 @@ use tempfile::tempdir;
 
 #[test]
 fn e2e_attribution_via_real_child_pid() {
+    if !require_zoanthrope() {
+        return;
+    }
     if !cfg!(target_os = "linux") {
         return;
     }
@@ -26,7 +30,7 @@ fn e2e_attribution_via_real_child_pid() {
 
     let pid = child.id();
     let presence = Arc::new(PresenceRegistry::new());
-    let occupancy = Arc::new(OccupancyMap::new());
+    let occupancy = Arc::new(CoordinationProxy::new(std::env::temp_dir()));
     let _ = presence.register(
         "e2e-child".into(),
         AgentKind::Other("e2e".into()),
@@ -58,4 +62,17 @@ fn e2e_attribution_via_real_child_pid() {
         !claims.is_empty(),
         "expected auto-claim after child write; got: {claims:?}"
     );
+}
+
+/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
+/// on PATH the proxy is degraded (advisory: claims always grant and
+/// never conflict), so the coordination assertions below are
+/// meaningless — skip loudly rather than fail against an uncoordinated
+/// workspace. CI installs zoanthrope and runs these for real.
+fn require_zoanthrope() -> bool {
+    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
+        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
+        return false;
+    }
+    true
 }

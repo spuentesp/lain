@@ -129,6 +129,9 @@ fn count_grants_and_conflicts(responses: &[(String, serde_json::Value)]) -> (usi
 /// exactly one grant and three conflicts.
 #[test]
 fn linearizability_holds_across_n_agents_and_n_iterations() {
+    if !require_zoanthrope() {
+        return;
+    }
     let (_dir, server) = fresh_server();
     let agents: Vec<RaceAgent> = (0..4)
         .map(|i| register(&server, &format!("racer-{i}")))
@@ -198,6 +201,9 @@ fn linearizability_holds_across_n_agents_and_n_iterations() {
 /// plan's acceptance criterion, exactly one wins and nine lose.
 #[test]
 fn linearizability_n10_stress() {
+    if !require_zoanthrope() {
+        return;
+    }
     let (_dir, server) = fresh_server();
     let agents: Vec<RaceAgent> = (0..10)
         .map(|i| register(&server, &format!("n10-{i}")))
@@ -223,6 +229,9 @@ fn linearizability_n10_stress() {
 /// release and claim contend on the same per-agent path lock.
 #[test]
 fn linearizability_release_then_reclaim_cycle() {
+    if !require_zoanthrope() {
+        return;
+    }
     let (_dir, server) = fresh_server();
     let agents: Vec<RaceAgent> = (0..4)
         .map(|i| register(&server, &format!("cycle-{i}")))
@@ -308,3 +317,16 @@ fn non_overlapping_scopes_both_win() {
 // and may be picked up by future iterations.
 #[allow(dead_code)]
 fn _pathbuf_marker(_p: &PathBuf) {}
+
+/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
+/// on PATH the proxy is degraded (advisory: claims always grant and
+/// never conflict), so the coordination assertions below are
+/// meaningless — skip loudly rather than fail against an uncoordinated
+/// workspace. CI installs zoanthrope and runs these for real.
+fn require_zoanthrope() -> bool {
+    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
+        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
+        return false;
+    }
+    true
+}

@@ -275,6 +275,9 @@ async fn blast_radius_latency_benchmark() {
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn concurrent_agents_contention_benchmark() {
+    if !require_zoanthrope() {
+        return;
+    }
     const AGENTS: usize = 8;
     const CYCLES: usize = 30;
     const FILES: usize = 12;
@@ -417,4 +420,17 @@ fn concurrent_agents_contention_benchmark() {
         0,
         "occupancy must be empty after all agents released"
     );
+}
+
+/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
+/// on PATH the proxy is degraded (advisory: claims always grant and
+/// never conflict), so the coordination assertions below are
+/// meaningless — skip loudly rather than fail against an uncoordinated
+/// workspace. CI installs zoanthrope and runs these for real.
+fn require_zoanthrope() -> bool {
+    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
+        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
+        return false;
+    }
+    true
 }

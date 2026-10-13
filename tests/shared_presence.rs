@@ -54,6 +54,9 @@ fn claim(server: &Arc<LainServer>, id: &str, token: &str, path: &str) -> serde_j
 
 #[tokio::test]
 async fn a_claim_on_one_server_conflicts_on_another() {
+    if !require_zoanthrope() {
+        return;
+    }
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let state = tempfile::tempdir().unwrap();
     isolate_state_dir(state.path());
@@ -157,4 +160,17 @@ async fn releasing_on_one_server_frees_the_file_on_another() {
         "a released file must be free on every server; resp={resp}"
     );
     assert_eq!(resp["granted"].as_array().unwrap().len(), 1);
+}
+
+/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
+/// on PATH the proxy is degraded (advisory: claims always grant and
+/// never conflict), so the coordination assertions below are
+/// meaningless — skip loudly rather than fail against an uncoordinated
+/// workspace. CI installs zoanthrope and runs these for real.
+fn require_zoanthrope() -> bool {
+    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
+        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
+        return false;
+    }
+    true
 }

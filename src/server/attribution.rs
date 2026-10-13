@@ -30,13 +30,14 @@
 //! its entire lifetime.
 //!
 //! Successful attribution claims the file for the agent (intent:
-//! `Edit`) on the shared `OccupancyMap` and broadcasts a `ClaimGranted`
+//! `Edit`) on the shared `CoordinationProxy` and broadcasts a `ClaimGranted`
 //! event so SSE subscribers see the update. Such claims are marked
 //! `inferred` and carry a short TTL: they are a guess, they say so, and
 //! a wrong one expires on its own.
 
+use crate::server::coordination::CoordinationProxy;
 use crate::server::presence::{
-    ClaimIntent, ClaimRequest, OccupancyMap, PresenceEvent, PresenceRegistry,
+    ClaimIntent, ClaimRequest, PresenceEvent, PresenceRegistry,
 };
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
@@ -241,7 +242,7 @@ impl AttributionBackend for NoopBackend {
 /// closure channel closes).
 pub struct AttributionWatcher {
     presence: Arc<PresenceRegistry>,
-    occupancy: Arc<OccupancyMap>,
+    occupancy: Arc<CoordinationProxy>,
     event_tx: broadcast::Sender<(u64, PresenceEvent)>,
     events_log: Arc<crate::server::events_log::EventsLog>,
     /// Roots to watch — the registered repos' local checkouts, not
@@ -262,7 +263,7 @@ impl AttributionWatcher {
     /// or to inject `LsofBackend` on macOS).
     pub fn new(
         presence: Arc<PresenceRegistry>,
-        occupancy: Arc<OccupancyMap>,
+        occupancy: Arc<CoordinationProxy>,
         event_tx: broadcast::Sender<(u64, PresenceEvent)>,
         events_log: Arc<crate::server::events_log::EventsLog>,
         roots: Vec<PathBuf>,
@@ -281,7 +282,7 @@ impl AttributionWatcher {
     pub fn new_with_backend(
         backend: Arc<dyn AttributionBackend>,
         presence: Arc<PresenceRegistry>,
-        occupancy: Arc<OccupancyMap>,
+        occupancy: Arc<CoordinationProxy>,
         event_tx: broadcast::Sender<(u64, PresenceEvent)>,
         events_log: Arc<crate::server::events_log::EventsLog>,
         roots: Vec<PathBuf>,
@@ -433,7 +434,7 @@ fn is_attributable(path: &Path, ignored: Option<bool>) -> bool {
 fn attribute_edit(
     path: &Path,
     presence: &PresenceRegistry,
-    occupancy: &OccupancyMap,
+    occupancy: &CoordinationProxy,
     event_tx: &broadcast::Sender<(u64, PresenceEvent)>,
     events_log: &crate::server::events_log::EventsLog,
     backend: &dyn AttributionBackend,

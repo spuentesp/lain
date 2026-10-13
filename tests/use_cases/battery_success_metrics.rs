@@ -416,7 +416,7 @@ fn explain_symbol_actually_describes_the_symbol() {
     use lain::server::tools::handlers::metrics::explain_symbol;
     let (dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let occupancy = lain::server::presence::OccupancyMap::default();
+    let occupancy = lain::server::coordination::CoordinationProxy::new(std::env::temp_dir());
     let text = explain_symbol(dir.path(), &db, &overlay, &occupancy, "real_hub")
         .expect("explain_symbol must succeed on a known symbol");
     // Success metric: response names the symbol AND lists its callees

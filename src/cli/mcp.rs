@@ -253,7 +253,7 @@ pub async fn run_mcp(
     // agent on those files for good.
     crate::server::ingest::background::spawn_presence_expiry_loop(
         server.presence().clone(),
-        server.occupancy().clone(),
+        server.coordination().clone(),
         server.presence_event_tx().clone(),
         server.audit_handle().events_log().clone(),
     );

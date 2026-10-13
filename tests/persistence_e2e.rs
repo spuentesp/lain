@@ -1,14 +1,21 @@
+//! Session-registry persistence across a lain restart.
+//!
+//! Claims no longer round-trip through lain's state file — they live
+//! in zoanthrope's `.zoanthrope/state.json` and survive by its own
+//! persistence. What must survive a lain restart is lain's own state:
+//! the session auth table (agents + `session_token`s) and the activity
+//! feed. This test pins that.
+
 use lain::server::activity::ActivityTracker;
 use lain::server::ingest::LainServer;
-use lain::server::intent::IntentRegistry;
 use lain::server::presence::{
-    load_pair, save_pair, AgentKind, AgentMode, ClaimIntent, ClaimRequest,
+    load_pair, save_pair, AgentKind, AgentMode,
 };
 use std::path::PathBuf;
 use tempfile::tempdir;
 
 #[test]
-fn presence_and_occupancy_survive_lain_restart() {
+fn sessions_survive_lain_restart() {
     let tmp = tempdir().unwrap();
     let stem = "restart-test";
     let state_path: PathBuf = tmp.path().join(format!("{stem}.json"));
@@ -16,10 +23,10 @@ fn presence_and_occupancy_survive_lain_restart() {
 
     // `LainServer::new` -> `GitSensor::new` calls `git2::Repository::open`,
     // which requires an initialized repo. Same precondition the other
-    // LainServer-based tests in `presence.rs` use.
+    // LainServer-based tests use.
     git2::Repository::init(tmp.path()).unwrap();
 
-    // Round 1: server with empty data dir.
+    // Round 1: register one agent, persist the session table.
     let server1 = LainServer::new(tmp.path(), &mem, None).expect("server");
     let agent = server1.presence().register(
         "alice".into(),
@@ -28,21 +35,9 @@ fn presence_and_occupancy_survive_lain_restart() {
         Some(99999),
         None,
     );
-    server1.occupancy().claim(
-        &agent.id,
-        vec![ClaimRequest {
-            path: tmp.path().join("foo.rs"),
-            symbols: vec!["bar".into()],
-            intent: ClaimIntent::Edit,
-            ttl_seconds: None,
-            plan_revision: None,
-        }],
-    );
     save_pair(
         &state_path,
         server1.presence(),
-        server1.occupancy(),
-        &IntentRegistry::new(),
         &ActivityTracker::new(),
     )
     .expect("save");
@@ -55,8 +50,6 @@ fn presence_and_occupancy_survive_lain_restart() {
     load_pair(
         &state_path,
         server2.presence(),
-        server2.occupancy(),
-        &IntentRegistry::new(),
         &ActivityTracker::new(),
     )
     .expect("load");
@@ -65,6 +58,11 @@ fn presence_and_occupancy_survive_lain_restart() {
     assert_eq!(active.len(), 1, "agent should survive restart");
     assert_eq!(active[0].name, "alice");
 
-    let claims = server2.occupancy().list_for_agent(&agent.id);
-    assert_eq!(claims.len(), 1, "claim should survive restart");
+    // The session token stays valid across the restart — that is the
+    // auth contract hooks depend on.
+    let by_token = server2.presence().by_token(&agent.session_token);
+    assert!(
+        by_token.is_some(),
+        "session token must resolve after restart"
+    );
 }

@@ -394,6 +394,9 @@ fn register(child: &mut AgentChild, name: &str) -> (String, String) {
 // checks the happy path.
 #[test]
 fn two_agents_race_claim_one_wins_one_conflicts() {
+    if !require_zoanthrope() {
+        return;
+    }
     let Some(bin) = lain_bin() else {
         eprintln!("skipping: no lain binary (set LAIN_BIN or run `cargo build`)");
         return;
@@ -540,6 +543,9 @@ fn two_agents_race_claim_one_wins_one_conflicts() {
 // each response carries an `advisories` entry naming A.
 #[test]
 fn three_agents_one_wins_two_observe_advisory() {
+    if !require_zoanthrope() {
+        return;
+    }
     let Some(bin) = lain_bin() else {
         eprintln!("skipping: no lain binary");
         return;
@@ -896,4 +902,17 @@ fn expired_session_rejected() {
             .is_some_and(|p| path_components_eq(p, &["src", "guarded.rs"])),
         "real token must still grant; got: {ok_resp}"
     );
+}
+
+/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
+/// on PATH the proxy is degraded (advisory: claims always grant and
+/// never conflict), so the coordination assertions below are
+/// meaningless — skip loudly rather than fail against an uncoordinated
+/// workspace. CI installs zoanthrope and runs these for real.
+fn require_zoanthrope() -> bool {
+    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
+        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
+        return false;
+    }
+    true
 }
