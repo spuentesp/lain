@@ -61,6 +61,39 @@ curl -s -m 2 "$URL/health" > "$TMP"
 python3 -c 'import sys,json; d=json.load(sys.stdin); print("server ready:", d.get("status"), "| repos:", [r["id"]+":"+r["health"] for r in d.get("federation",{}).get("repos",[])])' < "$TMP" || { echo "FAIL: server did not start"; tail -5 "$WORK/server.log"; exit 1; }
 rm -f "$TMP"
 
+# `/health` answers while the federation is still indexing — tool calls
+# return `warming_up` envelopes until the graph is built. Green runs
+# used to observe `subject:ready` on the first health response (the
+# server bound its port only after the initial index); since async
+# startup the first response is `subject:indexing` seconds later, and
+# both the load phase and the content gate below would measure a cold
+# graph. Wait for every repo to report `ready` before measuring.
+READY_TIMEOUT="${READY_TIMEOUT:-300}"
+echo "waiting for federation to finish initial index (timeout ${READY_TIMEOUT}s)..."
+index_ready=0
+for i in $(seq 1 "$READY_TIMEOUT"); do
+    if curl -s -m 2 "$URL/health" | python3 -c '
+import json, sys
+repos = json.load(sys.stdin).get("federation", {}).get("repos", [])
+sys.exit(0 if repos and all(r.get("health") == "ready" for r in repos) else 1)
+' 2>/dev/null; then
+        index_ready=1
+        break
+    fi
+    if [ $((i % 15)) -eq 0 ]; then
+        curl -s -m 2 "$URL/health" | python3 -c '
+import json, sys
+repos = json.load(sys.stdin).get("federation", {}).get("repos", [])
+print("  still indexing:", [r["id"] + ":" + r.get("health", "?") for r in repos])' 2>/dev/null || true
+    fi
+    sleep 1
+done
+if [ "$index_ready" -ne 1 ]; then
+    echo "FAIL: federation did not finish initial index within ${READY_TIMEOUT}s" >&2
+    tail -5 "$WORK/server.log" >&2
+    exit 1
+fi
+
 call_tool() {  # name args outfile → prints wall seconds
     local name="$1" args="$2" out="$3"
     curl -s -m 15 -o "$out" -w '%{time_total}' -X POST "$URL/mcp" \
@@ -198,19 +231,35 @@ fi
 # src/server/mcp/definitions.rs:208, so a blast_radius probe against
 # it would always "Node not found" and trip the gate.
 content_file="$WORK/raw/content-check.json"
-if ! curl -s -m 15 -o "$content_file" -X POST "$URL/mcp" \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":999,"method":"tools/call","params":{"name":"get_blast_radius","arguments":{"symbol":"run_claim_files"}}}'; then
-    echo "content check: get_blast_radius request failed" >&2
-    exit 1
-fi
-content_text=$(python3 -c '
+content_text=""
+for attempt in 1 2 3; do
+    if ! curl -s -m 15 -o "$content_file" -X POST "$URL/mcp" \
+        -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","id":999,"method":"tools/call","params":{"name":"get_blast_radius","arguments":{"symbol":"run_claim_files"}}}'; then
+        echo "content check: get_blast_radius request failed" >&2
+        exit 1
+    fi
+    content_text=$(python3 -c '
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
     print(d["result"]["content"][0]["text"])
 except Exception:
     print("")' "$content_file" 2>/dev/null || true)
+    if grep -q 'Total transitively affected nodes: ' <<< "$content_text"; then
+        break
+    fi
+    # A `warming_up` envelope means the graph is still indexing — honor
+    # its retry_after_ms instead of failing the gate on a cold read.
+    # Anything else ("Node not found", empty blast radius) is a real
+    # result and falls through to the gate below.
+    if grep -q '"state":"warming_up"' <<< "$content_text"; then
+        echo "content check: blast_radius still warming_up (attempt $attempt) — retrying in 3s" >&2
+        sleep 3
+        continue
+    fi
+    break
+done
 if ! grep -q 'Total transitively affected nodes: ' <<< "$content_text"; then
     echo "content check: blast_radius returned no dependents for run_claim_files — federation ingestion is broken" >&2
     echo "$content_text" >&2
