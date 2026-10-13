@@ -300,7 +300,7 @@ fn federation_root_setup_writes_server_config_entry_and_succeeds() {
     // launch from any cwd); canonicalize for comparison because tempdir
     // paths can sit behind symlinks (e.g. /tmp -> /private/tmp).
     let repos_yaml = fed.path().join("repos.yaml");
-    let repos_yaml = repos_yaml.canonicalize().unwrap_or(repos_yaml);
+    let repos_yaml = dunce::canonicalize(&repos_yaml).unwrap_or(repos_yaml);
     assert_eq!(
         written["mcpServers"]["lain"]["args"],
         serde_json::json!(["server", "--config", repos_yaml.display().to_string()]),

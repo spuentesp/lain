@@ -3,7 +3,16 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## 0.10.0 — 2026-10-13
+
+> **MINOR bump — the coordination contract changed.** Lain's
+> coordination core is now delegated to
+> [`zoanthrope`](https://github.com/spuentesp/zoanthrope) as an
+> external dependency, and three arbitration semantics changed with
+> it (listed plainly under **Contract deltas** below). Tool names and
+> response shapes are unchanged; the deltas are in *what a claim
+> covers, who wins a conflict, and when a claim expires*. This is why
+> 0.10.0 is a minor release and not 0.9.2.
 
 ### Changed
 
@@ -20,18 +29,89 @@ All notable changes to LAIN are documented here. Versions follow
   `caller_stamps` (`symbol:<name>` pins) that zoanthrope stores and
   returns. **If `zoanthrope` is not installed, coordination fails soft
   to advisory semantics**: claims are logged and never block, and
-  responses carry `"degraded": "zoanthrope-missing"`. Two semantic
-  shifts follow zoanthrope's arbitration: read-vs-edit on a file now
-  conflicts (readers no longer co-hold with editors), and claims are
-  file-granular (symbol-level claims carry symbol pins but do not
-  partition a file). Per-claim `ttl_seconds` is accepted but no longer
-  expires claims (zoanthrope's presence TTL governs). The hook family
-  (`hooks/<agent>/pre-edit.sh`) now runs `zoanthrope claim` directly —
-  see `hooks/README.md` for the two-string portability pattern;
-  `lain hooks` remains as a forwarding alias. Formal specs for the
-  migrated code (`PresenceClaims`, `FsLease`/`FsLeaseGuard`) left
-  `docs/formal/` for zoanthrope's `formal/` — see
-  `docs/formal/COORDINATION.md`.
+  responses carry `"degraded": "zoanthrope-missing"`. Full coordination
+  semantics need the zoanthrope binary on `PATH` (or `$ZOANTHROPE_BIN`);
+  `npm install -g @spuentesp/zoanthrope` is the documented install.
+  The hook family (`hooks/<agent>/pre-edit.sh`) now runs `zoanthrope
+  claim` directly — see `hooks/README.md` for the two-string
+  portability pattern; `lain hooks` remains as a forwarding alias.
+  Formal specs for the migrated code (`PresenceClaims`,
+  `FsLease`/`FsLeaseGuard`) left `docs/formal/` for zoanthrope's
+  `formal/` — see `docs/formal/COORDINATION.md`.
+
+  **Contract deltas (the reason for the minor bump) — three of them:**
+
+  1. **Read-vs-edit conflicts under blocking mode.** A read claim on a
+     file another agent holds for edit is now **refused** — readers no
+     longer co-hold with editors (they co-hold only with other
+     readers). The refusal names the holder and the blocking intent,
+     as before. Previously a read was granted with an advisory while
+     an editor held the file.
+  2. **File-granular claims; symbol pins ride along as
+     `caller_stamps`.** A claim covers the whole file. Symbol-level
+     claims still carry lain's symbol fingerprints (`symbol:<name>`
+     pins) as opaque `caller_stamps` that zoanthrope stores and
+     returns — but they no longer partition a file between agents.
+  3. **No per-claim TTL expiry.** `ttl_seconds` is still accepted on
+     the wire but no longer expires a claim; zoanthrope's presence
+     TTL governs claim lifetime.
+
+### Added
+
+- **Topology detection layer** (acceptance program, #304 — code
+  landed in the 0.9.1 tree; written up here because the 0.9.1 entry
+  predated the work). Coupling that used to leave the graph silent is
+  now minted as edges:
+  - **Bus/topic sensors** cover `confluent_kafka` topic usage, AMQP
+    (pika/amqplib publish and `queue_bind`/`bindQueue` consumer
+    idioms → `amqp/<queue>` topics), Avro/JSON-Schema payload edges
+    (`Topic → Schema`), Java/Go env-host dials and RPC env-dial
+    shapes.
+  - **Heuristic edge-minting** (`anchor_miner`): anchors, co-change
+    and commit-ref edges are mined from the same signals agents use
+    and marked heuristic — never presented as verified provenance.
+    Generated-code anchors let stub type names join proto services;
+    author-aware co-change stops bot noise from minting edges; anchor
+    twins are suppressed when a typed bus edge already covers the
+    pair; the mint pass reconciles its own edges (obsolete
+    anchor/co-change/commit-ref edges are retracted, synthesized
+    anchor endpoints survive reprojection).
+  - Docs: `docs/acceptance/FINDINGS-2026-10-11.md` records the
+    program's frame — Lain as an organizational code topology server.
+
+### Fixed
+
+- **Federation Nightly Benchmark content gate no longer trips on a
+  cold graph** (red nightly since 2026-09-28). Since async startup the
+  first `/health` response arrives as `subject:indexing`, so the load
+  phase and the one-shot content probe measured a graph still building
+  and read the `warming_up` envelope as an ingestion failure.
+  `tests/e2e/real-bench.sh` now waits for every repo to report ready
+  (bounded by `READY_TIMEOUT`, default 300s) and honors the warm-up
+  envelope's `retry_after_ms` before declaring ingestion broken.
+- **Fuzz nightly builds again.** The `fuzz/` workspace has no root, so
+  every nightly re-resolved its dependency tree and floated to a
+  breaking `ort` rc (`2.0.0-rc.14`, published 2026-10-12) that
+  `src/server/nlp.rs` is not written against. `ort` is now exact-pinned
+  (`=2.0.0-rc.13`) and `fuzz/Cargo.lock` is committed, same practice
+  as the root workspace — bump the pin and the code together.
+- **CI `version-drift` parser reads the `default:` line, not the doc
+  comment** (#316). The `lain-version` input's comment cites
+  historical versions (`v0.8.0`, `v0.7.4`) above the default line, and
+  a range scan picked those up first — the job failed on a correct
+  default. The extractor now filters to `^\s*default:` before matching
+  the version token.
+
+### Release housekeeping
+
+- **Post-release v0.9.1 metadata** (#317): `Formula/lain.rb` sha256
+  values filled from the published v0.9.1 `SHA256SUMS`, and the
+  health-badge action's `lain-version` default bumped to `v0.9.1`.
+  dev synced with the v0.9.1 release state (#321). Both POST-PUBLISH
+  steps are the model for this release too: the v0.10.0 formula
+  checksums and the badge default land **after** the tag publishes,
+  never before (pre-filled checksums are how v0.8.0 shipped a broken
+  brew formula; a pre-bumped badge default deadlocks the release gate).
 
 ## [0.9.1] - 2026-10-10
 
