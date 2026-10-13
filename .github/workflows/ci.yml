@@ -219,9 +219,12 @@ jobs:
             # Prefer the cached *real* binary over the npm shim: the
             # shim is a node wrapper whose stdio:inherit grandchild
             # does not die with it, which is slow and can wedge the
-            # test harness's subprocess capture.
+            # test harness's subprocess capture. (find exits non-zero
+            # when a cache root is absent — the macOS root on Linux —
+            # and `pipefail` would fail the step; `|| true` keeps the
+            # probe soft.)
             REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
-              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1)"
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1 || true)"
             if [ -n "$REAL_BIN" ]; then
               echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
             else
@@ -343,9 +346,10 @@ jobs:
             fi
           else
             # Prefer the cached *real* binary over the npm shim (see
-            # the `test` job for why).
+            # the `test` job for why). `|| true` keeps the probe soft
+            # under `pipefail` when a cache root is absent.
             REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
-              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1)"
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1 || true)"
             if [ -n "$REAL_BIN" ]; then
               echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
             else
@@ -437,7 +441,7 @@ jobs:
             fi
           else
             REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
-              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1)"
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1 || true)"
             if [ -n "$REAL_BIN" ]; then
               echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
             else
