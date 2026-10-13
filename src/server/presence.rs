@@ -981,19 +981,19 @@ pub fn load_pair(
     reg: &PresenceRegistry,
     activity: &crate::server::activity::ActivityTracker,
 ) -> Result<Vec<PresenceEvent>, String> {
-    // Missing file is a no-op; any *other* I/O failure (the path
-    // replaced by a directory, permissions revoked mid-run) fails
-    // closed so the caller surfaces it instead of proceeding on a
-    // stale view.
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("load {}: {e}", path.display())),
-    };
-    let state: PersistedState = match serde_json::from_str(&raw) {
-        Ok(s) => s,
-        Err(e) => return Err(format!("load {}: {e}", path.display())),
-    };
+    // Missing is a no-op — including the "unstat-able" case where a
+    // path component is a plain file (`$XDG_STATE_HOME/lain` blocked
+    // by a file of that name): `exists()` is false and a server must
+    // still construct, failing later at the lock with
+    // `CoordinationError::Unavailable`. An *existing* but unreadable
+    // path (e.g. the state path replaced by a directory) fails closed
+    // so the caller surfaces it instead of proceeding on a stale view.
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("load {}: {e}", path.display()))?;
+    let state: PersistedState =
+        serde_json::from_str(&raw).map_err(|e| format!("load {}: {e}", path.display()))?;
 
     let mut s = reg.inner.lock();
     s.sessions.clear();

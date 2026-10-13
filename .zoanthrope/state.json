@@ -1,0 +1,119 @@
+{
+  "version": 2,
+  "claims": [
+    {
+      "path": "/tmp/no_such_file_xyz_unique.rs",
+      "agent": "agy-466927-localhost",
+      "intent": "edit",
+      "claimed_at": 1791909734.8019323,
+      "fingerprint": {
+        "exists": false,
+        "mtime_ns": 0,
+        "size": 0
+      }
+    },
+    {
+      "path": "/tmp/foo.rs",
+      "agent": "claude-code-466927-localhost",
+      "intent": "edit",
+      "claimed_at": 1791909734.8341444,
+      "fingerprint": {
+        "exists": false,
+        "mtime_ns": 0,
+        "size": 0
+      }
+    }
+  ],
+  "agents": [
+    {
+      "name": "agy-466927-localhost",
+      "kind": "other",
+      "last_seen": 1791909734.8019323
+    },
+    {
+      "name": "claude-code-466927-localhost",
+      "kind": "other",
+      "last_seen": 1791909734.8341444
+    },
+    {
+      "name": "test-agent-fixed",
+      "kind": "other",
+      "last_seen": 1791909734.8390987
+    },
+    {
+      "name": "codex-466927-localhost",
+      "kind": "other",
+      "last_seen": 1791909734.8549864
+    },
+    {
+      "name": "kimi-466927-localhost",
+      "kind": "other",
+      "last_seen": 1791909734.8657176
+    }
+  ],
+  "posts": [],
+  "audit": [
+    {
+      "ts": 1791909734.8019323,
+      "agent": "agy-466927-localhost",
+      "action": "register",
+      "purpose": "other"
+    },
+    {
+      "ts": 1791909734.8019323,
+      "agent": "agy-466927-localhost",
+      "action": "claim",
+      "path": "/tmp/no_such_file_xyz_unique.rs"
+    },
+    {
+      "ts": 1791909734.8088171,
+      "agent": "claude-code-466927-localhost",
+      "action": "register",
+      "purpose": "other"
+    },
+    {
+      "ts": 1791909734.8341444,
+      "agent": "claude-code-466927-localhost",
+      "action": "claim",
+      "path": "/tmp/foo.rs"
+    },
+    {
+      "ts": 1791909734.8390987,
+      "agent": "test-agent-fixed",
+      "action": "register",
+      "purpose": "other"
+    },
+    {
+      "ts": 1791909734.8549864,
+      "agent": "codex-466927-localhost",
+      "action": "register",
+      "purpose": "other"
+    },
+    {
+      "ts": 1791909734.8657176,
+      "agent": "kimi-466927-localhost",
+      "action": "register",
+      "purpose": "other"
+    }
+  ],
+  "post_seq": 0,
+  "board": {
+    "epoch": 7,
+    "by_path": [
+      {
+        "path": "/tmp/foo.rs",
+        "agent": "claude-code-466927-localhost",
+        "intent": "edit"
+      },
+      {
+        "path": "/tmp/no_such_file_xyz_unique.rs",
+        "agent": "agy-466927-localhost",
+        "intent": "edit"
+      }
+    ],
+    "claims_count": 2,
+    "open_posts": 0,
+    "posts_count": 0,
+    "agents_count": 5
+  }
+}

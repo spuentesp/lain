@@ -45,7 +45,16 @@ impl CoordinationProxy {
         let mut advisories = Vec::new();
         for req in requests {
             let path_str = req.path.to_string_lossy().into_owned();
-            let stamps = super::symbol_stamps(&req.path, &req.symbols);
+            // Symbol fingerprints read the file's bytes — relative
+            // claim paths must resolve against the workspace root,
+            // not the process CWD (the CWD is wherever the server
+            // happened to start).
+            let read_path = if req.path.is_absolute() {
+                req.path.clone()
+            } else {
+                self.workspace().join(&req.path)
+            };
+            let stamps = super::symbol_stamps(&read_path, &req.symbols);
             match self.claim_file(
                 agent_id.as_str(),
                 &path_str,

@@ -265,6 +265,19 @@ fn symbol_stamps_pass_through_as_caller_stamps() {
     assert!(symbol_stamps(&src, &["nope".to_string()]).is_empty());
     assert!(symbol_stamps(&src, &[]).is_empty());
 
+    // A claim before the file exists keeps its declaration: pinned
+    // with the "unresolved" sentinel (no fingerprint available yet),
+    // so the symbol set survives the round-trip through zoanthrope.
+    let missing = ws.join("not-yet.rs");
+    let missing_pins = symbol_stamps(&missing, &["future_fn".to_string()]);
+    assert_eq!(
+        missing_pins.len(),
+        1,
+        "declaration must survive a missing file"
+    );
+    assert_eq!(missing_pins[0].name, "symbol:future_fn");
+    assert_eq!(missing_pins[0].value, "unresolved");
+
     // Round-trip through the wire shapes.
     let back = symbols_from_stamps(&pins);
     assert_eq!(back, vec!["parse_token".to_string()]);

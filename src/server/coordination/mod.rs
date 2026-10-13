@@ -91,17 +91,23 @@ pub fn resolve_zoanthrope_bin() -> Option<PathBuf> {
 /// are opaque to zoanthrope — it stores and returns them in
 /// `caller_stamps` and verifies only its own file content stamp;
 /// verifying the symbol pins is lain's business when it checks for
-/// drift later. Symbols the extractor cannot resolve are skipped (a
-/// stamp is evidence, never a guess).
+/// drift later.
+///
+/// Two skip rules: a symbol the extractor cannot resolve in a
+/// *readable* file is skipped (a stamp is evidence, never a guess);
+/// an unreadable file (claim-before-create is common) pins every
+/// declared symbol with value `"unresolved"` so the declaration
+/// itself survives the round-trip through zoanthrope.
 pub fn symbol_stamps(path: &Path, symbols: &[String]) -> Vec<CallerStamp> {
     if symbols.is_empty() {
         return Vec::new();
     }
-    let Ok(bytes) = std::fs::read(path) else {
-        return Vec::new();
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return unresolved_pins(symbols),
     };
     let Ok(src) = std::str::from_utf8(&bytes) else {
-        return Vec::new();
+        return unresolved_pins(symbols);
     };
     let defs = crate::server::treesitter::extract_definitions(path, src);
     let mut out = Vec::with_capacity(symbols.len());
@@ -121,4 +127,17 @@ pub fn symbol_stamps(path: &Path, symbols: &[String]) -> Vec<CallerStamp> {
         });
     }
     out
+}
+
+/// Declarations with no fingerprint available (file unreadable at
+/// claim time). The name keeps the declaration visible on every
+/// surface; the sentinel value says "no evidence yet".
+fn unresolved_pins(symbols: &[String]) -> Vec<CallerStamp> {
+    symbols
+        .iter()
+        .map(|name| CallerStamp {
+            name: format!("symbol:{name}"),
+            value: "unresolved".to_string(),
+        })
+        .collect()
 }

@@ -123,6 +123,12 @@ impl CoordinationProxy {
         self.bin.get_or_init(resolve_bin).as_deref()
     }
 
+    /// Workspace root: relative claim paths resolve against it (both
+    /// for zoanthrope's `--workspace` and for symbol-stamp reads).
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
     /// True when no zoanthrope is resolvable: every call fails soft to
     /// advisory semantics and every response carries
     /// `"degraded": "zoanthrope-missing"`.
