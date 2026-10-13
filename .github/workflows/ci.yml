@@ -216,7 +216,17 @@ jobs:
               echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
             fi
           else
-            echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            # Prefer the cached *real* binary over the npm shim: the
+            # shim is a node wrapper whose stdio:inherit grandchild
+            # does not die with it, which is slow and can wedge the
+            # test harness's subprocess capture.
+            REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1)"
+            if [ -n "$REAL_BIN" ]; then
+              echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            fi
           fi
           zoanthrope --version
 
@@ -332,7 +342,15 @@ jobs:
               echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
             fi
           else
-            echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            # Prefer the cached *real* binary over the npm shim (see
+            # the `test` job for why).
+            REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1)"
+            if [ -n "$REAL_BIN" ]; then
+              echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            fi
           fi
           zoanthrope --version
 
@@ -398,6 +416,35 @@ jobs:
           # and the next run starts cold again (the loop that kept the
           # macOS lane dying at 30/45/90 min).
           save-always: true
+
+      # demo.sh's multiplayer ground truth (grant/conflict shapes,
+      # occupancy, my_claims, intents) exercises real claim
+      # arbitration — install zoanthrope (pinned) the same way the
+      # test lanes do, and point at the cached real binary.
+      - name: Install zoanthrope (coordination core, pinned 0.1.3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @spuentesp/zoanthrope@0.1.3
+          if ! zoanthrope --version; then
+            echo "no prebuilt zoanthrope for this platform; building v0.1.3 from source"
+            cargo install --git https://github.com/spuentesp/zoanthrope.git \
+              --tag v0.1.3 --locked --force
+            if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
+            fi
+          else
+            REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1)"
+            if [ -n "$REAL_BIN" ]; then
+              echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            fi
+          fi
+          zoanthrope --version
 
       - name: Build release binary
         run: cargo build --release
