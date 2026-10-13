@@ -102,7 +102,9 @@ pub enum ClaimOutcome {
     Refused(Refusal),
     /// No zoanthrope on this machine: advisory semantics — logged
     /// locally, never blocks.
-    Degraded { path: String },
+    Degraded {
+        path: String,
+    },
 }
 
 /// Parse one zoanthrope claim body (grant or conflict shape) into a
@@ -124,7 +126,9 @@ pub fn parse_claim_body(path: &str, body: &serde_json::Value) -> Result<ClaimOut
             serde_json::from_value(g.clone()).map_err(|e| format!("zoanthrope grant: {e}"))?;
         return Ok(ClaimOutcome::Granted(grant));
     }
-    if body.get("holder").is_some() || body.get("reason").and_then(|r| r.as_str()) == Some("stale-claim") {
+    if body.get("holder").is_some()
+        || body.get("reason").and_then(|r| r.as_str()) == Some("stale-claim")
+    {
         let mut v = body.clone();
         if v.get("path").is_none() {
             v["path"] = serde_json::Value::String(path.to_string());

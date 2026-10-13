@@ -571,10 +571,7 @@ fn zoanthrope_claim(
         println!("lain hook: claim for {path} granted (zoanthrope)");
         Ok(())
     } else {
-        Err(anyhow::anyhow!(
-            "zoanthrope claim for {} refused",
-            path
-        ))
+        Err(anyhow::anyhow!("zoanthrope claim for {} refused", path))
     }
 }
 

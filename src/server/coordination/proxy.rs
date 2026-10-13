@@ -16,9 +16,7 @@
 //! stays installable standalone and coordination fails soft to
 //! advisory semantics (logged, never blocks).
 
-use super::shapes::{
-    parse_claim_body, CallerStamp, ClaimOutcome, DEGRADED_MARKER,
-};
+use super::shapes::{parse_claim_body, CallerStamp, ClaimOutcome, DEGRADED_MARKER};
 use crate::server::presence::{AgentId, Claim, ClaimIntent, SymbolHash};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -195,11 +193,12 @@ impl CoordinationProxy {
         // Exit 0 = granted, 1 = conflict — both are successful calls
         // whose body is the JSON we parse. Exit 2 (usage/IO) has a
         // message on stderr and no usable body.
-        let body: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .map_err(|_| ProxyError::Failed(format!(
+        let body: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|_| {
+            ProxyError::Failed(format!(
                 "claim: non-JSON output: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
-            )))?;
+            ))
+        })?;
         parse_claim_body(path, &body).map_err(ProxyError::Failed)
     }
 
@@ -218,7 +217,10 @@ impl CoordinationProxy {
             }));
         }
         self.cli_json("release", |cmd| {
-            cmd.arg("--files").arg(paths.join(",")).arg("--agent").arg(agent);
+            cmd.arg("--files")
+                .arg(paths.join(","))
+                .arg("--agent")
+                .arg(agent);
         })
     }
 
@@ -305,9 +307,10 @@ impl CoordinationProxy {
         let mut child = cmd.spawn().map_err(|e| ProxyError::Failed(e.to_string()))?;
         {
             use std::io::Write;
-            let stdin = child.stdin.as_mut().ok_or_else(|| {
-                ProxyError::Failed("zoanthrope mcp: no stdin".to_string())
-            })?;
+            let stdin = child
+                .stdin
+                .as_mut()
+                .ok_or_else(|| ProxyError::Failed("zoanthrope mcp: no stdin".to_string()))?;
             let init = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2024-11-05", "capabilities": {},
@@ -335,20 +338,23 @@ impl CoordinationProxy {
             if let Some(err) = v.get("error") {
                 return Err(ProxyError::Failed(format!(
                     "{tool}: {}",
-                    err.get("message").and_then(|m| m.as_str()).unwrap_or("mcp error")
+                    err.get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("mcp error")
                 )));
             }
-            let result = v.get("result").ok_or_else(|| {
-                ProxyError::Failed(format!("{tool}: no result"))
-            })?;
+            let result = v
+                .get("result")
+                .ok_or_else(|| ProxyError::Failed(format!("{tool}: no result")))?;
             if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
-                let text = result["content"][0]["text"].as_str().unwrap_or("tool error");
+                let text = result["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or("tool error");
                 return Err(ProxyError::Failed(format!("{tool}: {text}")));
             }
             let text = result["content"][0]["text"].as_str().unwrap_or("{}");
-            return serde_json::from_str(text).map_err(|e| {
-                ProxyError::Failed(format!("{tool}: bad tool JSON: {e}"))
-            });
+            return serde_json::from_str(text)
+                .map_err(|e| ProxyError::Failed(format!("{tool}: bad tool JSON: {e}")));
         }
         Err(ProxyError::Failed(format!(
             "{tool}: no tools/call response on stdout"
@@ -450,8 +456,14 @@ impl CoordinationProxy {
         files: Option<&[String]>,
     ) -> Result<serde_json::Value, ProxyError> {
         let mut args = serde_json::Map::new();
-        args.insert("agent_id".into(), serde_json::Value::String(agent.to_string()));
-        args.insert("post_id".into(), serde_json::Value::String(post_id.to_string()));
+        args.insert(
+            "agent_id".into(),
+            serde_json::Value::String(agent.to_string()),
+        );
+        args.insert(
+            "post_id".into(),
+            serde_json::Value::String(post_id.to_string()),
+        );
         if let Some(s) = status {
             args.insert("status".into(), serde_json::Value::String(s.to_string()));
         }
@@ -523,7 +535,9 @@ fn run_with_timeout(cmd: &mut Command) -> Result<std::process::Output, ProxyErro
                 child = Some(c);
                 break;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.raw_os_error() == Some(26) => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock || e.raw_os_error() == Some(26) =>
+            {
                 if attempt == 2 {
                     return Err(ProxyError::Failed(format!("spawn zoanthrope: {e}")));
                 }
@@ -536,7 +550,9 @@ fn run_with_timeout(cmd: &mut Command) -> Result<std::process::Output, ProxyErro
     drop(child.stdin.take());
     let (stdout, stderr) = wait_with_timeout(&mut child)?;
     Ok(std::process::Output {
-        status: child.wait().map_err(|e| ProxyError::Failed(e.to_string()))?,
+        status: child
+            .wait()
+            .map_err(|e| ProxyError::Failed(e.to_string()))?,
         stdout,
         stderr,
     })

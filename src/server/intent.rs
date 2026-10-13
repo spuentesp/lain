@@ -250,12 +250,20 @@ fn path_scopes(scopes: &[String]) -> Vec<String> {
 fn post_to_intent(post: &serde_json::Value) -> Option<Intent> {
     let post_id = post.get("post_id")?.as_str()?.to_string();
     let agent = post.get("agent_id")?.as_str()?.to_string();
-    let title = post.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let title = post
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
     let note = post.get("note").and_then(|t| t.as_str()).unwrap_or("");
     let (body, trailer_status, scopes) = decode_note(note);
     let goal = if body.is_empty() { title } else { body };
     let status = trailer_status.unwrap_or_else(|| {
-        IntentStatus::from_post_status(post.get("status").and_then(|s| s.as_str()).unwrap_or("open"))
+        IntentStatus::from_post_status(
+            post.get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("open"),
+        )
     });
     let at = |key: &str| {
         post.get(key)
@@ -317,12 +325,10 @@ impl IntentBoard {
                 Some(scopes),
             );
         }
-        match self.proxy.post_intention(
-            agent_id.as_str(),
-            &goal,
-            &note,
-            &path_scopes(&scopes),
-        ) {
+        match self
+            .proxy
+            .post_intention(agent_id.as_str(), &goal, &note, &path_scopes(&scopes))
+        {
             Ok(body) => {
                 let post = body.get("post").cloned().unwrap_or(body.clone());
                 post_to_intent(&post).ok_or_else(|| "post_intention: bad post body".to_string())
@@ -505,9 +511,18 @@ mod tests {
         assert_eq!(body, "a human wrote this note");
         assert_eq!(status, None, "no trailer → caller maps post status");
         assert!(scopes.is_empty());
-        assert_eq!(IntentStatus::from_post_status("open"), IntentStatus::Planning);
-        assert_eq!(IntentStatus::from_post_status("taken"), IntentStatus::Editing);
-        assert_eq!(IntentStatus::from_post_status("dropped"), IntentStatus::Done);
+        assert_eq!(
+            IntentStatus::from_post_status("open"),
+            IntentStatus::Planning
+        );
+        assert_eq!(
+            IntentStatus::from_post_status("taken"),
+            IntentStatus::Editing
+        );
+        assert_eq!(
+            IntentStatus::from_post_status("dropped"),
+            IntentStatus::Done
+        );
     }
 
     #[test]

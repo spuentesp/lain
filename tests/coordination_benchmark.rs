@@ -424,5 +424,3 @@ fn concurrent_agents_contention_benchmark() {
         "occupancy must be empty after all agents released"
     );
 }
-
-

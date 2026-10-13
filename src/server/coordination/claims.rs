@@ -11,8 +11,8 @@
 use super::shapes::{symbols_from_stamps, ClaimOutcome};
 use super::CoordinationProxy;
 use crate::server::presence::{
-    AgentId, AgentSession, Claim, ClaimIntent, ClaimRequest, ClaimResult, ConflictEntry,
-    Holder, OccupancyEntry, SymbolOccupancy,
+    AgentId, AgentSession, Claim, ClaimIntent, ClaimRequest, ClaimResult, ConflictEntry, Holder,
+    OccupancyEntry, SymbolOccupancy,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -117,7 +117,10 @@ impl CoordinationProxy {
     /// Release the given paths; returns those zoanthrope reports as
     /// released (all of them in degraded mode).
     pub fn release(&self, agent_id: &AgentId, paths: &[PathBuf]) -> Vec<PathBuf> {
-        let strs: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let strs: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
         match self.release_paths(agent_id.as_str(), &strs) {
             Ok(body) => body
                 .get("released")
@@ -175,10 +178,7 @@ impl CoordinationProxy {
     }
 }
 
-fn snap_entry_for_path(
-    snap: &super::proxy::ClaimSnapshot,
-    path: &Path,
-) -> Option<OccupancyEntry> {
+fn snap_entry_for_path(snap: &super::proxy::ClaimSnapshot, path: &Path) -> Option<OccupancyEntry> {
     let mut out: Vec<OccupancyEntry> = Vec::new();
     for c in snap.all().iter().filter(|c| c.path == path) {
         upsert_entry(&mut out, c);

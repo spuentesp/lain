@@ -41,9 +41,7 @@ pub mod shapes;
 mod claims;
 
 pub use proxy::{CoordinationProxy, ProxyError};
-pub use shapes::{
-    symbols_from_stamps, CallerStamp, ClaimOutcome, Grant, Refusal, DEGRADED_MARKER,
-};
+pub use shapes::{symbols_from_stamps, CallerStamp, ClaimOutcome, Grant, Refusal, DEGRADED_MARKER};
 
 use std::path::{Path, PathBuf};
 
@@ -61,7 +59,11 @@ pub fn resolve_zoanthrope_bin() -> Option<PathBuf> {
             return p.exists().then_some(p);
         }
     }
-    let name = if cfg!(windows) { "zoanthrope.exe" } else { "zoanthrope" };
+    let name = if cfg!(windows) {
+        "zoanthrope.exe"
+    } else {
+        "zoanthrope"
+    };
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);

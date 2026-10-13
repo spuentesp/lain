@@ -8,9 +8,7 @@
 
 use lain::server::activity::ActivityTracker;
 use lain::server::ingest::LainServer;
-use lain::server::presence::{
-    load_pair, save_pair, AgentKind, AgentMode,
-};
+use lain::server::presence::{load_pair, save_pair, AgentKind, AgentMode};
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -35,24 +33,14 @@ fn sessions_survive_lain_restart() {
         Some(99999),
         None,
     );
-    save_pair(
-        &state_path,
-        server1.presence(),
-        &ActivityTracker::new(),
-    )
-    .expect("save");
+    save_pair(&state_path, server1.presence(), &ActivityTracker::new()).expect("save");
 
     // Drop server1.
     drop(server1);
 
     // Round 2: new server, same data dir.
     let server2 = LainServer::new(tmp.path(), &mem, None).expect("server");
-    load_pair(
-        &state_path,
-        server2.presence(),
-        &ActivityTracker::new(),
-    )
-    .expect("load");
+    load_pair(&state_path, server2.presence(), &ActivityTracker::new()).expect("load");
 
     let active = server2.presence().list_active(true);
     assert_eq!(active.len(), 1, "agent should survive restart");

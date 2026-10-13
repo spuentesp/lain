@@ -57,7 +57,10 @@ fn test_embedder_and_cache() -> (NlpEmbedder, EmbeddingCache) {
 /// assert against the `occupancy` payload, they only care that the
 /// `query_graph` JSON result is well-formed.
 fn empty_presence() -> (PresenceRegistry, CoordinationProxy) {
-    (PresenceRegistry::new(), CoordinationProxy::new(std::env::temp_dir()))
+    (
+        PresenceRegistry::new(),
+        CoordinationProxy::new(std::env::temp_dir()),
+    )
 }
 
 #[test]

@@ -119,5 +119,3 @@ fn noop_backend_always_returns_none() {
     let pid = backend.lookup_writer_pid(std::path::Path::new("/nonexistent"));
     assert_eq!(pid, None);
 }
-
-

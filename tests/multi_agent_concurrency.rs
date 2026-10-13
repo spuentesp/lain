@@ -656,8 +656,7 @@ fn three_agents_edit_holder_conflicts_with_readers() {
                     .and_then(|v| v.as_str())
                     .or_else(|| c.get("holder").and_then(|v| v.as_str()));
                 holder == Some(a_id.as_str())
-                    && c
-                        .get("path")
+                    && c.get("path")
                         .and_then(|p| p.as_str())
                         .is_some_and(|p| path_components_eq(p, &["src", "shared.rs"]))
             }),
@@ -936,5 +935,3 @@ fn expired_session_rejected() {
         "real token must still grant; got: {ok_resp}"
     );
 }
-
-

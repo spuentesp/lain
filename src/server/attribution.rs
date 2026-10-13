@@ -36,9 +36,7 @@
 //! a wrong one expires on its own.
 
 use crate::server::coordination::CoordinationProxy;
-use crate::server::presence::{
-    ClaimIntent, ClaimRequest, PresenceEvent, PresenceRegistry,
-};
+use crate::server::presence::{ClaimIntent, ClaimRequest, PresenceEvent, PresenceRegistry};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 #[allow(unused_imports)]

@@ -229,7 +229,11 @@ fn degraded_mode_is_advisory_and_never_blocks() {
             plan_revision: None,
         }],
     );
-    assert_eq!(result.granted.len(), 1, "degraded claim is granted advisory");
+    assert_eq!(
+        result.granted.len(),
+        1,
+        "degraded claim is granted advisory"
+    );
     assert!(result.conflicts.is_empty(), "degraded never conflicts");
     assert!(
         !proxy.degraded_notes().is_empty(),

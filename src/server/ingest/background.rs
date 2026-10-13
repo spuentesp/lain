@@ -7,8 +7,8 @@
 use crate::server::attribution::{
     AttributionBackend, AttributionWatcher, LsofBackend, NoopBackend, ProcFsBackend,
 };
-use crate::server::events_log::EventsLog;
 use crate::server::coordination::CoordinationProxy;
+use crate::server::events_log::EventsLog;
 use crate::server::presence::{PresenceEvent, PresenceRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;

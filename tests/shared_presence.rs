@@ -165,5 +165,3 @@ async fn releasing_on_one_server_frees_the_file_on_another() {
     );
     assert_eq!(resp["granted"].as_array().unwrap().len(), 1);
 }
-
-

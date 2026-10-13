@@ -70,5 +70,3 @@ fn e2e_attribution_via_real_child_pid() {
         "expected auto-claim after child write; got: {claims:?}"
     );
 }
-
-

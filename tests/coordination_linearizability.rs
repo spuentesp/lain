@@ -320,5 +320,3 @@ fn non_overlapping_scopes_both_win() {
 // and may be picked up by future iterations.
 #[allow(dead_code)]
 fn _pathbuf_marker(_p: &PathBuf) {}
-
-

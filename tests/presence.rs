@@ -63,7 +63,9 @@ fn heartbeat_rejects_wrong_token() {
     );
     assert!(reg.heartbeat(&a.id, &a.session_token).is_ok());
     assert!(reg.heartbeat(&a.id, "wrong").is_err());
-    assert!(reg.heartbeat(&AgentId("ghost".into()), &a.session_token).is_err());
+    assert!(reg
+        .heartbeat(&AgentId("ghost".into()), &a.session_token)
+        .is_err());
 }
 
 #[test]

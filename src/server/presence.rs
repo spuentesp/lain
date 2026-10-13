@@ -888,7 +888,6 @@ impl From<PresenceEvent> for PresenceEventPublic {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Persistence: PresenceRegistry sessions + activity feed <-> JSON
 // ---------------------------------------------------------------------------
@@ -1168,7 +1167,6 @@ mod world_state_tests {
     }
 }
 
-
 #[cfg(test)]
 mod ttl_config_tests {
     use super::*;
@@ -1192,5 +1190,3 @@ mod ttl_config_tests {
         );
     }
 }
-
-
