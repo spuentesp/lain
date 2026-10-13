@@ -50,13 +50,42 @@ fn make_test_graph_with_nodes() -> (GraphDatabase, VolatileOverlay) {
 fn test_find_anchors_basic() {
     let (graph, overlay) = make_test_graph_with_nodes();
 
-    let result = find_anchors(&graph, &overlay, 5, false);
+    let result = find_anchors(&graph, &overlay, 5, false, true);
     assert!(result.is_ok());
     let text = result.unwrap();
     // May be empty if no anchor scores calculated, or show anchors if calculate_anchor_scores was run
     if !text.contains("No anchors") {
         assert!(text.contains("anchors") || text.contains("Top"));
     }
+}
+
+/// spuentesp/lain#296: when the quiesce budget expires with an
+/// indexing pass still running, `find_anchors` must label its answer
+/// with the stable degraded banner instead of silently ranking
+/// whatever torn state it found.
+#[test]
+fn find_anchors_labels_the_answer_when_a_write_pass_occupies_the_budget() {
+    let (graph, overlay) = make_test_graph_with_nodes();
+
+    let text = find_anchors(&graph, &overlay, 5, false, false).unwrap();
+    assert!(
+        text.contains("degraded: indexing in progress"),
+        "a mid-pass answer must carry the degraded banner, got:\n{text}"
+    );
+}
+
+/// The other half of the contract: a quiesced graph gets no banner —
+/// silence is the honest signal when there is nothing to warn about
+/// (same principle as the freshness marker, spuentesp/lain#292).
+#[test]
+fn find_anchors_is_silent_about_degradation_when_the_graph_is_quiesced() {
+    let (graph, overlay) = make_test_graph_with_nodes();
+
+    let text = find_anchors(&graph, &overlay, 5, false, true).unwrap();
+    assert!(
+        !text.contains("degraded"),
+        "a quiesced graph must get no degraded banner, got:\n{text}"
+    );
 }
 
 #[test]

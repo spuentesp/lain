@@ -2,7 +2,8 @@
 //!
 //! This binary is a thin dispatcher over the clap-derived [`Args`] /
 //! [`Commands`] enum in [`lain::cli`]. The kept subcommands are:
-//! `server`, `workspaces`, `repos`, `query`, `ask`, `hooks`, `doctor`.
+//! `server`, `workspaces`, `repos`, `query`, `impact`, `ask`, `hooks`,
+//! `doctor`.
 //! `Init`, `Agents`, `Projects`, and the old top-level `Use` are gone
 //! after the consolidation. `hooks` is the agent pre-edit hook entry
 //! point (claim/release against the server's presence registry).
@@ -100,6 +101,11 @@ fn main() -> Result<()> {
             // `lain mcp` (see cli::query::run_query).
             lain::cli::query::run_query(&expression, workspace.as_deref())
         }
+        Some(Commands::Impact {
+            workspace,
+            format,
+            symbol,
+        }) => lain::cli::impact::run_impact(&symbol, workspace.as_deref(), &format),
         Some(Commands::Ask {
             config: _,
             question,

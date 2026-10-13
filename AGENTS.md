@@ -16,6 +16,19 @@ Two-branch model:
 
 dev → main is **release-only**, not a routine merge:
 
+0. **Zero-pending audit — publishing is the LAST step, not the first.**
+   Before cutting the branch: nothing half-done may remain. Check, and
+   record the evidence:
+   - every item in the acceptance findings register is closed or
+     explicitly scoped out of the release *in writing* (with why);
+   - no open issues from the acceptance program;
+   - no known test flakes left unfixed;
+   - no uncommitted WIP in any worktree;
+   - the acceptance suites, `demo.sh`, and the full test battery are
+     green on the exact tree to be released.
+   If anything is open, either land it in this release or write the
+   deferral down first. A release that ships with a list of "pendientes"
+   is half-done work.
 1. Branch `release/v0.x.y` off `dev`.
 2. Bump every release-metadata file (`Cargo.toml`, `Cargo.lock`,
    `server.json`, `npm-shim/package.json`, `Formula/lain.rb`).

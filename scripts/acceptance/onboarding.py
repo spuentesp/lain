@@ -141,6 +141,7 @@ def find_all_lains(work, path):
 
     add(shutil.which("lain", path=path))
     patterns = (os.path.join(work, "*", "bin", "lain"),
+                os.path.join(work, "*", "lain"),
                 os.path.join(work, "xdg-cache", "lain", "*", "*", "lain"),
                 os.path.join(work, "*", "lib", "node_modules", "*", "bin", "lain"))
     for pattern in patterns:
@@ -163,12 +164,13 @@ def package_dev(work, ev):
     for name in ("lain", "lain-git-sidecar"):
         path = os.path.join(REPO_ROOT, "target", "release", name)
         bins[name] = path
-    if not all(os.path.isfile(p) for p in bins.values()) or \
-            os.environ.get("LAIN_REBUILD") == "1":
-        p = ev.cmd(["cargo", "build", "--release", "--bin", "lain",
-                    "--bin", "lain-git-sidecar"], cwd=REPO_ROOT)
-        if p.returncode != 0:
-            raise RuntimeError(f"cargo build failed:\n{p.stderr[-2000:]}")
+    # Always build: cargo is incremental, and skipping when the binaries
+    # exist silently ships a STALE build (observed 2026-10-11: the swarm
+    # re-run packaged a pre-fix binary because target/release was warm).
+    p = ev.cmd(["cargo", "build", "--release", "--bin", "lain",
+                "--bin", "lain-git-sidecar"], cwd=REPO_ROOT)
+    if p.returncode != 0:
+        raise RuntimeError(f"cargo build failed:\n{p.stderr[-2000:]}")
 
     version = package_version()
     platform_triple = detect_platform(ev)
@@ -410,9 +412,12 @@ def pump(src, dst, tag):
         dst.close()
     except Exception:
         pass
-threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, b">>>"), daemon=True).start()
+t_out = threading.Thread(target=pump, args=(proc.stdout, sys.stdout.buffer, b">>>"))
+t_out.start()
 threading.Thread(target=pump, args=(sys.stdin.buffer, proc.stdin, b"<<<"), daemon=True).start()
-sys.exit(proc.wait())
+rc = proc.wait()
+t_out.join(timeout=5)
+os._exit(rc)
 '''
 
 
@@ -703,9 +708,11 @@ def main():
                     help="work directory (default: fresh mktemp; always kept as evidence)")
     args = ap.parse_args()
 
-    if args.mode == "agent" and args.dist == "dev":
-        ap.error("--mode agent tests what an outsider can install from public "
-                 "docs: use --dist npm or npm@X.Y.Z (--dist dev is graph mode only)")
+    if args.mode == "agent" and args.dist == "dev" and args.stage in ("a", "all"):
+        ap.error("--mode agent's onboarding stage tests what an outsider can "
+                 "install from public docs: use --dist npm or npm@X.Y.Z there "
+                 "(--dist dev is fine for --stage b feature runs; the report "
+                 "records that the onboarding path was not under test)")
 
     import tempfile
     work = args.work or tempfile.mkdtemp(prefix="lain-onboarding-")
@@ -745,7 +752,10 @@ def main():
             prefix = os.path.join(work, "prefix")
             os.makedirs(os.path.join(prefix, "bin"), exist_ok=True)
             env["npm_config_prefix"] = prefix
-            env["PATH"] = os.path.join(prefix, "bin") + os.pathsep + env["PATH"]
+            # prefix/bin for npm installs; prefix itself for the install.sh
+            # (dev) layout, which drops `lain` directly into LAIN_INSTALL_DIR.
+            env["PATH"] = (os.path.join(prefix, "bin") + os.pathsep
+                           + prefix + os.pathsep + env["PATH"])
             # The agent CLI needs its own login (real HOME). LAIN's config and
             # state stay isolated: clean_env points XDG_CONFIG_HOME/XDG_STATE_HOME
             # at the scratch dirs, so no inherited LAIN state can leak in.

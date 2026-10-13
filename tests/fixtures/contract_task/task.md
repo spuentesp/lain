@@ -10,7 +10,9 @@ Decision made by the team: `orders` renames the RESPONSE field `customer_id`
 to `customerId` (same type). The request side keeps `customer_id`. Endpoint
 paths and public function names must not change, and nothing under `tests/`
 may be modified in any repo. Committing is allowed if the tool's update path
-requires it.
+requires it. The code-graph tooling can also emit verifiable impact claims
+(e.g. `lain impact --format claims <symbol>`) — prefer copying its output
+over inventing a format.
 
 ## Before editing anything
 

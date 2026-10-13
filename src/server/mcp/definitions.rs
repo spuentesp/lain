@@ -728,4 +728,38 @@ mod dump_tools_schema_tests {
             "non-inert tools dropped: {names:?}"
         );
     }
+
+    /// #293: the dump is the schema consumers read, and it must tell the
+    /// same story as the runtime. `sync_state` genuinely requires a repo
+    /// scope on a multi-repo server (the resolver rejects an unscoped
+    /// call), so the dumped schema must declare `repo_id` — optional in
+    /// single-repo mode, but named, with a description that says exactly
+    /// when it becomes required. Before this fix the property was absent
+    /// and `required` was `[]`, so a schema-following agent hit a config
+    /// error it could not have anticipated.
+    #[test]
+    fn sync_state_schema_declares_repo_scope() {
+        let tools = dump_tools_schema(&[]);
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "sync_state")
+            .expect("sync_state in dump");
+        let schema = &tool["inputSchema"];
+        let prop = schema
+            .pointer("/properties/repo_id")
+            .expect("sync_state inputSchema must declare repo_id");
+        assert_eq!(prop["type"], "string");
+        let description = prop["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("Required when the server hosts more than one repository"),
+            "repo_id description must state exactly when it is required, got: {description:?}"
+        );
+        // Optional in single-repo mode — must NOT be in `required`.
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|r| !r.iter().any(|v| v == "repo_id")),
+            "repo_id must stay optional (single-repo servers accept a bare call): {schema}"
+        );
+    }
 }

@@ -229,6 +229,7 @@ async fn blast_radius_latency_benchmark() {
         let out = lain::tools::handlers::impact::get_blast_radius(
             &graph,
             &overlay,
+            std::path::Path::new("/"),
             "function_9999",
             false,
             // Heuristic edges (DynamicDispatch / BusTopic / RouteMatches)

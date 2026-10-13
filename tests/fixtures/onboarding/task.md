@@ -11,7 +11,9 @@ The function `normalize_token` in `core.py` must also collapse runs of internal
 whitespace to a single space: `"  A   B  "` must normalize to `"a b"` (it
 already strips and lowercases). Public function names must not change, and
 nothing under `tests/` may be modified. Committing your change is allowed if
-the tool's update path requires it.
+the tool's update path requires it. The code-graph tooling can also emit
+verifiable impact claims (e.g. `lain impact --format claims <symbol>`) —
+prefer copying its output over inventing a format.
 
 ## Before editing anything
 

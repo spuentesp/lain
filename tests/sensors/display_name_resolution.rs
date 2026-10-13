@@ -27,8 +27,10 @@
 //!   4. Net::HTTP direct — exercises the surviving hardcoded Ruby arm
 //!      that maps `Net::HTTP` to `net/http`.
 //!   5. Java OkHttp `client.newCall(...).execute()` — exercises the
-//!      display_name path through the framework's `.scm` query, with
-//!      the URL living upstream (the OkHttp `.scm` is execute-only).
+//!      display_name path through the framework's `.scm` query; the
+//!      `.scm` binds the `newCall` argument as `@url`, so the
+//!      inline `Request.Builder().url(...)` chain resolves to a
+//!      real host.
 //!
 //! ## On scenario 2 (originally `client = HTTParty; client.get(url)`)
 //!
@@ -169,15 +171,15 @@ fn net_http_direct_get_resolves_to_canonical_lib_path() {
 
 /// Java OkHttp — `okhttp-outbound` carries `display_name: okhttp`
 /// (Item 2 of the parked-Minor #2 pass). The walker falls through to
-/// the `ktor / okhttp / httpclient` synthetic-URL branch (the .scm
-/// matches `execute()` only — no `@url` capture and no `@lib`
-/// capture), reads `framework.effective_id()` to mint both the
-/// synthetic URL prefix and the `via_lib`. The expected `via_lib`
-/// is `"okhttp"` — the public gem-name declared via `display_name`
-/// in `frameworks.yaml`. A regression that drops the synthetic-URL
+/// the `ktor / okhttp / httpclient` branch, reads
+/// `framework.effective_id()` to mint the `via_lib`. The expected
+/// `via_lib` is `"okhttp"` — the public gem-name declared via
+/// `display_name` in `frameworks.yaml`. A regression that drops the
 /// branch's `lib_text` fallback to `effective_id()` would emit
 /// `Library { name: "" }` for this shape — the regression this test
-/// pins.
+/// pins. The `.scm` binds the `newCall` argument as `@url`, so the
+/// inline `Request.Builder().url(...)` chain must also resolve to
+/// the real host rather than a synthetic URL.
 #[test]
 fn java_okhttp_execute_resolves_to_display_name() {
     let src = "\
@@ -193,14 +195,19 @@ class Foo {
         !calls.is_empty(),
         "OkHttpClient.newCall(...).execute() must be detected via okhttp-outbound.scm; got empty"
     );
-    // The OkHttp `.scm` captures `execute` only — no `@url` and no
-    // `@lib` — so the walker emits a synthetic URL. Pin that exactly
-    // one call was emitted and that via is "okhttp".
+    // Exactly one call site (the `execute()`), via "okhttp", with
+    // the URL bound from the `newCall` argument's builder chain.
     assert_eq!(calls.len(), 1, "got {calls:?}");
     let c = &calls[0];
     assert!(
         matches!(&c.via, CallVia::Library { name } if name == "okhttp"),
         "via must be Library {{ name: \"okhttp\" }} via display_name resolution; got {:?}",
         c.via
+    );
+    assert_eq!(
+        c.url.host,
+        lain::server::federation::contracts::model::HostPart::Literal("example.com".to_string()),
+        "the builder-chain URL must resolve; got {:?}",
+        c.url.host
     );
 }

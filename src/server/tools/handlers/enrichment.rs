@@ -30,9 +30,16 @@ pub fn run_enrichment(
                 cochange_min_pair_count,
                 cochange_max_commit_files,
             ) {
-                Ok(pairs) => pairs,
+                Ok(pairs) => {
+                    graph_clone.clear_cochange_failure();
+                    pairs
+                }
                 Err(e) => {
+                    // #302: record the failure on the graph so
+                    // `get_coupling_radar` can report "analysis
+                    // unavailable" instead of a false "no coupling".
                     tracing::warn!("Co-change analysis failed: {}, skipping", e);
+                    graph_clone.record_cochange_failure(&e);
                     Vec::new()
                 }
             };
@@ -40,7 +47,10 @@ pub fn run_enrichment(
             (pairs, commit)
         };
 
-        // 2. Insert co-change edges into the graph
+        // 2. Insert co-change edges into the graph. Announce the
+        // mutating pass first so readers wait it out instead of
+        // answering from the mid-pass graph (spuentesp/lain#296).
+        let _write_pass = graph_clone.begin_write_pass();
         if !co_change_pairs.is_empty() {
             let pair_tuples: Vec<_> = co_change_pairs
                 .iter()
@@ -186,9 +196,22 @@ pub fn sync_state(
         let (new_commits, latest_commit): (Vec<CommitInfo>, String) = {
             let new_commits = if let Some(ref last) = last_commit {
                 match git_clone.get_new_commits_since(last) {
-                    Ok(c) => c,
+                    Ok(c) => {
+                        graph_clone.clear_cochange_failure();
+                        c
+                    }
                     Err(e) => {
-                        tracing::warn!("Failed to get new commits: {}, doing full refresh", e);
+                        // The old code warned "doing full refresh" and then
+                        // analyzed NOTHING — a silent negative (spuentesp/lain#302
+                        // family). Record the failure so coupling answers say
+                        // the analysis is unavailable instead of "no coupling".
+                        tracing::warn!(
+                            "Failed to get new commits: {e}; co-change sync skipped \
+                             and recorded as unavailable"
+                        );
+                        graph_clone.record_cochange_failure(&format!(
+                            "new-commit listing failed during sync: {e}"
+                        ));
                         Vec::new()
                     }
                 }
@@ -227,6 +250,9 @@ pub fn sync_state(
             .map(|((f1, f2), c)| (f1, f2, c))
             .collect();
 
+        // Mutating pass starts here (co-change edges + scores);
+        // readers wait it out (spuentesp/lain#296).
+        let _write_pass = graph_clone.begin_write_pass();
         if !pair_tuples.is_empty() {
             if let Err(e) = graph_clone.insert_co_change_edges(&pair_tuples) {
                 tracing::error!("Sync failed to insert edges: {}", e);

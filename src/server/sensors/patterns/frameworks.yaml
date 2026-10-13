@@ -71,6 +71,13 @@ languages:
     - id: aiokafka-consumer
       kind: topic_consumer
       path_regex: '\b(?:AIOKafkaConsumer|KafkaConsumer)\s*\(\s*["'']([^"'']+)["'']'
+    - id: confluent-kafka-consumer
+      kind: topic_consumer
+      # confluent_kafka Python: `consumer.subscribe(["topic"])` —
+      # the literal topic list (the `Consumer({...})` ctor carries
+      # config only, never a topic). Group 1: string-literal topic
+      # name.
+      path_regex: '\.subscribe\s*\(\s*\[\s*["'']([^"'']+)["'']'
     - id: aiohttp-send
       kind: topic_producer
       # `.send_and_wait(...)` / `.send(...)` with first string
@@ -88,6 +95,29 @@ languages:
       # same-file lookahead for the next `def` line; the spec is a
       # stable sentinel because Celery doesn't pass a spec string.
       path_regex: '^@(?:\w+\.)?task\b|^@shared_task\b'
+    # Task 2: pika (Python AMQP) idioms. The walker consumes these
+    # via `topic_producer_patterns` / `topic_consumer_patterns`; the
+    # event sensor derives broker "amqp" from the `pika*` framework
+    # id, so these mint `amqp/<queue>` topics instead of `kafka/…`.
+    # Group 1: string-literal queue/routing-key name. Group 2: bare
+    # identifier (resolved against same-file constants).
+    - id: pika-publish
+      kind: topic_producer
+      path_regex: '\.basic_publish\s*\([^)]*?routing_key\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pika-consume
+      kind: topic_consumer
+      path_regex: '\.basic_consume\s*\([^)]*?queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pika-queue-declare
+      kind: topic_producer
+      path_regex: '\.queue_declare\s*\([^)]*?queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pika-queue-bind
+      kind: topic_consumer
+      # `channel.queue_bind(queue=..., exchange=..., routing_key=...)`
+      # declares the repo's use of the queue — the acceptance
+      # fixtures' ONLY AMQP consumer idiom (no basic_consume /
+      # basic_publish / queue_declare anywhere). Queue is the `queue`
+      # kwarg. Group 1: string literal. Group 2: bare identifier.
+      path_regex: '\.queue_bind\s*\([^)]*?queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
 
   # ── TypeScript / JavaScript ─────────────────────────────────────
   tsjs:
@@ -127,6 +157,34 @@ languages:
       kind: topic_consumer
       # Group 1: string-literal topic name in the topics array.
       path_regex: '\.(?:run|subscribe)\s*\(\s*\{[^}]*?topics?\s*:\s*\[\s*["'']([^"'']+)["'']'
+    # Task 2: amqplib (Node AMQP) idioms. The event sensor derives
+    # broker "amqp" from the `amqplib*` framework id, so these mint
+    # `amqp/<queue>` topics instead of `kafka/…`.
+    - id: amqplib-publish
+      kind: topic_producer
+      # amqplib `channel.publish(exchange, routingKey, content, …)` —
+      # the routing key is argument 2. The trailing `\s*,` requires
+      # the mandatory content argument, keeping unrelated two-argument
+      # `res.publish(a, b)` calls from minting a bus topic. Group 1:
+      # string literal. Group 2: bare identifier.
+      path_regex: '\.publish\s*\([^,]+,\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))\s*,'
+    - id: amqplib-consume
+      kind: topic_consumer
+      # amqplib `channel.consume(queue, onMessage, …)` — the queue is
+      # argument 1; argument 2 is the callback and is never a queue
+      # name. Group 1: string literal. Group 2: bare identifier.
+      path_regex: '\.consume\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: amqplib-queue-declare
+      kind: topic_producer
+      # amqplib `channel.assertQueue(queue, options)` — the queue is
+      # argument 1 (the queue.declare sibling of pika's queue_declare).
+      path_regex: '\.assertQueue\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: amqplib-queue-bind
+      kind: topic_consumer
+      # amqplib `channel.bindQueue(queue, source, pattern, args)` —
+      # binding the queue declares the repo's use of it (the sibling
+      # of pika's queue_bind); the queue is argument 1.
+      path_regex: '\.bindQueue\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
     - id: nestjs-cron
       kind: scheduled
       path_regex: '@Cron\s*\(\s*["'']([^"'']+)["'']'

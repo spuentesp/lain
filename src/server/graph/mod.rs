@@ -68,9 +68,10 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
 /// - `HttpRoute` with `ProviderOrigin::OpenApi` → [`SensorOwner::OpenApiSensor`]
 /// - `Schema`, `Field` → [`SensorOwner::GrpcProviderSensor`] for `.proto`,
 ///   [`SensorOwner::GraphqlProviderSensor`] for `.graphql`/`.gql`,
-///   [`SensorOwner::EventSensor`] for `.avsc`, else
+///   [`SensorOwner::EventSensor`] for `.avsc` / `*.schema.json` (the
+///   payload schemas `event_sensor::scan_payload_schemas` emits), else
 ///   [`SensorOwner::OpenApiSensor`] (which owns `openapi.json` too —
-///   never route `.json` to the event sensor)
+///   never route plain `.json` to the event sensor)
 /// - Contract facts win over node-type catch-alls: `WebSocketConsumer`
 ///   rides on `HttpClientCall`, `TopicConsumer` on `Function`
 /// - `HttpClientCall` → [`SensorOwner::HttpClientSensor`] (PR 6)
@@ -190,19 +191,18 @@ fn derive_owner(
                 // never passed to `replace_sensor_output` — so those
                 // nodes were never retracted either.
                 Some(SensorOwner::GraphqlProviderSensor)
-            } else if node.path.ends_with(".avsc") {
-                // Avro payload schemas belong to the event/topic
-                // sensor. NOTE: `.json` is deliberately NOT here —
+            } else if node.path.ends_with(".avsc") || node.path.ends_with(".schema.json") {
+                // Payload schemas (Avro / JSON-Schema) belong to the
+                // event/topic sensor: `event_sensor` walks `*.avsc`
+                // and `*.schema.json` and emits these nodes
+                // (`scan_payload_schemas`), so it is the one sensor
+                // entitled to retract them on rescan.
+                //
+                // NOTE: a plain `.json` path is deliberately NOT here —
                 // `openapi_sensor` emits Schema/Field nodes for
                 // `openapi.json` / `swagger.json`, and routing those to
                 // EventSensor makes `event_sensor`'s
                 // `replace_sensor_output` retract them on every scan.
-                //
-                // NOTE: no sensor emits these today — `parse_payload_file`,
-                // which would have fed them, had no callers and was
-                // removed. The arm is kept because a future emitter is
-                // plausible and the routing is decided here; do not read
-                // it as live coverage.
                 Some(SensorOwner::EventSensor)
             } else {
                 Some(SensorOwner::OpenApiSensor)
@@ -213,7 +213,9 @@ fn derive_owner(
                 Some(SensorOwner::GrpcProviderSensor)
             } else if node.path.ends_with(".graphql") || node.path.ends_with(".gql") {
                 Some(SensorOwner::GraphqlProviderSensor)
-            } else if node.path.ends_with(".avsc") {
+            } else if node.path.ends_with(".avsc") || node.path.ends_with(".schema.json") {
+                // Same routing as the `Schema` arm above: the emitter
+                // (`event_sensor` for payload schemas) owns its fields.
                 Some(SensorOwner::EventSensor)
             } else {
                 Some(SensorOwner::OpenApiSensor)
@@ -376,6 +378,46 @@ pub struct GraphDatabase {
     /// matches the other shared fields so `GraphDatabase::clone` is
     /// still cheap and points at the same accumulator.
     pending_external_edges: Arc<parking_lot::Mutex<Vec<GraphEdge>>>,
+    /// Count of in-flight mutating indexing passes (`build_core_memory`,
+    /// `index_one_repo`, background enrichment). Readers that must not
+    /// observe a torn mid-pass graph — the pass replaces nodes in
+    /// place and only restores anchor scores and co-change edges at
+    /// the very end — poll this via [`Self::write_pass_active`] and
+    /// wait it out (spuentesp/lain#296: tool calls landing mid-pass
+    /// ranked anchors alphabetically and claimed "no co-change").
+    /// Shared across clones so a pass begun on one handle is visible
+    /// to readers holding any other clone of the same database.
+    write_pass_active: Arc<std::sync::atomic::AtomicU64>,
+    /// Why the most recent co-change analysis pass failed, when it did
+    /// (issue #302). An empty co-change edge set is ambiguous on its
+    /// own: it means "nothing co-changes" after a successful pass and
+    /// "unknown" after a failed one. The ingest pipeline records the
+    /// failure here instead of swallowing it into an empty edge set,
+    /// and `get_coupling_radar` reads it so a failed analysis is
+    /// reported as unavailable rather than as the false negative
+    /// "No co-change coupling found". In-memory only (not WAL-logged,
+    /// not persisted): it annotates the pass that just ran, not
+    /// durable graph state. Cleared by a later successful pass and by
+    /// [`Self::reset`].
+    cochange_failure: Arc<RwLock<Option<String>>>,
+}
+
+/// RAII marker for "a mutating indexing pass is running on this graph".
+///
+/// Held for the duration of one indexing/enrichment pass; the counter
+/// it bumps is shared across `GraphDatabase` clones. Readers poll
+/// [`GraphDatabase::write_pass_active`] and wait for it to drop to
+/// zero before answering. Dropping the guard (including on an early
+/// return or a panic unwinding through the pass) clears the slot.
+pub struct WritePassGuard {
+    active: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Drop for WritePassGuard {
+    fn drop(&mut self) {
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// How current the graph is for one file.
@@ -477,6 +519,8 @@ impl GraphDatabase {
             // `insert_co_change_edges`.
             namespace: RepoNamespace::for_test(),
             pending_external_edges: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            write_pass_active: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cochange_failure: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -508,6 +552,26 @@ impl GraphDatabase {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Mark the start of a mutating indexing pass. The returned guard
+    /// must be held until the pass has fully finished writing (scores
+    /// recomputed, co-change edges inserted) so readers can wait out
+    /// the torn mid-pass window instead of answering from it
+    /// (spuentesp/lain#296).
+    pub fn begin_write_pass(&self) -> WritePassGuard {
+        self.write_pass_active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        WritePassGuard {
+            active: Arc::clone(&self.write_pass_active),
+        }
+    }
+
+    /// Whether at least one mutating indexing pass is in flight.
+    pub fn write_pass_active(&self) -> bool {
+        self.write_pass_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
     }
 
     fn check_writable(&self) -> Result<(), LainError> {
@@ -2152,6 +2216,26 @@ impl GraphDatabase {
         Ok(out)
     }
 
+    /// Record that the most recent co-change analysis failed (issue
+    /// #302), so readers can tell "unknown" apart from a genuine "no
+    /// co-changes". In-memory annotation; not persisted.
+    pub fn record_cochange_failure(&self, err: impl std::fmt::Display) {
+        *self.cochange_failure.write() = Some(err.to_string());
+    }
+
+    /// Forget any recorded co-change failure. Called when a co-change
+    /// pass completes successfully, so a fixed git repository stops
+    /// reporting the stale error.
+    pub fn clear_cochange_failure(&self) {
+        *self.cochange_failure.write() = None;
+    }
+
+    /// The recorded co-change analysis failure, if the most recent pass
+    /// failed. `None` means the last pass succeeded or none has run.
+    pub fn cochange_failure(&self) -> Option<String> {
+        self.cochange_failure.read().clone()
+    }
+
     pub fn get_last_commit(&self) -> Result<Option<String>, LainError> {
         Ok(self.last_commit.read().clone())
     }
@@ -2190,6 +2274,9 @@ impl GraphDatabase {
         self.path_index.clear();
         self.pending_external_edges.lock().clear();
         *self.last_commit.write() = None;
+        // A wiped graph will be rebuilt by a fresh analysis pass; a
+        // stale failure from before the reset must not outlive it.
+        self.clear_cochange_failure();
         Ok(())
     }
 
@@ -2955,6 +3042,53 @@ mod replace_tests {
     fn sensor_owner_of_returns_none_for_unowned_nodes() {
         let plain = GraphNode::new(NodeType::Function, "parse".into(), "src/x.rs".into());
         assert!(sensor_owner_of(&plain).is_none());
+    }
+
+    /// Payload schema files route to the sensor that emits them
+    /// (`event_sensor` scans `*.avsc` and `*.schema.json`), while a
+    /// plain `.json` OpenAPI spec stays with `OpenApiSensor`. Routing
+    /// `*.schema.json` to OpenApiSensor would strand its nodes — that
+    /// sensor never emits them, so `event_sensor`'s rescan could never
+    /// retract them — and routing plain `.json` the other way would
+    /// let `event_sensor`'s rescan retract `openapi.json` schemas.
+    #[test]
+    fn payload_schema_files_route_to_event_sensor_and_plain_json_stays_openapi() {
+        use crate::federation::contracts::model::{ContractFact, Direction, FieldMeta, TypeDesc};
+
+        let schema_at = |path: &str| {
+            let mut n = GraphNode::new(NodeType::Schema, "Order".into(), path.into());
+            n.contract = vec![ContractFact::Schema {
+                direction: Direction::Payload,
+            }];
+            n
+        };
+        let field_at = |path: &str| {
+            let mut n = GraphNode::new(NodeType::Field, "customer_id".into(), path.into());
+            n.contract = vec![ContractFact::Field(FieldMeta {
+                ty: TypeDesc::String,
+                required: true,
+                nullable: false,
+                enum_values: None,
+            })];
+            n
+        };
+
+        for (path, want) in [
+            ("schemas/order.avsc", Some(SensorOwner::EventSensor)),
+            ("schemas/order.schema.json", Some(SensorOwner::EventSensor)),
+            ("openapi.json", Some(SensorOwner::OpenApiSensor)),
+        ] {
+            assert_eq!(
+                sensor_owner_of(&schema_at(path)),
+                want,
+                "Schema ownership for {path}"
+            );
+            assert_eq!(
+                sensor_owner_of(&field_at(path)),
+                want,
+                "Field ownership for {path}"
+            );
+        }
     }
 }
 
@@ -4405,6 +4539,60 @@ mod survivor_pin_tests {
         assert!(
             !g.has_references_from(&w_id),
             "a node with no outgoing edges has no references"
+        );
+    }
+}
+
+/// #302: the co-change failure annotation must survive clones (the tool
+/// context holds a clone taken at startup), be cleared by a later
+/// successful pass, and be forgotten by `reset` (which wipes the edges
+/// the next full build will regenerate).
+#[cfg(test)]
+mod cochange_failure_tests {
+    use super::*;
+
+    fn db(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    #[test]
+    fn failure_recorded_cleared_and_shared_across_clones() {
+        let g = db("lain_test_cochange_failure");
+        assert_eq!(g.cochange_failure(), None, "fresh graph has no failure");
+
+        g.record_cochange_failure("git sensor wedged");
+        assert_eq!(
+            g.cochange_failure().as_deref(),
+            Some("git sensor wedged"),
+            "recorded failure must be readable"
+        );
+
+        let clone = g.clone();
+        assert_eq!(
+            clone.cochange_failure().as_deref(),
+            Some("git sensor wedged"),
+            "clones share the annotation (tool context holds a clone)"
+        );
+
+        clone.clear_cochange_failure();
+        assert_eq!(
+            g.cochange_failure(),
+            None,
+            "a successful pass (clear) is visible from every handle"
+        );
+    }
+
+    #[test]
+    fn reset_forgets_a_stale_failure() {
+        let g = db("lain_test_cochange_failure_reset");
+        g.record_cochange_failure("git sensor wedged");
+        g.reset().unwrap();
+        assert_eq!(
+            g.cochange_failure(),
+            None,
+            "reset wipes edges and the stale failure with them"
         );
     }
 }

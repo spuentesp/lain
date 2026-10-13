@@ -24,6 +24,7 @@ reference, tuning options, and day-to-day operating notes.
 | `lain repos` | Add, list, or remove entries in `repos.yaml`. |
 | `lain workspaces` | Create and switch named groups of repositories. |
 | `lain query` | Run a `query_graph` operation array against a saved graph. |
+| `lain impact` | Print machine-checkable impact claims for a symbol: `AFFECTED: <repo>:<file>:<symbol>  EVIDENCE: <verified\|needs-investigation\|missing>`. `--format json` for the structured claims. Reads the saved graph like `lain query`. |
 | `lain init` | Create a minimal `repos.yaml` for the current Git repository. |
 | `lain ask` | PreToolUse hook handler used by `hooks/claude/lain-hook.sh`: takes the hook JSON and prints a decision. To search code from a shell, use `lain oneshot search_code "<text>"`. |
 | `lain hooks` | Claim or release files and check branch overlap from agent hooks. |

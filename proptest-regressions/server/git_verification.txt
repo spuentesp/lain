@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# failures which occur on your machine are also run on CI.
+# Two failures of server::git::verification::differential::
+# sensor_agrees_with_git_after_every_operation observed in CI on
+# 2026-10-10 (both: the Added-label assertion's `git diff --cached
+# --diff-filter=D` oracle silently dropped a staged deletion to a
+# rename because it lacked --no-renames).
+cc 0b9f14a3a4da36676e908c8189b28018f50ad6d321780112bb55b3881ad36196
+cc 3d669b8f44647f0005a9ff4393b551d45229c9f60edf159e2d3e1cedf48cff63

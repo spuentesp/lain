@@ -159,7 +159,7 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
     // Build a minimal overlay (the function takes one even when
     // unused).
     let overlay = lain::overlay::VolatileOverlay::new();
-    let text = find_anchors(&db, &overlay, 50, true)
+    let text = find_anchors(&db, &overlay, 50, true, true)
         .expect("find_anchors should not error on a known-shape graph");
 
     eprintln!("[find_anchors] response:\n{text}");
@@ -247,8 +247,8 @@ fn find_anchors_on_empty_graph_returns_empty_list() {
     let db = per_repo.db().clone();
 
     let overlay = lain::overlay::VolatileOverlay::new();
-    let text =
-        find_anchors(&db, &overlay, 10, true).expect("find_anchors on empty graph must succeed");
+    let text = find_anchors(&db, &overlay, 10, true, true)
+        .expect("find_anchors on empty graph must succeed");
     let _ = per_repo;
     assert!(
         text.is_empty() || text.contains("No anchors"),

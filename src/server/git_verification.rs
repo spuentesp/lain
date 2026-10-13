@@ -54,6 +54,7 @@ fn concurrent_use_of_one_shared_sensor_is_consistent() {
 mod differential {
     use super::*;
     use proptest::prelude::*;
+    use proptest::test_runner::RngSeed;
     use std::collections::{BTreeMap, BTreeSet};
     use std::process::Command;
 
@@ -192,7 +193,16 @@ mod differential {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig { cases: 40, max_shrink_iters: 200, ..ProptestConfig::default() })]
+        // Fixed `rng_seed`: every run replays the same op sequences, so the
+        // verdict is reproducible instead of depending on a fresh random seed
+        // each CI round (#295). The two historical CI failures are persisted
+        // in proptest-regressions/server/git_verification.txt and replay first.
+        #![proptest_config(ProptestConfig {
+            cases: 40,
+            max_shrink_iters: 200,
+            rng_seed: RngSeed::Fixed(0x0295_D1FF),
+            ..ProptestConfig::default()
+        })]
 
         #[test]
         fn sensor_agrees_with_git_after_every_operation(ops in prop::collection::vec(op(), 1..14)) {
@@ -220,7 +230,12 @@ mod differential {
                     .lines()
                     .map(str::to_string)
                     .collect();
-                let staged_deleted: BTreeSet<String> = git(&root, &["diff", "--cached", "--name-only", "--diff-filter=D"])
+                // `--no-renames`, like `expected()`: with rename detection on
+                // (git's default), a staged deletion whose content matches a
+                // staged addition is reported as a rename, and `--diff-filter=D`
+                // then drops it — wrongly failing this assertion for the
+                // INDEX_DELETED|WT_NEW recreation the sensor labels `Added` (#295).
+                let staged_deleted: BTreeSet<String> = git(&root, &["diff", "--cached", "--name-only", "--no-renames", "--diff-filter=D"])
                     .lines()
                     .map(str::to_string)
                     .collect();

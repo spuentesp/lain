@@ -62,12 +62,14 @@ impl VolatileOverlay {
     }
 
     /// Bump the overlay's last-updated timestamp without changing
-    /// nodes. Used after a successful indexing pass so the freshness
-    /// indicator reflects "we just indexed" rather than "no edits
-    /// ever". The index path doesn't insert nodes through the
-    /// overlay (it writes the static graph), so without this the
-    /// freshness banner stays "stale" forever on a freshly-indexed
-    /// server.
+    /// nodes. Used after a successful indexing pass (and overlay
+    /// syncs) so `last_update_age_secs` reflects "we just worked on
+    /// this" rather than "no edits ever" — the index path doesn't
+    /// insert nodes through the overlay (it writes the static graph).
+    /// Note this age no longer drives any user-facing freshness
+    /// marker: `get_blast_radius` warns only on real unindexed
+    /// changes (spuentesp/lain#292), because an idle-overlay age
+    /// read as "answers may be wrong" on a fully-current graph.
     pub fn touch(&self) {
         *self.last_updated.write() = Instant::now();
     }

@@ -50,6 +50,14 @@ test('checksum mismatch fails closed', () => {
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('Windows extraction uses System32 bsdtar, not the first tar on PATH', () => {
+  const env = { SystemRoot: 'C:\\Windows' };
+  assert.strictEqual(runtime.tarExecutable('win32', env, () => true), 'C:\\Windows\\System32\\tar.exe');
+  assert.strictEqual(runtime.tarExecutable('win32', env, () => false), 'tar');
+  assert.strictEqual(runtime.tarExecutable('win32', {}, () => true), 'tar');
+  assert.strictEqual(runtime.tarExecutable('linux', env, () => true), 'tar');
+});
+
 test('Windows runtime DLLs are installed beside the executable', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lain-windows-dlls-'));
   const source = path.join(directory, 'source');

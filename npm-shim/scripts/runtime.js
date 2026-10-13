@@ -104,6 +104,20 @@ function verifyWindowsRuntimeDlls(directory, platform = process.platform) {
   }
 }
 
+// On Windows, `tar` on PATH is whatever comes first. Under Git Bash (the
+// shell GitHub's Windows runners and many dev setups use) that is Git's GNU
+// tar, which fails on these archives with `gzip: stdin: unexpected end of
+// file`. Windows ships bsdtar at System32\tar.exe; use it when present.
+function tarExecutable(platform = process.platform, env = process.env, exists = fs.existsSync) {
+  if (platform !== 'win32') return 'tar';
+  const root = env.SystemRoot || env.SYSTEMROOT || env.windir || env.WINDIR;
+  if (root) {
+    const system = path.win32.join(root, 'System32', 'tar.exe');
+    if (exists(system)) return system;
+  }
+  return 'tar';
+}
+
 function download(url, destination, redirects = 5) {
   return new Promise((resolve, reject) => {
     const request = https.get(url, { headers: { 'User-Agent': '@spuentesp/lain-mcp' } }, (response) => {
@@ -165,7 +179,7 @@ async function ensureBinary(options = {}) {
     await fetch(releaseUrl(version, 'SHA256SUMS'), sums);
     await fetch(releaseUrl(version, asset), archive);
     verifyArchive(archive, parseChecksum(fs.readFileSync(sums, 'utf8'), asset));
-    execFileSync('tar', ['xzf', archive, '-C', temporary], { stdio: ['ignore', 'ignore', 'inherit'] });
+    execFileSync(tarExecutable(platform, env), ['xzf', archive, '-C', temporary], { stdio: ['ignore', 'ignore', 'inherit'] });
     const extracted = path.join(temporary, platform === 'win32' ? 'lain.exe' : 'lain');
     if (!fs.existsSync(extracted)) throw new Error(`${asset} does not contain the Lain executable at its root`);
     if (platform !== 'win32') fs.chmodSync(extracted, 0o755);
@@ -194,4 +208,4 @@ async function ensureBinary(options = {}) {
   }
 }
 
-module.exports = { assetName, binaryPath, cacheRoot, ensureBinary, installWindowsRuntimeDlls, normalizeVersion, parseChecksum, releaseUrl, selectedVersion, sha256, targetFor, verifyArchive, verifyBinary, verifySidecarBinary, verifyWindowsRuntimeDlls };
+module.exports = { assetName, binaryPath, cacheRoot, ensureBinary, installWindowsRuntimeDlls, normalizeVersion, parseChecksum, releaseUrl, selectedVersion, sha256, tarExecutable, targetFor, verifyArchive, verifyBinary, verifySidecarBinary, verifyWindowsRuntimeDlls };

@@ -486,6 +486,51 @@ pub fn format_ago(unix_secs: i64) -> String {
     format_duration(now - unix_secs)
 }
 
+/// How long a tool waits for an in-flight indexing pass to finish
+/// before answering from the mid-pass graph anyway (with a degraded
+/// banner). Overridable via `LAIN_WRITE_QUIESCED_WAIT_MS`, parsed at
+/// call time so operators can tune it without a restart. See
+/// spuentesp/lain#296: a re-index replaces nodes in place and restores
+/// anchor scores / co-change edges only at the end, so a call landing
+/// mid-pass used to rank anchors alphabetically and claim "no
+/// co-change" — silently.
+pub fn write_quiesced_wait() -> std::time::Duration {
+    match std::env::var("LAIN_WRITE_QUIESCED_WAIT_MS") {
+        Ok(s) => match s.parse::<u64>() {
+            Ok(ms) => std::time::Duration::from_millis(ms),
+            Err(_) => std::time::Duration::from_millis(10_000),
+        },
+        Err(_) => std::time::Duration::from_millis(10_000),
+    }
+}
+
+/// Banner prefix tools use when they had to answer while a mutating
+/// indexing pass was still running (the quiesce wait expired).
+/// Stable token so clients — and the capability suite — can
+/// distinguish "degraded" from a genuine answer
+/// (spuentesp/lain#296).
+pub const WRITE_PASS_DEGRADED_BANNER: &str =
+    "⚠ [degraded: indexing in progress — this answer may be partial]\n";
+
+/// Wait (bounded by `timeout`) for every in-flight mutating indexing
+/// pass on `graph` to finish. Returns `true` when the graph is
+/// quiesced, `false` when the timeout expired with a pass still
+/// running — the caller must then label its answer as possibly
+/// partial instead of presenting a mid-pass view as fact.
+pub async fn await_graph_quiesced(graph: &GraphDatabase, timeout: std::time::Duration) -> bool {
+    let poll = std::time::Duration::from_millis(50);
+    let start = std::time::Instant::now();
+    loop {
+        if !graph.write_pass_active() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return !graph.write_pass_active();
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
 /// Build enriched text for embedding: name + signature + docstring + path
 /// + the first ~200 tokens of the source body (when a line range is known).
 ///

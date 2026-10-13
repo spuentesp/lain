@@ -37,6 +37,27 @@ source ~/.zshrc   # or ~/.bashrc
 lain --version
 ```
 
+Or from npm (macOS, Linux, and x64 Windows):
+
+```bash
+npm install -g @spuentesp/lain-mcp
+lain --version
+```
+
+Two npm notes:
+
+- `npm install -g` fails with `EEXIST` when an unrelated `lain` file
+  already sits in npm's global bin directory — for example an older
+  manual copy in `~/.local/bin` when your npm prefix is `~/.local`. The
+  npm error itself cannot tell the file is unrelated; move or remove it,
+  or install under a different prefix:
+  `npm install -g --prefix ~/.local/lain-npm @spuentesp/lain-mcp` (then
+  add `~/.local/lain-npm/bin` to your `PATH`).
+- If npm install scripts were disabled (`--ignore-scripts`, a
+  locked-down CI), the platform binary is not fetched during install.
+  The first `lain` run downloads and verifies it, so that first run
+  needs network access; once cached, lain works offline.
+
 Rust 1.89 or newer is only needed when building from source. The
 [quickstart](docs/QUICKSTART.md) covers non-interactive installation and the
 optional local embedding model.
@@ -53,24 +74,43 @@ lain setup --agent vscode
 lain setup --agent continue
 ```
 
-Use `lain setup --agent generic` for another MCP host. It writes this
-project-level `.mcp.json`, with the absolute path of the `lain` binary that
-ran setup as `command`:
+Use `lain setup --agent generic` for another MCP host. Each adapter
+writes the client's own configuration — `claude mcp add` for Claude
+Code, `~/.codex/config.toml` for Codex, `~/.cursor/mcp.json` for
+Cursor, `.vscode/mcp.json` (or the user-scoped `mcp.json`) for VS
+Code, a block file under the repository's `.continue/mcpServers/` for
+Continue. `generic` writes this project-level `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "lain": {
-      "command": "/home/you/.local/bin/lain",
+      "command": "/home/you/.local/lain/lain",
       "args": ["mcp"]
     }
   }
 }
 ```
 
-Restart the agent after setup. Lain walks up from the agent's working directory
-to find `.git`, builds `.lain/graph.bin`, and serves the repository over stdio.
-No `repos.yaml` is needed for one repository.
+`command` is always the absolute path of the `lain` binary that ran
+setup — not the bare name — so the agent runs the same binary no matter
+which `PATH` it inherits. That path depends on the install: the release
+installer puts the binary at `~/.local/lain/lain`, while the npm
+package registers the verified cache binary it launches
+(`~/.cache/lain/<version>/<target>/lain` on Linux,
+`~/Library/Caches/lain/…` on macOS, `%LOCALAPPDATA%\lain\Cache\…` on
+Windows). Setup finishes by starting exactly that command once and
+verifying the MCP handshake.
+
+On a terminal, `lain setup` without `--agent` asks which client to
+configure (Enter picks Claude Code), and without `--lsp` asks which
+optional language servers to install (Enter installs none).
+Non-interactive runs default to `generic` and no language servers, so
+scripts should pass `--agent` and `--lsp` explicitly.
+
+Restart the agent after setup. Lain walks up from the agent's working
+directory to find `.git`, builds `.lain/graph.bin`, and serves the
+repository over stdio. No `repos.yaml` is needed for one repository.
 
 ## Languages
 

@@ -415,14 +415,7 @@ mod indexed_flag_tests {
             !NodeType::Resource.is_indexed(),
             "Resource has no producer in this codebase"
         );
-        // `PayloadSchema` is parsed by `payload_schema.rs` but no sensor
-        // mints the Topic → Schema edge yet, so advertising it would make
-        // `describe_schema` promise an edge clients can never observe.
-        for e in [
-            EdgeType::Imports,
-            EdgeType::DeployedTo,
-            EdgeType::PayloadSchema,
-        ] {
+        for e in [EdgeType::Imports, EdgeType::DeployedTo] {
             assert!(!e.is_indexed(), "{e} has no producer in this codebase");
         }
     }
@@ -454,6 +447,9 @@ mod indexed_flag_tests {
             EdgeType::Binds,
             EdgeType::ReadsTable,
             EdgeType::WritesTable,
+            // `event_sensor::scan_payload_schemas` mints it from
+            // Avro/JSON-Schema payload files.
+            EdgeType::PayloadSchema,
         ] {
             assert!(
                 e.is_indexed(),

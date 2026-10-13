@@ -645,7 +645,17 @@ pub fn impact_propagation(e: &EdgeType) -> Propagation {
         // touch?" gets the table when they start at the function
         // and follow forward (a separate traversal pass).
         | EdgeType::ReadsTable
-        | EdgeType::WritesTable => Propagation::Incoming,
+        | EdgeType::WritesTable
+        // Anchor-miner stage: heuristic `BusTopic` / `RouteMatches`
+        // edges (minted by `federation::anchor_miner`, and by the
+        // dynamic-dispatch sensor on per-repo graphs) are couplings
+        // the impact traversal must surface — they carry their
+        // confidence so `min_confidence` filters them and the claims
+        // pipeline grades them `needs-investigation`. Stopping here
+        // was part of the silence the edge-minting layer exists to
+        // fix.
+        | EdgeType::BusTopic
+        | EdgeType::RouteMatches => Propagation::Incoming,
         EdgeType::Consumes
         | EdgeType::PayloadSchema
         | EdgeType::Produces
@@ -658,8 +668,6 @@ pub fn impact_propagation(e: &EdgeType) -> Propagation {
         | EdgeType::DeployedTo
         | EdgeType::CrossRepoSameSymbol
         | EdgeType::DynamicDispatch
-        | EdgeType::BusTopic
-        | EdgeType::RouteMatches
         | EdgeType::RuntimeCall
         | EdgeType::ReadsFrom => Propagation::Stop,
     }

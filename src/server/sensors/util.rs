@@ -341,6 +341,9 @@ pub fn compose_service_name(package: &str, service: &str) -> String {
 /// - `os.environ["X"]` / `os.environ.get("X", …)` / `os.getenv("X", …)`
 /// - `process.env.X` / `process.env["X"]`
 /// - `settings.X` / `config.X`
+/// - `System.getenv("X")` (Java — possibly a prefix of a larger
+///   concatenation, e.g. `System.getenv("X") + "/path"`)
+/// - `os.Getenv("X")` (Go)
 ///
 /// The function does not strip trailing punctuation — callers
 /// that pass through the raw value of an object-literal field
@@ -367,6 +370,30 @@ pub fn host_env_name(text: &str) -> Option<&str> {
         }
         if let Some(stripped) = rest.strip_suffix(')') {
             return Some(inner_paren(stripped));
+        }
+    }
+    // `os.Getenv("X")` (Go) — same shapes as Python's `os.getenv`.
+    if let Some(rest) = t.strip_prefix("os.Getenv(") {
+        if let Some(end) = rest.find(',') {
+            return Some(inner_paren(&rest[..end]));
+        }
+        if let Some(stripped) = rest.strip_suffix(')') {
+            return Some(inner_paren(stripped));
+        }
+    }
+    // `System.getenv("X")` (Java) — the call always takes exactly
+    // one argument and ends at its own `)`, so the env name is the
+    // quoted literal up to the first `)`. This deliberately
+    // tolerates a trailing concatenation
+    // (`System.getenv("X") + "/path"`): the env call is still the
+    // host expression. A no-arg `System.getenv()` (the whole
+    // environment map) yields an empty inner and is not a binding.
+    if let Some(rest) = t.strip_prefix("System.getenv(") {
+        if let Some(end) = rest.find(')') {
+            let name = inner_paren(&rest[..end]);
+            if !name.is_empty() {
+                return Some(name);
+            }
         }
     }
     // `process.env.X` / `process.env["X"]`.
