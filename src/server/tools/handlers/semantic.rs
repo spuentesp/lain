@@ -29,7 +29,7 @@ use crate::graph::GraphDatabase;
 use crate::nlp::{CrossEncoder, NlpEmbedder};
 use crate::overlay::VolatileOverlay;
 use crate::schema::{GraphNode, NodeType};
-use crate::server::presence::OccupancyMap;
+use crate::server::coordination::CoordinationProxy;
 use crate::server::tools::utils::{required_str_arg, resolve_node_ambiguous, str_arg, usize_arg};
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
@@ -151,7 +151,7 @@ pub async fn get_context(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    occupancy: &OccupancyMap,
+    occupancy: &CoordinationProxy,
     args: &Map<String, Value>,
 ) -> Result<String, LainError> {
     let symbol = required_str_arg(args, "symbol")?;

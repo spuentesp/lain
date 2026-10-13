@@ -1,16 +1,15 @@
-//! Battery of positive + negative tests for the audit log + file lock layers.
+//! Battery of positive + negative tests for the audit log layer.
 //!
 //! Audit log: every grant/reject should append a single JSONL line.
-//! File lock: zero-daemon claim/release (wishlist #3) — must work
-//! without a running server.
+//! The file-lock layer that used to live alongside it is zoanthrope's
+//! now (see `docs/formal/COORDINATION.md`); its contract tests moved
+//! with it.
 
 use lain::server::audit::{
     append_edit_event, audit_log_present_and_readable, read_audit_log, AuditEvent,
 };
-use lain::server::presence::{AgentId, AgentKind, ClaimIntent};
-use lain::server::presence_lock::{lock_path_for, release_lock, release_lock_at, try_lock};
+use lain::server::presence::AgentId;
 use lain::server::revision_log::RevisionId;
-use std::path::Path;
 
 fn fresh_audit_event() -> AuditEvent {
     AuditEvent {
@@ -82,120 +81,4 @@ fn audit_multiple_appends_append_multiple_lines() {
         "three appends must produce three events; got {}",
         events.len()
     );
-}
-
-// ─── File lock (zero-daemon path, wishlist #3) ────────────────────
-
-#[test]
-fn file_lock_acquires_and_releases() {
-    let dir = tempfile::tempdir().unwrap();
-    let workspace = dir.path();
-    let path = Path::new("src/lib.rs");
-    let agent = AgentId("agent-a".into());
-    let lock = try_lock(
-        workspace,
-        path,
-        &agent,
-        AgentKind::ClaudeCode,
-        ClaimIntent::Edit,
-    )
-    .expect("first acquire must succeed");
-    assert!(lock.path.exists(), "lock file must be created");
-}
-
-#[test]
-fn file_lock_returns_conflict_on_duplicate() {
-    let dir = tempfile::tempdir().unwrap();
-    let workspace = dir.path();
-    let path = Path::new("src/lib.rs");
-    let agent_a = AgentId("agent-a".into());
-    let agent_b = AgentId("agent-b".into());
-    let _lock = try_lock(
-        workspace,
-        path,
-        &agent_a,
-        AgentKind::ClaudeCode,
-        ClaimIntent::Edit,
-    )
-    .expect("first acquire must succeed");
-    let second = try_lock(
-        workspace,
-        path,
-        &agent_b,
-        AgentKind::ClaudeCode,
-        ClaimIntent::Edit,
-    );
-    assert!(second.is_err(), "second acquire on same path must conflict");
-}
-
-#[test]
-fn file_lock_release_clears_the_lock() {
-    let dir = tempfile::tempdir().unwrap();
-    let workspace = dir.path();
-    let path = Path::new("src/lib.rs");
-    let agent = AgentId("agent-a".into());
-    let lock = try_lock(
-        workspace,
-        path,
-        &agent,
-        AgentKind::ClaudeCode,
-        ClaimIntent::Edit,
-    )
-    .expect("acquire");
-    release_lock(&lock).expect("release");
-    let _lock2 = try_lock(
-        workspace,
-        path,
-        &agent,
-        AgentKind::ClaudeCode,
-        ClaimIntent::Edit,
-    )
-    .expect("re-acquire after release must succeed");
-}
-
-#[test]
-fn file_lock_release_at_handles_missing() {
-    let dir = tempfile::tempdir().unwrap();
-    let missing = dir.path().join("not_a_lock");
-    let result = release_lock_at(&missing);
-    assert!(
-        result.is_ok() || result.is_err(),
-        "release_lock_at on missing path must not panic"
-    );
-}
-
-#[test]
-fn file_lock_path_for_unique_per_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let workspace = dir.path();
-    let p_a = lock_path_for(workspace, Path::new("src/a.rs"));
-    let p_b = lock_path_for(workspace, Path::new("src/b.rs"));
-    assert_ne!(p_a, p_b, "different paths → different lock files");
-}
-
-#[test]
-fn file_lock_zero_daemon_path_works_without_server() {
-    // Wishlist #3 — claim/release works against a plain state
-    // directory when no server is running. No `lain` process spawned.
-    let dir = tempfile::tempdir().unwrap();
-    let workspace = dir.path();
-    let path = Path::new("src/lib.rs");
-    let agent = AgentId("agent-a".into());
-    let lock = try_lock(
-        workspace,
-        path,
-        &agent,
-        AgentKind::ClaudeCode,
-        ClaimIntent::Edit,
-    )
-    .expect("zero-daemon lock must succeed");
-    release_lock(&lock).expect("zero-daemon release must succeed");
-    let _lock2 = try_lock(
-        workspace,
-        path,
-        &agent,
-        AgentKind::ClaudeCode,
-        ClaimIntent::Edit,
-    )
-    .expect("re-acquire after release");
 }

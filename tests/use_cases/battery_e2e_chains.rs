@@ -125,7 +125,7 @@ fn chain_dead_to_call_sites_to_explain() {
 
     let (dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let occupancy = lain::server::presence::OccupancyMap::default();
+    let occupancy = lain::server::coordination::CoordinationProxy::new(dir.path().to_path_buf());
 
     // Step 1: find_dead_code — surface dead_one.
     let dead_text = find_dead_code(

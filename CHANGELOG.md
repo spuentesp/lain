@@ -5,6 +5,34 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+### Changed
+
+- **Coordination core moved to zoanthrope.** Lain's claims registry,
+  filesystem lease layer (`presence_lock`), and intent storage are
+  gone: file claims, exclusive leases, presence, and the postboard now
+  live in [`zoanthrope`](https://github.com/spuentesp/zoanthrope)
+  behind a thin proxy (`src/server/coordination/`). Tool names and
+  response shapes are unchanged (`claim_files` still answers
+  `granted`/`conflicts` with holder naming; `lain_intent` still
+  answers its intent shape) — they are adapters over `zoanthrope
+  claim|release|rejoin` and the postboard tools now. Symbol
+  fingerprints stay lain's (code intelligence) and travel as opaque
+  `caller_stamps` (`symbol:<name>` pins) that zoanthrope stores and
+  returns. **If `zoanthrope` is not installed, coordination fails soft
+  to advisory semantics**: claims are logged and never block, and
+  responses carry `"degraded": "zoanthrope-missing"`. Two semantic
+  shifts follow zoanthrope's arbitration: read-vs-edit on a file now
+  conflicts (readers no longer co-hold with editors), and claims are
+  file-granular (symbol-level claims carry symbol pins but do not
+  partition a file). Per-claim `ttl_seconds` is accepted but no longer
+  expires claims (zoanthrope's presence TTL governs). The hook family
+  (`hooks/<agent>/pre-edit.sh`) now runs `zoanthrope claim` directly —
+  see `hooks/README.md` for the two-string portability pattern;
+  `lain hooks` remains as a forwarding alias. Formal specs for the
+  migrated code (`PresenceClaims`, `FsLease`/`FsLeaseGuard`) left
+  `docs/formal/` for zoanthrope's `formal/` — see
+  `docs/formal/COORDINATION.md`.
+
 ### Fixed
 
 - **`assess_change` no longer reads a zero-dependent result as a safety

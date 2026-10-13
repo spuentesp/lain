@@ -588,10 +588,13 @@ else
   check_contains "the conflict names the holder"           "alpha"     "$C"
   check_contains "the conflict states the blocking intent" "edit"      "$C"
 
-  # A read never blocks; it is granted with an advisory instead.
+  # A read conflicts with an editor's hold — zoanthrope arbitration is
+  # file-granular (an edit conflicts with anything, a read with an
+  # edit). Refused, and the refusal names the holder. Readers co-hold
+  # only with other readers.
   RD=$(call claim_files "{\"agent_id\":\"$B_ID\",\"session_token\":\"$B_TOK\",\"files\":[{\"path\":\"src/core.rs\",\"intent\":\"read\"}]}")
-  check_contains "beta's read is granted, not refused" "granted" "$RD"
-  check_contains "and carries an advisory"            "advisor" "$RD"
+  check_contains "beta's read conflicts with alpha's edit" "\"name\"" "$RD"
+  check_contains "and the refusal names the holder"        "alpha"    "$RD"
 
   OCC=$(call list_occupancy '{"path":"src/core.rs"}')
   check_contains "occupancy shows holders"       "holders" "$OCC"

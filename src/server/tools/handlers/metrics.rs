@@ -5,7 +5,7 @@ use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
 use crate::schema::NodeType;
-use crate::server::presence::OccupancyMap;
+use crate::server::coordination::CoordinationProxy;
 use crate::server::tools::utils::read_body_summary;
 use crate::server::tools::utils::{build_enriched_text, cosine_similarity, resolve_node};
 use parking_lot::Mutex;
@@ -652,7 +652,7 @@ pub fn explain_symbol(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    occupancy: &OccupancyMap,
+    occupancy: &CoordinationProxy,
     symbol: &str,
 ) -> Result<String, LainError> {
     let (node, other_defs) =

@@ -14,7 +14,8 @@ use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
 use crate::server::annotations::AnnotationRegistry;
-use crate::server::presence::{OccupancyMap, PresenceRegistry};
+use crate::server::coordination::CoordinationProxy;
+use crate::server::presence::PresenceRegistry;
 use crate::server::tools::UiSession;
 use crate::tuning::TuningConfig;
 use async_trait::async_trait;
@@ -75,7 +76,7 @@ pub struct ToolContext {
     pub presence: Arc<PresenceRegistry>,
     /// Occupancy map shared with the `LainServer` orchestrator. Same
     /// wiring story as `presence` — see above.
-    pub occupancy: Arc<OccupancyMap>,
+    pub occupancy: Arc<CoordinationProxy>,
     /// Last-refresh outcome shared with the `LainServer` orchestrator.
     /// The startup re-index spawn in `LainMcpServer::run_stdio` /
     /// `run_http` writes the timeout / failure result here; `get_health`
@@ -185,7 +186,7 @@ impl ToolContext {
             // replaces these with the live `Arc`s once the
             // orchestrator is built.
             presence: Arc::new(PresenceRegistry::new()),
-            occupancy: Arc::new(OccupancyMap::new()),
+            occupancy: Arc::new(CoordinationProxy::new(std::path::PathBuf::from("."))),
             // Default to Skipped so a standalone / sidecar executor
             // (which never runs the spawn) still returns a valid
             // outcome. `LainMcpServer::with_server` swaps in the

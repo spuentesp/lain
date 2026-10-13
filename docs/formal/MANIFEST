@@ -24,12 +24,6 @@ ReloadBus                         | ReloadBus                         | fail | p
 ReloadBus_Fixed                   | ReloadBus                         | pass | fixed: subscribe before spawn
 SnapshotInstallHold               | SnapshotInstallHold               | fail | pre-fix: hold taken after the insert lock drops
 SnapshotInstallHold_Fixed         | SnapshotInstallHold               | pass | fixed: install_resident_held
-FsLeaseGuard_Unguarded            | FsLeaseGuard                      | fail | pre-fix: scan-then-create, all acquirers win
-FsLeaseGuard                      | FsLeaseGuard                      | pass | fixed: O_EXCL acquire guard
-FsLeaseGuard_Stall                | FsLeaseGuard                      | fail | residual: guard holder frozen > GUARD_TTL
-FsLease                           | FsLease                           | fail | scan-then-create (same bug, fine-grained)
-FsLease_Excl                      | FsLease                           | pass | fixed-path O_EXCL lease, no expiry
-FsLease_ExclExpiry                | FsLease                           | fail | residual: expiry + steal needs fencing tokens
 JobRegistry_RacyCap               | JobRegistry                       | fail | pre-fix: cap counted and inserted under separate locks
 JobRegistry_PanicLeak             | JobRegistry                       | fail | pre-fix: a panicking job stays Running (slot leak)
 JobRegistry_GhostRestore          | JobRegistry                       | fail | pre-fix: persisted Running jobs reload as Running
@@ -46,7 +40,5 @@ FederationRepoLifecycle           | FederationRepoLifecycle           | pass | r
 FederationRepoLifecycle_Unchecked | FederationRepoLifecycle           | fail | if the repo lookup is hoisted out of the lock, a removed repo is resurrected
 RateLimit                         | RateLimit                         | pass | auth token bucket: range + rate bound
 RateLimit_NoClamp                 | RateLimit                         | fail | no clamp: idle key banks unbounded credit
-PresenceClaims                    | PresenceClaims                    | pass | presence claim arbitration: no conflicting holders
-PresenceClaims_LastWins           | PresenceClaims                    | fail | pre-fix: last claim hides strongest intent (finding 3)
 LspPool                           | LspPool                           | pass | LSP pool round-robin: balanced across clones
 LspPool_PerCloneCounter           | LspPool                           | fail | pre-fix: per-clone counter starves multiplexers

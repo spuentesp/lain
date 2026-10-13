@@ -7,8 +7,9 @@
 use crate::server::attribution::{
     AttributionBackend, AttributionWatcher, LsofBackend, NoopBackend, ProcFsBackend,
 };
+use crate::server::coordination::CoordinationProxy;
 use crate::server::events_log::EventsLog;
-use crate::server::presence::{OccupancyMap, PresenceEvent, PresenceRegistry};
+use crate::server::presence::{PresenceEvent, PresenceRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -36,7 +37,7 @@ pub fn default_attribution_backend() -> Arc<dyn AttributionBackend> {
 /// the handle and abort it; not needed for MVP.)
 pub fn spawn_presence_expiry_loop(
     presence: Arc<PresenceRegistry>,
-    occupancy: Arc<OccupancyMap>,
+    occupancy: Arc<CoordinationProxy>,
     tx: broadcast::Sender<(u64, PresenceEvent)>,
     events_log: Arc<EventsLog>,
 ) {
@@ -60,7 +61,7 @@ pub fn spawn_presence_expiry_loop(
 /// `ClaimReleased` per released path, all with durable events-log ids.
 pub fn expiry_tick(
     presence: &PresenceRegistry,
-    occupancy: &OccupancyMap,
+    occupancy: &CoordinationProxy,
     tx: &broadcast::Sender<(u64, PresenceEvent)>,
     events_log: &EventsLog,
 ) {
@@ -102,7 +103,7 @@ pub fn expiry_tick(
 pub fn start_attribution_watcher(
     attribution: Arc<dyn AttributionBackend>,
     presence: Arc<PresenceRegistry>,
-    occupancy: Arc<OccupancyMap>,
+    occupancy: Arc<CoordinationProxy>,
     tx: broadcast::Sender<(u64, PresenceEvent)>,
     events_log: Arc<EventsLog>,
     repo_roots: Vec<PathBuf>,
@@ -350,9 +351,9 @@ mod expiry_tests {
     #[test]
     fn expiry_tick_releases_claims_of_expired_sessions() {
         let presence = PresenceRegistry::with_expiry(std::time::Duration::from_millis(20));
-        let occupancy = OccupancyMap::new();
-        let (tx, _rx) = broadcast::channel(16);
         let tmp = tempfile::tempdir().unwrap();
+        let occupancy = CoordinationProxy::new(tmp.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(16);
         let log = EventsLog::open(tmp.path()).unwrap();
 
         let sess = presence.register(
@@ -385,14 +386,33 @@ mod expiry_tests {
         );
     }
 
-    /// Claims WITH a TTL still expire via their own path; sessions whose
-    /// claims expire keep living (heartbeat-independent).
+    /// Claims no longer TTL-expire. Per-claim `ttl_seconds` is still
+    /// accepted on the wire, but claim lifetime is zoanthrope's
+    /// presence TTL plus explicit release ("claims are never
+    /// auto-released") — the expiry loop leaves a live session's
+    /// TTL'd claim in place. This pins the new contract (the
+    /// CHANGELOG records the delta from the old per-claim expiry).
     #[test]
-    fn expiry_tick_keeps_ttl_claim_path() {
+    fn expiry_tick_does_not_ttl_expire_claims() {
+        // The claim must be visible in zoanthrope state for the
+        // assertion to mean anything — degraded mode grants and
+        // forgets. CI sets CI_REQUIRE_ZOANTHROPE=1 so this can never
+        // silently skip on the battery lanes.
+        if crate::server::coordination::resolve_zoanthrope_bin().is_none() {
+            let required = std::env::var_os("CI_REQUIRE_ZOANTHROPE")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            assert!(
+                !required,
+                "zoanthrope is required (CI_REQUIRE_ZOANTHROPE=1) but no binary was found"
+            );
+            eprintln!("SKIP: zoanthrope not on PATH (claim visibility is degraded)");
+            return;
+        }
         let presence = PresenceRegistry::new();
-        let occupancy = OccupancyMap::new();
-        let (tx, _rx) = broadcast::channel(16);
         let tmp = tempfile::tempdir().unwrap();
+        let occupancy = CoordinationProxy::new(tmp.path().to_path_buf());
+        let (tx, _rx) = broadcast::channel(16);
         let log = EventsLog::open(tmp.path()).unwrap();
 
         let sess = presence.register(
@@ -408,14 +428,19 @@ mod expiry_tests {
                 path: PathBuf::from("b.rs"),
                 symbols: vec![],
                 intent: ClaimIntent::Edit,
-                ttl_seconds: Some(0), // expires immediately
+                ttl_seconds: Some(0), // ignored by design — see above
                 plan_revision: None,
             }],
         );
 
         expiry_tick(&presence, &occupancy, &tx, &log);
 
-        assert!(occupancy.list_all().is_empty(), "TTL claim expired");
+        assert_eq!(
+            occupancy.list_all().len(),
+            1,
+            "ttl_seconds must NOT auto-release a claim: zoanthrope's presence TTL \
+             governs and claims are never auto-released"
+        );
         assert_eq!(presence.list_active(true).len(), 1, "session alive");
     }
 }

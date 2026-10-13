@@ -12,6 +12,10 @@
 //! `LainServer` values over the same workspace — which is the same
 //! thing from the state file's point of view.
 
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
+
 use lain::server::mcp::presence_tools::{
     run_claim_files, run_list_active_agents, run_register_agent, run_release_files,
 };
@@ -54,6 +58,9 @@ fn claim(server: &Arc<LainServer>, id: &str, token: &str, path: &str) -> serde_j
 
 #[tokio::test]
 async fn a_claim_on_one_server_conflicts_on_another() {
+    if !require_zoanthrope() {
+        return;
+    }
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let state = tempfile::tempdir().unwrap();
     isolate_state_dir(state.path());

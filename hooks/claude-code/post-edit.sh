@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Claude Code PostToolUse hook — releases the claim after a successful edit.
-# Always exits 0.
+# Releases via zoanthrope (the coordination core). Always exits 0.
+#
+# Porting to another agent framework = two strings (see hooks/README.md).
 
 set +e
 trap 'exit 0' ERR
@@ -15,10 +17,10 @@ fi
 
 if [ -z "$FILE_PATH" ]; then exit 0; fi
 
-LAIN_URL="${LAIN_URL:-http://localhost:9999}"
-
-# Identity resolution.
-if [ -n "$LAIN_AGENT_NAME" ]; then
+# Identity resolution (same order as pre-edit.sh).
+if [ -n "$ZOANTHROPE_AGENT_NAME" ]; then
+    AGENT_NAME="$ZOANTHROPE_AGENT_NAME"
+elif [ -n "$LAIN_AGENT_NAME" ]; then
     AGENT_NAME="$LAIN_AGENT_NAME"
 elif [ -n "$CLAUDE_AGENT_NAME" ]; then
     AGENT_NAME="claude-code-$CLAUDE_AGENT_NAME"
@@ -31,27 +33,11 @@ else
     AGENT_NAME="claude-code-${PPID:-?}-${SHORT_HOST}"
 fi
 
-# Parent session ID forwarded by subagent orchestrators.
-if [ -n "$LAIN_PARENT_AGENT_ID" ]; then
-    PARENT_SESSION_ID="$LAIN_PARENT_AGENT_ID"
-else
-    PARENT_SESSION_ID=""
+if ! command -v zoanthrope >/dev/null 2>&1; then
+    echo "zoanthrope not on PATH; release skipped (advisory)" >&2
+    exit 0
 fi
 
-if ! command -v lain >/dev/null 2>&1; then exit 0; fi
-
-RELEASE_ARGS=(
-    --url "$LAIN_URL"
-    --path "$FILE_PATH"
-    --agent-name "$AGENT_NAME"
-    --agent-kind "claude-code"
-)
-if [ -n "$PARENT_SESSION_ID" ]; then
-    RELEASE_ARGS+=(--parent-session-id "$PARENT_SESSION_ID")
-fi
-# Pipe the full release output (summary line + any JSON) to stderr.
-# `| head -1` was previously used here too, but for release there is
-# no conflict payload so dropping it is harmless — and consistent with
-# the pre-edit hooks (wishlist #5 fix).
-lain hooks release "${RELEASE_ARGS[@]}" >&2
+# Pipe the full release output to stderr; never blocks.
+zoanthrope release --files "$FILE_PATH" --agent "$AGENT_NAME" >&2
 exit 0
