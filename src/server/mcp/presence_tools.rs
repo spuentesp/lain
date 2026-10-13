@@ -511,10 +511,36 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
     // only see peers if the registry is refreshed from the shared state
     // file first — and only stay correct if the grant is written back
     // under the same lock.
-    server
-        .with_shared_presence(|| run_claim_files_inner(server, a.clone()))
+    with_presence_busy_retry(server, || run_claim_files_inner(server, a.clone()))
         .map_err(|e| e.to_string())
         .and_then(|inner| inner)
+}
+
+/// Run a presence critical section, retrying lock *busy* only.
+///
+/// A claim under contention must answer grant or the conflict shape
+/// naming the holder. `CoordinationError::Unavailable` means the
+/// presence state-file lock starved past its deadline — plumbing, and
+/// (seen as `concurrent_agents_contention_benchmark` failing in CI)
+/// exactly the thing that must not become the claim's answer. Claims
+/// are arbitrated by zoanthrope under its own state lock; the session
+/// table is a hint, so waiting a little longer for its lock is safe.
+/// Every other coordination error still surfaces — the caller must
+/// see a refresh/persist failure.
+fn with_presence_busy_retry<T>(
+    server: &LainServer,
+    mut f: impl FnMut() -> T,
+) -> Result<T, crate::server::ingest::handles::presence::CoordinationError> {
+    use crate::server::ingest::handles::presence::CoordinationError;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match server.with_shared_presence(&mut f) {
+            Err(CoordinationError::Unavailable) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            out => return out,
+        }
+    }
 }
 
 fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value, String> {
@@ -981,8 +1007,9 @@ pub fn run_release_files(server: &LainServer, args: Value) -> Result<Value, Stri
              `agent_id` and `session_token`."
         )
     })?;
-    server
-        .with_shared_presence(|| run_release_files_inner(server, a.clone()))
+    // Same contract as claims: release under contention answers the
+    // released list, never a lock-acquisition plumbing error.
+    with_presence_busy_retry(server, || run_release_files_inner(server, a.clone()))
         .map_err(|e| e.to_string())
         .and_then(|inner| inner)
 }
