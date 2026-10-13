@@ -1,5 +1,6 @@
 # Build outputs
 /target
+/fuzz/target
 
 # Lain memory
 /.lain_memory/
