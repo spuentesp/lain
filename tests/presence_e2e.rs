@@ -1,3 +1,7 @@
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
+
 use lain::server::attribution::AttributionWatcher;
 use lain::server::coordination::CoordinationProxy;
 use lain::server::presence::{AgentKind, AgentMode, PresenceRegistry};
@@ -30,7 +34,10 @@ fn e2e_attribution_via_real_child_pid() {
 
     let pid = child.id();
     let presence = Arc::new(PresenceRegistry::new());
-    let occupancy = Arc::new(CoordinationProxy::new(std::env::temp_dir()));
+    // Workspace root for the coordination proxy must be the test's own
+    // tempdir — a shared root would let parallel tests collide on one
+    // `.zoanthrope/state.json`.
+    let occupancy = Arc::new(CoordinationProxy::new(tmp.path().to_path_buf()));
     let _ = presence.register(
         "e2e-child".into(),
         AgentKind::Other("e2e".into()),
@@ -64,15 +71,4 @@ fn e2e_attribution_via_real_child_pid() {
     );
 }
 
-/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
-/// on PATH the proxy is degraded (advisory: claims always grant and
-/// never conflict), so the coordination assertions below are
-/// meaningless — skip loudly rather than fail against an uncoordinated
-/// workspace. CI installs zoanthrope and runs these for real.
-fn require_zoanthrope() -> bool {
-    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
-        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
-        return false;
-    }
-    true
-}
+

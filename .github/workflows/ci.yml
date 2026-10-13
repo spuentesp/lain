@@ -189,6 +189,37 @@ jobs:
           # macOS lane dying at 30/45/90 min).
           save-always: true
 
+      # Coordination battery: install zoanthrope, the coordination
+      # core that lain's `src/server/coordination/` proxies. Pinned
+      # (0.1.3) so claim arbitration is deterministic; the npm path is
+      # the documented install. Its postinstall skips the platform
+      # binary download under CI=true, so the version probe below
+      # forces the download (and verifies the binary runs). No prebuilt
+      # binary exists for Windows — fall back to building the same
+      # pinned tag from source so the battery runs there too.
+      # `CI_REQUIRE_ZOANTHROPE=1` on the test step turns the tests'
+      # missing-binary skip into a hard failure: the coordination
+      # battery must run against the real product in CI, never silently
+      # degrade to the advisory fallback.
+      - name: Install zoanthrope (coordination core, pinned 0.1.3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @spuentesp/zoanthrope@0.1.3
+          if ! zoanthrope --version; then
+            echo "no prebuilt zoanthrope for this platform; building v0.1.3 from source"
+            cargo install --git https://github.com/spuentesp/zoanthrope.git \
+              --tag v0.1.3 --locked --force
+            if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+          fi
+          zoanthrope --version
+
       # 17 tests in `tests/use_cases/battery_*` invoke the `lain` binary at
       # `target/debug/lain` and panic with a helpful message if it is
       # missing. Building it here (rather than relying on `cargo test`
@@ -200,6 +231,10 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          # Turns the coordination battery's missing-zoanthrope skip
+          # into a hard failure (see tests/support/zoanthrope_gate.rs).
+          CI_REQUIRE_ZOANTHROPE: "1"
         run: cargo test --workspace
 
       # Every `mod foo;` must resolve to a *committed* file. Catches the
@@ -278,6 +313,29 @@ jobs:
           # macOS lane dying at 30/45/90 min).
           save-always: true
 
+      # Coordination battery: same zoanthrope install as the `test`
+      # job (pinned 0.1.3; npm path with a source-build fallback for
+      # platforms without a prebuilt asset — Windows). Keeps the main
+      # battery running against real claim arbitration.
+      - name: Install zoanthrope (coordination core, pinned 0.1.3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @spuentesp/zoanthrope@0.1.3
+          if ! zoanthrope --version; then
+            echo "no prebuilt zoanthrope for this platform; building v0.1.3 from source"
+            cargo install --git https://github.com/spuentesp/zoanthrope.git \
+              --tag v0.1.3 --locked --force
+            if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+          fi
+          zoanthrope --version
+
       - name: Build binaries (for use_cases/battery_* and sidecar tests that invoke them as subprocesses)
         shell: bash
         run: cargo build --bin lain --bin lain-git-sidecar
@@ -293,6 +351,10 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          # Turns the coordination battery's missing-zoanthrope skip
+          # into a hard failure (see tests/support/zoanthrope_gate.rs).
+          CI_REQUIRE_ZOANTHROPE: "1"
         run: cargo test --workspace
 
       - name: Module declarations resolve to committed files

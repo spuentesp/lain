@@ -386,10 +386,29 @@ mod expiry_tests {
         );
     }
 
-    /// Claims WITH a TTL still expire via their own path; sessions whose
-    /// claims expire keep living (heartbeat-independent).
+    /// Claims no longer TTL-expire. Per-claim `ttl_seconds` is still
+    /// accepted on the wire, but claim lifetime is zoanthrope's
+    /// presence TTL plus explicit release ("claims are never
+    /// auto-released") — the expiry loop leaves a live session's
+    /// TTL'd claim in place. This pins the new contract (the
+    /// CHANGELOG records the delta from the old per-claim expiry).
     #[test]
-    fn expiry_tick_keeps_ttl_claim_path() {
+    fn expiry_tick_does_not_ttl_expire_claims() {
+        // The claim must be visible in zoanthrope state for the
+        // assertion to mean anything — degraded mode grants and
+        // forgets. CI sets CI_REQUIRE_ZOANTHROPE=1 so this can never
+        // silently skip on the battery lanes.
+        if crate::server::coordination::resolve_zoanthrope_bin().is_none() {
+            let required = std::env::var_os("CI_REQUIRE_ZOANTHROPE")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            assert!(
+                !required,
+                "zoanthrope is required (CI_REQUIRE_ZOANTHROPE=1) but no binary was found"
+            );
+            eprintln!("SKIP: zoanthrope not on PATH (claim visibility is degraded)");
+            return;
+        }
         let presence = PresenceRegistry::new();
         let tmp = tempfile::tempdir().unwrap();
         let occupancy = CoordinationProxy::new(tmp.path().to_path_buf());
@@ -409,14 +428,19 @@ mod expiry_tests {
                 path: PathBuf::from("b.rs"),
                 symbols: vec![],
                 intent: ClaimIntent::Edit,
-                ttl_seconds: Some(0), // expires immediately
+                ttl_seconds: Some(0), // ignored by design — see above
                 plan_revision: None,
             }],
         );
 
         expiry_tick(&presence, &occupancy, &tx, &log);
 
-        assert!(occupancy.list_all().is_empty(), "TTL claim expired");
+        assert_eq!(
+            occupancy.list_all().len(),
+            1,
+            "ttl_seconds must NOT auto-release a claim: zoanthrope's presence TTL \
+             governs and claims are never auto-released"
+        );
         assert_eq!(presence.list_active(true).len(), 1, "session alive");
     }
 }

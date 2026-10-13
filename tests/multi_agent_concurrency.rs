@@ -28,6 +28,10 @@
 //! Each test owns its `TempDir`s — fixture and state dir both
 //! dropped on test exit — so state is hermetic.
 
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -535,14 +539,18 @@ fn two_agents_race_claim_one_wins_one_conflicts() {
     );
 }
 
-// ─── 2. Three agents: holder edits, two readers observe advisory ────
+// ─── 2. Three agents: read-vs-edit conflicts, readers co-hold ───────
 //
-// A holds an edit claim on `src/shared.rs`. B and C
-// simultaneously claim the same path with `intent: "read"`.
-// Both reads succeed (wishlist #5: reads never conflict) but
-// each response carries an `advisories` entry naming A.
+// Zoanthrope arbitration is file-granular and strict:
+//   - a read claim conflicts with another agent's edit claim — the
+//     claim is refused and the refusal names the holder (pre-refactor
+//     this was a granted read plus an advisory; the CHANGELOG records
+//     the delta). `ZOANTHROPE_MODE` only decides whether a *hook*
+//     denies the tool call — arbitration is the same either way;
+//   - readers co-hold happily with each other when no editor holds
+//     the path.
 #[test]
-fn three_agents_one_wins_two_observe_advisory() {
+fn three_agents_edit_holder_conflicts_with_readers() {
     if !require_zoanthrope() {
         return;
     }
@@ -623,49 +631,74 @@ fn three_agents_one_wins_two_observe_advisory() {
         c_thread.join().expect("carol join"),
     ];
 
-    // Both reads should have succeeded.
+    // Zoanthrope arbitration: a read claim conflicts with another
+    // agent's edit claim — both readers are refused, and the refusal
+    // names the holder. (Pre-refactor, reads were granted with an
+    // advisory; the CHANGELOG records the delta.)
     for (who, r) in &results {
-        let granted = r
+        let granted_empty = r
             .get("granted")
-            .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("{who}: missing granted array: {r}"));
-        assert!(
-            granted.iter().any(|g| {
-                g.get("path")
-                    .and_then(|p| p.as_str())
-                    .is_some_and(|p| path_components_eq(p, &["src", "shared.rs"]))
-            }),
-            "{who} read claim must be granted: {r}"
-        );
-        let conflicts_empty = r
-            .get("conflicts")
             .and_then(|v| v.as_array())
             .map(|a| a.is_empty())
             .unwrap_or(true);
         assert!(
-            conflicts_empty,
-            "{who} read claim must not produce a conflict (read intent is non-blocking): {r}"
+            granted_empty,
+            "{who} read claim must NOT be granted while an editor holds the file: {r}"
         );
-    }
-
-    // Both readers should observe an advisory pointing at
-    // alice.
-    for (who, r) in &results {
-        let advisories = r
-            .get("advisories")
+        let conflicts = r
+            .get("conflicts")
             .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("{who} missing advisories array: {r}"));
+            .unwrap_or_else(|| panic!("{who}: missing conflicts array: {r}"));
         assert!(
-            advisories.iter().any(|adv| {
-                adv.get("agent_id").and_then(|v| v.as_str()) == Some(a_id.as_str())
-                    && adv
+            conflicts.iter().any(|c| {
+                let holder = c
+                    .get("agent_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| c.get("holder").and_then(|v| v.as_str()));
+                holder == Some(a_id.as_str())
+                    && c
                         .get("path")
                         .and_then(|p| p.as_str())
                         .is_some_and(|p| path_components_eq(p, &["src", "shared.rs"]))
             }),
-            "{who} must see alice's edit claim as an advisory, got: {advisories:?}; full: {r}"
+            "{who} read claim must be refused with alice named as holder; \
+             got: {conflicts:?}; full: {r}"
         );
     }
+
+    // Readers co-hold happily with each other when no editor holds the
+    // path — the second half of the arbitration contract.
+    let mut d = spawn_agent(&bin, &env, &pv, "dave-read");
+    let mut e = spawn_agent(&bin, &env, &pv, "erin-read");
+    let (d_id, d_token) = register(&mut d, "dave-read");
+    let (e_id, e_token) = register(&mut e, "erin-read");
+    for (who, child, id, tok) in [
+        ("dave", &mut d, &d_id, &d_token),
+        ("erin", &mut e, &e_id, &e_token),
+    ] {
+        let r = child.call_tool_json(
+            "claim_files",
+            serde_json::json!({
+                "agent_id": id,
+                "session_token": tok,
+                "files": [{"path": "src/quiet.rs", "intent": "read"}],
+            }),
+        );
+        assert!(
+            r.get("granted")
+                .and_then(|v| v.as_array())
+                .is_some_and(|arr| {
+                    arr.iter().any(|g| {
+                        g.get("path")
+                            .and_then(|p| p.as_str())
+                            .is_some_and(|p| path_components_eq(p, &["src", "quiet.rs"]))
+                    })
+                }),
+            "{who} read claim must co-hold with another reader: {r}"
+        );
+    }
+    d.shutdown();
+    e.shutdown();
 }
 
 // ─── 3. A released claim is available again ──────────────────────────
@@ -904,15 +937,4 @@ fn expired_session_rejected() {
     );
 }
 
-/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
-/// on PATH the proxy is degraded (advisory: claims always grant and
-/// never conflict), so the coordination assertions below are
-/// meaningless — skip loudly rather than fail against an uncoordinated
-/// workspace. CI installs zoanthrope and runs these for real.
-fn require_zoanthrope() -> bool {
-    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
-        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
-        return false;
-    }
-    true
-}
+

@@ -18,6 +18,9 @@
 //! Repeated across many iterations to flush timing-dependent bugs.
 #[path = "support/isolated_state.rs"]
 mod isolated_state;
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
 
 use lain::server::mcp::presence_tools::{run_claim_files, run_register_agent, run_release_files};
 use lain::server::LainServer;
@@ -318,15 +321,4 @@ fn non_overlapping_scopes_both_win() {
 #[allow(dead_code)]
 fn _pathbuf_marker(_p: &PathBuf) {}
 
-/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
-/// on PATH the proxy is degraded (advisory: claims always grant and
-/// never conflict), so the coordination assertions below are
-/// meaningless — skip loudly rather than fail against an uncoordinated
-/// workspace. CI installs zoanthrope and runs these for real.
-fn require_zoanthrope() -> bool {
-    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
-        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
-        return false;
-    }
-    true
-}
+

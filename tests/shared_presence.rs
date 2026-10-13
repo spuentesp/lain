@@ -12,6 +12,10 @@
 //! `LainServer` values over the same workspace — which is the same
 //! thing from the state file's point of view.
 
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
+
 use lain::server::mcp::presence_tools::{
     run_claim_files, run_list_active_agents, run_register_agent, run_release_files,
 };
@@ -162,15 +166,4 @@ async fn releasing_on_one_server_frees_the_file_on_another() {
     assert_eq!(resp["granted"].as_array().unwrap().len(), 1);
 }
 
-/// Real claim arbitration lives in zoanthrope. Without a `zoanthrope`
-/// on PATH the proxy is degraded (advisory: claims always grant and
-/// never conflict), so the coordination assertions below are
-/// meaningless — skip loudly rather than fail against an uncoordinated
-/// workspace. CI installs zoanthrope and runs these for real.
-fn require_zoanthrope() -> bool {
-    if lain::server::coordination::resolve_zoanthrope_bin().is_none() {
-        eprintln!("SKIP: zoanthrope not on PATH (coordination degraded/advisory)");
-        return false;
-    }
-    true
-}
+
