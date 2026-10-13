@@ -16,11 +16,16 @@ flowchart TB
         CL2["claim_files(auth.rs, read)"]
     end
 
-    subgraph REG["Presence registry (in-process)"]
-        PR["PresenceRegistry<br/>(agents map, sessions)"]
-        OM["OccupancyMap<br/>(path → holders[])"]
-        LOCK["state_lock<br/>(advisory file lock)"]
+    subgraph LAIN["lain (session auth + code intelligence)"]
+        PR["PresenceRegistry<br/>(sessions, session_token)"]
         ST["~/.local/lain/state/&lt;hash&gt;.json"]
+        SYM["symbol stamps<br/>(BLAKE3 → caller_stamps)"]
+    end
+
+    subgraph ZOO["zoanthrope (coordination core)"]
+        OM["claims registry<br/>(path → holder)"]
+        LEASE["filesystem leases"]
+        ZS[".zoanthrope/state.json"]
     end
 
     SSE["SSE feed /events"]
@@ -28,22 +33,31 @@ flowchart TB
 
     A1 --> REG1 --> PR
     A2 --> REG2 --> PR
-    CL1 --> OM
+    CL1 --> SYM --> OM
     CL2 --> OM
-    PR <--> LOCK
-    OM <--> LOCK
-    LOCK <--> ST
-    PR -.events.-> SSE
+    OM <--> LEASE
+    OM <--> ZS
+    PR <--> ST
     OM -.events.-> SSE
+    PR -.events.-> SSE
     SSE --> CC
 ```
 
-Two agents register, both want to look at the same file. The
-registry holds their sessions; the occupancy map holds the per-path
-claims; the state file is the cross-process coordination point (so
-two `lain mcp` processes spawned by two agent consoles see each
-other). Every mutation pushes an event into the SSE feed the
-Command Center consumes.
+Two agents register, both want the same file. **Coordination is
+zoanthrope's** (`src/server/coordination/` is lain's proxy to it):
+the per-path claim registry, the exclusive filesystem leases, and
+the cross-process state (`<workspace>/.zoanthrope/state.json`) all
+live in the zoanthrope binary. Lain keeps the session auth table
+(`session_token`, heartbeat), the code-intelligence half (symbol
+fingerprints pinned as opaque `caller_stamps` on each claim), and the
+SSE feed the Command Center consumes. Every mutation pushes an event
+into that feed.
+
+Tool names did not change — `claim_files`, `release_files`,
+`lain_intent` and friends answer the same JSON shapes they always
+have (adapters over `zoanthrope claim|release|rejoin` and its
+postboard). What changed is the arbitration underneath: see
+[Arbitration](#arbitration-zoanthrope-contract) below.
 
 ## Operator quickstart
 
@@ -76,8 +90,10 @@ What's new on the wire:
 | Command Center panels | `GET /` now shows the **Agents online** and **Rooms** (file occupancy) panels, updated live. |
 | Existing tools | `query_graph`, `get_repo_info`, `explain_symbol`, and `get_cross_repo_blast_radius` now include attribution hints (active editors) and surfaces occupancy where it's relevant. |
 
-No new flags. No new dependencies. If your existing `repos.yaml` works,
-multiplayer works.
+Coordination needs the **zoanthrope** binary on `PATH` (or
+`$ZOANTHROPE_BIN`): `npm install -g @spuentesp/zoanthrope` is the
+documented install. Without it lain still runs — coordination
+degrades to advisory semantics (see [Arbitration](#arbitration-zoanthrope-contract)).
 
 ## Agent quickstart
 
@@ -87,15 +103,16 @@ Every agent that wants to participate goes through this 4-call dance:
 const { agent_id, session_token, expires_at_unix } = await mcp.call("register_agent", {name: "claude", kind: "claude-code", pid: process.pid});
 
 // Before editing auth.rs, claim it.
-const { granted, conflicts, advisories } = await mcp.call("claim_files", {agent_id, session_token, files: [{path: "auth.rs", symbols: ["login"], intent: "edit"}]});
+const { granted, conflicts, advisories, degraded } = await mcp.call("claim_files", {agent_id, session_token, files: [{path: "auth.rs", symbols: ["login"], intent: "edit"}]});
 if (conflicts.length > 0) {
-  // Refused: someone else holds a competing edit claim. Pick another scope.
-  for (const c of conflicts) console.warn(`agent ${c.agent_id} holds this scope`);
+  // Refused: another agent holds the file. Pick another scope.
+  for (const c of conflicts) console.warn(`agent ${c.agent_id} holds this file`);
 }
 for (const a of advisories ?? []) {
-  // Granted anyway — a read over someone's live edit. Re-read before patching.
+  // Granted, but arbitration could not be consulted — re-read before patching.
   console.warn(a.note);
 }
+if (degraded) console.warn(`coordination degraded: ${degraded}`);
 
 // After editing:
 await mcp.call("release_files", {agent_id, session_token, files: [{path: "auth.rs"}]});
@@ -115,28 +132,35 @@ The four calls in plain English:
    the session, so this is only for an agent that will be idle a long
    time. Interactive sessions expire after 10 minutes without a call,
    background (cron/CI) ones after 60 seconds; both are configurable
-   under `presence` in the tuning config. The TTL was 60s for everyone
-   and refreshed only by an explicit heartbeat, which is shorter than a
-   single LLM turn — agents lost their claims mid-task.
+   under `presence` in the tuning config.
 3. **`claim_files`** — before editing. Pass an array of
    `{path, symbols?, intent?}` entries. `intent` is `edit` or `read`;
-   `symbols` is an optional list of symbol names to scope the claim
-   finer than the file. lain returns `{granted, conflicts, advisories}`:
-   - `conflicts` — your claim was **refused**; another agent holds a
-     competing edit claim. Each entry names the holder, their intent,
-     when they were last seen, and whether the claim was `inferred`
+   `symbols` is an optional list of symbol names — lain fingerprints
+   each declared symbol body (BLAKE3) and pins the hashes on the claim
+   as zoanthrope `caller_stamps` (`symbol:<name>`), so a later check
+   can detect drift. The pins are *evidence*, not scope: arbitration
+   is file-granular (see [Arbitration](#arbitration-zoanthrope-contract)).
+   lain returns `{granted, conflicts, advisories, degraded?}`:
+   - `conflicts` — your claim was **refused**; another agent holds the
+     file (any intent — a `read` claim conflicts with an editor's hold
+     too). Each entry names the holder (`agent_id`, `name`, and the
+     `holder` spelling zoanthrope uses), their intent, when they were
+     last seen, and whether the claim was `inferred`
      (guessed by the attribution watcher) rather than declared.
-   - `advisories` — your claim was **granted**, but somebody else is
-     editing that file. A read never blocks on a writer; this is how
-     you find out anyway. Re-read before you patch.
+   - `advisories` — your claim was **granted**, but arbitration could
+     not be consulted (zoanthrope transport error). Re-read before you
+     patch. (Pre-refactor this is where a read over a live edit
+     appeared; that case is a conflict now.)
+   - `degraded` — `"zoanthrope-missing"`: no zoanthrope installed, so
+     the claim was advisory (logged, never enforced).
 
-   Conflicts and advisories carry the holder's `name` alongside its
+   Conflicts carry the holder's `name` alongside its
    `agent_id`, so you do not need a second call to learn who. `name` is
    `null` when that session has since ended — never a fabricated
    placeholder.
 
    Paths are canonicalized, so `/abs/auth.rs`, `auth.rs` and
-   `./auth.rs` are the same claim. They used to be three.
+   `./auth.rs` are the same claim.
 4. **`release_files`** — after editing. Frees the claim so the next
    agent can pick it up.
 
@@ -152,10 +176,13 @@ Each occupancy entry carries `holders`:
                { "agent_id": "…", "name": "bob",   "intent": "read", "inferred": false } ] }
 ```
 
-Read `intent` before concluding anything: an `edit` claim makes other
-agents' edit claims on that file conflict, a `read` claim never does. Without it a surveying agent cannot tell a
-blocking hold from a harmless one — two agents on a live server drew
-exactly the wrong conclusion from a bare list of ids.
+Read `intent` before concluding anything: claims are file-granular —
+an `edit` claim makes anything another agent holds on that file
+conflict (including reads), and a `read` claim conflicts with an
+editor's hold. Readers co-hold with each other. Without the intent a
+surveying agent cannot tell a blocking hold from a harmless one —
+two agents on a live server drew exactly the wrong conclusion from a
+bare list of ids.
 
 ### Listening for events (push)
 
@@ -181,10 +208,50 @@ stream verbatim.
 
 `claim_released` and `claim_revoked` are deliberately distinct.
 *Released* means the holder gave the claim up. *Revoked* means it was
-taken away — its session expired, or its own `ttl_seconds` ran out —
-and carries a `reason` of `session_expired` or `ttl_expired`. The
-holder may still believe it owns the file, so a subscriber seeing a
-revocation should treat that agent's in-flight edit as unprotected.
+taken away — its session expired or was unregistered — and carries a
+`reason` (`session_expired`, `unregistered`). The holder may still
+believe it owns the file, so a subscriber seeing a revocation should
+treat that agent's in-flight edit as unprotected. Claims themselves
+never expire on a timer: per-claim `ttl_seconds` is accepted but not
+enforced (see [Arbitration](#arbitration-zoanthrope-contract)).
+
+## Arbitration (zoanthrope contract)
+
+Claim arbitration is zoanthrope's; lain's `claim_files` /
+`release_files` are adapters. The contract the swarm experiments
+validated:
+
+- **File-granular.** A claim covers the whole path. `symbols` ride
+  along as `caller_stamps` (`symbol:<name>` = BLAKE3 of the symbol
+  body) so lain can later detect drift — pins are evidence, never
+  scope.
+- **Strict.** An edit claim conflicts with anything another agent
+  holds on the path; a read claim conflicts with an edit; readers
+  co-hold with each other. A refused batch is all-or-nothing per
+  call, and every refusal names the holder.
+- **Never auto-released.** Release (or session teardown) hands a file
+  over. A holder silent past the presence TTL is `stale` and still
+  blocks. `zoanthrope rejoin` re-asserts a returning agent's claims
+  without breaking anyone else's.
+- **Content-bound.** Every claim records a content fingerprint of the
+  file; a guarded write against a changed file is refused as
+  `stale-claim` (re-read, re-claim). Caller stamps are not checked by
+  zoanthrope — verifying them is lain's business.
+
+Modes and degraded behavior are runtime knobs, not wiring:
+
+| Knob | Effect |
+|---|---|
+| `ZOANTHROPE_MODE=advisory\|blocking` (or `{"mode": …}` in `.zoanthrope/config.json`) | Whether the *hook layer* denies a tool call on conflict (blocking) or only reports it (advisory). Claim arbitration is identical either way. |
+| `ZOANTHROPE_BIN` | Where to find the `zoanthrope` binary (default: `PATH`). |
+| (no binary found) | **Degraded**: claims are advisory — logged, never blocked — and responses carry `"degraded": "zoanthrope-missing"`. Lain stays installable standalone. |
+
+The formal specs (PresenceClaims, FsLease/FsLeaseGuard,
+RejoinProtocol) live in zoanthrope's `formal/`; lain's
+[`docs/formal/COORDINATION.md`](formal/COORDINATION.md) points there
+and records what stayed in lain. The hook family
+(`hooks/<agent>/pre-edit.sh`) runs `zoanthrope claim` directly — see
+[`hooks/README.md`](../hooks/README.md).
 
 ## How attribution works (defensive layer)
 
@@ -215,11 +282,12 @@ flowchart TB
 3. **Single-agent fallback**: if only one agent is connected, edits are attributed to them. This carries most attributions, because a write usually closes its file descriptor before the inotify event is handled.
 4. **Audit log**: unattributed edits are logged to stderr so the operator can investigate.
 
-Claims created this way are marked **`inferred: true`** and carry a
-short TTL. They are a guess: they say so on every surface that reports
-them, and a wrong one expires on its own rather than sticking until the
-session dies. A claim the agent later declares itself is upgraded to a
-declared claim; an inference never downgrades a declaration.
+Claims created this way are marked **`inferred: true`**. They are a
+guess: they say so on every surface that reports them. They do not
+self-expire (claims are never auto-released) — they end when the
+session ends or the claim is released — and a claim the agent later
+declares itself is upgraded to a declared claim; an inference never
+downgrades a declaration.
 
 ## Lifecycle
 
@@ -246,34 +314,49 @@ defaults are shown; you only need the keys you want to change.
 [presence]
 interactive_session_ttl_secs   = 600  # an agent doing ordinary work
 background_session_ttl_secs    = 60   # cron / CI agents, reaped fast
-inferred_claim_ttl_secs        = 120  # how long a *guessed* claim lives
-state_lock_acquire_timeout_ms  = 2000 # then proceed without the lock
+state_lock_acquire_timeout_ms  = 2000 # then fail closed, caller retries
 state_lock_retry_interval_ms   = 20   # gap between lock attempts
 state_lock_stale_after_secs    = 10   # assume the holder died
 ```
 
-The retry interval sets the tail latency under contention: with eight
-agents on one file, p99 on a contended `claim_files` is roughly ten
-retries' worth. Shorten it to trade CPU for latency.
+These gate lain's *session* table (register / heartbeat / expire) and
+the state-file lock around it. Claim arbitration runs on zoanthrope's
+clocks: `ZOANTHROPE_TTL_SECS` (presence TTL, default 15 min) and
+`ZOANTHROPE_LEASE_TTL_SECS` (filesystem lease TTL, default 60 s).
+`inferred_claim_ttl_secs` is retired — it belonged to the deleted
+in-memory claims registry, and claims are never auto-released now.
+
+The retry interval sets the session-lock tail latency under
+contention. Shorten it to trade CPU for latency; claim contention has
+its own backoff inside zoanthrope.
 
 ## Stability & persistence
 
-Symbol IDs include a BLAKE3 content hash. Claims carry an optional `ttl_seconds` that bounds them even with active heartbeats. State (`PresenceRegistry` + `OccupancyMap`) is persisted to `~/.local/lain/state/<config-stem>-<hash>.json` (hash of the absolute config path, so two configs that share a filename stem don't collide) on every mutation and restored on `lain server` startup, so claims survive restarts.
+Symbol IDs include a BLAKE3 content hash, and claims pin per-symbol
+BLAKE3 fingerprints as zoanthrope `caller_stamps` so a later check can
+detect drift. Session auth (`PresenceRegistry`) and the activity feed
+are persisted to `~/.local/lain/state/<config-stem>-<hash>.json`
+(hash of the absolute config path, so two configs that share a
+filename stem don't collide) and restored on `lain server` startup.
+**Claims are persisted by zoanthrope** in
+`<workspace>/.zoanthrope/state.json` (atomic writes, its own lock),
+so they survive restarts of either product.
 
-**That file is also how presence is shared between processes.** The MCP
-stdio transport spawns one server per client, so two agent consoles on
-one repo run two server processes. Each presence call takes a lock on
-the state file, re-reads it if a peer has written since, acts, and lets
-the persist callback write back — so a claim taken in one console is
-visible in the other. Before this, the file was only ever written and
-never re-read: every claim was granted, no conflict was ever reported,
-and nothing indicated the coordination layer was inert.
+**That zoanthrope state file is how coordination is shared between
+processes.** The MCP stdio transport spawns one server per client, so
+two agent consoles on one repo run two server processes; every one of
+them arbitrates claims against the same `.zoanthrope/state.json`,
+serialized by zoanthrope's lock. Before this, coordination was an
+in-process map shared through lain's state file: every claim was
+granted, no conflict was ever reported, and nothing indicated the
+layer was inert.
 
-The locking is advisory throughout. If the lock cannot be taken within
-its timeout the call proceeds without it, and a failed load or save is
-logged rather than surfaced. A presence registry that occasionally
-loses a concurrent write is a nuisance; one that can wedge an agent's
-tool call is a much worse failure.
+Claims never auto-release (per-claim `ttl_seconds` is accepted but not
+enforced). A holder silent past zoanthrope's presence TTL is marked
+*stale* and its claims still block — forcing one open is a policy this
+stack did not take. An agent that goes away and comes back runs
+`zoanthrope rejoin --agent <name>` once: it re-asserts that agent's
+claims and reports anything that changed while it was gone.
 
 For attribution portability, lain selects the backend at startup:
 
@@ -404,16 +487,17 @@ of three levels:
 The split between presence and ownership is the load-bearing
 distinction: presence (registration, activity feed) is
 eventually-consistent and fail-open. Ownership (`claim_files`,
-`RED` evaluation) is answered from the in-memory registry, shared
-across `lain mcp` processes through the state file (re-read under
-lock): a competing edit claim is refused, and the coordination
-engine never downgrades a RED.
+`RED` evaluation) is answered from zoanthrope's claim registry
+(shared by every `lain mcp` process through
+`.zoanthrope/state.json`, re-read under its lock): a competing claim
+is refused, and the coordination engine never downgrades a RED.
 
 This is coordination between cooperating agents, not isolation.
-Claims expire (TTL and heartbeat), inferred claims are guesses, and
-the `.lain/locks/` files are written best-effort: a filesystem
-conflict does not roll back an in-memory claim. An agent that skips
-`claim_files` or ignores a refusal can still write the file.
+Claims never auto-release; inferred claims are guesses; an agent that
+skips `claim_files` or ignores a refusal can still write the file.
+What blocks that is the hook layer, and only in zoanthrope's blocking
+mode (`ZOANTHROPE_MODE=blocking`, the default for its guard hooks):
+a conflict then *denies* the tool call instead of only reporting it.
 
 ### Graph-distance refinement
 
@@ -485,9 +569,10 @@ the deterministic `agy_e2e.sh` pass:
 
 - **kill winner** — alice claims, the server is SIGKILLed
   mid-cycle, a fresh server is started after the stale-lock
-  window, bob attempts the same scope. Variant 1 currently
-  surfaces a real linearizability gap (`OccupancyMap::load` does
-  not drop stale-by-agent claims); tracked in the issue tracker.
+  window, bob attempts the same scope. Claims now live in
+  zoanthrope's `state.json` with its own rejoin/orphan policy; the
+  variant exercises that path (and the `zoanthrope rejoin` recovery
+  contract) rather than a lain-side registry reload.
 - **corrupt state** — the state file is truncated between
   iterations; recovery must succeed.
 - **stale-lock takeover** — a stale filesystem lock is planted
