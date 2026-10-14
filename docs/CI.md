@@ -56,9 +56,9 @@ The coordination battery (`shared_presence`, `multi_agent_concurrency`,
 `coordination_*`, `attribution`, `presence_e2e`) runs against real
 zoanthrope arbitration when a `zoanthrope` binary is on `PATH` (or
 `$ZOANTHROPE_BIN`) and skips with a message when it is not. CI installs
-`@spuentesp/zoanthrope@0.1.3` and sets `CI_REQUIRE_ZOANTHROPE=1`, which
+`@spuentesp/zoanthrope@0.1.4` and sets `CI_REQUIRE_ZOANTHROPE=1`, which
 turns that skip into a hard failure — do the same locally
-(`npm install -g @spuentesp/zoanthrope@0.1.3`) to reproduce a CI
+(`npm install -g @spuentesp/zoanthrope@0.1.4`) to reproduce a CI
 coordination failure.
 
 For npm launcher changes:
