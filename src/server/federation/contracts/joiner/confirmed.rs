@@ -67,8 +67,29 @@ pub(crate) fn apply_confirmed_binding(
     };
     let mut matched_any = false;
     for node in nodes {
-        let Some(ContractFact::Consumer(consumer)) = node.contract.first() else {
-            continue;
+        let (node_key, reads_complete) = match node.contract.first() {
+            Some(ContractFact::Consumer(consumer)) => {
+                let Some(template) = consumer.url.template.clone() else {
+                    continue;
+                };
+                (
+                    ContractKey::Http {
+                        method: consumer.method.clone(),
+                        template,
+                    },
+                    consumer.reads_complete,
+                )
+            }
+            Some(ContractFact::GraphqlConsumer(fact)) => (
+                ContractKey::Graphql {
+                    op: fact.op,
+                    field: fact.field.clone(),
+                },
+                // GraphQL call sites carry no §6.5 escape flag; the
+                // protocol resolvers record them as fully read.
+                true,
+            ),
+            _ => continue,
         };
         let Ok(gid) = GlobalId::parse(&node.id) else {
             continue;
@@ -83,15 +104,7 @@ pub(crate) fn apply_confirmed_binding(
         if symbol_name != binding.consumer.symbol {
             continue;
         }
-        if consumer.url.template.is_none() {
-            continue;
-        }
-        let tmpl = consumer.url.template.clone().unwrap();
-        let ck = ContractKey::Http {
-            method: consumer.method.clone(),
-            template: tmpl,
-        };
-        if ck != consumer_key {
+        if node_key != consumer_key {
             continue;
         }
         matched_any = true;
@@ -128,7 +141,7 @@ pub(crate) fn apply_confirmed_binding(
                     stripped_prefix: None,
                 }),
                 bound_endpoints: vec![(provider_svc.clone(), provider_key.clone())],
-                reads_complete: consumer.reads_complete,
+                reads_complete,
             }],
         );
     }

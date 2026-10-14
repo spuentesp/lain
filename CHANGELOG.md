@@ -13,6 +13,9 @@ All notable changes to LAIN are documented here. Versions follow
   behavior).
 - config: `bindings[].{consumer,provider}.key` accepts
   `graphql:op:field` keys (previously HTTP-only grammar).
+- bindings: `repos.yaml#bindings` entries can pin GraphQL consumers
+  (keys `graphql:op:field`, consumer `symbol` = node name
+  `graphql-call:{op}:{field}`). No migration needed.
 
 ## 0.10.0 — 2026-10-13
 

@@ -1050,6 +1050,83 @@ fn confirmed_binding_no_consumer_marks_stale() {
     ));
 }
 
+/// Shared config for the GraphQL confirmed-binding tests: service
+/// `api` (repo `api`) exposes `query product` and service
+/// `storefront` pins its `graphql-call:query:product` call site to
+/// it via `bindings[0]`.
+fn config_with_graphql_binding() -> ContractFederationConfig {
+    ContractFederationConfig {
+        services: multi_service_config(&[("api", &[]), ("storefront", &[])]).services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "storefront".into(),
+                path: "src/gql.ts".into(),
+                symbol: "graphql-call:query:product".into(),
+                key: "graphql:query:product".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "api".into(),
+                key: "graphql:query:product".into(),
+            },
+        }],
+        databases: vec![],
+    }
+}
+
+#[test]
+fn confirmed_graphql_binding_binds_consumer_to_provider_service() {
+    let provider = graphql_provider_node("api", "schema.graphql", GraphqlOp::Query, "product", 10);
+    let consumer =
+        graphql_consumer_node("storefront", "src/gql.ts", GraphqlOp::Query, "product", 20);
+    let cfg = config_with_graphql_binding();
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    assert_eq!(out.binds.len(), 1);
+    let edge = &out.binds[0];
+    assert!(matches!(edge.provenance, EdgeProvenance::Confirmed { .. }));
+    assert!((edge.confidence - 1.0).abs() < f32::EPSILON);
+    assert!(out.index.stale_bindings.is_empty());
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
+    assert!(matches!(
+        res.target,
+        Some(ConsumerTarget::Binds {
+            provenance: EdgeProvenance::Confirmed { .. },
+            ..
+        })
+    ));
+    assert_eq!(res.bound_endpoints.len(), 1);
+}
+
+#[test]
+fn confirmed_graphql_binding_no_consumer_marks_stale() {
+    let provider = graphql_provider_node("api", "schema.graphql", GraphqlOp::Query, "product", 10);
+    let cfg = config_with_graphql_binding();
+    let out = ContractJoiner::run(&[provider], &[], &cfg);
+    assert!(out.binds.is_empty());
+    assert_eq!(out.index.stale_bindings.len(), 1);
+    assert!(matches!(
+        out.index.stale_bindings[0].reason,
+        StaleReason::NoConsumer
+    ));
+}
+
+#[test]
+fn confirmed_graphql_binding_no_endpoint_marks_stale() {
+    let consumer =
+        graphql_consumer_node("storefront", "src/gql.ts", GraphqlOp::Query, "product", 20);
+    let cfg = config_with_graphql_binding();
+    let out = ContractJoiner::run(&[consumer], &[], &cfg);
+    assert!(out.binds.is_empty());
+    assert_eq!(out.index.stale_bindings.len(), 1);
+    assert!(matches!(
+        out.index.stale_bindings[0].reason,
+        StaleReason::NoEndpoint
+    ));
+}
+
 // ─── §7.8 ordering ─────────────────────────────────────────────────
 
 #[test]
