@@ -432,6 +432,10 @@ consumer repo and joins it to the named endpoint with
 Bindings that match no consumer or whose endpoint does not exist
 appear in `coverage.stale_bindings` and contribute nothing.
 
+A binding `key` follows the grammar `"<METHOD> <template>"` or
+`"graphql:<query|mutation|subscription>:<field>"`, where `<field>`
+is the operation's root field (e.g. `"graphql:query:ProductDetails"`).
+
 ```yaml
 bindings:
   - consumer:
@@ -459,8 +463,9 @@ The config load fails with a precise message for each of:
   neither declared nor implicit.
 - Same `env` name listed by two services.
 - Same exact `hosts` entry listed by two services.
-- A `key` that does not parse as `<METHOD> <template>` or that does
-  not survive normalization unchanged.
+- A `key` that parses as neither `<METHOD> <template>` nor
+  `graphql:<query|mutation|subscription>:<field>`, or an HTTP
+  template that does not survive normalization unchanged.
 - `path_arg > 5`.
 - Upper-case host or service-name entries.
 

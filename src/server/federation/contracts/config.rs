@@ -15,7 +15,7 @@
 //! key on it.
 
 use crate::error::LainError;
-use crate::federation::contracts::model::service_name_is_valid;
+use crate::federation::contracts::model::{service_name_is_valid, ContractKey};
 use crate::federation::contracts::normalize;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -403,7 +403,8 @@ impl ContractFederationConfig {
         }
 
         // Rule 8: malformed key — every entry that carries one must
-        // parse as `<METHOD> <template>` and survive normalization.
+        // parse as `<METHOD> <template>` (or `graphql:op:field`) and
+        // survive normalization.
         for b in &self.bindings {
             validate_key("bindings.consumer.key", &b.consumer.key)?;
             validate_key("bindings.provider.key", &b.provider.key)?;
@@ -593,8 +594,22 @@ fn path_prefixes_overlap(a: &str, b: &str) -> bool {
 /// `http:<METHOD> <template>` and the shortened form
 /// `<METHOD> <template>` used by `generic_keys` and the consumer key
 /// inside `bindings`. The shortened form is the §7.1 config shape;
-/// the full form is what `ContractKey::from_str` requires.
+/// the full form is what `ContractKey::from_str` requires. Keys
+/// prefixed `graphql:` instead carry the
+/// `graphql:<query|mutation|subscription>:<field>` grammar and skip
+/// the HTTP normalization path.
 fn validate_key(field: &str, key: &str) -> Result<(), LainError> {
+    if key.starts_with("graphql:") {
+        match ContractKey::from_str(key) {
+            Ok(ContractKey::Graphql { field, .. }) if !field.is_empty() => return Ok(()),
+            Ok(_) => {
+                return Err(LainError::Config(format!(
+                    "{field}: '{key}' is not a graphql key"
+                )))
+            }
+            Err(e) => return Err(LainError::Config(format!("{field} '{key}': {e}"))),
+        }
+    }
     // Strip the optional `http:` prefix that the wire grammar
     // uses. Config keys are written without it.
     let body = key.strip_prefix("http:").unwrap_or(key);
@@ -843,6 +858,17 @@ services:
                 .contains("host 'api.example.com' is listed by both"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_key_accepts_graphql_key() {
+        assert!(validate_key("bindings.consumer.key", "graphql:query:product").is_ok());
+    }
+
+    #[test]
+    fn validate_key_rejects_graphql_key_with_unknown_op() {
+        let err = validate_key("bindings.consumer.key", "graphql:queryish:product").unwrap_err();
+        assert!(err.to_string().contains("unknown graphql op"), "got: {err}");
     }
 
     #[test]

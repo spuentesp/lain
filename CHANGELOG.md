@@ -11,6 +11,8 @@ All notable changes to LAIN are documented here. Versions follow
   GraphQL provider endpoints; set `false` for repos that only carry
   SDL copies. No migration needed (default `true` preserves prior
   behavior).
+- config: `bindings[].{consumer,provider}.key` accepts
+  `graphql:op:field` keys (previously HTTP-only grammar).
 
 ## 0.10.0 — 2026-10-13
 

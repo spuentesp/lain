@@ -10,7 +10,7 @@ use crate::federation::contracts::config::{
 use crate::federation::contracts::index::{
     ConsumerTarget, EndpointId, FieldRefResolution, StaleReason, UnresolvedReason,
 };
-use crate::federation::contracts::joiner::{ContractJoiner, JoinOutput};
+use crate::federation::contracts::joiner::{parse_contract_key, ContractJoiner, JoinOutput};
 use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, FieldMeta, FieldReadFact,
     GraphqlConsumerFact, GraphqlOp, GraphqlProviderFact, HostPart, HttpMethod, JsonPath,
@@ -1238,6 +1238,18 @@ fn contract_key_display_round_trip_table() {
     let parsed: ContractKey = s.parse().unwrap();
     assert_eq!(parsed, k);
     assert!(s.starts_with("table:"));
+}
+
+#[test]
+fn parse_contract_key_accepts_graphql_prefix() {
+    let key = parse_contract_key("graphql:query:product").unwrap();
+    assert_eq!(
+        key,
+        ContractKey::Graphql {
+            op: GraphqlOp::Query,
+            field: "product".into()
+        }
+    );
 }
 
 // ─── Task 9 — pin `is_suffix` boundary cases under the

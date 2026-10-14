@@ -780,13 +780,15 @@ pub(super) fn parse_method(s: &str) -> Option<HttpMethod> {
 /// Generic keys (and `bindings[*].provider.key`) are written in
 /// the shortened `<METHOD> <template>` form, not the
 /// `http:<METHOD> <template>` wire form, so we normalize them
-/// here.
+/// here. `graphql:op:field` keys already carry their prefix and
+/// pass through untouched.
 pub(super) fn parse_contract_key(s: &str) -> Result<ContractKey, String> {
-    let normalized = if s.starts_with("http:") || s.starts_with("topic:") {
-        s.to_string()
-    } else {
-        format!("http:{s}")
-    };
+    let normalized =
+        if s.starts_with("http:") || s.starts_with("topic:") || s.starts_with("graphql:") {
+            s.to_string()
+        } else {
+            format!("http:{s}")
+        };
     normalized.parse()
 }
 
