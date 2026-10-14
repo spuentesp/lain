@@ -3,6 +3,15 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- config: `services[].provides_graphql` scopes which services mint
+  GraphQL provider endpoints; set `false` for repos that only carry
+  SDL copies. No migration needed (default `true` preserves prior
+  behavior).
+
 ## 0.10.0 — 2026-10-13
 
 > **MINOR bump — the coordination contract changed.** Lain's

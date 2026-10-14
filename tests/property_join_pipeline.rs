@@ -115,6 +115,7 @@ fn arb_service_decl() -> BoxedStrategy<ServiceDecl> {
             env,
             base_path: None,
             route_prefixes: Vec::new(),
+            provides_graphql: true,
         })
         .boxed()
 }
@@ -257,6 +258,7 @@ fn ws_config(svc: &str, host: &str) -> ContractFederationConfig {
             env: vec![],
             base_path: None,
             route_prefixes: vec![],
+            provides_graphql: true,
         }],
         http_clients: vec![],
         generic_keys: vec![],
@@ -398,6 +400,7 @@ fn every_topic_call_lands_in_exactly_one_terminal_state() {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "billing".into(),
@@ -407,6 +410,7 @@ fn every_topic_call_lands_in_exactly_one_terminal_state() {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
         ],
         http_clients: vec![],

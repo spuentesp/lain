@@ -156,6 +156,7 @@ fn config_with_service(name: &str) -> ContractFederationConfig {
             env: Vec::new(),
             base_path: None,
             route_prefixes: Vec::new(),
+            provides_graphql: true,
         }],
         http_clients: vec![],
         generic_keys: vec![],
@@ -176,6 +177,7 @@ fn config_with_two_services(a: &str, b: &str) -> ContractFederationConfig {
                 env: Vec::new(),
                 base_path: None,
                 route_prefixes: Vec::new(),
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: b.to_string(),
@@ -185,6 +187,7 @@ fn config_with_two_services(a: &str, b: &str) -> ContractFederationConfig {
                 env: Vec::new(),
                 base_path: None,
                 route_prefixes: Vec::new(),
+                provides_graphql: true,
             },
         ],
         http_clients: vec![],
@@ -193,6 +196,16 @@ fn config_with_two_services(a: &str, b: &str) -> ContractFederationConfig {
         bindings: vec![],
         databases: vec![],
     }
+}
+
+fn config_with_two_services_provides_graphql(
+    a: &str,
+    b: &str,
+    b_provides_graphql: bool,
+) -> ContractFederationConfig {
+    let mut cfg = config_with_two_services(a, b);
+    cfg.services[1].provides_graphql = b_provides_graphql;
+    cfg
 }
 
 fn run(
@@ -462,6 +475,79 @@ fn f5_federation_ambiguous_no_single_bind() {
     assert!(
         out.binds.is_empty(),
         "no Binds edges may be emitted for ambiguous federation"
+    );
+}
+
+// ─── provides_graphql — config-scoped provider surface ───────────────
+
+/// `services[].provides_graphql: false` shrinks the `(op, field)`
+/// provider key space: two services mint GraphQL provider endpoints
+/// for (query, product) — the API (real SDL) and a consumer repo
+/// carrying a schema copy. With `provides_graphql: false` on the
+/// copy, exactly one provider remains and the consumer must Binds
+/// instead of `graphql_no_op`.
+#[test]
+fn provides_graphql_false_shrinks_provider_key_space() {
+    let nodes = vec![
+        graphql_provider_node(
+            "api",
+            "schema.graphql",
+            GraphqlOp::Query,
+            "product",
+            3,
+            "Product",
+        ),
+        graphql_provider_node(
+            "dashboard",
+            "schema.graphql",
+            GraphqlOp::Query,
+            "product",
+            5,
+            "Product",
+        ),
+        graphql_consumer_node(
+            "storefront",
+            "src/product.ts",
+            GraphqlOp::Query,
+            "product",
+            7,
+        ),
+    ];
+    let cfg = config_with_two_services_provides_graphql("api", "dashboard", false);
+    let out = run(nodes, cfg);
+    assert!(
+        out.binds
+            .iter()
+            .any(|e| e.consumer.name().as_deref() == Some("graphql-call:query:product")),
+        "the storefront consumer must Binds once the copy stops minting providers, got binds={:?}",
+        out.binds
+    );
+    let consumer_id = gid(
+        "storefront",
+        NodeType::Function,
+        "src/product.ts",
+        "graphql-call:query:product",
+        7,
+    );
+    let Some(resolution) = out.index.consumer(&consumer_id) else {
+        panic!(
+            "consumer must resolve: binds={:?} endpoints={:?}",
+            out.binds, out.index.endpoints
+        );
+    };
+    assert_eq!(
+        resolution.bound_endpoints.len(),
+        1,
+        "exactly one provider must remain after provides_graphql: false, got {:?}",
+        resolution.bound_endpoints
+    );
+    assert!(
+        matches!(
+            resolution.target.as_ref(),
+            Some(ConsumerTarget::Binds { .. })
+        ),
+        "target must be Binds (not graphql_no_op), got {:?}",
+        resolution.target
     );
 }
 

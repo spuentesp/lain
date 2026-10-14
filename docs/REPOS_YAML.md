@@ -374,8 +374,22 @@ services:
     base_path: /api             # prefix the service is reached under
     route_prefixes:             # cross-file router mounts (§6.2)
       - { path: src/routers/admin.py, prefix: /admin }
+    provides_graphql: true      # mint GraphQL provider endpoints from this service's SDL (default true)
   - { name: shipping, repo: platform, paths: [services/shipping/] }
   - { name: inventory, repo: platform, paths: [services/inventory/] }
+```
+
+Set `provides_graphql: false` for repos that only carry schema
+copies (codegen inputs), so their `.graphql`/`.gql` SDL does not
+duplicate every `(op, field)` provider key and push consumers into
+`graphql_no_op`:
+
+```yaml
+services:
+  - name: saleor-dashboard
+    repo: saleor-dashboard
+    # Schema copies only (codegen inputs) — not a GraphQL provider.
+    provides_graphql: false
 ```
 
 ### `http_clients` (list)

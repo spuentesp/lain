@@ -79,6 +79,7 @@ async fn build_min_federation(root: &Path) -> Arc<FederatedIndex> {
                 env: vec!["ORDERS_URL".into()],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             lain::federation::contracts::config::ServiceDecl {
                 name: "billing".into(),
@@ -88,6 +89,7 @@ async fn build_min_federation(root: &Path) -> Arc<FederatedIndex> {
                 env: vec!["BILLING_URL".into()],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
         ],
         http_clients: vec![],

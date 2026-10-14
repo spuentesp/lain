@@ -89,6 +89,7 @@ fn allows_schema_decl_when_a_service_in_the_same_repo_exists() {
         env: vec![],
         base_path: None,
         route_prefixes: vec![],
+        provides_graphql: true,
     });
     cfg.schemas.push(SchemaDecl {
         topic: "payments.charged".into(),
@@ -202,6 +203,7 @@ fn allows_distinct_tables_across_databases() {
         env: vec![],
         base_path: None,
         route_prefixes: vec![],
+        provides_graphql: true,
     });
     cfg.services.push(ServiceDecl {
         name: "analytics".into(),
@@ -211,6 +213,7 @@ fn allows_distinct_tables_across_databases() {
         env: vec![],
         base_path: None,
         route_prefixes: vec![],
+        provides_graphql: true,
     });
     cfg.databases.push(DatabaseDecl {
         name: "orders_db".into(),
@@ -263,6 +266,7 @@ fn database_service_rejects_unknown_service() {
         env: vec![],
         base_path: None,
         route_prefixes: vec![],
+        provides_graphql: true,
     });
     cfg.databases.push(DatabaseDecl {
         name: "orders_db".into(),
@@ -294,6 +298,7 @@ fn database_shared_with_can_target_implicit_service() {
         env: vec![],
         base_path: None,
         route_prefixes: vec![],
+        provides_graphql: true,
     });
     cfg.databases.push(DatabaseDecl {
         name: "orders_db".into(),

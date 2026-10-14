@@ -107,6 +107,7 @@ async fn build_three_repo_federation(
                 env: vec!["ORDERS_URL".into()],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "billing".into(),
@@ -116,6 +117,7 @@ async fn build_three_repo_federation(
                 env: vec!["BILLING_URL".into()],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "reports".into(),
@@ -125,6 +127,7 @@ async fn build_three_repo_federation(
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
         ],
         http_clients: vec![],
@@ -2521,6 +2524,7 @@ mod pr15_event {
                     env: vec![],
                     base_path: None,
                     route_prefixes: vec![],
+                    provides_graphql: true,
                 },
                 ServiceDecl {
                     name: "billing".into(),
@@ -2530,6 +2534,7 @@ mod pr15_event {
                     env: vec![],
                     base_path: None,
                     route_prefixes: vec![],
+                    provides_graphql: true,
                 },
                 ServiceDecl {
                     name: "reports".into(),
@@ -2539,6 +2544,7 @@ mod pr15_event {
                     env: vec![],
                     base_path: None,
                     route_prefixes: vec![],
+                    provides_graphql: true,
                 },
             ],
             http_clients: vec![],
@@ -2812,6 +2818,7 @@ mod pr18_operation_id {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             }],
             http_clients: vec![HttpClientDecl {
                 call: "client.orders.{method}".into(),

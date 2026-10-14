@@ -116,6 +116,7 @@ fn orders_config() -> ContractFederationConfig {
             env: vec![],
             base_path: None,
             route_prefixes: vec![],
+            provides_graphql: true,
         }],
         http_clients: vec![],
         generic_keys: vec![],
@@ -343,6 +344,7 @@ fn scenario_16_shipping_to_inventory_one_binds_cross_repo_false() {
                 env: vec!["INVENTORY_URL".into()],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "inventory".into(),
@@ -352,6 +354,7 @@ fn scenario_16_shipping_to_inventory_one_binds_cross_repo_false() {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
         ],
         http_clients: vec![],

@@ -70,6 +70,16 @@ pub struct ServiceDecl {
     pub base_path: Option<String>,
     #[serde(default)]
     pub route_prefixes: Vec<RoutePrefix>,
+    /// Whether this service's `.graphql`/`.gql` SDL files mint GraphQL
+    /// provider endpoints. Set `false` for repos that only carry schema
+    /// copies (codegen inputs) so they do not pollute the `(op, field)`
+    /// provider key space. Defaults to `true`.
+    #[serde(default = "default_provides_graphql")]
+    pub provides_graphql: bool,
+}
+
+fn default_provides_graphql() -> bool {
+    true
 }
 
 /// One cross-file router mount. The provider declares a route under
@@ -728,6 +738,29 @@ services:
 "#;
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         assert!(cfg.validate(&repo_ids()).is_ok());
+    }
+
+    #[test]
+    fn parses_provides_graphql_default_true() {
+        let yaml = r#"
+services:
+  - name: orders
+    repo: alpha
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        assert!(cfg.services.iter().all(|s| s.provides_graphql));
+    }
+
+    #[test]
+    fn parses_provides_graphql_false() {
+        let yaml = r#"
+services:
+  - name: orders
+    repo: alpha
+    provides_graphql: false
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        assert!(!cfg.services[0].provides_graphql);
     }
 
     #[test]
