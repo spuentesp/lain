@@ -162,9 +162,10 @@ on the tagged commit and `release.yml` refuses to build it.
    itself noted as "reaches users with the next release". A release cut
    over a red nightly is how pending work becomes invisible.
 4. **zoanthrope 0.1.0's binary was broken.** The coordination core is
-   an external dependency now; its version matters. CI pins
-   `@spuentesp/zoanthrope@0.1.3` (npm install, source-build fallback
-   for platforms without a prebuilt asset) and `CI_REQUIRE_ZOANTHROPE=1`
+   an external dependency now; its version matters. CI pins a concrete
+   `@spuentesp/zoanthrope` version (0.1.6 as of this audit; npm
+   install, source-build fallback for platforms without a prebuilt
+   asset) and `CI_REQUIRE_ZOANTHROPE=1`
    turns the battery's missing-binary skip into a hard failure, so a
    broken or absent zoanthrope can never pass silently again.
 
@@ -176,14 +177,23 @@ tagged until this pending list is clean *and* the owner has said go.
 A release that ships with a list of "pendientes" is half-done work.
 
 
-## Final absorb (2026-10-13)
+## Final absorb (2026-10-13 → 2026-10-14)
 
-- zoanthrope **0.1.4** published (npm `latest`): the state-lock contention fix
-  (claims answer grant-or-conflict, never plumbing errors). Its `tla2tools.jar`
-  is now vendored after the upstream asset churned hashes three times in one day.
-- lain's CI pin bumped to `@spuentesp/zoanthrope@0.1.4` (#324, merged to dev).
-- The branch absorbed dev twice (#323 gap + contention retry, #324 pin) and
-  main's history once (merge-base stitching for the PR). Metadata re-validated:
+- zoanthrope **0.1.4** published (npm `latest` at the time): the state-lock
+  contention fix (claims answer grant-or-conflict, never plumbing errors).
+  Its `tla2tools.jar` is now vendored after the upstream asset churned hashes
+  three times in one day.
+- zoanthrope **0.1.5** (#325 pin): the Windows target —
+  `x86_64-pc-windows-msvc` ships as a prebuilt asset, so the cross-platform
+  lane installs a real binary instead of building from source.
+- zoanthrope **0.1.6** (#326 pin, merged to dev as `d5b8ec21`): its npm shim
+  hit the SAME GNU-tar failure as lain #312 on Windows (`gzip: unexpected end
+  of file`) and shipped the same System32 bsdtar fix. #326 also makes the pin
+  coherent — step label, npm pin and source fallback had drifted to three
+  different versions (0.1.4 / 0.1.5 / 0.1.4) and now all say 0.1.6.
+- The branch absorbed dev (#323 gap + contention retry, #324 pin 0.1.4,
+  #325 pin 0.1.5, #326 pin 0.1.6 + label coherence) and main's history once
+  (merge-base stitching for the PR). Metadata re-validated:
   `check-release-version.py --tag v0.10.0` -> OK.
 
 **Status: complete — awaiting the owner's explicit go. Do not merge/tag without it.**
