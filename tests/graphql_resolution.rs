@@ -1868,3 +1868,63 @@ fn t9_detect_in_code_unterminated_body_does_not_overrun() {
         "an unterminated body still parses what it has, got {found:?}"
     );
 }
+
+// ─── Storefront .graphql document shapes — behavior pin ─────────────
+//
+//     Two real-world storefront document shapes, pinned before the
+//     GraphQL config-bridge work touches the engine: a full
+//     `query … { … }` operation file mints one consumer node per
+//     top-level field, and a fragment-only file mints none. Later
+//     tasks must not silently alter either behavior.
+
+/// A full storefront operation file (`query ProductDetails($slug: String!)
+/// { product(slug: $slug) { … } }`) scanned through the workspace
+/// consumer harness must mint a consumer node named
+/// `graphql-call:query:product` — one per top-level field of the
+/// operation (`parse_document` at `graphql_consumer_sensor.rs:269`
+/// parses standalone `.graphql` documents).
+#[test]
+fn storefront_graphql_op_file_mints_one_consumer_per_top_field() {
+    use lain::graph::GraphDatabase;
+    use lain::server::sensors::graphql_consumer_sensor::scan_workspace_graphql_consumer;
+
+    let root = fixed_workspace("sf_op_files");
+    write_file(
+        &root,
+        "src/graphql/ProductDetails.graphql",
+        "query ProductDetails($slug: String!) {\n  product(slug: $slug) {\n    id\n    name\n  }\n}\n",
+    );
+    let graph = GraphDatabase::new(&root.join("graph.bin")).unwrap();
+    scan_workspace_graphql_consumer(&graph, &root, &ns()).unwrap();
+    let nodes = graph.get_all_nodes();
+    let names: Vec<&str> = nodes.iter().map(|n| n.name.as_str()).collect();
+    assert!(
+        names.contains(&"graphql-call:query:product"),
+        "expected consumer node graphql-call:query:product, got {names:?}"
+    );
+}
+
+/// A fragment-only storefront document (no top-level operation)
+/// must mint no consumer nodes at all: `parse_document` reports it
+/// as a single dynamic record, and the scanner skips dynamic
+/// records before emitting nodes.
+#[test]
+fn fragment_only_graphql_file_mints_no_consumer() {
+    use lain::graph::GraphDatabase;
+    use lain::server::sensors::graphql_consumer_sensor::scan_workspace_graphql_consumer;
+
+    let root = fixed_workspace("sf_frag_file");
+    write_file(
+        &root,
+        "src/graphql/OrderDetailsFragment.graphql",
+        "fragment OrderDetails on Order {\n  id\n  number\n}\n",
+    );
+    let graph = GraphDatabase::new(&root.join("graph.bin")).unwrap();
+    scan_workspace_graphql_consumer(&graph, &root, &ns()).unwrap();
+    let nodes = graph.get_all_nodes();
+    assert!(
+        nodes.is_empty(),
+        "fragment-only docs must mint no consumers, got {:?}",
+        nodes.iter().map(|n| &n.name).collect::<Vec<_>>()
+    );
+}
