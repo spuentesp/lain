@@ -174,3 +174,16 @@ on the tagged commit and `release.yml` refuses to build it.
 is the last step, not the first: nothing is merged and nothing is
 tagged until this pending list is clean *and* the owner has said go.
 A release that ships with a list of "pendientes" is half-done work.
+
+
+## Final absorb (2026-10-13)
+
+- zoanthrope **0.1.4** published (npm `latest`): the state-lock contention fix
+  (claims answer grant-or-conflict, never plumbing errors). Its `tla2tools.jar`
+  is now vendored after the upstream asset churned hashes three times in one day.
+- lain's CI pin bumped to `@spuentesp/zoanthrope@0.1.4` (#324, merged to dev).
+- The branch absorbed dev twice (#323 gap + contention retry, #324 pin) and
+  main's history once (merge-base stitching for the PR). Metadata re-validated:
+  `check-release-version.py --tag v0.10.0` -> OK.
+
+**Status: complete — awaiting the owner's explicit go. Do not merge/tag without it.**
