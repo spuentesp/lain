@@ -754,6 +754,36 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
+      # The audit/coordination tests gate on a real zoanthrope binary.
+      # Without one they skip (or, with CI_REQUIRE_ZOANTHROPE, fail) —
+      # and a coordination battery that silently skips under coverage
+      # is how a regression ships. Install the same pinned core the
+      # test jobs use.
+      - name: Install zoanthrope (coordination core, pinned 0.1.6)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @spuentesp/zoanthrope@0.1.6
+          if ! zoanthrope --version; then
+            echo "no prebuilt zoanthrope for this platform; building v0.1.6 from source"
+            cargo install --git https://github.com/spuentesp/zoanthrope.git \
+              --tag v0.1.6 --locked --force
+            if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
+            fi
+          else
+            REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1 || true)"
+            if [ -n "$REAL_BIN" ]; then
+              echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            fi
+          fi
+          zoanthrope --version
+
       - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
         # 17 tests in `tests/use_cases/battery_*` invoke the `lain`
         # binary and panic with a helpful message if it is missing.
@@ -770,6 +800,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: target
           LAIN_PERF_BUDGET_MULTIPLIER: '4.0'
+          CI_REQUIRE_ZOANTHROPE: '1'
         run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
 
       - name: Upload to Codecov
