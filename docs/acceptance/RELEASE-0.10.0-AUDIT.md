@@ -2,7 +2,10 @@
 
 **Date:** 2026-10-13
 **Branch:** `release/v0.10.0`, cut from `origin/dev` @ `3b0922a0`
-(`chore: sync dev with v0.9.1 release state (#321)`)
+(`chore: sync dev with v0.9.1 release state (#321)`), then updated to
+absorb `origin/dev` @ `10ee2fdb` (#323 — gap-close + contention fix) via
+merge `5c0e4300` (clean; see "Absorbing #323" below). This record
+reflects the tree as it now stands.
 **Status at this audit:** the pending list is **clean**. Nothing here is
 merged or tagged — per the process rule at the bottom, the tag happens
 only after the owner's explicit go.
@@ -54,11 +57,21 @@ and copy work, explicitly not part of this release:
 
 - **Release base (dev tip `3b0922a0`)** — fast lane green:
   [CI run 38444215391](https://github.com/spuentesp/lain/actions/runs/38444215391)
-  (`conclusion: success`, 17m33s, 2026-10-13) on exactly the commit
-  this branch is cut from. Jobs green: Ubuntu `cargo test --workspace`
-  (incl. the capability suite / `demo.sh`), lint + format + doc tests,
-  npm-shim install tests, schema-drift, arch guardrails, agent-contract
-  publish.
+  (`conclusion: success`, 17m33s, 2026-10-13) on the commit this branch
+  was cut from. Jobs green: Ubuntu `cargo test --workspace` (incl. the
+  capability suite / `demo.sh`), lint + format + doc tests, npm-shim
+  install tests, schema-drift, arch guardrails, agent-contract publish.
+- **#323 landing (dev tip `10ee2fdb`, absorbed by merge `5c0e4300`)** —
+  fast lane green:
+  [CI run 38486568258](https://github.com/spuentesp/lain/actions/runs/38486568258)
+  (`conclusion: success`, 17m10s). The PR run that preceded it is the
+  one that caught the contention defect (below): red
+  [38477829773](https://github.com/spuentesp/lain/actions/runs/38477829773)
+  (`concurrent_agents_contention_benchmark`: `claim_files must not error
+  under contention: "presence coordination unavailable: state-file lock
+  not acquired within the configured deadline"`), green again as
+  [38485239734](https://github.com/spuentesp/lain/actions/runs/38485239734)
+  after the fix.
 - **Full hardened battery** — green on main tip `a507e726` (#318):
   [CI run 38440263606](https://github.com/spuentesp/lain/actions/runs/38440263606)
   (`conclusion: success`, 35m37s). PR-to-main re-runs the full battery
@@ -69,18 +82,45 @@ and copy work, explicitly not part of this release:
   `Cargo Test (ubuntu-latest)` on the #319 push — was superseded by the
   #321 sync, whose run is the green 38444215391 above.
 
+## Absorbing #323 (gap-close + contention fix) — the tree as it stands
+
+PR #323 landed on dev **after** this branch was cut, and the release
+travels complete: merge `5c0e4300` brought it in. Merge was **clean**
+(`ort` strategy); only `src/server/mcp/presence_tools.rs` changed in the
+merge result (31+/4−).
+
+**Contention fix (#323) — the live defect the gap-close CI found:**
+`concurrent_agents_contention_benchmark` failed on the gap-close PR with
+`claim_files` answering `presence coordination unavailable: state-file
+lock not acquired within the configured deadline` instead of a grant or
+a conflict. Under load the presence critical section (which shells out
+to zoanthrope per claim) outlives the state-file lock's 2s budget, and
+the plumbing error was surfacing as the claim's answer. **A claim under
+contention must grant or conflict** — claims are arbitrated by
+zoanthrope under its own state lock; the session table is a hint.
+Fixed in **zoanthrope's arbitration** and in **lain's proxy retry**:
+`claim_files` / `release_files` now retry lock-busy (`Unavailable`)
+within a 5s budget (25ms backoff) via `with_presence_busy_retry`;
+refresh/persist failures still surface unchanged. Validated by lain's
+three contention batteries: `tests/coordination_benchmark.rs`
+(`concurrent_agents_contention_benchmark`), `tests/multi_agent_concurrency.rs`,
+and `tests/coordination_linearizability.rs` (exactly one grant, the rest
+conflicts) — all green on the #323 re-run and on the dev tip run above.
+
 ## What this branch changed beyond the version bump
 
 The v0.9.1 → v0.10.0 content (coordination delegation #319, nightlies
 fixes #318, badge-parser fix #316, post-release metadata #317, sync
-#321) is what `origin/dev` carries. While assembling this audit, four
-**main-only live fixes were found missing on dev** — the dev sync
-(#321) dropped main-only code files (only `fuzz/Cargo.lock` had been
-restored, in `a4d4bbe0`). All four are restored on this branch,
-verbatim, so the release cannot regress them and the PR-to-main
-Windows lane is not red:
+#321, gap-close + contention fix #323) is what `origin/dev` carries.
+While assembling this audit, four **main-only live fixes were found
+missing on dev** — the dev sync (#321) dropped main-only code files
+(only `fuzz/Cargo.lock` had been restored, in `a4d4bbe0`). All four are
+on this branch, verbatim, so the release cannot regress them and the
+PR-to-main Windows lane is not red. **#323 then landed the same four on
+dev**, and the merge found them byte-identical to what this branch
+already carried — conflict-free, nothing to resolve:
 
-| Restored | Source | What it is |
+| Restored (then matched by #323 on dev) | Source | What it is |
 |---|---|---|
 | `tests/setup_e2e.rs` | `4c350035` (in the v0.9.1 release squash #315) | compare `.mcp.json` entries against `dunce::canonicalize` paths — `Path::canonicalize` yields `\\?\` paths on Windows and the windows-latest battery failed on it |
 | `tests/e2e/real-bench.sh` | #318 | federation readiness gate (`READY_TIMEOUT`) + warm-up `retry_after_ms` — without it the Federation Nightly Benchmark goes red again |

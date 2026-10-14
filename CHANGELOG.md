@@ -81,6 +81,21 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **`claim_files` / `release_files` survive state-lock contention** (#323).
+  Under load the presence critical section (which shells out to
+  zoanthrope per claim) can outlive the presence state-file lock's
+  budget, and the plumbing error (`presence coordination unavailable:
+  state-file lock not acquired within the configured deadline`) was
+  surfacing as the claim's answer. **A claim under contention must
+  answer grant or the conflict shape naming the holder** — claims are
+  arbitrated by zoanthrope under its own state lock; the session table
+  is a hint. Claim/release now retry lock-busy (`Unavailable`) in the
+  proxy within a 5s budget (25ms backoff); refresh/persist failures
+  still surface unchanged. Found by the gap-close CI run
+  (`concurrent_agents_contention_benchmark`), fixed in zoanthrope's
+  arbitration and in lain's proxy retry, and validated by lain's three
+  contention batteries (`coordination_benchmark`,
+  `multi_agent_concurrency`, `coordination_linearizability`).
 - **Federation Nightly Benchmark content gate no longer trips on a
   cold graph** (red nightly since 2026-09-28). Since async startup the
   first `/health` response arrives as `subject:indexing`, so the load
@@ -104,6 +119,11 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Release housekeeping
 
+- **dev/main content gap closed** (#323): the windows test-path fix, the
+  federation bench readiness gate, the `fuzz/target` ignore and the
+  version-drift parser fix were sitting on main only (the dev sync had
+  dropped main-only code files); dev now carries them, and this release
+  branch absorbed the #323 landing so the release travels complete.
 - **Post-release v0.9.1 metadata** (#317): `Formula/lain.rb` sha256
   values filled from the published v0.9.1 `SHA256SUMS`, and the
   health-badge action's `lain-version` default bumped to `v0.9.1`.
