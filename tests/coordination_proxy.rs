@@ -13,7 +13,9 @@
 
 use lain::server::coordination::shapes::{symbols_from_stamps, CallerStamp, ClaimOutcome};
 use lain::server::coordination::{symbol_stamps, CoordinationProxy};
-use lain::server::presence::{AgentId, ClaimIntent, ClaimRequest};
+use lain::server::presence::{
+    AgentId, AgentKind, AgentMode, AgentSession, ClaimIntent, ClaimRequest,
+};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -220,7 +222,7 @@ fn degraded_mode_is_advisory_and_never_blocks() {
 
     // The facade grants the request (advisory) and logs it.
     let result = proxy.claim(
-        &AgentId("alpha".into()),
+        "alpha",
         vec![ClaimRequest {
             path: PathBuf::from("a.rs"),
             symbols: vec![],
@@ -321,7 +323,7 @@ fn mcp_list_claims_adapts_to_lain_claims() {
     let by_path = snap.for_path(Path::new("a.rs")).expect("claim for a.rs");
     assert_eq!(by_path.agent_id.as_str(), "beta");
 
-    let for_beta = proxy.claims_for_agent(&AgentId("beta".into()));
+    let for_beta = proxy.claims_for_agent("beta");
     assert_eq!(for_beta.len(), 1);
 }
 
@@ -334,10 +336,67 @@ fn release_and_rejoin_round_trip() {
     std::fs::create_dir_all(&ws).unwrap();
     let proxy = CoordinationProxy::with_bin(ws, Some(bin));
 
-    let released = proxy.release(&AgentId("alpha".into()), &[PathBuf::from("a.rs")]);
+    let released = proxy.release("alpha", &[PathBuf::from("a.rs")]);
     assert_eq!(released, vec![PathBuf::from("a.rs")]);
 
     let body = proxy.rejoin("alpha", None).expect("rejoin");
     assert_eq!(body["ok"], true);
     assert_eq!(body["agent_id"], "alpha");
+}
+
+/// Regression (codex review): one zoanthrope identity on every path —
+/// the agent NAME. `claim_with_session` used to claim under
+/// `session.id` (a fresh UUID per registration) while the zero-daemon
+/// hooks released under `agent_name`; flip daemon reachability
+/// between claim and release and the release cannot find the claim —
+/// zoanthrope claims never expire, so the mismatched holder blocks
+/// the file forever.
+#[test]
+fn session_claim_and_name_release_share_one_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = install_fake_zoanthrope(dir.path(), "grant");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let proxy = CoordinationProxy::with_bin(ws, Some(bin));
+
+    let session = AgentSession::new(
+        AgentId("0f9d3a5c-0000-4000-8000-000000000001".into()),
+        "alice".into(),
+        AgentKind::Other("test".into()),
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    let request = |path: &str| ClaimRequest {
+        path: PathBuf::from(path),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+        plan_revision: None,
+    };
+
+    // Session claim path (MCP `claim_files` route), then release by
+    // the name that path derives — exactly what `release_files`,
+    // the expiry loop and `unregister_agent` do.
+    let claimed = proxy.claim_with_session(&session, vec![request("a.rs")]);
+    assert_eq!(claimed.granted.len(), 1, "grant: {claimed:?}");
+    let released = proxy.release(&session.name, &[PathBuf::from("a.rs")]);
+    assert_eq!(released, vec![PathBuf::from("a.rs")]);
+
+    // Inverse: claim under the name directly (the hooks route),
+    // release through the same name identity.
+    let claimed = proxy.claim(session.name.as_str(), vec![request("b.rs")]);
+    assert_eq!(claimed.granted.len(), 1, "grant: {claimed:?}");
+    let released = proxy.release(&session.name, &[PathBuf::from("b.rs")]);
+    assert_eq!(released, vec![PathBuf::from("b.rs")]);
+
+    let log = std::fs::read_to_string(dir.path().join("calls.log")).expect("fake log");
+    assert!(
+        log.lines().all(|l| l.contains("--agent alice")),
+        "every claim/release must carry the agent NAME; log: {log}"
+    );
+    assert!(
+        !log.contains(session.id.as_str()),
+        "the session UUID must never reach zoanthrope; log: {log}"
+    );
 }

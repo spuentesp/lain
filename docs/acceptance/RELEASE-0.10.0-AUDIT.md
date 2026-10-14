@@ -19,7 +19,7 @@ This is the AGENTS.md step-0 evidence, written down.
 | Open issues | **0** (as of 2026-10-13) | `gh issue list --state open` empty; the acceptance-program issues (#294–#302) are all closed |
 | Open PRs | **1** — #305, deferred in writing | see quote below |
 | Red CI on main / dev | **none** | see CI evidence below |
-| Uncommitted WIP in any worktree | **none** | four worktrees checked (`orca/lain`, `lain-proxy`, `lain-sync`, `lain-release-010`); only a local untracked build dir `fuzz/target/` in `orca/lain` — ignored again by this branch's `.gitignore` restore |
+| Uncommitted WIP in any worktree | **none** | two active worktrees checked (`orca/lain`, `lain-release-010`) plus the `zoanthrope` checkout; the merged feature worktrees were pruned. A stray federation WIP patch found outside any worktree during that cleanup was filed as issue #328 — scoped out of this release (coordination scope), patch preserved in the issue |
 | Known test flakes left unfixed | **none** | #295 (GitSensor differential proptest seed) and #296 (load-sensitive `find_anchors`/coupling-radar) both fixed in 0.9.1 and closed; `proptest-regressions/server/git_verification.txt` pins the reproductions |
 | Acceptance findings registers | closed / scoped out in writing | `FINDINGS-2026-10-10.md` housekeeping block is marked RESOLVED (CodeQL dismissals, dependabot triage); `FINDINGS-2026-10-11.md` §Open items holds three deliberate scope-outs (below) |
 | Release metadata consistent | **yes** | `scripts/check-release-version.py --tag v0.10.0` → `OK: release metadata matches 0.10.0` |
@@ -191,9 +191,33 @@ A release that ships with a list of "pendientes" is half-done work.
   of file`) and shipped the same System32 bsdtar fix. #326 also makes the pin
   coherent — step label, npm pin and source fallback had drifted to three
   different versions (0.1.4 / 0.1.5 / 0.1.4) and now all say 0.1.6.
+- **#327** (merged to dev as `35f0e540`): the full battery found `Coverage
+  (cargo llvm-cov)` red — `audit_integration` was the only coordination-
+  battery file not gating on `require_zoanthrope()`, and the coverage job
+  installed no zoanthrope, so its 3 arbitration tests ran against the
+  advisory fallback and failed. The tests now gate like their siblings
+  (skip without a binary; hard-fail under `CI_REQUIRE_ZOANTHROPE=1`) and
+  the coverage job installs the same pinned core as the test jobs — the
+  battery runs for real under coverage instead of skipping silently.
+- **#329** (merged to dev as `0c50ea45`): closes the three inline Codex
+  review findings on this PR (1×P1, 2×P2), each verified against the code
+  before fixing:
+  1. **P1 claim identity** — the server claimed under `session.id` (a fresh
+     UUID per registration) while the zero-daemon hooks claimed under
+     `agent_name`; a daemon flap between claim and release stranded a
+     zombie holder (claims never expire upstream). Identity is now the
+     agent NAME on every path (owner's decision).
+  2. **P2 MCP stdin** — `mcp_call` closed stdin right after the requests,
+     racing the MCP SDK's transport shutdown (the failure ordering
+     `tests/oneshot_e2e.rs` documents). Stdin now stays open until the
+     `tools/call` response arrives.
+  3. **P2 pipe drain** — `wait_with_timeout` drained stdout then stderr
+     sequentially; a full stderr pipe deadlocked until the 10s kill. Both
+     pipes now drain concurrently. The fail-soft policy on transport
+     errors is unchanged (design decision).
 - The branch absorbed dev (#323 gap + contention retry, #324 pin 0.1.4,
-  #325 pin 0.1.5, #326 pin 0.1.6 + label coherence) and main's history once
-  (merge-base stitching for the PR). Metadata re-validated:
-  `check-release-version.py --tag v0.10.0` -> OK.
+  #325 pin 0.1.5, #326 pin 0.1.6 + label coherence, #327 coverage gates,
+  #329 codex findings) and main's history once (merge-base stitching for
+  the PR). Metadata re-validated: `check-release-version.py --tag v0.10.0` -> OK.
 
 **Status: complete — awaiting the owner's explicit go. Do not merge/tag without it.**

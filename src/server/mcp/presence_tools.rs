@@ -96,6 +96,29 @@ fn validate_git_ref(git_ref: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve a claim holder to its live session. Zoanthrope claim
+/// holders are agent *names* — the identity every claim/release path
+/// shares; a session id still matches for claims persisted under the
+/// old id-keyed scheme. `None` when no live session matches, which is
+/// itself useful: the holder is gone.
+fn holder_session(server: &LainServer, holder: &AgentId) -> Option<AgentSession> {
+    server
+        .presence()
+        .list_active(true)
+        .into_iter()
+        .find(|s| s.name == holder.as_str() || s.id == *holder)
+}
+
+/// Resolve a claim holder to its registered name.
+///
+/// Conflicts and occupancy used to report raw session UUIDs, so an
+/// agent that was told "someone else holds this" had to make a second
+/// `list_active_agents` round-trip to learn who — and a human reading
+/// the dashboard saw a hex string.
+fn agent_name(server: &LainServer, id: &AgentId) -> Option<String> {
+    holder_session(server, id).map(|s| s.name)
+}
+
 /// Resolve a session token to its session, refreshing the heartbeat as
 /// a side effect.
 ///
@@ -108,17 +131,6 @@ fn validate_git_ref(git_ref: &str) -> Result<(), String> {
 ///
 /// Any authenticated call is proof of life. Every dispatcher that
 /// resolves a token goes through here.
-/// Resolve an agent id to its registered name.
-///
-/// Conflicts and occupancy reported raw UUIDs, so an agent that was told
-/// "someone else holds this" had to make a second `list_active_agents`
-/// round-trip to learn who — and a human reading the dashboard saw a
-/// hex string. `None` when the session has since expired, which is
-/// itself useful: the holder is gone.
-fn agent_name(server: &LainServer, id: &AgentId) -> Option<String> {
-    server.presence().get(id).map(|s| s.name)
-}
-
 pub(crate) fn authenticate(server: &LainServer, token: &str) -> Result<AgentSession, String> {
     let session = server
         .presence()
@@ -225,7 +237,7 @@ pub fn run_list_active_agents(server: &LainServer, args: Value) -> Result<Value,
     let out: Vec<Value> = sessions
         .into_iter()
         .map(|s| {
-            let claims = server.coordination().list_for_agent(&s.id);
+            let claims = server.coordination().list_for_agent(&s.name);
             // Intent + activity feed (PR 1 of
             // `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). Surfaced here
             // so `list_active_agents` becomes the cross-agent
@@ -296,7 +308,7 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
     server.refresh_shared_presence();
     let a: WhoAmIArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = authenticate(server, &a.session_token)?;
-    let claims = server.coordination().list_for_agent(&session.id);
+    let claims = server.coordination().list_for_agent(&session.name);
     let parent_session_id = session
         .parent_session_id
         .as_ref()
@@ -661,7 +673,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     // look like a retraction.
     let held_before: std::collections::HashSet<String> = server
         .coordination()
-        .list_for_agent(&session.id)
+        .list_for_agent(&session.name)
         .into_iter()
         .flat_map(|c| c.symbols)
         .collect();
@@ -704,7 +716,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
         // We snapshot the agent's full claim set once and partition
         // it per granted path so a multi-file claim still produces
         // one audit line per granted file.
-        let all_claims = server.coordination().list_for_agent(&session.id);
+        let all_claims = server.coordination().list_for_agent(&session.name);
         let landed_revision = server.overlay().current_revision();
         let audit_dir = server.state_dir_for_audit();
         let audit_scope = server.audit_scope();
@@ -1023,7 +1035,7 @@ fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<V
     for f in a.files {
         paths.push(std::path::PathBuf::from(f.path));
     }
-    let released = server.coordination().release(&session.id, &paths);
+    let released = server.coordination().release(&session.name, &paths);
     for path in &released {
         server.emit_presence_event(PresenceEvent::ClaimReleased {
             agent_id: session.id.clone(),
@@ -1065,7 +1077,7 @@ pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, Str
         // dropped because it would be silently empty for sessions
         // that had expired but still had artifacts on disk.
         let last_seen_unix: Option<u64> = e.agents.iter()
-            .filter_map(|id| server.presence().get(id))
+            .filter_map(|id| holder_session(server, id))
             .next()
             .map(|s| crate::server::time::unix_secs_u64(s.last_heartbeat));
         json!({
@@ -1103,7 +1115,7 @@ pub fn run_my_claims(server: &LainServer, args: Value) -> Result<Value, String> 
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
-    let claims = server.coordination().list_for_agent(&session.id);
+    let claims = server.coordination().list_for_agent(&session.name);
     Ok(json!(claims
         .into_iter()
         .map(|c| json!({

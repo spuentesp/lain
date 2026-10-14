@@ -540,8 +540,10 @@ impl LainServer {
         // called only so construction stays uniform.
         self.presence.intent().set_persist_callback(cb);
         let coordination_for_remove = Arc::clone(self.presence.coordination());
-        self.presence.presence().set_on_remove_callback(move |id| {
-            coordination_for_remove.release_all_for(id);
-        });
+        self.presence
+            .presence()
+            .set_on_remove_callback(move |session| {
+                coordination_for_remove.release_all_for(&session.name);
+            });
     }
 }

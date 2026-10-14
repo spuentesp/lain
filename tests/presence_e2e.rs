@@ -64,7 +64,7 @@ fn e2e_attribution_via_real_child_pid() {
     // The agent should now have an auto-claim on auth.rs.
     let sessions = presence.list_active(true);
     assert_eq!(sessions.len(), 1);
-    let claims = occupancy.list_for_agent(&sessions[0].id);
+    let claims = occupancy.list_for_agent(sessions[0].name.as_str());
     assert!(
         !claims.is_empty(),
         "expected auto-claim after child write; got: {claims:?}"
