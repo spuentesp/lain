@@ -65,7 +65,7 @@ fn attribution_auto_claims_via_pid_on_linux() {
         attempt += 1;
         std::fs::write(&file, format!("fn login() {{ changed {attempt} }}")).unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        claims = occupancy.list_for_agent(&s.id);
+        claims = occupancy.list_for_agent(s.name.as_str());
         if !claims.is_empty() {
             break;
         }

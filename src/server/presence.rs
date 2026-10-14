@@ -381,7 +381,9 @@ struct PresenceState {
 type PersistFn = std::sync::Arc<dyn Fn() + Send + Sync>;
 
 /// Callback invoked when an agent session is explicitly removed.
-pub type RemoveCallbackFn = std::sync::Arc<dyn Fn(&AgentId) + Send + Sync>;
+/// Passes the whole session (not just its id) so the receiver can
+/// release coordination claims, which are keyed by `session.name`.
+pub type RemoveCallbackFn = std::sync::Arc<dyn Fn(&AgentSession) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct PresenceRegistry {
@@ -525,10 +527,11 @@ impl PresenceRegistry {
     }
 
     /// Install a callback fired when a session is explicitly removed from the
-    /// registry. Fired on `remove(id)` with the id of the removed agent.
+    /// registry. Fired on `remove(id)` with the removed session, so
+    /// the receiver can release name-keyed coordination claims.
     pub fn set_on_remove_callback<F>(&self, cb: F)
     where
-        F: Fn(&AgentId) + Send + Sync + 'static,
+        F: Fn(&AgentSession) + Send + Sync + 'static,
     {
         let mut slot = self.on_remove_cb.lock();
         *slot = Some(std::sync::Arc::new(cb));
@@ -597,7 +600,10 @@ impl PresenceRegistry {
         }
     }
 
-    pub fn expire_stale(&self) -> Vec<AgentId> {
+    /// Remove every session past its TTL and return them. Returns the
+    /// sessions (not bare ids) because the expiry loop releases each
+    /// one's coordination claims, which are keyed by `session.name`.
+    pub fn expire_stale(&self) -> Vec<AgentSession> {
         let now = SystemTime::now();
         // Read `expires_after` under the lock and compute the
         // `now` baseline once at the top. The pre-fix code acquired
@@ -611,24 +617,23 @@ impl PresenceRegistry {
             let s = self.inner.lock();
             (s.expires_after, s.background_expires_after)
         };
-        let stale: Vec<AgentId> = {
+        let stale: Vec<AgentSession> = {
             let mut s = self.inner.lock();
-            let stale: Vec<AgentId> = s
+            let stale: Vec<AgentSession> = s
                 .sessions
-                .iter()
-                .filter(|(_, sess)| {
+                .values()
+                .filter(|sess| {
                     let ttl = match sess.mode {
                         AgentMode::Background => background_expires_after,
                         AgentMode::Interactive => expires_after,
                     };
                     now.duration_since(sess.last_heartbeat).unwrap_or_default() >= ttl
                 })
-                .map(|(id, _)| id.clone())
+                .cloned()
                 .collect();
-            for id in &stale {
-                if let Some(sess) = s.sessions.remove(id) {
-                    s.by_token.remove(&sess.session_token);
-                }
+            for sess in &stale {
+                s.sessions.remove(&sess.id);
+                s.by_token.remove(&sess.session_token);
             }
             stale
         };
@@ -662,9 +667,9 @@ impl PresenceRegistry {
             }
             removed
         };
-        if removed.is_some() {
+        if let Some(sess) = &removed {
             if let Some(cb) = self.cloned_on_remove_cb() {
-                cb(id);
+                cb(sess);
             }
             if let Some(cb) = self.cloned_persist_cb() {
                 cb();

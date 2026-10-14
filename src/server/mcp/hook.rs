@@ -203,6 +203,9 @@ pub fn evaluate(server: &LainServer, body: Value) -> Result<Value, String> {
         .filter(|i| i.agent_id != session.id)
         .collect();
     let peer_intents_refs: Vec<&crate::server::intent::Intent> = peer_intents.iter().collect();
+    // Occupancy holders are agent names (zoanthrope's claim identity
+    // on every path), so the caller excludes its own claims by name.
+    let me = crate::server::presence::AgentId(session.name.clone());
     let peer_claims: Vec<crate::server::presence::Claim> = server
         .coordination()
         .list_all()
@@ -211,11 +214,11 @@ pub fn evaluate(server: &LainServer, body: Value) -> Result<Value, String> {
             entry
                 .agents
                 .into_iter()
-                .filter(|aid| aid != &session.id)
+                .filter(|aid| aid != &me)
                 .map(move |aid| (aid, entry.path.clone(), entry.symbols.clone()))
         })
         .filter_map(|(aid, path, _symbols)| {
-            let claims = server.coordination().list_for_agent(&aid);
+            let claims = server.coordination().list_for_agent(aid.as_str());
             claims.into_iter().find(|c| c.path == path).map(|c| {
                 let mut claim = c;
                 claim.agent_id = aid;

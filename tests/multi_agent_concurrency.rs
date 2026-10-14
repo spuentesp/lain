@@ -517,7 +517,8 @@ fn two_agents_race_claim_one_wins_one_conflicts() {
     );
 
     // The lost agent's conflict entry must point at the
-    // winner's agent_id.
+    // winner's agent NAME — zoanthrope's claim identity, shared
+    // with the zero-daemon hook path (not the session UUID).
     let (loser_name, _, loser_resp) = losers[0];
     let conflict = loser_resp
         .get("conflicts")
@@ -529,9 +530,9 @@ fn two_agents_race_claim_one_wins_one_conflicts() {
         .and_then(|v| v.as_str())
         .expect("conflict entry missing agent_id");
     let expected_winner = if *loser_name == "alice" {
-        &bob_id
+        "bob"
     } else {
-        &alice_id
+        "alice"
     };
     assert_eq!(
         reported_winner, expected_winner,
@@ -655,7 +656,8 @@ fn three_agents_edit_holder_conflicts_with_readers() {
                     .get("agent_id")
                     .and_then(|v| v.as_str())
                     .or_else(|| c.get("holder").and_then(|v| v.as_str()));
-                holder == Some(a_id.as_str())
+                // Holder identity is the agent name, not a session UUID.
+                holder == Some("alice-edit")
                     && c.get("path")
                         .and_then(|p| p.as_str())
                         .is_some_and(|p| path_components_eq(p, &["src", "shared.rs"]))

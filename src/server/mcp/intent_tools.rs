@@ -145,23 +145,29 @@ fn run_lain_intent_inner(server: &LainServer, args: Value) -> Result<Value, Stri
         .iter()
         .filter(|i| i.agent_id != intent.agent_id)
         .collect();
-    // Pull peer claims by walking `OccupancyMap::list_for_agent` for
-    // each peer (the `OccupancyMap` API exposes a per-agent listing;
-    // there is no flat "all peer claims" surface, and `list_all`
-    // strips the per-claim `intent` field which the evaluator
-    // needs). One list_for_agent call per peer is fine — the agent
-    // count is bounded by what the workspace can sustain.
-    let peer_agent_ids: Vec<crate::server::presence::AgentId> =
-        peer_intents.iter().map(|i| i.agent_id.clone()).collect();
+    // Pull peer claims by walking `list_for_agent` for each peer (the
+    // API exposes a per-agent listing; there is no flat "all peer
+    // claims" surface, and `list_all` strips the per-claim `intent`
+    // field which the evaluator needs). One list_for_agent call per
+    // peer is fine — the agent count is bounded by what the workspace
+    // can sustain.
     let mut peer_claims: Vec<crate::server::presence::Claim> = Vec::new();
-    for aid in &peer_agent_ids {
-        for mut c in server.coordination().list_for_agent(aid) {
+    for peer in &peer_intents {
+        // Zoanthrope stores claims under the agent NAME; map the
+        // intent's session id back through presence. A session that
+        // has since expired can't resolve — its claims are
+        // unreachable through this id-keyed path.
+        let Some(name) = server.presence().get(&peer.agent_id).map(|s| s.name) else {
+            continue;
+        };
+        let aid = crate::server::presence::AgentId(name);
+        for mut c in server.coordination().list_for_agent(aid.as_str()) {
             // Defensive: ensure the claim's `agent_id` field matches
             // the agent id we asked about. The occupancy map owns
             // both ends so this should always be true, but a future
             // refactor that splits claim storage from agent
             // ownership could drift.
-            if c.agent_id != *aid {
+            if c.agent_id != aid {
                 c.agent_id = aid.clone();
             }
             peer_claims.push(c);

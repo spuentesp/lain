@@ -94,7 +94,9 @@ async fn a_claim_on_one_server_conflicts_on_another() {
         1,
         "bob must see alice's claim from the other server; resp={resp}"
     );
-    assert_eq!(conflicts[0]["agent_id"].as_str().unwrap(), alice);
+    // Holders are agent names now (the one zoanthrope identity every
+    // path shares) — not alice's session UUID.
+    assert_eq!(conflicts[0]["agent_id"].as_str().unwrap(), "alice");
     assert_eq!(
         resp["granted"].as_array().unwrap().len(),
         0,

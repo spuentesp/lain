@@ -7,8 +7,10 @@
 //!   hook family and the upstream experiments pin.
 //! - **`zoanthrope mcp`** stdio JSON-RPC — where the CLI has no
 //!   mirror (presence listings, postboard). A short-lived child:
-//!   `initialize` + one `tools/call`, stdin closed, response parsed,
-//!   child reaped. zoanthrope exits on EOF, so nothing lingers.
+//!   `initialize` + one `tools/call`, stdin kept open until the
+//!   response with `id == 2` arrives (EOF mid-call races the SDK's
+//!   transport shutdown), then stdin closed, response parsed, child
+//!   reaped. zoanthrope exits on EOF, so nothing lingers.
 //!
 //! Resolution order for the binary: `$ZOANTHROPE_BIN`, then `PATH`
 //! (same knobs zoanthrope's own hooks honor). Missing binary is not
@@ -329,42 +331,108 @@ impl CoordinationProxy {
             writeln!(stdin, "{init}").map_err(|e| ProxyError::Failed(e.to_string()))?;
             writeln!(stdin, "{call}").map_err(|e| ProxyError::Failed(e.to_string()))?;
         }
-        // Close stdin so `zoanthrope mcp` sees EOF and exits after the
-        // call; then collect the line stream.
-        drop(child.stdin.take());
-        let (out, _) = wait_with_timeout(&mut child)?;
-        let stdout = String::from_utf8_lossy(&out);
-        for line in stdout.lines() {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            if v.get("id").and_then(|i| i.as_u64()) != Some(2) {
-                continue;
+        // stdin stays OPEN until the id-2 response arrives — closing
+        // it now makes the MCP SDK start transport shutdown, and the
+        // in-flight tools/call can lose that race before its response
+        // is produced (the same bug `tests/oneshot_e2e.rs` pins for
+        // `lain oneshot`). EOF is sent below, once we have the answer.
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProxyError::Failed("zoanthrope mcp: no stdout".to_string()))?;
+        let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break, // EOF or IO error: child gone
+                    Ok(_) => {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if v.get("id").is_some() && tx.send(v).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
-            if let Some(err) = v.get("error") {
-                return Err(ProxyError::Failed(format!(
-                    "{tool}: {}",
-                    err.get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("mcp error")
-                )));
-            }
-            let result = v
-                .get("result")
-                .ok_or_else(|| ProxyError::Failed(format!("{tool}: no result")))?;
-            if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
-                let text = result["content"][0]["text"]
-                    .as_str()
-                    .unwrap_or("tool error");
-                return Err(ProxyError::Failed(format!("{tool}: {text}")));
-            }
-            let text = result["content"][0]["text"].as_str().unwrap_or("{}");
-            return serde_json::from_str(text)
-                .map_err(|e| ProxyError::Failed(format!("{tool}: bad tool JSON: {e}")));
+        });
+        // Drain stderr on its own thread: a child that fills the
+        // ~64KB stderr pipe would otherwise block while we wait on
+        // stdout (same pipe deadlock `wait_with_timeout` guards).
+        if let Some(mut err_pipe) = child.stderr.take() {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut sink = Vec::new();
+                let _ = err_pipe.read_to_end(&mut sink);
+            });
         }
-        Err(ProxyError::Failed(format!(
-            "{tool}: no tools/call response on stdout"
-        )))
+        let deadline = std::time::Instant::now() + SUBPROCESS_TIMEOUT;
+        let response = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ProxyError::Timeout);
+            }
+            match rx.recv_timeout(remaining) {
+                // Skip the initialize response; wait for id 2.
+                Ok(v) if v.get("id").and_then(|i| i.as_u64()) != Some(2) => continue,
+                Ok(v) => break v,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ProxyError::Timeout);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    // stdout EOF before id 2: the child exited without
+                    // answering.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ProxyError::Failed(format!(
+                        "{tool}: no tools/call response on stdout"
+                    )));
+                }
+            }
+        };
+        // Answer in hand: EOF lets the child exit on its own; reap it
+        // under the same hard deadline, killing a wedged child.
+        drop(child.stdin.take());
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+            }
+        }
+        if let Some(err) = response.get("error") {
+            return Err(ProxyError::Failed(format!(
+                "{tool}: {}",
+                err.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("mcp error")
+            )));
+        }
+        let result = response
+            .get("result")
+            .ok_or_else(|| ProxyError::Failed(format!("{tool}: no result")))?;
+        if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
+            let text = result["content"][0]["text"]
+                .as_str()
+                .unwrap_or("tool error");
+            return Err(ProxyError::Failed(format!("{tool}: {text}")));
+        }
+        let text = result["content"][0]["text"].as_str().unwrap_or("{}");
+        serde_json::from_str(text)
+            .map_err(|e| ProxyError::Failed(format!("{tool}: bad tool JSON: {e}")))
     }
 
     /// Pull every live claim (`list_claims`) and adapt it to lain's
@@ -381,12 +449,10 @@ impl CoordinationProxy {
         ClaimSnapshot { claims }
     }
 
-    /// `list_claims` scoped to one agent, adapted to lain's `Claim`.
-    pub fn claims_for_agent(&self, agent: &AgentId) -> Vec<Claim> {
-        let body = match self.mcp_call(
-            "list_claims",
-            serde_json::json!({ "agent_id": agent.as_str() }),
-        ) {
+    /// `list_claims` scoped to one agent identity (the agent name),
+    /// adapted to lain's `Claim`.
+    pub fn claims_for_agent(&self, identity: &str) -> Vec<Claim> {
+        let body = match self.mcp_call("list_claims", serde_json::json!({ "agent_id": identity })) {
             Ok(b) => b,
             Err(_) => return Vec::new(),
         };
@@ -573,26 +639,72 @@ fn wait_with_timeout(child: &mut std::process::Child) -> Result<(Vec<u8>, Vec<u8
         None => return Err(ProxyError::Failed("zoanthrope: no stdout".to_string())),
     };
     let mut err_pipe = child.stderr.take();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
+    // One thread per pipe. A single reader draining stdout to EOF
+    // first and only then stderr deadlocks when the child fills the
+    // ~64KB stderr pipe while stdout is still open: the child blocks
+    // on stderr, we block on stdout, and the deadline kills a healthy
+    // process (whose failure `claims.rs` then fails open on).
+    let (out_tx, out_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let out_reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = pipe.read_to_end(&mut buf);
+        let _ = out_tx.send(buf);
+    });
+    let (err_tx, err_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let err_reader = std::thread::spawn(move || {
         let mut ebuf = Vec::new();
         if let Some(ref mut ep) = err_pipe {
             let _ = ep.read_to_end(&mut ebuf);
         }
-        let _ = tx.send((buf, ebuf));
+        let _ = err_tx.send(ebuf);
     });
-    match rx.recv_timeout(SUBPROCESS_TIMEOUT) {
-        Ok(both) => {
+    let deadline = std::time::Instant::now() + SUBPROCESS_TIMEOUT;
+    let remaining = || deadline.saturating_duration_since(std::time::Instant::now());
+    let out = out_rx.recv_timeout(remaining());
+    let err = err_rx.recv_timeout(remaining());
+    match (out, err) {
+        (Ok(stdout), Ok(stderr)) => {
             let _ = child.wait();
-            let _ = reader.join();
-            Ok(both)
+            let _ = out_reader.join();
+            let _ = err_reader.join();
+            Ok((stdout, stderr))
         }
-        Err(_) => {
+        _ => {
             let _ = child.kill();
             let _ = child.wait();
+            // Reader threads are not joined: they exit on EOF once the
+            // killed child's pipe ends close.
             Err(ProxyError::Timeout)
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// Regression: both pipes must drain concurrently. The child
+    /// writes >64KB to stderr (more than the OS pipe buffer) while
+    /// keeping stdout open, then exits. Reading stdout to EOF before
+    /// touching stderr deadlocks exactly like that — child blocked on
+    /// stderr, reader blocked on stdout — and the 10s deadline would
+    /// kill a healthy process.
+    #[test]
+    fn wait_with_timeout_drains_stderr_without_deadlocking() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("head -c 200000 /dev/zero >&2; echo ok")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn sh");
+        let start = std::time::Instant::now();
+        let (out, _err) = wait_with_timeout(&mut child).expect("must complete within deadline");
+        assert_eq!(String::from_utf8_lossy(&out), "ok\n");
+        assert!(
+            start.elapsed() < SUBPROCESS_TIMEOUT,
+            "completed in {:?} — the deadline must not be hit",
+            start.elapsed()
+        );
     }
 }

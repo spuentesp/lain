@@ -69,15 +69,15 @@ pub fn expiry_tick(
         let eid = events_log.append(&ev);
         let _ = tx.send((eid, ev));
     };
-    for id in presence.expire_stale() {
-        emit(PresenceEvent::HeartbeatExpired(id.clone()));
-        for path in occupancy.release_all_for(&id) {
+    for session in presence.expire_stale() {
+        emit(PresenceEvent::HeartbeatExpired(session.id.clone()));
+        for path in occupancy.release_all_for(&session.name) {
             // `ClaimRevoked`, not `ClaimReleased`: the agent did not ask
             // to give this up and may still be mid-edit. Subscribers
             // need to tell the two apart to know whether the file is
             // genuinely free.
             emit(PresenceEvent::ClaimRevoked {
-                agent_id: id.clone(),
+                agent_id: session.id.clone(),
                 path,
                 reason: "session_expired".to_string(),
             });
@@ -364,7 +364,7 @@ mod expiry_tests {
             None,
         );
         let granted = occupancy.claim(
-            &sess.id,
+            sess.name.as_str(),
             vec![ClaimRequest {
                 path: PathBuf::from("a.rs"),
                 symbols: vec![],
@@ -423,7 +423,7 @@ mod expiry_tests {
             None,
         );
         occupancy.claim(
-            &sess.id,
+            sess.name.as_str(),
             vec![ClaimRequest {
                 path: PathBuf::from("b.rs"),
                 symbols: vec![],

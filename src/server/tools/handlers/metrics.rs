@@ -802,13 +802,14 @@ pub fn explain_symbol(
     if let Some(entry) = occupancy.list_for_path(std::path::Path::new(&node.path)) {
         if !entry.agents.is_empty() {
             // `list_for_agent` returns claims keyed by agent, so we
-            // walk it to find this file's intent for each agent on it.
+            // walk it to find this file's intent for each agent on it
+            // (occupancy agents are zoanthrope holders — agent names).
             // An Edit intent overrides Read — if any of the agent's
             // claims on the file is Edit, surface Edit (the
             // collaborator is mutating, so the asker should pause).
             let mut intent = "read";
             for agent_id in &entry.agents {
-                let claims = occupancy.list_for_agent(agent_id);
+                let claims = occupancy.list_for_agent(agent_id.as_str());
                 for c in &claims {
                     if c.path == node.path
                         && matches!(c.intent, crate::server::presence::ClaimIntent::Edit)

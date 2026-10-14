@@ -439,12 +439,12 @@ fn attribute_edit(
 ) {
     // 1. Try PID attribution via the injected backend.
     let pid = backend.lookup_writer_pid(path);
-    let agent_id = if let Some(pid) = pid {
+    let attributed = if let Some(pid) = pid {
         presence
             .list_active(true)
             .into_iter()
             .find(|s| s.pid == Some(pid))
-            .map(|s| s.id)
+            .map(|s| (s.id, s.name))
     } else {
         None
     };
@@ -463,18 +463,18 @@ fn attribute_edit(
     // whole lifetime. `is_attributable` removes that class outright, and
     // what remains is marked `inferred` with a short TTL — visible as a
     // guess, and self-healing when the guess is wrong.
-    let agent_id = agent_id.or_else(|| {
+    let attributed = attributed.or_else(|| {
         let active: Vec<_> = presence.list_active(false);
         if active.len() == 1 {
-            Some(active[0].id.clone())
+            Some((active[0].id.clone(), active[0].name.clone()))
         } else {
             None
         }
     });
 
-    if let Some(agent_id) = agent_id {
+    if let Some((agent_id, name)) = attributed {
         let result = occupancy.claim_inferred(
-            &agent_id,
+            &name,
             vec![ClaimRequest {
                 path: path.to_path_buf(),
                 symbols: vec![],

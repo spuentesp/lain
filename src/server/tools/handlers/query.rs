@@ -27,7 +27,7 @@ fn occupancy_payload(presence: &PresenceRegistry, occupancy: &CoordinationProxy)
     let active = presence.list_active(false);
     let mut agents_json: Vec<Value> = Vec::with_capacity(active.len());
     for sess in &active {
-        let claims = occupancy.list_for_agent(&sess.id);
+        let claims = occupancy.list_for_agent(sess.name.as_str());
         let mut files: Vec<String> = claims
             .iter()
             .map(|c| c.path.to_string_lossy().to_string())
