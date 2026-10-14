@@ -21,25 +21,32 @@ impl CoordinationProxy {
     /// Claim the requested files on behalf of a registered session.
     /// One zoanthrope call per file (per-file intents, per-file
     /// partial grants); the symbol pins ride along as `caller_stamps`.
+    ///
+    /// The zoanthrope identity is `session.name`, never `session.id`:
+    /// claims never expire upstream, so they must be releasable by
+    /// every path — the zero-daemon hooks in `cli::hooks` only ever
+    /// know the agent name.
     pub fn claim_with_session(
         &self,
         session: &AgentSession,
         requests: Vec<ClaimRequest>,
     ) -> ClaimResult {
-        self.claim_batch(&session.id, requests)
+        self.claim_batch(&session.name, requests)
     }
 
     /// Claim without a session (attribution watcher's inferred
     /// claims). Same delegation; purpose marks the claim inferred.
-    pub fn claim(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
-        self.claim_batch(agent_id, requests)
+    /// `identity` is the agent name — zoanthrope's claim identity on
+    /// every path.
+    pub fn claim(&self, identity: &str, requests: Vec<ClaimRequest>) -> ClaimResult {
+        self.claim_batch(identity, requests)
     }
 
-    pub fn claim_inferred(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
-        self.claim_batch(agent_id, requests)
+    pub fn claim_inferred(&self, identity: &str, requests: Vec<ClaimRequest>) -> ClaimResult {
+        self.claim_batch(identity, requests)
     }
 
-    fn claim_batch(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
+    fn claim_batch(&self, identity: &str, requests: Vec<ClaimRequest>) -> ClaimResult {
         let mut granted = Vec::new();
         let mut conflicts = Vec::new();
         let mut advisories = Vec::new();
@@ -55,13 +62,7 @@ impl CoordinationProxy {
                 self.workspace().join(&req.path)
             };
             let stamps = super::symbol_stamps(&read_path, &req.symbols);
-            match self.claim_file(
-                agent_id.as_str(),
-                &path_str,
-                None,
-                req.intent.clone(),
-                &stamps,
-            ) {
+            match self.claim_file(identity, &path_str, None, req.intent.clone(), &stamps) {
                 Ok(ClaimOutcome::Granted(_)) => granted.push(req),
                 Ok(ClaimOutcome::Refused(r)) => {
                     let entry = ConflictEntry {
@@ -97,7 +98,7 @@ impl CoordinationProxy {
                     // never block an agent's edit.
                     granted.push(req);
                     advisories.push(ConflictEntry {
-                        agent_id: agent_id.clone(),
+                        agent_id: AgentId(identity.to_string()),
                         path: PathBuf::from(&path_str),
                         symbols: Vec::new(),
                         intent: ClaimIntent::Edit,
@@ -124,13 +125,15 @@ impl CoordinationProxy {
     }
 
     /// Release the given paths; returns those zoanthrope reports as
-    /// released (all of them in degraded mode).
-    pub fn release(&self, agent_id: &AgentId, paths: &[PathBuf]) -> Vec<PathBuf> {
+    /// released (all of them in degraded mode). `identity` is the
+    /// agent name — the same identity `claim_with_session` claimed
+    /// under, so a release actually finds the claim.
+    pub fn release(&self, identity: &str, paths: &[PathBuf]) -> Vec<PathBuf> {
         let strs: Vec<String> = paths
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
-        match self.release_paths(agent_id.as_str(), &strs) {
+        match self.release_paths(identity, &strs) {
             Ok(body) => body
                 .get("released")
                 .and_then(serde_json::Value::as_array)
@@ -144,18 +147,18 @@ impl CoordinationProxy {
         }
     }
 
-    /// Release every claim zoanthrope credits to `agent_id` (session
+    /// Release every claim zoanthrope credits to `identity` (session
     /// teardown path). Two calls: one listing, one release.
-    pub fn release_all_for(&self, agent_id: &AgentId) -> Vec<PathBuf> {
+    pub fn release_all_for(&self, identity: &str) -> Vec<PathBuf> {
         let held: Vec<PathBuf> = self
-            .claims_for_agent(agent_id)
+            .claims_for_agent(identity)
             .into_iter()
             .map(|c| c.path)
             .collect();
         if held.is_empty() {
             return held;
         }
-        self.release(agent_id, &held)
+        self.release(identity, &held)
     }
 
     /// Per-claim TTLs have no zoanthrope counterpart (zoanthrope's
@@ -182,8 +185,8 @@ impl CoordinationProxy {
         out
     }
 
-    pub fn list_for_agent(&self, agent_id: &AgentId) -> Vec<Claim> {
-        self.claims_for_agent(agent_id)
+    pub fn list_for_agent(&self, identity: &str) -> Vec<Claim> {
+        self.claims_for_agent(identity)
     }
 }
 

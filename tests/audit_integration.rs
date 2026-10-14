@@ -111,9 +111,10 @@ async fn granted_claim_appends_audit_event() {
     // second test). The audit module serializes whatever the caller hands it,
     // so pinning a value here would over-specify the contract.
     // One Claim in the granted set: the just-recorded claim for
-    // auth.rs on behalf of `agent_id`.
+    // auth.rs on behalf of `alice` (claim holders are agent names —
+    // the identity shared with the zero-daemon hook path).
     assert_eq!(ev.claim_set.len(), 1, "claim_set should mirror the grant");
-    assert_eq!(ev.claim_set[0].agent_id.as_str(), agent_id);
+    assert_eq!(ev.claim_set[0].agent_id.as_str(), "alice");
     assert_eq!(ev.claim_set[0].path.to_string_lossy(), "auth.rs");
     assert_eq!(ev.claim_set[0].symbols, vec!["login"]);
     // No racers: alice was alone on this file.

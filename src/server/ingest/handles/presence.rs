@@ -158,7 +158,16 @@ impl PresenceLayer {
         agent_id: &AgentId,
     ) -> Vec<PathBuf> {
         self.with_shared_presence(|| {
-            let released = self.coordination.release_all_for(agent_id);
+            // Claims live in zoanthrope under the agent NAME; resolve
+            // it while the session is still registered. (If it is
+            // already gone, its claims are unreachable by id — the
+            // remove callback below carries the name for that path.)
+            let identity = self
+                .presence
+                .get(agent_id)
+                .map(|s| s.name)
+                .unwrap_or_else(|| agent_id.as_str().to_string());
+            let released = self.coordination.release_all_for(&identity);
             for path in &released {
                 self.emit_presence_event(
                     events_log,

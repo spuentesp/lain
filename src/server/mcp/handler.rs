@@ -4883,7 +4883,7 @@ fn get_repo_info_handler(
             let active = s.presence().list_active(false);
             active
                 .iter()
-                .filter(|sess| !occupancy.list_for_agent(&sess.id).is_empty())
+                .filter(|sess| !occupancy.list_for_agent(sess.name.as_str()).is_empty())
                 .count()
         })
         .unwrap_or(0);

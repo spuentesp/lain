@@ -90,10 +90,13 @@ fn stale_sessions_expire_and_fresh_ones_survive() {
     assert!(reg.heartbeat(&b.id, &b.session_token).is_ok());
     let expired = reg.expire_stale();
     assert!(
-        expired.contains(&a.id),
+        expired.iter().any(|s| s.id == a.id),
         "stale session must expire; expired={expired:?}"
     );
-    assert!(!expired.contains(&b.id), "heartbeated session must survive");
+    assert!(
+        !expired.iter().any(|s| s.id == b.id),
+        "heartbeated session must survive"
+    );
     assert!(reg.get(&a.id).is_none());
     assert!(reg.get(&b.id).is_some());
 }
