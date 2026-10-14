@@ -191,25 +191,26 @@ jobs:
 
       # Coordination battery: install zoanthrope, the coordination
       # core that lain's `src/server/coordination/` proxies. Pinned
-      # (0.1.4) so claim arbitration is deterministic; the npm path is
+      # (0.1.6) so claim arbitration is deterministic; the npm path is
       # the documented install. Its postinstall skips the platform
       # binary download under CI=true, so the version probe below
-      # forces the download (and verifies the binary runs). No prebuilt
-      # binary exists for Windows — fall back to building the same
+      # forces the download (and verifies the binary runs). Prebuilt
+      # assets cover all five targets (Windows included since 0.1.5);
+      # if the probe still fails, fall back to building the same
       # pinned tag from source so the battery runs there too.
       # `CI_REQUIRE_ZOANTHROPE=1` on the test step turns the tests'
       # missing-binary skip into a hard failure: the coordination
       # battery must run against the real product in CI, never silently
       # degrade to the advisory fallback.
-      - name: Install zoanthrope (coordination core, pinned 0.1.4)
+      - name: Install zoanthrope (coordination core, pinned 0.1.6)
         shell: bash
         run: |
           set -euo pipefail
-          npm install -g @spuentesp/zoanthrope@0.1.5
+          npm install -g @spuentesp/zoanthrope@0.1.6
           if ! zoanthrope --version; then
-            echo "no prebuilt zoanthrope for this platform; building v0.1.4 from source"
+            echo "no prebuilt zoanthrope for this platform; building v0.1.6 from source"
             cargo install --git https://github.com/spuentesp/zoanthrope.git \
-              --tag v0.1.4 --locked --force
+              --tag v0.1.6 --locked --force
             if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
               echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
             else
@@ -327,18 +328,18 @@ jobs:
           save-always: true
 
       # Coordination battery: same zoanthrope install as the `test`
-      # job (pinned 0.1.4; npm path with a source-build fallback for
-      # platforms without a prebuilt asset — Windows). Keeps the main
+      # job (pinned 0.1.6; npm path with a source-build fallback for
+      # platforms without a prebuilt asset). Keeps the main
       # battery running against real claim arbitration.
-      - name: Install zoanthrope (coordination core, pinned 0.1.4)
+      - name: Install zoanthrope (coordination core, pinned 0.1.6)
         shell: bash
         run: |
           set -euo pipefail
-          npm install -g @spuentesp/zoanthrope@0.1.5
+          npm install -g @spuentesp/zoanthrope@0.1.6
           if ! zoanthrope --version; then
-            echo "no prebuilt zoanthrope for this platform; building v0.1.4 from source"
+            echo "no prebuilt zoanthrope for this platform; building v0.1.6 from source"
             cargo install --git https://github.com/spuentesp/zoanthrope.git \
-              --tag v0.1.4 --locked --force
+              --tag v0.1.6 --locked --force
             if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
               echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
             else
@@ -425,15 +426,15 @@ jobs:
       # occupancy, my_claims, intents) exercises real claim
       # arbitration — install zoanthrope (pinned) the same way the
       # test lanes do, and point at the cached real binary.
-      - name: Install zoanthrope (coordination core, pinned 0.1.4)
+      - name: Install zoanthrope (coordination core, pinned 0.1.6)
         shell: bash
         run: |
           set -euo pipefail
-          npm install -g @spuentesp/zoanthrope@0.1.5
+          npm install -g @spuentesp/zoanthrope@0.1.6
           if ! zoanthrope --version; then
-            echo "no prebuilt zoanthrope for this platform; building v0.1.4 from source"
+            echo "no prebuilt zoanthrope for this platform; building v0.1.6 from source"
             cargo install --git https://github.com/spuentesp/zoanthrope.git \
-              --tag v0.1.4 --locked --force
+              --tag v0.1.6 --locked --force
             if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
               echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
             else
