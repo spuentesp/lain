@@ -205,7 +205,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm install -g @spuentesp/zoanthrope@0.1.4
+          npm install -g @spuentesp/zoanthrope@0.1.5
           if ! zoanthrope --version; then
             echo "no prebuilt zoanthrope for this platform; building v0.1.4 from source"
             cargo install --git https://github.com/spuentesp/zoanthrope.git \
@@ -334,7 +334,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm install -g @spuentesp/zoanthrope@0.1.4
+          npm install -g @spuentesp/zoanthrope@0.1.5
           if ! zoanthrope --version; then
             echo "no prebuilt zoanthrope for this platform; building v0.1.4 from source"
             cargo install --git https://github.com/spuentesp/zoanthrope.git \
@@ -429,7 +429,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm install -g @spuentesp/zoanthrope@0.1.4
+          npm install -g @spuentesp/zoanthrope@0.1.5
           if ! zoanthrope --version; then
             echo "no prebuilt zoanthrope for this platform; building v0.1.4 from source"
             cargo install --git https://github.com/spuentesp/zoanthrope.git \
