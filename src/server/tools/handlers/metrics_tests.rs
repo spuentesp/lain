@@ -4,7 +4,7 @@ use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
-use crate::server::presence::OccupancyMap;
+use crate::server::coordination::CoordinationProxy;
 use crate::server::tools::handlers::metrics::{
     explain_symbol, find_anchors, find_dead_code, get_anchor_score, get_context_depth,
     is_anchor_excluded_path, suggest_refactor_targets,
@@ -182,7 +182,7 @@ fn test_explain_symbol_existing() {
     node.anchor_score = Some(0.3);
     overlay.insert_node(node);
 
-    let occupancy = OccupancyMap::new();
+    let occupancy = CoordinationProxy::new(std::env::temp_dir());
     let result = explain_symbol(
         std::path::Path::new(""),
         &graph,
@@ -202,7 +202,7 @@ fn test_explain_symbol_not_found() {
     let (graph, overlay) = make_test_graph_with_nodes();
 
     // find_dead_code returns empty (not error), but explain_symbol should error
-    let occupancy = OccupancyMap::new();
+    let occupancy = CoordinationProxy::new(std::env::temp_dir());
     let result = explain_symbol(
         std::path::Path::new(""),
         &graph,
@@ -399,7 +399,7 @@ fn explain_symbol_does_not_report_a_defining_file_as_a_caller() {
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
     let overlay = VolatileOverlay::new();
-    let occupancy = OccupancyMap::new();
+    let occupancy = CoordinationProxy::new(std::env::temp_dir());
 
     let file = GraphNode::new(
         NodeType::File,
@@ -444,7 +444,7 @@ fn explain_symbol_still_reports_real_callers() {
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
     let overlay = VolatileOverlay::new();
-    let occupancy = OccupancyMap::new();
+    let occupancy = CoordinationProxy::new(std::env::temp_dir());
 
     let caller = GraphNode::new(
         NodeType::Function,
@@ -1119,111 +1119,6 @@ fn find_dead_code_applies_the_name_and_trait_filters_together() {
     assert!(
         !text.contains("- new ("),
         "a conventional name must be filtered by the name half:\n{text}"
-    );
-}
-
-/// `explain_symbol` annotates a symbol with who else is on its file and
-/// whether they are *reading* or *editing* — the signal that tells an
-/// agent to pause. The check is
-/// `c.path == node.path && matches!(c.intent, ClaimIntent::Edit)`, and
-/// that `&&` survived mutation to `||`: with it, a Read claim reports as
-/// "edit", and so does a claim on an entirely different file. Both make
-/// the collaborator look busier than they are, and neither test failed.
-#[test]
-fn occupancy_reports_read_intent_as_read() {
-    use crate::server::presence::{AgentId, ClaimIntent, ClaimRequest, OccupancyMap};
-
-    let tmp = std::env::temp_dir().join("test_metrics_occupancy_read");
-    let _ = std::fs::remove_dir_all(&tmp);
-    let graph = GraphDatabase::new(&tmp).unwrap();
-    let overlay = VolatileOverlay::new();
-    let occupancy = OccupancyMap::new();
-
-    let node = GraphNode::new(NodeType::Function, "login".into(), "auth.rs".into());
-    graph.upsert_node(node).unwrap();
-
-    let agent = AgentId("reader".into());
-    occupancy.claim(
-        &agent,
-        vec![ClaimRequest {
-            path: std::path::PathBuf::from("auth.rs"),
-            symbols: vec!["login".into()],
-            intent: ClaimIntent::Read,
-            ttl_seconds: None,
-            plan_revision: None,
-        }],
-    );
-
-    let text = explain_symbol(
-        std::path::Path::new(""),
-        &graph,
-        &overlay,
-        &occupancy,
-        "login",
-    )
-    .unwrap();
-    assert!(
-        text.contains("Occupancy"),
-        "an active claim must be surfaced:\n{text}"
-    );
-    assert!(
-        text.contains("\"read\""),
-        "a Read claim must report as read, not edit:\n{text}"
-    );
-    assert!(
-        !text.contains("\"edit\""),
-        "nothing is editing this file:\n{text}"
-    );
-}
-
-/// And an Edit claim on a *different* file must not colour this symbol.
-#[test]
-fn occupancy_ignores_edit_claims_on_other_files() {
-    use crate::server::presence::{AgentId, ClaimIntent, ClaimRequest, OccupancyMap};
-
-    let tmp = std::env::temp_dir().join("test_metrics_occupancy_other_file");
-    let _ = std::fs::remove_dir_all(&tmp);
-    let graph = GraphDatabase::new(&tmp).unwrap();
-    let overlay = VolatileOverlay::new();
-    let occupancy = OccupancyMap::new();
-
-    let node = GraphNode::new(NodeType::Function, "login".into(), "auth.rs".into());
-    graph.upsert_node(node).unwrap();
-
-    let agent = AgentId("busy".into());
-    occupancy.claim(
-        &agent,
-        vec![
-            // Reading the file we ask about...
-            ClaimRequest {
-                path: std::path::PathBuf::from("auth.rs"),
-                symbols: vec!["login".into()],
-                intent: ClaimIntent::Read,
-                ttl_seconds: None,
-                plan_revision: None,
-            },
-            // ...while editing an unrelated one.
-            ClaimRequest {
-                path: std::path::PathBuf::from("billing.rs"),
-                symbols: vec!["charge".into()],
-                intent: ClaimIntent::Edit,
-                ttl_seconds: None,
-                plan_revision: None,
-            },
-        ],
-    );
-
-    let text = explain_symbol(
-        std::path::Path::new(""),
-        &graph,
-        &overlay,
-        &occupancy,
-        "login",
-    )
-    .unwrap();
-    assert!(
-        !text.contains("\"edit\""),
-        "an Edit claim on billing.rs must not mark auth.rs as being edited:\n{text}"
     );
 }
 

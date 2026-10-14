@@ -20,11 +20,11 @@ use crate::server::federation::federated_index::FederatedIndex;
 use crate::server::federation::workspace::WorkspacesFile;
 use crate::server::git::AnyGitSensor;
 use crate::server::graph::GraphDatabase;
-use crate::server::intent::IntentRegistry;
+use crate::server::intent::IntentBoard;
 use crate::server::lsp::LspPool;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::VolatileOverlay;
-use crate::server::presence::{OccupancyMap, PresenceRegistry};
+use crate::server::presence::PresenceRegistry;
 use crate::server::reload::ReloadBus;
 use crate::server::tools::{ToolExecutor, ToolExecutorConfig};
 use crate::server::tuning::{load_tuning_config, TuningConfig};
@@ -428,12 +428,16 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     // The expiry loop prunes stale sessions + claim TTLs and
     // broadcasts `PresenceEvent` notifications.
     let presence = Arc::new(PresenceRegistry::from_config(&tuning.presence));
-    let occupancy = Arc::new(OccupancyMap::new());
-    // Intent + activity trackers ride alongside presence/occupancy
-    // (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). They share
-    // the same persistence path and the same install_persist_callback
-    // wiring; the data they carry is additive on the JSON snapshot.
-    let intent_registry = Arc::new(IntentRegistry::new());
+    // Claims, presence listings, and the postboard live in
+    // zoanthrope behind this proxy. Degraded (no `zoanthrope` on
+    // PATH) is advisory, never blocking. Claim paths outside the
+    // root stay absolute in zoanthrope's keys, so federation repo
+    // paths work with the staging dir as root.
+    let coordination = Arc::new(crate::server::coordination::CoordinationProxy::new(
+        ws.to_path_buf(),
+    ));
+    // The intent board is the postboard adapter over the same proxy.
+    let intent_registry = Arc::new(IntentBoard::new(Arc::clone(&coordination)));
     let activity_tracker = Arc::new(ActivityTracker::new());
     let (presence_event_tx, _) = broadcast::channel(PRESENCE_EVENT_CHANNEL_CAPACITY);
     // P1 #2: open the events log before `mem_path` is moved into the
@@ -445,14 +449,14 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     let events_log = Arc::new(EventsLog::open(&events_log_path).expect("open events.jsonl"));
     spawn_presence_expiry_loop(
         presence.clone(),
-        occupancy.clone(),
+        coordination.clone(),
         presence_event_tx.clone(),
         events_log.clone(),
     );
     start_attribution_watcher(
         attribution,
         presence.clone(),
-        occupancy.clone(),
+        coordination.clone(),
         presence_event_tx.clone(),
         events_log.clone(),
         federation.repo_paths(),
@@ -479,7 +483,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     let presence_handle = Arc::new(super::handles::PresenceLayer::new(
         Arc::clone(&presence_state_seen),
         presence,
-        occupancy,
+        coordination,
         intent_registry,
         activity_tracker,
         presence_event_tx.clone(),
@@ -694,16 +698,19 @@ impl LainServer {
         let process_change_lock = Arc::new(tokio::sync::Mutex::new(()));
         let overlay_updated = Arc::new(Notify::new());
 
-        // Intent + activity trackers ride alongside presence/occupancy
-        // (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`); same
-        // persistence story as the federation-mode constructor.
-        let intent_registry = Arc::new(IntentRegistry::new());
+        // The intent board is the postboard adapter over the same
+        // proxy; same degraded story as the federation-mode
+        // constructor.
+        let coordination = Arc::new(crate::server::coordination::CoordinationProxy::new(
+            workspace.to_path_buf(),
+        ));
+        let intent_registry = Arc::new(IntentBoard::new(Arc::clone(&coordination)));
         let activity_tracker = Arc::new(ActivityTracker::new());
 
         let presence_handle = Arc::new(super::handles::PresenceLayer::new(
             Arc::clone(&presence_state_seen),
             Arc::new(PresenceRegistry::from_config(&tuning.presence)),
-            Arc::new(OccupancyMap::new()),
+            coordination,
             intent_registry,
             activity_tracker,
             presence_event_tx.clone(),

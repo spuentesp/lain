@@ -1516,7 +1516,7 @@ impl LainMcpServer {
     /// `active_agents: []` even after agents register.
     pub fn with_server(mut self, server: Arc<LainServer>) -> Self {
         let presence = Arc::clone(server.presence());
-        let occupancy = Arc::clone(server.occupancy());
+        let occupancy = Arc::clone(server.coordination());
         let last_outcome = Arc::clone(server.refresh_handle().last_outcome());
         let annotations = Arc::clone(server.annotations());
         // The watchdog spawned by `IngestHandle::start_git_sensor_watchdog`
@@ -4879,11 +4879,11 @@ fn get_repo_info_handler(
     let active_edits = ctx
         .server
         .map(|s| {
-            let occupancy = s.occupancy();
+            let occupancy = s.coordination();
             let active = s.presence().list_active(false);
             active
                 .iter()
-                .filter(|sess| !occupancy.list_for_agent(&sess.id).is_empty())
+                .filter(|sess| !occupancy.list_for_agent(sess.name.as_str()).is_empty())
                 .count()
         })
         .unwrap_or(0);

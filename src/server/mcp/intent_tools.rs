@@ -18,7 +18,7 @@
 //! module stays focused. New tools added to the intent layer go in
 //! this file and register with the same macro machinery.
 
-use crate::server::intent::{Intent, IntentRegistry, IntentStatus};
+use crate::server::intent::{Intent, IntentBoard, IntentStatus};
 use crate::server::mcp::presence_tools::authenticate;
 use crate::server::presence::{AgentId, AgentSession};
 use crate::server::LainServer;
@@ -95,11 +95,15 @@ fn run_lain_intent_inner(server: &LainServer, args: Value) -> Result<Value, Stri
         return Err("agent_id does not match session token".into());
     }
     let agent_id = session.id.clone();
-    let intent_registry: &IntentRegistry = server.intent();
+    let intent_board: &IntentBoard = server.intent();
 
     let intent = match a.intent_id {
         None => {
-            // Declare path.
+            // Declare path. `goal` is required (else the intent has
+            // nothing to declare); `scopes` is optional. The board
+            // adapter maps this onto a zoanthrope post and returns
+            // the wire `Intent` (post id, timestamps) directly —
+            // there is no local storage to re-read.
             let goal = a
                 .goal
                 .ok_or_else(|| "lain_intent: goal is required when declaring".to_string())?;
@@ -109,25 +113,21 @@ fn run_lain_intent_inner(server: &LainServer, args: Value) -> Result<Value, Stri
                 .as_deref()
                 .map(IntentStatus::parse)
                 .unwrap_or_default();
-            let _id = intent_registry.declare(agent_id, goal, scopes, status);
-            // Re-read the just-declared intent so the response shape
-            // is uniform across declare and update.
-            intent_registry
-                .get(&session.id)
-                .ok_or_else(|| "lain_intent: declared intent disappeared".to_string())?
+            intent_board.declare(agent_id, goal, scopes, status)?
         }
         Some(intent_id_str) => {
             // Update path. Empty strings / `None` mean "leave alone".
             let intent_id = crate::server::intent::IntentId(intent_id_str);
             let add_scopes = a.add_scopes.unwrap_or_default();
             let remove_scopes = a.remove_scopes.unwrap_or_default();
-            intent_registry.update(
+            intent_board.update(
                 session.id.clone(),
                 intent_id,
                 add_scopes,
                 remove_scopes,
                 a.goal,
                 a.status.as_deref().map(IntentStatus::parse),
+                None,
             )?
         }
     };
@@ -140,28 +140,34 @@ fn run_lain_intent_inner(server: &LainServer, args: Value) -> Result<Value, Stri
     // without a target. The first scope (or a placeholder when
     // none) stands in as the target so the level reflects peer
     // activity on the agent's own surface.
-    let all_intents = intent_registry.list_active();
+    let all_intents = intent_board.list_active();
     let peer_intents: Vec<&Intent> = all_intents
         .iter()
         .filter(|i| i.agent_id != intent.agent_id)
         .collect();
-    // Pull peer claims by walking `OccupancyMap::list_for_agent` for
-    // each peer (the `OccupancyMap` API exposes a per-agent listing;
-    // there is no flat "all peer claims" surface, and `list_all`
-    // strips the per-claim `intent` field which the evaluator
-    // needs). One list_for_agent call per peer is fine — the agent
-    // count is bounded by what the workspace can sustain.
-    let peer_agent_ids: Vec<crate::server::presence::AgentId> =
-        peer_intents.iter().map(|i| i.agent_id.clone()).collect();
+    // Pull peer claims by walking `list_for_agent` for each peer (the
+    // API exposes a per-agent listing; there is no flat "all peer
+    // claims" surface, and `list_all` strips the per-claim `intent`
+    // field which the evaluator needs). One list_for_agent call per
+    // peer is fine — the agent count is bounded by what the workspace
+    // can sustain.
     let mut peer_claims: Vec<crate::server::presence::Claim> = Vec::new();
-    for aid in &peer_agent_ids {
-        for mut c in server.occupancy().list_for_agent(aid) {
+    for peer in &peer_intents {
+        // Zoanthrope stores claims under the agent NAME; map the
+        // intent's session id back through presence. A session that
+        // has since expired can't resolve — its claims are
+        // unreachable through this id-keyed path.
+        let Some(name) = server.presence().get(&peer.agent_id).map(|s| s.name) else {
+            continue;
+        };
+        let aid = crate::server::presence::AgentId(name);
+        for mut c in server.coordination().list_for_agent(aid.as_str()) {
             // Defensive: ensure the claim's `agent_id` field matches
             // the agent id we asked about. The occupancy map owns
             // both ends so this should always be true, but a future
             // refactor that splits claim storage from agent
             // ownership could drift.
-            if c.agent_id != *aid {
+            if c.agent_id != aid {
                 c.agent_id = aid.clone();
             }
             peer_claims.push(c);

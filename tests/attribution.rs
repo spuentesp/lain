@@ -1,13 +1,21 @@
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
+
 use lain::server::attribution::{
     AttributionBackend, AttributionWatcher, NoopBackend, ProcFsBackend,
 };
-use lain::server::presence::{AgentKind, AgentMode, OccupancyMap, PresenceRegistry};
+use lain::server::coordination::CoordinationProxy;
+use lain::server::presence::{AgentKind, AgentMode, PresenceRegistry};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]
 fn attribution_auto_claims_via_pid_on_linux() {
+    if !require_zoanthrope() {
+        return;
+    }
     if !cfg!(target_os = "linux") {
         return;
     }
@@ -16,7 +24,10 @@ fn attribution_auto_claims_via_pid_on_linux() {
     std::fs::write(&file, "fn login() {}").unwrap();
 
     let presence = Arc::new(PresenceRegistry::new());
-    let occupancy = Arc::new(OccupancyMap::new());
+    // Workspace root for the coordination proxy must be the test's own
+    // tempdir — a shared root would let parallel tests collide on one
+    // `.zoanthrope/state.json`.
+    let occupancy = Arc::new(CoordinationProxy::new(tmp.path().to_path_buf()));
     let s = presence.register(
         "test-agent".into(),
         AgentKind::ClaudeCode,
@@ -54,7 +65,7 @@ fn attribution_auto_claims_via_pid_on_linux() {
         attempt += 1;
         std::fs::write(&file, format!("fn login() {{ changed {attempt} }}")).unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        claims = occupancy.list_for_agent(&s.id);
+        claims = occupancy.list_for_agent(s.name.as_str());
         if !claims.is_empty() {
             break;
         }

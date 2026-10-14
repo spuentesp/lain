@@ -228,9 +228,11 @@ small presence registry on disk).
 
 A hard lock would mean "agent B cannot edit auth.rs while A holds
 the lock". This is wrong — B may be editing a different line, or
-adding a comment. The model is *advisory visibility*: `claim_files
-(edit)` returns conflicts; `claim_files(read)` never does. Mirrors
-how humans collaborate.
+adding a comment. The model is *advisory visibility*: the tools
+answer with grants and conflicts that name the holder, and the
+caller decides. A cooperating agent treats a conflict as "work on
+something else"; nothing in Lain stops a write by an agent that
+never asks or that ignores the answer.
 
 The intent layer above this — `lain_intent` plus the
 GREEN / YELLOW / RED coordination engine (see
@@ -238,26 +240,56 @@ GREEN / YELLOW / RED coordination engine (see
 — layers a *strong-consistency* advisory on top of the same data.
 GREEN means the agent's declared scope is fine to edit; YELLOW
 warns of a peer's declared intent or current activity in the
-same scope; RED reports that a peer holds a live exclusive edit
-claim on the target, and `claim_files(edit)` refuses a competing
-claim. Both are answers given to a cooperating caller. The
-in-memory registry (`OccupancyMap`) is the source of truth; the
-`.lain/locks/` files are a best-effort hint for operators and
-non-`lain` tooling, and nothing in Lain stops a write by an agent
-that never asks or that ignores the answer. GREEN and YELLOW are
-advisory in the same way. The YELLOW level now consults the static
-graph for symbol-scope distance (BFS over `Calls` edges, 32-hop
-cap), so sibling symbols that share a call graph edge are
-treated as YELLOW even when their file paths differ.
+same scope; RED reports that a peer holds a live claim on the
+target. Both are answers given to a cooperating caller. GREEN
+and YELLOW are advisory in the same way. The YELLOW level now
+consults the static graph for symbol-scope distance (BFS over
+`Calls` edges, 32-hop cap), so sibling symbols that share a call
+graph edge are treated as YELLOW even when their file paths
+differ.
 
-### Why cross-process via a state file
+### Where coordination lives: zoanthrope
 
-MCP stdio spawns one `lain mcp` per client session. Two agent
-consoles on one repo = two server processes. They must share
-presence. Before this, the file was only ever written and never
-re-read: every claim was granted, no conflict was ever reported.
-The fix is `re-read under lock` on every mutation — smallest
-change that makes the coordination layer actually coordinate.
+Claim arbitration, filesystem leases, and the agent postboard are
+**zoanthrope**'s (`github.com/spuentesp/zoanthrope`, npm
+`@spuentesp/zoanthrope`) — lain's `src/server/coordination/` is a
+subprocess proxy over its CLI (`zoanthrope claim|release|rejoin`,
+JSON on stdout) and a short-lived `zoanthrope mcp` round trip for
+presence and postboard calls. Lain keeps what is genuinely its own:
+session auth (`session_token`), the code-intelligence half of a
+claim (symbol-body fingerprints pinned as opaque `caller_stamps`), the
+`world_state` retract detector, audit + SSE, and the GREEN/YELLOW/RED
+evaluator. Tool names and response shapes are adapters, not rewrites.
+
+Consequences:
+
+- Arbitration is **file-granular** and strict: an edit conflicts with
+  anything another agent holds on the path; a read conflicts with an
+  edit; readers co-hold with each other. Symbol pins travel with the
+  claim as evidence (drift detection), not as arbitration scope.
+- Claims **never auto-release**. Per-claim `ttl_seconds` is accepted
+  on the wire but no longer expires anything; zoanthrope's presence
+  TTL marks silent holders *stale* (still blocking) and explicit
+  release is the only way to hand a file over.
+- Cross-process consistency is zoanthrope's `re-read under lock` on
+  `.zoanthrope/state.json` — MCP stdio spawns one `lain mcp` per
+  client, and every process arbitrates against the same state. The
+  advisory/lain-side state file holds sessions and activity only.
+- Advisory vs blocking enforcement is runtime mode, not wiring:
+  `ZOANTHROPE_MODE=advisory|blocking` (or `.zoanthrope/config.json`)
+  decides whether the *hook layer* denies a tool call on conflict.
+  The claim response reports the same refusal either way.
+- **Degraded mode**: no `zoanthrope` binary (`$ZOANTHROPE_BIN`, then
+  `PATH`) and every coordination call fails soft to advisory
+  semantics — claims are logged locally and never block, responses
+  carry `"degraded": "zoanthrope-missing"`. Lain stays installable
+  standalone.
+
+The formal specs for the coordination core live in zoanthrope's
+`formal/` (PresenceClaims, FsLease/FsLeaseGuard, RejoinProtocol) —
+[`docs/formal/COORDINATION.md`](formal/COORDINATION.md) is the
+pointer. Lain's proxy conforms to those specs: it adds no
+arbitration of its own.
 
 ### Why attribution exists
 
@@ -266,8 +298,11 @@ would be unnecessary. They don't. Without attribution, in-flight
 edits from a fresh-context or crashed agent are unattributed and
 invisible to `list_occupancy`. The attribution layer (inotify +
 `/proc/<pid>/fd` + single-agent fallback) gives those edits an
-*inferred* claim with a short TTL. Wrong inferences expire;
-correct ones become real claims when declared.
+*inferred* claim. Inferred claims are guesses: they say so on every
+surface that reports them, they do not expire on their own
+(claims are never auto-released — they end with the session or an
+explicit release), and a claim the agent later declares itself
+upgrades the record to a declaration.
 
 ## MCP as the only contract
 
@@ -384,7 +419,7 @@ Exceptions:
 | `lain mcp` walks up for `.git` | "Just works" UX | Federation features unavailable |
 | 1000-node blast-radius cap | Actionable responses | Deep traversals set `truncated: true` |
 | Per-repo workers in federation | No name collisions | Cross-repo joins pay re-keying |
-| Always-on multiplayer | Coordination for free | Small disk overhead |
+| Always-on multiplayer | Coordination via zoanthrope proxy | Subprocess + `.zoanthrope/state.json` |
 | Inventory-collected tools | One-line registration | No static guarantee (mitigated by tests) |
 
 ## Deferred sub-projects

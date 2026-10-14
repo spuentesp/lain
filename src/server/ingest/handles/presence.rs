@@ -1,19 +1,24 @@
-//! Presence — registry, occupancy, broadcast sender, state-file timestamp.
+//! Presence — session registry, coordination proxy, broadcast sender,
+//! state-file timestamp.
 //!
-//! Extracted from `LainServer` in PR 3.7a. `LainServer` will hold an
-//! `Arc<PresenceLayer>` in PR 3.7b. The state-path resolution is
+//! Extracted from `LainServer` in PR 3.7a. The state-path resolution is
 //! precomputed at construction (single-workspace vs federation-mode
 //! is fixed once the server is built) and stored in the handle so
 //! presence methods can call `self.state_path()` directly without
 //! reaching into the federation or ingest partitions.
+//!
+//! Claims and posts are not stored here: [`CoordinationProxy`] is the
+//! forwarder to zoanthrope. This layer owns lain's session auth table
+//! and the cross-process state-file lock around it.
 
 use crate::config::state_path_for_workspace;
 use crate::graph::GraphDatabase;
 use crate::server::activity::ActivityTracker;
-use crate::server::intent::IntentRegistry;
+use crate::server::coordination::CoordinationProxy;
+use crate::server::intent::IntentBoard;
 use crate::server::presence::{
-    load_pair as load_presence_pair, save_pair as save_presence_pair, AgentId, OccupancyMap,
-    PresenceEvent, PresenceRegistry,
+    load_pair as load_presence_pair, save_pair as save_presence_pair, AgentId, PresenceEvent,
+    PresenceRegistry,
 };
 use crate::server::state_lock as lain_state_lock;
 use parking_lot::Mutex;
@@ -21,15 +26,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-/// Presence registry, occupancy map, broadcast sender, and the
+/// Session registry, coordination proxy, broadcast sender, and the
 /// state-file timestamp tracker. Owned by the LainServer but exposed
 /// as a handle so the persistence + cross-process locking logic is
 /// named after its concern rather than hiding in the god struct.
 pub struct PresenceLayer {
     pub(crate) presence_state_seen: Arc<Mutex<Option<std::time::SystemTime>>>,
     pub(crate) presence: Arc<PresenceRegistry>,
-    pub(crate) occupancy: Arc<OccupancyMap>,
-    pub(crate) intent: Arc<IntentRegistry>,
+    pub(crate) coordination: Arc<CoordinationProxy>,
+    pub(crate) intent: Arc<IntentBoard>,
     pub(crate) activity: Arc<ActivityTracker>,
     pub(crate) presence_event_tx: broadcast::Sender<(u64, PresenceEvent)>,
     pub(crate) state_path: PathBuf,
@@ -51,18 +56,17 @@ struct LockTimeouts {
 }
 
 impl PresenceLayer {
-    /// Construct from the registry, occupancy map, broadcast sender,
-    /// and a precomputed state file path. The state path is derived
-    /// from `repos_yaml` if set, otherwise from
-    /// `config.workspace`; the caller (PR 3.7b's `LainServer::serve`)
-    /// computes it via the same `state_path_for_workspace` helper the
-    /// LainServer uses today.
+    /// Construct from the session registry, coordination proxy,
+    /// broadcast sender, and a precomputed state file path. The state
+    /// path is derived from `repos_yaml` if set, otherwise from
+    /// `config.workspace`; the caller (`LainServer::serve`) computes
+    /// it via the same `state_path_for_workspace` helper.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         presence_state_seen: Arc<Mutex<Option<std::time::SystemTime>>>,
         presence: Arc<PresenceRegistry>,
-        occupancy: Arc<OccupancyMap>,
-        intent: Arc<IntentRegistry>,
+        coordination: Arc<CoordinationProxy>,
+        intent: Arc<IntentBoard>,
         activity: Arc<ActivityTracker>,
         presence_event_tx: broadcast::Sender<(u64, PresenceEvent)>,
         repos_yaml: Option<&std::path::Path>,
@@ -76,7 +80,7 @@ impl PresenceLayer {
         Self {
             presence_state_seen,
             presence,
-            occupancy,
+            coordination,
             intent,
             activity,
             presence_event_tx,
@@ -89,59 +93,53 @@ impl PresenceLayer {
         }
     }
 
-    /// Path on disk where this server's `PresenceRegistry` +
-    /// `OccupancyMap` JSON snapshot is persisted. Derived from a
-    /// stable identifier at construction; see [`Self::new`].
+    /// Path on disk where this server's session-registry + activity
+    /// snapshot is persisted. Derived from a stable identifier at
+    /// construction; see [`Self::new`].
     pub fn state_path(&self) -> PathBuf {
         self.state_path.clone()
     }
 
     /// Borrowed handle to the presence registry. The field itself is
     /// already `pub`, but this accessor keeps the contract consistent
-    /// with the other `Arc`-sharing accessors.
+    /// across presence methods that need to reach for the registry.
     pub fn presence(&self) -> &Arc<PresenceRegistry> {
         &self.presence
     }
 
-    /// Borrowed handle to the occupancy map. Same rationale as
-    /// `presence()`.
-    pub fn occupancy(&self) -> &Arc<OccupancyMap> {
-        &self.occupancy
+    /// Borrowed handle to the zoanthrope coordination proxy (claims,
+    /// presence listings, postboard). Same rationale as
+    /// [`Self::presence`].
+    pub fn coordination(&self) -> &Arc<CoordinationProxy> {
+        &self.coordination
     }
 
-    /// Borrowed handle to the intent registry (PR 1 of
-    /// `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). Same rationale as
-    /// `presence()`.
-    pub fn intent(&self) -> &Arc<crate::server::intent::IntentRegistry> {
+    /// Borrowed handle to the intent board (postboard adapter).
+    pub fn intent(&self) -> &Arc<IntentBoard> {
         &self.intent
     }
 
-    /// Borrowed handle to the activity tracker (PR 1). Same
-    /// rationale as `presence()`.
-    pub fn activity(&self) -> &Arc<crate::server::activity::ActivityTracker> {
+    /// Borrowed handle to the activity tracker.
+    pub fn activity(&self) -> &Arc<ActivityTracker> {
         &self.activity
     }
 
-    /// Borrowed handle to the `PresenceEvent` broadcast sender.
+    /// Borrowed handle to the presence-event broadcast sender.
     pub fn presence_event_tx(&self) -> &broadcast::Sender<(u64, PresenceEvent)> {
         &self.presence_event_tx
     }
 
-    /// Modification time of the presence state file as of our last load.
+    /// Borrowed handle to the "when did we last see the on-disk state
+    /// file change?" tracker.
     pub fn presence_state_seen(&self) -> &Arc<Mutex<Option<std::time::SystemTime>>> {
         &self.presence_state_seen
     }
 
-    /// Emit a presence event: append it to the durable events log
-    /// (assigning its monotonic `event_id`) and broadcast the
-    /// `(event_id, event)` pair to all subscribers. This is the only
-    /// path live events should take — sending on `presence_event_tx`
-    /// directly would skip durability and break SSE `Last-Event-ID`
-    /// resume.
-    ///
-    /// The events log is held by the sibling `AuditState` handle in
-    /// PR 3.7b. In this PR the method takes it as a parameter so the
-    /// handle compiles standalone.
+    /// Fan a presence event out to the SSE broadcast channel via the
+    /// durable events log (assigning its monotonic `event_id`). This is
+    /// the only path live events should take — sending on
+    /// `presence_event_tx` directly would skip durability and break
+    /// SSE `Last-Event-ID` resume.
     pub fn emit_presence_event(
         &self,
         events_log: &crate::server::events_log::EventsLog,
@@ -151,20 +149,25 @@ impl PresenceLayer {
         let _ = self.presence_event_tx.send((id, event));
     }
 
-    /// Unregister an agent session by its ID, removing it from the presence
-    /// registry and releasing all its occupancy claims and advisory lock leases.
-    /// Emits `ClaimRevoked` presence events for any released claims.
-    /// Returns the paths that were released.
-    ///
-    /// The events log is passed in for the same reason as
-    /// `emit_presence_event`.
+    /// Drop an agent entirely: release everything it holds in
+    /// zoanthrope, drop its intent (board post), its activity feed
+    /// entry, and its session. Returns the paths released.
     pub fn unregister_agent(
         &self,
         events_log: &crate::server::events_log::EventsLog,
         agent_id: &AgentId,
     ) -> Vec<PathBuf> {
         self.with_shared_presence(|| {
-            let released = self.occupancy.release_all_for(agent_id);
+            // Claims live in zoanthrope under the agent NAME; resolve
+            // it while the session is still registered. (If it is
+            // already gone, its claims are unreachable by id — the
+            // remove callback below carries the name for that path.)
+            let identity = self
+                .presence
+                .get(agent_id)
+                .map(|s| s.name)
+                .unwrap_or_else(|| agent_id.as_str().to_string());
+            let released = self.coordination.release_all_for(&identity);
             for path in &released {
                 self.emit_presence_event(
                     events_log,
@@ -178,9 +181,8 @@ impl PresenceLayer {
             // Drop the agent's intent and activity too so the
             // activity feed doesn't show a ghost entry after the
             // session ends. `presence.remove` triggers the
-            // `on_remove_callback` (which only releases
-            // occupancy); intent + activity are independent and
-            // need explicit cleanup here.
+            // `on_remove_callback`; intent + activity are
+            // independent and need explicit cleanup here.
             self.intent.retire(agent_id);
             self.activity.drop_agent(agent_id);
             self.presence.remove(agent_id);
@@ -198,55 +200,29 @@ impl PresenceLayer {
         self.unregister_agent(events_log, agent_id)
     }
 
-    /// Persist the live `PresenceRegistry` + `OccupancyMap` +
-    /// `IntentRegistry` + `ActivityTracker` to the server's state
-    /// file. The intent and activity registries are additive
-    /// (`#[serde(default)]` on the JSON shape), so older state files
-    /// hydrate cleanly with empty registries.
+    /// Persist the live `PresenceRegistry` + `ActivityTracker` to the
+    /// server's state file. Claims and intents live in zoanthrope's
+    /// `.zoanthrope/state.json` and are not written here.
     pub fn save_state(&self) -> Result<(), crate::server::error::LainError> {
         let path = self.state_path();
-        save_presence_pair(
-            &path,
-            &self.presence,
-            &self.occupancy,
-            &self.intent,
-            &self.activity,
-        )
-        .map_err(|e| {
+        save_presence_pair(&path, &self.presence, &self.activity).map_err(|e| {
             crate::server::error::LainError::Other(format!("save_state({}): {e}", path.display()))
         })
     }
 
-    /// Hydrate the live `PresenceRegistry` + `OccupancyMap` +
-    /// `IntentRegistry` + `ActivityTracker` from the server's state
-    /// file, if any. Idempotent: missing file is a no-op.
-    ///
-    /// Side effect: `load_presence_pair` returns the list of
-    /// `ClaimRevoked { reason: "stale_owner" }` events the load
-    /// itself produced (a fresh server reclaiming claims whose
-    /// owner is no longer in `PresenceRegistry::sessions`). Those
-    /// events are forwarded to the SSE broadcast channel here so
-    /// peers learn the linearizability gap has been closed.
-    /// `events_log::append` is intentionally skipped — the audit
-    /// log is append-only across the *current* process's lifetime
-    /// and a load happens before any agent is registered, so the
-    /// reclamation never needs an audit trail.
+    /// Hydrate the live `PresenceRegistry` + `ActivityTracker` from
+    /// the server's state file, if any. Idempotent: missing file is a
+    /// no-op. Claim-reclamation events are gone with the in-memory
+    /// claims registry — zoanthrope owns claim lifetime now.
     pub fn load_state(&self) -> Result<(), crate::server::error::LainError> {
         let path = self.state_path();
-        let revoked = load_presence_pair(
-            &path,
-            &self.presence,
-            &self.occupancy,
-            &self.intent,
-            &self.activity,
-        )
-        .map_err(|e| {
+        let events = load_presence_pair(&path, &self.presence, &self.activity).map_err(|e| {
             crate::server::error::LainError::Other(format!("load_state({}): {e}", path.display()))
         })?;
         // Use a monotonic counter so each load-time event gets a
         // unique SSE id even though we skipped the audit log.
         let mut counter: u64 = 0;
-        for event in revoked {
+        for event in events {
             counter = counter.saturating_add(1);
             let _ = self.presence_event_tx.send((counter, event));
         }
@@ -254,73 +230,22 @@ impl PresenceLayer {
     }
 
     /// Run `f` inside the cross-process presence critical section:
-    /// take the state-file lock, refresh the in-memory registries from
-    /// disk, run `f`, then write the result back.
+    /// take the state-file lock, refresh the in-memory session
+    /// registry from disk, run `f`, then write the result back.
     ///
     /// Advisory throughout — a lock timeout proceeds unlocked, and a
     /// failed load or save is logged rather than surfaced. Presence is
     /// a coordination hint; it must never be the thing that breaks a
     /// tool call.
     ///
-    /// Unlocked-fallback concurrency: when the lock acquisition
-    /// times out, two or more processes can end up holding nothing and
-    /// reading the same pre-claim snapshot. Each then mutates its
-    /// in-memory copy and the `install_persist_callback` writes its
-    /// own state to disk in some order, so the last writer's claims
-    /// are the only ones a peer ever observes. To keep the
-    /// linearizability invariant from the archived coordination plan
-    /// ("at most one live exclusive lease per scope") under that
-    /// concurrent-unlocked-write scenario, we hash the state file
-    /// before `f` and again after `f` returns; if the hash changed,
-    /// another process wrote during our critical section, our
-    /// in-memory decision may have missed its claim, and we re-run
-    /// `f` on the refreshed state. The retry is bounded so a
-    /// permanently-contended workload doesn't livelock.
+    /// Claim arbitration does not go through this lock: zoanthrope
+    /// serializes claims under its own state-file lock. This critical
+    /// section exists for lain's *session table* (register /
+    /// heartbeat / expire across processes).
     ///
-    /// Re-running is safe for the claim/release paths because the
-    /// in-memory conflict filter excludes the agent's own id
-    /// (`OccupancyMap::claim_in_memory` filters `entry.agents` with
-    /// `a != agent_id`) and re-claiming your own scope is a no-op.
-    /// `register_agent` is NOT idempotent — it mints a fresh
-    /// `agent_id` per call — but the linearizability invariant
-    /// applies only to exclusive leases; a duplicate session under
-    /// the rare race where two agents register at the same instant
-    /// is benign and the duplicate expires on its TTL.
-    ///
-    /// Refresh / persist failures: if `refresh_shared_presence`
-    /// can't read the on-disk state (e.g. the state path was
-    /// replaced by a directory, or the file's permissions revoke
-    /// read access mid-run), or the persist callback can't write
-    /// the on-disk state after `f` returns, this function surfaces
-    /// the error as `Err(CoordinationError::RefreshFailed)` or
-    /// `Err(CoordinationError::PersistFailed)`. Without this
-    /// propagation both processes see stale in-memory decisions and
-    /// return `granted` based on no peer state — the
-    /// `runs/20260921-pr199-persist-failure/` artefact under
-    /// `anemone/runs/` reproduces that exact scenario.
-    /// Run `f` inside the cross-process presence critical section.
-    ///
-    /// The state-file lock is acquired with the loaded tuning
-    /// (`tuning.toml`'s `state_lock_*` keys) and held through
-    /// `refresh_shared_presence` + `f` + the persist callback. If
-    /// the lock cannot be acquired within the configured deadline,
-    /// this returns `Err(CoordinationError::Unavailable)` — the
-    /// caller surfaces the failure to the agent so it can retry
-    /// instead of silently writing a stale view.
-    ///
-    /// Why fail closed (instead of the historical "proceed unlocked"
-    /// advisory): the linearizability invariant from
-    /// `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` says at most
-    /// one live exclusive lease per scope. Holding the lock through
-    /// persist is the only way to enforce that invariant under
-    /// contention. Proceeding unlocked is the failure mode that
-    /// the reproducer in `harness/reproduce-stdio-lock-fail-open.py`
-    /// surfaces — six agents reading the same pre-claim snapshot,
-    /// each firing its persist callback, and the last writer's
-    /// state being the only one peers ever observe. Returning
-    /// `Unavailable` puts the retry decision on the agent, which
-    /// can do exponential backoff, surface the error to its user,
-    /// or escalate to a hard failure.
+    /// Refresh / persist failures surface as
+    /// `Err(CoordinationError::RefreshFailed)` /
+    /// `Err(CoordinationError::PersistFailed)`.
     pub fn with_shared_presence<T>(&self, f: impl FnOnce() -> T) -> Result<T, CoordinationError> {
         let path = self.state_path();
         let lock = lain_state_lock::acquire_with(
@@ -351,42 +276,19 @@ impl PresenceLayer {
         // it for the duration of this critical section by stashing
         // the previous callback and installing a fresh one that
         // records its result in the cell.
-        //
-        // One cell per registry: a shared cell would let the second
-        // callback's error overwrite the first. Both presence and
-        // occupancy persist can fail independently; both must reach
-        // the caller.
         let presence_persist =
-            std::sync::Arc::new(parking_lot::Mutex::new(None::<Result<(), String>>));
-        let occupancy_persist =
             std::sync::Arc::new(parking_lot::Mutex::new(None::<Result<(), String>>));
         let prev_presence_cb = self.presence.swap_persist_capture(
             std::sync::Arc::clone(&presence_persist),
             path.clone(),
             self.presence.clone(),
-            self.occupancy.clone(),
-            self.intent.clone(),
-            self.activity.clone(),
-        );
-        let prev_occupancy_cb = self.occupancy.swap_persist_capture(
-            std::sync::Arc::clone(&occupancy_persist),
-            path.clone(),
-            self.presence.clone(),
-            self.occupancy.clone(),
-            self.intent.clone(),
             self.activity.clone(),
         );
         let result = f();
         if let Some(prev) = prev_presence_cb {
             self.presence.restore_persist_callback(prev);
         }
-        if let Some(prev) = prev_occupancy_cb {
-            self.occupancy.restore_persist_callback(prev);
-        }
         if let Some(Err(e)) = presence_persist.lock().clone() {
-            return Err(CoordinationError::PersistFailed(e));
-        }
-        if let Some(Err(e)) = occupancy_persist.lock().clone() {
             return Err(CoordinationError::PersistFailed(e));
         }
         Ok(result)
@@ -417,10 +319,6 @@ impl PresenceLayer {
         Ok(())
     }
 
-    // `install_persist_callback` stays on LainServer in PR 3.7b — it
-    // wires `Presence` + `Occupancy` together with the workspace root
-    // and federation claim roots, which cross handle boundaries.
-
     // Reference held for the doc comment on the LainServer fields
     // originally borrowed these; the import is no longer needed at
     // this layer but kept here so the docstring stays accurate.
@@ -437,10 +335,7 @@ impl PresenceLayer {
 /// can't be read after the lock is held (e.g. the path was
 /// replaced by a directory between lock acquisition and read);
 /// `PersistFailed` covers the case where the in-memory mutation
-/// ran but the on-disk write failed. All three together enforce
-/// the linearizability invariant from
-/// `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` ("at most one
-/// live exclusive lease per scope").
+/// ran but the on-disk write failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinationError {
     /// State-file lock acquisition timed out. A peer process is
@@ -500,15 +395,13 @@ mod tests {
             workspace
         };
         let (presence_tx, _rx) = broadcast::channel(8);
-        // Intent + activity trackers ride alongside presence /
-        // occupancy (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
-        // These tests only assert on presence state paths, so empty
-        // trackers are correct.
+        let coordination = Arc::new(CoordinationProxy::new(workspace.to_path_buf()));
+        let intent = Arc::new(IntentBoard::new(Arc::clone(&coordination)));
         PresenceLayer::new(
             Arc::new(Mutex::new(None)),
             Arc::new(PresenceRegistry::new()),
-            Arc::new(OccupancyMap::default()),
-            Arc::new(crate::server::intent::IntentRegistry::new()),
+            coordination,
+            intent,
             Arc::new(crate::server::activity::ActivityTracker::new()),
             presence_tx,
             repos_yaml,
@@ -538,7 +431,7 @@ mod tests {
     fn accessors_return_the_stored_arcs() {
         let l = layer(None, std::path::Path::new("/tmp/ws"));
         assert!(Arc::strong_count(l.presence()) > 0);
-        assert!(Arc::strong_count(l.occupancy()) > 0);
+        assert!(Arc::strong_count(l.coordination()) > 0);
         assert_eq!(l.presence_event_tx().receiver_count(), 0);
     }
 
@@ -546,8 +439,7 @@ mod tests {
     /// return `Err(CoordinationError::Unavailable)` when the
     /// state-file lock can't be acquired, so the agent sees a
     /// coordination failure instead of silently writing a stale
-    /// view. We plant a fresh sentinel that the acquisition will
-    /// treat as held for the full timeout.
+    /// view. A peer process holds the sibling lock file.
     ///
     /// Cross-process version of this scenario is the reproducer in
     /// `harness/reproduce-stdio-lock-fail-open.py`.
@@ -568,15 +460,15 @@ mod tests {
         };
         let presence_state_seen = Arc::new(Mutex::new(None));
         let presence = Arc::new(crate::server::presence::PresenceRegistry::new());
-        let occupancy = Arc::new(crate::server::presence::OccupancyMap::new());
-        let intent = Arc::new(crate::server::intent::IntentRegistry::new());
+        let coordination = Arc::new(CoordinationProxy::new(ws.clone()));
+        let intent = Arc::new(IntentBoard::new(Arc::clone(&coordination)));
         let activity = Arc::new(crate::server::activity::ActivityTracker::new());
         let (tx, _rx) = tokio::sync::broadcast::channel(8);
         let state_path = crate::config::state_path_for_workspace(&repos);
         let l = PresenceLayer {
             presence_state_seen,
             presence,
-            occupancy,
+            coordination,
             intent,
             activity,
             presence_event_tx: tx,
@@ -614,17 +506,13 @@ mod tests {
         drop(peer);
     }
 
-    /// Unit test for the I/O-failure path the user identified: the
-    /// state-file lock acquisition succeeds (sibling lock path is
-    /// writable), but the state-file *content* path is unwritable
-    /// (replaced by a directory between two agents registering).
-    /// Both `refresh_shared_presence` (which tries to read the
-    /// file) and the persist callback (which tries to write it)
-    /// would silently fail under the historical advisory design;
-    /// both agents would then return "granted" based on a stale
-    /// in-memory view that never observed peer activity. After the
-    /// PR #199 fix that surfaces those failures, both calls must
-    /// return `Err(CoordinationError::RefreshFailed | PersistFailed)`.
+    /// Unit test for the I/O-failure path: the state-file lock
+    /// acquisition succeeds, but the state-file *content* path is
+    /// unwritable (replaced by a directory between two agents
+    /// registering). Both `refresh_shared_presence` and the persist
+    /// callback fail under that layout; both must surface
+    /// `Err(CoordinationError::RefreshFailed | PersistFailed)` rather
+    /// than proceed on a stale view (PR #199).
     #[test]
     fn with_shared_presence_fails_closed_when_state_path_is_a_directory() {
         let tmp = tempdir();
@@ -638,8 +526,8 @@ mod tests {
         let cfg = crate::server::tuning::PresenceConfig::default();
         let presence_state_seen = Arc::new(Mutex::new(None));
         let presence = Arc::new(crate::server::presence::PresenceRegistry::new());
-        let occupancy = Arc::new(crate::server::presence::OccupancyMap::new());
-        let intent = Arc::new(crate::server::intent::IntentRegistry::new());
+        let coordination = Arc::new(CoordinationProxy::new(ws.clone()));
+        let intent = Arc::new(IntentBoard::new(Arc::clone(&coordination)));
         let activity = Arc::new(crate::server::activity::ActivityTracker::new());
         let (tx, _rx) = tokio::sync::broadcast::channel(8);
         let state_path = crate::config::state_path_for_workspace(&repos);
@@ -649,7 +537,7 @@ mod tests {
         let l = PresenceLayer {
             presence_state_seen,
             presence,
-            occupancy,
+            coordination,
             intent,
             activity,
             presence_event_tx: tx,

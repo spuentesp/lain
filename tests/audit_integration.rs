@@ -12,6 +12,15 @@ use lain::server::audit::{read_audit_log, AuditEvent};
 use lain::server::LainServer;
 use std::sync::Mutex;
 
+// The grant/reject arbitration tests below assert real zoanthrope
+// arbitration (a granted claim mirrors its claim_set; a conflicting
+// writer is rejected). The degraded `zoanthrope-missing` fallback is
+// advisory by design and cannot satisfy those assertions, so they
+// gate on the binary like the rest of the coordination battery.
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
+
 /// Process-wide mutex that serialises the audit tests below. The
 /// `XDG_STATE_HOME` override in `isolate_state_dir` is process-wide
 /// (it's an env var), so two audit tests running concurrently would
@@ -48,6 +57,9 @@ fn isolate_state_dir() -> (tempfile::TempDir, std::path::PathBuf) {
 /// zero before the claim landed).
 #[tokio::test]
 async fn granted_claim_appends_audit_event() {
+    if !require_zoanthrope() {
+        return;
+    }
     let _guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_state_tmp, audit_dir) = isolate_state_dir();
 
@@ -111,9 +123,10 @@ async fn granted_claim_appends_audit_event() {
     // second test). The audit module serializes whatever the caller hands it,
     // so pinning a value here would over-specify the contract.
     // One Claim in the granted set: the just-recorded claim for
-    // auth.rs on behalf of `agent_id`.
+    // auth.rs on behalf of `alice` (claim holders are agent names —
+    // the identity shared with the zero-daemon hook path).
     assert_eq!(ev.claim_set.len(), 1, "claim_set should mirror the grant");
-    assert_eq!(ev.claim_set[0].agent_id.as_str(), agent_id);
+    assert_eq!(ev.claim_set[0].agent_id.as_str(), "alice");
     assert_eq!(ev.claim_set[0].path.to_string_lossy(), "auth.rs");
     assert_eq!(ev.claim_set[0].symbols, vec!["login"]);
     // No racers: alice was alone on this file.
@@ -130,6 +143,9 @@ async fn granted_claim_appends_audit_event() {
 /// phantom grant" invariants.
 #[tokio::test]
 async fn rejected_claim_does_not_append_audit_event() {
+    if !require_zoanthrope() {
+        return;
+    }
     let _guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_state_tmp, audit_dir) = isolate_state_dir();
 
@@ -205,6 +221,9 @@ async fn rejected_claim_does_not_append_audit_event() {
 /// the specific file it describes.
 #[tokio::test]
 async fn multi_file_grant_emits_one_audit_line_per_path() {
+    if !require_zoanthrope() {
+        return;
+    }
     let _guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_state_tmp, audit_dir) = isolate_state_dir();
 

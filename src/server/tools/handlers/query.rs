@@ -6,7 +6,8 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::query::{Executor, QuerySpec};
-use crate::server::presence::{OccupancyMap, PresenceRegistry};
+use crate::server::coordination::CoordinationProxy;
+use crate::server::presence::PresenceRegistry;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 use std::sync::Arc;
@@ -22,11 +23,11 @@ use std::sync::Arc;
 /// This is intentionally local-only: federation-wide occupancy would
 /// require a separate per-repo mapping we don't track yet, and the
 /// tool doc describes the result as "active agents in this workspace".
-fn occupancy_payload(presence: &PresenceRegistry, occupancy: &OccupancyMap) -> Value {
+fn occupancy_payload(presence: &PresenceRegistry, occupancy: &CoordinationProxy) -> Value {
     let active = presence.list_active(false);
     let mut agents_json: Vec<Value> = Vec::with_capacity(active.len());
     for sess in &active {
-        let claims = occupancy.list_for_agent(&sess.id);
+        let claims = occupancy.list_for_agent(sess.name.as_str());
         let mut files: Vec<String> = claims
             .iter()
             .map(|c| c.path.to_string_lossy().to_string())
@@ -55,7 +56,7 @@ pub fn query_graph(
     embedder: &NlpEmbedder,
     embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     presence: &PresenceRegistry,
-    occupancy: &OccupancyMap,
+    occupancy: &CoordinationProxy,
     arguments: Option<&Map<String, Value>>,
     default_limit: usize,
 ) -> Result<String, LainError> {

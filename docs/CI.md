@@ -52,6 +52,16 @@ cargo clippy --workspace --all-targets -- \
 cargo test --workspace
 ```
 
+The coordination battery (`shared_presence`, `multi_agent_concurrency`,
+`coordination_*`, `attribution`, `presence_e2e`, `audit_integration`)
+runs against real
+zoanthrope arbitration when a `zoanthrope` binary is on `PATH` (or
+`$ZOANTHROPE_BIN`) and skips with a message when it is not. CI installs
+`@spuentesp/zoanthrope@0.1.6` and sets `CI_REQUIRE_ZOANTHROPE=1`, which
+turns that skip into a hard failure — do the same locally
+(`npm install -g @spuentesp/zoanthrope@0.1.6`) to reproduce a CI
+coordination failure.
+
 For npm launcher changes:
 
 ```bash

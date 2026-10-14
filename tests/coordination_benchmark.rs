@@ -20,6 +20,9 @@
 //! Run with: cargo test --test coordination_benchmark -- --nocapture
 #[path = "support/isolated_state.rs"]
 mod isolated_state;
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
 
 use lain::graph::GraphDatabase;
 use lain::overlay::VolatileOverlay;
@@ -275,6 +278,9 @@ async fn blast_radius_latency_benchmark() {
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn concurrent_agents_contention_benchmark() {
+    if !require_zoanthrope() {
+        return;
+    }
     const AGENTS: usize = 8;
     const CYCLES: usize = 30;
     const FILES: usize = 12;

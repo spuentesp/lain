@@ -1,18 +1,16 @@
-//! The `O_EXCL` sentinel-file primitive shared by lain's two file locks.
+//! The `O_EXCL` sentinel-file primitive behind lain's state-file lock.
 //!
-//! Both [`presence_lock`](crate::server::presence_lock) (an advisory
-//! *claim* lock, holding agent identity and intent) and
-//! [`state_lock`](crate::server::state_lock) (a plain critical section
-//! around the presence state file) are built on the same three
+//! [`state_lock`](crate::server::state_lock) (the plain critical
+//! section around the presence state file) is built on three
 //! mechanics: create a sentinel atomically, treat one whose mtime is
 //! older than a TTL as abandoned by a dead holder, and remove it to
-//! release.
+//! release. The claim-lock sibling of this primitive (`presence_lock`,
+//! holding agent identity and intent) moved to zoanthrope with the
+//! coordination core — see `docs/formal/COORDINATION.md`.
 //!
-//! Only the *mechanism* lives here. The policies differ and stay with
-//! their callers: a claim lock reports who is holding it and expires in
-//! seconds, while a critical section retries to a deadline and then
-//! proceeds unlocked. Sharing the policy would have forced one of those
-//! shapes onto the other.
+//! Only the *mechanism* lives here. The policy stays with the caller:
+//! a critical section retries to a deadline and then proceeds
+//! unlocked.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};

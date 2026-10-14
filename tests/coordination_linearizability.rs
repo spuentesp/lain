@@ -18,6 +18,9 @@
 //! Repeated across many iterations to flush timing-dependent bugs.
 #[path = "support/isolated_state.rs"]
 mod isolated_state;
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
 
 use lain::server::mcp::presence_tools::{run_claim_files, run_register_agent, run_release_files};
 use lain::server::LainServer;
@@ -129,6 +132,9 @@ fn count_grants_and_conflicts(responses: &[(String, serde_json::Value)]) -> (usi
 /// exactly one grant and three conflicts.
 #[test]
 fn linearizability_holds_across_n_agents_and_n_iterations() {
+    if !require_zoanthrope() {
+        return;
+    }
     let (_dir, server) = fresh_server();
     let agents: Vec<RaceAgent> = (0..4)
         .map(|i| register(&server, &format!("racer-{i}")))
@@ -198,6 +204,9 @@ fn linearizability_holds_across_n_agents_and_n_iterations() {
 /// plan's acceptance criterion, exactly one wins and nine lose.
 #[test]
 fn linearizability_n10_stress() {
+    if !require_zoanthrope() {
+        return;
+    }
     let (_dir, server) = fresh_server();
     let agents: Vec<RaceAgent> = (0..10)
         .map(|i| register(&server, &format!("n10-{i}")))
@@ -223,6 +232,9 @@ fn linearizability_n10_stress() {
 /// release and claim contend on the same per-agent path lock.
 #[test]
 fn linearizability_release_then_reclaim_cycle() {
+    if !require_zoanthrope() {
+        return;
+    }
     let (_dir, server) = fresh_server();
     let agents: Vec<RaceAgent> = (0..4)
         .map(|i| register(&server, &format!("cycle-{i}")))

@@ -142,8 +142,9 @@ pub struct EvalContext<'a> {
     /// Every other agent's intent. Excludes the calling agent so
     /// the agent doesn't conflict with itself.
     pub peer_intents: Vec<&'a Intent>,
-    /// Active claims from `OccupancyMap.list_all()` (or a
-    /// pre-filtered subset). Excludes claims by the calling agent.
+    /// Active claims from the zoanthrope proxy
+    /// (`CoordinationProxy::list_all`, or a pre-filtered subset).
+    /// Excludes claims by the calling agent.
     pub peer_claims: Vec<&'a Claim>,
     /// Set of (agent_id, file) pairs the agent is currently
     /// reading — derived from the activity tracker in PR 2. The

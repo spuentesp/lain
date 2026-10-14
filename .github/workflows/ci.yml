@@ -189,6 +189,51 @@ jobs:
           # macOS lane dying at 30/45/90 min).
           save-always: true
 
+      # Coordination battery: install zoanthrope, the coordination
+      # core that lain's `src/server/coordination/` proxies. Pinned
+      # (0.1.6) so claim arbitration is deterministic; the npm path is
+      # the documented install. Its postinstall skips the platform
+      # binary download under CI=true, so the version probe below
+      # forces the download (and verifies the binary runs). Prebuilt
+      # assets cover all five targets (Windows included since 0.1.5);
+      # if the probe still fails, fall back to building the same
+      # pinned tag from source so the battery runs there too.
+      # `CI_REQUIRE_ZOANTHROPE=1` on the test step turns the tests'
+      # missing-binary skip into a hard failure: the coordination
+      # battery must run against the real product in CI, never silently
+      # degrade to the advisory fallback.
+      - name: Install zoanthrope (coordination core, pinned 0.1.6)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @spuentesp/zoanthrope@0.1.6
+          if ! zoanthrope --version; then
+            echo "no prebuilt zoanthrope for this platform; building v0.1.6 from source"
+            cargo install --git https://github.com/spuentesp/zoanthrope.git \
+              --tag v0.1.6 --locked --force
+            if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
+            fi
+          else
+            # Prefer the cached *real* binary over the npm shim: the
+            # shim is a node wrapper whose stdio:inherit grandchild
+            # does not die with it, which is slow and can wedge the
+            # test harness's subprocess capture. (find exits non-zero
+            # when a cache root is absent — the macOS root on Linux —
+            # and `pipefail` would fail the step; `|| true` keeps the
+            # probe soft.)
+            REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1 || true)"
+            if [ -n "$REAL_BIN" ]; then
+              echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            fi
+          fi
+          zoanthrope --version
+
       # 17 tests in `tests/use_cases/battery_*` invoke the `lain` binary at
       # `target/debug/lain` and panic with a helpful message if it is
       # missing. Building it here (rather than relying on `cargo test`
@@ -200,6 +245,10 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          # Turns the coordination battery's missing-zoanthrope skip
+          # into a hard failure (see tests/support/zoanthrope_gate.rs).
+          CI_REQUIRE_ZOANTHROPE: "1"
         run: cargo test --workspace
 
       # Every `mod foo;` must resolve to a *committed* file. Catches the
@@ -278,6 +327,38 @@ jobs:
           # macOS lane dying at 30/45/90 min).
           save-always: true
 
+      # Coordination battery: same zoanthrope install as the `test`
+      # job (pinned 0.1.6; npm path with a source-build fallback for
+      # platforms without a prebuilt asset). Keeps the main
+      # battery running against real claim arbitration.
+      - name: Install zoanthrope (coordination core, pinned 0.1.6)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @spuentesp/zoanthrope@0.1.6
+          if ! zoanthrope --version; then
+            echo "no prebuilt zoanthrope for this platform; building v0.1.6 from source"
+            cargo install --git https://github.com/spuentesp/zoanthrope.git \
+              --tag v0.1.6 --locked --force
+            if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
+            fi
+          else
+            # Prefer the cached *real* binary over the npm shim (see
+            # the `test` job for why). `|| true` keeps the probe soft
+            # under `pipefail` when a cache root is absent.
+            REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1 || true)"
+            if [ -n "$REAL_BIN" ]; then
+              echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            fi
+          fi
+          zoanthrope --version
+
       - name: Build binaries (for use_cases/battery_* and sidecar tests that invoke them as subprocesses)
         shell: bash
         run: cargo build --bin lain --bin lain-git-sidecar
@@ -293,6 +374,10 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          # Turns the coordination battery's missing-zoanthrope skip
+          # into a hard failure (see tests/support/zoanthrope_gate.rs).
+          CI_REQUIRE_ZOANTHROPE: "1"
         run: cargo test --workspace
 
       - name: Module declarations resolve to committed files
@@ -336,6 +421,35 @@ jobs:
           # and the next run starts cold again (the loop that kept the
           # macOS lane dying at 30/45/90 min).
           save-always: true
+
+      # demo.sh's multiplayer ground truth (grant/conflict shapes,
+      # occupancy, my_claims, intents) exercises real claim
+      # arbitration — install zoanthrope (pinned) the same way the
+      # test lanes do, and point at the cached real binary.
+      - name: Install zoanthrope (coordination core, pinned 0.1.6)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @spuentesp/zoanthrope@0.1.6
+          if ! zoanthrope --version; then
+            echo "no prebuilt zoanthrope for this platform; building v0.1.6 from source"
+            cargo install --git https://github.com/spuentesp/zoanthrope.git \
+              --tag v0.1.6 --locked --force
+            if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
+            fi
+          else
+            REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1 || true)"
+            if [ -n "$REAL_BIN" ]; then
+              echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            fi
+          fi
+          zoanthrope --version
 
       - name: Build release binary
         run: cargo build --release
@@ -640,6 +754,36 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
+      # The audit/coordination tests gate on a real zoanthrope binary.
+      # Without one they skip (or, with CI_REQUIRE_ZOANTHROPE, fail) —
+      # and a coordination battery that silently skips under coverage
+      # is how a regression ships. Install the same pinned core the
+      # test jobs use.
+      - name: Install zoanthrope (coordination core, pinned 0.1.6)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @spuentesp/zoanthrope@0.1.6
+          if ! zoanthrope --version; then
+            echo "no prebuilt zoanthrope for this platform; building v0.1.6 from source"
+            cargo install --git https://github.com/spuentesp/zoanthrope.git \
+              --tag v0.1.6 --locked --force
+            if [ -f "${HOME}/.cargo/bin/zoanthrope.exe" ]; then
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope.exe" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=${HOME}/.cargo/bin/zoanthrope" >> "$GITHUB_ENV"
+            fi
+          else
+            REAL_BIN="$(find "${HOME}/.cache/zoanthrope" "${HOME}/Library/Caches/zoanthrope" \
+              -type f \( -name zoanthrope -o -name zoanthrope.exe \) 2>/dev/null | head -1 || true)"
+            if [ -n "$REAL_BIN" ]; then
+              echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
+            else
+              echo "ZOANTHROPE_BIN=$(command -v zoanthrope)" >> "$GITHUB_ENV"
+            fi
+          fi
+          zoanthrope --version
+
       - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
         # 17 tests in `tests/use_cases/battery_*` invoke the `lain`
         # binary and panic with a helpful message if it is missing.
@@ -656,6 +800,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: target
           LAIN_PERF_BUDGET_MULTIPLIER: '4.0'
+          CI_REQUIRE_ZOANTHROPE: '1'
         run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
 
       - name: Upload to Codecov

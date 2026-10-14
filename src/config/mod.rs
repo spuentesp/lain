@@ -156,7 +156,7 @@ pub fn prune_old_sessions(max_age: std::time::Duration) -> std::io::Result<usize
 
 /// Return the path to the lain state dir (`~/.local/lain/state`).
 /// `LainServer::save_state` / `load_state` write and read the
-/// `PresenceRegistry` + `OccupancyMap` JSON snapshot here, one file
+/// session-registry + activity JSON snapshot here, one file
 /// per workspace (`<stem>-<hash>.json`, see `state_path_for_workspace`). `$XDG_STATE_HOME/lain`
 /// takes precedence when present (per the XDG spec).
 pub fn state_dir() -> PathBuf {

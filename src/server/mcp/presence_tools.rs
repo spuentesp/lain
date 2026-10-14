@@ -1,11 +1,14 @@
 //! MCP tools for the multiplayer layer.
 //!
-//! Most tools read or mutate `PresenceRegistry` + `OccupancyMap` on the
-//! `LainServer`. Tools that mutate state return the new state; tools
-//! that read return JSON the agent can render. `detect_overlap` is the
-//! one exception: it consults git and the federation's repo roots rather
-//! than live presence state, because it answers a commit-time question
-//! ("did two refs touch the same symbols?") rather than a live one.
+//! Most tools read or mutate the session `PresenceRegistry` or the
+//! zoanthrope coordination proxy (`claim_files`, `release_files`,
+//! `my_claims`, `list_occupancy` delegate to `zoanthrope claim` /
+//! `release` — see `server::coordination`). Tools that mutate state
+//! return the new state; tools that read return JSON the agent can
+//! render. `detect_overlap` is the one exception: it consults git and
+//! the federation's repo roots rather than live presence state,
+//! because it answers a commit-time question ("did two refs touch the
+//! same symbols?") rather than a live one.
 
 use crate::server::audit::{append_edit_event, AuditEvent};
 use crate::server::ingest::LainServer;
@@ -93,6 +96,29 @@ fn validate_git_ref(git_ref: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve a claim holder to its live session. Zoanthrope claim
+/// holders are agent *names* — the identity every claim/release path
+/// shares; a session id still matches for claims persisted under the
+/// old id-keyed scheme. `None` when no live session matches, which is
+/// itself useful: the holder is gone.
+fn holder_session(server: &LainServer, holder: &AgentId) -> Option<AgentSession> {
+    server
+        .presence()
+        .list_active(true)
+        .into_iter()
+        .find(|s| s.name == holder.as_str() || s.id == *holder)
+}
+
+/// Resolve a claim holder to its registered name.
+///
+/// Conflicts and occupancy used to report raw session UUIDs, so an
+/// agent that was told "someone else holds this" had to make a second
+/// `list_active_agents` round-trip to learn who — and a human reading
+/// the dashboard saw a hex string.
+fn agent_name(server: &LainServer, id: &AgentId) -> Option<String> {
+    holder_session(server, id).map(|s| s.name)
+}
+
 /// Resolve a session token to its session, refreshing the heartbeat as
 /// a side effect.
 ///
@@ -105,17 +131,6 @@ fn validate_git_ref(git_ref: &str) -> Result<(), String> {
 ///
 /// Any authenticated call is proof of life. Every dispatcher that
 /// resolves a token goes through here.
-/// Resolve an agent id to its registered name.
-///
-/// Conflicts and occupancy reported raw UUIDs, so an agent that was told
-/// "someone else holds this" had to make a second `list_active_agents`
-/// round-trip to learn who — and a human reading the dashboard saw a
-/// hex string. `None` when the session has since expired, which is
-/// itself useful: the holder is gone.
-fn agent_name(server: &LainServer, id: &AgentId) -> Option<String> {
-    server.presence().get(id).map(|s| s.name)
-}
-
 pub(crate) fn authenticate(server: &LainServer, token: &str) -> Result<AgentSession, String> {
     let session = server
         .presence()
@@ -200,7 +215,7 @@ fn run_heartbeat_inner(server: &LainServer, a: HeartbeatArgs) -> Result<Value, S
     // occupancy registries have separate locks, so this is two
     // separate calls; the staleness clock now advances as long as both
     // succeed (the presence call above already errored on auth).
-    server.occupancy().touch(&agent_id);
+    server.coordination().touch(&agent_id);
     Ok(json!({ "ok": true }))
 }
 
@@ -222,7 +237,7 @@ pub fn run_list_active_agents(server: &LainServer, args: Value) -> Result<Value,
     let out: Vec<Value> = sessions
         .into_iter()
         .map(|s| {
-            let claims = server.occupancy().list_for_agent(&s.id);
+            let claims = server.coordination().list_for_agent(&s.name);
             // Intent + activity feed (PR 1 of
             // `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). Surfaced here
             // so `list_active_agents` becomes the cross-agent
@@ -293,7 +308,7 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
     server.refresh_shared_presence();
     let a: WhoAmIArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = authenticate(server, &a.session_token)?;
-    let claims = server.occupancy().list_for_agent(&session.id);
+    let claims = server.coordination().list_for_agent(&session.name);
     let parent_session_id = session
         .parent_session_id
         .as_ref()
@@ -508,10 +523,36 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
     // only see peers if the registry is refreshed from the shared state
     // file first — and only stay correct if the grant is written back
     // under the same lock.
-    server
-        .with_shared_presence(|| run_claim_files_inner(server, a.clone()))
+    with_presence_busy_retry(server, || run_claim_files_inner(server, a.clone()))
         .map_err(|e| e.to_string())
         .and_then(|inner| inner)
+}
+
+/// Run a presence critical section, retrying lock *busy* only.
+///
+/// A claim under contention must answer grant or the conflict shape
+/// naming the holder. `CoordinationError::Unavailable` means the
+/// presence state-file lock starved past its deadline — plumbing, and
+/// (seen as `concurrent_agents_contention_benchmark` failing in CI)
+/// exactly the thing that must not become the claim's answer. Claims
+/// are arbitrated by zoanthrope under its own state lock; the session
+/// table is a hint, so waiting a little longer for its lock is safe.
+/// Every other coordination error still surfaces — the caller must
+/// see a refresh/persist failure.
+fn with_presence_busy_retry<T>(
+    server: &LainServer,
+    mut f: impl FnMut() -> T,
+) -> Result<T, crate::server::ingest::handles::presence::CoordinationError> {
+    use crate::server::ingest::handles::presence::CoordinationError;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match server.with_shared_presence(&mut f) {
+            Err(CoordinationError::Unavailable) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            out => return out,
+        }
+    }
 }
 
 fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value, String> {
@@ -631,12 +672,12 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     // request is trivially held — which would make every unknown name
     // look like a retraction.
     let held_before: std::collections::HashSet<String> = server
-        .occupancy()
-        .list_for_agent(&session.id)
+        .coordination()
+        .list_for_agent(&session.name)
         .into_iter()
         .flat_map(|c| c.symbols)
         .collect();
-    let mut result = server.occupancy().claim_with_session(&session, requests);
+    let mut result = server.coordination().claim_with_session(&session, requests);
     // Populate `world_state` only when the caller supplied a
     // `plan_revision`. The brief's Step 3 pseudocode:
     //   1. Check each requested symbol against the static graph and
@@ -675,7 +716,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
         // We snapshot the agent's full claim set once and partition
         // it per granted path so a multi-file claim still produces
         // one audit line per granted file.
-        let all_claims = server.occupancy().list_for_agent(&session.id);
+        let all_claims = server.coordination().list_for_agent(&session.name);
         let landed_revision = server.overlay().current_revision();
         let audit_dir = server.state_dir_for_audit();
         let audit_scope = server.audit_scope();
@@ -744,9 +785,12 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
                 .collect(),
         ),
     );
+    // Conflicts name the holder (`agent_id`/`name` for lain's historic
+    // clients, plus `holder` — the zoanthrope/swarm-experiment spelling).
     out.insert("conflicts".into(), Value::Array(result.conflicts.iter().map(|c| json!({
         "agent_id": c.agent_id.as_str(),
         "name": agent_name(server, &c.agent_id),
+        "holder": c.agent_id.as_str(),
         "path": posix_string(&c.path),
         "symbols": c.symbols,
         "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
@@ -775,6 +819,12 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
         if let Ok(v) = serde_json::to_value(ws) {
             out.insert("world_state".into(), v);
         }
+    }
+    // Degraded mode: zoanthrope is absent, claims were advisory-only
+    // (logged, never blocked). Say so in the response so a caller can
+    // tell an uncoordinated workspace from a free one.
+    if let Some(marker) = server.coordination().degraded_marker() {
+        out.insert("degraded".into(), Value::String(marker.to_string()));
     }
     Ok(Value::Object(out))
 }
@@ -969,8 +1019,9 @@ pub fn run_release_files(server: &LainServer, args: Value) -> Result<Value, Stri
              `agent_id` and `session_token`."
         )
     })?;
-    server
-        .with_shared_presence(|| run_release_files_inner(server, a.clone()))
+    // Same contract as claims: release under contention answers the
+    // released list, never a lock-acquisition plumbing error.
+    with_presence_busy_retry(server, || run_release_files_inner(server, a.clone()))
         .map_err(|e| e.to_string())
         .and_then(|inner| inner)
 }
@@ -984,14 +1035,20 @@ fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<V
     for f in a.files {
         paths.push(std::path::PathBuf::from(f.path));
     }
-    let released = server.occupancy().release(&session.id, &paths);
+    let released = server.coordination().release(&session.name, &paths);
     for path in &released {
         server.emit_presence_event(PresenceEvent::ClaimReleased {
             agent_id: session.id.clone(),
             path: path.clone(),
         });
     }
-    Ok(json!({ "released": released.iter().map(|p| posix_string(p)).collect::<Vec<_>>() }))
+    let mut body = serde_json::json!({
+        "released": released.iter().map(|p| posix_string(p)).collect::<Vec<_>>()
+    });
+    if let Some(marker) = server.coordination().degraded_marker() {
+        body["degraded"] = Value::String(marker.to_string());
+    }
+    Ok(body)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1005,12 +1062,12 @@ pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, Str
         serde_json::from_value(args).unwrap_or(ListOccupancyArgs { path: None });
     let entries: Vec<OccupancyEntry> = if let Some(p) = a.path.as_deref() {
         server
-            .occupancy()
+            .coordination()
             .list_for_path(std::path::Path::new(p))
             .into_iter()
             .collect()
     } else {
-        server.occupancy().list_all()
+        server.coordination().list_all()
     };
     let out: Vec<Value> = entries.into_iter().map(|e| {
         // `last_seen_unix` is the heartbeat of the first live agent
@@ -1020,7 +1077,7 @@ pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, Str
         // dropped because it would be silently empty for sessions
         // that had expired but still had artifacts on disk.
         let last_seen_unix: Option<u64> = e.agents.iter()
-            .filter_map(|id| server.presence().get(id))
+            .filter_map(|id| holder_session(server, id))
             .next()
             .map(|s| crate::server::time::unix_secs_u64(s.last_heartbeat));
         json!({
@@ -1058,7 +1115,7 @@ pub fn run_my_claims(server: &LainServer, args: Value) -> Result<Value, String> 
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
-    let claims = server.occupancy().list_for_agent(&session.id);
+    let claims = server.coordination().list_for_agent(&session.name);
     Ok(json!(claims
         .into_iter()
         .map(|c| json!({

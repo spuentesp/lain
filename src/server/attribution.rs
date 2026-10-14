@@ -30,14 +30,13 @@
 //! its entire lifetime.
 //!
 //! Successful attribution claims the file for the agent (intent:
-//! `Edit`) on the shared `OccupancyMap` and broadcasts a `ClaimGranted`
+//! `Edit`) on the shared `CoordinationProxy` and broadcasts a `ClaimGranted`
 //! event so SSE subscribers see the update. Such claims are marked
 //! `inferred` and carry a short TTL: they are a guess, they say so, and
 //! a wrong one expires on its own.
 
-use crate::server::presence::{
-    ClaimIntent, ClaimRequest, OccupancyMap, PresenceEvent, PresenceRegistry,
-};
+use crate::server::coordination::CoordinationProxy;
+use crate::server::presence::{ClaimIntent, ClaimRequest, PresenceEvent, PresenceRegistry};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 #[allow(unused_imports)]
@@ -241,7 +240,7 @@ impl AttributionBackend for NoopBackend {
 /// closure channel closes).
 pub struct AttributionWatcher {
     presence: Arc<PresenceRegistry>,
-    occupancy: Arc<OccupancyMap>,
+    occupancy: Arc<CoordinationProxy>,
     event_tx: broadcast::Sender<(u64, PresenceEvent)>,
     events_log: Arc<crate::server::events_log::EventsLog>,
     /// Roots to watch — the registered repos' local checkouts, not
@@ -262,7 +261,7 @@ impl AttributionWatcher {
     /// or to inject `LsofBackend` on macOS).
     pub fn new(
         presence: Arc<PresenceRegistry>,
-        occupancy: Arc<OccupancyMap>,
+        occupancy: Arc<CoordinationProxy>,
         event_tx: broadcast::Sender<(u64, PresenceEvent)>,
         events_log: Arc<crate::server::events_log::EventsLog>,
         roots: Vec<PathBuf>,
@@ -281,7 +280,7 @@ impl AttributionWatcher {
     pub fn new_with_backend(
         backend: Arc<dyn AttributionBackend>,
         presence: Arc<PresenceRegistry>,
-        occupancy: Arc<OccupancyMap>,
+        occupancy: Arc<CoordinationProxy>,
         event_tx: broadcast::Sender<(u64, PresenceEvent)>,
         events_log: Arc<crate::server::events_log::EventsLog>,
         roots: Vec<PathBuf>,
@@ -433,19 +432,19 @@ fn is_attributable(path: &Path, ignored: Option<bool>) -> bool {
 fn attribute_edit(
     path: &Path,
     presence: &PresenceRegistry,
-    occupancy: &OccupancyMap,
+    occupancy: &CoordinationProxy,
     event_tx: &broadcast::Sender<(u64, PresenceEvent)>,
     events_log: &crate::server::events_log::EventsLog,
     backend: &dyn AttributionBackend,
 ) {
     // 1. Try PID attribution via the injected backend.
     let pid = backend.lookup_writer_pid(path);
-    let agent_id = if let Some(pid) = pid {
+    let attributed = if let Some(pid) = pid {
         presence
             .list_active(true)
             .into_iter()
             .find(|s| s.pid == Some(pid))
-            .map(|s| s.id)
+            .map(|s| (s.id, s.name))
     } else {
         None
     };
@@ -464,18 +463,18 @@ fn attribute_edit(
     // whole lifetime. `is_attributable` removes that class outright, and
     // what remains is marked `inferred` with a short TTL — visible as a
     // guess, and self-healing when the guess is wrong.
-    let agent_id = agent_id.or_else(|| {
+    let attributed = attributed.or_else(|| {
         let active: Vec<_> = presence.list_active(false);
         if active.len() == 1 {
-            Some(active[0].id.clone())
+            Some((active[0].id.clone(), active[0].name.clone()))
         } else {
             None
         }
     });
 
-    if let Some(agent_id) = agent_id {
+    if let Some((agent_id, name)) = attributed {
         let result = occupancy.claim_inferred(
-            &agent_id,
+            &name,
             vec![ClaimRequest {
                 path: path.to_path_buf(),
                 symbols: vec![],

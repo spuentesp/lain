@@ -1,5 +1,10 @@
+#[path = "support/zoanthrope_gate.rs"]
+mod zoanthrope_gate;
+use zoanthrope_gate::require_zoanthrope;
+
 use lain::server::attribution::AttributionWatcher;
-use lain::server::presence::{AgentKind, AgentMode, OccupancyMap, PresenceRegistry};
+use lain::server::coordination::CoordinationProxy;
+use lain::server::presence::{AgentKind, AgentMode, PresenceRegistry};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,6 +12,9 @@ use tempfile::tempdir;
 
 #[test]
 fn e2e_attribution_via_real_child_pid() {
+    if !require_zoanthrope() {
+        return;
+    }
     if !cfg!(target_os = "linux") {
         return;
     }
@@ -26,7 +34,10 @@ fn e2e_attribution_via_real_child_pid() {
 
     let pid = child.id();
     let presence = Arc::new(PresenceRegistry::new());
-    let occupancy = Arc::new(OccupancyMap::new());
+    // Workspace root for the coordination proxy must be the test's own
+    // tempdir — a shared root would let parallel tests collide on one
+    // `.zoanthrope/state.json`.
+    let occupancy = Arc::new(CoordinationProxy::new(tmp.path().to_path_buf()));
     let _ = presence.register(
         "e2e-child".into(),
         AgentKind::Other("e2e".into()),
@@ -53,7 +64,7 @@ fn e2e_attribution_via_real_child_pid() {
     // The agent should now have an auto-claim on auth.rs.
     let sessions = presence.list_active(true);
     assert_eq!(sessions.len(), 1);
-    let claims = occupancy.list_for_agent(&sessions[0].id);
+    let claims = occupancy.list_for_agent(sessions[0].name.as_str());
     assert!(
         !claims.is_empty(),
         "expected auto-claim after child write; got: {claims:?}"
