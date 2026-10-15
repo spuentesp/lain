@@ -25,7 +25,7 @@ the in-memory petgraph.
 {
   "name": "query_graph",
   "arguments": {
-    "spec": {
+    "query": {
       "ops": [...],
       "mode": "auto",
       "named": null
@@ -33,6 +33,11 @@ the in-memory petgraph.
   }
 }
 ```
+
+The tool's input schema declares one property, `query` (see
+`docs/tool-schema.json`). The handler also accepts the same object
+under `spec`, or the `QuerySpec` fields unwrapped as top-level
+arguments.
 
 ---
 
@@ -55,16 +60,16 @@ the in-memory petgraph.
 Locate nodes in the graph.
 
 ```json
-{ "op": "find", "type": "Function", "name": "foo", "label": "test" }
+{ "op": "find", "type": "Function", "name": "foo", "label": "deprecated" }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | string \| `["Type1", "Type2"]` | Node type — see [Node Types](#node-types). Omit to match every kind |
-| `name` | string | Exact name (or object with glob/startsWith/endsWith) |
-| `id` | string | Node UUID |
-| `label` | string \| `["L1"]` \| `{ "not": ["L1"] }` | Node label |
-| `path` | string | File path containing the node |
+| `name` | string | Exact name (or object with exact/glob/startsWith/endsWith) |
+| `id` | string | Node UUID. Honoured only inside a `connect` `target`; a top-level `find` parses it but ignores it (known limitation) |
+| `label` | string \| `["L1"]` | Node label (exact, or any-of). The only label the query path attaches is `deprecated`; a `{"not": ...}` object is rejected at parse |
+| `path` | string | Substring match on the node's path |
 
 Name selector object:
 ```json
@@ -73,6 +78,7 @@ Name selector object:
 { "name": { "startsWith": "test_" } }
 { "name": { "endsWith": "_test" } }
 ```
+The `starts_with` / `ends_with` spellings are accepted as well.
 
 ### connect
 
@@ -98,18 +104,34 @@ flowchart LR
 
 | Field | Description |
 |-------|-------------|
-| `edge` | `Calls`, `Contains`, `Uses`, `Implements`, `Imports`, `CoChangedWith`, `Pattern`, `CallsHttp`, `Produces`, `Consumes`, `DeployedTo`, `CrossRepoSameSymbol` |
-| `direction` | `outgoing` \| `incoming` \| `both` |
-| `depth` | Integer `N` (1 to N hops; `0` is the start nodes) or `{ "min": N, "max": M }` (inclusive) |
-| `target` | Optional nested `FindOp` — only follow edges to matching nodes |
+| `edge` | An [Edge Types](#edge-types) name (or array of names) |
+| `direction` | `outgoing` \| `incoming` \| `both` (default `outgoing`) |
+| `depth` | Integer `N` — report nodes at hops 1..=N. Start nodes are never reported, so `0` selects nothing. Or `{ "min": N, "max": M }` — hops N..=M inclusive; nearer nodes are walked through but not reported |
+| `target` | Optional nested `FindOp` — keep only the reached nodes it selects (this is where `id` is honoured) |
 
 ### filter
 
-Narrow current result set.
+Narrow current result set. Same selectors as `find`: `type`, `name`,
+`label`.
 
 ```json
-{ "op": "filter", "type": "Function", "name": "test_*", "label": "deprecated" }
+{ "op": "filter", "type": "Function", "name": { "glob": "test_*" }, "label": "deprecated" }
 ```
+
+### semantic_filter
+
+Keep nodes semantically similar to a natural-language query.
+
+```json
+{ "op": "semantic_filter", "like": "authentication flow", "threshold": 0.3 }
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `like` | string | Natural-language query (required) |
+| `threshold` | number 0.0–1.0 | Minimum cosine similarity (default `0.3`) |
+
+Nodes without a usable embedding are dropped.
 
 ### group
 
@@ -130,7 +152,7 @@ Order results.
 ```
 
 `by`: `name` \| `type` \| `label`
-`direction`: `asc` \| `desc`
+`direction`: `asc` \| `desc` (default `asc`)
 
 ### limit
 
@@ -139,6 +161,10 @@ Paginate.
 ```json
 { "op": "limit", "count": 10, "offset": 0 }
 ```
+
+Without a `limit` op, the executor caps the answer at
+`tuning.ingestion.default_query_limit` (default 100) and reports the
+trim in `meta.truncated` / `meta.matched_before_limit`.
 
 ---
 
@@ -164,21 +190,36 @@ dedicated tools (`get_call_chain`, `get_call_sites`, `get_blast_radius`).
 
 ## Result Format
 
+The executor returns `QueryResult`; the tool handler then splices in
+`occupancy`. Empty arrays and absent options are omitted from the
+JSON, not emitted as `null`.
+
 ```json
 {
-  "nodes": [{ "id": "...", "type": "Function", "name": "foo", "label": null }],
-  "edges": [{ "id": "...", "type": "Calls", "from": "N1", "to": "N2" }],
-  "paths": [{ "nodes": [...], "edges": [...] }],
+  "nodes": [{ "id": "...", "type": "Function", "name": "foo" }],
   "count": 42,
   "legacy": false,
   "meta": {
     "exec_us": 1234,
-    "nodes_visited": 156,
-    "plan": "find -> connect(1) -> connect(2)"
+    "nodes_visited": 156
   },
-  "groups": null
+  "groups": [{ "key": "Function", "count": 40, "nodes": ["..."] }],
+  "occupancy": {
+    "active_agents": [{ "agent_id": "...", "name": "...", "files": ["src/lib.rs"] }]
+  }
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `nodes` | Matched nodes (`id`, `type`, `name`; `label` appears only as `"deprecated"`). Omitted when empty |
+| `count` | Number of nodes returned, after `limit` or the default cap |
+| `legacy` | `true` when the result came from a `named` query |
+| `meta.exec_us`, `meta.nodes_visited` | Always present |
+| `meta.truncated`, `meta.matched_before_limit` | Only when the default cap trimmed the result |
+| `groups` | Only after a `group` op: `{ key, count, nodes }` entries. Omitted otherwise |
+| `occupancy` | Active agents in this workspace and the files each has claimed (`active_agents: []` when none registered). Added by the tool handler, not the executor |
+| `edges`, `paths` | Present on the internal result type but never populated by the traversal, so they never appear in the JSON (known limitation). `meta.plan` is likewise never filled and always omitted |
 
 ---
 
@@ -229,12 +270,12 @@ With args via `ops` equivalent:
 Use the `find_untested_functions` tool: "has no caller" is an absence,
 which a `connect` step cannot express.
 
-### Find deprecated public functions
+### Find deprecated functions
 
 ```json
 {
   "ops": [
-    { "op": "find", "type": "Function", "label": { "not": ["test", "mock"] } },
+    { "op": "find", "type": "Function", "label": "deprecated" },
     { "op": "filter", "name": { "startsWith": "deprecated_" } },
     { "op": "sort", "by": "name" },
     { "op": "limit", "count": 50 }
@@ -273,28 +314,47 @@ Use the `get_coverage_summary` tool.
 
 ## Edge Types
 
-These are generated from the `EdgeType` enum, so `describe_schema` and
-this table cannot drift from what the indexer actually emits.
+Every variant of the `EdgeType` enum (`src/server/schema.rs`), which
+is also what `describe_schema` reports from the same enum. Edges
+marked *not emitted* have no producing indexer (`indexed: false`) —
+traversing one always returns nothing.
 
 | Edge | Meaning |
 |------|---------|
-| `Calls` | Function invocation |
 | `Contains` | File/module contains a symbol |
+| `Calls` | Function invocation |
 | `Uses` | Code uses a variable or type |
 | `Implements` | Class implements an interface |
-| `Imports` | Import/use statement |
+| `Imports` | Import/use statement — **not emitted** (`indexed: false`: no indexer produces it) |
 | `CoChangedWith` | Historical co-change (temporal coupling, not a static dependency) |
 | `Pattern` | Semantic boundary indicator (path prefix, topic name) |
 | `CallsHttp` | HTTP route → handler |
 | `Produces` / `Consumes` | Producer/consumer ↔ message topic |
-| `DeployedTo` | IaC resource → cloud resource |
+| `DeployedTo` | IaC resource → cloud resource — **not emitted** (`indexed: false`) |
 | `CrossRepoSameSymbol` | Federation-only: same symbol in two repos |
+| `DynamicDispatch` | Heuristic: call whose receiver type is not statically known (carries a heuristic provenance) |
+| `BusTopic` | Heuristic: producer/consumer of a named topic or event bus |
+| `RouteMatches` | Heuristic: path/pattern routed to a handler via a schema-driven router |
+| `RuntimeCall` | Caller/callee pair observed in an OpenTelemetry span |
+| `SendsHttp` | Function/method → its `HttpClientCall` call site |
+| `RequestSchema` / `ResponseSchema` | `HttpRoute` → `Schema` (request body / 2xx responses) |
+| `PayloadSchema` | `Topic` → `Schema` (payload schema) |
+| `HasField` | `Schema` → its flattened `Field` |
+| `ReadsField` | Function/method → `FieldRef` (a response-field read) |
+| `ReadsFrom` | `FieldRef` → the `HttpClientCall` whose response it reads |
+| `Binds` | Federation-only: consumer → matched provider |
+| `ReadsTable` / `WritesTable` | Function/method/file → `Table` (SELECT / INSERT·UPDATE·DELETE) |
 
 ## Node Types
 
+Every variant of the `NodeType` enum (`src/server/schema.rs`), which
+is also what `describe_schema` reports. `Resource` is the only type
+with `indexed: false` — no indexer emits it yet.
+
 `File`, `Namespace`, `Module`, `Package`, `Class`, `Interface`, `Struct`,
 `Enum`, `Trait`, `Function`, `Method`, `Property`, `Variable`, `Constant`,
-`HttpRoute`, `Topic`, `Resource`, `Schema`
+`HttpRoute`, `Topic`, `Resource`, `Schema`, `HttpClientCall`, `Field`,
+`FieldRef`, `Synthetic`, `Table`
 
 `Function` and `Method` are distinct. In Rust and other impl-heavy
 languages most code is a `Method`, so a query filtered to `Function`
