@@ -28,7 +28,7 @@ use lain::nlp::NlpEmbedder;
 use lain::query::executor::Executor;
 use lain::query::spec::{
     ConnectOp, DepthSpec, Direction, EdgeSelector, FilterOp, FindOp, GraphOp, LabelSelector,
-    NameSelector, QueryResult, QuerySpec, TypeSelector,
+    LimitOp, NameSelector, QueryResult, QuerySpec, TypeSelector,
 };
 use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use parking_lot::Mutex;
@@ -1445,6 +1445,76 @@ fn path_tie_break_prefers_the_lowest_predecessor_id() {
     cleanup_scratch(&dir);
 }
 
+/// Parallel matching edges between one pair of nodes: the hop takes the
+/// smallest edge type name's edge (tie-break level 5).
+#[test]
+fn path_tie_break_prefers_the_smallest_edge_type_name() {
+    let (graph, dir) = scratch_graph("edges_paths_tie_edge_type");
+    // s→a→b with TWO matching edges on the a→b pair. `Uses` is inserted
+    // first, so winning with `Calls` cannot be neighbour order luck.
+    let s = insert(&graph, node_with_id("s"));
+    let a = insert(&graph, node_with_id("a"));
+    let b = insert(&graph, node_with_id("b"));
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, s.clone(), a.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Uses, a.clone(), b.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, a.clone(), b.clone()))
+        .unwrap();
+
+    let res = exec_query(
+        &graph,
+        &QuerySpec::new(vec![
+            find_by_name("s"),
+            GraphOp::Connect(ConnectOp {
+                edge: EdgeSelector::Or(vec!["Calls".to_string(), "Uses".to_string()]),
+                direction: Direction::Outgoing,
+                depth: DepthSpec::Single(2),
+                target: None,
+            }),
+        ]),
+        0,
+    );
+
+    assert_eq!(res.count, 2);
+    // The a→b hop is the `Calls` edge ("Calls" < "Uses"), never `Uses`.
+    assert_eq!(
+        path_shapes(&res),
+        BTreeMap::from([
+            (
+                "a".to_string(),
+                (
+                    vec!["s".to_string(), "a".to_string()],
+                    vec![("s".to_string(), "a".to_string(), "Calls".to_string())],
+                ),
+            ),
+            (
+                "b".to_string(),
+                (
+                    vec!["s".to_string(), "a".to_string(), "b".to_string()],
+                    vec![
+                        ("s".to_string(), "a".to_string(), "Calls".to_string()),
+                        ("a".to_string(), "b".to_string(), "Calls".to_string()),
+                    ],
+                ),
+            ),
+        ])
+    );
+    // The larger type's parallel edge is not on the selected path, so it
+    // stays out of `edges` entirely.
+    assert_eq!(
+        edge_shapes(&res),
+        vec![
+            ("a".to_string(), "b".to_string(), "Calls".to_string()),
+            ("s".to_string(), "a".to_string(), "Calls".to_string()),
+        ]
+    );
+    cleanup_scratch(&dir);
+}
+
 /// `direction: both` with a node one hop away each way: the outgoing
 /// walk's path wins the equal-length tie.
 #[test]
@@ -1656,6 +1726,70 @@ fn truncation_carries_edges_and_paths_of_the_reported_nodes_only() {
         edge_shapes(&res).len(),
         1,
         "only the reported node's edge is walked"
+    );
+    cleanup_scratch(&dir);
+}
+
+/// An explicit `limit` op trims nodes; `edges`/`paths` follow exactly
+/// the N survivors — no path or edge is kept for a trimmed node.
+#[test]
+fn limit_op_carries_edges_and_paths_of_the_reported_nodes_only() {
+    let (graph, dir) = scratch_graph("edges_paths_limit");
+    // s→a→b→c at depth 3 reports a, b, c (BFS order); limit 2 keeps a, b.
+    let s = insert(&graph, node_with_id("s"));
+    let a = insert(&graph, node_with_id("a"));
+    let b = insert(&graph, node_with_id("b"));
+    let c = insert(&graph, node_with_id("c"));
+    for (from, to) in [(&s, &a), (&a, &b), (&b, &c)] {
+        graph
+            .insert_edge(&GraphEdge::new(EdgeType::Calls, from.clone(), to.clone()))
+            .unwrap();
+    }
+
+    let res = exec_query(
+        &graph,
+        &QuerySpec::new(vec![
+            find_by_name("s"),
+            connect_calls(Direction::Outgoing, DepthSpec::Single(3)),
+            GraphOp::Limit(LimitOp {
+                count: 2,
+                offset: 0,
+            }),
+        ]),
+        0,
+    );
+
+    assert_eq!(res.count, 2);
+    // Paths for the two survivors only; trimmed `c` gets no path.
+    assert_eq!(
+        path_shapes(&res),
+        BTreeMap::from([
+            (
+                "a".to_string(),
+                (
+                    vec!["s".to_string(), "a".to_string()],
+                    vec![("s".to_string(), "a".to_string(), "Calls".to_string())],
+                ),
+            ),
+            (
+                "b".to_string(),
+                (
+                    vec!["s".to_string(), "a".to_string(), "b".to_string()],
+                    vec![
+                        ("s".to_string(), "a".to_string(), "Calls".to_string()),
+                        ("a".to_string(), "b".to_string(), "Calls".to_string()),
+                    ],
+                ),
+            ),
+        ])
+    );
+    // The trimmed node's edge (b→c) is not among the walked edges.
+    assert_eq!(
+        edge_shapes(&res),
+        vec![
+            ("a".to_string(), "b".to_string(), "Calls".to_string()),
+            ("s".to_string(), "a".to_string(), "Calls".to_string()),
+        ]
     );
     cleanup_scratch(&dir);
 }

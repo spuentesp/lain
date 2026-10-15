@@ -219,7 +219,7 @@ JSON, not emitted as `null`.
 | `meta.truncated`, `meta.matched_before_limit` | Only when the default cap trimmed the result |
 | `groups` | Only after a `group` op: `{ key, count, nodes }` entries. Omitted otherwise |
 | `occupancy` | Active agents in this workspace and the files each has claimed (`active_agents: []` when none registered). Added by the tool handler, not the executor |
-| `edges` | The edges walked to reach the reported nodes — the deduplicated union of the edges on `paths` (`{ id, type, from, to }`, sorted by `from`, `to`, `type`). Only when the reported nodes came from a `connect`; see [Edges and paths](#edges-and-paths). Omitted when empty |
+| `edges` | The deduplicated union of the `paths` edges — the edges walked to reach the reported nodes (`{ id, type, from, to }`, sorted by `from`, `to`, `type`). Only when the reported nodes came from a `connect`; see [Edges and paths](#edges-and-paths). Omitted when empty |
 | `paths` | One selected shortest path per reported node, parallel to `nodes` (seed first). Only when the reported nodes came from a `connect`; see [Edges and paths](#edges-and-paths). Omitted when empty |
 
 `meta.plan` has been removed from `QueryMeta` — it never appeared on the
