@@ -2455,7 +2455,9 @@
               "method_mismatch",
               "template_mismatch",
               "same_service",
-              "already_bound"
+              "already_bound",
+              "op_mismatch",
+              "field_mismatch"
             ],
             "type": "string"
           },

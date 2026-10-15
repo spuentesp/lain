@@ -2386,6 +2386,407 @@ async fn pr13_hermetic_precision_recall_over_t1_fixture() {
     );
 }
 
+// ─── Task 5 (pr14): check_binding for GraphQL consumers ─────────────
+
+mod pr14_check_binding_graphql {
+    //! `check_binding`'s GraphQL arm: a `graphql-call:{op}:{field}`
+    //! consumer validates a `graphql:op:field` endpoint link and
+    //! receives the `bindings_entry` YAML the confirmed-binding
+    //! matcher (`apply_confirmed_binding`) accepts verbatim —
+    //! consumer `symbol` = node name, keys `graphql:op:field` on
+    //! both sides.
+    //!
+    //! The fixture mirrors the federation/gateway ambiguity shape
+    //! (`f5_federation_ambiguous_no_single_bind` in
+    //! `tests/graphql_resolution.rs`): `saleor-api` and
+    //! `saleor-catalog` both expose `query product`, so the
+    //! storefront consumer is `Unresolved { GraphqlNoOp }` rather
+    //! than auto-bound — exactly the state where an operator needs
+    //! `check_binding` to propose a confirmed link.
+
+    use super::*;
+    use lain::federation::contracts::model::{
+        ContractFact, GraphqlConsumerFact, GraphqlOp, GraphqlProviderFact, HttpMethod,
+        ProviderFact, ProviderOrigin,
+    };
+
+    fn graphql_provider_node(
+        repo: &str,
+        path: &str,
+        op: GraphqlOp,
+        field: &str,
+        line: u32,
+        return_type: &str,
+    ) -> GraphNode {
+        let ns = RepoNamespace::for_test();
+        let id_name = format!("{}:{}", op, field);
+        let id = GlobalId::new(
+            &RepoId::new(repo).unwrap(),
+            NodeType::Module,
+            path,
+            &id_name,
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        let mut n = GraphNode::new_in(NodeType::Module, id_name, path.to_string(), &ns);
+        n.repo_id = Some(repo.to_string());
+        n.id = id;
+        n.line_start = Some(line);
+        n.line_end = Some(line);
+        n.contract = vec![ContractFact::GraphqlProvider(GraphqlProviderFact {
+            op,
+            field: field.to_string(),
+            return_type: return_type.to_string(),
+        })];
+        n
+    }
+
+    fn graphql_consumer_node(
+        repo: &str,
+        path: &str,
+        op: GraphqlOp,
+        field: &str,
+        line: u32,
+    ) -> GraphNode {
+        let ns = RepoNamespace::for_test();
+        let id_name = format!("graphql-call:{}:{}", op, field);
+        let id = GlobalId::new(
+            &RepoId::new(repo).unwrap(),
+            NodeType::Function,
+            path,
+            &id_name,
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        let mut n = GraphNode::new_in(NodeType::Function, id_name, path.to_string(), &ns);
+        n.repo_id = Some(repo.to_string());
+        n.id = id;
+        n.line_start = Some(line);
+        n.line_end = Some(line);
+        n.contract = vec![ContractFact::GraphqlConsumer(GraphqlConsumerFact {
+            op,
+            field: field.to_string(),
+        })];
+        n
+    }
+
+    fn post_route_node(repo: &str, path: &str, template: &str, line: u32) -> GraphNode {
+        let ns = RepoNamespace::for_test();
+        let id_name = format!("http:POST {}", template);
+        let id = GlobalId::new(
+            &RepoId::new(repo).unwrap(),
+            NodeType::HttpRoute,
+            path,
+            &id_name,
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        let mut n = GraphNode::new_in(NodeType::HttpRoute, id_name, path.to_string(), &ns);
+        n.repo_id = Some(repo.to_string());
+        n.id = id;
+        n.line_start = Some(line);
+        n.line_end = Some(line);
+        n.contract = vec![ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Post,
+            template: template.to_string(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        })];
+        n
+    }
+
+    /// Three-repo saleor-style federation: `saleor-api` serves
+    /// `query product` + `query somethingElse` on `POST /graphql`,
+    /// `saleor-catalog` also exposes `query product` (ambiguous
+    /// join), and `storefront` carries the
+    /// `graphql-call:query:product` call site. Returns the
+    /// federation and the consumer node (its `.id` is the real
+    /// GlobalId the tests pass to `check_binding`).
+    async fn build_graphql_federation(root: &Path) -> (Arc<FederatedIndex>, GraphNode) {
+        let api_dir = root.join("saleor-api");
+        let catalog_dir = root.join("saleor-catalog");
+        let storefront_dir = root.join("storefront");
+        for d in [&api_dir, &catalog_dir, &storefront_dir] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("src/.keep"), b"").unwrap();
+        }
+        git_init_committed(&api_dir);
+        git_init_committed(&catalog_dir);
+        git_init_committed(&storefront_dir);
+
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let backend: Arc<dyn lain::federation::graph_backend::GraphBackend> =
+            Arc::new(PetgraphBackend::new(&data_dir).expect("backend"));
+        let fed = Arc::new(FederatedIndex::new(backend));
+
+        let cfg = ContractFederationConfig {
+            services: vec![
+                ServiceDecl {
+                    name: "saleor-api".into(),
+                    repo: "saleor-api".into(),
+                    paths: vec!["src".into()],
+                    hosts: vec![],
+                    env: vec![],
+                    base_path: None,
+                    route_prefixes: vec![],
+                    provides_graphql: true,
+                },
+                ServiceDecl {
+                    name: "saleor-catalog".into(),
+                    repo: "saleor-catalog".into(),
+                    paths: vec!["src".into()],
+                    hosts: vec![],
+                    env: vec![],
+                    base_path: None,
+                    route_prefixes: vec![],
+                    provides_graphql: true,
+                },
+                ServiceDecl {
+                    name: "storefront".into(),
+                    repo: "storefront".into(),
+                    paths: vec!["src".into()],
+                    hosts: vec![],
+                    env: vec![],
+                    base_path: None,
+                    route_prefixes: vec![],
+                    provides_graphql: true,
+                },
+            ],
+            http_clients: vec![],
+            generic_keys: vec![],
+            schemas: vec![],
+            bindings: vec![],
+            databases: vec![],
+        };
+        fed.set_contract_config(cfg);
+
+        let api_id = RepoId::new("saleor-api").unwrap();
+        let catalog_id = RepoId::new("saleor-catalog").unwrap();
+        let storefront_id = RepoId::new("storefront").unwrap();
+        for (repo_id, dir) in [
+            (api_id.clone(), api_dir.clone()),
+            (catalog_id.clone(), catalog_dir.clone()),
+            (storefront_id.clone(), storefront_dir.clone()),
+        ] {
+            let src: Box<dyn lain::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::with_config(
+                    repo_id.clone(),
+                    dir.clone(),
+                    lain::federation::config::SourceConfig::WorkspaceDir { path: dir.clone() },
+                )
+                .unwrap(),
+            );
+            src.fetch().await.unwrap();
+            fed.add_repo(src, &data_dir).await.unwrap();
+            fed.get_repo(&repo_id)
+                .unwrap()
+                .set_health(RepoHealth::Ready);
+        }
+
+        let api_g = fed.get_repo(&api_id).unwrap().db().clone();
+        let catalog_g = fed.get_repo(&catalog_id).unwrap().db().clone();
+        let storefront_g = fed.get_repo(&storefront_id).unwrap().db().clone();
+
+        // saleor-api: SDL root fields + the POST /graphql route.
+        let api_product = graphql_provider_node(
+            "saleor-api",
+            "src/schema.graphql",
+            GraphqlOp::Query,
+            "product",
+            3,
+            "Product",
+        );
+        let api_other = graphql_provider_node(
+            "saleor-api",
+            "src/schema.graphql",
+            GraphqlOp::Query,
+            "somethingElse",
+            4,
+            "String",
+        );
+        let api_route = post_route_node("saleor-api", "src/server.ts", "/graphql", 12);
+        api_g
+            .insert_nodes_batch(&[api_product.clone(), api_other.clone(), api_route.clone()])
+            .unwrap();
+
+        // saleor-catalog: a second `query product` root field — the
+        // join is ambiguous, so the consumer stays unbound.
+        let catalog_product = graphql_provider_node(
+            "saleor-catalog",
+            "src/schema.graphql",
+            GraphqlOp::Query,
+            "product",
+            3,
+            "Product",
+        );
+        catalog_g
+            .insert_nodes_batch(std::slice::from_ref(&catalog_product))
+            .unwrap();
+
+        // storefront: the gql-tagged `query { product { id } }`.
+        let consumer = graphql_consumer_node(
+            "storefront",
+            "src/product.ts",
+            GraphqlOp::Query,
+            "product",
+            20,
+        );
+        storefront_g
+            .insert_nodes_batch(std::slice::from_ref(&consumer))
+            .unwrap();
+
+        fed.register_contract_node_for_test(api_id.clone(), api_product.id.clone());
+        fed.register_contract_node_for_test(api_id.clone(), api_other.id.clone());
+        fed.register_contract_node_for_test(api_id.clone(), api_route.id.clone());
+        fed.register_contract_node_for_test(catalog_id.clone(), catalog_product.id.clone());
+        fed.register_contract_node_for_test(storefront_id.clone(), consumer.id.clone());
+        fed.mark_contracts_dirty();
+        for id in [&api_id, &catalog_id, &storefront_id] {
+            fed.project_repo(id).await.expect("project_repo");
+        }
+        fed.rejoin_contracts_if_dirty().expect("rejoin");
+
+        (fed, consumer)
+    }
+
+    #[tokio::test]
+    async fn pr14_check_binding_emits_graphql_bindings_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (fed, consumer) = build_graphql_federation(root).await;
+        let outcome = check_binding_handle(
+            &{
+                let _status = Box::leak(Box::new(
+                    lain::server::mcp::handler::HandlerStatus::for_test(),
+                ));
+                ctx_for(&fed, _status)
+            },
+            json!({
+                "snapshot": "live",
+                "consumer": consumer.id,
+                "endpoint": {"service": "saleor-api", "key": "graphql:query:product"}
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !outcome.is_error,
+            "errors: {:?}",
+            outcome.structured["error"]
+        );
+        let data = &outcome.structured["data"];
+        assert_eq!(
+            data["valid"],
+            json!(true),
+            "check_binding must accept the graphql link: {data:?}"
+        );
+        let yaml = data["bindings_entry"].as_str().unwrap();
+        assert!(
+            yaml.contains("key: \"graphql:query:product\""),
+            "both keys must round-trip as graphql:query:product: {yaml}"
+        );
+        assert!(
+            yaml.contains("symbol: graphql-call:query:product"),
+            "symbol must be the consumer node name: {yaml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr14_check_binding_rejects_key_kind_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (fed, consumer) = build_graphql_federation(root).await;
+        let outcome = check_binding_handle(
+            &{
+                let _status = Box::leak(Box::new(
+                    lain::server::mcp::handler::HandlerStatus::for_test(),
+                ));
+                ctx_for(&fed, _status)
+            },
+            json!({
+                "snapshot": "live",
+                "consumer": consumer.id,
+                "endpoint": {"service": "saleor-api", "key": "http:POST /graphql"}
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !outcome.is_error,
+            "errors: {:?}",
+            outcome.structured["error"]
+        );
+        let data = &outcome.structured["data"];
+        assert_eq!(
+            data["valid"],
+            json!(false),
+            "graphql consumer must not validate against an http key: {data:?}"
+        );
+        let reasons: Vec<&str> = data["reasons"]
+            .as_array()
+            .expect("reasons array")
+            .iter()
+            .filter_map(|r| r.as_str())
+            .collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|r| *r == "op_mismatch" || *r == "field_mismatch"),
+            "key-kind mismatch must surface as graphql pair mismatch: {data:?}"
+        );
+        assert!(
+            !reasons.contains(&"template_mismatch") && !reasons.contains(&"method_mismatch"),
+            "a graphql-call name carries no HTTP method/template — those labels would mislead: {data:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr14_check_binding_rejects_wrong_graphql_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (fed, consumer) = build_graphql_federation(root).await;
+        let outcome = check_binding_handle(
+            &{
+                let _status = Box::leak(Box::new(
+                    lain::server::mcp::handler::HandlerStatus::for_test(),
+                ));
+                ctx_for(&fed, _status)
+            },
+            json!({
+                "snapshot": "live",
+                "consumer": consumer.id,
+                "endpoint": {"service": "saleor-api", "key": "graphql:query:somethingElse"}
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !outcome.is_error,
+            "errors: {:?}",
+            outcome.structured["error"]
+        );
+        let data = &outcome.structured["data"];
+        assert_eq!(
+            data["valid"],
+            json!(false),
+            "wrong graphql field must not validate: {data:?}"
+        );
+        assert!(
+            data["reasons"]
+                .as_array()
+                .expect("reasons array")
+                .iter()
+                .any(|r| r == "field_mismatch"),
+            "wrong field must surface as field_mismatch: {data:?}"
+        );
+    }
+}
+
 // ─── PR 15 (stretch): event sensor + topic join ─────────────────────
 
 mod pr15_event {

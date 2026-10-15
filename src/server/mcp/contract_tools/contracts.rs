@@ -48,6 +48,7 @@ use crate::federation::contracts::route_match::match_route;
 use crate::federation::repo_id::GlobalId;
 use crate::schema::{EdgeProvenance, RouteMatch};
 use crate::server::mcp::handler::McpContext;
+use crate::server::sensors::util::GRAPHQL_CALL_PREFIX;
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::time::Instant;
@@ -613,29 +614,64 @@ async fn run_check_binding(
     }
     let _ = (); // sentinel — keep the binding site stable
     let (consumer_method, consumer_template) = parse_consumer_call_shape(&consumer_id);
-    let (provider_method, provider_template) = match &key {
-        ContractKey::Http { method, template } => (method.clone(), template.clone()),
+    let (method_match, template_match) = match &key {
+        ContractKey::Http { method, template } => {
+            if consumer_id
+                .name()
+                .is_some_and(|n| n.starts_with(GRAPHQL_CALL_PREFIX))
+            {
+                // Key-kind mismatch: a `graphql-call:{op}:{field}`
+                // node carries no HTTP method/template, so the HTTP
+                // comparison would be vacuous (`Unknown`/`None` always
+                // "match"). Report the GraphQL pair as unmatched
+                // instead of a misleading `template_mismatch`.
+                reasons.push("op_mismatch");
+                reasons.push("field_mismatch");
+                (false, "none")
+            } else {
+                let mm = methods_compatible(&consumer_method, method);
+                if !mm {
+                    reasons.push("method_mismatch");
+                }
+                let (tc, label) = templates_compatible(consumer_template.as_deref(), template);
+                if !tc {
+                    reasons.push("template_mismatch");
+                }
+                (mm, label)
+            }
+        }
+        ContractKey::Graphql { op, field } => {
+            // GraphQL consumers are synthetic nodes named
+            // `graphql-call:{op}:{field}`; `parse_consumer_call_shape`
+            // cannot see them (no whitespace in the name). Compare
+            // `(op, field)` against the name directly and reuse the
+            // same verdict fields: `method_match` is op equality,
+            // `template_match` is `exact`/`none` on field equality.
+            // A non-GraphQL consumer name falls through the prefix
+            // strip to empty parts and mismatches cleanly on both.
+            let name = consumer_id.name().unwrap_or_default();
+            let rest = name.strip_prefix(GRAPHQL_CALL_PREFIX).unwrap_or("");
+            let (cop, cfield) = rest.split_once(':').unwrap_or((rest, ""));
+            let op_ok = cop == op.to_string();
+            let field_ok = cfield == field;
+            if !op_ok {
+                reasons.push("op_mismatch");
+            }
+            if !field_ok {
+                reasons.push("field_mismatch");
+            }
+            (op_ok, if field_ok { "exact" } else { "none" })
+        }
         _ => {
             return Err(error_outcome(
                 "invalid_argument",
-                "topic endpoints not supported in 0.9",
+                "only http and graphql endpoints are supported in 0.9",
                 Some(json!({"arg": "endpoint.key"})),
                 &snap_label,
                 started,
             ));
         }
     };
-
-    let method_match = methods_compatible(&consumer_method, &provider_method);
-    if !method_match {
-        reasons.push("method_mismatch");
-    }
-    let (template_compatible, match_label) =
-        templates_compatible(consumer_template.as_deref(), &provider_template);
-    let template_match = match_label;
-    if !template_compatible {
-        reasons.push("template_mismatch");
-    }
     let valid = reasons.is_empty() && endpoint_def.is_some();
 
     let data = if valid {

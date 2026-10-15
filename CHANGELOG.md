@@ -16,6 +16,10 @@ All notable changes to LAIN are documented here. Versions follow
 - bindings: `repos.yaml#bindings` entries can pin GraphQL consumers
   (keys `graphql:op:field`, consumer `symbol` = node name
   `graphql-call:{op}:{field}`). No migration needed.
+- contracts: `check_binding` accepts GraphQL endpoints
+  (`graphql:op:field`); new reasons `op_mismatch`/`field_mismatch`.
+  Tool schema updated — regenerate `docs/tool-schema.json` consumers
+  if you mirror it.
 
 ## 0.10.0 — 2026-10-13
 
