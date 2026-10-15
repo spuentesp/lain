@@ -434,7 +434,9 @@ appear in `coverage.stale_bindings` and contribute nothing.
 
 A binding `key` follows the grammar `"<METHOD> <template>"` or
 `"graphql:<query|mutation|subscription>:<field>"`, where `<field>`
-is the operation's root field (e.g. `"graphql:query:ProductDetails"`).
+is the operation's root field, not its name (e.g. operation
+`ProductDetails` with root field `product` →
+`"graphql:query:product"`).
 
 ```yaml
 bindings:

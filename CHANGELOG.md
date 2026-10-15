@@ -21,6 +21,14 @@ All notable changes to LAIN are documented here. Versions follow
   Tool schema updated — regenerate `docs/tool-schema.json` consumers
   if you mirror it.
 
+### Fixed
+
+- contracts: `check_binding` with a GraphQL consumer and an HTTP
+  endpoint key used to return `valid: true` with an unusable
+  `bindings_entry` (pre-existing vacuous-match bug); it now returns
+  `valid: false` with `op_mismatch`/`field_mismatch`. Re-validate any
+  `bindings_entry` saved from the old behavior.
+
 ## 0.10.0 — 2026-10-13
 
 > **MINOR bump — the coordination contract changed.** Lain's

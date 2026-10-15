@@ -74,12 +74,19 @@ pub struct ServiceDecl {
     /// provider endpoints. Set `false` for repos that only carry schema
     /// copies (codegen inputs) so they do not pollute the `(op, field)`
     /// provider key space. Defaults to `true`.
-    #[serde(default = "default_provides_graphql")]
+    #[serde(
+        default = "default_provides_graphql",
+        skip_serializing_if = "is_default_provides_graphql"
+    )]
     pub provides_graphql: bool,
 }
 
 fn default_provides_graphql() -> bool {
     true
+}
+
+fn is_default_provides_graphql(value: &bool) -> bool {
+    *value
 }
 
 /// One cross-file router mount. The provider declares a route under
@@ -776,6 +783,72 @@ services:
 "#;
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         assert!(!cfg.services[0].provides_graphql);
+    }
+
+    #[test]
+    fn config_hash_ignores_explicit_default_provides_graphql() {
+        // The default `provides_graphql: true` must not change the
+        // canonical form: an upgraded config that spells the default
+        // out keeps its pre-upgrade hash.
+        let without = r#"
+services:
+  - name: orders
+    repo: alpha
+"#;
+        let with_explicit_default = r#"
+services:
+  - name: orders
+    repo: alpha
+    provides_graphql: true
+"#;
+        let h1 = ContractFederationConfig::load_from_str(without)
+            .unwrap()
+            .config_hash();
+        let h2 = ContractFederationConfig::load_from_str(with_explicit_default)
+            .unwrap()
+            .config_hash();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn config_hash_reflects_provides_graphql_false() {
+        let without = r#"
+services:
+  - name: orders
+    repo: alpha
+"#;
+        let disabled = r#"
+services:
+  - name: orders
+    repo: alpha
+    provides_graphql: false
+"#;
+        let h1 = ContractFederationConfig::load_from_str(without)
+            .unwrap()
+            .config_hash();
+        let h2 = ContractFederationConfig::load_from_str(disabled)
+            .unwrap()
+            .config_hash();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn provides_graphql_survives_serde_round_trip() {
+        for value in [true, false] {
+            let yaml = format!(
+                r#"
+services:
+  - name: orders
+    repo: alpha
+    provides_graphql: {value}
+"#
+            );
+            let cfg = ContractFederationConfig::load_from_str(&yaml).unwrap();
+            let reserialized = serde_yaml::to_string(&cfg).unwrap();
+            let back: ContractFederationConfig = serde_yaml::from_str(&reserialized).unwrap();
+            assert_eq!(back.services[0].provides_graphql, value);
+            assert_eq!(back, cfg);
+        }
     }
 
     #[test]
