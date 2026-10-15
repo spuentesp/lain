@@ -2499,32 +2499,13 @@ mod pr14_check_binding_graphql {
         n
     }
 
-    /// Three-repo saleor-style federation: `saleor-api` serves
-    /// `query product` + `query somethingElse` on `POST /graphql`,
-    /// `saleor-catalog` also exposes `query product` (ambiguous
-    /// join), and `storefront` carries the
-    /// `graphql-call:query:product` call site. Returns the
-    /// federation and the consumer node (its `.id` is the real
-    /// GlobalId the tests pass to `check_binding`).
-    async fn build_graphql_federation(root: &Path) -> (Arc<FederatedIndex>, GraphNode) {
-        let api_dir = root.join("saleor-api");
-        let catalog_dir = root.join("saleor-catalog");
-        let storefront_dir = root.join("storefront");
-        for d in [&api_dir, &catalog_dir, &storefront_dir] {
-            std::fs::create_dir_all(d.join("src")).unwrap();
-            std::fs::write(d.join("src/.keep"), b"").unwrap();
-        }
-        git_init_committed(&api_dir);
-        git_init_committed(&catalog_dir);
-        git_init_committed(&storefront_dir);
-
-        let data_dir = root.join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-        let backend: Arc<dyn lain::federation::graph_backend::GraphBackend> =
-            Arc::new(PetgraphBackend::new(&data_dir).expect("backend"));
-        let fed = Arc::new(FederatedIndex::new(backend));
-
-        let cfg = ContractFederationConfig {
+    /// The saleor-style service table the graphql fixture and the
+    /// Task 6 round-trip acceptance test both join against. Every
+    /// service starts with `provides_graphql: true` — the
+    /// negative/positive pair flips it on `saleor-catalog` to shrink
+    /// the `(op, field)` provider key space.
+    pub(super) fn graphql_federation_config() -> ContractFederationConfig {
+        ContractFederationConfig {
             services: vec![
                 ServiceDecl {
                     name: "saleor-api".into(),
@@ -2562,8 +2543,35 @@ mod pr14_check_binding_graphql {
             schemas: vec![],
             bindings: vec![],
             databases: vec![],
-        };
-        fed.set_contract_config(cfg);
+        }
+    }
+
+    /// Three-repo saleor-style federation: `saleor-api` serves
+    /// `query product` + `query somethingElse` on `POST /graphql`,
+    /// `saleor-catalog` also exposes `query product` (ambiguous
+    /// join), and `storefront` carries the
+    /// `graphql-call:query:product` call site. Returns the
+    /// federation and the consumer node (its `.id` is the real
+    /// GlobalId the tests pass to `check_binding`).
+    pub(super) async fn build_graphql_federation(root: &Path) -> (Arc<FederatedIndex>, GraphNode) {
+        let api_dir = root.join("saleor-api");
+        let catalog_dir = root.join("saleor-catalog");
+        let storefront_dir = root.join("storefront");
+        for d in [&api_dir, &catalog_dir, &storefront_dir] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("src/.keep"), b"").unwrap();
+        }
+        git_init_committed(&api_dir);
+        git_init_committed(&catalog_dir);
+        git_init_committed(&storefront_dir);
+
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let backend: Arc<dyn lain::federation::graph_backend::GraphBackend> =
+            Arc::new(PetgraphBackend::new(&data_dir).expect("backend"));
+        let fed = Arc::new(FederatedIndex::new(backend));
+
+        fed.set_contract_config(graphql_federation_config());
 
         let api_id = RepoId::new("saleor-api").unwrap();
         let catalog_id = RepoId::new("saleor-catalog").unwrap();
@@ -2783,6 +2791,226 @@ mod pr14_check_binding_graphql {
                 .iter()
                 .any(|r| r == "field_mismatch"),
             "wrong field must surface as field_mismatch: {data:?}"
+        );
+    }
+}
+
+// ─── Task 6 (acceptance): check_binding YAML round-trip ─────────────
+
+mod task6_check_binding_yaml_round_trip {
+    //! Acceptance for the whole graphql-config bridge chain: the
+    //! `bindings_entry` YAML `check_binding` emits (Task 5) parses as
+    //! `repos.yaml#bindings` through `ContractFederationConfig` (Task 3),
+    //! the joiner's confirmed-binding matcher (Task 4) turns it into a
+    //! `Binds` edge with `EdgeProvenance::Confirmed`, and
+    //! `services[].provides_graphql: false` (Task 2) shrinks the
+    //! provider key space so the remaining service owns the `(op,
+    //! field)` pair.
+    //!
+    //! Ordering note: `check_binding` refuses an already-bound
+    //! consumer (`already_bound`), so the tool round-trip runs while
+    //! the fixture is still ambiguous — before the `provides_graphql`
+    //! flip.
+
+    use super::pr14_check_binding_graphql::{build_graphql_federation, graphql_federation_config};
+    use super::*;
+    use lain::federation::contracts::index::{ConsumerTarget, UnresolvedReason};
+    use lain::federation::contracts::model::{ContractKey, GraphqlOp};
+
+    #[tokio::test]
+    async fn check_binding_yaml_round_trip_binds_graphql_consumer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (fed, consumer) = build_graphql_federation(root).await;
+
+        // (1) Negative — no suppression: `saleor-api` and
+        // `saleor-catalog` both expose `query product`, so the joiner
+        // refuses to single-bind and the consumer lands in the
+        // graphql_no_op unresolved class, not Binds.
+        let index = fed.contract_index().expect("contract index");
+        let before = index
+            .consumer(&GlobalId::from_canonical(&consumer.id))
+            .expect("consumer resolution");
+        assert!(
+            matches!(
+                &before.target,
+                Some(ConsumerTarget::Unresolved {
+                    reason: UnresolvedReason::GraphqlNoOp,
+                    ..
+                })
+            ),
+            "two graphql providers must leave the consumer graphql_no_op, got {:?}",
+            before.target
+        );
+        assert!(before.bound_endpoints.is_empty());
+
+        // Tool half: the still-unresolved consumer validates against
+        // the `saleor-api` endpoint and receives a `bindings_entry`.
+        let outcome = check_binding_handle(
+            &{
+                let _status = Box::leak(Box::new(
+                    lain::server::mcp::handler::HandlerStatus::for_test(),
+                ));
+                ctx_for(&fed, _status)
+            },
+            json!({
+                "snapshot": "live",
+                "consumer": consumer.id,
+                "endpoint": {"service": "saleor-api", "key": "graphql:query:product"}
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !outcome.is_error,
+            "errors: {:?}",
+            outcome.structured["error"]
+        );
+        let data = &outcome.structured["data"];
+        assert_eq!(
+            data["valid"],
+            json!(true),
+            "check_binding must accept the graphql link: {data:?}"
+        );
+        let entry = data["bindings_entry"].as_str().expect("bindings_entry");
+
+        // (2) Round-trip, config half: the emitted YAML is a legal
+        // `bindings:` item — `load_from_str` parses it and `validate`
+        // runs `validate_key` over both `graphql:op:field` keys.
+        let parsed = ContractFederationConfig::load_from_str(&format!("bindings:\n{entry}"))
+            .expect("emitted entry must parse as a bindings item");
+        assert_eq!(parsed.bindings.len(), 1, "emitted entry: {entry}");
+        let binding = &parsed.bindings[0];
+        assert_eq!(binding.consumer.repo, "storefront");
+        assert_eq!(binding.consumer.path, "src/product.ts");
+        assert_eq!(binding.consumer.symbol, "graphql-call:query:product");
+        assert_eq!(binding.consumer.key, "graphql:query:product");
+        assert_eq!(binding.provider.service, "saleor-api");
+        assert_eq!(binding.provider.key, "graphql:query:product");
+
+        let mut join_cfg = graphql_federation_config();
+        join_cfg.bindings = parsed.bindings.clone();
+        join_cfg
+            .validate(&[
+                "saleor-api".to_string(),
+                "saleor-catalog".to_string(),
+                "storefront".to_string(),
+            ])
+            .expect("emitted keys must survive validate_key");
+
+        // (3) Round-trip, join half: the joiner accepts the entry and
+        // the confirmed binding resolves the ambiguity — exactly one
+        // Binds edge, Confirmed, sourced at `repos.yaml#bindings`.
+        fed.set_contract_config(join_cfg);
+        fed.rejoin_contracts_if_dirty().expect("rejoin");
+        let index = fed.contract_index().expect("contract index after join");
+        let cid = GlobalId::from_canonical(&consumer.id);
+        let after = index.consumer(&cid).expect("consumer resolution");
+        let Some(ConsumerTarget::Binds { provenance, .. }) = after.target.as_ref() else {
+            panic!(
+                "confirmed binding must bind the consumer, got {:?}",
+                after.target
+            );
+        };
+        let EdgeProvenance::Confirmed { source } = provenance else {
+            panic!("bind must carry Confirmed provenance, got {provenance:?}");
+        };
+        assert!(
+            source.contains("repos.yaml#bindings"),
+            "provenance must name the bindings entry, got {source}"
+        );
+        assert!(
+            index.stale_bindings.is_empty(),
+            "the emitted entry matched its consumer: {:?}",
+            index.stale_bindings
+        );
+        assert_eq!(
+            after.bound_endpoints.len(),
+            1,
+            "exactly one bound endpoint: {:?}",
+            after.bound_endpoints
+        );
+        let bound = &after.bound_endpoints[0];
+        assert_eq!(bound.0 .0, "saleor-api");
+        assert!(
+            matches!(&bound.1, ContractKey::Graphql { op: GraphqlOp::Query, field } if field == "product"),
+            "bound endpoint must be graphql:query:product, got {:?}",
+            bound.1
+        );
+        let provider_id = index
+            .endpoints
+            .get(bound)
+            .expect("saleor-api graphql:query:product endpoint")
+            .providers
+            .first()
+            .expect("endpoint provider")
+            .node_id
+            .clone();
+
+        let binds: Vec<GraphEdge> = fed
+            .backend()
+            .all_edges()
+            .expect("edges")
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::Binds)
+            .collect();
+        assert_eq!(binds.len(), 1, "exactly one Binds edge expected: {binds:?}");
+        let edge = &binds[0];
+        assert_eq!(edge.source_id, consumer.id);
+        assert_eq!(edge.target_id, provider_id.as_str());
+        let Some(EdgeProvenance::Confirmed { source }) = &edge.provenance else {
+            panic!(
+                "Binds edge must carry Confirmed provenance, got {:?}",
+                edge.provenance
+            );
+        };
+        assert!(
+            source.contains("repos.yaml#bindings"),
+            "provenance must name the bindings entry, got {source}"
+        );
+
+        // (4) Positive provides_graphql pair: suppressing
+        // `saleor-catalog`'s schema copies shrinks the provider key
+        // space to one candidate and the consumer auto-binds to the
+        // remaining service — with `bindings: []`, so this is the
+        // Task 2 path, not the confirmed one.
+        let mut shrink_cfg = graphql_federation_config();
+        shrink_cfg
+            .services
+            .iter_mut()
+            .find(|s| s.name == "saleor-catalog")
+            .expect("saleor-catalog service")
+            .provides_graphql = false;
+        assert!(shrink_cfg.bindings.is_empty());
+        fed.set_contract_config(shrink_cfg);
+        fed.rejoin_contracts_if_dirty().expect("rejoin");
+        let index = fed.contract_index().expect("contract index after flip");
+        let shrunk = index.consumer(&cid).expect("consumer resolution");
+        let Some(ConsumerTarget::Binds { provenance, .. }) = shrunk.target.as_ref() else {
+            panic!(
+                "suppressed provider must leave a single bindable service, got {:?}",
+                shrunk.target
+            );
+        };
+        // The auto-bind verdict carries Static provenance — proving
+        // this resolution was recomputed from the shrunk key space and
+        // is not the leftover confirmed edge from phase (3).
+        assert!(
+            matches!(provenance, EdgeProvenance::Static { .. }),
+            "the provides_graphql flip must auto-bind, not keep the confirmed edge: {provenance:?}"
+        );
+        assert_eq!(
+            shrunk.bound_endpoints.len(),
+            1,
+            "exactly one remaining endpoint: {:?}",
+            shrunk.bound_endpoints
+        );
+        let bound = &shrunk.bound_endpoints[0];
+        assert_eq!(bound.0 .0, "saleor-api");
+        assert!(
+            matches!(&bound.1, ContractKey::Graphql { op: GraphqlOp::Query, field } if field == "product"),
+            "consumer must bind the remaining service's field, got {:?}",
+            bound.1
         );
     }
 }
