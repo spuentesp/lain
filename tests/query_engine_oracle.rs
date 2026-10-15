@@ -610,7 +610,7 @@ fn build_graph(spec: &GraphSpec) -> (GraphDatabase, Vec<String>, PathBuf) {
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_scratch(&dir);
     let graph = GraphDatabase::new(&dir).unwrap();
 
     let mut ids = Vec::new();
@@ -681,10 +681,21 @@ fn run_case(graph_spec: &GraphSpec, query_plan: &QueryPlan) {
         "executor and reference disagree\ngraph: {graph_spec:?}\nquery: {query_plan:?}\nwire: {wire}"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_scratch(&dir);
 }
 
 // ─── Deterministic regressions for the audited bugs ──────────────────
+
+/// Remove a scratch graph directory *and* the WAL `GraphDatabase` leaves
+/// beside it (`<path>.wal` — a sibling file, see
+/// `graph::wal::wal_path_for`). `remove_dir_all` alone leaks the WAL into
+/// the temp dir; one leaked file per case is enough to exhaust a quota.
+fn cleanup_scratch(dir: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(dir);
+    let mut wal = dir.as_os_str().to_owned();
+    wal.push(".wal");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(wal));
+}
 
 fn scratch_graph(name: &str) -> (GraphDatabase, PathBuf) {
     let dir = std::env::temp_dir().join(format!(
@@ -692,7 +703,7 @@ fn scratch_graph(name: &str) -> (GraphDatabase, PathBuf) {
         std::process::id(),
         name
     ));
-    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_scratch(&dir);
     (GraphDatabase::new(&dir).unwrap(), dir)
 }
 
@@ -749,7 +760,7 @@ fn find_id_selects_exactly_that_node() {
         .map(|n| n.id.clone())
         .collect();
     assert!(got.is_empty(), "a wrong find.id must select nothing, got {got:?}");
-    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_scratch(&dir);
 }
 
 /// `{"not": [...]}` must be reachable from JSON for both selector kinds.
@@ -819,7 +830,7 @@ fn find_label_matches_the_nodes_actual_label() {
         .map(|n| n.id.clone())
         .collect();
     assert_eq!(got, slow, "executor must match labels other than deprecated");
-    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_scratch(&dir);
 }
 
 /// `depth` counts hops along a **shortest** matching-edge path. A node two
@@ -920,7 +931,7 @@ fn depth_counts_shortest_path_hops() {
                 .collect();
             assert_eq!(got, expect, "executor hop sets (swap={swap})");
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        cleanup_scratch(&dir);
     }
 }
 
@@ -974,7 +985,7 @@ fn start_nodes_are_not_reported_through_cycles() {
         .map(|n| n.id.clone())
         .collect();
     assert_eq!(got, slow);
-    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_scratch(&dir);
 }
 
 // ─── The oracle itself ───────────────────────────────────────────────
