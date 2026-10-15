@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 963b6c2891765b6d21889fbe462df6ed0651497d40fe11a39c2a6c91ae569ddd # shrinks to graph = GraphSpec { nodes: [NodeSpec { node_type: 0, name: "a", path: "src/f0.rs", label: None }, NodeSpec { node_type: 0, name: "a", path: "src/f1.rs", label: None }], edges: [] }, query = QueryPlan { find: FindPlan { type_sel: Some(Or(0, 3)), name: None, id: Some(Existing(0)), label: None, path: None }, tail: [] }
