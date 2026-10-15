@@ -106,8 +106,8 @@ impl NodeType {
     /// forever and had no way to tell "this codebase has no HTTP routes"
     /// apart from "lain cannot see HTTP routes".
     ///
-    /// Kept honest by `describe_schema`'s `indexed_flags_match_reality`
-    /// test, which greps for a producer of each variant.
+    /// Kept honest by `describe_schema`'s `indexed_flag_tests` module,
+    /// which greps for a producer of each variant.
     pub fn is_indexed(&self) -> bool {
         match self {
             NodeType::File
@@ -133,30 +133,25 @@ impl NodeType {
             // synthetic node is the only honest indexer-side
             // representation. Confidence is propagated via
             // `EdgeProvenance::Heuristic` rather than this type.
-            | NodeType::Synthetic
-            // No producer anywhere in the codebase. The sensors cover
-            // HTTP, OpenAPI, proto, GraphQL and WebSocket; none of them
-            // emits a queue topic, an IaC resource, or a standalone
-            // schema node. Writing an indexer is the prerequisite for
-            // advertising these, not wiring one up.
-            => true,
-            // Contract-federation node types (PR 3 schema v3).
-            // `HttpClientCall`, `Field`, and `FieldRef` are reserved
-            // here so the federated graph, the joiner and the `Binds`
-            // edge can refer to them by name today; the sensors that
-            // emit them land in later PRs (`http_client_sensor`,
-            // `openapi_sensor`, `field_access_sensor`). They will be
-            // flipped to `true` as their producers get wired into
-            // `sensors::run_all`; for now `describe_schema` reports
-            // them as known-but-unindexed so an agent following the
-            // schema can tell "lain knows about HTTP client calls"
-            // from "lain has no notion of HTTP client calls".
+            | NodeType::Synthetic => true,
+            // Contract-federation node types (PR 3 schema v3), each
+            // emitted by a registered sensor: `HttpClientCall`
+            // (`http_client_sensor`, also `websocket_sensor`), `Field`
+            // (`openapi_sensor` and the schema sensors), `FieldRef`
+            // (`field_access_sensor`), `Topic` and `Schema`
+            // (`event_sensor`), `Table` (`sql_sensor`). They are wired
+            // into `sensors::run_all`, so `describe_schema` advertises
+            // them as available.
             NodeType::HttpClientCall
             | NodeType::Field
             | NodeType::FieldRef
             | NodeType::Topic
             | NodeType::Schema
             | NodeType::Table => true,
+            // Known-but-unindexed: `Resource` has no producer in this
+            // codebase (there is no IaC resource sensor), so
+            // `describe_schema` reports it as unavailable rather than
+            // promising a selection that can only answer `count: 0`.
             NodeType::Resource => false,
         }
     }
@@ -230,10 +225,21 @@ impl NodeType {
     }
 
     /// Labels that may be attached to this node type.
+    ///
+    /// Only what the ingest producers actually attach: `deprecated` from
+    /// `#[deprecated]` / the LSP `DEPRECATED` tag, `test` from `#[test]` or
+    /// a test container (`src/server/ingest/scan.rs`). Other attribute
+    /// identifiers (`async_trait`, `no_mangle`, …) can land in
+    /// `GraphNode::label` too, but they are open-ended and not listed
+    /// here. The earlier list claimed `async` and `generated` — no
+    /// producer ever emits either (`#[async_trait]` yields `async_trait`,
+    /// and nothing labels a file `generated`), so selecting them could
+    /// only ever answer `count: 0`. Kept honest by
+    /// `every_advertised_label_is_selectable` in `executor_tests.rs`.
     pub fn labels(&self) -> &'static [&'static str] {
         match self {
-            NodeType::File => &["generated", "test"],
-            NodeType::Function | NodeType::Method => &["test", "deprecated", "async"],
+            NodeType::File => &[],
+            NodeType::Function | NodeType::Method => &["test", "deprecated"],
             NodeType::Class | NodeType::Struct | NodeType::Enum | NodeType::Trait => {
                 &["test", "deprecated"]
             }
@@ -374,29 +380,19 @@ impl EdgeType {
             // Indexed so consumers can build queries even before any
             // spans have arrived; they just see an empty result.
             | EdgeType::RuntimeCall => true,
-            // Contract-federation edge types (PR 3 schema v3).
-            // Reserved here so the joiner and impact-traversal table
-            // (§5.2) can refer to them by name today; the per-repo
-            // sensors and the federation joiner that emit them land
-            // in later PRs (`http_client_sensor`, `openapi_sensor`,
-            // `field_access_sensor`, `ContractJoiner`). Each is
-            // flipped to `true` when its producer gets wired in —
-            // for now `describe_schema` reports them as
-            // known-but-unindexed so an agent following the schema
-            // can tell "lain knows about HTTP bindings" from
-            // "lain has no notion of HTTP bindings".
-            //
-            // `Binds` is the federation-only join (§5.3); it
-            // materializes once `ContractJoiner::run` is wired into
-            // `FederatedIndex::rejoin_contracts_if_dirty`.
-            //
-            // `ReadsField` / `ReadsFrom` are produced by the wired
-            // field-access sensor (§6.5, PR 9) but deliberately stay
-            // `false` here: flipping them expands `describe_schema`'s
-            // advertised edge set and is deferred to PR 13, which
-            // owns the `indexed_flags_match_reality` test that flips
-            // them with confidence. The other types still ship here
-            // as known-but-unindexed.
+            // Contract-federation edge types (PR 3 schema v3), each
+            // produced by a wired emitter: `SendsHttp` (`http_client_sensor`),
+            // `ReadsField` / `ReadsFrom` (`field_access_sensor`),
+            // `RequestSchema` / `ResponseSchema` / `HasField`
+            // (`openapi_sensor`, `grpc_provider_sensor`,
+            // `graphql_provider_sensor`), `ReadsTable` / `WritesTable`
+            // (`sql_sensor`), `Produces` / `Consumes` (`event_sensor`),
+            // `PayloadSchema` (`event_sensor::scan_payload_schemas`,
+            // mints the Topic → Schema edge for `*.avsc` /
+            // `*.schema.json` payload schemas that name an emitted
+            // topic), and `Binds` (the federation-only §5.3 join,
+            // materialized by `ContractJoiner`). All are indexed, so
+            // `describe_schema` advertises them as available.
             EdgeType::SendsHttp
             | EdgeType::RequestSchema
             | EdgeType::ResponseSchema
@@ -408,9 +404,6 @@ impl EdgeType {
             | EdgeType::WritesTable
             | EdgeType::Produces
             | EdgeType::Consumes
-            // `event_sensor::scan_payload_schemas` mints the
-            // Topic → Schema edge for `*.avsc` / `*.schema.json`
-            // payload schemas that name an emitted topic.
             | EdgeType::PayloadSchema => true,
             // Known-but-unindexed: no producer in this codebase.
             // `Imports` reads like a core relationship and has never
@@ -695,9 +688,10 @@ pub struct GraphNode {
     pub co_change_count: Option<usize>,
     #[serde(default)]
     pub is_deprecated: bool,
-    /// Single label for the node (e.g. "test", "deprecated", "async").
-    /// Used by `find ... | filter label X`. For multi-label semantics use
-    /// `signature` with a structured payload.
+    /// Single label for the node: "deprecated", "test", or the first
+    /// identifier of whatever `#[...]` attribute the producer saw
+    /// ("async_trait", "no_mangle", …). Used by `find ... | filter label X`.
+    /// For multi-label semantics use `signature` with a structured payload.
     #[serde(default)]
     pub label: Option<String>,
     /// The type, class, module, or namespace a method or property belongs to.
@@ -971,6 +965,22 @@ impl GraphNode {
             namespace,
         );
         self
+    }
+
+    /// The node's label as the query language exposes it.
+    ///
+    /// `is_deprecated` wins over the `label` field: the ingest producers
+    /// surface the flag as the `deprecated` label (`#[deprecated]`, the
+    /// LSP `DEPRECATED` tag) and never leave a deprecated node labelled
+    /// as something else. Everything else — `test` from `#[test]` or a
+    /// test container, `async_trait`/`no_mangle`/… from other attributes
+    /// — is whatever attribute-derived label the node carries.
+    pub fn query_label(&self) -> Option<&str> {
+        if self.is_deprecated {
+            Some("deprecated")
+        } else {
+            self.label.as_deref()
+        }
     }
 }
 

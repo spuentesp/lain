@@ -21,6 +21,19 @@ All notable changes to LAIN are documented here. Versions follow
   Tool schema updated — regenerate `docs/tool-schema.json` consumers
   if you mirror it.
 
+### Changed
+
+- query: `QueryMeta.plan` is removed from the Rust `QueryMeta` struct.
+  It was always `None` and never appeared on the wire, so JSON clients
+  see no change; Rust consumers constructing `QueryMeta` must drop the
+  field.
+- query: `connect` hop counts (`depth`) are now shortest
+  matching-edge distances, and a query's start nodes are never
+  reported — not even back through a cycle. On multi-path graphs a
+  `depth` range can now return nodes the old walk missed (it reported
+  first-discovery depths) and stop returning a seed that only appeared
+  via a loop.
+
 ### Fixed
 
 - contracts: `check_binding` with a GraphQL consumer and an HTTP
@@ -28,6 +41,18 @@ All notable changes to LAIN are documented here. Versions follow
   `bindings_entry` (pre-existing vacuous-match bug); it now returns
   `valid: false` with `op_mismatch`/`field_mismatch`. Re-validate any
   `bindings_entry` saved from the old behavior.
+- query: a top-level `find.id` now selects exactly that node. It was
+  parsed and then ignored, so `{"op":"find","id":"..."}` answered with
+  every match of the other (usually absent) filters — the whole graph.
+  `connect.target.id` was already honoured.
+- query: `{"not": [...]}` is now a valid wire form for `label` and
+  `edge` selectors (e.g. `{"label": {"not": ["deprecated"]}}`). The
+  untagged enums rejected the object at parse, so the NOT variants
+  were unreachable from JSON.
+- query: label selectors match the node's actual label (`test` and
+  other attribute-derived labels), not only the `deprecated` flag, and
+  results surface that label. `describe_schema` stops advertising the
+  labels `async` and `generated` — no producer emits either.
 
 ## 0.10.0 — 2026-10-13
 

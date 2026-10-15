@@ -53,6 +53,39 @@ proptest! {
         }
     }
 
+    /// All three label-selector forms survive the wire, including the
+    /// `{"not": [...]}` object the untagged derive used to reject.
+    #[test]
+    fn label_selector_round_trips_through_json(s in "\\PC{0,12}", which in 0u8..3) {
+        let sel = match which {
+            0 => LabelSelector::Single(s),
+            1 => LabelSelector::Or(vec![s]),
+            _ => LabelSelector::Not(vec![s]),
+        };
+        let json = serde_json::to_value(&sel).unwrap();
+        let back: LabelSelector = serde_json::from_value(json.clone()).unwrap();
+        prop_assert_eq!(serde_json::to_value(&back).unwrap(), json);
+        for probe in [None, Some(""), Some("a"), Some("\\PC")] {
+            prop_assert_eq!(sel.matches(probe), back.matches(probe));
+        }
+    }
+
+    /// Same for edge selectors.
+    #[test]
+    fn edge_selector_round_trips_through_json(s in "\\PC{0,12}", which in 0u8..3) {
+        let sel = match which {
+            0 => EdgeSelector::Single(s),
+            1 => EdgeSelector::Or(vec![s]),
+            _ => EdgeSelector::Not(vec![s]),
+        };
+        let json = serde_json::to_value(&sel).unwrap();
+        let back: EdgeSelector = serde_json::from_value(json.clone()).unwrap();
+        prop_assert_eq!(serde_json::to_value(&back).unwrap(), json);
+        for probe in ["", "a", "Calls"] {
+            prop_assert_eq!(sel.matches(probe), back.matches(probe));
+        }
+    }
+
     #[test]
     fn depth_ranges_never_panic_and_single_means_up_to(n in any::<u32>(), lo in any::<u32>(), hi in any::<u32>()) {
         let r = DepthSpec::Single(n).to_range();
@@ -91,7 +124,9 @@ proptest! {
         let _ = serde_json::from_value::<QuerySpec>(v.clone());
         let _ = serde_json::from_value::<GraphOp>(v.clone());
         let _ = serde_json::from_value::<NameSelector>(v.clone());
-        let _ = serde_json::from_value::<DepthSpec>(v);
+        let _ = serde_json::from_value::<DepthSpec>(v.clone());
+        let _ = serde_json::from_value::<LabelSelector>(v.clone());
+        let _ = serde_json::from_value::<EdgeSelector>(v);
     }
 
     /// A spec built from valid parts survives a JSON round trip unchanged.

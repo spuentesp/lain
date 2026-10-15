@@ -11,7 +11,7 @@ use crate::query::spec::{
 use crate::tools::utils::{build_enriched_text, cosine_similarity};
 use parking_lot::Mutex;
 use petgraph::Direction as PetDirection;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Instant;
@@ -184,7 +184,6 @@ impl<'a> Executor<'a> {
             meta: Some(QueryMeta {
                 exec_us,
                 nodes_visited: self.nodes_visited,
-                plan: None,
                 truncated,
                 matched_before_limit: truncated.then_some(matched),
             }),
@@ -202,12 +201,20 @@ impl<'a> Executor<'a> {
 
     fn execute_find(&mut self, find: &FindOp) -> Result<Vec<GraphNodeRef>, LainError> {
         check_node_types(find)?;
-        let nodes = self.graph.query_nodes(
+        let mut nodes = self.graph.query_nodes(
             find.type_selector.as_ref(),
             find.name.as_ref(),
             find.label_selector.as_ref(),
             find.path.as_deref(),
         );
+        // `id` selects exactly one node — at top level too. It used to be
+        // honoured only inside a `connect` `target`, so a top-level
+        // `{"op":"find","id":"..."}` parsed the id and then ignored it,
+        // answering with every match of the other (often absent) filters:
+        // the whole graph, for a query that asked for one node.
+        if let Some(want) = &find.id {
+            nodes.retain(|n| &n.id == want);
+        }
 
         self.nodes_visited += nodes.len();
 
@@ -217,11 +224,11 @@ impl<'a> Executor<'a> {
                 id: n.id.clone(),
                 node_type: n.node_type.to_string(),
                 name: n.name.clone(),
-                label: if n.is_deprecated {
-                    Some("deprecated".into())
-                } else {
-                    None
-                },
+                // Surface the node's query label, not just `deprecated`:
+                // producers attach `test` and attribute-derived labels too,
+                // and a `filter` on one of those needs to see them. The old
+                // mapping collapsed everything else to `None`.
+                label: n.query_label().map(str::to_string),
             })
             .collect();
 
@@ -317,11 +324,21 @@ impl<'a> Executor<'a> {
 
         let mut found_nodes = Vec::new();
 
+        // Plain BFS, with the start seeded into `visited`. This used to
+        // walk the queue as a LIFO stack, so a node reachable by paths of
+        // different lengths was reported at its *first-discovery* depth
+        // rather than its shortest hop count — `depth: 2` could miss a
+        // node two hops away that the walk happened to reach via a
+        // three-hop detour first, and "hops exactly 3" could report a node
+        // two hops away. The start was also missing from `visited`, so a
+        // cycle or self-loop re-reported the start node at its loop depth
+        // even though start nodes are never reported (`docs/query-language.md`).
         let mut visited = HashMap::new();
-        let mut queue: Vec<TraversalQueueItem> =
-            vec![(start_id.into(), vec![start_id.into()], vec![])];
+        visited.insert(start_id.to_string(), true);
+        let mut queue: VecDeque<TraversalQueueItem> =
+            VecDeque::from([(start_id.into(), vec![start_id.into()], vec![])]);
 
-        while let Some((current_id, path_ids, path_edges)) = queue.pop() {
+        while let Some((current_id, path_ids, path_edges)) = queue.pop_front() {
             let current_depth = path_ids.len() - 1;
 
             if depth_range.contains(&(current_depth as u32)) && path_ids.len() > 1 {
@@ -330,11 +347,7 @@ impl<'a> Executor<'a> {
                         id: node.id.clone(),
                         node_type: node.node_type.to_string(),
                         name: node.name.clone(),
-                        label: if node.is_deprecated {
-                            Some("deprecated".into())
-                        } else {
-                            None
-                        },
+                        label: node.query_label().map(str::to_string),
                     });
                 }
             }
@@ -371,7 +384,7 @@ impl<'a> Executor<'a> {
                 let mut new_path_edges = path_edges.clone();
                 new_path_edges.push(edge_key);
 
-                queue.push((neighbor.id, new_path_ids, new_path_edges));
+                queue.push_back((neighbor.id, new_path_ids, new_path_edges));
             }
         }
 

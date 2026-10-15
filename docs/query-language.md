@@ -67,8 +67,8 @@ Locate nodes in the graph.
 |-------|------|-------------|
 | `type` | string \| `["Type1", "Type2"]` | Node type — see [Node Types](#node-types). Omit to match every kind |
 | `name` | string | Exact name (or object with exact/glob/startsWith/endsWith) |
-| `id` | string | Node UUID. Honoured only inside a `connect` `target`; a top-level `find` parses it but ignores it (known limitation) |
-| `label` | string \| `["L1"]` | Node label (exact, or any-of). The only label the query path attaches is `deprecated`; a `{"not": ...}` object is rejected at parse |
+| `id` | string | Node UUID — exact match. Honoured in a top-level `find` and inside a `connect` `target`; an id no node has selects nothing |
+| `label` | string \| `["L1"]` \| `{"not": ["L1"]}` | Node label: exact, any-of, or none-of. The label is `deprecated` when the symbol is deprecated (`#[deprecated]`, LSP deprecated tag), else the attribute-derived label the indexer attached — `test` from `#[test]` or a test container, otherwise the attribute's identifier (`async_trait`, `no_mangle`, …). Unlabelled nodes match none of the positive forms and all `{"not": [...]}` forms |
 | `path` | string | Substring match on the node's path |
 
 Name selector object:
@@ -104,10 +104,10 @@ flowchart LR
 
 | Field | Description |
 |-------|-------------|
-| `edge` | An [Edge Types](#edge-types) name (or array of names) |
+| `edge` | An [Edge Types](#edge-types) name, an array of names (any-of), or `{"not": [...]}` (none-of) |
 | `direction` | `outgoing` \| `incoming` \| `both` (default `outgoing`) |
-| `depth` | Integer `N` — report nodes at hops 1..=N. Start nodes are never reported, so `0` selects nothing. Or `{ "min": N, "max": M }` — hops N..=M inclusive; nearer nodes are walked through but not reported |
-| `target` | Optional nested `FindOp` — keep only the reached nodes it selects (this is where `id` is honoured) |
+| `depth` | Integer `N` — report nodes at hops 1..=N, where hops are counted along a shortest matching-edge path. Start nodes are never reported (not even back through a cycle), so `0` selects nothing. Or `{ "min": N, "max": M }` — hops N..=M inclusive; nearer nodes are walked through but not reported |
+| `target` | Optional nested `FindOp` — keep only the reached nodes it selects (`id` matches exactly here too) |
 
 ### filter
 
@@ -212,14 +212,14 @@ JSON, not emitted as `null`.
 
 | Field | Description |
 |-------|-------------|
-| `nodes` | Matched nodes (`id`, `type`, `name`; `label` appears only as `"deprecated"`). Omitted when empty |
+| `nodes` | Matched nodes (`id`, `type`, `name`, and `label` — `deprecated`, `test`, or another attribute-derived label; the field is omitted when the node carries none). Omitted when empty |
 | `count` | Number of nodes returned, after `limit` or the default cap |
 | `legacy` | `true` when the result came from a `named` query |
 | `meta.exec_us`, `meta.nodes_visited` | Always present |
 | `meta.truncated`, `meta.matched_before_limit` | Only when the default cap trimmed the result |
 | `groups` | Only after a `group` op: `{ key, count, nodes }` entries. Omitted otherwise |
 | `occupancy` | Active agents in this workspace and the files each has claimed (`active_agents: []` when none registered). Added by the tool handler, not the executor |
-| `edges`, `paths` | Present on the internal result type but never populated by the traversal, so they never appear in the JSON (known limitation). `meta.plan` is likewise never filled and always omitted |
+| `edges`, `paths` | Present on the internal result type but never populated by the traversal, so they never appear in the JSON (known limitation). `meta.plan` has been removed from `QueryMeta` — it never appeared on the wire (always `None`), so only the Rust type changes |
 
 ---
 

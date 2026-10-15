@@ -1754,14 +1754,14 @@ impl GraphDatabase {
                         return false;
                     }
                 }
-                // Label filter (is_deprecated is the only label for now)
+                // Label filter. Matches the node's query label —
+                // `deprecated` when `is_deprecated` is set, else whatever
+                // attribute-derived label it carries (`test`, …). It used
+                // to see only the `deprecated` flag, so a `find` by any
+                // other label answered `count: 0` on a graph full of
+                // matching nodes.
                 if let Some(sel) = label_selector {
-                    let label = if n.is_deprecated {
-                        Some("deprecated")
-                    } else {
-                        None
-                    };
-                    if !sel.matches(label) {
+                    if !sel.matches(n.query_label()) {
                         return false;
                     }
                 }
