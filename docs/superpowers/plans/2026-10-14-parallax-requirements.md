@@ -72,6 +72,8 @@ El mirror de la respuesta de `check_binding` en Parallax (`packages/shared/src/l
 
 ## 4. Señales que el advisor debe detectar
 
+**Directiva de diseño (siempre):** los detectores del advisor viven en configuración/plantillas — patrones editables por workspace (archivos de config con los matchers de operaciones, SDL, env-URLs, wrappers, codegen), no hardcodeados en el código. Cambiar o añadir un patrón de detección es un cambio de config, no de código. Misma filosofía que los `<repo>/.lain/patterns/` de LAIN.
+
 Patrones concretos observados en el fixture Saleor (pero no únicos de él). LAIN no los ve, los ve incompleto, o los malinterpreta:
 
 | Señal | Evidencia en el fixture | Por qué importa |

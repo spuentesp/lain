@@ -12,7 +12,7 @@ Two-branch model:
   CI: full hardened battery (all OSes, capability suite, coverage,
   release contracts). ~20 min.
 
-**Always open PRs against `dev`. Never target `main` directly.**
+**Feature branches are cut from `dev` and merged back into `dev`. Never target `main` directly.**
 
 dev → main is **release-only**, not a routine merge:
 
@@ -89,7 +89,7 @@ cancels superseded runs for the same ref.
 
 ## Conventions for AI agents
 
-- Open PRs against `dev`. Never target `main` directly.
+- Feature branches: cut from `dev`, merge back into `dev`. Never target `main` directly.
 - Don't bump versions in feature PRs — that's the release PR's job.
 - Don't commit secrets, even test fixtures. Use `hooks/<agent>/` to
   claim files before editing.

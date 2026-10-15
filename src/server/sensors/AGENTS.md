@@ -11,6 +11,13 @@ The short version:
 
 - Each sensor is one concern. Don't mix protocol detection with graph
   mutation.
+- **Detection patterns belong in config/templates, not in code.**
+  Call-shape matchers, document shapes, and similar detection patterns
+  must be expressed as editable configuration (the per-repo
+  `<repo>/.lain/patterns/` YAML + `.scm` override mechanism for HTTP;
+  an equivalent config surface for anything new) instead of hardcoded
+  literals in the sensor. Adding or changing a pattern is a config
+  change, not a code change.
 - The walker shell, the `is_read_only` guard, the `to_snake_case` /
   `to_camel_case` helpers, and the `find_handler_in_graph` resolver
   all live in `util.rs` and the `Sensor` trait default impls. **Import
