@@ -7,6 +7,16 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- query: `query_graph` results now carry `edges` and `paths` when the
+  reported nodes came from a `connect` step. `paths` holds one selected
+  shortest matching-edge path per reported node (parallel to `nodes`,
+  seed first) and `edges` the deduplicated union of the walked edges on
+  those paths, sorted by `(from, to, type)`. Tie-breaks — fewest hops,
+  then the outgoing walk, then the lowest seed id, then the lowest-id
+  equal-distance predecessor per hop — are documented in
+  `docs/query-language.md`. Find/filter-only results omit both fields
+  (skip-if-empty), as before. `QueryResult` itself is unchanged; the
+  executor's unused `TraversalResult` alias is gone.
 - config: `services[].provides_graphql` scopes which services mint
   GraphQL provider endpoints; set `false` for repos that only carry
   SDL copies. No migration needed (default `true` preserves prior

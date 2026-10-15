@@ -219,7 +219,68 @@ JSON, not emitted as `null`.
 | `meta.truncated`, `meta.matched_before_limit` | Only when the default cap trimmed the result |
 | `groups` | Only after a `group` op: `{ key, count, nodes }` entries. Omitted otherwise |
 | `occupancy` | Active agents in this workspace and the files each has claimed (`active_agents: []` when none registered). Added by the tool handler, not the executor |
-| `edges`, `paths` | Present on the internal result type but never populated by the traversal, so they never appear in the JSON (known limitation). `meta.plan` has been removed from `QueryMeta` — it never appeared on the wire (always `None`), so only the Rust type changes |
+| `edges` | The edges walked to reach the reported nodes — the deduplicated union of the edges on `paths` (`{ id, type, from, to }`, sorted by `from`, `to`, `type`). Only when the reported nodes came from a `connect`; see [Edges and paths](#edges-and-paths). Omitted when empty |
+| `paths` | One selected shortest path per reported node, parallel to `nodes` (seed first). Only when the reported nodes came from a `connect`; see [Edges and paths](#edges-and-paths). Omitted when empty |
+
+`meta.plan` has been removed from `QueryMeta` — it never appeared on the
+wire (always `None`), so only the Rust type changes.
+
+### Edges and paths
+
+When the reported nodes were produced by a `connect` step, the result
+carries the edges that were walked to reach them and one selected shortest
+path per node. Find/filter-only pipelines carry neither field (empty
+arrays are omitted from the JSON).
+
+```json
+{
+  "nodes": [{ "id": "…b", "type": "Function", "name": "b" }],
+  "edges": [
+    { "id": "…a->…b:Calls", "type": "Calls", "from": "…a", "to": "…b" }
+  ],
+  "paths": [
+    {
+      "nodes": [
+        { "id": "…s", "type": "Function", "name": "s" },
+        { "id": "…a", "type": "Function", "name": "a" },
+        { "id": "…b", "type": "Function", "name": "b" }
+      ],
+      "edges": [
+        { "id": "…s->…a:Calls", "type": "Calls", "from": "…s", "to": "…a" },
+        { "id": "…a->…b:Calls", "type": "Calls", "from": "…a", "to": "…b" }
+      ]
+    }
+  ],
+  "count": 1
+}
+```
+
+- `paths` is parallel to `nodes`: `paths[i]` is the path to `nodes[i]`.
+  Each path is `nodes` (walk order, seed first, reported node last) plus
+  `edges` (one per hop). `edges[k]` joins `nodes[k]` to `nodes[k+1]` and
+  carries the edge's stored direction — on an `incoming` walk the edge
+  points from the later node to the earlier one. The hop count obeys the
+  same `depth` range as node reporting: start nodes are never reported
+  (not even back through a cycle), and `min > 1` walks through nearer
+  nodes, which appear only as intermediate path nodes.
+- A node gets **one** path, even under `direction: both` (a path never
+  mixes directions — it comes from one pure walk). The selected path is
+  the shortest matching-edge path from the seed of the walk that reached
+  the node; ties resolve deterministically, in this order:
+  1. fewest hops;
+  2. the outgoing walk's path over the incoming walk's (`direction: both`);
+  3. the lowest seed id, when several seeds reach the node at the same length;
+  4. at each hop, the lowest-id predecessor at the next-lower hop count;
+  5. among parallel matching edges on that pair, the smallest edge type name.
+- `edges` is the deduplicated union of the edges on those paths (one entry
+  per `from`/`to`/`type`), sorted by `from`, `to`, `type`. An edge's `id`
+  is its `{from}->{to}:{type}` key. Transit edges of intermediate nodes are
+  included even when those nodes are not reported themselves; edges of
+  unselected alternative routes are not.
+- Paths come from the `connect` step that produced the node; chained
+  `connect` steps do not compose paths across steps.
+- `meta.truncated` (or a `limit` op) trims `nodes`, and `edges`/`paths`
+  follow exactly the nodes that were reported.
 
 ---
 

@@ -689,7 +689,10 @@ fn test_query_meta_has_no_plan_field() {
         matched_before_limit: None,
     };
     let json = serde_json::to_value(&meta).unwrap();
-    assert!(json.get("plan").is_none(), "meta must not resurrect `plan`: {json}");
+    assert!(
+        json.get("plan").is_none(),
+        "meta must not resurrect `plan`: {json}"
+    );
     assert_eq!(json["exec_us"], 1);
     assert_eq!(json["nodes_visited"], 2);
 }

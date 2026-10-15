@@ -359,9 +359,7 @@ impl<'de> Deserialize<'de> for EdgeSelector {
         let value = serde_json::Value::deserialize(deserializer)?;
         match value {
             serde_json::Value::String(value) => Ok(EdgeSelector::Single(value)),
-            serde_json::Value::Array(values) => {
-                selector_string_list(values).map(EdgeSelector::Or)
-            }
+            serde_json::Value::Array(values) => selector_string_list(values).map(EdgeSelector::Or),
             serde_json::Value::Object(object) if object.len() == 1 => {
                 let (key, value) = object
                     .into_iter()
@@ -828,9 +826,18 @@ pub struct QueryResult {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<GraphNodeRef>,
 
+    /// The edges walked to reach the reported nodes: the deduplicated
+    /// union of the edges on [`Self::paths`], one entry per
+    /// (from, to, type), sorted by those three fields. Only populated when
+    /// the reported nodes came from a `connect` step; find/filter-only
+    /// pipelines leave it empty (and the JSON omits it).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<GraphEdgeRef>,
 
+    /// One selected shortest path per reported node, parallel to
+    /// [`Self::nodes`] (`paths[i]` leads to `nodes[i]`). See [`GraphPath`]
+    /// for the shape and `docs/query-language.md` for the selection rule.
+    /// Same population rule as [`Self::edges`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<GraphPath>,
 
@@ -854,6 +861,9 @@ pub struct GraphNodeRef {
     pub label: Option<String>,
 }
 
+/// A reference to one graph edge on the wire. `id` is the
+/// `{from}->{to}:{type}` key, so the same physical edge always carries the
+/// same id wherever it appears.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphEdgeRef {
     pub id: String,
@@ -863,6 +873,11 @@ pub struct GraphEdgeRef {
     pub to: String,
 }
 
+/// The selected shortest matching-edge path to one reported node: `nodes`
+/// in walk order (seed first, reported node last) and one entry of
+/// [`GraphEdgeRef`] per hop. `edges[k]` joins `nodes[k]` to `nodes[k+1]`
+/// and carries the edge's stored direction — on an `incoming` walk the edge
+/// points from the later node to the earlier one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphPath {
     pub nodes: Vec<GraphNodeRef>,
