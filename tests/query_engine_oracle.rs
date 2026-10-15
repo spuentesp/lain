@@ -8,7 +8,8 @@
 //! `QuerySpec`, evaluate it twice — once through the real `Executor`, once
 //! through a deliberately naive reference (full scan, no indexes, plain BFS)
 //! that implements the documented semantics — and assert the two agree on
-//! the set of returned node ids (order is a separate concern).
+//! the set of returned node ids (order is a separate concern), on the walked
+//! edge set, and on the exact selected path of every reported node.
 //!
 //! Every generated spec is pushed through its JSON wire form before either
 //! side sees it, so wire-shape bugs are in scope: a selector form that
@@ -27,13 +28,13 @@ use lain::nlp::NlpEmbedder;
 use lain::query::executor::Executor;
 use lain::query::spec::{
     ConnectOp, DepthSpec, Direction, EdgeSelector, FilterOp, FindOp, GraphOp, LabelSelector,
-    NameSelector, QuerySpec, TypeSelector,
+    NameSelector, QueryResult, QuerySpec, TypeSelector,
 };
 use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use parking_lot::Mutex;
 use petgraph::Direction as PetDirection;
 use proptest::prelude::*;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -53,6 +54,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 //   reported). `direction: both` is the union of a pure-outgoing and a
 //   pure-incoming walk, each with its own shortest-path depths — never a
 //   path that mixes directions.
+// * `paths` holds, per reported node, the selected shortest matching-edge
+//   path from the seed of the walk that reached it: fewest hops, then the
+//   outgoing walk over the incoming one, then the lowest seed id, then at
+//   each hop the lowest-id equal-distance predecessor (and, among parallel
+//   matching edges on that pair, the smallest edge type name). `edges` is
+//   the deduplicated union of the edges on those paths.
 
 /// A node's label as the query language exposes it.
 fn query_label(node: &GraphNode) -> Option<&str> {
@@ -126,12 +133,101 @@ fn bfs_hops(
     hops
 }
 
-/// The three collections a connect step produces; only nodes are compared.
+/// The selected shortest path for one reported node: the walk's node ids in
+/// walk order (seed first, reported node last) and one `(from, to, type)`
+/// edge triple per hop, in the edge's stored direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefPath {
+    seed: String,
+    /// `true` when the path was taken from the pure-incoming walk. Used only
+    /// for selection (equal hops prefer the outgoing walk); never mixed.
+    incoming: bool,
+    nodes: Vec<String>,
+    edges: Vec<(String, String, String)>,
+}
+
+impl RefPath {
+    fn hops(&self) -> u32 {
+        self.nodes.len() as u32 - 1
+    }
+}
+
+/// An edge's wire identity: from-node id, to-node id, type name.
+fn edge_triple(edge: &GraphEdge) -> (String, String, String) {
+    (
+        edge.source_id.clone(),
+        edge.target_id.clone(),
+        edge.edge_type.to_string(),
+    )
+}
+
+/// Reconstruct the selected shortest path from `seed` to `target` inside one
+/// pure walk, walking hops backwards. Each hop goes to the **lowest-id**
+/// predecessor sitting at the next-lower hop count — the documented
+/// tie-break — and among parallel matching edges on that pair the
+/// lexicographically smallest edge type name.
+fn ref_path(
+    graph: &GraphDatabase,
+    seed: &str,
+    target: &str,
+    hops: &HashMap<String, u32>,
+    direction: PetDirection,
+    edge_sel: &EdgeSelector,
+) -> RefPath {
+    // The walk moves `current -> neighbour` along `direction`; walking it
+    // backwards flips the direction.
+    let backwards = match direction {
+        PetDirection::Outgoing => PetDirection::Incoming,
+        PetDirection::Incoming => PetDirection::Outgoing,
+    };
+    let mut nodes = vec![target.to_string()];
+    let mut edges = Vec::new();
+    let mut current = target.to_string();
+    while current != seed {
+        let depth = hops[&current];
+        let mut best: Option<(String, (String, String, String))> = None;
+        for (pred, edge) in graph.get_neighbors(&current, backwards) {
+            if !edge_sel.matches(&edge.edge_type.to_string()) {
+                continue;
+            }
+            if hops.get(&pred.id).copied() != Some(depth - 1) {
+                continue;
+            }
+            let key = (pred.id.clone(), edge_triple(&edge));
+            let better = match &best {
+                None => true,
+                Some((best_pred, best_edge)) => {
+                    (key.0.as_str(), key.1 .2.as_str()) < (best_pred.as_str(), best_edge.2.as_str())
+                }
+            };
+            if better {
+                best = Some(key);
+            }
+        }
+        let (pred_id, triple) = best.expect("BFS guarantees a shortest-path predecessor");
+        edges.push(triple);
+        nodes.push(pred_id.clone());
+        current = pred_id;
+    }
+    nodes.reverse();
+    edges.reverse();
+    RefPath {
+        seed: seed.to_string(),
+        incoming: matches!(direction, PetDirection::Incoming),
+        nodes,
+        edges,
+    }
+}
+
+/// A connect step as the reference sees it: the reported node ids and the
+/// selected shortest path per node. A node is reported when some pure walk
+/// places it inside the reported hop range; its path is the best such walk
+/// by (fewest hops, outgoing walk before incoming, lowest seed id).
 fn connect_reference(
     graph: &GraphDatabase,
     seeds: &[String],
     connect: &ConnectOp,
-) -> Vec<String> {
+) -> (Vec<String>, HashMap<String, RefPath>) {
     let range = connect.depth.to_range();
     let lo = (*range.start()).max(1);
     let hi = *range.end();
@@ -141,18 +237,43 @@ fn connect_reference(
         Direction::Incoming => vec![PetDirection::Incoming],
     };
 
-    let mut found: BTreeSet<String> = BTreeSet::new();
+    let mut walks: Vec<(String, PetDirection, HashMap<String, u32>)> = Vec::new();
     for seed in seeds {
-        for direction in &directions {
-            for (id, hops) in bfs_hops(graph, seed, *direction, &connect.edge) {
-                if hops >= lo && hops <= hi {
-                    found.insert(id);
-                }
+        for &direction in &directions {
+            walks.push((
+                seed.clone(),
+                direction,
+                bfs_hops(graph, seed, direction, &connect.edge),
+            ));
+        }
+    }
+
+    let mut paths: HashMap<String, RefPath> = HashMap::new();
+    for (seed, direction, hops) in &walks {
+        let incoming = matches!(direction, PetDirection::Incoming);
+        for (id, &h) in hops {
+            if h < lo || h > hi {
+                continue;
+            }
+            // Selection key: fewest hops, then the outgoing walk, then the
+            // lowest seed id (`false` sorts before `true`, so `incoming`
+            // loses every equal-hop tie).
+            let key = (h, incoming, seed.as_str());
+            let better = match paths.get(id) {
+                None => true,
+                Some(prev) => key < (prev.hops(), prev.incoming, prev.seed.as_str()),
+            };
+            if better {
+                paths.insert(
+                    id.clone(),
+                    ref_path(graph, seed, id, hops, *direction, &connect.edge),
+                );
             }
         }
     }
 
-    let mut nodes: Vec<String> = found.into_iter().collect();
+    let mut nodes: Vec<String> = paths.keys().cloned().collect();
+    nodes.sort();
     if let Some(target) = connect.target.as_deref() {
         nodes.retain(|id| {
             graph
@@ -161,14 +282,20 @@ fn connect_reference(
                 .flatten()
                 .is_some_and(|n| find_matches(target, &n))
         });
+        let keep: BTreeSet<&str> = nodes.iter().map(String::as_str).collect();
+        paths.retain(|id, _| keep.contains(id.as_str()));
     }
-    nodes
+    (nodes, paths)
 }
 
 /// Evaluate a whole `QuerySpec` the slow, obvious way. Returns the ids of
-/// the final working set.
-fn reference_eval(graph: &GraphDatabase, spec: &QuerySpec) -> BTreeSet<String> {
+/// the final working set and the selected path of every reported node.
+fn reference_eval(
+    graph: &GraphDatabase,
+    spec: &QuerySpec,
+) -> (BTreeSet<String>, HashMap<String, RefPath>) {
     let mut current: Vec<String> = Vec::new();
+    let mut paths: HashMap<String, RefPath> = HashMap::new();
     for op in &spec.ops {
         match op {
             GraphOp::Find(find) => {
@@ -178,6 +305,7 @@ fn reference_eval(graph: &GraphDatabase, spec: &QuerySpec) -> BTreeSet<String> {
                     .filter(|n| find_matches(find, n))
                     .map(|n| n.id)
                     .collect();
+                paths.clear();
             }
             GraphOp::Filter(filter) => {
                 current.retain(|id| {
@@ -203,16 +331,25 @@ fn reference_eval(graph: &GraphDatabase, spec: &QuerySpec) -> BTreeSet<String> {
                 });
             }
             GraphOp::Connect(connect) => {
-                current = connect_reference(graph, &current, connect);
+                let (nodes, found) = connect_reference(graph, &current, connect);
+                current = nodes;
+                paths = found;
             }
             // Excluded from the generator; a spec carrying one is not a
             // valid oracle input.
-            GraphOp::SemanticFilter(_) | GraphOp::Group(_) | GraphOp::Sort(_) | GraphOp::Limit(_) => {
+            GraphOp::SemanticFilter(_)
+            | GraphOp::Group(_)
+            | GraphOp::Sort(_)
+            | GraphOp::Limit(_) => {
                 panic!("oracle input must not contain {:?}", op)
             }
         }
     }
-    current.into_iter().collect()
+    // Paths describe the reported nodes only; a filter step drops nodes
+    // without dropping their neighbours' paths from the map.
+    let reported: BTreeSet<&str> = current.iter().map(String::as_str).collect();
+    paths.retain(|id, _| reported.contains(id.as_str()));
+    (current.into_iter().collect(), paths)
 }
 
 // ─── Graph + query generators ────────────────────────────────────────
@@ -471,8 +608,7 @@ fn arb_type_plan() -> BoxedStrategy<Option<TypePlan>> {
     prop_oneof![
         Just(None),
         (0..NODE_TYPES.len()).prop_map(|i| Some(TypePlan::One(i))),
-        (0..NODE_TYPES.len(), 0..NODE_TYPES.len())
-            .prop_map(|(a, b)| Some(TypePlan::Or(a, b))),
+        (0..NODE_TYPES.len(), 0..NODE_TYPES.len()).prop_map(|(a, b)| Some(TypePlan::Or(a, b))),
     ]
     .boxed()
 }
@@ -499,12 +635,16 @@ fn arb_id_plan() -> BoxedStrategy<Option<IdPlan>> {
 }
 
 fn arb_find_plan() -> impl Strategy<Value = FindPlan> {
-    (
+    let free = (
         arb_type_plan(),
         arb_name_plan(),
         arb_id_plan(),
         arb_label_plan(),
-        prop_oneof![Just(None), Just(Some("src".to_string())), Just(Some("f1".to_string()))],
+        prop_oneof![
+            Just(None),
+            Just(Some("src".to_string())),
+            Just(Some("f1".to_string()))
+        ],
     )
         .prop_map(|(type_sel, name, id, label, path)| FindPlan {
             type_sel,
@@ -512,18 +652,30 @@ fn arb_find_plan() -> impl Strategy<Value = FindPlan> {
             id,
             label,
             path,
-        })
+        });
+    // A plan anchored on one real node id, with every other selector clear.
+    // The free flavour above usually selects nothing (its independent
+    // name/type/label clauses rarely agree on one node), and an oracle that
+    // never seeds a traversal never compares edges or paths at all.
+    let anchored = (0..8usize).prop_map(|i| FindPlan {
+        type_sel: None,
+        name: None,
+        id: Some(IdPlan::Existing(i)),
+        label: None,
+        path: None,
+    });
+    prop_oneof![free, anchored]
 }
 
 fn arb_op_plan() -> impl Strategy<Value = OpPlan> {
     prop_oneof![
-        (arb_type_plan(), arb_label_plan(), arb_name_plan()).prop_map(
-            |(type_sel, label, name)| OpPlan::Filter {
+        (arb_type_plan(), arb_label_plan(), arb_name_plan()).prop_map(|(type_sel, label, name)| {
+            OpPlan::Filter {
                 type_sel,
                 label,
-                name
+                name,
             }
-        ),
+        }),
         (
             prop_oneof![
                 (0..EDGE_TYPES.len()).prop_map(EdgePlan::One),
@@ -594,7 +746,11 @@ fn arb_graph_spec() -> impl Strategy<Value = GraphSpec> {
                     .collect();
                 let edges = edges
                     .into_iter()
-                    .map(|(from, to, edge_type)| EdgeSpec { from, to, edge_type })
+                    .map(|(from, to, edge_type)| EdgeSpec {
+                        from,
+                        to,
+                        edge_type,
+                    })
                     .collect();
                 GraphSpec { nodes, edges }
             })
@@ -665,7 +821,8 @@ fn run_case(graph_spec: &GraphSpec, query_plan: &QueryPlan) {
         std::num::NonZeroUsize::new(8).unwrap(),
     )));
     // Cap disabled: the oracle compares full, pre-truncation sets.
-    let mut exec = Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 0);
+    let mut exec =
+        Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 0);
     let result = exec.execute(&spec).expect("executor accepts a valid spec");
     let meta = result.meta.clone().expect("executor always reports meta");
     assert!(
@@ -675,11 +832,84 @@ fn run_case(graph_spec: &GraphSpec, query_plan: &QueryPlan) {
     );
 
     let fast: BTreeSet<String> = result.nodes.iter().map(|n| n.id.clone()).collect();
-    let slow = reference_eval(&graph, &spec);
+    let (slow, slow_paths) = reference_eval(&graph, &spec);
     assert_eq!(
         fast, slow,
-        "executor and reference disagree\ngraph: {graph_spec:?}\nquery: {query_plan:?}\nwire: {wire}"
+        "executor and reference disagree on node ids\ngraph: {graph_spec:?}\nquery: {query_plan:?}\nwire: {wire}"
     );
+
+    // Paths: exactly one per reported node when the reference has any,
+    // parallel to `nodes`, and equal to the reference's selected path —
+    // node sequence and edge sequence, seed first.
+    assert_eq!(
+        result.paths.is_empty(),
+        slow_paths.is_empty(),
+        "paths must appear exactly when the reference has them\ngraph: {graph_spec:?}\nquery: {query_plan:?}\nwire: {wire}\nfast paths: {:?}\nslow paths: {:?}",
+        result.paths, slow_paths
+    );
+    if !slow_paths.is_empty() {
+        assert_eq!(
+            result.paths.len(),
+            result.nodes.len(),
+            "paths parallel nodes\ngraph: {graph_spec:?}\nquery: {query_plan:?}"
+        );
+        for (node, path) in result.nodes.iter().zip(result.paths.iter()) {
+            let want = slow_paths
+                .get(&node.id)
+                .expect("reference has a path for every reported node");
+            let got_nodes: Vec<&str> = path.nodes.iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(
+                got_nodes, want.nodes,
+                "path node sequence for {}\ngraph: {graph_spec:?}\nquery: {query_plan:?}\nwire: {wire}",
+                node.id
+            );
+            let got_edges: Vec<(String, String, String)> = path
+                .edges
+                .iter()
+                .map(|e| (e.from.clone(), e.to.clone(), e.edge_type.clone()))
+                .collect();
+            assert_eq!(
+                got_edges, want.edges,
+                "path edge sequence for {}\ngraph: {graph_spec:?}\nquery: {query_plan:?}\nwire: {wire}",
+                node.id
+            );
+            assert_eq!(
+                path.nodes.last().map(|n| n.id.as_str()),
+                Some(node.id.as_str()),
+                "paths[i] must end at nodes[i]"
+            );
+        }
+    }
+
+    // Edges: the deduplicated union of the reported path edges, in the
+    // documented (from, to, type) sort order, with the stable composite id.
+    let mut slow_edges: BTreeSet<(String, String, String)> = BTreeSet::new();
+    for p in slow_paths.values() {
+        slow_edges.extend(p.edges.iter().cloned());
+    }
+    let fast_edges: BTreeSet<(String, String, String)> = result
+        .edges
+        .iter()
+        .map(|e| (e.from.clone(), e.to.clone(), e.edge_type.clone()))
+        .collect();
+    assert_eq!(
+        fast_edges, slow_edges,
+        "executor and reference disagree on walked edges\ngraph: {graph_spec:?}\nquery: {query_plan:?}\nwire: {wire}"
+    );
+    for (a, b) in result.edges.iter().zip(result.edges.iter().skip(1)) {
+        assert!(
+            (a.from.as_str(), a.to.as_str(), a.edge_type.as_str())
+                < (b.from.as_str(), b.to.as_str(), b.edge_type.as_str()),
+            "edges must be sorted by (from, to, type) and deduplicated: {a:?} then {b:?}"
+        );
+    }
+    for e in &result.edges {
+        assert_eq!(
+            e.id,
+            format!("{}->{}:{}", e.from, e.to, e.edge_type),
+            "edge id must be the (from, to, type) key"
+        );
+    }
 
     cleanup_scratch(&dir);
 }
@@ -731,14 +961,15 @@ fn find_id_selects_exactly_that_node() {
         id: Some(id_a.clone()),
         ..Default::default()
     })]);
-    let hit = reference_eval(&graph, &spec);
+    let (hit, _) = reference_eval(&graph, &spec);
     assert_eq!(hit, BTreeSet::from([id_a.clone()]));
 
     let embedder = NlpEmbedder::new_stub();
     let cache = std::sync::Arc::new(Mutex::new(lru::LruCache::new(
         std::num::NonZeroUsize::new(8).unwrap(),
     )));
-    let mut exec = Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 0);
+    let mut exec =
+        Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 0);
     let got: BTreeSet<String> = exec
         .execute(&spec)
         .unwrap()
@@ -759,7 +990,10 @@ fn find_id_selects_exactly_that_node() {
         .iter()
         .map(|n| n.id.clone())
         .collect();
-    assert!(got.is_empty(), "a wrong find.id must select nothing, got {got:?}");
+    assert!(
+        got.is_empty(),
+        "a wrong find.id must select nothing, got {got:?}"
+    );
     cleanup_scratch(&dir);
 }
 
@@ -814,14 +1048,15 @@ fn find_label_matches_the_nodes_actual_label() {
         label_selector: Some(LabelSelector::Single("test".into())),
         ..Default::default()
     })]);
-    let slow = reference_eval(&graph, &spec);
+    let (slow, _) = reference_eval(&graph, &spec);
     assert_eq!(slow.len(), 1, "reference selects the labelled node");
 
     let embedder = NlpEmbedder::new_stub();
     let cache = std::sync::Arc::new(Mutex::new(lru::LruCache::new(
         std::num::NonZeroUsize::new(8).unwrap(),
     )));
-    let mut exec = Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 0);
+    let mut exec =
+        Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 0);
     let got: BTreeSet<String> = exec
         .execute(&spec)
         .unwrap()
@@ -829,7 +1064,10 @@ fn find_label_matches_the_nodes_actual_label() {
         .iter()
         .map(|n| n.id.clone())
         .collect();
-    assert_eq!(got, slow, "executor must match labels other than deprecated");
+    assert_eq!(
+        got, slow,
+        "executor must match labels other than deprecated"
+    );
     cleanup_scratch(&dir);
 }
 
@@ -921,7 +1159,8 @@ fn depth_counts_shortest_path_hops() {
             (DepthSpec::Range { min: 3, max: 3 }, BTreeSet::new()),
         ] {
             let spec = connect(depth);
-            assert_eq!(reference_eval(&graph, &spec), expect, "reference hop sets");
+            let (expected_hops, _) = reference_eval(&graph, &spec);
+            assert_eq!(expected_hops, expect, "reference hop sets");
             let got: BTreeSet<String> = exec
                 .execute(&spec)
                 .unwrap()
@@ -969,14 +1208,19 @@ fn start_nodes_are_not_reported_through_cycles() {
             target: None,
         }),
     ]);
-    let slow = reference_eval(&graph, &spec);
-    assert_eq!(slow, BTreeSet::from([b.clone()]), "a must not report itself");
+    let (slow, _) = reference_eval(&graph, &spec);
+    assert_eq!(
+        slow,
+        BTreeSet::from([b.clone()]),
+        "a must not report itself"
+    );
 
     let embedder = NlpEmbedder::new_stub();
     let cache = std::sync::Arc::new(Mutex::new(lru::LruCache::new(
         std::num::NonZeroUsize::new(8).unwrap(),
     )));
-    let mut exec = Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 0);
+    let mut exec =
+        Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 0);
     let got: BTreeSet<String> = exec
         .execute(&spec)
         .unwrap()
@@ -988,14 +1232,484 @@ fn start_nodes_are_not_reported_through_cycles() {
     cleanup_scratch(&dir);
 }
 
+// ─── edges / paths: walked edges and selected shortest paths ────────────
+//
+// The contract `docs/query-language.md` states: when the reported nodes
+// came from a `connect`, `paths` holds one entry per reported node
+// (parallel to `nodes`) with the selected shortest matching-edge path from
+// the seed, and `edges` is the deduplicated union of the edges on those
+// paths, sorted by (from, to, type). These tests pin the selection rule
+// itself; the proptest below checks the executor against an independent
+// implementation of the same rule.
+
+type PathShape = (Vec<String>, Vec<(String, String, String)>);
+
+/// A function node with a caller-chosen id, so tie-break expectations read
+/// as ids (`"a" < "b"`) instead of opaque UUIDs.
+fn node_with_id(id: &str) -> GraphNode {
+    let mut n = GraphNode::new(NodeType::Function, id.to_string(), format!("src/{id}.rs"));
+    n.id = id.to_string();
+    n
+}
+
+fn find_by_name(name: &str) -> GraphOp {
+    GraphOp::Find(FindOp {
+        name: Some(NameSelector::Exact(name.to_string())),
+        ..Default::default()
+    })
+}
+
+fn connect_calls(direction: Direction, depth: DepthSpec) -> GraphOp {
+    GraphOp::Connect(ConnectOp {
+        edge: EdgeSelector::Single("Calls".to_string()),
+        direction,
+        depth,
+        target: None,
+    })
+}
+
+fn exec_query(graph: &GraphDatabase, spec: &QuerySpec, default_limit: usize) -> QueryResult {
+    let embedder = NlpEmbedder::new_stub();
+    let cache = std::sync::Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(8).unwrap(),
+    )));
+    let mut exec = Executor::with_default_limit(
+        graph,
+        &embedder,
+        &cache,
+        std::path::Path::new(""),
+        default_limit,
+    );
+    exec.execute(spec).expect("executor accepts a valid spec")
+}
+
+/// One `(path node ids, path edge triples)` shape per reported node, keyed
+/// by node id. Panics when `paths` is not parallel to `nodes`.
+fn path_shapes(result: &QueryResult) -> BTreeMap<String, PathShape> {
+    assert_eq!(
+        result.paths.len(),
+        result.nodes.len(),
+        "paths must parallel nodes"
+    );
+    result
+        .nodes
+        .iter()
+        .zip(result.paths.iter())
+        .map(|(n, p)| {
+            (
+                n.id.clone(),
+                (
+                    p.nodes.iter().map(|x| x.id.clone()).collect(),
+                    p.edges
+                        .iter()
+                        .map(|e| (e.from.clone(), e.to.clone(), e.edge_type.clone()))
+                        .collect(),
+                ),
+            )
+        })
+        .collect()
+}
+
+/// The wire `edges` as (from, to, type) triples, in reported order.
+fn edge_shapes(result: &QueryResult) -> Vec<(String, String, String)> {
+    result
+        .edges
+        .iter()
+        .map(|e| (e.from.clone(), e.to.clone(), e.edge_type.clone()))
+        .collect()
+}
+
+/// `edges`/`paths` of a `connect` result: one path per reported node
+/// (seed first), and `edges` the deduplicated union of the path edges.
+#[test]
+fn connect_results_carry_walked_edges_and_shortest_paths() {
+    let (graph, dir) = scratch_graph("edges_paths_chain");
+    // s → a → b. Depth 2 reports a and b with their walk paths.
+    let s = insert(&graph, node_with_id("s"));
+    let a = insert(&graph, node_with_id("a"));
+    let b = insert(&graph, node_with_id("b"));
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, s.clone(), a.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, a.clone(), b.clone()))
+        .unwrap();
+
+    let res = exec_query(
+        &graph,
+        &QuerySpec::new(vec![
+            find_by_name("s"),
+            connect_calls(Direction::Outgoing, DepthSpec::Single(2)),
+        ]),
+        0,
+    );
+
+    assert_eq!(res.count, 2);
+    assert_eq!(
+        path_shapes(&res),
+        BTreeMap::from([
+            (
+                "a".to_string(),
+                (
+                    vec!["s".to_string(), "a".to_string()],
+                    vec![("s".to_string(), "a".to_string(), "Calls".to_string())],
+                ),
+            ),
+            (
+                "b".to_string(),
+                (
+                    vec!["s".to_string(), "a".to_string(), "b".to_string()],
+                    vec![
+                        ("s".to_string(), "a".to_string(), "Calls".to_string()),
+                        ("a".to_string(), "b".to_string(), "Calls".to_string()),
+                    ],
+                ),
+            ),
+        ])
+    );
+    // Sorted by (from, to, type): "a" < "s".
+    assert_eq!(
+        edge_shapes(&res),
+        vec![
+            ("a".to_string(), "b".to_string(), "Calls".to_string()),
+            ("s".to_string(), "a".to_string(), "Calls".to_string()),
+        ]
+    );
+    cleanup_scratch(&dir);
+}
+
+/// When several shortest paths reach a node, the selected one runs through
+/// the lowest-id equal-distance predecessor at every hop.
+#[test]
+fn path_tie_break_prefers_the_lowest_predecessor_id() {
+    let (graph, dir) = scratch_graph("edges_paths_tie_pred");
+    // s→a, s→b, a→c, b→c: c sits at hop 2 over two equal-length paths.
+    let s = insert(&graph, node_with_id("s"));
+    let a = insert(&graph, node_with_id("a"));
+    let b = insert(&graph, node_with_id("b"));
+    let c = insert(&graph, node_with_id("c"));
+    for (from, to) in [(&s, &a), (&s, &b), (&a, &c), (&b, &c)] {
+        graph
+            .insert_edge(&GraphEdge::new(EdgeType::Calls, from.clone(), to.clone()))
+            .unwrap();
+    }
+
+    let res = exec_query(
+        &graph,
+        &QuerySpec::new(vec![
+            find_by_name("s"),
+            connect_calls(Direction::Outgoing, DepthSpec::Single(2)),
+        ]),
+        0,
+    );
+
+    // "a" < "b", so c's path is s→a→c; the s→b→c route's edges stay out.
+    assert_eq!(
+        path_shapes(&res),
+        BTreeMap::from([
+            (
+                "a".to_string(),
+                (
+                    vec!["s".to_string(), "a".to_string()],
+                    vec![("s".to_string(), "a".to_string(), "Calls".to_string())],
+                ),
+            ),
+            (
+                "b".to_string(),
+                (
+                    vec!["s".to_string(), "b".to_string()],
+                    vec![("s".to_string(), "b".to_string(), "Calls".to_string())],
+                ),
+            ),
+            (
+                "c".to_string(),
+                (
+                    vec!["s".to_string(), "a".to_string(), "c".to_string()],
+                    vec![
+                        ("s".to_string(), "a".to_string(), "Calls".to_string()),
+                        ("a".to_string(), "c".to_string(), "Calls".to_string()),
+                    ],
+                ),
+            ),
+        ])
+    );
+    // Only the selected path's edges: (b→c) was walked but is not on it.
+    assert_eq!(
+        edge_shapes(&res),
+        vec![
+            ("a".to_string(), "c".to_string(), "Calls".to_string()),
+            ("s".to_string(), "a".to_string(), "Calls".to_string()),
+            ("s".to_string(), "b".to_string(), "Calls".to_string()),
+        ]
+    );
+    cleanup_scratch(&dir);
+}
+
+/// `direction: both` with a node one hop away each way: the outgoing
+/// walk's path wins the equal-length tie.
+#[test]
+fn equal_hops_prefer_the_outgoing_walks_path() {
+    let (graph, dir) = scratch_graph("edges_paths_both_tie");
+    let s = insert(&graph, node_with_id("s"));
+    let x = insert(&graph, node_with_id("x"));
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, s.clone(), x.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, x.clone(), s.clone()))
+        .unwrap();
+
+    let res = exec_query(
+        &graph,
+        &QuerySpec::new(vec![
+            find_by_name("s"),
+            connect_calls(Direction::Both, DepthSpec::Single(1)),
+        ]),
+        0,
+    );
+
+    // One path for x, over the outgoing s→x edge — never (x→s).
+    assert_eq!(
+        path_shapes(&res),
+        BTreeMap::from([(
+            "x".to_string(),
+            (
+                vec!["s".to_string(), "x".to_string()],
+                vec![("s".to_string(), "x".to_string(), "Calls".to_string())],
+            ),
+        )])
+    );
+    assert_eq!(
+        edge_shapes(&res),
+        vec![("s".to_string(), "x".to_string(), "Calls".to_string())]
+    );
+    cleanup_scratch(&dir);
+}
+
+/// `direction: both` reports one path per node: the shorter of the two
+/// pure walks, even when it runs against the edge direction.
+#[test]
+fn both_walks_report_the_shorter_path() {
+    let (graph, dir) = scratch_graph("edges_paths_both_shorter");
+    // y→s is one hop on the incoming walk; s→m→y is two hops outgoing.
+    let s = insert(&graph, node_with_id("s"));
+    let m = insert(&graph, node_with_id("m"));
+    let y = insert(&graph, node_with_id("y"));
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, y.clone(), s.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, s.clone(), m.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, m.clone(), y.clone()))
+        .unwrap();
+
+    let res = exec_query(
+        &graph,
+        &QuerySpec::new(vec![
+            find_by_name("s"),
+            connect_calls(Direction::Both, DepthSpec::Single(2)),
+        ]),
+        0,
+    );
+
+    assert_eq!(res.count, 2);
+    assert_eq!(
+        path_shapes(&res),
+        BTreeMap::from([
+            (
+                "m".to_string(),
+                (
+                    vec!["s".to_string(), "m".to_string()],
+                    vec![("s".to_string(), "m".to_string(), "Calls".to_string())],
+                ),
+            ),
+            (
+                "y".to_string(),
+                (
+                    vec!["s".to_string(), "y".to_string()],
+                    // The incoming walk's edge, stored y→s: shorter beats
+                    // the outgoing s→m→y route.
+                    vec![("y".to_string(), "s".to_string(), "Calls".to_string())],
+                ),
+            ),
+        ])
+    );
+    // Only m's own path keeps (s→m); (m→y) is on no selected path.
+    assert_eq!(
+        edge_shapes(&res),
+        vec![
+            ("s".to_string(), "m".to_string(), "Calls".to_string()),
+            ("y".to_string(), "s".to_string(), "Calls".to_string()),
+        ]
+    );
+    cleanup_scratch(&dir);
+}
+
+/// `edges` covers the transit edges walked to reach a reported node, even
+/// when the transit node itself is outside the reported hop range.
+#[test]
+fn edges_cover_transit_nodes_the_depth_range_does_not_report() {
+    let (graph, dir) = scratch_graph("edges_paths_transit");
+    // s→a→b with depth {min:2,max:2}: only b is reported, but its path
+    // walks through a, so (s→a) is part of the walked edges.
+    let s = insert(&graph, node_with_id("s"));
+    let a = insert(&graph, node_with_id("a"));
+    let b = insert(&graph, node_with_id("b"));
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, s.clone(), a.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, a.clone(), b.clone()))
+        .unwrap();
+
+    let res = exec_query(
+        &graph,
+        &QuerySpec::new(vec![
+            find_by_name("s"),
+            connect_calls(Direction::Outgoing, DepthSpec::Range { min: 2, max: 2 }),
+        ]),
+        0,
+    );
+
+    assert_eq!(res.count, 1);
+    assert_eq!(
+        path_shapes(&res),
+        BTreeMap::from([(
+            "b".to_string(),
+            (
+                vec!["s".to_string(), "a".to_string(), "b".to_string()],
+                vec![
+                    ("s".to_string(), "a".to_string(), "Calls".to_string()),
+                    ("a".to_string(), "b".to_string(), "Calls".to_string()),
+                ],
+            ),
+        )])
+    );
+    assert_eq!(
+        edge_shapes(&res),
+        vec![
+            ("a".to_string(), "b".to_string(), "Calls".to_string()),
+            ("s".to_string(), "a".to_string(), "Calls".to_string()),
+        ]
+    );
+    cleanup_scratch(&dir);
+}
+
+/// Find/filter-only pipelines have no walked edges; skip-if-empty keeps
+/// the fields off the wire entirely.
+#[test]
+fn find_only_results_carry_no_edges_or_paths() {
+    let (graph, dir) = scratch_graph("edges_paths_find_only");
+    insert(&graph, node_with_id("s"));
+
+    let res = exec_query(&graph, &QuerySpec::new(vec![find_by_name("s")]), 0);
+    assert_eq!(res.count, 1);
+    assert!(res.edges.is_empty(), "find-only must not invent edges");
+    assert!(res.paths.is_empty(), "find-only must not invent paths");
+
+    let wire = serde_json::to_value(&res).expect("QueryResult serializes");
+    assert!(
+        wire.get("edges").is_none(),
+        "empty edges stay off the wire: {wire}"
+    );
+    assert!(
+        wire.get("paths").is_none(),
+        "empty paths stay off the wire: {wire}"
+    );
+    cleanup_scratch(&dir);
+}
+
+/// The default result cap trims nodes; `edges`/`paths` follow exactly the
+/// nodes that were reported.
+#[test]
+fn truncation_carries_edges_and_paths_of_the_reported_nodes_only() {
+    let (graph, dir) = scratch_graph("edges_paths_truncated");
+    let s = insert(&graph, node_with_id("s"));
+    for id in ["a", "b"] {
+        let n = insert(&graph, node_with_id(id));
+        graph
+            .insert_edge(&GraphEdge::new(EdgeType::Calls, s.clone(), n))
+            .unwrap();
+    }
+
+    let res = exec_query(
+        &graph,
+        &QuerySpec::new(vec![
+            find_by_name("s"),
+            connect_calls(Direction::Outgoing, DepthSpec::Single(1)),
+        ]),
+        1, // default cap: one node
+    );
+
+    assert_eq!(res.count, 1);
+    let meta = res.meta.clone().expect("meta always present");
+    assert!(meta.truncated, "the cap must be reported: {meta:?}");
+    assert_eq!(meta.matched_before_limit, Some(2));
+    let shapes = path_shapes(&res);
+    assert_eq!(shapes.len(), 1, "one path for the one reported node");
+    let (id, (nodes, edges)) = shapes.into_iter().next().unwrap();
+    assert_eq!(nodes, vec!["s".to_string(), id.clone()]);
+    assert_eq!(edges, vec![("s".to_string(), id, "Calls".to_string())]);
+    assert_eq!(
+        edge_shapes(&res).len(),
+        1,
+        "only the reported node's edge is walked"
+    );
+    cleanup_scratch(&dir);
+}
+
+/// Equal-length paths from different seeds: the lower seed id wins.
+#[test]
+fn equal_hops_across_seeds_prefer_the_lowest_seed_id() {
+    let (graph, dir) = scratch_graph("edges_paths_seed_tie");
+    // s1→c and s2→c; both seeds one hop from c ("s1" < "s2").
+    let s1 = insert(&graph, node_with_id("s1"));
+    let s2 = insert(&graph, node_with_id("s2"));
+    let c = insert(&graph, node_with_id("c"));
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, s1.clone(), c.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, s2.clone(), c.clone()))
+        .unwrap();
+
+    let res = exec_query(
+        &graph,
+        &QuerySpec::new(vec![
+            GraphOp::Find(FindOp {
+                name: Some(NameSelector::StartsWith("s".to_string())),
+                ..Default::default()
+            }),
+            connect_calls(Direction::Outgoing, DepthSpec::Single(1)),
+        ]),
+        0,
+    );
+
+    assert_eq!(res.count, 1);
+    assert_eq!(
+        path_shapes(&res),
+        BTreeMap::from([(
+            "c".to_string(),
+            (
+                vec!["s1".to_string(), "c".to_string()],
+                vec![("s1".to_string(), "c".to_string(), "Calls".to_string())],
+            ),
+        )])
+    );
+    cleanup_scratch(&dir);
+}
+
 // ─── The oracle itself ───────────────────────────────────────────────
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// Fast executor ≡ reference evaluator, on random graphs and random
-    /// valid queries, after a JSON wire round-trip. Sets only: ordering
-    /// (sort/group/limit) is out of scope for now.
+    /// valid queries, after a JSON wire round-trip: node-id set, walked edge
+    /// set, and the exact selected path per node. Ordering (sort/group/
+    /// limit) is out of scope for now.
     #[test]
     fn executor_agrees_with_the_reference(graph in arb_graph_spec(), query in arb_query_plan()) {
         run_case(&graph, &query);
