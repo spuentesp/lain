@@ -52,7 +52,9 @@ All notable changes to LAIN are documented here. Versions follow
 - query: label selectors match the node's actual label (`test` and
   other attribute-derived labels), not only the `deprecated` flag, and
   results surface that label. `describe_schema` stops advertising the
-  labels `async` and `generated` — no producer emits either.
+  labels `async` and `generated` — no producer emits either — and `File`
+  nodes no longer advertise `generated`/`test`, which nothing attaches to
+  a `File`.
 
 ## 0.10.0 — 2026-10-13
 

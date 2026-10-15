@@ -105,7 +105,7 @@ flowchart LR
 | Field | Description |
 |-------|-------------|
 | `edge` | An [Edge Types](#edge-types) name, an array of names (any-of), or `{"not": [...]}` (none-of) |
-| `direction` | `outgoing` \| `incoming` \| `both` (default `outgoing`) |
+| `direction` | `outgoing` \| `incoming` \| `both` (default `outgoing`). `both` walks each direction as its own pure traversal (outgoing-only paths ∪ incoming-only paths) — a single path never mixes directions |
 | `depth` | Integer `N` — report nodes at hops 1..=N, where hops are counted along a shortest matching-edge path. Start nodes are never reported (not even back through a cycle), so `0` selects nothing. Or `{ "min": N, "max": M }` — hops N..=M inclusive; nearer nodes are walked through but not reported |
 | `target` | Optional nested `FindOp` — keep only the reached nodes it selects (`id` matches exactly here too) |
 

@@ -224,9 +224,10 @@ impl NodeType {
         }
     }
 
-    /// Labels that may be attached to this node type.
+    /// Labels selectable for this node type in queries (advertised by
+    /// `describe_schema`, matched by `GraphNode::query_label`).
     ///
-    /// Only what the ingest producers actually attach: `deprecated` from
+    /// What the ingest producers attach on this node type: `deprecated` from
     /// `#[deprecated]` / the LSP `DEPRECATED` tag, `test` from `#[test]` or
     /// a test container (`src/server/ingest/scan.rs`). Other attribute
     /// identifiers (`async_trait`, `no_mangle`, …) can land in
