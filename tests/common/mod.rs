@@ -120,16 +120,26 @@ pub fn free_port() -> u16 {
     use std::collections::HashSet;
     use std::sync::Mutex;
     static TAKEN: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
-    let mut guard = TAKEN.lock().unwrap();
-    let taken = guard.get_or_insert_with(HashSet::new);
-    loop {
+    // Bounded: 32 consecutive already-registered picks means something
+    // other than this registry is eating the ephemeral space — fail
+    // loudly instead of spinning forever.
+    for _ in 0..32 {
+        // Bind (and its unwrap) outside the registry lock: a panic
+        // while the mutex is held would poison the static and fail
+        // every later test in this binary.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        if taken.insert(port) {
+        let mut guard = TAKEN.lock().unwrap();
+        if guard.get_or_insert_with(HashSet::new).insert(port) {
             return port;
         }
     }
+    panic!(
+        "free_port: the kernel handed out already-registered ports on \
+         32 consecutive binds — this test binary's ephemeral space is \
+         exhausted or another component is stealing picks"
+    );
 }
 
 /// Poll `GET /health` on `host` until it answers 200 with no repo

@@ -9,6 +9,8 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod common;
+
 struct Server {
     child: Child,
     host: String,
@@ -19,14 +21,6 @@ impl Drop for Server {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -65,7 +59,7 @@ fn boot() -> Server {
     .unwrap();
     let state = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
-    let port = free_port();
+    let port = common::free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_lain"))
         .args([
             "server",

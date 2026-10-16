@@ -372,16 +372,17 @@ async fn set_workspace_stress_visible_to_shared_lock() {
     // The writer held off until the reader sampled the pre-write
     // state, and the reader runs until it sees the final state, so
     // both endpoints are in `observed` by construction — the
-    // assertion below is deterministic, not scheduler luck. Without
+    // assertions below are deterministic, not scheduler luck. Without
     // the fix, the reader would see the construction-time count of
     // `1` for the *entire* test run, because the LainMcpServer held
     // an independent snapshot — the no-progress watchdog would fire.
-    // The punched-line assertions:
     //
-    // (1) the reader sees the writer's final state — proves writes
-    //     reach the lock cell the dispatch path reads through.
-    // (2) the reader saw the pre-write state AND the final state —
-    //     two distinct counts observed through the same cell.
+    // The two assertions below guard the handshake and the fixture
+    // shape (a broken handshake, or a fixture without a distinct
+    // pre-write state, surfaces here) — the reader's control flow
+    // already implies both. The real detectors of the snapshot bug
+    // are the monotonicity assert and the stall watchdog in the
+    // reader, plus the exact final-state check after these.
     let max_seen = *observed.iter().max().unwrap_or(&0);
     assert!(
         max_seen >= NUM_WRITES,
