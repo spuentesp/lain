@@ -85,7 +85,7 @@ cancels superseded runs for the same ref.
 | `test-cross` (macOS + Windows) | — | ✓ |
 | `lint`, `npm-shim`, `schema-drift`, `health-badge` | ✓ | ✓ |
 | `capability` (demo.sh) | ✓ | ✓ |
-| `mutation` (incremental, PRs to `dev` only) | ✓ | — |
+| `mutation` (two-phase, incremental, PRs to `dev` only) | ✓ | — |
 | `coverage`, `version-drift`, `action-contracts` | — | ✓ |
 
 ## Conventions for AI agents

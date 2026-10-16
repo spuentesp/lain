@@ -652,10 +652,12 @@ jobs:
     name: Incremental mutation gate
     needs: [changes]
     runs-on: ubuntu-latest
-    # Bounded on purpose: the mutant set scales with the PR diff and each
-    # mutant costs a rebuild + `cargo test --lib` (~60-90s measured). A
-    # pathological diff that would exceed this cap fails the job rather
-    # than burning a runner, which is the intended signal ("split the PR").
+    # Bounded on purpose: the mutant set scales with the PR diff. Phase 1
+    # costs a rebuild + `cargo test --lib` per mutant (~60-90s measured);
+    # phase-2 candidates (phase-1 MISSED/TIMEOUT) each pay the full
+    # `cargo test` confirm (~12 min). A diff that would exceed this cap
+    # fails the job rather than burning a runner, which is the intended
+    # signal ("split the PR").
     timeout-minutes: 60
     # PRs to dev only — see the workflow header for why release PRs (to
     # main) are out of scope. Drafts skip like the other heavy jobs;

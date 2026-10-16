@@ -97,23 +97,38 @@ pins the same contract during `cargo test`.
 ## Mutation gate
 
 `scripts/mutation-gate.sh` is the anti-weak-assertion layer. For every line
-of library code a PR diff touches, `cargo mutants --in-diff` generates the
+of library code a diff touches, `cargo mutants --in-diff` generates the
 mutants that line admits (operator swaps, `true`/`false` returns, deleted
-`!`, deleted match arms, …) and runs the unit-test suite against each one.
-A mutant that survives means no test observes that behavior: hardcoded
-branches, dead code, or an assertion that asserts less than it claims.
+`!`, deleted match arms, …) and tests each one. A mutant that survives
+means no test observes that behavior: hardcoded branches, dead code, or an
+assertion that asserts less than it claims.
 
-Only the diff is mutated, so cost scales with the PR, not with the tree.
-The unmutated tree is assumed green (`--baseline skip` — the `test` job
-proves it), and each mutant is judged by `cargo test --lib` (~2500 unit
-tests, ~35s), which keeps per-mutant cost around a minute and leaves the
-integration tests in `tests/` unrun — a mutant observed only by an
-integration test is reported `MISSED` even though the full suite would
-catch it. See the script header for the full blind-spot list and the
-manual re-check command. The gate is wired into the `lain/agent-contract`
-rollup, so a surviving mutant fails the PR.
+The gate judges in two phases, because a `--lib` survival is a *candidate*,
+not a verdict:
 
-Run it locally against your branch's diff since `dev`:
+1. **Census** — every mutant runs against `cargo test --lib` (~2500 unit
+   tests, ~35s), which bounds per-mutant cost (~45–55s) and skips the ~85
+   integration-test binaries. Blind spot: a mutant observed only by an
+   integration test (e.g. `src/server/query/executor.rs`, driven by
+   tests/query_engine_oracle.rs) shows up here as `MISSED` even though the
+   full suite would catch it.
+2. **Confirm** — every phase-1 `MISSED`/`TIMEOUT` is re-tested against the
+   full `cargo test` (override with `--confirm-cmd`, which must stay
+   `cargo test` with optional args). Only a mutant that survives the full
+   suite is a real survivor and fails the gate; one that is caught on
+   confirm is reported `caught-on-confirm` (a phase-1 false alarm) and
+   does not fail.
+
+Cost profile: well-tested diffs pay only the census. A diff whose mutants
+the unit suite cannot see pays one full-suite confirm round on top (build
+of all test targets + one full run per candidate). Only the diff is
+mutated, so cost scales with the PR, not with the tree. The unmutated tree
+is assumed green (`--baseline skip` — the `test` job proves it). The gate
+is wired into the `lain/agent-contract` rollup, so a confirmed survivor
+fails the PR.
+
+Run it locally against your branch's diff since `dev` (the patch includes
+uncommitted work, so it can run before committing):
 
 ```bash
 TMPDIR=/data/agents/tmp-lain-tests scripts/mutation-gate.sh          # this dev machine
@@ -127,16 +142,16 @@ it is given. CI has neither problem. `cargo-mutants` must be installed
 (`cargo install cargo-mutants --version 27.1.0`; CI pins the same
 version).
 
-Output is one line per mutant (`CAUGHT` / `MISSED` / `TIMEOUT` /
-`UNVIABLE`) plus a summary. Exit 0 means every mutant was caught (or the
-diff contains no mutable product code); exit 1 means at least one
-survivor — treat each `MISSED` name as a finding:
+Output is one line per mutant (`MISSED` / `TIMEOUT` / `CAUGHT-ON-CONFIRM`
+/ `UNVIABLE` / `CAUGHT`) plus per-phase summaries. Exit 0 means nothing
+survived the confirm phase (or the diff contains no mutable product code);
+exit 1 names the confirmed survivors — treat each `MISSED`/`TIMEOUT` line
+as a finding:
 
-1. Re-check it against the full suite before blaming the tests
-   (`cargo test --workspace` with the mutant re-applied): the `--lib`
-   blind spot can produce false survivors.
-2. If the full suite also misses it, the behavior is genuinely unpinned —
-   add the test that catches it.
+1. The confirm phase already re-checked it against the full suite, so a
+   reported survivor is a real gap unless the confirm environment itself
+   was red (the `test` job's suite is the evidence it was not).
+2. Add the test that catches it.
 3. Never convert a survivor into green by widening `.cargo/mutants.toml`
    exclusions; those are only for triaged equivalent mutants, each with a
    comment saying why the mutation cannot change observable behavior.
