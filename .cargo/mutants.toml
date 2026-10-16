@@ -1,7 +1,21 @@
-# cargo-mutants configuration (see `make mutants`).
+# cargo-mutants configuration (shared by `make mutants` and
+# `scripts/mutation-gate.sh`; this is the default tree config path for
+# cargo-mutants 27.1.0 — `cargo mutants --emit-schema config` is the
+# authority on what may appear here).
+#
+# Timeouts are deliberately NOT set here: the schema has no absolute
+# timeout keys (only multipliers, which need a measured baseline), and
+# both users run `--baseline skip`. `scripts/mutation-gate.sh` passes
+# `--timeout 300 --build-timeout 600` on the command line; `make
+# mutants` passes its own `--timeout 120`.
 #
 # Mutants that cannot change observable behaviour in a normal build are
 # excluded with the reason, so a "missed" mutant always means a real test gap.
+# (The mutation gate adds no exclusions of its own: nothing generated or
+# dump-like is in cargo-mutants' examine set — see `cargo mutants
+# --list-files`; its bin-target scope filter lives on the
+# scripts/mutation-gate.sh command line, not here. New entries must justify
+# themselves here; never add one to turn a MISSED mutant green.)
 exclude_re = [
     # Test-only helper module inside lsp.rs.
     'test_support::',
