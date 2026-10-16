@@ -65,6 +65,30 @@ fn test_get_commit_history_basic() {
 #[test]
 fn test_get_commit_history_with_limit() {
     let (_tmp, root) = seeded_repo();
+    // More commits than the limit: with a single commit `take(5)` never
+    // truncates and the limit path is vacuous.
+    {
+        let repo = git2::Repository::open(&root).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        for i in 0..5 {
+            let name = format!("f{i}.txt");
+            std::fs::write(root.join(&name), format!("{i}\n")).unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new(&name)).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                &format!("c{i}"),
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        }
+    }
     let git = Arc::new(AnyGitSensor::from_env(&root).unwrap());
 
     let result = get_commit_history(&git, Some(5));
@@ -73,6 +97,14 @@ fn test_get_commit_history_with_limit() {
     assert!(text.contains("## Commit History"));
     // Should have commit hashes
     assert!(text.contains("**") && text.contains(" ago"));
+    // 6 commits exist; the limit of 5 must truncate: exactly 5 entries
+    // back, and the oldest (`init`) dropped.
+    let entries = text.lines().filter(|l| l.starts_with("**")).count();
+    assert_eq!(entries, 5, "limit 5 must return exactly 5 commits:\n{text}");
+    assert!(
+        !text.contains("init"),
+        "oldest commit must be truncated:\n{text}"
+    );
 }
 
 #[test]

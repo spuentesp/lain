@@ -53,27 +53,32 @@ fn test_git_sensor_get_tracked_files() {
 fn test_git_sensor_is_ignored() {
     let (_tmp, root) = seeded_repo();
     let sensor = GitSensor::new(&root).unwrap();
-    // .git directory should be ignored
-    let is_ignored = sensor.is_ignored(Path::new(".git"));
-    assert!(is_ignored.is_ok());
+    // .git is matched by libgit2's built-in ignore rules
+    // (`GIT_IGNORE_DEFAULT_RULES` includes `.git`).
+    let is_ignored = sensor.is_ignored(Path::new(".git")).unwrap();
+    assert!(is_ignored, ".git must read as ignored");
 }
 
 #[test]
 fn test_git_sensor_is_ignored_target_dir() {
     let (_tmp, root) = seeded_repo();
+    // Fixture matches the comment: a real target/ dir ignored by rule.
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target").join("out.o"), "o").unwrap();
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
     let sensor = GitSensor::new(&root).unwrap();
     // target directory (rust build output) should be ignored
-    let is_ignored = sensor.is_ignored(Path::new("target"));
-    assert!(is_ignored.is_ok());
+    let is_ignored = sensor.is_ignored(Path::new("target")).unwrap();
+    assert!(is_ignored, "target/ must read as ignored via .gitignore");
 }
 
 #[test]
 fn test_git_sensor_is_ignored_nonexistent() {
     let (_tmp, root) = seeded_repo();
     let sensor = GitSensor::new(&root).unwrap();
-    // A nonexistent path may or may not be ignored depending on gitignore rules
+    // No ignore rule matches this name, extant or not.
     let result = sensor.is_ignored(Path::new("nonexistent_file_xyz123.txt"));
-    assert!(result.is_ok());
+    assert!(!result.unwrap(), "unmatched path must not read as ignored");
 }
 
 #[test]
@@ -83,10 +88,11 @@ fn test_git_sensor_get_uncommitted_changes_none() {
     // Clean working tree (after sync_state)
     let changes = sensor.get_uncommitted_changes();
     assert!(changes.is_ok());
-    // Changes may be empty or may have staged changes depending on state
     let changes_vec = changes.unwrap();
-    // Just verify it's a valid vec
-    println!("Uncommitted changes: {}", changes_vec.len());
+    assert!(
+        changes_vec.is_empty(),
+        "clean fixture must report no changes: {changes_vec:?}"
+    );
 }
 
 #[test]
@@ -102,6 +108,12 @@ fn test_git_sensor_get_uncommitted_changes_staged() {
     }
     let sensor = GitSensor::new(&root).unwrap();
     let changes = sensor.get_uncommitted_changes().unwrap();
+    assert!(
+        changes
+            .iter()
+            .any(|c| c.path.ends_with("keep.txt") && c.staged),
+        "staged keep.txt must appear as a staged entry: {changes:?}"
+    );
     for change in changes {
         println!("Change: {:?} at {:?}", change.change_type, change.path);
     }
