@@ -438,6 +438,14 @@ is the operation's root field, not its name (e.g. operation
 `ProductDetails` with root field `product` →
 `"graphql:query:product"`).
 
+`consumer.key` and `provider.key` must form a well-formed pair in
+the `check_binding` (§12) sense: the same key kind; for HTTP,
+compatible methods and templates (`exact` / `pattern` /
+`prefix_stripped` — so `GET /v1/api/orders/{}` may bridge to
+`GET /api/orders/{}`); for GraphQL, the same `op` and `field`.
+Cross-kind pairs (e.g. `graphql:query:product` →
+`http:POST /graphql`) are a config error and never bind.
+
 ```yaml
 bindings:
   - consumer:
@@ -468,6 +476,9 @@ The config load fails with a precise message for each of:
 - A `key` that parses as neither `<METHOD> <template>` nor
   `graphql:<query|mutation|subscription>:<field>`, or an HTTP
   template that does not survive normalization unchanged.
+- A `bindings` entry whose `consumer.key` and `provider.key` are
+  not a well-formed pair (the message names `bindings[<i>]` and
+  both keys).
 - `path_arg > 5`.
 - Upper-case host or service-name entries.
 

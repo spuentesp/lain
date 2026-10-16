@@ -46,6 +46,19 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- contracts: a `bindings` entry whose `consumer.key` and
+  `provider.key` are not a well-formed pair — cross-kind
+  (`graphql:…` vs `http:…`), HTTP methods/templates
+  `check_binding` would reject, or differing GraphQL `op`/`field` —
+  is now a config error at load, and the joiner never binds it (it
+  is recorded as an `ill_formed_keys` stale binding if an
+  unvalidated config slips through). Previously a cross-kind entry
+  could pin a consumer to an endpoint of a different kind (I1,
+  "no invented bindings"). Same-kind HTTP template bridges (e.g.
+  `GET /v1/api/orders/{}` → `GET /api/orders/{}`) stay supported.
+  Recovery: make the pair well-formed (same key kind;
+  `check_binding`-compatible methods and templates; equal GraphQL
+  `op`/`field`).
 - contracts: `check_binding` with a GraphQL consumer and an HTTP
   endpoint key used to return `valid: true` with an unusable
   `bindings_entry` (pre-existing vacuous-match bug); it now returns

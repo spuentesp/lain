@@ -194,9 +194,10 @@ pub struct BoundField {
 }
 
 /// A confirmed-binding entry that matched no consumer
-/// (`reason = NoConsumer`) or whose endpoint does not exist
-/// (`reason = NoEndpoint`). Keyed by `(repo, path, symbol, key)` per
-/// §7.6.
+/// (`reason = NoConsumer`), whose endpoint does not exist
+/// (`reason = NoEndpoint`), or whose keys do not form a
+/// well-formed pair (`reason = IllFormedKeys`). Keyed by
+/// `(repo, path, symbol, key)` per §7.6.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleBinding {
     pub consumer: ConfirmedBindingKey,
@@ -222,6 +223,14 @@ pub struct ConfirmedBindingProviderKey {
 pub enum StaleReason {
     NoConsumer,
     NoEndpoint,
+    /// `consumer.key` and `provider.key` are not a well-formed pair
+    /// in the `check_binding` sense (`key_compat::keys_compatible`):
+    /// cross-kind (`graphql:…` vs `http:…`), incompatible HTTP
+    /// methods/templates, or differing GraphQL `op`/`field`. Same-
+    /// kind HTTP template bridges ARE well-formed and bind; this
+    /// reason is only for the ill-formed case. (Wire label if a
+    /// renderer ever lands: `ill_formed_keys`.)
+    IllFormedKeys,
 }
 
 /// Re-export of the schema's `NodeType` so callers that hold a

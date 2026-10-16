@@ -1,10 +1,17 @@
 //! Step 6 of the joiner — apply confirmed bindings (§7.6).
 //!
 //! A confirmed binding (declared in `repos.yaml#bindings[]`)
-//! replaces the rule-4 verdict for every matching call. Stale
-//! entries (binding references a deleted endpoint or no
-//! matching consumer exists) are recorded on the
-//! `JoinOutput.stale_bindings` list for the surface tools.
+//! replaces the rule-4 verdict for every matching call. A binding
+//! applies only when its `consumer.key` and `provider.key` form a
+//! well-formed pair in the `check_binding` sense
+//! (`key_compat::keys_compatible`) — I1a ("no invented bindings")
+//! forbids pinning a consumer to an endpoint of a different kind
+//! or with incompatible methods/templates. Same-kind HTTP template
+//! bridges (e.g. `GET /v1/api/orders/{}` → `GET /api/orders/{}`)
+//! are supported. Stale entries (binding references a deleted
+//! endpoint, no matching consumer exists, or the keys are
+//! ill-formed) are recorded on the `JoinOutput.stale_bindings`
+//! list for the surface tools.
 
 use std::collections::BTreeMap;
 
@@ -16,6 +23,7 @@ use crate::federation::contracts::index::{
 use crate::federation::contracts::joiner::endpoints::EndpointTable;
 use crate::federation::contracts::joiner::parse_contract_key;
 use crate::federation::contracts::joiner::BindsEdge;
+use crate::federation::contracts::key_compat::keys_compatible;
 use crate::federation::contracts::model::{ContractFact, ContractKey, ServiceName};
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{EdgeProvenance, GraphNode, RouteMatch};
@@ -23,7 +31,12 @@ use crate::schema::{EdgeProvenance, GraphNode, RouteMatch};
 /// Apply one confirmed binding to the current bind set. The
 /// orchestrator calls this once per entry in
 /// `config.bindings`. Returns nothing; mutates `binds`,
-/// `consumers`, and `stale_bindings` in place.
+/// `consumers`, and `stale_bindings` in place. The binding applies
+/// only when `consumer.key` and `provider.key` form a well-formed
+/// pair (`key_compat::keys_compatible` — `check_binding`'s rules;
+/// same-kind HTTP template bridges included). An ill-formed pair is
+/// recorded as a `StaleReason::IllFormedKeys` stale entry and binds
+/// nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_confirmed_binding(
     binding: &ConfirmedBinding,
@@ -39,6 +52,36 @@ pub(crate) fn apply_confirmed_binding(
         Ok(k) => k,
         Err(_) => return,
     };
+    let consumer_key = match parse_contract_key(&binding.consumer.key) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
+    // I1a (docs/formal/ConsumerBinding.tla): a confirmed binding
+    // may only bind a consumer to an endpoint whose key is
+    // compatible with the consumer's key — `check_binding`'s rules
+    // (`key_compat::keys_compatible`): same kind; for HTTP,
+    // compatible methods and templates (so a `GET /v1/…` →
+    // `GET /api/…` bridge is fine); for GraphQL, equal `(op,
+    // field)`. Cross-kind pairs (e.g. `graphql:query:product` →
+    // `http:POST /graphql`) invent a binding and bind nothing;
+    // `validate()` rejects the same entry at load.
+    if !keys_compatible(&consumer_key, &provider_key) {
+        stale_bindings.push(StaleBinding {
+            consumer: ConfirmedBindingKey {
+                repo: RepoId::new(&binding.consumer.repo)
+                    .unwrap_or_else(|_| RepoId::new("unknown").unwrap()),
+                path: binding.consumer.path.clone(),
+                symbol: binding.consumer.symbol.clone(),
+                key: binding.consumer.key.clone(),
+            },
+            provider: ConfirmedBindingProviderKey {
+                service: ServiceName(binding.provider.service.clone()),
+                key: binding.provider.key.clone(),
+            },
+            reason: StaleReason::IllFormedKeys,
+        });
+        return;
+    }
     let provider_svc = ServiceName(binding.provider.service.clone());
     let providers_for_endpoint = endpoints.get(&(provider_svc.clone(), provider_key.clone()));
     let provider_id = match providers_for_endpoint.and_then(|v| v.first().map(|p| p.id.clone())) {
@@ -60,10 +103,6 @@ pub(crate) fn apply_confirmed_binding(
             });
             return;
         }
-    };
-    let consumer_key = match parse_contract_key(&binding.consumer.key) {
-        Ok(k) => k,
-        Err(_) => return,
     };
     let mut matched_any = false;
     for node in nodes {

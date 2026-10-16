@@ -10,6 +10,11 @@
 //!   functions; no graph or config dependencies.
 //! - `route_match` (PR 5): provider template ↔ consumer template
 //!   matching (§7.4). Pure logic; used by the joiner in PR 7.
+//! - `key_compat`: the key-pair well-formedness rules a
+//!   `bindings` entry must satisfy (`methods_compatible` /
+//!   `templates_compatible` / `keys_compatible` — §7.6 / §12).
+//!   Shared by `mcp/contract_tools/contracts.rs` (`check_binding`)
+//!   and the confirmed-binding layers.
 //! - `config` (PR 7): `ContractFederationConfig` (§7.1) — the
 //!   parsed-and-validated form of the contract-federation sections
 //!   in `repos.yaml`. Pure data + validation; no graph or sensor
@@ -53,6 +58,7 @@ pub mod field_join;
 pub mod index;
 pub mod index_cache;
 pub mod joiner;
+pub mod key_compat;
 pub mod mirrors;
 pub mod model;
 pub mod normalize;

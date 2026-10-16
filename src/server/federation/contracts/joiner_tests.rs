@@ -1127,6 +1127,181 @@ fn confirmed_graphql_binding_no_endpoint_marks_stale() {
     ));
 }
 
+#[test]
+fn confirmed_binding_cross_kind_keys_marks_stale_and_does_not_bind() {
+    // A confirmed binding may only join a consumer to an endpoint
+    // of the same key kind (I1a — no invented bindings). A
+    // hand-written binding with `consumer.key:
+    // graphql:query:product` and `provider.key: http:POST /graphql`
+    // must therefore bind NOTHING: the node walk and the endpoint
+    // lookup would otherwise pin the call site to an endpoint of a
+    // different kind.
+    let provider = provider_node(
+        "api",
+        "src/graphql_route.py",
+        "graphql_route",
+        10,
+        HttpMethod::Post,
+        "/graphql",
+    );
+    let consumer =
+        graphql_consumer_node("storefront", "src/gql.ts", GraphqlOp::Query, "product", 20);
+    let cfg = ContractFederationConfig {
+        services: multi_service_config(&[("api", &[]), ("storefront", &[])]).services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "storefront".into(),
+                path: "src/gql.ts".into(),
+                symbol: "graphql-call:query:product".into(),
+                key: "graphql:query:product".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "api".into(),
+                key: "http:POST /graphql".into(),
+            },
+        }],
+        databases: vec![],
+    };
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "cross-kind binding must not invent a Binds edge: {:?}",
+        out.binds
+    );
+    assert_eq!(out.index.stale_bindings.len(), 1);
+    assert!(matches!(
+        out.index.stale_bindings[0].reason,
+        StaleReason::IllFormedKeys
+    ));
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
+    assert!(
+        !matches!(res.target, Some(ConsumerTarget::Binds { .. })),
+        "consumer must keep the ladder verdict, got {:?}",
+        res.target
+    );
+}
+
+#[test]
+fn confirmed_binding_template_bridge_binds() {
+    // Same-kind HTTP template bridges are supported (§15.2 ground
+    // truth scenario 10): the call site's key carries the gateway
+    // `/v1` prefix, the endpoint's key does not. The binding's two
+    // keys differ but form a well-formed pair (`check_binding`'s
+    // rules), so it binds with `Confirmed` provenance.
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "get_order",
+        10,
+        HttpMethod::Get,
+        "/api/orders/{}",
+    );
+    let mut c = consumer_node(
+        "billing",
+        "src/orders_api.py",
+        "create_order",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(HostPart::None, Some("/v1/api/orders/{}")),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    c.container = Some("create_order".into());
+    let cfg = ContractFederationConfig {
+        services: default_config().services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "billing".into(),
+                path: "src/orders_api.py".into(),
+                symbol: "create_order".into(),
+                key: "GET /v1/api/orders/{}".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "orders".into(),
+                key: "GET /api/orders/{}".into(),
+            },
+        }],
+        databases: vec![],
+    };
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
+    assert_eq!(out.binds.len(), 1, "bridge must bind: {:?}", out.binds);
+    let edge = &out.binds[0];
+    assert!(matches!(edge.provenance, EdgeProvenance::Confirmed { .. }));
+    assert_eq!(
+        edge.target_endpoint,
+        (
+            ServiceName("orders".into()),
+            ContractKey::Http {
+                method: MethodSpec::Known(HttpMethod::Get),
+                template: "/api/orders/{}".into(),
+            }
+        )
+    );
+    assert!(out.index.stale_bindings.is_empty());
+}
+
+#[test]
+fn confirmed_binding_equivalent_key_spelling_binds() {
+    // The well-formedness rules run on the parsed `ContractKey`s,
+    // not the raw strings: "POST /api/orders" and
+    // "http:POST /api/orders" are the same key and the binding
+    // still applies.
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "create_order",
+        10,
+        HttpMethod::Post,
+        "/api/orders",
+    );
+    let mut c = consumer_node(
+        "billing",
+        "src/orders_api.py",
+        "create_order",
+        1,
+        MethodSpec::Known(HttpMethod::Post),
+        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders")),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    c.container = Some("create_order".into());
+    let cfg = ContractFederationConfig {
+        services: default_config().services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "billing".into(),
+                path: "src/orders_api.py".into(),
+                symbol: "create_order".into(),
+                key: "POST /api/orders".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "orders".into(),
+                key: "http:POST /api/orders".into(),
+            },
+        }],
+        databases: vec![],
+    };
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
+    assert_eq!(out.binds.len(), 1);
+    assert!(matches!(
+        out.binds[0].provenance,
+        EdgeProvenance::Confirmed { .. }
+    ));
+    assert!(out.index.stale_bindings.is_empty());
+}
+
 // ─── §7.8 ordering ─────────────────────────────────────────────────
 
 #[test]

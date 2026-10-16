@@ -42,6 +42,7 @@ use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
 use crate::federation::contracts::index::{
     ConsumerResolution, ConsumerTarget, ContractIndex, Endpoint, EndpointId, UnresolvedReason,
 };
+use crate::federation::contracts::key_compat::{methods_compatible, templates_compatible};
 use crate::federation::contracts::model::MethodSpec;
 use crate::federation::contracts::model::{ContractKey, Direction, ServiceName};
 use crate::federation::contracts::route_match::match_route;
@@ -1135,38 +1136,6 @@ fn parse_consumer_call_shape(
     (method, parts.get(1).map(|s| s.to_string()))
 }
 
-fn methods_compatible(
-    cm: &crate::federation::contracts::model::MethodSpec,
-    pm: &crate::federation::contracts::model::MethodSpec,
-) -> bool {
-    use crate::federation::contracts::model::{HttpMethod, MethodSpec};
-    match (cm, pm) {
-        (MethodSpec::Known(a), MethodSpec::Known(b)) => {
-            a == b || matches!(b, HttpMethod::Any) || matches!(a, HttpMethod::Any)
-        }
-        (MethodSpec::Unknown, _) | (_, MethodSpec::Unknown) => true,
-    }
-}
-
-fn templates_compatible(consumer: Option<&str>, provider: &str) -> (bool, &'static str) {
-    let Some(c) = consumer else {
-        return (true, "pattern");
-    };
-    let r = match_route(
-        crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Any,
-        ),
-        c,
-        crate::federation::contracts::model::HttpMethod::Any,
-        provider,
-    );
-    if r.is_match() {
-        (true, "exact")
-    } else {
-        (false, "none")
-    }
-}
-
 fn render_bindings_entry(
     consumer_repo: &str,
     consumer_id: &GlobalId,
@@ -1288,32 +1257,6 @@ mod tests {
             MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Get)
         ));
         assert_eq!(t.as_deref(), Some("/api/orders/{}"));
-    }
-
-    #[test]
-    fn methods_compatible_handles_any() {
-        let g = MethodSpec::Known(HttpMethod::Get);
-        let a = MethodSpec::Known(HttpMethod::Any);
-        let u = MethodSpec::Unknown;
-        assert!(methods_compatible(&g, &a));
-        assert!(methods_compatible(&a, &g));
-        assert!(methods_compatible(&u, &g));
-        let p = MethodSpec::Known(HttpMethod::Post);
-        assert!(!methods_compatible(&g, &p));
-    }
-
-    #[test]
-    fn templates_compatible_returns_exact_when_paths_match() {
-        let (ok, label) = templates_compatible(Some("/api/orders/{}"), "/api/orders/{}");
-        assert!(ok);
-        assert_eq!(label, "exact");
-    }
-
-    #[test]
-    fn templates_compatible_returns_none_on_mismatch() {
-        let (ok, label) = templates_compatible(Some("/api/users/{}"), "/api/orders/{}");
-        assert!(!ok);
-        assert_eq!(label, "none");
     }
 
     #[test]

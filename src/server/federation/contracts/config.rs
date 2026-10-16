@@ -15,6 +15,8 @@
 //! key on it.
 
 use crate::error::LainError;
+use crate::federation::contracts::joiner::parse_contract_key;
+use crate::federation::contracts::key_compat::keys_compatible;
 use crate::federation::contracts::model::{service_name_is_valid, ContractKey};
 use crate::federation::contracts::normalize;
 use serde::{Deserialize, Serialize};
@@ -415,6 +417,41 @@ impl ContractFederationConfig {
         for b in &self.bindings {
             validate_key("bindings.consumer.key", &b.consumer.key)?;
             validate_key("bindings.provider.key", &b.provider.key)?;
+        }
+        // A confirmed binding may only join a consumer to an
+        // endpoint whose key is compatible with the consumer's key
+        // (I1a — no invented bindings,
+        // `docs/formal/ConsumerBinding.tla`). The rules are
+        // `check_binding`'s (`key_compat::keys_compatible`, §12):
+        // same key kind; for HTTP, compatible methods and templates
+        // (a same-kind template bridge like `GET /v1/api/orders/{}`
+        // → `GET /api/orders/{}` is fine); for GraphQL, equal
+        // `(op, field)`. Ill-formed pairs — cross-kind
+        // (`graphql:…` vs `http:…`) above all — are rejected here
+        // so the operator learns at load. The joiner
+        // (`joiner/confirmed.rs::apply_confirmed_binding`) records
+        // the same pair as an `IllFormedKeys` stale binding if an
+        // unvalidated config slips through.
+        for (i, b) in self.bindings.iter().enumerate() {
+            let consumer_key = parse_contract_key(&b.consumer.key).map_err(|e| {
+                LainError::Config(format!(
+                    "bindings[{i}] consumer key '{key}': {e}",
+                    key = b.consumer.key
+                ))
+            })?;
+            let provider_key = parse_contract_key(&b.provider.key).map_err(|e| {
+                LainError::Config(format!(
+                    "bindings[{i}] provider key '{key}': {e}",
+                    key = b.provider.key
+                ))
+            })?;
+            if !keys_compatible(&consumer_key, &provider_key) {
+                return Err(LainError::Config(format!(
+                    "bindings[{i}]: consumer key '{c}' and provider key '{p}' are not a well-formed pair — cross-kind or incompatible methods/templates",
+                    c = b.consumer.key,
+                    p = b.provider.key
+                )));
+            }
         }
         // Generic keys follow the same grammar (§7.1: "it must parse
         // as <METHOD> <template> and survive normalization
@@ -1033,6 +1070,69 @@ bindings:
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
         assert!(err.to_string().contains("unknown repo"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_binding_cross_kind_keys() {
+        // A confirmed binding may only join a consumer to an endpoint
+        // of the same key kind (I1a — no invented bindings), so a
+        // cross-kind pair is rejected at load with both keys named.
+        let yaml = r#"
+bindings:
+  - consumer: { repo: beta, path: src/gql.ts, symbol: "graphql-call:query:product", key: "graphql:query:product" }
+    provider: { service: alpha, key: "http:POST /graphql" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        let err = cfg.validate(&repo_ids()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bindings[0]"), "got: {msg}");
+        assert!(msg.contains("graphql:query:product"), "got: {msg}");
+        assert!(msg.contains("http:POST /graphql"), "got: {msg}");
+    }
+
+    #[test]
+    fn accepts_binding_http_template_bridge() {
+        // Same-kind HTTP template bridges are supported: the call
+        // goes through a gateway `/v1` prefix, the endpoint does not
+        // (§15.2 ground truth scenario 10).
+        let yaml = r#"
+bindings:
+  - consumer: { repo: beta, path: src/orders_api.py, symbol: create_order, key: "GET /v1/api/orders/{}" }
+    provider: { service: alpha, key: "GET /api/orders/{}" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        cfg.validate(&repo_ids()).unwrap();
+    }
+
+    #[test]
+    fn rejects_binding_incompatible_http_keys() {
+        // Same-kind is not enough: `check_binding`'s method and
+        // template rules still apply.
+        let yaml = r#"
+bindings:
+  - consumer: { repo: beta, path: src/orders_api.py, symbol: create_order, key: "GET /api/users/{}" }
+    provider: { service: alpha, key: "POST /api/orders/{}" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        let err = cfg.validate(&repo_ids()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bindings[0]"), "got: {msg}");
+        assert!(msg.contains("GET /api/users/{}"), "got: {msg}");
+        assert!(msg.contains("POST /api/orders/{}"), "got: {msg}");
+    }
+
+    #[test]
+    fn allows_binding_equivalent_key_spelling() {
+        // The well-formedness rules run on the parsed `ContractKey`s,
+        // not the raw strings: the wire prefix `http:` may be spelled
+        // out on one side only.
+        let yaml = r#"
+bindings:
+  - consumer: { repo: beta, path: src/orders_api.py, symbol: create_order, key: "POST /api/orders" }
+    provider: { service: alpha, key: "http:POST /api/orders" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        cfg.validate(&repo_ids()).unwrap();
     }
 
     #[test]
