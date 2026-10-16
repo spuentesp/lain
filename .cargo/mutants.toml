@@ -66,19 +66,4 @@ exclude_re = [
     # Drop's final fsync is power-loss durability only — unobservable without a
     # crash (same class as the `created` guard above).
     'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
-    # Workspace-root-as-git-fixture tests: they open the build-time
-    # CARGO_MANIFEST_DIR as a git repo, but cargo-mutants builds/runs each
-    # mutant in a copied scratch tree without `.git`, so their runs fail on
-    # `could not find repository` and poison outcomes into "caught" (proven
-    # by a dead helper that looked caught). scripts/mutation-gate.sh skips
-    # these runs in both phases; exclude their mutants too so a PR touching
-    # them cannot false-MISS. Tracked follow-up: fixture own temp repos.
-    'git_tests::',
-    'gitops_tests::',
-    'job_panic_tests::',
-    'wiring_tests::',
-    'repo_index::tests::',
-    'handles::ingest::tests::sidecar_watchdog_clears_on_cancel',
-    'handler::tests::health_response_surfaces_git_sensor_telemetry',
-    'tools::tests::get_agent_strategy_',
 ]

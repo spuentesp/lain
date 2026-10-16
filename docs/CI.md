@@ -111,7 +111,10 @@ not a verdict:
    integration-test binaries. Blind spot: a mutant observed only by an
    integration test (e.g. `src/server/query/executor.rs`, driven by
    tests/query_engine_oracle.rs) shows up here as `MISSED` even though the
-   full suite would catch it.
+   full suite would catch it. Tests must be hermetic: both phases run them
+   inside cargo-mutants' copied scratch tree, which carries no `.git` —
+   the former workspace-root git-fixture tests now build their own temp
+   repos.
 2. **Confirm** — every phase-1 `MISSED`/`TIMEOUT` is re-tested against the
    full `cargo test` (override with `--confirm-cmd`, which must stay
    `cargo test` with optional args). Only a mutant that survives the full
