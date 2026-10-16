@@ -42,3 +42,5 @@ RateLimit                         | RateLimit                         | pass | a
 RateLimit_NoClamp                 | RateLimit                         | fail | no clamp: idle key banks unbounded credit
 LspPool                           | LspPool                           | pass | LSP pool round-robin: balanced across clones
 LspPool_PerCloneCounter           | LspPool                           | fail | pre-fix: per-clone counter starves multiplexers
+ConsumerBinding                   | ConsumerBinding                   | pass | I1 no invented bindings incl. confirmed override
+ConsumerBinding_Unchecked         | ConsumerBinding_Unchecked         | fail | cross-kind confirmed binding invents a binding
