@@ -1330,9 +1330,15 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
     use std::path::{Path, PathBuf};
     let overlay = crate::overlay::VolatileOverlay::new();
     let embedder = crate::nlp::NlpEmbedder::new_stub();
+    // Prefer the ambient workspace when it is a git checkout; otherwise fall
+    // back to a throwaway stub repo (the same seam `new_read_only` uses)
+    // rather than `/tmp`, which is not a repository and made every test
+    // built through this helper panic in a tree without `.git` (e.g.
+    // cargo-mutants' copied scratch tree).
     let git = Arc::new(
         crate::git::AnyGitSensor::from_env(Path::new(".")).unwrap_or_else(|_| {
-            crate::git::AnyGitSensor::from_env(Path::new("/tmp")).expect("fallback git sensor")
+            let stub = ToolExecutor::ensure_stub_git_repo().expect("stub git repo");
+            crate::git::AnyGitSensor::from_env(&stub).expect("fallback git sensor")
         }),
     );
     let lsp_pool = Arc::new(

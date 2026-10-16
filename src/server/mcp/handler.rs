@@ -3784,7 +3784,11 @@ mod tests {
     fn health_response_surfaces_git_sensor_telemetry_and_sidecar_degraded_state() {
         use crate::server::git::{sidecar_binary_helpers, AnyGitSensor, GitSensorMode};
 
-        let repo_root = std::env::current_dir().unwrap();
+        // Own git fixture: cargo-mutants runs tests in a copied scratch
+        // tree without `.git`, so the workspace root is not a valid repo.
+        let repo_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo_dir.path()).unwrap();
+        let repo_root = repo_dir.path().to_path_buf();
         let in_proc_sensor = AnyGitSensor::new(&repo_root, GitSensorMode::InProcess).unwrap();
 
         // 1. In-process mode reports ok status and in_process kind.

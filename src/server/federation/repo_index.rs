@@ -1382,17 +1382,17 @@ mod tests {
     use super::*;
     use crate::federation::repo_id::RepoId;
     use crate::federation::repo_source::WorkspaceDirSource;
-    use std::path::PathBuf;
 
     #[test]
     fn new_creates_with_indexing_health() {
         let tmp = tempfile::tempdir().unwrap();
+        // Own git fixture: cargo-mutants runs tests in a copied scratch
+        // tree without `.git`, so the workspace root is not a valid repo.
+        let repo_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo_dir.path()).unwrap();
         let src = Box::new(
-            WorkspaceDirSource::new(
-                RepoId::new("r").unwrap(),
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-            )
-            .unwrap(),
+            WorkspaceDirSource::new(RepoId::new("r").unwrap(), repo_dir.path().to_path_buf())
+                .unwrap(),
         );
         let ri = RepoIndex::new(src, tmp.path()).unwrap();
         assert_eq!(ri.health(), RepoHealth::Indexing);
@@ -1401,12 +1401,11 @@ mod tests {
     #[test]
     fn set_health_updates_state() {
         let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo_dir.path()).unwrap();
         let src = Box::new(
-            WorkspaceDirSource::new(
-                RepoId::new("r").unwrap(),
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-            )
-            .unwrap(),
+            WorkspaceDirSource::new(RepoId::new("r").unwrap(), repo_dir.path().to_path_buf())
+                .unwrap(),
         );
         let ri = RepoIndex::new(src, tmp.path()).unwrap();
         ri.set_health(RepoHealth::Ready);

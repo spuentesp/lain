@@ -623,8 +623,11 @@ mod tests {
 
     #[tokio::test]
     async fn sidecar_watchdog_clears_on_cancel() {
-        let repo_root = std::env::current_dir().unwrap();
-        let git = Arc::new(AnyGitSensor::from_env(&repo_root).unwrap());
+        // Own git fixture: cargo-mutants runs tests in a copied scratch
+        // tree without `.git`, so the workspace root is not a valid repo.
+        let repo_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo_dir.path()).unwrap();
+        let git = Arc::new(AnyGitSensor::from_env(repo_dir.path()).unwrap());
         let busy_since = Arc::new(AtomicU64::new(0));
         let cancel = tokio_util::sync::CancellationToken::new();
         let handle = tokio::spawn(run_sidecar_watchdog(
