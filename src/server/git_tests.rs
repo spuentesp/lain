@@ -124,11 +124,18 @@ fn test_git_sensor_get_file_diff_on_clean_file() {
     let (_tmp, root) = seeded_repo();
     let sensor = GitSensor::new(&root).unwrap();
     let files = sensor.get_all_tracked_files().unwrap();
-    if let Some(file) = files.first() {
-        let diff = sensor.get_file_diff(file);
-        // File might not have unstaged changes, but call should succeed
-        assert!(diff.is_ok());
-    }
+    // GitSensor canonicalizes its workspace through `dunce` (no `\\?\`
+    // prefix on Windows); compare on the same footing.
+    let expected = dunce::canonicalize(&root).unwrap().join("keep.txt");
+    assert_eq!(
+        files,
+        vec![expected],
+        "seeded fixture must track exactly keep.txt: {files:?}"
+    );
+    // The fixture is hermetic: keep.txt is committed and unmodified, so
+    // the index-to-workdir diff is deterministically empty.
+    let diff = sensor.get_file_diff(&files[0]).unwrap();
+    assert_eq!(diff, "", "clean tracked file must produce an empty diff");
 }
 
 #[test]
