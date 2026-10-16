@@ -47,7 +47,6 @@ exclude_re = [
     # read_exact on a regular file fails only with UnexpectedEof; another kind
     # cannot be produced by a test.
     'wal\.rs.*UnexpectedEof with true in replay_inner',
-    # `on_disk > good_end` vs `>=`: equal lengths make set_len a no-op.
     # Same wall-clock boundary as the presence lock guard.
     'socket_server\.rs:97.*replace > with >= in StartGuard::take',
     # `recursive(true)` create of an existing directory is a no-op.
@@ -57,11 +56,29 @@ exclude_re = [
     # A file entry has agents iff it has symbols (a file-level claim records the
     # `__file_level__` scope), so `&&` and `||` agree.
     'presence\.rs.*replace && with \|\| in OccupancyMap::release',
-    # The retain predicate's `&&` vs `||`: rows `||` would additionally drop are
-    # dropped by their own to_drop entry in the same pass.
     # `now < claimed_at` vs `<=`: equality of two wall-clock readings.
     'presence\.rs:1690.*replace < with <= in OccupancyMap::expire_by_ttl',
+    # The retain predicate's `&&` vs `||`: rows `||` would additionally drop are
+    # dropped by their own to_drop entry in the same pass.
     'presence\.rs:17(35|41).*replace && with \|\| in OccupancyMap::expire_by_ttl',
+    # `on_disk > good_end` vs `>=`: equal lengths make set_len a no-op.
     'wal\.rs:355.*replace > with >= in replay_inner',
+    # Drop's final fsync is power-loss durability only — unobservable without a
+    # crash (same class as the `created` guard above).
     'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
+    # Workspace-root-as-git-fixture tests: they open the build-time
+    # CARGO_MANIFEST_DIR as a git repo, but cargo-mutants builds/runs each
+    # mutant in a copied scratch tree without `.git`, so their runs fail on
+    # `could not find repository` and poison outcomes into "caught" (proven
+    # by a dead helper that looked caught). scripts/mutation-gate.sh skips
+    # these runs in both phases; exclude their mutants too so a PR touching
+    # them cannot false-MISS. Tracked follow-up: fixture own temp repos.
+    'git_tests::',
+    'gitops_tests::',
+    'job_panic_tests::',
+    'wiring_tests::',
+    'repo_index::tests::',
+    'handles::ingest::tests::sidecar_watchdog_clears_on_cancel',
+    'handler::tests::health_response_surfaces_git_sensor_telemetry',
+    'tools::tests::get_agent_strategy_',
 ]

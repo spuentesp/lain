@@ -53,6 +53,9 @@
 #   mutant observed only by an integration test (e.g. `src/server/query/
 #   executor.rs`, driven by tests/query_engine_oracle.rs) shows up as MISSED
 #   even though the suite would catch it. Doc tests never run either.
+#   Both phases also skip the workspace-root-as-git-fixture tests (see the
+#   `fixture_skips` block below): they cannot run inside cargo-mutants'
+#   copied scratch tree and would poison outcomes into "caught".
 #
 #   Phase 2 (confirm): every phase-1 MISSED/TIMEOUT is re-tested as its own
 #   mutant against the fuller command -- default `cargo test`, i.e. the
@@ -165,6 +168,32 @@ for w in "${confirm_words[@]:2}"; do
   fi
 done
 
+# Fixture-dependent tests: these open the workspace root (the build-time
+# CARGO_MANIFEST_DIR) as a git repository. cargo-mutants builds and runs
+# every mutant in a COPIED scratch tree under TMPDIR that carries no
+# `.git`, so each of them fails on an unrelated `Git("could not find
+# repository at …")` and poisons every mutant outcome into "caught" —
+# proven by the red demo, where a dead `#[allow(dead_code)]` helper looked
+# caught on exactly these 24 failures. Skipped in BOTH phases; the same
+# modules' mutants are excluded in .cargo/mutants.toml so a PR touching
+# them cannot false-MISS either. Known cost: these tests cannot observe
+# mutants until they fixture their own temp repos (tracked follow-up).
+# NOTE the double `--`: the first ends cargo-mutants' own args, the second is
+# passed through to `cargo test` as its libtest separator (cargo-mutants
+# inserts none — the `make mutants` pattern is `-- -- …`). Without it,
+# `--skip` is rejected by cargo, the test phase exits instantly, and every
+# mutant looks "caught" (0s test).
+fixture_skips=(
+  -- --skip server::git_tests::
+  --skip gitops_tests::
+  --skip job_panic_tests::
+  --skip wiring_tests::
+  --skip repo_index::tests::
+  --skip handles::ingest::tests::sidecar_watchdog_clears_on_cancel
+  --skip handler::tests::health_response_surfaces_git_sensor_telemetry
+  --skip tools::tests::get_agent_strategy_
+)
+
 if [[ -z "$base" ]]; then
   if base="$(git merge-base HEAD origin/dev 2>/dev/null)" && [[ -n "$base" ]]; then
     :
@@ -241,6 +270,7 @@ cargo mutants \
   -e 'src/main.rs' -e 'src/bin/*' \
   --output "$WORK/phase1" \
   --unviable --caught \
+  ${fixture_skips[@]+"--" "${fixture_skips[@]}"} \
   2>&1 | tee "$WORK/phase1.log"
 cm_rc=${PIPESTATUS[0]}
 
@@ -293,7 +323,7 @@ if [[ ${#candidates[@]} -gt 0 ]]; then
     ${confirm_args[@]+"${confirm_args[@]}"} \
     --output "$WORK/phase2" \
     --unviable --caught \
-    ${trailing[@]+"--" "${trailing[@]}"} \
+    -- "${fixture_skips[@]}" ${trailing[@]+"${trailing[@]}"} \
     2>&1 | tee "$WORK/phase2.log"
   cm2_rc=${PIPESTATUS[0]}
 

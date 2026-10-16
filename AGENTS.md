@@ -6,7 +6,7 @@ Two-branch model:
 
 - **`dev`** — integration. Default branch. PRs target `dev`.
   CI: fast lane (Ubuntu tests, lint, npm-shim, schema-drift,
-  health-badge, capability suite). ~5 min.
+  health-badge, capability suite, mutation gate). ~5 min.
 - **`main`** — release line. Receives changes only via reviewed
   PRs from `dev`, and only when cutting a new release.
   CI: full hardened battery (all OSes, capability suite, coverage,
