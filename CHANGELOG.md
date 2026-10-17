@@ -8,8 +8,8 @@ All notable changes to LAIN are documented here. Versions follow
 ### Fixed
 
 - contracts: `list_unresolved` candidates honor the item's
-  `target_service` — the §9.7 could-match gate (`get_service`'s
-  `unresolved_candidates` predicate). When the resolver named one
+  `target_service` — the §9.7 could-match gate (`diff.rs::could_match`'s
+  service-name condition). When the resolver named one
   (HTTP `no_route_in_service`, GraphQL `route_owner`), candidates
   come only from that service's endpoints, still subject to the
   per-kind key rules (HTTP method/template matching, GraphQL
