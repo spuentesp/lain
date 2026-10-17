@@ -38,7 +38,7 @@ Las tres herramientas involucradas (MCP JSON-RPC sobre `POST /mcp`, `method: "to
 - Forma del item (lo que se consume): `item.consumer.id` (GlobalId, p. ej. `storefront:Function:src/checkout/graphql/checkout.graphql:graphql-call%3Amutation%3AcheckoutLinesUpdate:205`), `item.consumer.repo`, `item.consumer.path`, `item.reason`.
 - El nombre del nodo (`graphql-call:{op}:{field}`) viene **URL-codificado** dentro de `consumer.id`; decodificarlo para derivar claves.
 - Códigos `reason` relevantes: `graphql_no_op` (0 o ≥2 providers para `(op, field)`), `env_unmapped`, `no_match`, `stale_binding`, `env_ambiguous`.
-- Trampa conocida: el campo `candidates` de cada item es inútil para GraphQL (lista todos los endpoints HTTP del índice). No usarlo como candidatos reales; para bindings, la fuente es `list_contracts`.
+- `candidates`: para consumidores GraphQL ahora lista solo endpoints GraphQL (los del mismo `op` primero); sigue siendo advisory — para bindings, la fuente de verdad es `list_contracts`.
 
 ### 3.2 `list_contracts`
 

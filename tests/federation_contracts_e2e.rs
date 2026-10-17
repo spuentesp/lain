@@ -2795,6 +2795,60 @@ mod pr14_check_binding_graphql {
     }
 }
 
+// ─── list_unresolved candidates for GraphQL consumers ─────────────────
+
+mod pr14_list_unresolved_graphql_candidates {
+    //! `list_unresolved`'s per-item `candidates` for a GraphQL
+    //! consumer must be the federation's GraphQL endpoints (same-`op`
+    //! first) — not the pre-fix noise of every `ContractKey::Http`
+    //! endpoint. Fixture: `build_graphql_federation` (query product
+    //! on two services + query somethingElse + the `POST /graphql`
+    //! route that the old filter listed).
+
+    use super::pr14_check_binding_graphql::build_graphql_federation;
+    use super::*;
+
+    #[tokio::test]
+    async fn pr14_list_unresolved_graphql_candidates_drop_http_noise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (fed, consumer) = build_graphql_federation(root).await;
+        let outcome = list_unresolved_handle(
+            &{
+                let _status = Box::leak(Box::new(
+                    lain::server::mcp::handler::HandlerStatus::for_test(),
+                ));
+                ctx_for(&fed, _status)
+            },
+            json!({"snapshot": "live", "limit": 1000}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !outcome.is_error,
+            "errors: {:?}",
+            outcome.structured["error"]
+        );
+        let items = outcome.structured["data"]["items"].as_array().unwrap();
+        let item = items
+            .iter()
+            .find(|it| it["consumer"]["id"] == json!(consumer.id.clone()))
+            .unwrap_or_else(|| panic!("graphql consumer missing from items: {items:?}"));
+        let cands = item["candidates"].as_array().expect("candidates array");
+        assert!(
+            !cands.is_empty(),
+            "graphql endpoints must be listed as candidates: {item:?}"
+        );
+        for c in cands {
+            let key = c["endpoint"]["key"].as_str().unwrap();
+            assert!(
+                key.starts_with("graphql:"),
+                "graphql consumer must not see http endpoints: {key}"
+            );
+        }
+    }
+}
+
 // ─── Task 6 (acceptance): check_binding YAML round-trip ─────────────
 
 mod task6_check_binding_yaml_round_trip {

@@ -3,6 +3,15 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- contracts: `list_unresolved` now lists GraphQL endpoints (same-`op`
+  first) as `candidates` for GraphQL consumers
+  (`graphql-call:{op}:{field}`) instead of every HTTP endpoint in the
+  index. HTTP consumers are unchanged.
+
 ## 0.10.0 — 2026-10-13
 
 > **MINOR bump — the coordination contract changed.** Lain's

@@ -1053,6 +1053,48 @@ fn candidate_endpoints_for(
     call_id: &GlobalId,
     _resolution: &ConsumerResolution,
 ) -> Vec<Value> {
+    // GraphQL consumers (`graphql-call:{op}:{field}`) carry no HTTP
+    // method/template: `parse_consumer_call_shape` reads their name
+    // as `Unknown`/no template, so the HTTP filter below would admit
+    // every `ContractKey::Http` endpoint (pure noise). Their
+    // candidates are the GraphQL endpoints in the index instead:
+    // the same-`op` set when non-empty (a `query` consumer's
+    // candidates are query endpoints), else every GraphQL endpoint.
+    // HTTP endpoints are never listed. Reason labels stay on the
+    // wire vocabulary (`list_unresolved.out.json`): `same_key` for an
+    // exact `(op, field)` pair, `pattern` for any other GraphQL
+    // candidate. Ordering is the index's `BTreeMap` key order.
+    if call_id
+        .name()
+        .is_some_and(|n| n.starts_with(GRAPHQL_CALL_PREFIX))
+    {
+        let name = call_id.name().unwrap_or_default();
+        let rest = name.strip_prefix(GRAPHQL_CALL_PREFIX).unwrap_or("");
+        let (cop, cfield) = rest.split_once(':').unwrap_or((rest, ""));
+        let same_op_present = view.endpoints.keys().any(
+            |ep_id| matches!(&ep_id.1, ContractKey::Graphql { op, .. } if op.to_string() == cop),
+        );
+        let mut out: Vec<Value> = Vec::new();
+        for ep_id in view.endpoints.keys() {
+            if let ContractKey::Graphql { op, field } = &ep_id.1 {
+                let same_op = op.to_string() == cop;
+                if same_op_present && !same_op {
+                    continue;
+                }
+                let reason = if same_op && field == cfield {
+                    "same_key"
+                } else {
+                    "pattern"
+                };
+                out.push(json!({
+                    "endpoint": {"service": ep_id.0 .0, "key": ep_id.1.to_string()},
+                    "reason": reason,
+                }));
+            }
+        }
+        return out;
+    }
+
     let mut out: Vec<Value> = Vec::new();
     let (consumer_method, consumer_template) = parse_consumer_call_shape(call_id);
     for ep_id in view.endpoints.keys() {
@@ -1238,7 +1280,7 @@ fn render_check_binding(data: &Value) -> String {
 mod tests {
     use super::*;
     use crate::federation::contracts::index::EndpointId;
-    use crate::federation::contracts::model::{HttpMethod, MethodSpec};
+    use crate::federation::contracts::model::{GraphqlOp, HttpMethod, MethodSpec};
     use crate::federation::repo_id::RepoId;
 
     #[test]
@@ -1343,6 +1385,258 @@ mod tests {
         assert_eq!(
             o.structured["error"]["details"]["reason"],
             json!("cursor_mismatch")
+        );
+    }
+
+    fn graphql_key(op: GraphqlOp, field: &str) -> ContractKey {
+        ContractKey::Graphql {
+            op,
+            field: field.to_string(),
+        }
+    }
+
+    fn http_key(method: HttpMethod, template: &str) -> ContractKey {
+        ContractKey::Http {
+            method: MethodSpec::Known(method),
+            template: template.to_string(),
+        }
+    }
+
+    fn insert_ep(view: &mut ContractIndex, service: &str, key: ContractKey) {
+        let id: EndpointId = (ServiceName(service.to_string()), key);
+        view.endpoints.insert(
+            id.clone(),
+            Endpoint {
+                id,
+                method: HttpMethod::Any,
+                template: String::new(),
+                providers: Vec::new(),
+                schemas: Default::default(),
+            },
+        );
+    }
+
+    fn call_id(repo: &str, name: &str) -> GlobalId {
+        let id = GlobalId::new(
+            &RepoId::new(repo).unwrap(),
+            crate::schema::NodeType::Function,
+            "src/calls.ts",
+            name,
+            Some(10),
+        );
+        GlobalId::from_canonical(id.as_str())
+    }
+
+    fn candidate_triples(view: &ContractIndex, id: &GlobalId) -> Vec<(String, String, String)> {
+        let res = ConsumerResolution {
+            call_id: id.clone(),
+            service: ServiceName("storefront".to_string()),
+            target: None,
+            bound_endpoints: Vec::new(),
+            reads_complete: true,
+        };
+        candidate_endpoints_for(view, id, &res)
+            .into_iter()
+            .map(|c| {
+                (
+                    c["endpoint"]["service"].as_str().unwrap().to_string(),
+                    c["endpoint"]["key"].as_str().unwrap().to_string(),
+                    c["reason"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// A `graphql-call:{op}:{field}` consumer must see the GraphQL
+    /// endpoints in the index — never the HTTP endpoints the
+    /// method/template filter used to admit wholesale (the consumer
+    /// name has no whitespace, so it parsed as `Unknown`/no template
+    /// and matched every `ContractKey::Http`).
+    #[test]
+    fn graphql_consumer_candidates_are_graphql_endpoints_only() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "somethingElse"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Mutation, "updateProduct"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            http_key(HttpMethod::Post, "/graphql"),
+        );
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+
+        let gid = call_id("storefront", "graphql-call:query:product");
+        let got = candidate_triples(&view, &gid);
+        assert!(!got.is_empty(), "graphql endpoints must be candidates");
+        for (svc, key, _) in &got {
+            assert!(
+                key.starts_with("graphql:"),
+                "graphql consumer must not see http endpoints: {svc} {key}"
+            );
+        }
+        let keys: Vec<&str> = got.iter().map(|(_, k, _)| k.as_str()).collect();
+        assert!(
+            keys.iter().any(|k| *k == "graphql:query:product"),
+            "the consumer's own (op, field) endpoint must be a candidate: {keys:?}"
+        );
+    }
+
+    /// Same-`op` GraphQL endpoints are the candidates while any exist
+    /// (a `query` consumer's candidates are query endpoints); with no
+    /// same-op endpoint the consumer falls back to every GraphQL
+    /// endpoint. Reason labels stay on the wire vocabulary: `same_key`
+    /// for an exact `(op, field)` pair, `pattern` otherwise.
+    #[test]
+    fn graphql_consumer_candidates_prefer_same_op() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "somethingElse"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Mutation, "updateProduct"),
+        );
+
+        let gid = call_id("storefront", "graphql-call:query:product");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:product".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:somethingElse".to_string(),
+                    "pattern".to_string(),
+                ),
+            ],
+            "a query consumer lists query endpoints only"
+        );
+
+        // No subscription endpoint in the index — fall back to every
+        // GraphQL key, never to HTTP.
+        let gid = call_id("storefront", "graphql-call:subscription:tick");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:product".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:somethingElse".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:mutation:updateProduct".to_string(),
+                    "pattern".to_string(),
+                ),
+            ],
+            "with no same-op endpoints every graphql endpoint is a candidate"
+        );
+    }
+
+    /// HTTP consumers keep the pre-existing candidate behavior —
+    /// method/template matching over HTTP endpoints only, with the
+    /// `same_key` / `pattern` reason labels — so the GraphQL fix
+    /// cannot drift the HTTP path.
+    #[test]
+    fn http_consumer_candidates_unchanged() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/users/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Post, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "shipping",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+
+        // `GET /api/orders/{}` → route-matching GET endpoints, `same_key`.
+        let gid = call_id("billing", "GET /api/orders/{}");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "orders".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "shipping".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "same_key".to_string(),
+                ),
+            ]
+        );
+
+        // No consumer template (`GET`) → every GET endpoint, `pattern`.
+        let gid = call_id("billing", "GET");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "orders".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "orders".to_string(),
+                    "http:GET /api/users/{}".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "shipping".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "pattern".to_string(),
+                ),
+            ]
         );
     }
 }
