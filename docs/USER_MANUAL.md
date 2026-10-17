@@ -17,7 +17,7 @@ reference, tuning options, and day-to-day operating notes.
 
 | Command | Purpose |
 |---|---|
-| `lain mcp` | Start a single-repository MCP server on stdio. It walks up from the current directory to find `.git`; no `repos.yaml` is required. |
+| `lain mcp` | Start an MCP server on stdio. Zero-args: walks up from the current directory to find `.git`. Repeat `--workspace <PATH>` (or set `LAIN_WORKSPACE=a,b`) to serve several checkouts in one process; no `repos.yaml` is required. |
 | `lain setup` | Configure an MCP client and verify the connection. `--dry-run` and `--print-config` don't write files. |
 | `lain oneshot` | Call one tool, print the answer, and exit. The first call starts a background `lain mcp` for the repository (it exits on its own after 15 idle minutes, `LAIN_SHARED_IDLE_SECS`); later calls reuse its warm graph. `LAIN_ONESHOT_NO_SHARE=1` forces a private server. Example: `lain oneshot get_blast_radius validate_token`. |
 | `lain server` | Start the federation server and, with HTTP transport, the Command Center. |

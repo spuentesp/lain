@@ -30,7 +30,15 @@ lain --help
 | Mode | When | MCP config |
 |------|------|------------|
 | **Single-repo** (`lain mcp`) | One repo, "just works" | `{"command":"lain","args":["mcp"]}` |
+| **Multi-repo** (`lain mcp --workspace …`) | N checkouts in one process, no config file | `{"command":"lain","args":["mcp","--workspace","/abs/repo-a","--workspace","/abs/repo-b"]}` |
 | **Federation** (`lain server --config repos.yaml`) | N repos, org-wide questions | `{"command":"lain","args":["server","--config","./repos.yaml","--transport","stdio"]}` |
+
+Multi-repo notes: `--workspace` takes **paths** (repeat the flag once per
+checkout; or set `LAIN_WORKSPACE=/abs/a,/abs/b`). It is not a
+`workspaces.yaml` name — a name fails with
+`no .git found at <name> (or any parent)`. With more than one workspace,
+`lain mcp` synthesizes a federation config internally (same tool surface as
+`lain server`); with one workspace it serves the light per-repo surface.
 
 ```mermaid
 flowchart LR
