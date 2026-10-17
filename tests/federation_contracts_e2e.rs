@@ -2547,12 +2547,15 @@ mod pr14_check_binding_graphql {
     }
 
     /// Three-repo saleor-style federation: `saleor-api` serves
-    /// `query product` + `query somethingElse` on `POST /graphql`,
-    /// `saleor-catalog` also exposes `query product` (ambiguous
-    /// join), and `storefront` carries the
-    /// `graphql-call:query:product` call site. Returns the
-    /// federation and the consumer node (its `.id` is the real
-    /// GlobalId the tests pass to `check_binding`).
+    /// `query product` + `query somethingElse` and `mutation
+    /// updateProduct` on `POST /graphql`, `saleor-catalog` also
+    /// exposes `query product` and `mutation updateProduct` (both
+    /// joins ambiguous), and `storefront` carries the
+    /// `graphql-call:query:product` and
+    /// `graphql-call:mutation:updateProduct` call sites. Returns the
+    /// federation and the query consumer node (its `.id` is the real
+    /// GlobalId the tests pass to `check_binding`); the mutation
+    /// consumer surfaces through `list_unresolved` items.
     pub(super) async fn build_graphql_federation(root: &Path) -> (Arc<FederatedIndex>, GraphNode) {
         let api_dir = root.join("saleor-api");
         let catalog_dir = root.join("saleor-catalog");
@@ -2617,13 +2620,27 @@ mod pr14_check_binding_graphql {
             4,
             "String",
         );
+        let api_update = graphql_provider_node(
+            "saleor-api",
+            "src/schema.graphql",
+            GraphqlOp::Mutation,
+            "updateProduct",
+            5,
+            "Product",
+        );
         let api_route = post_route_node("saleor-api", "src/server.ts", "/graphql", 12);
         api_g
-            .insert_nodes_batch(&[api_product.clone(), api_other.clone(), api_route.clone()])
+            .insert_nodes_batch(&[
+                api_product.clone(),
+                api_other.clone(),
+                api_update.clone(),
+                api_route.clone(),
+            ])
             .unwrap();
 
-        // saleor-catalog: a second `query product` root field — the
-        // join is ambiguous, so the consumer stays unbound.
+        // saleor-catalog: a second `query product` and `mutation
+        // updateProduct` root field — both joins are ambiguous, so
+        // the consumers stay unbound.
         let catalog_product = graphql_provider_node(
             "saleor-catalog",
             "src/schema.graphql",
@@ -2632,11 +2649,20 @@ mod pr14_check_binding_graphql {
             3,
             "Product",
         );
+        let catalog_update = graphql_provider_node(
+            "saleor-catalog",
+            "src/schema.graphql",
+            GraphqlOp::Mutation,
+            "updateProduct",
+            5,
+            "Product",
+        );
         catalog_g
-            .insert_nodes_batch(std::slice::from_ref(&catalog_product))
+            .insert_nodes_batch(&[catalog_product.clone(), catalog_update.clone()])
             .unwrap();
 
-        // storefront: the gql-tagged `query { product { id } }`.
+        // storefront: the gql-tagged `query { product { id } }` and
+        // `mutation { updateProduct … }`.
         let consumer = graphql_consumer_node(
             "storefront",
             "src/product.ts",
@@ -2644,15 +2670,25 @@ mod pr14_check_binding_graphql {
             "product",
             20,
         );
+        let mutation_consumer = graphql_consumer_node(
+            "storefront",
+            "src/cart.ts",
+            GraphqlOp::Mutation,
+            "updateProduct",
+            30,
+        );
         storefront_g
-            .insert_nodes_batch(std::slice::from_ref(&consumer))
+            .insert_nodes_batch(&[consumer.clone(), mutation_consumer.clone()])
             .unwrap();
 
         fed.register_contract_node_for_test(api_id.clone(), api_product.id.clone());
         fed.register_contract_node_for_test(api_id.clone(), api_other.id.clone());
+        fed.register_contract_node_for_test(api_id.clone(), api_update.id.clone());
         fed.register_contract_node_for_test(api_id.clone(), api_route.id.clone());
         fed.register_contract_node_for_test(catalog_id.clone(), catalog_product.id.clone());
+        fed.register_contract_node_for_test(catalog_id.clone(), catalog_update.id.clone());
         fed.register_contract_node_for_test(storefront_id.clone(), consumer.id.clone());
+        fed.register_contract_node_for_test(storefront_id.clone(), mutation_consumer.id.clone());
         fed.mark_contracts_dirty();
         for id in [&api_id, &catalog_id, &storefront_id] {
             fed.project_repo(id).await.expect("project_repo");
@@ -2799,11 +2835,13 @@ mod pr14_check_binding_graphql {
 
 mod pr14_list_unresolved_graphql_candidates {
     //! `list_unresolved`'s per-item `candidates` for a GraphQL
-    //! consumer must be the federation's GraphQL endpoints (same-`op`
-    //! first) — not the pre-fix noise of every `ContractKey::Http`
-    //! endpoint. Fixture: `build_graphql_federation` (query product
-    //! on two services + query somethingElse + the `POST /graphql`
-    //! route that the old filter listed).
+    //! consumer must be the federation's GraphQL endpoints — the
+    //! same-`op` set when any exist, else all GraphQL endpoints —
+    //! never the pre-fix noise of every `ContractKey::Http` endpoint.
+    //! Fixture: `build_graphql_federation` (query product +
+    //! mutation updateProduct on two services each, so both consumers
+    //! stay `graphql_no_op`-ambiguous, plus the `POST /graphql` route
+    //! the old filter listed).
 
     use super::pr14_check_binding_graphql::build_graphql_federation;
     use super::*;
@@ -2846,6 +2884,43 @@ mod pr14_list_unresolved_graphql_candidates {
                 "graphql consumer must not see http endpoints: {key}"
             );
         }
+        // Same-`op` exclusivity at tool level: a query consumer never
+        // sees the mutation endpoint.
+        let query_keys: Vec<&str> = cands
+            .iter()
+            .map(|c| c["endpoint"]["key"].as_str().unwrap())
+            .collect();
+        assert!(
+            query_keys.iter().all(|k| k.starts_with("graphql:query:")),
+            "query consumer must not see mutation endpoints: {query_keys:?}"
+        );
+
+        // …and vice versa: the mutation consumer never sees the
+        // query endpoints. `url_expr` is the decoded node name.
+        let mut mutation_items = 0usize;
+        for it in items {
+            if it["url_expr"] == json!("graphql-call:mutation:updateProduct") {
+                mutation_items += 1;
+                let mkeys: Vec<&str> = it["candidates"]
+                    .as_array()
+                    .expect("candidates array")
+                    .iter()
+                    .map(|c| c["endpoint"]["key"].as_str().unwrap())
+                    .collect();
+                assert!(
+                    !mkeys.is_empty(),
+                    "mutation endpoints must be candidates: {it:?}"
+                );
+                assert!(
+                    mkeys.iter().all(|k| k.starts_with("graphql:mutation:")),
+                    "mutation consumer must not see query endpoints: {mkeys:?}"
+                );
+            }
+        }
+        assert_eq!(
+            mutation_items, 1,
+            "the mutation consumer must appear once in items"
+        );
     }
 }
 
