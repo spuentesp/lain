@@ -7,6 +7,14 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- contracts: `list_unresolved` candidates honor the item's
+  `target_service` — the §9.7 could-match gate (`get_service`'s
+  `unresolved_candidates` predicate). When the resolver named one
+  (HTTP `no_route_in_service`, GraphQL `route_owner`), candidates
+  come only from that service's endpoints, still subject to the
+  per-kind key rules (HTTP method/template matching, GraphQL
+  same-op preference within the named service); items without one
+  keep listing the whole index, and candidate order is unchanged.
 - contracts: `list_unresolved` candidate `reason` now emits
   `prefix_stripped` when the consumer's template matches the endpoint
   only under the §7.4 route matcher's prefix-strip rule (the

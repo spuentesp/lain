@@ -38,7 +38,7 @@ Las tres herramientas involucradas (MCP JSON-RPC sobre `POST /mcp`, `method: "to
 - Forma del item (lo que se consume): `item.consumer.id` (GlobalId, p. ej. `storefront:Function:src/checkout/graphql/checkout.graphql:graphql-call%3Amutation%3AcheckoutLinesUpdate:205`), `item.consumer.repo`, `item.consumer.path`, `item.reason`.
 - El nombre del nodo (`graphql-call:{op}:{field}`) viene **URL-codificado** dentro de `consumer.id`; decodificarlo para derivar claves.
 - Códigos `reason` relevantes: `graphql_no_op` (0 o ≥2 providers para `(op, field)`), `env_unmapped`, `no_match`, `stale_binding`, `env_ambiguous`.
-- `candidates`: para consumidores GraphQL ahora lista solo endpoints GraphQL (los del mismo `op` si existen; si no, todos los GraphQL); sigue siendo advisory — para bindings, la fuente de verdad es `list_contracts`.
+- `candidates`: para consumidores GraphQL ahora lista solo endpoints GraphQL (los del mismo `op` si existen; si no, todos los GraphQL); sigue siendo advisory — para bindings, la fuente de verdad es `list_contracts`. **Gating §9.7**: si el ítem trae `target_service` (el resolver nombró uno — `no_route_in_service` en HTTP, `route_owner` en GraphQL), los `candidates` salen solo de los endpoints de ese servicio (la preferencia por mismo `op` se aplica dentro de ese servicio); si no, de todo el índice. La etiqueta `reason` de cada candidato es `same_key` (clave idéntica), `pattern` (otro match de ruta) o `prefix_stripped` (match solo tras el prefix-strip del §7.4, p. ej. `GET /v1/api/orders/{}` → `GET /api/orders/{}`).
 
 ### 3.2 `list_contracts`
 

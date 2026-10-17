@@ -1051,8 +1051,21 @@ fn provenance_to_json(p: &EdgeProvenance) -> Value {
 fn candidate_endpoints_for(
     view: &ContractIndex,
     call_id: &GlobalId,
-    _resolution: &ConsumerResolution,
+    resolution: &ConsumerResolution,
 ) -> Vec<Value> {
+    // §9.7 gating: a `target_service` the resolver named (HTTP
+    // `no_route_in_service`, GraphQL `route_owner`) means the
+    // consumer could match only that service's endpoints; without
+    // one the whole index is in play. The gate is a filter over the
+    // existing listing rules, so `BTreeMap` key order is unchanged.
+    let target_service: Option<&ServiceName> = match &resolution.target {
+        Some(ConsumerTarget::Unresolved { target_service, .. }) => target_service.as_ref(),
+        _ => None,
+    };
+    let in_target = |ep_id: &EndpointId| match target_service {
+        Some(ts) => &ep_id.0 == ts,
+        None => true,
+    };
     // GraphQL consumers (`graphql-call:{op}:{field}`) carry no HTTP
     // method/template: `parse_consumer_call_shape` reads their name
     // as `Unknown`/no template, so the HTTP filter below would admit
@@ -1071,11 +1084,15 @@ fn candidate_endpoints_for(
         let name = call_id.name().unwrap_or_default();
         let rest = name.strip_prefix(GRAPHQL_CALL_PREFIX).unwrap_or("");
         let (cop, cfield) = rest.split_once(':').unwrap_or((rest, ""));
-        let same_op_present = view.endpoints.keys().any(
-            |ep_id| matches!(&ep_id.1, ContractKey::Graphql { op, .. } if op.to_string() == cop),
-        );
+        let same_op_present = view.endpoints.keys().any(|ep_id| {
+            in_target(ep_id)
+                && matches!(&ep_id.1, ContractKey::Graphql { op, .. } if op.to_string() == cop)
+        });
         let mut out: Vec<Value> = Vec::new();
         for ep_id in view.endpoints.keys() {
+            if !in_target(ep_id) {
+                continue;
+            }
             if let ContractKey::Graphql { op, field } = &ep_id.1 {
                 let same_op = op.to_string() == cop;
                 if same_op_present && !same_op {
@@ -1098,6 +1115,9 @@ fn candidate_endpoints_for(
     let mut out: Vec<Value> = Vec::new();
     let (consumer_method, consumer_template) = parse_consumer_call_shape(call_id);
     for ep_id in view.endpoints.keys() {
+        if !in_target(ep_id) {
+            continue;
+        }
         if let ContractKey::Http { method, template } = &ep_id.1 {
             let same_method = match (&consumer_method, method) {
                 (
@@ -1445,10 +1465,21 @@ mod tests {
     }
 
     fn candidate_triples(view: &ContractIndex, id: &GlobalId) -> Vec<(String, String, String)> {
+        candidate_triples_for(view, id, None)
+    }
+
+    fn candidate_triples_for(
+        view: &ContractIndex,
+        id: &GlobalId,
+        target_service: Option<&ServiceName>,
+    ) -> Vec<(String, String, String)> {
         let res = ConsumerResolution {
             call_id: id.clone(),
             service: ServiceName("storefront".to_string()),
-            target: None,
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: target_service.cloned(),
+            }),
             bound_endpoints: Vec::new(),
             reads_complete: true,
         };
@@ -1754,6 +1785,136 @@ mod tests {
             candidate_triples(&view, &gid),
             Vec::new(),
             "no §7.4 match → no candidate (see the bridge pair above)"
+        );
+    }
+
+    /// §9.7 gating: when the item carries a `target_service` (the
+    /// HTTP `no_route_in_service` resolver named one, or GraphQL's
+    /// `route_owner`), candidates come only from THAT service's
+    /// endpoints — still subject to the per-kind key rules (HTTP
+    /// method/template matching, GraphQL same-op preference, which
+    /// now applies within the named service). Without one, the whole
+    /// index stays in play. `BTreeMap` key order is unchanged.
+    #[test]
+    fn candidates_respect_target_service() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "shipping",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "somethingElse"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-catalog",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+
+        // HTTP: `target_service = orders` lists only orders' endpoint,
+        // even though shipping exposes the same key.
+        let gid = call_id("billing", "GET /api/orders/{}");
+        assert_eq!(
+            candidate_triples_for(&view, &gid, Some(&ServiceName("orders".to_string()))),
+            vec![(
+                "orders".to_string(),
+                "http:GET /api/orders/{}".to_string(),
+                "same_key".to_string(),
+            )],
+            "a named target_service rules other services out (§9.7)"
+        );
+        // No target_service → both services, as before.
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "orders".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "shipping".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "same_key".to_string(),
+                ),
+            ],
+            "without a target_service every service is listed"
+        );
+
+        // GraphQL `route_owner` gating: the same-op preference still
+        // applies, within the named service — saleor-catalog's
+        // `query:product` is not a candidate for a `route_owner =
+        // saleor-api` item.
+        let gid = call_id("storefront", "graphql-call:query:product");
+        assert_eq!(
+            candidate_triples_for(&view, &gid, Some(&ServiceName("saleor-api".to_string()))),
+            vec![
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:product".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:somethingElse".to_string(),
+                    "pattern".to_string(),
+                ),
+            ],
+            "route_owner gating keeps only that service's graphql endpoints"
+        );
+        // Without a route_owner the whole GraphQL set is listed.
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:product".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:somethingElse".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "saleor-catalog".to_string(),
+                    "graphql:query:product".to_string(),
+                    "same_key".to_string(),
+                ),
+            ],
+            "without a route_owner every graphql endpoint is listed"
+        );
+
+        // Same-op preference is computed within the named service:
+        // `saleor-catalog` has no mutation endpoint, so a mutation
+        // consumer gated to it falls back to that service's GraphQL
+        // endpoints (`pattern`), not to another service's mutations.
+        let gid = call_id("storefront", "graphql-call:mutation:updateProduct");
+        assert_eq!(
+            candidate_triples_for(
+                &view,
+                &gid,
+                Some(&ServiceName("saleor-catalog".to_string()))
+            ),
+            vec![(
+                "saleor-catalog".to_string(),
+                "graphql:query:product".to_string(),
+                "pattern".to_string(),
+            )],
+            "same-op fallback runs inside the target_service's endpoints"
         );
     }
 }

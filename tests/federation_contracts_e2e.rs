@@ -2895,6 +2895,24 @@ mod pr14_list_unresolved_graphql_candidates {
             "query consumer must not see mutation endpoints: {query_keys:?}"
         );
 
+        // §9.7 gating at tool level: `saleor-api` owns the fixture's
+        // only `POST /graphql` route, so the unresolved item carries
+        // `target_service = saleor-api` (the GraphQL `route_owner`)
+        // and its candidates come only from that service —
+        // `saleor-catalog`'s `query:product` is not among them.
+        assert_eq!(
+            item["target_service"],
+            json!("saleor-api"),
+            "route_owner must surface as the item's target_service: {item:?}"
+        );
+        for c in cands {
+            assert_eq!(
+                c["endpoint"]["service"],
+                json!("saleor-api"),
+                "target_service gating must rule out other services: {c:?}"
+            );
+        }
+
         // …and vice versa: the mutation consumer never sees the
         // query endpoints. `url_expr` is the decoded node name.
         let mut mutation_items = 0usize;
