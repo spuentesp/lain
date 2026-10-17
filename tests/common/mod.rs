@@ -164,7 +164,9 @@ pub fn wait_for_health_of(server: &mut ServerGuard, host: &str, deadline: Durati
         }
         if start.elapsed() > deadline {
             let log = std::fs::read_to_string(&server.stderr_path).unwrap_or_default();
-            panic!("server did not become healthy on {host} within {deadline:?}; last stderr:\n{log}");
+            panic!(
+                "server did not become healthy on {host} within {deadline:?}; last stderr:\n{log}"
+            );
         }
         let attempt = (|| -> std::io::Result<(u16, String)> {
             let mut stream = TcpStream::connect(host)?;

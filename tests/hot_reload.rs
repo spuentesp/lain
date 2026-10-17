@@ -313,7 +313,6 @@ async fn set_workspace_stress_visible_to_shared_lock() {
     // ---
     let reader_lock = std::sync::Arc::clone(&shared_lock);
     let reader = tokio::spawn({
-        let reader_sampled = reader_sampled;
         async move {
             let mut observed_counts: std::collections::BTreeSet<usize> =
                 std::collections::BTreeSet::new();
