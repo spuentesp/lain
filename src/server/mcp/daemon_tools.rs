@@ -117,6 +117,23 @@ fn unique_id(path: &Path, taken: &mut Vec<String>) -> String {
     }
 }
 
+/// One `add_workspaces` call must not be able to pin the daemon for
+/// hours or fill the runtime dir: the entry count and each path's
+/// length are capped up front, before any validation or mutation.
+const MAX_PATHS: usize = 32;
+/// Longest accepted path string (PATH_MAX on Linux/macOS).
+const MAX_PATH_BYTES: usize = 4096;
+
+/// Serializes the config read-modify-write + rebuild so two late
+/// clients handing config at once cannot interleave: the temp file is
+/// uniquely named now (`cli::io::write_file_atomic`), but two writers
+/// could still lose each other's repo entries in the
+/// load→append→write sequence without one writer at a time.
+fn add_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// The `add_workspaces` implementation. Returns the tool payload on
 /// success and the typed-error envelope on failure (the socket layer
 /// turns the latter into `isError: true`).
@@ -128,6 +145,13 @@ pub async fn run_add_workspaces(server: &LainServer, args: &Value) -> Result<Val
     if paths.is_empty() {
         return Err(err("invalid_args", None, "`paths` must not be empty"));
     }
+    if paths.len() > MAX_PATHS {
+        return Err(err(
+            "invalid_args",
+            None,
+            format!("too many paths: {} (max {MAX_PATHS} per call)", paths.len()),
+        ));
+    }
 
     // Validate everything BEFORE mutating anything: a bad path fails
     // the whole call loudly instead of half-applying the request.
@@ -136,10 +160,22 @@ pub async fn run_add_workspaces(server: &LainServer, args: &Value) -> Result<Val
         let s = p
             .as_str()
             .ok_or_else(|| err("invalid_args", None, "`paths` entries must be strings"))?;
+        if s.len() > MAX_PATH_BYTES {
+            return Err(err(
+                "invalid_args",
+                None,
+                format!("path exceeds {MAX_PATH_BYTES} bytes: {:.64}…", s),
+            ));
+        }
         requested.push(validated(s)?);
     }
     requested.sort();
     requested.dedup();
+
+    // One writer at a time from here to the end of the rebuild: two
+    // late clients handing config concurrently would otherwise
+    // interleave load→append→write and lose each other's entries.
+    let add_guard = add_lock().lock().await;
 
     let served = served_workspaces(server);
     let (already, missing): (Vec<PathBuf>, Vec<PathBuf>) =
@@ -228,6 +264,10 @@ pub async fn run_add_workspaces(server: &LainServer, args: &Value) -> Result<Val
         .await
         .map_err(|e| err("add_failed", None, format!("hot-add rebuild failed: {e}")))?;
 
+    // Rebuild done — hand the lock to the next adder before waiting on
+    // indexing, which can take a full `INDEX_WAIT`.
+    drop(add_guard);
+
     // 3. Per-repo indexing status. The index runs in the background
     //    (same as cold boot), so wait — bounded — for each addition to
     //    reach a terminal health before answering.
@@ -237,7 +277,7 @@ pub async fn run_add_workspaces(server: &LainServer, args: &Value) -> Result<Val
         results.push(results_for(p, "already", id.as_deref(), "ready"));
     }
     for (id, path) in &additions {
-        let indexing = wait_for_index(server, id, INDEX_WAIT);
+        let indexing = wait_for_index(server, id, INDEX_WAIT).await;
         results.push(results_for(path, "added", Some(id), &indexing));
     }
 
@@ -250,8 +290,10 @@ pub async fn run_add_workspaces(server: &LainServer, args: &Value) -> Result<Val
 
 /// Poll a hot-added repo's health until it leaves `Indexing`, or the
 /// budget elapses. Returns the health label (`ready`, `degraded`, …)
-/// as the per-repo indexing status.
-fn wait_for_index(server: &LainServer, repo_id: &str, budget: Duration) -> String {
+/// as the per-repo indexing status. Async throughout: a blocking
+/// sleep here would stall the tokio worker that is also running the
+/// socket accept loop and every other connection's dispatch.
+async fn wait_for_index(server: &LainServer, repo_id: &str, budget: Duration) -> String {
     let deadline = Instant::now() + budget;
     loop {
         let health = server
@@ -273,7 +315,7 @@ fn wait_for_index(server: &LainServer, repo_id: &str, budget: Duration) -> Strin
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

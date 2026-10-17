@@ -413,15 +413,18 @@ fn two_clients_same_set_share_one_daemon() {
         "one daemon pid file expected; found {pid_files:?}"
     );
 
-    // Both bridges are open on that daemon — the daemon-side view.
+    // Both bridges are open on that daemon. The probe connection counts
+    // itself, so A + B + probe = 3: the old `>= 2` bound also held with
+    // client B privately serving (A's bridge + this probe alone).
     let info = daemon_info(&sock);
     let open = info
         .pointer("/result/open_connections")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     assert!(
-        open >= 2,
-        "both clients must be attached to the one daemon (open_connections={open}); info: {info}"
+        open >= 3,
+        "both bridges must be attached to the one daemon \
+         (A + B + this probe = 3; open_connections={open}); info: {info}"
     );
     let served = info
         .pointer("/result/workspaces")
@@ -446,6 +449,23 @@ fn two_clients_same_set_share_one_daemon() {
         serde_json::json!({}),
         &contains("anchor"),
         Duration::from_secs(90),
+    );
+
+    // Sharing, from the inside: A's OWN bridge asks the daemon for its
+    // connection count and must SEE B's bridge on the same daemon.
+    // This path has no probe connection — A's bridge IS the connection
+    // — so the count is A + B = 2, and would be 1 if B were privately
+    // serving. (Identical tool text alone would not prove sharing: a
+    // private server answers the same for the same workspace.)
+    let via_a = a.request("lain/daemon_info", serde_json::json!({}));
+    let open_via_a = via_a
+        .pointer("/result/open_connections")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    assert!(
+        open_via_a >= 2,
+        "A's bridge must observe B's bridge on the same daemon \
+         (open_connections={open_via_a}); reply: {via_a}"
     );
     assert_eq!(
         tool_text(&ra),

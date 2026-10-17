@@ -399,48 +399,63 @@ pub fn attach_or_start(
                 )
             }
         },
-        Discovery::Partial { socket, missing } => match UnixStream::connect(&socket) {
-            Ok(stream) => {
-                tracing::info!(
-                    "lain mcp: handing {} workspace(s) to the daemon at {}",
-                    missing.len(),
-                    socket.display()
-                );
-                match admin_add_workspaces(&stream, &missing, ADD_BUDGET) {
-                    Ok(payload) => {
-                        tracing::info!("lain mcp: daemon accepted the config: {payload}");
-                        Some(stream)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "add_workspaces on {} failed ({e}); starting a dedicated daemon",
-                            socket.display()
-                        );
-                        drop(stream);
-                        start_detached_daemon(
-                            workspaces,
-                            &socket_key,
-                            start_wait_budget(),
-                            embedding_model,
-                            reindex_timeout,
-                        )
+        Discovery::Partial { socket, missing } => {
+            // Rival-spawn convergence: if the hand-off fails we spawn
+            // a daemon for OUR set rather than falling back to a
+            // private server — two daemons may then coexist briefly
+            // (each on its own set-keyed socket), and later clients
+            // converge on one because a covering daemon is preferred
+            // over spawning and `add_workspaces` grows the survivor;
+            // the unreferenced one idle-exits.
+            let handoff = UnixStream::connect(&socket)
+                .map_err(|e| anyhow!("connect: {e}"))
+                .and_then(|admin| {
+                    tracing::info!(
+                        "lain mcp: handing {} workspace(s) to the daemon at {}",
+                        missing.len(),
+                        socket.display()
+                    );
+                    admin_add_workspaces(&admin, &missing, ADD_BUDGET)
+                });
+            match handoff {
+                Ok(payload) => {
+                    tracing::info!("lain mcp: daemon accepted the config: {payload}");
+                    // The bridge gets a FRESH connection: the admin
+                    // exchange's BufReader may have buffered bytes
+                    // past the tool response, and those would be lost
+                    // if the admin stream were reused as the bridge.
+                    match UnixStream::connect(&socket) {
+                        Ok(stream) => Some(stream),
+                        Err(e) => {
+                            tracing::warn!(
+                                "daemon at {} vanished after add_workspaces ({e}); starting one",
+                                socket.display()
+                            );
+                            start_detached_daemon(
+                                workspaces,
+                                &socket_key,
+                                start_wait_budget(),
+                                embedding_model,
+                                reindex_timeout,
+                            )
+                        }
                     }
                 }
+                Err(e) => {
+                    tracing::warn!(
+                        "handing config to the daemon at {} failed ({e}); starting a dedicated daemon",
+                        socket.display()
+                    );
+                    start_detached_daemon(
+                        workspaces,
+                        &socket_key,
+                        start_wait_budget(),
+                        embedding_model,
+                        reindex_timeout,
+                    )
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "partial daemon at {} vanished ({e}); starting one",
-                    socket.display()
-                );
-                start_detached_daemon(
-                    workspaces,
-                    &socket_key,
-                    start_wait_budget(),
-                    embedding_model,
-                    reindex_timeout,
-                )
-            }
-        },
+        }
         Discovery::None => {
             tracing::info!(
                 "lain mcp: no shared daemon; starting one at {}",
