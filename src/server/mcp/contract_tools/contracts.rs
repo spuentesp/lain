@@ -45,7 +45,7 @@ use crate::federation::contracts::index::{
 use crate::federation::contracts::key_compat::{methods_compatible, templates_compatible};
 use crate::federation::contracts::model::MethodSpec;
 use crate::federation::contracts::model::{ContractKey, Direction, ServiceName};
-use crate::federation::contracts::route_match::match_route;
+use crate::federation::contracts::route_match::{match_route, MatchOutcome};
 use crate::federation::repo_id::GlobalId;
 use crate::schema::{EdgeProvenance, RouteMatch};
 use crate::server::mcp::handler::McpContext;
@@ -1119,16 +1119,33 @@ fn candidate_endpoints_for(
                                 crate::federation::contracts::model::HttpMethod::Any
                             }
                         };
-                    let r = match_route(consumer_method.clone(), t, provider_method, template);
-                    if r.is_match() {
-                        (true, "same_key")
-                    } else {
-                        (false, "pattern")
+                    match match_route(consumer_method.clone(), t, provider_method, template) {
+                        MatchOutcome::Match(detail) => {
+                            // Candidate labels reuse the §7.4
+                            // classifier (`match_route`'s
+                            // `RouteMatch` kind — the taxonomy
+                            // `route_match_label` renders as
+                            // `exact|pattern|prefix_stripped`):
+                            // `same_key` only for a truly equal key,
+                            // `prefix_stripped` when the match needed
+                            // the matcher's gateway-prefix strip,
+                            // `pattern` for any other route match.
+                            let keys_identical =
+                                &consumer_method == method && t == template.as_str();
+                            let reason = if keys_identical {
+                                "same_key"
+                            } else if matches!(detail.kind, RouteMatch::PrefixStripped) {
+                                "prefix_stripped"
+                            } else {
+                                "pattern"
+                            };
+                            (true, reason)
+                        }
+                        MatchOutcome::NoMatch => (false, "pattern"),
                     }
                 }
                 None => (true, "pattern"),
             };
-            let _ = ok;
             if ok {
                 out.push(json!({
                     "endpoint": {"service": ep_id.0 .0, "key": ep_id.1.to_string()},
@@ -1568,7 +1585,13 @@ mod tests {
     /// HTTP consumers keep the pre-existing candidate behavior —
     /// method/template matching over HTTP endpoints only, with the
     /// `same_key` / `pattern` reason labels — so the GraphQL fix
-    /// cannot drift the HTTP path.
+    /// cannot drift the HTTP path. "Unchanged" means: the inclusion
+    /// rule (method gate + §7.4 `match_route`, `BTreeMap` key order),
+    /// a truly equal key still labeled `same_key`, and a consumer
+    /// with no template still listed `pattern`. The ONLY pin this
+    /// test adjusts is the gateway-bridge case appended below: its
+    /// label moves from the pre-fix `same_key` (every route match
+    /// collapsed to it) to `prefix_stripped`.
     #[test]
     fn http_consumer_candidates_unchanged() {
         let mut view = ContractIndex::default();
@@ -1637,6 +1660,100 @@ mod tests {
                     "pattern".to_string(),
                 ),
             ]
+        );
+
+        // The one adjusted pin: the gateway-bridge shape (the §15.2
+        // scenario-10 pair the `list_unresolved` golden carries,
+        // `GET /v1/api/orders/{}` → `GET /api/orders/{}`) used to be
+        // labeled `same_key` like every other route match; it is now
+        // `prefix_stripped`.
+        let gid = call_id("billing", "GET /v1/api/orders/{}");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "orders".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "prefix_stripped".to_string(),
+                ),
+                (
+                    "shipping".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "prefix_stripped".to_string(),
+                ),
+            ],
+            "bridge matches must be labeled prefix_stripped"
+        );
+    }
+
+    /// Candidate `reason` labels reuse the §7.4 route matcher's
+    /// classifier (`match_route` / `RouteMatch` — the
+    /// `exact|pattern|prefix_stripped` taxonomy `route_match_label`
+    /// renders for bound consumers) instead of a second matcher:
+    /// `same_key` only when the consumer's key equals the endpoint
+    /// key, `prefix_stripped` when the templates match only after
+    /// the matcher strips the consumer's gateway prefix (the
+    /// bridge shape), and `pattern` for every other route match
+    /// (literal-vs-placeholder, wildcard).
+    #[test]
+    fn prefix_stripped_candidate_label_for_bridge_templates() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+
+        // Truly equal key → `same_key`.
+        let gid = call_id("billing", "GET /api/orders/{}");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![(
+                "orders".to_string(),
+                "http:GET /api/orders/{}".to_string(),
+                "same_key".to_string(),
+            )],
+            "an identical key stays same_key"
+        );
+
+        // Wildcard/pattern match (literal id vs `{}`) → `pattern`.
+        let gid = call_id("billing", "GET /api/orders/42");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![(
+                "orders".to_string(),
+                "http:GET /api/orders/{}".to_string(),
+                "pattern".to_string(),
+            )],
+            "a placeholder match is not the same key — pattern"
+        );
+
+        // Gateway-bridge shape: the consumer template matches the
+        // endpoint template only after `match_route` strips the
+        // consumer's leading literal (`/v1`) — `RouteMatch::PrefixStripped`.
+        let gid = call_id("billing", "GET /v1/api/orders/{}");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![(
+                "orders".to_string(),
+                "http:GET /api/orders/{}".to_string(),
+                "prefix_stripped".to_string(),
+            )],
+            "a prefix-bridge match is prefix_stripped, not same_key"
+        );
+
+        // Boundary: `GET /v1/orders` is NOT a §7.4 match for
+        // `GET /api/orders` — prefix tolerance strips only the
+        // CONSUMER's leading literals, and after dropping `/v1` the
+        // consumer is `/orders`, one segment short of `/api/orders`
+        // (`segments_match` requires equal segment counts). The pair
+        // is not a candidate at all; the bridge that does classify
+        // as `PrefixStripped` is the one above (`/v1/api/orders/…`).
+        let gid = call_id("billing", "GET /v1/orders");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            Vec::new(),
+            "no §7.4 match → no candidate (see the bridge pair above)"
         );
     }
 }

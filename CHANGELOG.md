@@ -7,6 +7,15 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- contracts: `list_unresolved` candidate `reason` now emits
+  `prefix_stripped` when the consumer's template matches the endpoint
+  only under the §7.4 route matcher's prefix-strip rule (the
+  gateway-bridge shape, e.g. `GET /v1/api/orders/{}` →
+  `GET /api/orders/{}`). Labels reuse the route matcher's classifier:
+  a truly equal key is `same_key`, any other route match is `pattern`,
+  and a prefix-bridge match is `prefix_stripped`. Previously every
+  route match was labeled `same_key`, so the enum's `prefix_stripped`
+  value was never emitted. GraphQL candidate labels are unchanged.
 - contracts: `list_unresolved` now lists GraphQL endpoints as
   `candidates` for GraphQL consumers (`graphql-call:{op}:{field}`) —
   same-`op` endpoints when any exist, else all GraphQL endpoints —
