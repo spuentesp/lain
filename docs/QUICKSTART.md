@@ -33,6 +33,15 @@ lain --help
 | **Multi-repo** (`lain mcp --workspace …`) | N checkouts in one process, no config file | `{"command":"lain","args":["mcp","--workspace","/abs/repo-a","--workspace","/abs/repo-b"]}` |
 | **Federation** (`lain server --config repos.yaml`) | N repos, org-wide questions | `{"command":"lain","args":["server","--config","./repos.yaml","--transport","stdio"]}` |
 
+The `lain mcp` entries share one **resident daemon** per machine: the
+first client starts it, later clients attach to it and talk over a
+Unix socket (one index, one memory, N agents). A late agent that needs
+*other* workspaces hands them to the running daemon, which indexes
+them in hot — after which any agent whose set is covered attaches
+automatically. Zero configuration; `LAIN_MCP_NO_SHARE=1` opts out
+(per-client private server), and the daemon exits by itself after an
+idle window.
+
 Multi-repo notes: `--workspace` takes **paths** (repeat the flag once per
 checkout; or set `LAIN_WORKSPACE=/abs/a,/abs/b`). It is not a
 `workspaces.yaml` name — a name fails with

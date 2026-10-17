@@ -43,6 +43,10 @@ Run `lain <command> --help` for flags. The generated MCP tool schema lives at
 Lain advertises a small tool surface and keeps the rest registered
 but hidden — advertising is not dispatch, so hook scripts can call
 hidden tools (claims, heartbeat) whether or not the model sees them.
+The shared daemon adds `add_workspaces` (`paths: [string]`) on its
+Unix socket only — the tool a late `lain mcp` client uses to hand a
+running daemon more workspaces; it is deliberately unadvertised and
+daemon-side.
 Everything is organized into **capability packages** — small skills,
 each with a pitch, a level, and a "when to reach for it" per tool.
 `list_packages` renders the whole menu at runtime; `load_package`
@@ -206,6 +210,15 @@ one repo. With a single repo nothing to choose. Relative paths
 resolve against that repo's checkout.
 
 ## Multi-agent coordination
+
+**N agents share one resident daemon automatically.** `lain mcp` is
+zero-config multi-agent: the first client starts a shared daemon keyed
+by its resolved workspace set, later clients attach to it, and a late
+agent that needs other workspaces hands them to the running daemon
+(`add_workspaces`), which indexes them in hot — after which subset
+clients attach automatically. One index, one memory, one process group
+per machine; the daemon exits after an idle window. `LAIN_MCP_NO_SHARE=1`
+restores the old one-server-per-client behavior.
 
 Four-call dance per agent (sequence diagram in [multiplayer.md](multiplayer.md#agent-quickstart)):
 

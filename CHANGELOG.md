@@ -5,6 +5,34 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+### Added
+
+- Zero-config multi-agent shared daemon: `lain mcp` (stdio) now
+  attaches to — or starts — one resident `lain mcp --daemon` per
+  machine and bridges stdin↔socket JSON-RPC to it transparently. The
+  daemon is keyed by the resolved workspace **set** (sorted canonical
+  paths → short hash; a singleton set keeps the historical
+  `oneshot` socket key), a live daemon whose served set is a superset
+  covers subset clients, and N agents share one index and one memory
+  with no configuration. `LAIN_MCP_NO_SHARE=1` opts out; every failure
+  path still falls back to the historical private server.
+- `add_workspaces` daemon-side MCP tool (`paths: [string]`): hot-adds
+  workspace paths to the served federation — the same path
+  `workspaces.yaml`/`repos.yaml` reload uses (per-repo index, cross-repo
+  relink, watchers) — and returns per-repo indexing status. Idempotent
+  (`already` for known paths); typed errors for non-repo or unreadable
+  paths. A late `lain mcp` client whose workspaces are not covered calls
+  it automatically before bridging, so the daemon serves the union.
+
+### Changed
+
+- `lain mcp --daemon` boots the resolved workspace set as a federation
+  (synthesized `repos.yaml` under the runtime dir, set-hash keyed) so
+  the served set can grow in hot via `add_workspaces`; idle-exit and
+  open-connection pinning are unchanged. Explicit `lain mcp --socket
+  PATH` (without `--daemon`) keeps its historical meaning: a private
+  server that also binds that socket.
+
 ### Fixed
 
 - contracts: `list_unresolved` candidates honor the item's
