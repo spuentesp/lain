@@ -143,6 +143,21 @@ pub fn config_dir() -> PathBuf {
     PathBuf::from(home).join(".config").join("lain")
 }
 
+/// Return the persistent Lain home (`$LAIN_HOME` or `~/.local/lain`).
+/// State that must survive reboots and runtime-dir cleanups lives
+/// here — notably the shared daemon's federation data dir (per-repo
+/// graphs), so a daemon respawned after a reboot starts warm instead
+/// of re-indexing. Mirrors the resolution `lain workspaces init` uses.
+pub fn lain_home() -> PathBuf {
+    if let Ok(home) = std::env::var("LAIN_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local").join("lain")
+}
+
 /// Return the path to the lain runtime dir (`~/.local/lain/run`).
 /// Used by the hot-reload Unix socket listener to drop per-project
 /// `.sock` files. `$XDG_RUNTIME_DIR/lain` takes precedence when

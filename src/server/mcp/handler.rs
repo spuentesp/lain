@@ -1031,6 +1031,64 @@ pub(crate) fn profile_allows(
     crate::server::tools::profile::profile_allows_inner(profile, tool_name)
 }
 
+/// The advertised `tools/list` surface in wire-JSON shape
+/// (`{name, description, inputSchema}`), with the same filtering for
+/// every transport: `inert_tool_names` (tools that cannot answer in
+/// this mode), `advertise_repo_scope` (federation), the conditional
+/// groups (federation/contract, workspaces), and the
+/// `LAIN_TOOL_PROFILE` gate. The stdio path
+/// (`handle_list_tools_request`), the HTTP `tools/list` arm, and the
+/// shared-daemon Unix socket all serve this one surface, so a bridged
+/// client sees exactly what a privately served one would.
+pub(crate) fn advertised_tools_json(
+    executor: &ToolExecutor,
+    federation: Option<&FederatedIndex>,
+    has_workspaces: bool,
+) -> Vec<serde_json::Value> {
+    let mut tools_vec = crate::tools::registry::ToolRegistry::definitions();
+    // The 6 special-case tools (kept in sync with the stdio
+    // transport's handle_list_tools_request).
+    tools_vec.extend(special_tool_definitions());
+    // Same mode filter as the stdio path (wishlist #9): do not
+    // advertise a tool that is guaranteed to fail in this mode.
+    let inert = inert_tool_names(executor.embedder());
+    tools_vec.retain(|def| !inert.contains(&def.name));
+    let mut tools: Vec<serde_json::Value> = tools_vec
+        .iter()
+        .map(|def| {
+            let mut schema = def.input_schema.clone();
+            if let Some(fed) = federation {
+                advertise_repo_scope(def.name, &mut schema, fed);
+            }
+            serde_json::json!({
+                "name": def.name,
+                "description": def.description,
+                "inputSchema": schema
+            })
+        })
+        .collect();
+    if federation.is_some() {
+        tools.extend(defs_to_value_tools(FEDERATION_TOOL_DEFS));
+        // Contract-federation service view (PR 16).
+        tools.extend(defs_to_value_tools(CONTRACT_TOOL_DEFS));
+    }
+    if has_workspaces {
+        tools.extend(defs_to_value_tools(WORKSPACE_TOOL_DEFS));
+    }
+    tools.extend(defs_to_value_tools(SERVER_TOOL_DEFS));
+    // Same wire-level profile filter as the stdio path.
+    // `LAIN_TOOL_PROFILE=full` opts back in to the legacy surface.
+    let profile = crate::server::tools::profile::ToolProfile::from_env();
+    tools
+        .into_iter()
+        .filter(|t| {
+            t.get("name")
+                .and_then(|n| n.as_str())
+                .is_none_or(|n| profile_allows(&profile, n))
+        })
+        .collect()
+}
+
 #[async_trait]
 impl ServerHandler for LainHandler {
     async fn handle_list_tools_request(
@@ -2400,54 +2458,13 @@ async fn handle_request(
                         })
                     }
                     "tools/list" => {
-                        let mut tools_vec = crate::tools::registry::ToolRegistry::definitions();
-                        // Append the 6 special-case tools (kept in sync with
-                        // the stdio transport's handle_list_tools_request).
-                        tools_vec.extend(special_tool_definitions());
-                        // Same mode filter as the stdio path (wishlist #9):
-                        // do not advertise a tool that is guaranteed to
-                        // fail in this mode. This is the transport agents
-                        // actually use, so a filter only on the stdio side
-                        // would not be the fix.
-                        let inert = inert_tool_names(executor.embedder());
-                        tools_vec.retain(|def| !inert.contains(&def.name));
-                        let mut tools: Vec<serde_json::Value> = tools_vec
-                            .iter()
-                            .map(|def| {
-                                let mut schema = def.input_schema.clone();
-                                if let Some(fed) = federation.as_deref() {
-                                    advertise_repo_scope(def.name, &mut schema, fed);
-                                }
-                                serde_json::json!({
-                                    "name": def.name,
-                                    "description": def.description,
-                                    "inputSchema": schema
-                                })
-                            })
-                            .collect();
-                        if federation.is_some() {
-                            tools.extend(defs_to_value_tools(FEDERATION_TOOL_DEFS));
-                            // Contract-federation service view (PR 16).
-                            tools.extend(defs_to_value_tools(CONTRACT_TOOL_DEFS));
-                        }
-                        if workspaces.is_some() {
-                            tools.extend(defs_to_value_tools(WORKSPACE_TOOL_DEFS));
-                        }
-                        for t in defs_to_value_tools(SERVER_TOOL_DEFS) {
-                            tools.push(t);
-                        }
-                        // Same wire-level profile filter as the stdio
-                        // path. `LAIN_TOOL_PROFILE=full` opts back in to
-                        // the legacy 79-tool surface.
-                        let http_profile = crate::server::tools::profile::ToolProfile::from_env();
-                        let tools: Vec<serde_json::Value> = tools
-                            .into_iter()
-                            .filter(|t| {
-                                t.get("name")
-                                    .and_then(|n| n.as_str())
-                                    .is_none_or(|n| profile_allows(&http_profile, n))
-                            })
-                            .collect();
+                        // One shared surface builder for every
+                        // transport (see `advertised_tools_json`).
+                        let tools = advertised_tools_json(
+                            &executor,
+                            federation.as_deref(),
+                            workspaces.is_some(),
+                        );
                         serde_json::json!({"jsonrpc": "2.0", "result": {"tools": tools}, "id": id})
                     }
                     "tools/call" => {

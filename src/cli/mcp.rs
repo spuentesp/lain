@@ -414,7 +414,14 @@ async fn run_mcp_daemon(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "daemon".to_string());
     let config_path = crate::config::run_dir().join(format!("lain-daemon-{stem}.yaml"));
-    let data_dir = crate::config::run_dir().join(format!("lain-daemon-{stem}.d"));
+    // Per-repo graphs under the persistent Lain home (not the runtime
+    // dir): the runtime dir is tmpfs on many systems, and a re-index
+    // after every reboot is exactly what sharing the daemon is meant
+    // to avoid. The config itself is regenerated under the runtime dir
+    // on every boot (the boot's workspace set is the source of truth).
+    let data_dir = crate::config::lain_home()
+        .join("federation")
+        .join(format!("lain-daemon-{stem}"));
     let yaml = build_repos_yaml_with_data_dir(workspaces, &data_dir);
     crate::cli::io::write_file_atomic(&config_path, yaml.as_bytes())
         .map_err(|e| anyhow!("write {}: {e}", config_path.display()))?;

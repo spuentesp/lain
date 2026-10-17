@@ -47,7 +47,12 @@ checkout; or set `LAIN_WORKSPACE=/abs/a,/abs/b`). It is not a
 `workspaces.yaml` name — a name fails with
 `no .git found at <name> (or any parent)`. With more than one workspace,
 `lain mcp` synthesizes a federation config internally (same tool surface as
-`lain server`); with one workspace it serves the light per-repo surface.
+`lain server`). With one workspace the *private fallback* serves the
+light per-repo surface; under the shared daemon the same client gets
+the daemon's federation surface (per-repo tools plus `list_repos`,
+`search_org`, …). Every transport applies the same `tools/list`
+filtering (tool profile, mode-inert tools), so a bridged client sees
+the same effective surface a private one would.
 
 ```mermaid
 flowchart LR

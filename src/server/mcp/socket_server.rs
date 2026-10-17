@@ -398,17 +398,16 @@ async fn dispatch(
             });
         }
         "tools/list" => {
-            let tool_defs = crate::server::mcp::definitions::dump_tools_schema(&[]);
-            let tools: Vec<Value> = tool_defs
-                .into_iter()
-                .map(|def| {
-                    json!({
-                        "name": def.get("name").cloned().unwrap_or(Value::Null),
-                        "description": def.get("description").cloned().unwrap_or(Value::Null),
-                        "inputSchema": def.get("inputSchema").cloned().unwrap_or(json!({})),
-                    })
-                })
-                .collect();
+            // Same surface builder as stdio and HTTP
+            // (`handler::advertised_tools_json`): inert-tool filter,
+            // repo-scope advertising, conditional groups, and the
+            // `LAIN_TOOL_PROFILE` gate. A bridged client must see
+            // exactly what a privately served one would.
+            let tools = crate::server::mcp::handler::advertised_tools_json(
+                server.ingest().tool_executor(),
+                server.federation().map(|f| f.as_ref()),
+                server.workspaces_handle().is_some(),
+            );
             response["result"] = json!({"tools": tools});
         }
         "tools/call" => {

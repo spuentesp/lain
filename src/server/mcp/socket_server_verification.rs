@@ -909,7 +909,24 @@ async fn dispatch_methods_have_their_documented_results() {
 
     let list = d("tools/list", Value::Null).await;
     let tools = list["result"]["tools"].as_array().expect("tools array");
-    assert!(tools.len() > 50);
+    // Surface parity with stdio/HTTP: the socket must serve exactly
+    // the shared advertised surface (`handler::advertised_tools_json`
+    // — inert-tool + tool-profile filtering included). This used to
+    // assert `> 50` tools, which only held for the old unfiltered
+    // dump and hid the divergence a bridged client would see.
+    let expected = crate::server::mcp::handler::advertised_tools_json(
+        server.ingest().tool_executor(),
+        server.federation().map(|f| f.as_ref()),
+        server.workspaces_handle().is_some(),
+    );
+    assert_eq!(
+        tools, &expected,
+        "socket tools/list must match the shared advertised surface"
+    );
+    assert!(
+        !tools.is_empty(),
+        "the advertised surface must not be empty"
+    );
     assert!(tools
         .iter()
         .all(|t| t["name"].is_string() && t["inputSchema"].is_object()));
