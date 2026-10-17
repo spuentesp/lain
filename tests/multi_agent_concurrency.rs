@@ -162,6 +162,11 @@ impl AgentChild {
             .arg(workspace)
             .env("XDG_STATE_HOME", xdg_state_home)
             .env("LAIN_REINDEX_TIMEOUT", "30")
+            // Each agent must get its OWN `lain mcp` process here — the
+            // cross-process presence lock is the thing under test, and
+            // zero-config sharing would collapse all agents into one
+            // daemon (and leak it past the test).
+            .env("LAIN_MCP_NO_SHARE", "1")
             .env_remove("LAIN_EMBEDDING_MODEL")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

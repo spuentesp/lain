@@ -277,12 +277,23 @@ fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
         assert!(out.status.success(), "oneshot failed");
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
+    // The daemon's MCP socket is `lain-mcp-<16hex>.sock`. The run dir
+    // also holds the daemon's hot-reload signal socket
+    // (`lain-daemon-…`), so "first .sock" is not good enough — the
+    // holder must pin (and ping) the MCP socket specifically.
+    fn is_mcp_sock(p: &std::path::Path) -> bool {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("lain-mcp-"))
+            .and_then(|s| s.strip_suffix(".sock"))
+            .is_some_and(|stem| stem.len() == 16 && stem.chars().all(|c| c.is_ascii_alphanumeric()))
+    }
     let socket = || {
         std::fs::read_dir(&sock_dir)
             .ok()?
             .flatten()
             .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|x| x == "sock"))
+            .find(|p| is_mcp_sock(p))
     };
 
     // The daemon must not outlive this test: under `cargo llvm-cov` a process
@@ -325,10 +336,7 @@ fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
             let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 let found = std::fs::read_dir(&sock_dir).ok().and_then(|entries| {
-                    entries
-                        .flatten()
-                        .map(|e| e.path())
-                        .find(|p| p.extension().is_some_and(|x| x == "sock"))
+                    entries.flatten().map(|e| e.path()).find(|p| is_mcp_sock(p))
                 });
                 if let Some(s) = found {
                     if let Ok(stream) = UnixStream::connect(&s) {

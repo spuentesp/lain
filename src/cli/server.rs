@@ -47,18 +47,6 @@ pub async fn run_server(
 ) -> Result<()> {
     init_tracing(log_level);
 
-    info!(
-        "lain server: loading federation from {}",
-        config_path.display()
-    );
-    let (fed, workspace_scope) = load_federation_for_workspace(config_path, workspace_arg)
-        .await
-        .map_err(|e| anyhow!("federation load: {e}"))?;
-
-    // Indexing runs in the background so the server listens at once;
-    // see `index_federation`.
-    tokio::spawn(index_federation(Arc::clone(&fed)));
-
     let transport_enum = match transport {
         "http" => Transport::Http,
         "stdio" => Transport::Stdio,
@@ -69,105 +57,16 @@ pub async fn run_server(
         }
     };
 
-    // Pick the attribution backend based on the platform and the
-    // `--no-process-attribution` flag. The CLI is the only place that
-    // knows about the flag, so it's the only place that can decide
-    // between `ProcFsBackend` (Linux default), `LsofBackend` (macOS
-    // default), and `NoopBackend` (Windows default or explicit
-    // opt-out). Tests and embedders that go through `with_federation*`
-    // directly still get a cfg-based default and never see this
-    // dispatch.
-    let attribution: Arc<dyn AttributionBackend> = if no_process_attribution {
-        info!("attribution: --no-process-attribution set; using NoopBackend");
-        Arc::new(NoopBackend)
-    } else if cfg!(target_os = "linux") {
-        Arc::new(ProcFsBackend)
-    } else if cfg!(target_os = "macos") {
-        Arc::new(LsofBackend)
-    } else {
-        Arc::new(NoopBackend)
-    };
-    info!("attribution: using backend '{}'", attribution.name());
-
-    // If a workspaces file exists next to repos.yaml, load it so the
-    // workspace MCP tools are registered. Optional — a server with no
-    // workspaces.yaml still works (no workspace tools, today's behavior).
-    let workspaces = load_workspaces_for_server(config_path).ok().flatten();
-    let repos_yaml = Some(config_path.to_path_buf());
-    // Captured before `fed` is moved into the server: the source watcher
-    // needs one root per indexed repo.
-    let fed_repo_paths = fed.repo_paths();
-    let server = if let Some(workspaces) = workspaces {
-        LainServer::with_federation_and_workspaces_with_attribution(
-            fed,
-            transport_enum,
-            port,
-            bind,
-            workspaces,
-            repos_yaml.clone(),
-            attribution,
-            embedding_model,
-        )?
-    } else {
-        LainServer::with_federation_with_attribution(
-            fed,
-            transport_enum,
-            port,
-            bind,
-            repos_yaml.clone(),
-            attribution,
-            embedding_model,
-        )?
-    };
-
-    // Record which workspace `--workspace` resolved to: `run_rebuild`
-    // re-scopes hot-reload membership to it instead of importing every
-    // repo in `repos.yaml`.
-    server.set_workspace_scope(workspace_scope);
-
-    // Record this project under `~/.config/lain/recent_projects` so the
-    // dashboard's project switcher can find it. Failures are logged and
-    // ignored — never block startup on a side-effect that is purely
-    // operator convenience.
-    if let Some(p) = repos_yaml.as_deref() {
-        if let Err(e) = crate::config::recent_projects::record(p) {
-            tracing::warn!("could not record recent project {}: {e}", p.display());
-        }
-    }
-
-    // Hot-reload subsystem: file watcher, Unix socket, rebuild loop.
-    spawn_hot_reload(config_path, &server).await;
-
-    // Source-file watcher: keeps the volatile overlay fresh between
-    // reindexes. One per indexed repo — `spawn_config_watcher` above
-    // only watches `repos.yaml`/`workspaces.yaml`, not source.
-    //
-    // `start_source_watcher` waits (bounded 5s) for its watcher to
-    // actually register before returning, so its caller knows the
-    // watcher is subscribed rather than racing its startup. Awaiting
-    // that sequentially, one repo at a time, meant a federation of N
-    // repos could add up to 5*N seconds to every server boot; starting
-    // all of them concurrently bounds the wait to the slowest one.
-    let watcher_tasks: Vec<_> = fed_repo_paths
-        .into_iter()
-        .map(|root| {
-            tokio::spawn(crate::server::ingest::background::start_source_watcher(
-                root,
-                server.clone(),
-            ))
-        })
-        .collect();
-    for task in watcher_tasks {
-        if let Err(e) = task.await {
-            tracing::warn!("source file watcher registration task panicked: {e}");
-        }
-    }
-
-    // Reap expired `/ui/...` sessions; the HTTP transport creates one per
-    // interactive blast-radius link and nothing ever removed them.
-    crate::server::ingest::background::spawn_ui_session_reaper(
-        server.ingest().tool_executor().ctx.clone(),
-    );
+    let server = boot_federation_server(
+        config_path,
+        transport_enum,
+        port,
+        bind,
+        workspace_arg,
+        no_process_attribution,
+        embedding_model,
+    )
+    .await?;
 
     // OTLP runtime-trace listener: opt-in via LAIN_TRACE_RUNTIME=true.
     // Bound to a separate TcpListener so the runtime trace path
@@ -250,6 +149,137 @@ pub async fn run_server(
         .serve()
         .await
         .map_err(|e| anyhow!("federation server: {e}"))
+}
+
+/// Boot a federation-mode `LainServer` without serving any transport:
+/// load `repos.yaml` (+ optional `workspaces.yaml` beside it), start
+/// background indexing, wire attribution / hot reload / source
+/// watchers, and hand the ready server back to the caller. Shared by
+/// [`run_server`] (stdio / HTTP) and the zero-config shared daemon
+/// (`lain mcp --daemon`), which serves the Unix socket instead.
+#[allow(clippy::too_many_arguments)]
+pub async fn boot_federation_server(
+    config_path: &Path,
+    transport: Transport,
+    port: u16,
+    bind: IpAddr,
+    workspace_arg: &str,
+    no_process_attribution: bool,
+    embedding_model: Option<&Path>,
+) -> Result<LainServer> {
+    info!(
+        "lain server: loading federation from {}",
+        config_path.display()
+    );
+    let (fed, workspace_scope) = load_federation_for_workspace(config_path, workspace_arg)
+        .await
+        .map_err(|e| anyhow!("federation load: {e}"))?;
+
+    // Indexing runs in the background so the server listens at once;
+    // see `index_federation`.
+    tokio::spawn(index_federation(Arc::clone(&fed)));
+
+    // Pick the attribution backend based on the platform and the
+    // `--no-process-attribution` flag. The CLI is the only place that
+    // knows about the flag, so it's the only place that can decide
+    // between `ProcFsBackend` (Linux default), `LsofBackend` (macOS
+    // default), and `NoopBackend` (Windows default or explicit
+    // opt-out). Tests and embedders that go through `with_federation*`
+    // directly still get a cfg-based default and never see this
+    // dispatch.
+    let attribution: Arc<dyn AttributionBackend> = if no_process_attribution {
+        info!("attribution: --no-process-attribution set; using NoopBackend");
+        Arc::new(NoopBackend)
+    } else if cfg!(target_os = "linux") {
+        Arc::new(ProcFsBackend)
+    } else if cfg!(target_os = "macos") {
+        Arc::new(LsofBackend)
+    } else {
+        Arc::new(NoopBackend)
+    };
+    info!("attribution: using backend '{}'", attribution.name());
+
+    // If a workspaces file exists next to repos.yaml, load it so the
+    // workspace MCP tools are registered. Optional — a server with no
+    // workspaces.yaml still works (no workspace tools, today's behavior).
+    let workspaces = load_workspaces_for_server(config_path).ok().flatten();
+    let repos_yaml = Some(config_path.to_path_buf());
+    // Captured before `fed` is moved into the server: the source watcher
+    // needs one root per indexed repo.
+    let fed_repo_paths = fed.repo_paths();
+    let server = if let Some(workspaces) = workspaces {
+        LainServer::with_federation_and_workspaces_with_attribution(
+            fed,
+            transport,
+            port,
+            bind,
+            workspaces,
+            repos_yaml.clone(),
+            attribution,
+            embedding_model,
+        )?
+    } else {
+        LainServer::with_federation_with_attribution(
+            fed,
+            transport,
+            port,
+            bind,
+            repos_yaml.clone(),
+            attribution,
+            embedding_model,
+        )?
+    };
+
+    // Record which workspace `--workspace` resolved to: `run_rebuild`
+    // re-scopes hot-reload membership to it instead of importing every
+    // repo in `repos.yaml`.
+    server.set_workspace_scope(workspace_scope);
+
+    // Record this project under `~/.config/lain/recent_projects` so the
+    // dashboard's project switcher can find it. Failures are logged and
+    // ignored — never block startup on a side-effect that is purely
+    // operator convenience.
+    if let Some(p) = repos_yaml.as_deref() {
+        if let Err(e) = crate::config::recent_projects::record(p) {
+            tracing::warn!("could not record recent project {}: {e}", p.display());
+        }
+    }
+
+    // Hot-reload subsystem: file watcher, Unix socket, rebuild loop.
+    spawn_hot_reload(config_path, &server).await;
+
+    // Source-file watcher: keeps the volatile overlay fresh between
+    // reindexes. One per indexed repo — `spawn_config_watcher` above
+    // only watches `repos.yaml`/`workspaces.yaml`, not source.
+    //
+    // `start_source_watcher` waits (bounded 5s) for its watcher to
+    // actually register before returning, so its caller knows the
+    // watcher is subscribed rather than racing its startup. Awaiting
+    // that sequentially, one repo at a time, meant a federation of N
+    // repos could add up to 5*N seconds to every server boot; starting
+    // all of them concurrently bounds the wait to the slowest one.
+    let watcher_tasks: Vec<_> = fed_repo_paths
+        .into_iter()
+        .map(|root| {
+            tokio::spawn(crate::server::ingest::background::start_source_watcher(
+                root,
+                server.clone(),
+            ))
+        })
+        .collect();
+    for task in watcher_tasks {
+        if let Err(e) = task.await {
+            tracing::warn!("source file watcher registration task panicked: {e}");
+        }
+    }
+
+    // Reap expired `/ui/...` sessions; the HTTP transport creates one per
+    // interactive blast-radius link and nothing ever removed them.
+    crate::server::ingest::background::spawn_ui_session_reaper(
+        server.ingest().tool_executor().ctx.clone(),
+    );
+
+    Ok(server)
 }
 
 /// Load `workspaces.yaml` from the same directory as `repos.yaml`. Returns

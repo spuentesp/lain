@@ -16,6 +16,8 @@ pub mod repos;
 pub mod schema;
 pub mod server;
 pub mod setup;
+#[cfg(unix)]
+pub mod shared_daemon;
 pub mod signal;
 #[cfg(unix)]
 pub mod socket_session;

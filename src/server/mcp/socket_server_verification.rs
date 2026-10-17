@@ -7,6 +7,15 @@ fn sock(dir: &Path) -> PathBuf {
     dir.join("s.sock")
 }
 
+/// An `Activity` counter with no open connections — for `dispatch`
+/// unit calls that run outside the accept loop.
+fn idle_activity() -> Arc<Activity> {
+    Arc::new(Activity {
+        open: AtomicUsize::new(0),
+        last: parking_lot::Mutex::new(Instant::now()),
+    })
+}
+
 /// A concurrent test's fork() can briefly hold a copy of a just-dropped
 /// listener's fd (until its exec closes it), making the socket look live.
 /// Wait for the kernel to see it as dead before asserting on it.
@@ -493,7 +502,8 @@ mod surface {
             .run(&strategy, |(method, params, id)| {
                 let server = server.clone();
                 let (m, p, i) = (method.clone(), params, id.clone());
-                let resp = rt.block_on(async move { dispatch(&m, p, i, &server).await });
+                let activity = idle_activity();
+                let resp = rt.block_on(async move { dispatch(&m, p, i, &server, &activity).await });
                 if method == "notifications/initialized" {
                     prop_assert_eq!(resp, Value::Null);
                     return Ok(());
@@ -878,7 +888,8 @@ async fn dispatch_methods_have_their_documented_results() {
     let d = |m: &str, p: Value| {
         let server = server.clone();
         let m = m.to_string();
-        async move { dispatch(&m, p, json!(9), &server).await }
+        let activity = idle_activity();
+        async move { dispatch(&m, p, json!(9), &server, &activity).await }
     };
     let init = d("initialize", Value::Null).await;
     assert_eq!(init["id"], 9);

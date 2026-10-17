@@ -161,6 +161,11 @@ impl LainChild {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            // These tests pin the private-server contract (handshake
+            // latency, gate envelopes) on a fresh process per spawn;
+            // without this each spawn would bridge into a shared
+            // daemon and leak it past the test.
+            .env("LAIN_MCP_NO_SHARE", "1")
             .env_remove("LAIN_REINDEX_TIMEOUT");
         for (k, v) in extra_env {
             cmd.env(k, v);
