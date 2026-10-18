@@ -354,7 +354,8 @@ fn contains(needle: &str) -> impl Fn(&serde_json::Value) -> bool {
 
 /// Two stdio clients with the same resolved workspace set must share
 /// exactly one daemon: one socket file, one recorded pid, two open
-/// bridges (`open_connections >= 2` while both clients are alive). If
+/// bridges (`open_connections >= 3` while both clients are alive: two
+/// bridges plus the test's own probe). If
 /// the second client had built a private server, its calls would not
 /// pin the first daemon's connection counter — this is the
 /// "second client attaches, no second index build" assertion.

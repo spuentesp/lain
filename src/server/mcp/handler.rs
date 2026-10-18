@@ -1048,6 +1048,10 @@ pub(crate) fn advertised_tools_json(
     let mut tools_vec = crate::tools::registry::ToolRegistry::definitions();
     // The 6 special-case tools (kept in sync with the stdio
     // transport's handle_list_tools_request).
+    // NOTE: the stdio path appends specials AFTER its inert retain,
+    // while here they are extended before it. No-op today (inert only
+    // ever contains registry tools) — if a special tool ever becomes
+    // inert, make both sides filter it identically.
     tools_vec.extend(special_tool_definitions());
     // Same mode filter as the stdio path (wishlist #9): do not
     // advertise a tool that is guaranteed to fail in this mode.

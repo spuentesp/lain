@@ -85,8 +85,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("f.txt");
         write_file_atomic(&path, b"ok").unwrap();
-        // The .tmp sibling should be gone (rename moved it).
-        assert!(!path.with_extension("tmp").exists());
+        // The .tmp.<pid>-<n> sibling should be gone (rename moved it).
+        let leftovers: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("f.txt.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp siblings left behind: {leftovers:?}"
+        );
     }
 
     #[tokio::test]
@@ -97,7 +106,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"\x01\x02\x03");
-        assert!(!path.with_extension("tmp").exists());
+        let leftovers: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("graph.bin.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp siblings left behind: {leftovers:?}"
+        );
     }
 
     #[tokio::test]
