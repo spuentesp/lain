@@ -873,7 +873,8 @@ fn no_share_daemon_is_not_discoverable() {
 
 /// `add_workspaces` against a no-share daemon fails with the typed
 /// `not_shared` error BEFORE any validation or mutation — the served
-/// set is unchanged.
+/// set is unchanged. And the property is pinned at boot: a config read
+/// error after startup does not re-enable the handoff.
 #[test]
 fn no_share_daemon_refuses_add_workspaces() {
     let iso = Isolation::new();
@@ -912,6 +913,31 @@ fn no_share_daemon_refuses_add_workspaces() {
         vec![ws1.canonicalize().unwrap().display().to_string()],
         "a refused handoff must leave the served set untouched; got {:?}",
         served_set(&info)
+    );
+
+    // The property is pinned at boot: corrupting the daemon's
+    // synthesized config after startup must not flip it back to the
+    // shared default (which would make it discoverable again).
+    let stem = sock.file_stem().unwrap().to_string_lossy().into_owned();
+    let config = iso.socket_dir().join(format!("lain-daemon-{stem}.yaml"));
+    assert!(config.exists(), "daemon config at {}", config.display());
+    std::fs::write(&config, "share: \"yes\"\nnot: valid: [yaml").unwrap();
+    let info = daemon_info(&sock);
+    assert_eq!(
+        info.pointer("/result/shared"),
+        Some(&serde_json::json!(false)),
+        "the boot-pinned share must survive a later config read error: {info}"
+    );
+    let resp = raw_add_workspaces(&sock, &[&ws2]);
+    assert_eq!(
+        resp.pointer("/result/isError"),
+        Some(&serde_json::json!(true)),
+        "a read error must not re-enable the handoff: {resp}"
+    );
+    assert!(
+        tool_text(&resp).contains("not_shared"),
+        "still not_shared after the config went bad: {}",
+        tool_text(&resp)
     );
 
     iso.reap_daemons();

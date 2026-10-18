@@ -517,8 +517,10 @@ pub fn attach_or_start(
 /// [`start_detached_daemon`] connects to whoever won the socket — which
 /// can be a no-share daemon that owns the same set-keyed path. A
 /// definite `shared: false` refuses the bridge (the caller serves
-/// privately); a daemon that does not answer is accepted, matching
-/// discovery's "no daemon here" treatment of silent sockets.
+/// privately). A probe that errors or times out is NOT a refusal: the
+/// connection we already hold is live, and silence is not evidence of
+/// no-share. (Discovery's treatment of silent sockets is different in
+/// kind: it skips them as candidates rather than picking one.)
 fn only_shared(stream: UnixStream, socket: &Path) -> Option<UnixStream> {
     match query_daemon_info(socket) {
         Some(info) if !info.shared => {

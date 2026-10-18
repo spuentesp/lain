@@ -227,7 +227,11 @@ make one instance private instead, set `share: false` in its
 skips the instance (it reports `shared: false` and is never attached
 to), `add_workspaces` is refused with a typed `not_shared` error, and
 a no-share client serves privately (the historical one-server-per-client
-path) even when a covering shared daemon exists.
+path) even when a covering shared daemon exists. The `share` property is
+pinned at startup (edit + restart to change it). Note: spawned daemons
+inherit their environment, so an ambient `LAIN_MCP_NO_SHARE=1` also
+marks warm daemons started in that shell (e.g. `lain oneshot`'s)
+no-share — unset it there to keep those shared.
 
 Four-call dance per agent (sequence diagram in [multiplayer.md](multiplayer.md#agent-quickstart)):
 

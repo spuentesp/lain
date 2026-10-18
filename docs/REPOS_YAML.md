@@ -55,7 +55,7 @@ repos:
 | `data_dir`             | path string      | no       | `./.lain/federation`   | Per-repo clones and `.lain/graph.bin`-style state files live here. Each repo gets a subdirectory named after its `id`. |
 | `max_concurrent_indexers` | unsigned int  | no       | `8`                    | Caps how many repos index in parallel at startup. |
 | `ready_threshold`      | float 0.0–1.0    | no       | `0.8`                  | Fraction of repos that must reach `Ready` health before the federation reports `healthy`. |
-| `share`                | bool             | no       | `true`                 | Whether the instance takes part in the shared-daemon pool. `false` = private instance: `lain mcp` discovery skips it (it reports `shared: false` on `lain/daemon_info` and is never attached to) and `add_workspaces` refuses the workspace handoff with a typed `not_shared` error. Same property as `lain mcp --no-share` / `LAIN_MCP_NO_SHARE=1`. A non-bool value is a config error. |
+| `share`                | bool             | no       | `true`                 | Whether the instance takes part in the shared-daemon pool (pinned at startup — edit + restart to change). `false` = private instance: `lain mcp` discovery skips it (it reports `shared: false` on `lain/daemon_info` and is never attached to) and `add_workspaces` refuses the workspace handoff with a typed `not_shared` error. Same property as `lain mcp --no-share` / `LAIN_MCP_NO_SHARE=1`. A non-bool value is a config error. |
 | `repos`                | list of `RepoConfig` | yes   | —                      | At least one repo is required for a useful federation. |
 
 ### `RepoConfig`

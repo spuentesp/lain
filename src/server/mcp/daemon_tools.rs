@@ -47,18 +47,17 @@ fn err(code: &str, path: Option<&Path>, message: impl AsRef<str>) -> Value {
     })
 }
 
-/// Whether this instance takes part in the shared-daemon pool: read
-/// from the daemon's own `repos.yaml` (`share`, default `true`). A
-/// private (`share: false`) instance is skipped by discovery and
-/// refuses the `add_workspaces` handoff. No config on the server (or
-/// one that cannot be loaded) defaults to shared — the property is
-/// opt-out and the shipped default is the shared ephemeral service.
+/// Whether this instance takes part in the shared-daemon pool: the
+/// `share` property pinned at boot from the daemon's own `repos.yaml`
+/// (default `true`) — see [`crate::server::ingest::handles::FederationHandle::new`].
+/// A private (`share: false`) instance is skipped by discovery and
+/// refuses the `add_workspaces` handoff. Pinned once at construction,
+/// never re-read: a later config read error cannot flip a no-share
+/// instance to shared (which would make it discoverable again), nor a
+/// shared instance to no-share (which would hide it). The property is
+/// opt-out; the shipped default is the shared ephemeral service.
 pub fn instance_shared(server: &LainServer) -> bool {
-    server
-        .repos_yaml()
-        .and_then(|p| crate::server::federation::config::FederationConfig::load(p).ok())
-        .map(|c| c.share)
-        .unwrap_or(true)
+    server.federation_handle().share()
 }
 
 /// Canonicalized local path for every workspace the server currently
