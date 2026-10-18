@@ -23,6 +23,17 @@ All notable changes to LAIN are documented here. Versions follow
   (`already` for known paths); typed errors for non-repo or unreadable
   paths. A late `lain mcp` client whose workspaces are not covered calls
   it automatically before bridging, so the daemon serves the union.
+- `no share` as a configurable per-instance property (default stays the
+  shared daemon above). Three surfaces, one property: `share: false` in
+  `repos.yaml` (flat key, default `true`; non-bool is a config error),
+  `lain mcp --no-share`, and `LAIN_MCP_NO_SHARE=1` (unchanged hard
+  override). A no-share instance reports `shared: false` on
+  `lain/daemon_info`, is skipped by discovery (never attached to, never
+  grown), and refuses `add_workspaces` with the typed `not_shared`
+  error before any mutation; a no-share client serves privately on the
+  historical fallback path even when a covering shared daemon exists. A
+  daemon spawned for a no-share instance carries `share: false` in its
+  synthesized config.
 
 ### Changed
 

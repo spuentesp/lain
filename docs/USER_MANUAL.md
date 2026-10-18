@@ -217,8 +217,17 @@ by its resolved workspace set, later clients attach to it, and a late
 agent that needs other workspaces hands them to the running daemon
 (`add_workspaces`), which indexes them in hot — after which subset
 clients attach automatically. One index, one memory, one process group
-per machine; the daemon exits after an idle window. `LAIN_MCP_NO_SHARE=1`
-restores the old one-server-per-client behavior.
+per machine; the daemon exits after an idle window.
+
+**Isolating an instance.** The shared daemon is the default — it is a
+service that runs while somebody is connected and exits when idle. To
+make one instance private instead, set `share: false` in its
+`repos.yaml`, pass `lain mcp --no-share`, or set
+`LAIN_MCP_NO_SHARE=1`. All three mark the same property: discovery
+skips the instance (it reports `shared: false` and is never attached
+to), `add_workspaces` is refused with a typed `not_shared` error, and
+a no-share client serves privately (the historical one-server-per-client
+path) even when a covering shared daemon exists.
 
 Four-call dance per agent (sequence diagram in [multiplayer.md](multiplayer.md#agent-quickstart)):
 

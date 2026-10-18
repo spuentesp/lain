@@ -9,9 +9,10 @@
 //! `initialize`, `notifications/initialized`, `ping`, `tools/list`,
 //! `tools/call`, plus two daemon-only methods the zero-config
 //! multi-agent path (2026-10-17) needs: `lain/daemon_info` (pid +
-//! served workspace set + open connections — how a `lain mcp` client
-//! decides to attach) and `tools/call add_workspaces` (hot-add
-//! workspace paths to the served federation, see
+//! served workspace set + open connections + `shared` — how a
+//! `lain mcp` client decides to attach; a no-share instance reports
+//! `shared: false` and is skipped) and `tools/call add_workspaces`
+//! (hot-add workspace paths to the served federation, see
 //! [`crate::server::mcp::daemon_tools`]). `tools/call` runs the same
 //! readiness-gate → dispatch → envelope pipeline as the stdio and HTTP
 //! transports
@@ -383,7 +384,10 @@ async fn dispatch(
         }
         // Discovery handshake for the zero-config attach-or-start path:
         // who is behind this socket and which workspaces does it serve.
-        // Not part of the MCP surface — bridges never forward it.
+        // `shared` (from the instance's own `repos.yaml`) marks a
+        // no-share instance: discovery must skip it and never hand it
+        // `add_workspaces`. Not part of the MCP surface — bridges never
+        // forward it.
         "lain/daemon_info" => {
             let workspaces: Vec<Value> =
                 crate::server::mcp::daemon_tools::served_workspaces(server)
@@ -395,6 +399,7 @@ async fn dispatch(
                 "version": env!("CARGO_PKG_VERSION"),
                 "workspaces": workspaces,
                 "open_connections": activity.open.load(Ordering::SeqCst),
+                "shared": crate::server::mcp::daemon_tools::instance_shared(server),
             });
         }
         "tools/list" => {

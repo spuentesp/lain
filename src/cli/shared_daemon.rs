@@ -18,10 +18,19 @@
 //! that a daemon grew past its initial set through `add_workspaces`.
 //!
 //! ## Fallback contract
-//! Every failure path (non-Unix, opted out via `LAIN_MCP_NO_SHARE=1`,
-//! socket path too long, daemon failed to come up, `add_workspaces`
-//! refused) falls back to the historical private `lain mcp` server, so
-//! an agent is never worse off than before.
+//! Every failure path (non-Unix, opted out via `LAIN_MCP_NO_SHARE=1`
+//! or `--no-share`, socket path too long, daemon failed to come up,
+//! `add_workspaces` refused) falls back to the historical private
+//! `lain mcp` server, so an agent is never worse off than before.
+//!
+//! ## No-share instances (2026-10-18)
+//! A daemon whose own config carries `share: false` is isolated:
+//! discovery skips it (`daemon_info` reports `shared: false`), it
+//! refuses `add_workspaces` with `not_shared`, and a client asked for
+//! no-share (`--no-share` / `LAIN_MCP_NO_SHARE=1`) never attaches to
+//! anything — it serves privately on the fallback path. A daemon this
+//! module spawns inherits the property (`--no-share` on the child,
+//! `share: false` in its synthesized config). Default stays shared.
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -55,6 +64,10 @@ pub struct DaemonInfo {
     pub pid: u32,
     pub workspaces: Vec<PathBuf>,
     pub open_connections: u64,
+    /// `false` for a no-share instance (`share: false` in its config):
+    /// discovery must skip it. Missing field (older daemon) reads as
+    /// `true` — the shipped default.
+    pub shared: bool,
 }
 
 /// One newline-framed JSON-RPC round trip on a short-lived connection.
@@ -120,6 +133,10 @@ pub fn query_daemon_info(socket_path: &Path) -> Option<DaemonInfo> {
             .get("open_connections")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        shared: result
+            .get("shared")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     })
 }
 
@@ -180,6 +197,9 @@ fn candidate_sockets() -> Vec<PathBuf> {
 /// Scan for a daemon that can serve `workspaces` — preferring an
 /// existing covering daemon over spawning (rule c), and surfacing the
 /// best partial candidate for the `add_workspaces` hand-off path.
+/// No-share daemons (`shared: false`) are not candidates at all: they
+/// are neither covering nor partial, so they are never attached to and
+/// never grown.
 pub fn discover(workspaces: &[PathBuf]) -> Discovery {
     let needed = canonical_set(workspaces);
     let mut covering: Vec<(PathBuf, usize)> = Vec::new(); // (socket, served size)
@@ -189,6 +209,9 @@ pub fn discover(workspaces: &[PathBuf]) -> Discovery {
         let Some(info) = query_daemon_info(&socket) else {
             continue;
         };
+        if !info.shared {
+            continue;
+        }
         let served = canonical_set(&info.workspaces);
         let missing: Vec<PathBuf> = needed
             .iter()
@@ -227,12 +250,15 @@ pub fn discover(workspaces: &[PathBuf]) -> Discovery {
 /// caller) and return a connection once its socket accepts. Start
 /// race: when the child exits early because another daemon won the
 /// bind, connect to the winner (the `oneshot.rs` comment path).
+/// `no_share` is inherited by the child (`--no-share`): a no-share
+/// caller's daemon is a no-share instance.
 pub fn start_detached_daemon(
     workspaces: &[PathBuf],
     socket_path: &Path,
     wait: Duration,
     embedding_model: Option<&Path>,
     reindex_timeout: Option<std::time::Duration>,
+    no_share: bool,
 ) -> Option<UnixStream> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().ok()?;
@@ -242,6 +268,9 @@ pub fn start_detached_daemon(
         command.arg("--workspace").arg(ws);
     }
     command.arg("--socket").arg(socket_path).arg("--daemon");
+    if no_share {
+        command.arg("--no-share");
+    }
     if let Some(model) = embedding_model {
         command.arg("--embedding-model").arg(model);
     }
@@ -358,13 +387,16 @@ pub async fn run_stdio_bridge(stream: tokio::net::UnixStream) {
 /// Phase A entry point: attach to (or start) the resident shared
 /// daemon for `workspaces` and return the connection to bridge on.
 /// `None` means "cannot or should not share" — the caller serves
-/// privately exactly as before.
+/// privately exactly as before. A no-share caller (`no_share` flag or
+/// `LAIN_MCP_NO_SHARE`) never attaches and never starts a shared
+/// daemon: it serves privately on the fallback path.
 pub fn attach_or_start(
     workspaces: &[PathBuf],
     embedding_model: Option<&Path>,
     reindex_timeout: Option<std::time::Duration>,
+    no_share: bool,
 ) -> Option<UnixStream> {
-    if sharing_opt_out() {
+    if no_share || sharing_opt_out() {
         return None;
     }
     let socket_key = crate::config::shared_socket_path(workspaces);
@@ -382,7 +414,7 @@ pub fn attach_or_start(
                     "lain mcp: attaching to shared daemon at {}",
                     socket.display()
                 );
-                Some(stream)
+                only_shared(stream, &socket)
             }
             Err(e) => {
                 // Raced a dying daemon: fall through to a fresh start.
@@ -396,7 +428,9 @@ pub fn attach_or_start(
                     start_wait_budget(),
                     embedding_model,
                     reindex_timeout,
+                    no_share,
                 )
+                .and_then(|stream| only_shared(stream, &socket_key))
             }
         },
         Discovery::Partial { socket, missing } => {
@@ -425,7 +459,7 @@ pub fn attach_or_start(
                     // past the tool response, and those would be lost
                     // if the admin stream were reused as the bridge.
                     match UnixStream::connect(&socket) {
-                        Ok(stream) => Some(stream),
+                        Ok(stream) => only_shared(stream, &socket),
                         Err(e) => {
                             tracing::warn!(
                                 "daemon at {} vanished after add_workspaces ({e}); starting one",
@@ -437,7 +471,9 @@ pub fn attach_or_start(
                                 start_wait_budget(),
                                 embedding_model,
                                 reindex_timeout,
+                                no_share,
                             )
+                            .and_then(|stream| only_shared(stream, &socket_key))
                         }
                     }
                 }
@@ -452,7 +488,9 @@ pub fn attach_or_start(
                         start_wait_budget(),
                         embedding_model,
                         reindex_timeout,
+                        no_share,
                     )
+                    .and_then(|stream| only_shared(stream, &socket_key))
                 }
             }
         }
@@ -467,7 +505,29 @@ pub fn attach_or_start(
                 start_wait_budget(),
                 embedding_model,
                 reindex_timeout,
+                no_share,
             )
+            .and_then(|stream| only_shared(stream, &socket_key))
         }
+    }
+}
+
+/// A bridge may only land on a shared daemon. `discover` filters
+/// no-share daemons out, but the bind-race fallback in
+/// [`start_detached_daemon`] connects to whoever won the socket — which
+/// can be a no-share daemon that owns the same set-keyed path. A
+/// definite `shared: false` refuses the bridge (the caller serves
+/// privately); a daemon that does not answer is accepted, matching
+/// discovery's "no daemon here" treatment of silent sockets.
+fn only_shared(stream: UnixStream, socket: &Path) -> Option<UnixStream> {
+    match query_daemon_info(socket) {
+        Some(info) if !info.shared => {
+            tracing::warn!(
+                "daemon at {} is a no-share instance; serving privately",
+                socket.display()
+            );
+            None
+        }
+        _ => Some(stream),
     }
 }

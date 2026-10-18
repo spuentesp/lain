@@ -21,6 +21,13 @@
 //!    no flags, no feature env) starts or joins a daemon and serves
 //!    tools.
 //!
+//! 4–6. The no-share family (`share: false` / `--no-share` /
+//!    `LAIN_MCP_NO_SHARE=1`): a no-share daemon is not discoverable
+//!    and refuses the `add_workspaces` handoff (`not_shared`), and a
+//!    no-share client serves privately even when a covering shared
+//!    daemon exists. The DEFAULT stays the shared attach-or-start
+//!    daemon — tests 1–3 above pin it unchanged.
+//!
 //! Isolation: every test pins `XDG_RUNTIME_DIR` / `HOME` / `XDG_*` to
 //! its own tempdirs so sockets and state cannot collide with a real
 //! user daemon or another test. `LAIN_SHARED_IDLE_SECS=30` keeps the
@@ -148,10 +155,36 @@ impl McpClient {
     /// under `iso`'s isolated XDG roots. `cwd` overrides the working
     /// directory (walk-up tests).
     fn spawn(iso: &Isolation, workspaces: &[&Path], cwd: Option<&Path>) -> Self {
+        Self::spawn_opt(iso, workspaces, cwd, false, false)
+    }
+
+    /// Same, with `--no-share` (never attach; private instance).
+    fn spawn_no_share_flag(iso: &Isolation, workspaces: &[&Path], cwd: Option<&Path>) -> Self {
+        Self::spawn_opt(iso, workspaces, cwd, true, false)
+    }
+
+    /// Same, with `LAIN_MCP_NO_SHARE=1` (the hard override).
+    fn spawn_no_share_env(iso: &Isolation, workspaces: &[&Path], cwd: Option<&Path>) -> Self {
+        Self::spawn_opt(iso, workspaces, cwd, false, true)
+    }
+
+    fn spawn_opt(
+        iso: &Isolation,
+        workspaces: &[&Path],
+        cwd: Option<&Path>,
+        no_share_flag: bool,
+        no_share_env: bool,
+    ) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_lain"));
         cmd.arg("mcp");
         for ws in workspaces {
             cmd.arg("--workspace").arg(ws);
+        }
+        if no_share_flag {
+            cmd.arg("--no-share");
+        }
+        if no_share_env {
+            cmd.env("LAIN_MCP_NO_SHARE", "1");
         }
         cmd.env("XDG_RUNTIME_DIR", &iso.run)
             .env("HOME", iso.home.path())
@@ -639,6 +672,322 @@ fn plain_mcp_is_zero_config() {
         !tool_text(&hit).is_empty(),
         "find_anchors must answer through the zero-config path"
     );
+
+    iso.reap_daemons();
+}
+
+// ---------------------------------------------------------------------------
+// no-share: configurable per-instance isolation (share: false / --no-share /
+// LAIN_MCP_NO_SHARE=1). The DEFAULT stays the shared ephemeral daemon.
+// ---------------------------------------------------------------------------
+
+/// Spawn `lain mcp --daemon` on `socket` under `iso`'s isolated XDG
+/// roots (the test holds the `Child` and the reaper kills by pid file).
+/// `no_share` adds `--no-share` so the spawned daemon inherits the
+/// property.
+fn spawn_daemon(iso: &Isolation, workspaces: &[&Path], socket: &Path, no_share: bool) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lain"));
+    cmd.arg("mcp");
+    for ws in workspaces {
+        cmd.arg("--workspace").arg(ws);
+    }
+    cmd.arg("--socket").arg(socket).arg("--daemon");
+    if no_share {
+        cmd.arg("--no-share");
+    }
+    cmd.env("XDG_RUNTIME_DIR", &iso.run)
+        .env("HOME", iso.home.path())
+        .env("XDG_STATE_HOME", iso.home.path().join("state"))
+        .env("XDG_CONFIG_HOME", iso.home.path().join("config"))
+        .env("LAIN_SHARED_IDLE_SECS", "30")
+        .env_remove("LAIN_WORKSPACE")
+        .env_remove("LAIN_MCP_NO_SHARE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn().expect("spawn lain mcp --daemon")
+}
+
+/// Wait until `sock` answers `lain/daemon_info` (i.e. the daemon is
+/// listening). Bounded.
+fn wait_listening(sock: &Path, budget: Duration) -> serde_json::Value {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Ok(stream) = std::os::unix::net::UnixStream::connect(sock) {
+            drop(stream);
+            return daemon_info(sock);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon at {} never started listening",
+            sock.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// One raw `tools/call add_workspaces` round trip against the daemon
+/// behind `socket` (initialize first, like any MCP client).
+fn raw_add_workspaces(socket: &Path, paths: &[&Path]) -> serde_json::Value {
+    use std::os::unix::net::UnixStream;
+    let stream = UnixStream::connect(socket).expect("connect to daemon socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    let send = |writer: &mut std::os::unix::net::UnixStream, line: &str| {
+        writer.write_all(line.as_bytes()).unwrap();
+        writer.flush().unwrap();
+    };
+    send(
+        &mut writer,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"no-share-test\",\"version\":\"0\"}}}\n",
+    );
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("initialize reply");
+    let path_strings: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "add_workspaces", "arguments": {"paths": path_strings}},
+    });
+    send(&mut writer, &format!("{call}\n"));
+    line.clear();
+    reader.read_line(&mut line).expect("add_workspaces reply");
+    serde_json::from_str(line.trim()).expect("add_workspaces JSON")
+}
+
+fn served_set(info: &serde_json::Value) -> Vec<String> {
+    info.pointer("/result/workspaces")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn open_connections(info: &serde_json::Value) -> u64 {
+    info.pointer("/result/open_connections")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// 4. no_share_daemon_is_not_discoverable
+// ---------------------------------------------------------------------------
+
+/// A daemon marked no-share is invisible to discovery: a normal client
+/// whose set it would cover (or partially cover) must NOT attach to it
+/// and must NOT hand it `add_workspaces` — it starts its own daemon
+/// (distinct socket, distinct pid) and the no-share daemon's served
+/// set stays exactly what it booted with.
+#[test]
+fn no_share_daemon_is_not_discoverable() {
+    let iso = Isolation::new();
+    let parent = tempfile::tempdir().unwrap();
+    let (_t1, ws1) = make_repo_in(&parent, "ws1", "alphauniq");
+    let (_t2, ws2) = make_repo_in(&parent, "ws2", "megaomega");
+
+    // A's daemon: no-share, serving {ws1}, on a candidate-shaped
+    // socket (`lain-mcp-<16hex>.sock`) so discovery WOULD see it.
+    let sock_a = iso.socket_dir().join("lain-mcp-a1b2c3d4e5f60718.sock");
+    let mut daemon_a = spawn_daemon(&iso, &[&ws1], &sock_a, true);
+    let info_a = wait_listening(&sock_a, Duration::from_secs(60));
+    assert_eq!(
+        info_a.pointer("/result/shared"),
+        Some(&serde_json::json!(false)),
+        "a --no-share daemon must report shared: false: {info_a}"
+    );
+    let pid_a = info_a.pointer("/result/pid").and_then(|v| v.as_u64());
+
+    // B: a NORMAL client wanting {ws1, ws2} — without the feature this
+    // is the partial flow: B hands A's daemon ws2 and attaches to it.
+    let mut b = McpClient::spawn(&iso, &[&ws1, &ws2], None);
+    b.initialize();
+    b.call_until(
+        "list_repos",
+        serde_json::json!({}),
+        &contains("ws2"),
+        Duration::from_secs(120),
+    );
+
+    // The no-share daemon was never attached to and never grew.
+    let info_a2 = daemon_info(&sock_a);
+    assert_eq!(
+        info_a2.pointer("/result/shared"),
+        Some(&serde_json::json!(false)),
+        "the flag must be stable: {info_a2}"
+    );
+    assert_eq!(
+        served_set(&info_a2),
+        vec![ws1.canonicalize().unwrap().display().to_string()],
+        "no-share daemon must not grow via the handoff; got {:?}",
+        served_set(&info_a2)
+    );
+    assert_eq!(
+        open_connections(&info_a2),
+        1,
+        "only this probe may be connected to the no-share daemon \
+         (B's bridge would be a second connection): {info_a2}"
+    );
+
+    // B got its OWN daemon: two sockets, two live pids.
+    let sockets = iso.sockets();
+    assert_eq!(
+        sockets.len(),
+        2,
+        "B must spawn its own daemon beside A's; sockets: {sockets:?}"
+    );
+    let sock_b = sockets
+        .iter()
+        .find(|p| p.as_path() != sock_a.as_path())
+        .expect("B's socket");
+    let info_b = daemon_info(sock_b);
+    assert_eq!(
+        info_b.pointer("/result/shared"),
+        Some(&serde_json::json!(true)),
+        "a normal daemon keeps the default shared: true: {info_b}"
+    );
+    let served_b = served_set(&info_b);
+    assert!(
+        served_b.contains(&ws1.canonicalize().unwrap().display().to_string())
+            && served_b.contains(&ws2.canonicalize().unwrap().display().to_string()),
+        "B's daemon must serve the union; got {served_b:?}"
+    );
+    assert_ne!(
+        info_b.pointer("/result/pid").and_then(|v| v.as_u64()),
+        pid_a,
+        "A's and B's daemons must be distinct processes"
+    );
+
+    iso.reap_daemons();
+    let _ = daemon_a.kill();
+    let _ = daemon_a.wait();
+}
+
+// ---------------------------------------------------------------------------
+// 5. no_share_daemon_refuses_add_workspaces
+// ---------------------------------------------------------------------------
+
+/// `add_workspaces` against a no-share daemon fails with the typed
+/// `not_shared` error BEFORE any validation or mutation — the served
+/// set is unchanged.
+#[test]
+fn no_share_daemon_refuses_add_workspaces() {
+    let iso = Isolation::new();
+    let parent = tempfile::tempdir().unwrap();
+    let (_t1, ws1) = make_repo_in(&parent, "ws1", "alphauniq");
+    let (_t2, ws2) = make_repo_in(&parent, "ws2", "megaomega");
+
+    let sock = iso.socket_dir().join("lain-mcp-b2c3d4e5f6071829.sock");
+    let mut daemon = spawn_daemon(&iso, &[&ws1], &sock, true);
+    wait_listening(&sock, Duration::from_secs(60));
+
+    let resp = raw_add_workspaces(&sock, &[&ws2]);
+    assert_eq!(
+        resp.pointer("/result/isError"),
+        Some(&serde_json::json!(true)),
+        "add_workspaces must be refused: {resp}"
+    );
+    let text = tool_text(&resp);
+    let payload: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("typed error envelope expected: {e}: {text}"));
+    assert_eq!(
+        payload.pointer("/error"),
+        Some(&serde_json::json!("not_shared")),
+        "typed error code must be `not_shared`: {text}"
+    );
+    assert_eq!(
+        payload.pointer("/ok"),
+        Some(&serde_json::json!(false)),
+        "refusal envelope: {text}"
+    );
+
+    // Nothing mutated: the served set is still exactly {ws1}.
+    let info = daemon_info(&sock);
+    assert_eq!(
+        served_set(&info),
+        vec![ws1.canonicalize().unwrap().display().to_string()],
+        "a refused handoff must leave the served set untouched; got {:?}",
+        served_set(&info)
+    );
+
+    iso.reap_daemons();
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
+// ---------------------------------------------------------------------------
+// 6. no_share_client_serves_privately
+// ---------------------------------------------------------------------------
+
+/// A no-share client (`--no-share` or `LAIN_MCP_NO_SHARE=1`) never
+/// attaches — even to a covering shared daemon. It serves privately
+/// (the historical fallback path): its own tools answer, and the shared
+/// daemon's connection count proves no bridge was built.
+#[test]
+fn no_share_client_serves_privately() {
+    let iso = Isolation::new();
+    let (_ws_tmp, ws) = make_repo("iso");
+    let ws = ws.canonicalize().unwrap();
+
+    // The covering shared daemon (default surface), held open by A.
+    let mut a = McpClient::spawn(&iso, &[&ws], None);
+    a.initialize();
+    let sock = wait_for_daemon(&iso, Duration::from_secs(60));
+
+    for (label, mut b) in [
+        (
+            "--no-share",
+            McpClient::spawn_no_share_flag(&iso, &[&ws], None),
+        ),
+        (
+            "LAIN_MCP_NO_SHARE=1",
+            McpClient::spawn_no_share_env(&iso, &[&ws], None),
+        ),
+    ] {
+        let init = b.initialize();
+        assert_eq!(
+            init.pointer("/result/serverInfo/name"),
+            Some(&serde_json::json!("lain")),
+            "no-share client ({label}) must serve its own handshake: {init}"
+        );
+        let tools = b.request("tools/list", serde_json::json!({}));
+        assert!(
+            tools
+                .pointer("/result/tools")
+                .and_then(|t| t.as_array())
+                .is_some_and(|t| !t.is_empty()),
+            "no-share client ({label}) must advertise tools from its private server: {tools}"
+        );
+        let hit = b.call_until(
+            "find_anchors",
+            serde_json::json!({}),
+            &contains("anchor"),
+            Duration::from_secs(90),
+        );
+        assert!(
+            !tool_text(&hit).is_empty(),
+            "no-share client ({label}) must answer queries from its private server"
+        );
+
+        // No bridge to the shared daemon: with only A's bridge and this
+        // probe, open_connections is 2 — a bridged B (or C) would make 3.
+        let info = daemon_info(&sock);
+        assert_eq!(
+            open_connections(&info),
+            2,
+            "no-share client ({label}) must not bridge to the covering shared daemon: {info}"
+        );
+        // And it spawned no daemon of its own (private = in-process fallback).
+        assert_eq!(
+            iso.sockets().len(),
+            1,
+            "no-share client ({label}) must serve in-process, not spawn a daemon"
+        );
+    }
 
     iso.reap_daemons();
 }

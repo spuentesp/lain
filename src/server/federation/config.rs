@@ -16,6 +16,16 @@ pub struct FederationConfig {
     pub max_concurrent_indexers: usize,
     #[serde(default = "default_ready_threshold")]
     pub ready_threshold: f32,
+    /// Whether this instance takes part in the shared-daemon pool
+    /// (zero-config multi-agent, 2026-10-18). `false` = private
+    /// instance: discovery skips it and `add_workspaces` refuses the
+    /// handoff (`not_shared`). Flat key, default `true` — the
+    /// shipped default is the ephemeral shared service. Typed as
+    /// `bool`, so a non-bool value is a config error at load time;
+    /// serialized only when `false` so a rewrite keeps a no-share
+    /// instance no-share.
+    #[serde(default = "default_share", skip_serializing_if = "is_true")]
+    pub share: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_sensor: Option<crate::git::GitSensorMode>,
     #[serde(default)]
@@ -41,6 +51,7 @@ impl Default for FederationConfig {
             data_dir: default_data_dir(),
             max_concurrent_indexers: default_max_concurrent_indexers(),
             ready_threshold: default_ready_threshold(),
+            share: true,
             git_sensor: None,
             repos: Vec::new(),
             contract: ContractFederationConfig::default(),
@@ -59,6 +70,18 @@ pub const DEFAULT_READY_THRESHOLD: f32 = 0.8;
 
 fn default_ready_threshold() -> f32 {
     DEFAULT_READY_THRESHOLD
+}
+
+/// Default for the `share` key: shared (the ephemeral service).
+fn default_share() -> bool {
+    true
+}
+
+/// Skip serializing `share` when it is `true` — the default needs no
+/// key, and a `share: false` rewrite must keep the key so a no-share
+/// instance cannot flip shared on the next `add_workspaces` reload.
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -322,6 +345,81 @@ repos:
         assert!(
             err.to_string().contains("duplicate repo id 'same'"),
             "error should name the duplicate id: {err}"
+        );
+    }
+
+    /// The `share` key (no-share instances, 2026-10-18): flat top-level
+    /// bool, default `true` (the shipped shared daemon), `false` marks
+    /// a private instance. A non-bool value is a config error at load
+    /// time — same typed-field validation as `ready_threshold` etc.
+    #[test]
+    fn share_defaults_to_true_and_parses_false() {
+        let yaml = r#"
+data_dir: /tmp
+repos:
+  - id: ws
+    source: { type: workspace_dir, path: /srv/ws }
+"#;
+        let cfg = FederationConfig::load_from_str(yaml).unwrap();
+        assert!(cfg.share, "share must default to true");
+
+        let yaml_no_share = r#"
+share: false
+data_dir: /tmp
+repos:
+  - id: ws
+    source: { type: workspace_dir, path: /srv/ws }
+"#;
+        let cfg = FederationConfig::load_from_str(yaml_no_share).unwrap();
+        assert!(!cfg.share, "share: false must parse to a no-share instance");
+    }
+
+    #[test]
+    fn rejects_non_bool_share() {
+        let yaml = r#"
+share: "yes"
+data_dir: /tmp
+repos:
+  - id: ws
+    source: { type: workspace_dir, path: /srv/ws }
+"#;
+        let err = FederationConfig::load_from_str(yaml).unwrap_err();
+        assert!(
+            matches!(err, LainError::Config(_)),
+            "expected Config error, got {err:?}"
+        );
+    }
+
+    /// A rewrite (the `add_workspaces` read-modify-write path serializes
+    /// this struct) must keep `share: false` on disk — otherwise a
+    /// no-share daemon would flip shared the moment it is told to grow.
+    #[test]
+    fn share_false_survives_a_config_rewrite() {
+        let yaml = r#"
+share: false
+data_dir: /tmp
+repos:
+  - id: ws
+    source: { type: workspace_dir, path: /srv/ws }
+"#;
+        let cfg = FederationConfig::load_from_str(yaml).unwrap();
+        let rewritten = serde_yaml::to_string(&cfg).unwrap();
+        assert!(
+            rewritten.contains("share: false"),
+            "a no-share config must keep the key through a rewrite:\n{rewritten}"
+        );
+        let round_trip = FederationConfig::load_from_str(&rewritten).unwrap();
+        assert!(!round_trip.share);
+
+        // The default stays terse: a shared config writes no key.
+        let shared = FederationConfig::load_from_str(
+            "repos:\n  - id: ws\n    source: { type: workspace_dir, path: /srv/ws }\n",
+        )
+        .unwrap();
+        let rewritten = serde_yaml::to_string(&shared).unwrap();
+        assert!(
+            !rewritten.contains("share:"),
+            "share: true must not be serialized:\n{rewritten}"
         );
     }
 

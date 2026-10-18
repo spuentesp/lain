@@ -17,7 +17,10 @@
 //! only (`socket_server::dispatch`), not in the advertised tool
 //! surface — advertising is not dispatch, and the bridge calls it
 //! programmatically. It is idempotent: a path already served comes
-//! back with `status: "already"` and touches nothing.
+//! back with `status: "already"` and touches nothing. A no-share
+//! instance (`share: false` in its `repos.yaml`) refuses every call
+//! with the typed `not_shared` error before any validation or
+//! mutation.
 
 use crate::server::LainServer;
 use serde_json::{json, Value};
@@ -33,8 +36,8 @@ const INDEX_WAIT: Duration = Duration::from_secs(60);
 
 /// Typed-error envelope for a failed `add_workspaces`. `code` is
 /// machine-readable (`invalid_workspace`, `not_federated`,
-/// `add_failed`, `invalid_args`); `path` names the offending
-/// workspace when there is one.
+/// `not_shared`, `add_failed`, `invalid_args`); `path` names the
+/// offending workspace when there is one.
 fn err(code: &str, path: Option<&Path>, message: impl AsRef<str>) -> Value {
     json!({
         "ok": false,
@@ -42,6 +45,20 @@ fn err(code: &str, path: Option<&Path>, message: impl AsRef<str>) -> Value {
         "path": path.map(|p| p.display().to_string()),
         "message": message.as_ref(),
     })
+}
+
+/// Whether this instance takes part in the shared-daemon pool: read
+/// from the daemon's own `repos.yaml` (`share`, default `true`). A
+/// private (`share: false`) instance is skipped by discovery and
+/// refuses the `add_workspaces` handoff. No config on the server (or
+/// one that cannot be loaded) defaults to shared — the property is
+/// opt-out and the shipped default is the shared ephemeral service.
+pub fn instance_shared(server: &LainServer) -> bool {
+    server
+        .repos_yaml()
+        .and_then(|p| crate::server::federation::config::FederationConfig::load(p).ok())
+        .map(|c| c.share)
+        .unwrap_or(true)
 }
 
 /// Canonicalized local path for every workspace the server currently
@@ -138,6 +155,16 @@ fn add_lock() -> &'static tokio::sync::Mutex<()> {
 /// success and the typed-error envelope on failure (the socket layer
 /// turns the latter into `isError: true`).
 pub async fn run_add_workspaces(server: &LainServer, args: &Value) -> Result<Value, Value> {
+    // A no-share instance refuses the handoff outright — BEFORE any
+    // argument validation or mutation — so nothing about it can be
+    // grown by a foreign client.
+    if !instance_shared(server) {
+        return Err(err(
+            "not_shared",
+            None,
+            "this instance is not shared (share: false); it refuses the add_workspaces handoff",
+        ));
+    }
     let paths = args
         .get("paths")
         .and_then(Value::as_array)

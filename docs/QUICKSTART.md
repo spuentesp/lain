@@ -38,9 +38,16 @@ first client starts it, later clients attach to it and talk over a
 Unix socket (one index, one memory, N agents). A late agent that needs
 *other* workspaces hands them to the running daemon, which indexes
 them in hot — after which any agent whose set is covered attaches
-automatically. Zero configuration; `LAIN_MCP_NO_SHARE=1` opts out
-(per-client private server), and the daemon exits by itself after an
-idle window.
+automatically. Zero configuration; and the daemon exits by itself
+after an idle window.
+
+**Isolating an instance (opt-in).** The shared daemon is the default —
+it is a service that goes away when nobody is connected. To make one
+instance *private*, set `share: false` in its `repos.yaml`, launch it
+with `lain mcp --no-share`, or set `LAIN_MCP_NO_SHARE=1`. A no-share
+instance is never discovered by other clients (nobody attaches to it
+or hands it workspaces) and refuses the `add_workspaces` handoff; a
+no-share client serves privately on the historical per-client path.
 
 Multi-repo notes: `--workspace` takes **paths** (repeat the flag once per
 checkout; or set `LAIN_WORKSPACE=/abs/a,/abs/b`). It is not a

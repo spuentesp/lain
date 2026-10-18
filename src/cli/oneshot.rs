@@ -79,6 +79,7 @@ fn start_shared_daemon(
         wait,
         None,
         None,
+        false,
     )?;
     crate::cli::socket_session::from_stream(stream).ok()
 }
