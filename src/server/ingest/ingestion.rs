@@ -118,6 +118,9 @@ impl LainServer {
         // Held to the end of the pass (any exit, incl. `?` and cancellation):
         // an overlapping pass that finishes first must not publish `ready`.
         let _pass = self.readiness().begin_pass();
+        // This pass rewrites nodes (and their incident `Calls` edges);
+        // call answers are incomplete until its resolve phases land.
+        self.ingest().graph().clear_calls_published();
 
         // 1. Parallel Map Phase: Scan files for structure and external references
         let files = if let Some(ref last) = last_commit {
@@ -158,6 +161,7 @@ impl LainServer {
                 info!("build_core_memory: cancelled after orphan sweep");
                 return Err(LainError::Cancelled);
             }
+            self.ingest().graph().mark_calls_published(&latest_commit);
             self.ingest().graph().set_last_commit(latest_commit)?;
             // Persisting is for the next start; this process serves from memory.
             // An unwritable `.lain` failed the whole pass, so a complete
@@ -694,6 +698,17 @@ impl LainServer {
             pattern_edges.len()
         );
         insert_edges_reporting(self.ingest().graph(), &pattern_edges, "pattern")?;
+
+        // Every `Calls`-edge producer of this pass has now landed in the
+        // serving table (LSP references → "call", tree-sitter refs →
+        // "static", string-literal links → "pattern"). Publish that fact
+        // for `get_capabilities`'s `call_graph` capability — but only for
+        // a complete pass: a capped/timed-out pass leaves whole files
+        // unscanned, so its call answers are still incomplete even for
+        // the refs it did resolve.
+        if !partial {
+            self.ingest().graph().mark_calls_published(&latest_commit);
+        }
 
         // 3d. Protocol sensors: HTTP routes, OpenAPI, proto, GraphQL,
         // WebSocket. Runs after the symbol nodes exist, because
@@ -1615,6 +1630,11 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         "[federation] Building core topology for {:?} at commit {}",
         path, latest_commit
     );
+    // This pass rewrites nodes in place — `replace_nodes_for_paths`
+    // takes the old nodes' incident `Calls` edges with them — so call
+    // answers are incomplete until the resolve phases below re-insert
+    // them. `get_capabilities` gates `call_graph` on this marker.
+    graph.clear_calls_published();
 
     // `force=true` means the caller has independent evidence the
     // worktree changed (a kernel `notify` event, an explicit reindex
@@ -1651,6 +1671,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
             return Err(LainError::Cancelled);
         }
         sweep_orphans(path, graph, git);
+        // Deletion-only commit: nothing rewrote the surviving call
+        // graph, only pruned the deleted files' nodes (with their
+        // edges). Call answers for the surviving code are complete.
+        graph.mark_calls_published(&latest_commit);
         graph.set_last_commit(latest_commit)?;
         if let Err(e) = graph.save_to_disk_sync() {
             warn!("could not persist the graph ({e}); serving it from memory only");
@@ -1865,6 +1889,11 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         pattern_edges.len()
     );
     graph.insert_edges_batch(&pattern_edges)?;
+    // The pass's `Calls`-edge insert phases (call → static → pattern)
+    // have all landed in the serving table; call answers for
+    // `latest_commit` are complete again. `get_capabilities` reports
+    // `call_graph: ready` only once this marker is set.
+    graph.mark_calls_published(&latest_commit);
 
     // Refresh the federation's symbol index so the just-populated
     // per-repo DB is visible to subsequent cross-repo lookups in

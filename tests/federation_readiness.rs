@@ -15,6 +15,16 @@
 //! "warming_up" gate assertion does not require a real long-running
 //! index — we set `RepoHealth` directly and exercise the gate function
 //! verbatim.
+//!
+//! The bottom section adds one end-to-end readiness-truthfulness pin
+//! (`call_graph_ready_implies_call_answers_are_complete`): it boots a
+//! real `lain server` over a deterministic one-caller/one-callee
+//! fixture and asserts the readiness CONTRACT — whenever
+//! `get_capabilities` reports `call_graph: ready`, `get_call_sites`
+//! must name the real caller. It is the regression pin for the
+//! premature-ready bug where the capability said `ready` while a
+//! re-index pass had torn the `Calls` edges down and clients got
+//! false "leaf" answers.
 
 use std::sync::Arc;
 
@@ -326,4 +336,187 @@ fn capability_state_wire_names_match_documented_snake_case() {
             "CapabilityState wire name drifted: {state:?}"
         );
     }
+}
+
+// ── Readiness truthfulness: `call_graph` vs. the served call answers ────────
+//
+// End-to-end through `lain server --config` (the exact shape the demo /
+// acceptance controller polls). Deterministic fixture: one caller/callee
+// pair, `entry` calls `callee`.
+
+#[path = "common/mod.rs"]
+#[allow(clippy::duplicate_mod)]
+mod common;
+
+/// One deterministic caller/callee pair in a committed git repo:
+/// `entry` calls `callee`, so `get_call_sites("callee")` must name
+/// `entry` once the call graph for the indexed commit is served.
+fn truthfulness_fixture(root: &std::path::Path) {
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"call_graph_truth\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"), truthfulness_lib_source()).unwrap();
+    common::git_init_committed(root);
+}
+
+fn truthfulness_lib_source() -> String {
+    "pub fn entry() -> u32 { callee(1) + 2 }\n\
+     pub fn callee(x: u32) -> u32 { x + 1 }\n"
+        .to_string()
+}
+
+fn caps_json(host: &str) -> serde_json::Value {
+    let text = common::tools_call_text(host, "get_capabilities", serde_json::json!({}));
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn cap_state(caps: &serde_json::Value, name: &str) -> String {
+    caps["capabilities"][name]["state"]
+        .as_str()
+        .unwrap_or("?")
+        .to_string()
+}
+
+fn call_sites(host: &str, symbol: &str) -> String {
+    common::tools_call_text(
+        host,
+        "get_call_sites",
+        serde_json::json!({ "symbol": symbol }),
+    )
+}
+
+/// Readiness CONTRACT (verdict soundness): when `get_capabilities`
+/// reports `symbols: ready` AND `call_graph: ready`, `get_call_sites`
+/// on a known pair must name the real caller — never a false "leaf".
+///
+/// Cold boot on the fixture, then the same invariant is polled across a
+/// watcher-driven re-index. `index_forced` replaces nodes in place
+/// (taking their incident `Calls` edges with them) and only re-inserts
+/// them in its resolve phase; the capability must not claim `ready`
+/// inside that window. Before the fix it did — clients querying at the
+/// ready-transition saw "callee is a leaf" while `index_one_repo`'s
+/// caller was demonstrably in the tree — and `call_graph` never left
+/// `ready` during the rebuild at all.
+#[test]
+fn call_graph_ready_implies_call_answers_are_complete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = tmp.path().join("fixture");
+    truthfulness_fixture(&fixture);
+
+    let fed = tmp.path().join("fed");
+    std::fs::create_dir_all(fed.join("data")).unwrap();
+    let repos_yaml = fed.join("repos.yaml");
+    std::fs::write(
+        &repos_yaml,
+        format!(
+            "data_dir: {}\nrepos:\n  - id: truth\n    source: {{ type: workspace_dir, path: {} }}\n",
+            fed.join("data").display(),
+            fixture.display(),
+        ),
+    )
+    .unwrap();
+
+    let (host, mut guard) = common::boot_and_wait(&repos_yaml);
+
+    // Cold-boot gate: wait for BOTH capabilities to report `ready` —
+    // the exact contract the demo / acceptance controller polls.
+    let start = std::time::Instant::now();
+    let caps = loop {
+        let caps = caps_json(&host);
+        if cap_state(&caps, "symbols") == "ready" && cap_state(&caps, "call_graph") == "ready" {
+            break caps;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(120),
+            "index never reported both capabilities ready; caps: {caps}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+
+    // AUDIT (git_history): the capability builder hardcodes
+    // `git_history: Ready` — it never reflects a probe. Pin the
+    // observation on the same fixture: it reports `ready` at the
+    // ready-transition (and at every later observation below).
+    assert_eq!(
+        cap_state(&caps, "git_history"),
+        "ready",
+        "audit: git_history is hardcoded ready in the capability builder; \
+         got {}",
+        cap_state(&caps, "git_history")
+    );
+
+    // The readiness CONTRACT at the ready-transition.
+    let out = call_sites(&host, "callee");
+    assert!(
+        out.contains("entry"),
+        "get_capabilities reported `call_graph: ready` but get_call_sites('callee') \
+         did not name its caller `entry`: {out}"
+    );
+
+    // Same contract across a watcher-driven re-index: an uncommitted
+    // edit disables `index_forced`'s cycle suppression, so the next
+    // notify event re-scans the tree — the window in which the graph
+    // is half-built (nodes replaced, `Calls` edges not yet re-inserted).
+    std::fs::write(
+        fixture.join("src/lib.rs"),
+        format!(
+            "{}// touched: force a watcher re-index\n",
+            truthfulness_lib_source()
+        ),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut violations: Vec<String> = Vec::new();
+    let mut saw_rebuild = false;
+    let mut symbols_ready_while_rebuilding = 0usize;
+    while std::time::Instant::now() < deadline {
+        let caps = caps_json(&host);
+        let s = cap_state(&caps, "symbols");
+        let g = cap_state(&caps, "call_graph");
+        let out = call_sites(&host, "callee");
+        if g == "ready" {
+            if !out.contains("entry") {
+                violations.push(format!("symbols={s} call_graph={g}: {}", out.trim()));
+            } else if saw_rebuild {
+                // Rebuild signalled honestly and is complete again.
+                break;
+            }
+        } else {
+            saw_rebuild = true;
+            // AUDIT (symbols): `symbols` keeps its pre-existing
+            // semantics (structural state only) through a rebuild —
+            // the fix must not regress it. Documented here so a
+            // change to that mapping is visible; the report notes
+            // symbol answers can themselves be mid-teardown.
+            if s == "ready" {
+                symbols_ready_while_rebuilding += 1;
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "call_graph reported `ready` while the call graph was being rebuilt \
+         and get_call_sites answered a false leaf: {violations:?}"
+    );
+    assert!(
+        saw_rebuild,
+        "the re-index window was never observed: `call_graph` must leave `ready` \
+         while call edges are being rebuilt (readiness honesty)"
+    );
+    // AUDIT (symbols) — one assert: `symbols` keeps reporting `ready`
+    // through the rebuild (its mapping is structural-only and is
+    // deliberately unchanged by this fix — "do not regress symbols
+    // semantics"). The report notes the audit finding: symbol sets are
+    // also mid-teardown during the rebuild, the same premature-ready
+    // class, left for a follow-up.
+    assert!(
+        symbols_ready_while_rebuilding > 0,
+        "audit: `symbols` must keep its structural-only semantics (ready) \
+         through a rebuild — this fix must not change the symbols mapping"
+    );
+    let _ = guard.exit_diag();
 }

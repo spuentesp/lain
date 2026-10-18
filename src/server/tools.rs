@@ -568,15 +568,22 @@ impl ToolExecutor {
 
         fn capabilities_for(
             structural: CapabilityState,
+            call_graph_state: CapabilityState,
             retry_after_ms: Option<u64>,
             semantic_stub: bool,
             embeddings_running: bool,
         ) -> Capabilities {
             let mut symbols = Capability::new(structural, false);
-            let mut call_graph = Capability::new(structural, false);
+            let mut call_graph = Capability::new(call_graph_state, false);
             if structural == CapabilityState::WarmingUp {
                 symbols.retry_after_ms = retry_after_ms;
                 call_graph.retry_after_ms = retry_after_ms;
+            } else if call_graph_state == CapabilityState::WarmingUp {
+                // Symbols already answer while the pass is still
+                // re-inserting `Calls` edges; the call graph is the
+                // capability that lags, so its retry hint is the one
+                // a client must honour before asking who calls whom.
+                call_graph.retry_after_ms = retry_after_ms.or(Some(5_000));
             }
             let semantic_search = if semantic_stub {
                 Capability::new(CapabilityState::UnavailableOptional, true)
@@ -594,6 +601,22 @@ impl ToolExecutor {
                 call_graph,
                 git_history: Capability::new(CapabilityState::Ready, false),
                 semantic_search,
+            }
+        }
+
+        /// `call_graph` must mean "call answers are complete for the
+        /// indexed commit". A pass replaces nodes (and their incident
+        /// `Calls` edges) before its resolve phase re-inserts them, so
+        /// the marker is `None` mid-pass and `get_call_sites` would
+        /// answer real callers as "leaf". Never report `ready` then —
+        /// the call graph is the capability that lags `symbols`.
+        fn call_graph_state(structural: CapabilityState, calls_published: bool) -> CapabilityState {
+            if calls_published {
+                structural
+            } else if structural == CapabilityState::Ready {
+                CapabilityState::WarmingUp
+            } else {
+                structural
             }
         }
 
@@ -629,18 +652,31 @@ impl ToolExecutor {
             repos.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 
             let mut worst = CapabilityState::Ready;
+            let mut worst_call_graph = CapabilityState::Ready;
             let mut worst_retry_after_ms: Option<u64> = None;
             let repositories: Vec<serde_json::Value> = repos
                 .iter()
                 .map(|(id, health)| {
                     let snapshot = repo_health_to_snapshot(*health);
                     let structural = structural_state(snapshot.state);
+                    // Per-repo call answers are complete only while the
+                    // repo's serving graph carries its `calls_published`
+                    // marker (see `GraphDatabase::calls_published_for`).
+                    let calls_published = fed
+                        .get_repo(id)
+                        .map(|r| r.db().calls_published_for().is_some())
+                        .unwrap_or(false);
+                    let call_state = call_graph_state(structural, calls_published);
                     if badness(structural) > badness(worst) {
                         worst = structural;
                         worst_retry_after_ms = snapshot.retry_after_ms;
                     }
+                    if badness(call_state) > badness(worst_call_graph) {
+                        worst_call_graph = call_state;
+                    }
                     let caps = capabilities_for(
                         structural,
+                        call_state,
                         snapshot.retry_after_ms,
                         semantic_stub,
                         embeddings_running,
@@ -661,6 +697,7 @@ impl ToolExecutor {
                 .collect();
             let aggregate = capabilities_for(
                 worst,
+                worst_call_graph,
                 worst_retry_after_ms,
                 semantic_stub,
                 embeddings_running,
@@ -680,6 +717,7 @@ impl ToolExecutor {
         let structural = structural_state(lifecycle.state);
         let capabilities = capabilities_for(
             structural,
+            call_graph_state(structural, self.ctx.graph.calls_published_for().is_some()),
             lifecycle.retry_after_ms,
             semantic_stub,
             embeddings_running,

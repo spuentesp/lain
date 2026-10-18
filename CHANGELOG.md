@@ -47,6 +47,17 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- capability readiness is truthful — `call_graph` reports ready only
+  once call edges are served; queries at the ready-transition no longer
+  see empty/leaf answers. A re-index pass replaces nodes (taking their
+  incident `Calls` edges with them) and only re-inserts them in its
+  resolve phase, but the capability kept claiming `ready` for the whole
+  rebuild, so `get_call_sites` / `get_blast_radius` answered real
+  callers as "leaf" until the pass finished. The serving graph now
+  carries a per-pass `calls_published` marker (stamped when the pass's
+  call-edge insert phases land, cleared when a pass starts rewriting
+  nodes) and `get_capabilities` maps `call_graph` to `ready` only while
+  it is set. `symbols` semantics are unchanged.
 - contracts: `list_unresolved` candidates honor the item's
   `target_service` — the §9.7 could-match gate (`diff.rs::could_match`'s
   service-name condition). When the resolver named one

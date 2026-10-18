@@ -400,6 +400,21 @@ pub struct GraphDatabase {
     /// durable graph state. Cleared by a later successful pass and by
     /// [`Self::reset`].
     cochange_failure: Arc<RwLock<Option<String>>>,
+    /// The commit whose `Calls` edges are fully present in this serving
+    /// table. A mutating indexing pass replaces nodes in place —
+    /// `replace_nodes_for_paths` takes every incident edge with the old
+    /// node — and only re-inserts `Calls` edges in its resolve phase, so
+    /// mid-pass this graph answers `get_call_sites` with false
+    /// "leaf"/empty verdicts while the nodes themselves still resolve.
+    /// Ingest clears the marker when a pass starts rewriting nodes and
+    /// stamps it again once the pass's call-edge insert phases have
+    /// landed; `get_capabilities` maps `call_graph` to `ready` only while
+    /// it is set, so a client that trusts the capability never queries a
+    /// half-built call graph. Restored from `last_commit` on load: a
+    /// persisted graph is complete for its marker by construction
+    /// (only a full pass advances `last_commit`). In-memory only, like
+    /// [`Self::cochange_failure`]. Shared across clones.
+    calls_published_for: Arc<RwLock<Option<String>>>,
 }
 
 /// RAII marker for "a mutating indexing pass is running on this graph".
@@ -521,6 +536,7 @@ impl GraphDatabase {
             pending_external_edges: Arc::new(parking_lot::Mutex::new(Vec::new())),
             write_pass_active: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cochange_failure: Arc::new(RwLock::new(None)),
+            calls_published_for: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -2236,6 +2252,30 @@ impl GraphDatabase {
         self.cochange_failure.read().clone()
     }
 
+    /// The commit whose `Calls` edges are currently all served by this
+    /// graph, or `None` while a mutating pass is between "nodes are being
+    /// replaced" and "call edges re-inserted". `get_capabilities` gates
+    /// the `call_graph` capability on this so `ready` never claims more
+    /// than the graph can answer.
+    pub fn calls_published_for(&self) -> Option<String> {
+        self.calls_published_for.read().clone()
+    }
+
+    /// Called when a mutating indexing pass starts rewriting nodes. The
+    /// replaced nodes take their incident `Calls` edges with them, so any
+    /// previously published commit is no longer fully answered until the
+    /// pass's resolve phases finish ([`Self::mark_calls_published`]).
+    pub fn clear_calls_published(&self) {
+        *self.calls_published_for.write() = None;
+    }
+
+    /// Called once a pass's call-edge insert phases have landed for
+    /// `commit`: `get_call_sites` answers for that commit are complete
+    /// again (relative to what the pass scanned).
+    pub fn mark_calls_published(&self, commit: &str) {
+        *self.calls_published_for.write() = Some(commit.to_string());
+    }
+
     pub fn get_last_commit(&self) -> Result<Option<String>, LainError> {
         Ok(self.last_commit.read().clone())
     }
@@ -2277,6 +2317,9 @@ impl GraphDatabase {
         // A wiped graph will be rebuilt by a fresh analysis pass; a
         // stale failure from before the reset must not outlive it.
         self.clear_cochange_failure();
+        // Same for the call-graph publication marker: nothing is
+        // answered until the rebuild's resolve phases land.
+        self.clear_calls_published();
         Ok(())
     }
 
@@ -2653,6 +2696,10 @@ impl GraphDatabase {
             self.name_index.insert(k, v);
         }
         drop(graph);
+        // A loaded graph is complete for its recorded marker — only a
+        // full pass advances `last_commit` — so its call answers are
+        // published for that commit the moment it is on disk.
+        *self.calls_published_for.write() = state.last_commit.clone();
         *self.last_commit.write() = state.last_commit;
         Ok(())
     }
