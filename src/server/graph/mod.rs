@@ -410,10 +410,10 @@ pub struct GraphDatabase {
     /// stamps it again once the pass's call-edge insert phases have
     /// landed; `get_capabilities` maps `call_graph` to `ready` only while
     /// it is set, so a client that trusts the capability never queries a
-    /// half-built call graph. Restored from `last_commit` on load: a
-    /// persisted graph is complete for its marker by construction
-    /// (only a full pass advances `last_commit`). In-memory only, like
-    /// [`Self::cochange_failure`]. Shared across clones.
+    /// half-built call graph. Persisted with the graph (`persist::GraphState`)
+    /// and restored on load — a save that lands mid-pass records a cleared
+    /// stamp, so a warm boot does not publish `ready` over the torn graph.
+    /// Shared across clones.
     calls_published_for: Arc<RwLock<Option<String>>>,
 }
 
@@ -2256,7 +2256,9 @@ impl GraphDatabase {
     /// graph, or `None` while a mutating pass is between "nodes are being
     /// replaced" and "call edges re-inserted". `get_capabilities` gates
     /// the `call_graph` capability on this so `ready` never claims more
-    /// than the graph can answer.
+    /// than the graph can answer. The commit key is informational at read
+    /// time (consumers check `.is_some()`); it must be compared against
+    /// the serving commit if concurrency ever loosens.
     pub fn calls_published_for(&self) -> Option<String> {
         self.calls_published_for.read().clone()
     }
@@ -2476,7 +2478,16 @@ impl GraphDatabase {
             .map(|r| (r.key().clone(), *r.value()))
             .collect();
         let last_commit = self.last_commit.read().clone();
-        persist::GraphState::new(self.graph.read().clone(), index_map, last_commit)
+        // The stamp is written as *present* even when cleared: a save that
+        // lands mid-pass records `Some(None)`, which the loader must read
+        // as "do not publish" rather than as a pre-stamp file.
+        let calls_published_for = self.calls_published_for.read().clone();
+        persist::GraphState::new(
+            self.graph.read().clone(),
+            index_map,
+            last_commit,
+            calls_published_for,
+        )
     }
 
     /// Save graph to disk asynchronously (non-blocking)
@@ -2696,10 +2707,17 @@ impl GraphDatabase {
             self.name_index.insert(k, v);
         }
         drop(graph);
-        // A loaded graph is complete for its recorded marker — only a
-        // full pass advances `last_commit` — so its call answers are
-        // published for that commit the moment it is on disk.
-        *self.calls_published_for.write() = state.last_commit.clone();
+        // Trust the persisted stamp when the file carried one: `None` there
+        // means the save landed mid-pass — nodes replaced, `Calls` edges not
+        // yet re-inserted — and publishing would hand out false "leaf"
+        // answers. Files written before the stamp existed decode without it
+        // (`persist::decode_state`'s pre-stamp fallback); for those, fall
+        // back to the pre-stamp inference — a persisted graph was treated as
+        // complete for its `last_commit` — so existing warm boots are not
+        // stuck at `WarmingUp`.
+        *self.calls_published_for.write() = state
+            .calls_published_for
+            .unwrap_or_else(|| state.last_commit.clone());
         *self.last_commit.write() = state.last_commit;
         Ok(())
     }
@@ -3943,6 +3961,158 @@ mod load_from_disk_name_index_tests {
             reader.find_node_by_name("missing").is_none(),
             "unknown names still return None"
         );
+    }
+}
+
+// ─── Call-graph publication stamp across save/load ─────────────────────────
+//
+// The stamp (`calls_published_for`) is the honesty gate behind
+// `get_capabilities.call_graph`. A persist can land mid-pass — the map
+// phase saves after every batch flush, before the resolve phases re-insert
+// `Calls` edges — so the on-disk graph may hold replaced nodes without
+// their call edges. A warm boot must restore the stamp the save recorded,
+// never infer `ready` from `last_commit`.
+
+#[cfg(test)]
+mod calls_published_persist_tests {
+    use super::*;
+    use crate::schema::{GraphNode, NodeType};
+
+    fn caller_callee() -> (GraphNode, GraphNode) {
+        let caller = GraphNode::new(NodeType::Function, "caller".into(), "src/a.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "callee".into(), "src/b.rs".into());
+        (caller, callee)
+    }
+
+    /// A kill mid-reduce, simulated deterministically at the state level:
+    /// a complete pass is committed and saved, then a second pass clears
+    /// the stamp and replaces nodes (taking their `Calls` edges) before its
+    /// resolve phase runs — and the process dies at the batch flush's save.
+    /// The warm boot must NOT report the call graph published: the loaded
+    /// graph answers `get_call_sites("callee")` with a false leaf, so the
+    /// capability must stay `warming_up` until a pass completes.
+    ///
+    /// RED before the persisted stamp: `apply_state_loaded` inferred the
+    /// stamp from `last_commit` (the previous complete commit), so the
+    /// warm boot published `ready` over the torn graph — the bug on the
+    /// restart path.
+    #[test]
+    fn a_mid_pass_save_does_not_publish_call_graph_on_warm_boot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        let (caller, callee) = caller_callee();
+
+        // Complete pass at commit-a: nodes + `Calls` edge + stamp + commit.
+        let db = GraphDatabase::new(&path).expect("db");
+        db.insert_nodes_batch(&[caller.clone(), callee.clone()])
+            .expect("insert");
+        db.insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            caller.id.clone(),
+            callee.id.clone(),
+        ))
+        .expect("call edge");
+        db.mark_calls_published("commit-a");
+        db.set_last_commit("commit-a".into()).expect("commit");
+        db.save_to_disk_sync().expect("save complete pass");
+        assert_eq!(db.calls_published_for().as_deref(), Some("commit-a"));
+
+        // Second pass starts rewriting nodes for commit-b: the stamp is
+        // cleared at pass start, `replace_nodes_for_paths` takes the old
+        // node's incident `Calls` edge with it, and the batch flush saves
+        // before the resolve phase re-inserts call edges.
+        db.clear_calls_published();
+        let mut caller_b = caller.clone();
+        caller_b.line_start = Some(1);
+        db.replace_nodes_for_paths(&[caller.path.clone()], &[caller_b])
+            .expect("replace caller");
+        assert!(
+            db.get_edges_from(&caller.id).unwrap().is_empty(),
+            "precondition: the replacement dropped the Calls edge"
+        );
+        db.save_to_disk_sync().expect("mid-pass save");
+        drop(db);
+
+        // Warm boot after the kill: the persisted graph is torn and the
+        // stamp was cleared when it was written.
+        let booted = GraphDatabase::new(&path).expect("warm boot");
+        assert_eq!(
+            booted.get_last_commit().expect("last_commit").as_deref(),
+            Some("commit-a"),
+            "precondition: last_commit still names the previous complete commit"
+        );
+        assert_eq!(
+            booted.calls_published_for(),
+            None,
+            "warm boot must not publish the call graph over a mid-pass save: \
+             the loaded graph answers get_call_sites('callee') as a false leaf"
+        );
+    }
+
+    /// The restore path consults the persisted stamp, not `last_commit`:
+    /// a state whose stamp names a different commit than `last_commit`
+    /// reloads with the stamp it was saved under. RED before the persisted
+    /// stamp, which unconditionally overwrote the gate with `last_commit`.
+    #[test]
+    fn warm_boot_restores_the_persisted_stamp_not_last_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        let (caller, callee) = caller_callee();
+
+        let db = GraphDatabase::new(&path).expect("db");
+        db.insert_nodes_batch(&[caller, callee]).expect("insert");
+        db.mark_calls_published("stamp-commit");
+        db.set_last_commit("last-commit".into()).expect("commit");
+        db.save_to_disk_sync().expect("save");
+        drop(db);
+
+        let booted = GraphDatabase::new(&path).expect("warm boot");
+        assert_eq!(
+            booted.calls_published_for().as_deref(),
+            Some("stamp-commit")
+        );
+        assert_eq!(
+            booted.get_last_commit().expect("last_commit").as_deref(),
+            Some("last-commit")
+        );
+    }
+
+    /// A state WITHOUT the stamp field — the bytes an older Lain wrote —
+    /// loads cleanly and falls back to the pre-stamp inference (published
+    /// for `last_commit`), so existing graphs are not stuck at `WarmingUp`
+    /// on every warm boot. This is the old-format-load proof: no
+    /// `PATH_FORMAT_VERSION` bump, no `lain reindex` required.
+    #[test]
+    fn a_pre_stamp_graph_loads_and_infers_publication_from_last_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        let (caller, callee) = caller_callee();
+
+        let db = GraphDatabase::new(&path).expect("db");
+        db.insert_nodes_batch(&[caller, callee]).expect("insert");
+        db.mark_calls_published("commit-a");
+        db.set_last_commit("commit-a".into()).expect("commit");
+
+        // Rewrite the file in the pre-stamp wire layout, exactly as an
+        // older Lain would have left it.
+        let state = db.build_state();
+        let bytes = persist::encode_pre_stamp_state_for_tests(
+            state.graph,
+            state.index_map,
+            state.last_commit,
+        )
+        .expect("encode pre-stamp");
+        std::fs::write(&path, &bytes).expect("write pre-stamp graph");
+        drop(db);
+
+        let booted = GraphDatabase::new(&path).expect("warm boot pre-stamp");
+        assert_eq!(
+            booted.calls_published_for().as_deref(),
+            Some("commit-a"),
+            "a pre-stamp graph must fall back to the last_commit inference, \
+             not stay unpublished"
+        );
+        assert_eq!(booted.node_count(), 2);
     }
 }
 

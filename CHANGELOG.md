@@ -47,6 +47,24 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- call-graph readiness survives a restart honestly. The
+  `calls_published` marker is now persisted with the graph and restored
+  on load, so a warm boot after a kill/SIGPIPE mid-index no longer
+  reports `call_graph: ready` over a torn `graph.bin` (the map phase
+  saves after every batch flush — before the resolve phases re-insert
+  `Calls` edges — and the old loader inferred the marker from
+  `last_commit`, which still named the previous complete commit).
+  Graphs written before the marker existed still load (bincode is
+  positional, so a trailing `#[serde(default)]` field cannot express
+  their missing stamp; the loader retries the pre-stamp layout and
+  falls back to the old `last_commit` inference) — no `lain reindex`
+  required, and `PATH_FORMAT_VERSION` is unchanged.
+- `relink_cross_repo` takes part in the same clear/mark lifecycle as
+  the indexing passes: the gate is cleared while the cross-repo `Calls`
+  edges are re-resolved and re-stamped for the indexed commit when they
+  land. Previously it was a fourth `Calls`-edge producer outside the
+  lifecycle, so `call_graph` kept claiming `ready` during the startup
+  relink while cross-repo callers answered as false "leaf".
 - capability readiness is truthful — `call_graph` reports ready only
   once call edges are served; queries at the ready-transition no longer
   see empty/leaf answers. A re-index pass replaces nodes (taking their

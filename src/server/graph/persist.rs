@@ -45,23 +45,58 @@ pub(super) struct GraphState {
     pub(super) graph: StableGraph<GraphNode, GraphEdge>,
     pub(super) index_map: HashMap<String, NodeIndex>,
     pub(super) last_commit: Option<String>,
-    /// Absent in graphs written before the canonical-path change; serde
-    /// defaults it to 0, which fails the version check and forces a rebuild.
+    /// Absent in graphs written before the canonical-path change. Bincode
+    /// is positional, so such files fail to decode entirely (see
+    /// [`decode_state`]); the loader fail-softs to an empty graph and the
+    /// caller rebuilds — the same outcome as a version-check failure.
     #[serde(default)]
     pub(super) path_format_version: u32,
+    /// Call-graph publication stamp as of the snapshot. Tri-state:
+    ///
+    /// - outer `None` — the file predates the stamp ([`decode_state`]'s
+    ///   pre-stamp fallback records the absence; see that comment for why
+    ///   `#[serde(default)]` alone cannot express it in bincode);
+    /// - `Some(None)` — the stamp was written and is **cleared**: the save
+    ///   landed mid-pass, with nodes replaced and their `Calls` edges not
+    ///   yet re-inserted;
+    /// - `Some(Some(commit))` — the pass's call-edge inserts had landed
+    ///   for `commit` when the snapshot was written.
+    ///
+    /// [`super::GraphDatabase::apply_state_loaded`] trusts the inner value
+    /// when the field is present and falls back to inferring from
+    /// `last_commit` when it is absent.
+    #[serde(default)]
+    pub(super) calls_published_for: Option<Option<String>>,
+}
+
+/// The wire layout this struct had before `calls_published_for` existed
+/// (bincode is positional: fields are concatenated, no names, no count).
+/// Decoded as the fallback in [`decode_state`] for pre-stamp files.
+#[derive(Serialize, Deserialize)]
+struct PreStampState {
+    graph: StableGraph<GraphNode, GraphEdge>,
+    index_map: HashMap<String, NodeIndex>,
+    last_commit: Option<String>,
+    path_format_version: u32,
 }
 
 impl GraphState {
+    /// Build a state for a fresh save. `calls_published_for` is the stamp
+    /// as of the snapshot (`None` = cleared mid-pass); it is always written
+    /// as *present*, so a load can tell a mid-pass save apart from a file
+    /// that pre-dates the stamp entirely.
     pub(super) fn new(
         graph: StableGraph<GraphNode, GraphEdge>,
         index_map: HashMap<String, NodeIndex>,
         last_commit: Option<String>,
+        calls_published_for: Option<String>,
     ) -> Self {
         Self {
             graph,
             index_map,
             last_commit,
             path_format_version: PATH_FORMAT_VERSION,
+            calls_published_for: Some(calls_published_for),
         }
     }
 }
@@ -85,10 +120,46 @@ pub(crate) const DECODE_LIMIT: usize = 1 << 32;
 
 /// Decode bytes into a `GraphState`. Mirrors [`encode_state`]; the
 /// layout is the same, only allocation is bounded.
+///
+/// Pre-stamp files (written before `calls_published_for` existed) are
+/// accepted through an explicit fallback: bincode is a positional format,
+/// so `#[serde(default)]` cannot stand in for a trailing field the writer
+/// never emitted — the decoder hits the end of the slice mid-field and
+/// errors out. Retry the pre-stamp shape and record the stamp as *absent*
+/// (outer `None`) so [`super::GraphDatabase::apply_state_loaded`] can fall
+/// back to the pre-stamp inference for those files. The fallback accepts
+/// the pre-stamp shape only when it consumes the whole slice: a current
+/// file truncated inside the stamp tail must stay a decode error (the
+/// loader fail-softs to an empty graph) rather than half-loading as an
+/// old graph — see the truncation property in `persist_verification.rs`.
 pub(super) fn decode_state(
     data: &[u8],
 ) -> Result<(GraphState, usize), bincode::error::DecodeError> {
-    bincode::serde::decode_from_slice(data, bincode::config::legacy().with_limit::<DECODE_LIMIT>())
+    let config = bincode::config::legacy().with_limit::<DECODE_LIMIT>();
+    let current = bincode::serde::decode_from_slice(data, config);
+    let Err(err) = current else {
+        return current;
+    };
+    let Ok((pre, used)) = bincode::serde::decode_from_slice::<PreStampState, _>(data, config)
+    else {
+        return Err(err);
+    };
+    if used != data.len() {
+        // Trailing bytes mean this is not a whole pre-stamp file (a
+        // truncated current-shape file lands here): keep the original
+        // error so the caller fail-softs instead of half-loading.
+        return Err(err);
+    }
+    Ok((
+        GraphState {
+            graph: pre.graph,
+            index_map: pre.index_map,
+            last_commit: pre.last_commit,
+            path_format_version: pre.path_format_version,
+            calls_published_for: None,
+        },
+        used,
+    ))
 }
 
 /// Strict, read-only inspection for diagnostics. Unlike the runtime loader,
@@ -189,6 +260,116 @@ mod decode_limit_tests {
         let bytes = vec![0xffu8; 64];
         assert!(decode_state(&bytes).is_err());
     }
+}
+
+#[cfg(test)]
+mod stamp_persist_tests {
+    //! The `calls_published_for` stamp is tri-state on the wire (absent /
+    //! cleared / published) and every state of it must round-trip exactly,
+    //! because `apply_state_loaded` turns it into the `call_graph`
+    //! capability gate on warm boot.
+
+    use super::*;
+    use crate::schema::{GraphEdge, GraphNode, NodeType};
+
+    fn one_node() -> (
+        StableGraph<GraphNode, GraphEdge>,
+        HashMap<String, NodeIndex>,
+    ) {
+        let mut graph = StableGraph::new();
+        let node = GraphNode::new(NodeType::Function, "callee".into(), "src/b.rs".into());
+        let mut index_map = HashMap::new();
+        index_map.insert(node.id.clone(), graph.add_node(node));
+        (graph, index_map)
+    }
+
+    /// `Some(Some(commit))` survives encode/decode unchanged.
+    #[test]
+    fn a_published_stamp_survives_encode_decode() {
+        let (graph, index_map) = one_node();
+        let state = GraphState::new(graph, index_map, Some("abc".into()), Some("abc".into()));
+        let bytes = encode_state(&state).expect("encode");
+        let (decoded, used) = decode_state(&bytes).expect("decode");
+        assert_eq!(used, bytes.len());
+        assert_eq!(decoded.calls_published_for, Some(Some("abc".into())));
+        assert_eq!(decoded.last_commit.as_deref(), Some("abc"));
+    }
+
+    /// `Some(None)` — a save that landed mid-pass, stamp cleared — must
+    /// not be confused with a file that predates the stamp (outer `None`).
+    /// Confusing them would publish `ready` over the torn graph.
+    #[test]
+    fn a_cleared_stamp_survives_encode_decode_as_present() {
+        let (graph, index_map) = one_node();
+        let state = GraphState::new(graph, index_map, Some("abc".into()), None);
+        let bytes = encode_state(&state).expect("encode");
+        let (decoded, _) = decode_state(&bytes).expect("decode");
+        assert_eq!(
+            decoded.calls_published_for,
+            Some(None),
+            "a cleared stamp is present-and-None, never absent"
+        );
+    }
+
+    /// A file written before the stamp existed (4-field layout) decodes
+    /// and records the stamp as *absent*, so the loader can fall back to
+    /// the pre-stamp inference. `#[serde(default)]` cannot do this in
+    /// bincode — the format is positional and the decoder errors at the
+    /// missing tail instead of yielding `None` — so `decode_state` retries
+    /// the pre-stamp shape explicitly.
+    #[test]
+    fn a_pre_stamp_state_loads_and_records_the_stamp_absent() {
+        let (graph, index_map) = one_node();
+        let bytes = encode_pre_stamp_state_for_tests(graph, index_map, Some("old".into()))
+            .expect("encode pre-stamp");
+        let (decoded, used) = decode_state(&bytes).expect("pre-stamp file must load");
+        assert_eq!(used, bytes.len());
+        assert_eq!(
+            decoded.calls_published_for, None,
+            "a pre-stamp file records the stamp absent, not cleared"
+        );
+        assert_eq!(decoded.last_commit.as_deref(), Some("old"));
+        assert_eq!(decoded.path_format_version, PATH_FORMAT_VERSION);
+        assert_eq!(decoded.graph.node_count(), 1);
+    }
+
+    /// The pre-stamp fallback must not half-load a current-shape file
+    /// truncated inside the stamp tail: that stays a whole-file decode
+    /// error (the loader fail-softs to empty), preserving the truncation
+    /// property pinned in `persist_verification.rs`.
+    #[test]
+    fn a_state_truncated_in_the_stamp_is_not_half_loaded_as_pre_stamp() {
+        let (graph, index_map) = one_node();
+        let state = GraphState::new(graph, index_map, Some("abc".into()), Some("abc".into()));
+        let bytes = encode_state(&state).expect("encode");
+        // Cut inside the trailing stamp (`1u8 1u8` + string).
+        let cut = bytes.len() - 3;
+        assert!(
+            decode_state(&bytes[..cut]).is_err(),
+            "a truncated stamp tail must not decode as a pre-stamp file"
+        );
+    }
+}
+
+/// Encode a pre-stamp (4-field) state — the bytes an older Lain wrote —
+/// so load tests can prove those files still load (see
+/// [`stamp_persist_tests`] and the warm-boot tests in
+/// [`super::GraphDatabase`]'s test modules).
+#[cfg(test)]
+pub(super) fn encode_pre_stamp_state_for_tests(
+    graph: StableGraph<GraphNode, GraphEdge>,
+    index_map: HashMap<String, NodeIndex>,
+    last_commit: Option<String>,
+) -> Result<Vec<u8>, bincode::error::EncodeError> {
+    bincode::serde::encode_to_vec(
+        &PreStampState {
+            graph,
+            index_map,
+            last_commit,
+            path_format_version: PATH_FORMAT_VERSION,
+        },
+        bincode::config::legacy(),
+    )
 }
 
 #[cfg(test)]
