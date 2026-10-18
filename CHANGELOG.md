@@ -38,6 +38,18 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Changed
 
+- Topic nodes are now canonical hubs: `event_sensor` mints ONE `Topic`
+  node per `(broker, topic)` per repo (identity: the `broker/topic`
+  label alone — no path, no line) instead of one node per publish/
+  subscribe *site*, so a topic used from several files no longer
+  fragments into one node per file. Each site keeps its own
+  `Produces`/`Consumes` edge on the hub with `SourceSite { path, line }`
+  provenance. Existing graphs still load (node ids are content, not
+  format — `FEDERATION_GRAPH_VERSION` unchanged), but they carry the
+  old per-site `Topic` nodes and their ids until the repo is re-indexed;
+  run **`lain reindex`** to rebuild cleanly. `CONTRACT_ANALYZER_REV`
+  is bumped (5 → 6) because the analyzer's graph output changed, so
+  contract caches keyed on the old revision are ignored and rebuilt.
 - `lain mcp --daemon` boots the resolved workspace set as a federation
   (synthesized `repos.yaml` under the runtime dir, set-hash keyed) so
   the served set can grow in hot via `add_workspaces`; idle-exit and

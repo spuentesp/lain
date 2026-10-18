@@ -24,11 +24,14 @@
 //! - NestJS (TypeScript): `@Cron('0 0 * * *')` decorator marks the
 //!   following function as a scheduled topic.
 //!
-//! Each detected site emits a `Topic` node plus a `Produces` (publishers)
-//! or `Consumes` (subscribers) edge. Topic names are extracted from
-//! string literals and same-file `const` / `let` constant assignments
-//! (§6.7 "same-file constants"). Dynamic topic names are recorded but
-//! skipped from the graph so they surface in `coverage.unnormalized`.
+//! Each `(broker, topic)` pair mints ONE canonical `Topic` hub node per
+//! repo (id anchored on [`TOPIC_ANCHOR`] with the label alone — no path,
+//! no line) and each detected site hangs a `Produces` (publishers) or
+//! `Consumes` (subscribers) edge with `SourceSite` provenance off that
+//! hub. Topic names are extracted from string literals and same-file
+//! `const` / `let` constant assignments (§6.7 "same-file constants").
+//! Dynamic topic names are recorded but skipped from the graph so they
+//! surface in `coverage.unnormalized`.
 //!
 //! After site emission the sensor also walks payload schema files
 //! (`*.avsc`, `*.schema.json`): each parses into a `Schema` node with
@@ -53,6 +56,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const DEFAULT_BROKER: &str = "kafka";
+
+/// Hub identity anchor — the `path` component of the hub's ID only.
+/// A `Topic` hub's id is
+/// `generate_id(Topic, TOPIC_ANCHOR, "{broker}/{topic}", None, ns)` —
+/// the label alone — so every publish/subscribe site in the repo
+/// converges on ONE node per `(broker, topic)`. Site provenance lives
+/// on the `Produces`/`Consumes` edges (`site: SourceSite { path, line }`),
+/// one edge per site. The node RECORD keeps `path` = a real site file
+/// (see `emit_sites`): `prune_orphans` drops nodes whose path is not a
+/// tracked file. `tests/event_hub_e2e.rs` pins this literal.
+const TOPIC_ANCHOR: &str = "<topics>";
 
 /// What the regex extractor finds in a single file. `topic` is the
 /// literal name when extractable; `dynamic` means the topic arg is a
@@ -104,6 +118,11 @@ pub fn scan_workspace_event(
 
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
+    // Hub ids minted in this scan. One `Topic` node per (broker, topic)
+    // per repo — pushed once no matter how many sites reference it
+    // (per REPO scan, not per file: two files publishing one topic
+    // share the hub).
+    let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
 
     let any_ext = |p: &Path| {
         Some(
@@ -118,7 +137,8 @@ pub fn scan_workspace_event(
         let path_str = graph_path(root, &path);
         let constants = collect_same_file_constants(&content, ext);
         let sites = detect_sites(&content, ext, &constants);
-        let (nodes, edges) = emit_sites(&sites, &path_str, namespace, graph);
+        let (nodes, edges) =
+            emit_sites(&sites, &path_str, namespace, graph, &mut emitted_topic_ids);
         all_nodes.extend(nodes);
         all_edges.extend(edges);
     }
@@ -232,19 +252,18 @@ fn scan_payload_schemas(
 
         if let Some(topic_name) = &ps.topic {
             let topic_label = format!("{DEFAULT_BROKER}/{topic_name}");
-            // One edge per emitted `Topic` node with this name: the
-            // same topic can be declared in several files, and the
-            // joiner assigns a service only to nodes whose paths match
-            // a `ServiceDecl` — binding just the first (walk-order)
-            // node would silently drop the payload join when an
-            // unassigned file comes first. Both endpoints are in this
-            // batch, so no edge dangles either way.
-            let topic_ids: Vec<String> = nodes
+            // One hub per (broker, topic) per repo (`TOPIC_ANCHOR`), so
+            // this is a single `PayloadSchema` edge — the fan-out over
+            // per-site nodes is gone. The lookup reads the pending
+            // batch (not the graph) because a previous scan's `Topic`
+            // nodes are retracted in the same `replace_sensor_output`
+            // call — binding to one would mint an edge toward a stale
+            // id. Both endpoints are in this batch, so no edge dangles.
+            if let Some(topic_id) = nodes
                 .iter()
-                .filter(|n| n.node_type == NodeType::Topic && n.name == topic_label)
+                .find(|n| n.node_type == NodeType::Topic && n.name == topic_label)
                 .map(|n| n.id.clone())
-                .collect();
-            for topic_id in topic_ids {
+            {
                 edges.push(GraphEdge {
                     edge_type: EdgeType::PayloadSchema,
                     source_id: topic_id,
@@ -626,7 +645,9 @@ fn parse_def_name(line: &str) -> Option<String> {
 
 // ─── Emission ────────────────────────────────────────────────────────
 
-/// Emit one `Topic` node plus a `Produces`/`Consumes` edge per site.
+/// Emit the canonical `Topic` hub (one node per `(broker, topic)` per
+/// repo) plus one `Produces`/`Consumes` edge per site — the edge's
+/// `site` field is the per-site provenance.
 ///
 /// Edge-source invariant: the source is either an already-indexed
 /// enclosing symbol, or the per-site synthetic node that the consumer
@@ -639,6 +660,7 @@ fn emit_sites(
     graph_path: &str,
     namespace: &RepoNamespace,
     graph: &GraphDatabase,
+    emitted_topic_ids: &mut BTreeSet<String>,
 ) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     use crate::federation::contracts::model::{
         ContractFact as CF, TopicConsumerFact, TopicConsumerKind,
@@ -646,7 +668,6 @@ fn emit_sites(
 
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut edges: Vec<GraphEdge> = Vec::new();
-    let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
 
     for site in sites {
         let topic_name = match site.topic.clone() {
@@ -658,20 +679,30 @@ fn emit_sites(
             }
         };
 
-        // One `Topic` node per unique `(broker, name)` per file.
+        // One canonical hub per (broker, name) per repo: identity is
+        // the label alone (id anchored on `TOPIC_ANCHOR`, no line), so
+        // every site — in this file or any other — converges on the
+        // same node. The scan-scoped set pushes the node once; a hub
+        // already emitted contributes only the site's edge below.
         let topic_label = format!("{}/{}", site.broker, topic_name);
         let topic_id = GraphNode::generate_id(
             &NodeType::Topic,
-            graph_path,
+            TOPIC_ANCHOR,
             &topic_label,
-            Some(site.line),
+            None,
             namespace,
         );
         if emitted_topic_ids.insert(topic_id.clone()) {
+            // `path` is the minting site's file, NOT the id anchor:
+            // `prune_orphans` (ingestion orphan sweep) drops every node
+            // whose `path` is not a git-tracked file, and a dropped hub
+            // takes its `Produces`/`Consumes` edges with it. Same
+            // convention as `sql_sensor`'s `Table` nodes (file-anchored
+            // record, line-less id). `line_start` stays `None` like the
+            // id — the site lines live on the edges' `site` field.
             let mut node =
                 GraphNode::new(NodeType::Topic, topic_label.clone(), graph_path.to_string());
             node.id = topic_id.clone();
-            node.line_start = Some(site.line);
             node.contract = vec![CF::Provider(
                 crate::federation::contracts::model::ProviderFact {
                     method: crate::federation::contracts::model::HttpMethod::Any,
