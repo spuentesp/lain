@@ -2471,7 +2471,15 @@ impl GraphDatabase {
     /// Build a snapshot of this graph in its on-disk representation.
     /// Used by the save/load/export paths to keep the snapshot
     /// construction in one place.
+    ///
+    /// Everything is sampled under ONE `graph.read()` guard: mutations
+    /// hold `graph.write()` while they touch `index_map`, `last_commit`
+    /// and the publication stamp, so a snapshot can never mix a torn
+    /// graph with a stale stamp (the periodic WAL checkpoint raced that
+    /// pairing) nor a graph with dangling `index_map` entries.
     fn build_state(&self) -> persist::GraphState {
+        let graph_guard = self.graph.read();
+        let graph = graph_guard.clone();
         let index_map: HashMap<String, NodeIndex> = self
             .index_map
             .iter()
@@ -2482,12 +2490,8 @@ impl GraphDatabase {
         // lands mid-pass records `Some(None)`, which the loader must read
         // as "do not publish" rather than as a pre-stamp file.
         let calls_published_for = self.calls_published_for.read().clone();
-        persist::GraphState::new(
-            self.graph.read().clone(),
-            index_map,
-            last_commit,
-            calls_published_for,
-        )
+        drop(graph_guard);
+        persist::GraphState::new(graph, index_map, last_commit, calls_published_for)
     }
 
     /// Save graph to disk asynchronously (non-blocking)
