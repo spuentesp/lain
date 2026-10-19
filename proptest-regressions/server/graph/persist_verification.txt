@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc ed55c269fa861c096658f16c0ab4ac8d41f2c4866aa842dfadc88a607a29affc # shrinks to spec = ([], [])
+cc 52f479ff501da6c0b31b8a09d65186a4a16f805b36438959199c0cf92a5449df # shrinks to spec = ([(Function, "a", "aaaa///"), (Function, "aaaaaa", "a"), (Function, "aa", "//aaaaaaa"), (Function, "aaaaa", "a//aa")], [(0, 0), (0, 0), (0, 0), (0, 0), (0, 0)]), cut = 0.9991976630605225

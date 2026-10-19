@@ -107,8 +107,32 @@ impl GraphState {
 /// decoder). Returns `EncodeError` on shape/size failures; callers
 /// map that into their own `LainError` variant.
 pub(super) fn encode_state(state: &GraphState) -> Result<Vec<u8>, bincode::error::EncodeError> {
-    bincode::serde::encode_to_vec(state, bincode::config::legacy())
+    let payload = bincode::serde::encode_to_vec(state, bincode::config::legacy())?;
+    let mut out = Vec::with_capacity(SNAPSHOT_MAGIC.len() + payload.len());
+    out.extend_from_slice(SNAPSHOT_MAGIC);
+    out.extend_from_slice(&payload);
+    Ok(out)
 }
+
+/// Prefix every snapshot this codec writes, so the decoder can tell a
+/// current-shape file from a pre-stamp one by SHAPE instead of by
+/// guessing at the tail.
+///
+/// Without the marker the two shapes are ambiguous under truncation:
+/// a current file's `calls_published_for` tail can be as short as two
+/// bytes (`Some(None)` — a save that landed mid-pass with the stamp
+/// cleared), so cutting exactly those bytes leaves a byte sequence a
+/// genuine pre-stamp file could have produced. The pre-stamp fallback
+/// then accepted it and the torn snapshot loaded as a whole old-format
+/// graph — with the stamp "absent", i.e. inferred as published over the
+/// torn call graph. A marker at the FRONT survives every prefix cut
+/// (the only cuts a torn write produces), so a magic-bearing file is
+/// unambiguously current-shape and its truncations must fail whole.
+///
+/// Files written before this marker existed (pre-stamp, and current
+/// with the stamp field) keep loading through the unmarked path in
+/// [`decode_state`]; no `PATH_FORMAT_VERSION` bump, no reindex.
+pub(crate) const SNAPSHOT_MAGIC: &[u8] = b"lain-graph-snap\0";
 
 /// Upper bound on what one decode may allocate. Without a limit a
 /// corrupt length prefix (an interrupted write, a full disk, another
@@ -121,21 +145,49 @@ pub(crate) const DECODE_LIMIT: usize = 1 << 32;
 /// Decode bytes into a `GraphState`. Mirrors [`encode_state`]; the
 /// layout is the same, only allocation is bounded.
 ///
-/// Pre-stamp files (written before `calls_published_for` existed) are
-/// accepted through an explicit fallback: bincode is a positional format,
-/// so `#[serde(default)]` cannot stand in for a trailing field the writer
-/// never emitted — the decoder hits the end of the slice mid-field and
-/// errors out. Retry the pre-stamp shape and record the stamp as *absent*
-/// (outer `None`) so [`super::GraphDatabase::apply_state_loaded`] can fall
-/// back to the pre-stamp inference for those files. The fallback accepts
-/// the pre-stamp shape only when it consumes the whole slice: a current
-/// file truncated inside the stamp tail must stay a decode error (the
-/// loader fail-softs to an empty graph) rather than half-loading as an
-/// old graph — see the truncation property in `persist_verification.rs`.
+/// Two shapes are accepted, told apart by [`SNAPSHOT_MAGIC`]:
+///
+/// * **Marked (current)** — the magic prefix is present. The payload is
+///   decoded strictly as the current shape with NO pre-stamp fallback
+///   and no trailing bytes: a truncated marked file is a whole-file
+///   decode error (the loader fail-softs to an empty graph) rather than
+///   half-loading as an old graph. The fallback must not run here: a
+///   cut that removes exactly the stamp tail leaves bytes a pre-stamp
+///   file could have produced (`Some(None)` is two bytes) — see the
+///   truncation property in `persist_verification.rs`.
+/// * **Unmarked (legacy)** — pre-stamp files (written before
+///   `calls_published_for` existed), and current-shape files written
+///   before the magic existed. Pre-stamp files are accepted through an
+///   explicit fallback: bincode is a positional format, so
+///   `#[serde(default)]` cannot stand in for a trailing field the
+///   writer never emitted — the decoder hits the end of the slice
+///   mid-field and errors out. Retry the pre-stamp shape and record the
+///   stamp as *absent* (outer `None`) so
+///   [`super::GraphDatabase::apply_state_loaded`] can fall back to the
+///   pre-stamp inference for those files. The fallback accepts the
+///   pre-stamp shape only when it consumes the whole slice. Residual
+///   ambiguity (pre-magic files only): an unmarked current file cut
+///   exactly at its stamp tail is byte-identical to a whole pre-stamp
+///   file and still loads — only new writes carry the marker that makes
+///   that distinction possible.
 pub(super) fn decode_state(
     data: &[u8],
 ) -> Result<(GraphState, usize), bincode::error::DecodeError> {
     let config = bincode::config::legacy().with_limit::<DECODE_LIMIT>();
+    if data.starts_with(SNAPSHOT_MAGIC) {
+        // Current shape, by construction — never fall back to the
+        // pre-stamp layout for a marked file.
+        let payload = &data[SNAPSHOT_MAGIC.len()..];
+        let (state, used) = bincode::serde::decode_from_slice(payload, config)?;
+        if used != payload.len() {
+            // Trailing bytes after the frame: not a whole snapshot.
+            return Err(bincode::error::DecodeError::OtherString(format!(
+                "snapshot frame leaves {} trailing bytes",
+                payload.len() - used
+            )));
+        }
+        return Ok((state, SNAPSHOT_MAGIC.len() + used));
+    }
     let current = bincode::serde::decode_from_slice(data, config);
     let Err(err) = current else {
         return current;
@@ -146,8 +198,9 @@ pub(super) fn decode_state(
     };
     if used != data.len() {
         // Trailing bytes mean this is not a whole pre-stamp file (a
-        // truncated current-shape file lands here): keep the original
-        // error so the caller fail-softs instead of half-loading.
+        // truncated pre-magic current-shape file lands here): keep the
+        // original error so the caller fail-softs instead of
+        // half-loading.
         return Err(err);
     }
     Ok((
@@ -348,6 +401,45 @@ mod stamp_persist_tests {
             decode_state(&bytes[..cut]).is_err(),
             "a truncated stamp tail must not decode as a pre-stamp file"
         );
+    }
+
+    /// The exact counterexample the truncation property found: a
+    /// cleared stamp encodes as `Some(None)` — TWO bytes — so cutting
+    /// exactly those bytes left a slice a whole pre-stamp file could
+    /// have produced, and the fallback accepted it (the torn snapshot
+    /// loaded as an old-format graph whose stamp reads as *absent*,
+    /// i.e. published). Rejected whole now that snapshots carry
+    /// [`SNAPSHOT_MAGIC`].
+    #[test]
+    fn a_cleared_stamp_truncated_by_its_whole_tail_is_rejected() {
+        let (graph, index_map) = one_node();
+        let state = GraphState::new(graph, index_map, Some("abc".into()), None);
+        let bytes = encode_state(&state).expect("encode");
+        let cut = bytes.len() - 2;
+        assert!(
+            decode_state(&bytes[..cut]).is_err(),
+            "a snapshot missing exactly its 2-byte cleared stamp must not load"
+        );
+    }
+
+    /// The property the proptest samples, exhaustive over the cut
+    /// point: NO prefix of a saved snapshot decodes. Any cut removes a
+    /// tail, and the strict marked-shape decode cannot complete its
+    /// last field without it.
+    #[test]
+    fn every_prefix_truncation_of_a_snapshot_is_rejected() {
+        let (graph, index_map) = one_node();
+        let state = GraphState::new(graph, index_map, Some("abc".into()), None);
+        let bytes = encode_state(&state).expect("encode");
+        for cut in 0..bytes.len() {
+            assert!(
+                decode_state(&bytes[..cut]).is_err(),
+                "prefix cut {cut}/{} must be a whole-file decode error",
+                bytes.len()
+            );
+        }
+        // The whole file is, of course, fine.
+        assert!(decode_state(&bytes).is_ok());
     }
 }
 
