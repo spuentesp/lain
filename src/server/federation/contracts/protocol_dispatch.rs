@@ -123,10 +123,12 @@ impl ProtocolDispatch for TopicDispatch {
             return ConsumerResolution {
                 call_id: call_id.clone(),
                 service: own_service.clone(),
-                target: Some(crate::federation::contracts::index::ConsumerTarget::Unresolved {
-                    reason: crate::federation::contracts::model::UnresolvedReason::DynamicTopic,
-                    target_service: None,
-                }),
+                target: Some(
+                    crate::federation::contracts::index::ConsumerTarget::Unresolved {
+                        reason: crate::federation::contracts::model::UnresolvedReason::DynamicTopic,
+                        target_service: None,
+                    },
+                ),
                 bound_endpoints: Vec::new(),
                 reads_complete: true,
             };

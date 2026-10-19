@@ -756,11 +756,8 @@ fn emit_sites(
         // `joiner/mod.rs:390` (the `Unnormalized` arm) and the new
         // sibling arm for `DynamicTopic`. The `Produces` side stays a
         // pure drop, same as today.
-        let dynamic_topic = site.topic.is_none()
-            && matches!(
-                site.kind,
-                SiteKind::Consumes | SiteKind::Scheduled
-            );
+        let dynamic_topic =
+            site.topic.is_none() && matches!(site.kind, SiteKind::Consumes | SiteKind::Scheduled);
         let topic_name = match site.topic.clone() {
             Some(n) => n,
             None if !dynamic_topic => continue,
@@ -783,7 +780,13 @@ fn emit_sites(
         let topic_id = if dynamic_topic {
             String::new()
         } else {
-            GraphNode::generate_id(&NodeType::Topic, TOPIC_ANCHOR, &topic_label, None, namespace)
+            GraphNode::generate_id(
+                &NodeType::Topic,
+                TOPIC_ANCHOR,
+                &topic_label,
+                None,
+                namespace,
+            )
         };
         if !dynamic_topic && emitted_topic_ids.insert(topic_id.clone()) {
             // `path` is a real site file, NOT the id anchor:
@@ -1135,7 +1138,9 @@ mod tests {
     /// dispatch path with a hand-built node, not the walker.
     #[test]
     fn dynamic_topic_on_consumer_emits_sentinel_synthetic_node_and_no_topic_hub() {
-        use crate::federation::contracts::model::{ContractFact, TopicConsumerFact, TopicConsumerKind};
+        use crate::federation::contracts::model::{
+            ContractFact, TopicConsumerFact, TopicConsumerKind,
+        };
         use crate::server::sensors::util::TOPIC_DYNAMIC_SENTINEL;
         let dir = tempfile::tempdir().unwrap();
         // `QUEUE_NAME` is a bare identifier with no same-file const

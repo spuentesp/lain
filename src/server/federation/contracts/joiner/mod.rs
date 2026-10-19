@@ -313,8 +313,7 @@ impl ContractJoiner {
                     if matches!(
                         resolution.target,
                         Some(ConsumerTarget::Unresolved {
-                            reason: UnresolvedReason::Unnormalized
-                                | UnresolvedReason::DynamicTopic,
+                            reason: UnresolvedReason::Unnormalized | UnresolvedReason::DynamicTopic,
                             ..
                         })
                     ) {
@@ -406,8 +405,7 @@ impl ContractJoiner {
             if matches!(
                 resolution.target,
                 Some(ConsumerTarget::Unresolved {
-                    reason: UnresolvedReason::Unnormalized
-                        | UnresolvedReason::DynamicTopic,
+                    reason: UnresolvedReason::Unnormalized | UnresolvedReason::DynamicTopic,
                     ..
                 })
             ) {
