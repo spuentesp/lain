@@ -3502,6 +3502,561 @@ mod pr15_event {
     }
 }
 
+// ─── Task 3: bindings + check_binding for Topic/Rpc/WebSocket/Table ────
+
+mod pr15_check_binding_keys {
+    //! Manual confirmation for the fact-keyed `ContractKey` kinds
+    //! (`topic:<broker>:<name>` / `rpc:<system>:<service>:<method>` /
+    //! `ws:<route>` / `table:<name>`). The joiners already resolve all
+    //! six kinds; before this task `validate_key` and `check_binding`
+    //! accepted only `http:` and `graphql:` keys, so an operator could
+    //! not confirm a Topic/Rpc/WebSocket/Table link at all.
+    //!
+    //! Fixture: two repos with **unscoped** services (`paths: []`) so
+    //! the hub's service attribution cannot drift from the
+    //! publisher's site (the T1 min-site-path caveat: a hub record's
+    //! `path` is the min site file, which in a path-scoped monorepo
+    //! can belong to a different service than the publisher). The
+    //! topic hub lives in `orders` (`kafka/orders`); the subscriber is
+    //! a Function in `billing` carrying `TopicConsumerFact`.
+
+    use super::*;
+    use lain::federation::contracts::config::ContractFederationConfig;
+    use lain::federation::contracts::index::ConsumerTarget;
+    use lain::federation::contracts::model::{
+        ContractFact, ContractKey, HttpMethod, ProviderFact, ProviderOrigin, TopicConsumerFact,
+        TopicConsumerKind,
+    };
+    use std::str::FromStr;
+
+    fn hub_node(repo: &str, path: &str, line: u32, broker: &str, topic: &str) -> GraphNode {
+        let ns = RepoNamespace::for_test();
+        let name = format!("{broker}/{topic}");
+        let mut n = GraphNode::new_in(NodeType::Topic, name.clone(), path.to_string(), &ns);
+        n.repo_id = Some(repo.to_string());
+        n.id = GlobalId::new(
+            &RepoId::new(repo).unwrap(),
+            NodeType::Topic,
+            path,
+            &name,
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        n.line_start = Some(line);
+        n.line_end = Some(line);
+        n.contract = vec![ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Any,
+            template: topic.to_string(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        })];
+        n
+    }
+
+    fn subscriber_fn(
+        repo: &str,
+        path: &str,
+        name: &str,
+        line: u32,
+        broker: &str,
+        topic: &str,
+    ) -> GraphNode {
+        let ns = RepoNamespace::for_test();
+        let mut n = GraphNode::new_in(NodeType::Function, name.to_string(), path.to_string(), &ns);
+        n.repo_id = Some(repo.to_string());
+        n.id = GlobalId::new(
+            &RepoId::new(repo).unwrap(),
+            NodeType::Function,
+            path,
+            name,
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        n.line_start = Some(line);
+        n.line_end = Some(line);
+        n.contract = vec![ContractFact::TopicConsumer(TopicConsumerFact {
+            broker: broker.to_string(),
+            name: topic.to_string(),
+            kind: TopicConsumerKind::Subscription,
+        })];
+        n
+    }
+
+    fn fn_id(repo: &str, path: &str, name: &str, line: u32) -> String {
+        GlobalId::new(
+            &RepoId::new(repo).unwrap(),
+            NodeType::Function,
+            path,
+            name,
+            Some(line),
+        )
+        .as_str()
+        .to_string()
+    }
+
+    /// The fixture's service table: one unscoped service per repo.
+    fn fixture_services() -> Vec<ServiceDecl> {
+        vec![
+            ServiceDecl {
+                name: "orders-svc".into(),
+                repo: "orders".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+                provides_graphql: true,
+            },
+            ServiceDecl {
+                name: "billing-svc".into(),
+                repo: "billing".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+                provides_graphql: true,
+            },
+        ]
+    }
+
+    /// Two repos (`orders`, `billing`), one unscoped service each
+    /// (`orders-svc`, `billing-svc` — `paths: []` covers the whole
+    /// repo). `orders` publishes `kafka/orders`; `billing`'s
+    /// `on_orders` subscribes. Returns the federation and the
+    /// subscriber's GlobalId string.
+    async fn build_topic_binding_federation(root: &Path) -> (Arc<FederatedIndex>, String) {
+        let orders_dir = root.join("orders");
+        let billing_dir = root.join("billing");
+        for d in [&orders_dir, &billing_dir] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("src/.keep"), b"").unwrap();
+            git_init_committed(d);
+        }
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let backend: Arc<dyn lain::federation::graph_backend::GraphBackend> =
+            Arc::new(PetgraphBackend::new(&data_dir).expect("backend"));
+        let fed = Arc::new(FederatedIndex::new(backend));
+
+        let cfg = ContractFederationConfig {
+            services: fixture_services(),
+            ..Default::default()
+        };
+        fed.set_contract_config(cfg);
+
+        let orders_id = RepoId::new("orders").unwrap();
+        let billing_id = RepoId::new("billing").unwrap();
+        for (repo_id, dir) in [
+            (orders_id.clone(), orders_dir.clone()),
+            (billing_id.clone(), billing_dir.clone()),
+        ] {
+            let src: Box<dyn lain::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::with_config(
+                    repo_id.clone(),
+                    dir.clone(),
+                    lain::federation::config::SourceConfig::WorkspaceDir { path: dir.clone() },
+                )
+                .unwrap(),
+            );
+            src.fetch().await.unwrap();
+            fed.add_repo(src, &data_dir).await.unwrap();
+            fed.get_repo(&repo_id)
+                .unwrap()
+                .set_health(RepoHealth::Ready);
+        }
+
+        let orders_g = fed.get_repo(&orders_id).unwrap().db().clone();
+        let billing_g = fed.get_repo(&billing_id).unwrap().db().clone();
+
+        let hub = hub_node("orders", "src/events.rs", 5, "kafka", "orders");
+        let hub_id = hub.id.clone();
+        let publisher_id = fn_id("orders", "src/events.rs", "publish_orders", 5);
+        orders_g
+            .insert_nodes_batch(&[
+                hub,
+                make_fn(&orders_g, "publish_orders", "src/events.rs", 5),
+            ])
+            .unwrap();
+        orders_g
+            .insert_edges_batch(&[GraphEdge::new(
+                EdgeType::Produces,
+                publisher_id,
+                hub_id.clone(),
+            )])
+            .unwrap();
+
+        let consumer = subscriber_fn("billing", "src/sub.py", "on_orders", 10, "kafka", "orders");
+        let consumer_id = consumer.id.clone();
+        billing_g
+            .insert_nodes_batch(std::slice::from_ref(&consumer))
+            .unwrap();
+        billing_g
+            .insert_edges_batch(&[GraphEdge::new(
+                EdgeType::Consumes,
+                consumer_id.clone(),
+                hub_id.clone(),
+            )])
+            .unwrap();
+
+        fed.register_contract_node_for_test(orders_id, hub_id);
+        fed.register_contract_node_for_test(billing_id, consumer_id.clone());
+        fed.mark_contracts_dirty();
+        for id in [
+            RepoId::new("orders").unwrap(),
+            RepoId::new("billing").unwrap(),
+        ] {
+            fed.project_repo(&id).await.expect("project_repo");
+        }
+        fed.rejoin_contracts_if_dirty().expect("rejoin");
+        (fed, consumer_id)
+    }
+
+    #[tokio::test]
+    async fn pr15_check_binding_accepts_topic_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (fed, consumer_id) = build_topic_binding_federation(tmp.path()).await;
+        let outcome = check_binding_handle(
+            &{
+                let _status = Box::leak(Box::new(
+                    lain::server::mcp::handler::HandlerStatus::for_test(),
+                ));
+                ctx_for(&fed, _status)
+            },
+            json!({
+                "snapshot": "live",
+                "consumer": consumer_id,
+                "endpoint": {"service": "orders-svc", "key": "topic:kafka:orders"}
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !outcome.is_error,
+            "errors: {:?}",
+            outcome.structured["error"]
+        );
+        let data = &outcome.structured["data"];
+        assert_eq!(
+            data["valid"],
+            json!(true),
+            "check_binding must accept the topic link: {data:?}"
+        );
+        let entry = data["bindings_entry"].as_str().expect("bindings_entry");
+        assert!(
+            entry.contains("key: \"topic:kafka/orders\""),
+            "the entry must carry the topic wire-form key: {entry}"
+        );
+        assert!(
+            entry.contains("symbol: on_orders"),
+            "symbol must be the consumer node name: {entry}"
+        );
+        assert!(
+            entry.contains("service: orders-svc"),
+            "provider service must round-trip: {entry}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr15_check_binding_rejects_cross_kind_topic_vs_http() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (fed, consumer_id) = build_topic_binding_federation(tmp.path()).await;
+        let outcome = check_binding_handle(
+            &{
+                let _status = Box::leak(Box::new(
+                    lain::server::mcp::handler::HandlerStatus::for_test(),
+                ));
+                ctx_for(&fed, _status)
+            },
+            json!({
+                "snapshot": "live",
+                "consumer": consumer_id,
+                "endpoint": {"service": "orders-svc", "key": "http:POST /orders"}
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !outcome.is_error,
+            "errors: {:?}",
+            outcome.structured["error"]
+        );
+        let data = &outcome.structured["data"];
+        assert_eq!(
+            data["valid"],
+            json!(false),
+            "a topic consumer must not validate against an http key: {data:?}"
+        );
+        let reasons: Vec<&str> = data["reasons"]
+            .as_array()
+            .expect("reasons array")
+            .iter()
+            .filter_map(|r| r.as_str())
+            .collect();
+        assert!(
+            reasons.contains(&"method_mismatch"),
+            "cross-kind pairs surface as method_mismatch: {data:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr15_bindings_entry_round_trip_confirms_topic_consumer() {
+        // The `bindings_entry` `check_binding` emits must be a legal
+        // `repos.yaml#bindings` item whose confirmed application the
+        // joiner accepts — `apply_confirmed_binding` resolves
+        // `TopicConsumer` facts (not just HTTP/GraphQL) and the edge
+        // comes out `Confirmed`.
+        let tmp = tempfile::tempdir().unwrap();
+        let (fed, consumer_id) = build_topic_binding_federation(tmp.path()).await;
+        let outcome = check_binding_handle(
+            &{
+                let _status = Box::leak(Box::new(
+                    lain::server::mcp::handler::HandlerStatus::for_test(),
+                ));
+                ctx_for(&fed, _status)
+            },
+            json!({
+                "snapshot": "live",
+                "consumer": consumer_id,
+                "endpoint": {"service": "orders-svc", "key": "topic:kafka:orders"}
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !outcome.is_error,
+            "errors: {:?}",
+            outcome.structured["error"]
+        );
+        let entry = outcome.structured["data"]["bindings_entry"]
+            .as_str()
+            .expect("bindings_entry")
+            .to_string();
+
+        // (1) Config half: the entry parses and survives validate_key.
+        let parsed = ContractFederationConfig::load_from_str(&format!("bindings:\n{entry}"))
+            .expect("emitted entry must parse as a bindings item");
+        assert_eq!(parsed.bindings.len(), 1, "emitted entry: {entry}");
+        let binding = &parsed.bindings[0];
+        assert_eq!(binding.consumer.repo, "billing");
+        assert_eq!(binding.consumer.path, "src/sub.py");
+        assert_eq!(binding.consumer.symbol, "on_orders");
+        assert_eq!(binding.consumer.key, "topic:kafka/orders");
+        assert_eq!(binding.provider.service, "orders-svc");
+        assert_eq!(binding.provider.key, "topic:kafka/orders");
+
+        let mut join_cfg = ContractFederationConfig {
+            services: fixture_services(),
+            ..Default::default()
+        };
+        join_cfg.bindings = parsed.bindings.clone();
+        join_cfg
+            .validate(&["orders".to_string(), "billing".to_string()])
+            .expect("emitted keys must survive validate_key");
+
+        // (2) Join half: the confirmed binding resolves the consumer
+        // and the edge carries `Confirmed { repos.yaml#bindings }`.
+        fed.set_contract_config(join_cfg);
+        fed.rejoin_contracts_if_dirty().expect("rejoin");
+        let index = fed.contract_index().expect("contract index after join");
+        let cid = GlobalId::from_canonical(&consumer_id);
+        let after = index.consumer(&cid).expect("consumer resolution");
+        let Some(ConsumerTarget::Binds { provenance, .. }) = after.target.as_ref() else {
+            panic!(
+                "confirmed binding must bind the consumer, got {:?}",
+                after.target
+            );
+        };
+        let EdgeProvenance::Confirmed { source } = provenance else {
+            panic!("bind must carry Confirmed provenance, got {provenance:?}");
+        };
+        assert!(
+            source.contains("repos.yaml#bindings"),
+            "provenance must name the bindings entry, got {source}"
+        );
+        assert!(
+            index.stale_bindings.is_empty(),
+            "the emitted entry matched its consumer: {:?}",
+            index.stale_bindings
+        );
+        let binds: Vec<GraphEdge> = fed
+            .backend()
+            .all_edges()
+            .expect("edges")
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::Binds)
+            .collect();
+        assert_eq!(binds.len(), 1, "exactly one Binds edge expected: {binds:?}");
+        assert_eq!(binds[0].source_id, consumer_id);
+        // The stored graph edge's `provenance` is NOT part of this
+        // contract: the rejoin diff keys `Binds` edges on
+        // `(source, target)` only and `upsert_edge` short-circuits
+        // on `same_edge_identity`, so an edge the auto-join already
+        // wrote keeps its `Static` provenance. The joiner's verdict
+        // above (`ConsumerTarget::Binds { provenance: Confirmed }`)
+        // is the confirmation's source of truth. (Pre-existing gap,
+        // equally reachable for a hand-written HTTP binding.)
+    }
+
+    #[test]
+    fn pr15_validate_key_accepts_the_four_new_grammars() {
+        let good = r#"
+services:
+  - { name: orders-svc, repo: orders }
+  - { name: billing-svc, repo: billing }
+bindings:
+  - consumer: { repo: billing, path: src/sub.py, symbol: on_orders, key: "topic:kafka:orders" }
+    provider: { service: orders-svc, key: "topic:kafka:orders" }
+  - consumer: { repo: billing, path: src/c.py, symbol: get_order, key: "rpc:grpc:orders.v1:Get" }
+    provider: { service: orders-svc, key: "rpc:grpc:orders.v1:Get" }
+  - consumer: { repo: billing, path: src/w.py, symbol: dial, key: "ws:/realtime" }
+    provider: { service: orders-svc, key: "ws:/realtime" }
+  - consumer: { repo: billing, path: src/s.py, symbol: read_orders, key: "table:public.orders" }
+    provider: { service: orders-svc, key: "table:public.orders" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(good).expect("config parses");
+        cfg.validate(&["orders".to_string(), "billing".to_string()])
+            .expect("the four key grammars must survive validate_key");
+
+        // The wire forms the sensors emit are accepted too.
+        let wire = r#"
+services:
+  - { name: orders-svc, repo: orders }
+  - { name: billing-svc, repo: billing }
+bindings:
+  - consumer: { repo: billing, path: src/sub.py, symbol: on_orders, key: "topic:kafka/orders" }
+    provider: { service: orders-svc, key: "topic:kafka/orders" }
+  - consumer: { repo: billing, path: src/c.py, symbol: get_order, key: "rpc:orders.v1/Get" }
+    provider: { service: orders-svc, key: "rpc:orders.v1/Get" }
+  - consumer: { repo: billing, path: src/w.py, symbol: dial, key: "websocket:/realtime" }
+    provider: { service: orders-svc, key: "websocket:/realtime" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(wire).expect("wire config parses");
+        cfg.validate(&["orders".to_string(), "billing".to_string()])
+            .expect("the wire forms must survive validate_key");
+
+        // `topic:a:b:c` — three ':' components: ambiguous, rejected.
+        let bad = r#"
+services:
+  - { name: orders-svc, repo: orders }
+  - { name: billing-svc, repo: billing }
+bindings:
+  - consumer: { repo: billing, path: src/sub.py, symbol: on_orders, key: "topic:a:b:c" }
+    provider: { service: orders-svc, key: "topic:a:b:c" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(bad).expect("config parses");
+        let err = cfg
+            .validate(&["orders".to_string(), "billing".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("topic:a:b:c") && err.contains("two"),
+            "the error must name the key and the two-component rule: {err}"
+        );
+    }
+
+    #[test]
+    fn pr15_key_grammar_edge_cases_are_pinned() {
+        // Slash form (wire): split at the first '/'; the name may
+        // carry further '/' and ':' (Redis `orders:created`, MQTT
+        // `sensors/temp`).
+        assert_eq!(
+            ContractKey::from_str("topic:kafka/orders").unwrap(),
+            ContractKey::Topic {
+                broker: "kafka".into(),
+                name: "orders".into()
+            }
+        );
+        assert_eq!(
+            ContractKey::from_str("topic:redis/orders:created").unwrap(),
+            ContractKey::Topic {
+                broker: "redis".into(),
+                name: "orders:created".into()
+            }
+        );
+        assert_eq!(
+            ContractKey::from_str("topic:mqtt/sensors/temp").unwrap(),
+            ContractKey::Topic {
+                broker: "mqtt".into(),
+                name: "sensors/temp".into()
+            }
+        );
+        // Colon form (bindings): exactly two non-empty components.
+        assert_eq!(
+            ContractKey::from_str("topic:kafka:orders").unwrap(),
+            ContractKey::Topic {
+                broker: "kafka".into(),
+                name: "orders".into()
+            }
+        );
+        // Three components — ambiguous, typed error.
+        let err = ContractKey::from_str("topic:a:b:c").unwrap_err();
+        assert!(err.contains("two"), "got: {err}");
+        // A slash-form broker that would carry ':' collides with the
+        // colon form — rejected rather than guessed.
+        assert!(ContractKey::from_str("topic:a:b/c").is_err());
+        assert!(ContractKey::from_str("topic:kafka:orders/created").is_err());
+        // Empty components are never valid.
+        for k in [
+            "topic:",
+            "topic::orders",
+            "topic:kafka:",
+            "topic:/orders",
+            "topic:kafka/",
+        ] {
+            assert!(ContractKey::from_str(k).is_err(), "{k} must be rejected");
+        }
+
+        // rpc: same discipline — `system:service:method` or
+        // `service/method`.
+        assert_eq!(
+            ContractKey::from_str("rpc:grpc:orders.v1:Get").unwrap(),
+            ContractKey::Rpc {
+                system: lain::federation::contracts::model::RpcSystem::Grpc,
+                service: "orders.v1".into(),
+                method: "Get".into()
+            }
+        );
+        assert_eq!(
+            ContractKey::from_str("rpc:orders.v1/Get").unwrap(),
+            ContractKey::Rpc {
+                system: lain::federation::contracts::model::RpcSystem::Grpc,
+                service: "orders.v1".into(),
+                method: "Get".into()
+            }
+        );
+        assert!(ContractKey::from_str("rpc:a:b:c:d").is_err());
+        assert!(ContractKey::from_str("rpc:grpc:orders.v1").is_err());
+        assert!(ContractKey::from_str("rpc:nope:orders.v1:Get").is_err());
+
+        // ws: (short) and websocket: (wire) — the route is the whole
+        // remainder and may carry ':' and '/'.
+        assert_eq!(
+            ContractKey::from_str("ws:/realtime").unwrap(),
+            ContractKey::WebSocket {
+                route: "/realtime".into()
+            }
+        );
+        assert_eq!(
+            ContractKey::from_str("ws:/rt").unwrap(),
+            ContractKey::from_str("websocket:/rt").unwrap()
+        );
+        assert!(ContractKey::from_str("ws:").is_err());
+
+        // table: — non-empty name.
+        assert_eq!(
+            ContractKey::from_str("table:public.orders").unwrap(),
+            ContractKey::Table {
+                name: "public.orders".into()
+            }
+        );
+        assert!(ContractKey::from_str("table:").is_err());
+    }
+}
+
 // ─── PR 17 (stretch): codeowners_sensor + `owners` on used_by ──────────
 
 // ─── PR 18 (stretch): operationId fallback for generated SDK clients ───

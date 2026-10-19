@@ -106,30 +106,23 @@ pub(crate) fn apply_confirmed_binding(
     };
     let mut matched_any = false;
     for node in nodes {
-        let (node_key, reads_complete) = match node.contract.first() {
-            Some(ContractFact::Consumer(consumer)) => {
-                let Some(template) = consumer.url.template.clone() else {
-                    continue;
-                };
-                (
-                    ContractKey::Http {
-                        method: consumer.method.clone(),
-                        template,
-                    },
-                    consumer.reads_complete,
-                )
+        // Every consumer-side key the node carries — a
+        // `topic-read:<path>:<line>` site can subscribe to several
+        // topics, and a `TableConsumerFact` lists several tables, so
+        // the binding's key may match any of them (not only the
+        // first fact). HTTP / GraphQL / Topic / Rpc / WebSocket /
+        // Table all map through `ContractFact::consumer_keys`.
+        let mut node_keys: Vec<ContractKey> = Vec::new();
+        let mut reads_complete = true;
+        for fact in &node.contract {
+            if let ContractFact::Consumer(consumer) = fact {
+                reads_complete = consumer.reads_complete;
             }
-            Some(ContractFact::GraphqlConsumer(fact)) => (
-                ContractKey::Graphql {
-                    op: fact.op,
-                    field: fact.field.clone(),
-                },
-                // GraphQL call sites carry no §6.5 escape flag; the
-                // protocol resolvers record them as fully read.
-                true,
-            ),
-            _ => continue,
-        };
+            node_keys.extend(fact.consumer_keys());
+        }
+        if node_keys.is_empty() {
+            continue;
+        }
         let Ok(gid) = GlobalId::parse(&node.id) else {
             continue;
         };
@@ -143,7 +136,7 @@ pub(crate) fn apply_confirmed_binding(
         if symbol_name != binding.consumer.symbol {
             continue;
         }
-        if node_key != consumer_key {
+        if !node_keys.contains(&consumer_key) {
             continue;
         }
         matched_any = true;

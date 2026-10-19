@@ -123,11 +123,14 @@ pub struct SchemaDecl {
 }
 
 /// One person-confirmed binding (`repos.yaml#bindings[<i>]`). The
-/// consumer matches every `HttpClientCall` in `repo/path` whose
+/// consumer matches every consumer-fact node in `repo/path` whose
 /// enclosing symbol's name (or `Container.name`) is `symbol` and
-/// whose `ContractKey` equals `key`. The provider is the endpoint
-/// `(service, key)`. The `key` for both sides is the same wire
-/// grammar (`<METHOD> <template>`).
+/// which carries a `ContractKey` equal to `key` — an
+/// `HttpClientCall` (`<METHOD> <template>`), a GraphQL call
+/// (`graphql:op:field`), or a Topic / Rpc / WebSocket / Table
+/// consumer (`topic:…` / `rpc:…` / `ws:…` / `table:…`). The
+/// provider is the endpoint `(service, key)`. The `key` for both
+/// sides follows the same grammar (`docs/REPOS_YAML.md`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfirmedBinding {
     pub consumer: ConfirmedBindingConsumer,
@@ -426,7 +429,9 @@ impl ContractFederationConfig {
         // same key kind; for HTTP, compatible methods and templates
         // (a same-kind template bridge like `GET /v1/api/orders/{}`
         // → `GET /api/orders/{}` is fine); for GraphQL, equal
-        // `(op, field)`. Ill-formed pairs — cross-kind
+        // `(op, field)`; for Topic/Rpc/WebSocket/Table, exact key
+        // equality (broker+name / system+service+method / route /
+        // name). Ill-formed pairs — cross-kind
         // (`graphql:…` vs `http:…`) above all — are rejected here
         // so the operator learns at load. The joiner
         // (`joiner/confirmed.rs::apply_confirmed_binding`) records
@@ -641,7 +646,13 @@ fn path_prefixes_overlap(a: &str, b: &str) -> bool {
 /// the full form is what `ContractKey::from_str` requires. Keys
 /// prefixed `graphql:` instead carry the
 /// `graphql:<query|mutation|subscription>:<field>` grammar and skip
-/// the HTTP normalization path.
+/// the HTTP normalization path. The fact-keyed kinds —
+/// `topic:` (`topic:<broker>/<name>` or `topic:<broker>:<name>`),
+/// `rpc:` (`rpc:<service>/<method>` or
+/// `rpc:<system>:<service>:<method>`), `ws:` / `websocket:`
+/// (`ws:<route>`), and `table:` (`table:<name>`) — parse through
+/// `ContractKey::from_str`, which rejects empty components and
+/// ambiguous separator mixes.
 fn validate_key(field: &str, key: &str) -> Result<(), LainError> {
     if key.starts_with("graphql:") {
         match ContractKey::from_str(key) {
@@ -653,6 +664,16 @@ fn validate_key(field: &str, key: &str) -> Result<(), LainError> {
             }
             Err(e) => return Err(LainError::Config(format!("{field} '{key}': {e}"))),
         }
+    }
+    if key.starts_with("topic:")
+        || key.starts_with("rpc:")
+        || key.starts_with("ws:")
+        || key.starts_with("websocket:")
+        || key.starts_with("table:")
+    {
+        return ContractKey::from_str(key)
+            .map(|_| ())
+            .map_err(|e| LainError::Config(format!("{field} '{key}': {e}")));
     }
     // Strip the optional `http:` prefix that the wire grammar
     // uses. Config keys are written without it.

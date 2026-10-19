@@ -42,10 +42,13 @@ use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
 use crate::federation::contracts::index::{
     ConsumerResolution, ConsumerTarget, ContractIndex, Endpoint, EndpointId, UnresolvedReason,
 };
-use crate::federation::contracts::key_compat::{methods_compatible, templates_compatible};
+use crate::federation::contracts::key_compat::{
+    keys_compatible, methods_compatible, templates_compatible,
+};
 use crate::federation::contracts::model::MethodSpec;
 use crate::federation::contracts::model::{ContractKey, Direction, ServiceName};
 use crate::federation::contracts::route_match::{match_route, MatchOutcome};
+use crate::federation::graph_backend::GraphBackend;
 use crate::federation::repo_id::GlobalId;
 use crate::schema::{EdgeProvenance, RouteMatch};
 use crate::server::mcp::handler::McpContext;
@@ -610,10 +613,33 @@ async fn run_check_binding(
             reasons.push("same_service");
         }
         if let Some(ConsumerTarget::Binds { .. }) = &res.target {
-            reasons.push("already_bound");
+            // Confirming the endpoint the consumer is already bound
+            // to is idempotent — the joiner records the entry with
+            // `Confirmed` provenance. The conflict is re-pointing at
+            // a *different* endpoint.
+            if !res.bound_endpoints.iter().any(|e| e == &endpoint_id) {
+                reasons.push("already_bound");
+            }
         }
     }
     let _ = (); // sentinel — keep the binding site stable
+    let fact_keys = consumer_fact_keys(resolved.backend().as_ref(), &consumer_id);
+    // Cross-kind guard for fact-keyed consumers (Topic/Rpc/
+    // WebSocket/Table) against an `http:` endpoint key: the HTTP arm
+    // below treats a call-site name with no method/template as a
+    // pattern match (`Unknown` / no template), so an ill-formed
+    // cross-kind pair would otherwise validate vacuously. The reason
+    // is the existing `method_mismatch` (the wrong-shape axis) — no
+    // new reason value. `graphql:` endpoint keys are already
+    // rejected by the GraphQL arm's name parse below.
+    if matches!(key, ContractKey::Http { .. })
+        && fact_keys
+            .iter()
+            .any(|k| matches!(k.kind(), "topic" | "rpc" | "websocket" | "table"))
+        && !fact_keys.iter().any(|k| k.kind() == key.kind())
+    {
+        reasons.push("method_mismatch");
+    }
     let (consumer_method, consumer_template) = parse_consumer_call_shape(&consumer_id);
     let (method_match, template_match) = match &key {
         ContractKey::Http { method, template } => {
@@ -663,14 +689,42 @@ async fn run_check_binding(
             }
             (op_ok, if field_ok { "exact" } else { "none" })
         }
-        _ => {
-            return Err(error_outcome(
-                "invalid_argument",
-                "only http and graphql endpoints are supported in 0.9",
-                Some(json!({"arg": "endpoint.key"})),
-                &snap_label,
-                started,
-            ));
+        key @ (ContractKey::Topic { .. }
+        | ContractKey::Rpc { .. }
+        | ContractKey::WebSocket { .. }
+        | ContractKey::Table { .. }) => {
+            // Fact-keyed kinds: the consumer's key comes from its
+            // contract fact(s) (`consumer_fact_keys`), not its name.
+            // A well-formed pair is same-kind + `keys_compatible`'s
+            // equality semantics (broker+name / system+service+method
+            // / route / name). Reason mapping reuses the HTTP labels:
+            // cross-kind → `method_mismatch` (the shape axis),
+            // same-kind key mismatch → `template_mismatch` (the leaf
+            // axis). A graphql-call consumer carries no such key —
+            // report the GraphQL pair as unmatched (the HTTP arm's
+            // rule) instead of misleading labels.
+            if consumer_id
+                .name()
+                .is_some_and(|n| n.starts_with(GRAPHQL_CALL_PREFIX))
+            {
+                reasons.push("op_mismatch");
+                reasons.push("field_mismatch");
+                (false, "none")
+            } else {
+                let same_kind: Vec<&ContractKey> = fact_keys
+                    .iter()
+                    .filter(|k| k.kind() == key.kind())
+                    .collect();
+                if same_kind.is_empty() {
+                    reasons.push("method_mismatch");
+                    (false, "none")
+                } else if same_kind.iter().any(|ck| keys_compatible(ck, key)) {
+                    (true, "exact")
+                } else {
+                    reasons.push("template_mismatch");
+                    (true, "none")
+                }
+            }
         }
     };
     let valid = reasons.is_empty() && endpoint_def.is_some();
@@ -1175,6 +1229,23 @@ fn candidate_endpoints_for(
         }
     }
     out
+}
+
+/// The [`ContractKey`]s a consumer node names, taken from its
+/// contract facts. The HTTP/GraphQL arms read the key from the
+/// call-site name (`GET /path`, `graphql-call:{op}:{field}`); the
+/// fact-keyed kinds (Topic/Rpc/WebSocket/Table) are ordinary
+/// symbols whose key lives in the fact (`TopicConsumerFact`, …), so
+/// `check_binding` has to open the node. Empty when the node is
+/// gone or carries no consumer fact.
+fn consumer_fact_keys(backend: &dyn GraphBackend, id: &GlobalId) -> Vec<ContractKey> {
+    let Ok(Some(node)) = backend.get_node(id.as_str()) else {
+        return Vec::new();
+    };
+    node.contract
+        .iter()
+        .flat_map(|f| f.consumer_keys())
+        .collect()
 }
 
 fn parse_consumer_call_shape(

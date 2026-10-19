@@ -7,6 +7,25 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- `repos.yaml#bindings` and the `check_binding` MCP tool accept
+  `topic:` / `rpc:` / `ws:` (and `websocket:`) / `table:` keys, and
+  the confirmed-binding matcher resolves those consumer facts — all
+  six `ContractKey` kinds can now be manually confirmed, not just
+  HTTP and GraphQL. The four new kinds take the colon forms
+  (`topic:<broker>:<name>`, `rpc:<system>:<service>:<method>`,
+  `ws:<route>`, `table:<name>`) and keep the sensor wire forms
+  (`topic:<broker>/<name>`, `rpc:<service>/<method>`,
+  `websocket:<route>`). Topic/RPC keys use one split discipline: the
+  wire form splits at the first `/` (the name may carry further `/`
+  and `:` — Redis `orders:created`, MQTT `sensors/temp`), the colon
+  form takes exactly two (resp. three) non-empty components, and a
+  string that would read under both shapes (`topic:a:b/c`) is
+  rejected as ambiguous rather than guessed. `check_binding`'s
+  verdict reuses the existing reason values — cross-kind →
+  `method_mismatch`, same-kind mismatch → `template_mismatch` — so
+  the tool schemas and `docs/tool-schema.json` are unchanged. Grammar
+  reference: `docs/REPOS_YAML.md` (`bindings`).
+
 - Zero-config multi-agent shared daemon: `lain mcp` (stdio) now
   attaches to — or starts — one resident `lain mcp --daemon` per
   machine and bridges stdin↔socket JSON-RPC to it transparently. The
@@ -38,6 +57,13 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Changed
 
+- `check_binding` treats an already-bound consumer as a conflict only
+  when it is bound to a **different** endpoint: confirming the exact
+  pair the joiner already inferred is idempotent (the joiner records
+  the entry with `Confirmed` provenance; a newly created `Binds` edge
+  is written with it) instead of a hard `already_bound` refusal.
+  Re-pointing a bound consumer at another endpoint still fails with
+  `already_bound`.
 - Topic nodes are now canonical hubs: `event_sensor` mints ONE `Topic`
   node per `(broker, topic)` per repo (identity: the `broker/topic`
   label alone — no path, no line) instead of one node per publish/

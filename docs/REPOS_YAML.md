@@ -431,24 +431,49 @@ schemas:
 ### `bindings` (list)
 
 Person-confirmed consumer → provider links (§7.6). A binding's
-`(repo, path, symbol, key)` matches one `HttpClientCall` in the
-consumer repo and joins it to the named endpoint with
-`Confirmed { source: "repos.yaml#bindings[<i>]" }` provenance.
-Bindings that match no consumer or whose endpoint does not exist
-appear in `coverage.stale_bindings` and contribute nothing.
+`(repo, path, symbol, key)` matches one consumer call site in the
+consumer repo — an HTTP call, a GraphQL call, or a Topic / RPC /
+WebSocket / Table consumer — and joins it to the named endpoint
+with `Confirmed { source: "repos.yaml#bindings[<i>]" }`
+provenance. Bindings that match no consumer or whose endpoint does
+not exist appear in `coverage.stale_bindings` and contribute
+nothing.
 
-A binding `key` follows the grammar `"<METHOD> <template>"` or
-`"graphql:<query|mutation|subscription>:<field>"`, where `<field>`
-is the operation's root field, not its name (e.g. operation
-`ProductDetails` with root field `product` →
-`"graphql:query:product"`).
+A binding `key` follows the same grammar `check_binding` accepts
+for an `endpoint.key` — one of:
+
+- `"<METHOD> <template>"` or `"http:<METHOD> <template>"` (HTTP);
+- `"graphql:<query|mutation|subscription>:<field>"`, where
+  `<field>` is the operation's root field, not its name (e.g.
+  operation `ProductDetails` with root field `product` →
+  `"graphql:query:product"`);
+- `"topic:<broker>:<name>"` or the wire form
+  `"topic:<broker>/<name>"`;
+- `"rpc:<system>:<service>:<method>"` or the wire form
+  `"rpc:<service>/<method>"` (`system` is `grpc`);
+- `"ws:<route>"` or the wire form `"websocket:<route>"`;
+- `"table:<name>"`.
+
+Topic and RPC keys use one split discipline. The **wire form**
+splits at the first `/`; `<name>` (resp. `<method>`) may contain
+further `/` and `:` (Redis `orders:created`, MQTT `sensors/temp`),
+while `<broker>` (resp. `<service>`) may not contain `:`. The
+**bindings form** takes exactly two (resp. three) non-empty
+`:`-separated components — `topic:a:b:c` and `rpc:a:b:c:d` are
+rejected as ambiguous, not guessed. A string that would read under
+both shapes (e.g. `topic:a:b/c`, whose slash-form broker would be
+`a:b`) is rejected with an "ambiguous" error; so is any empty
+component. Broker (resp. service) names containing `/` are not
+representable — none of the supported brokers have one.
 
 `consumer.key` and `provider.key` must form a well-formed pair in
 the `check_binding` (§12) sense: the same key kind; for HTTP,
 compatible methods and templates (`exact` / `pattern` /
 `prefix_stripped` — so `GET /v1/api/orders/{}` may bridge to
-`GET /api/orders/{}`); for GraphQL, the same `op` and `field`.
-Cross-kind pairs (e.g. `graphql:query:product` →
+`GET /api/orders/{}`); for GraphQL, the same `op` and `field`; for
+Topic / RPC / WebSocket / Table, exact key equality
+(`broker`+`name` / `system`+`service`+`method` / `route` /
+`name`). Cross-kind pairs (e.g. `graphql:query:product` →
 `http:POST /graphql`) are a config error and never bind.
 
 ```yaml
@@ -478,9 +503,11 @@ The config load fails with a precise message for each of:
   neither declared nor implicit.
 - Same `env` name listed by two services.
 - Same exact `hosts` entry listed by two services.
-- A `key` that parses as neither `<METHOD> <template>` nor
-  `graphql:<query|mutation|subscription>:<field>`, or an HTTP
-  template that does not survive normalization unchanged.
+- A `key` that parses as none of the documented grammars (`<METHOD>
+  <template>`, `graphql:…`, `topic:…`, `rpc:…`, `ws:`/`websocket:…`,
+  `table:…`), a Topic/RPC key whose shape is ambiguous (see the
+  `bindings` split discipline above), an empty key component, or an
+  HTTP template that does not survive normalization unchanged.
 - A `bindings` entry whose `consumer.key` and `provider.key` are
   not a well-formed pair (the message names `bindings[<i>]` and
   both keys).

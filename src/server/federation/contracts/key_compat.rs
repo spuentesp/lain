@@ -55,10 +55,13 @@ pub fn templates_compatible(consumer: Option<&str>, provider: &str) -> (bool, &'
 ///    (a same-kind template bridge like `GET /v1/api/orders/{}` →
 ///    `GET /api/orders/{}` is supported — §15.2 scenario 10);
 /// 3. GraphQL pair: same `op` and same `field` (field bridging is
-///    not a thing).
+///    not a thing);
+/// 4. Topic / Rpc / WebSocket / Table pair: exact key equality
+///    (broker+name / system+service+method / route / name) — the
+///    `bindings` grammar for these kinds carries no bridge.
 ///
-/// Any other same-kind pair (outside the `bindings` key grammar)
-/// must agree exactly; cross-kind pairs never do.
+/// Any other same-kind pair must agree exactly; cross-kind pairs
+/// never do.
 pub fn keys_compatible(consumer: &ContractKey, provider: &ContractKey) -> bool {
     match (consumer, provider) {
         (
