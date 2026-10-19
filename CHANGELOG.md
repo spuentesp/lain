@@ -189,6 +189,32 @@ All notable changes to LAIN are documented here. Versions follow
   (full sensor path: `ch.basic_consume(queue=QUEUE_NAME)` →
   walker → synthetic node → sentinel fact) and the existing
   `topic_join_dynamic_sentinel_is_unnormalized` (dispatch path).
+- `coverage.unresolved_refs` is a new sibling bucket of
+  `coverage` (§9.7) that records external OpenAPI `$ref`s the
+  sensor could not resolve because the body lives outside the
+  workspace (`$ref: 'other.yaml#/components/schemas/Foo'`). The
+  `OpenApiSensor`'s per-flatten `unresolved_refs` accumulator —
+  present since the openapi sensor shipped but discarded by every
+  caller — is now wired: the sensor is converted from the
+  macro form to a direct `impl Sensor` (overriding
+  `scan_with_report`) so the per-repo coverage ledger records
+  one `UnresolvedRecord { reason: ExternalSchemaRef, count,
+  sample_ids }` per unique foreign URL, and `build_coverage`
+  aggregates those into the new bucket (one `UnresolvedRef` per
+  URL across the federation, `count` summed across repos). It
+  is NOT the same bucket as `unnormalized`: an external `$ref`
+  is not a consumer-shaped gap (no caller symbol), so the
+  existing `claims_from_coverage` "unnormalized consumer url"
+  note doesn't apply; `claims_from_coverage` adds a fourth
+  bucket that emits `missing` evidence with the foreign URL as
+  the file path. Pinned end-to-end by
+  `external_ref_yields_unresolved_record_in_scan_report` (sensor
+  path: spec → walker → `ScanReport.unresolved`) and
+  `build_coverage_aggregates_external_schema_refs` (coverage
+  build path: per-repo records → `Coverage.unresolved_refs`).
+  Tool output (`coverage_to_value`) and the schema
+  (`docs/tool-schema.json`) get the new `unresolved_refs` field
+  on `get_coverage`'s data envelope.
 
 ## 0.10.0 — 2026-10-13
 

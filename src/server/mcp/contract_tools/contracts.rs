@@ -1055,6 +1055,7 @@ pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         ExternalRef => "external_ref",
         DynamicSql => "dynamic_sql",
         OrmDynamicQuery => "orm_dynamic_query",
+        ExternalSchemaRef => "external_schema_ref",
     }
 }
 

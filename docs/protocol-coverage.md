@@ -57,6 +57,18 @@ each kind and are backlog, not silence.
   handlers as ordinary functions. The dedicated legs (`SendsHttp`,
   `CallsHttp`, `ReadsField`/`ReadsFrom`) are outside the dashboard
   filter.
+- **OpenAPI gap.** An OpenAPI spec that references a foreign
+  `$ref` (e.g. `$ref: 'other.yaml#/components/schemas/Foo'`)
+  emits the route and the `Schema{Response}` but no fields
+  downstream of the `$ref` (the body lives outside the
+  workspace). The `OpenApiSensor`'s `unresolved_refs` accumulator
+  records each foreign URL per spec; the per-repo coverage
+  ledger folds it into `coverage.unresolved_refs` (sibling of
+  `unnormalized`, not the same bucket — an external `$ref` is not
+  a consumer-shaped gap). `claims_from_coverage` surfaces it as
+  `missing` evidence with the foreign URL as the file path so the
+  operator sees a `Coverage.unresolved_refs` entry they can act
+  on (inline the schema or onboard the foreign file).
 - **Status.** Complete: detected, joined, confirmable, visible.
 
 ## graphql

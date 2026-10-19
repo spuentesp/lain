@@ -1630,11 +1630,39 @@ pub struct Coverage {
     pub schemaless_endpoints: Vec<EndpointId>,
     pub scope: Scope,
     pub complete: bool,
+    /// External OpenAPI `$ref` references the operator could close
+    /// (Phase F2b, §6.4 "external `$ref`"). Each entry is a
+    /// foreign-file URL the `OpenApiSensor` resolved during a
+    /// flatten but could not parse (the body lives outside the
+    /// workspace). Aggregated from the per-repo `RepoCoverage`'s
+    /// `ExternalSchemaRef` `UnresolvedRecord`s by [`build_coverage`].
+    /// Sibling of `unnormalized`, NOT the same bucket: an external
+    /// `$ref` is not a consumer-shaped gap, so the existing
+    /// `claims_from_coverage` "unnormalized consumer url" note does
+    /// not apply; a fourth bucket surfaces it as "unresolved
+    /// external schema ref".
+    pub unresolved_refs: Vec<UnresolvedRef>,
     /// TLA+ CoverageClaim.tla: the per-repo `RepoCoverage` state
     /// vectors. An absent entry is a coverage gap: the evaluator must
     /// never promote an unmeasured repository to `NoKnownImpact`.
     pub repo_coverages:
         std::collections::BTreeMap<String, crate::federation::contracts::coverage::RepoCoverage>,
+}
+
+/// One external OpenAPI `$ref` the `OpenApiSensor` recorded in a
+/// per-repo `RepoCoverage::unresolved` (reason `ExternalSchemaRef`).
+/// `count` is how many schema-walk sites referenced the same URL;
+/// `sample_paths` are up to 5 spec paths where the `$ref` was
+/// emitted (best-effort — the sensor's accumulator tags only the
+/// URL today, not the spec it came from, so `sample_paths` may be
+/// empty; the URL alone is what the operator needs to decide
+/// whether to inline the schema or onboard the foreign file).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedRef {
+    pub repo: String,
+    pub ref_url: String,
+    pub count: u32,
+    pub sample_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2535,6 +2563,7 @@ pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Sc
         .filter(|(_, e)| e.schemas.is_empty() || e.schemas.values().all(|s| s.fields.is_empty()))
         .map(|(id, _)| id.clone())
         .collect();
+    let unresolved_refs = aggregate_unresolved_refs(&repos);
     Coverage {
         repos,
         unresolved_consumers: unresolved,
@@ -2543,10 +2572,52 @@ pub fn build_coverage(index: &ContractIndex, repos: Vec<RepoCoverage>, scope: Sc
         external,
         stale_bindings: index.stale_bindings.len() as u32,
         schemaless_endpoints,
+        unresolved_refs,
         complete: scope.unreviewed.is_empty(),
         scope,
         repo_coverages: std::collections::BTreeMap::new(),
     }
+}
+
+/// Walk every per-repo [`RepoCoverage::unresolved`] record and pull
+/// the `ExternalSchemaRef` ones into [`Coverage::unresolved_refs`].
+/// One `UnresolvedRef` per unique foreign URL across the federation;
+/// `count` is the sum across repos; `sample_paths` is the first
+/// `sample_ids` list (the sensor encodes the URL itself into
+/// `sample_ids`; see [`build_unresolved_records`] in the openapi
+/// sensor for why).
+fn aggregate_unresolved_refs(repos: &[RepoCoverage]) -> Vec<UnresolvedRef> {
+    use std::collections::BTreeMap;
+    let mut by_url: BTreeMap<String, UnresolvedRef> = BTreeMap::new();
+    for r in repos {
+        for ur in &r.unresolved {
+            if !matches!(
+                ur.reason,
+                crate::federation::contracts::model::UnresolvedReason::ExternalSchemaRef
+            ) {
+                continue;
+            }
+            // The sensor's accumulator uses the foreign URL as
+            // `sample_ids`; the operator's actionable token is the
+            // URL, so we treat every entry's first sample_id as the
+            // canonical foreign reference and collapse duplicates.
+            let Some(url) = ur.sample_ids.first().cloned() else {
+                continue;
+            };
+            let entry = by_url.entry(url.clone()).or_insert_with(|| UnresolvedRef {
+                repo: r.repo.clone(),
+                ref_url: url.clone(),
+                count: 0,
+                sample_paths: Vec::new(),
+            });
+            entry.count += ur.count as u32;
+            // sample_paths stays a first-wins slice; the sensor's
+            // sample_ids list is a bounded deduplicated foreign URL
+            // list (not spec provenance), so appending would just
+            // repeat the URL.
+        }
+    }
+    by_url.into_values().collect()
 }
 
 /// Apply §9.7's `complete` rule. `complete` is true iff

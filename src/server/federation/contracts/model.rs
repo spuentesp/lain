@@ -1097,6 +1097,17 @@ pub enum UnresolvedReason {
     /// federation (rule 4: `External`); the ledger records the
     /// reference so an operator can decide whether to onboard it.
     ExternalRef,
+    /// Phase F2b (spec §6.4 "external `$ref`"): an OpenAPI spec
+    /// resolves a `$ref` to a foreign file (`other.yaml#/...`)
+    /// whose body is not part of this workspace. The route is
+    /// emitted, but the schema fields downstream of the `$ref`
+    /// are not — a coverage gap the operator can close by
+    /// inlining the external schema or onboarding the foreign
+    /// file. Recorded by the `OpenApiSensor` per-repo ledger and
+    /// aggregated into `coverage.unresolved_refs` (sibling of
+    /// `unnormalized`, not the same bucket — an external
+    /// `$ref` is not a consumer-shaped gap).
+    ExternalSchemaRef,
     /// Phase D (spec §7): the SQL call shape was recognised but
     /// the literal argument was non-literal (parameter, `format!`,
     /// f-string, …) or the parser could not classify the

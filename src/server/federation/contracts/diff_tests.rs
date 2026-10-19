@@ -127,6 +127,7 @@ fn minimal_coverage() -> Coverage {
         ambiguous: Vec::new(),
         unnormalized: Vec::new(),
         external: Vec::new(),
+        unresolved_refs: Vec::new(),
         stale_bindings: 0,
         schemaless_endpoints: Vec::new(),
         complete: true,
@@ -544,6 +545,7 @@ fn coverage_with_reviewed(reviewed: Vec<&str>) -> Coverage {
         ambiguous: Vec::new(),
         unnormalized: Vec::new(),
         external: Vec::new(),
+        unresolved_refs: Vec::new(),
         stale_bindings: 0,
         schemaless_endpoints: Vec::new(),
         complete: reviewed.is_empty(),
@@ -2682,6 +2684,63 @@ fn build_coverage_reflects_index_state() {
     );
     assert_eq!(cov.unresolved_consumers.len(), 1);
     assert!(cov.complete);
+}
+
+/// `build_coverage` aggregates `ExternalSchemaRef` records from the
+/// per-repo `RepoCoverage::unresolved` into the new
+/// `Coverage.unresolved_refs` sibling bucket. Two repos that
+/// reference the same foreign URL collapse into a single
+/// `UnresolvedRef` whose `count` is the sum (per-URL dedup is what
+/// keeps the bucket from doubling when two repos share a foreign
+/// schema library).
+#[test]
+fn build_coverage_aggregates_external_schema_refs() {
+    use crate::federation::contracts::coverage::UnresolvedRecord;
+    let repo_a = crate::federation::contracts::diff::RepoCoverage {
+        repo: "a".into(),
+        unresolved: vec![UnresolvedRecord {
+            reason: crate::federation::contracts::model::UnresolvedReason::ExternalSchemaRef,
+            count: 1,
+            sample_ids: vec!["shared.yaml#/components/schemas/Order".into()],
+        }],
+        ..Default::default()
+    };
+    let repo_b = crate::federation::contracts::diff::RepoCoverage {
+        repo: "b".into(),
+        unresolved: vec![UnresolvedRecord {
+            reason: crate::federation::contracts::model::UnresolvedReason::ExternalSchemaRef,
+            count: 3,
+            sample_ids: vec!["shared.yaml#/components/schemas/Order".into()],
+        }],
+        ..Default::default()
+    };
+    let cov = build_coverage(
+        &ContractIndex::default(),
+        vec![repo_a, repo_b],
+        Scope {
+            reviewed: Vec::new(),
+            unreviewed: Vec::new(),
+            configured_only: true,
+        },
+    );
+    assert_eq!(
+        cov.unresolved_refs.len(),
+        1,
+        "two repos referencing the same URL collapse to one entry; got: {:?}",
+        cov.unresolved_refs
+    );
+    assert_eq!(
+        cov.unresolved_refs[0].ref_url,
+        "shared.yaml#/components/schemas/Order"
+    );
+    assert_eq!(
+        cov.unresolved_refs[0].count, 4,
+        "count is the sum across repos: 1 + 3"
+    );
+    assert_eq!(
+        cov.unresolved_refs[0].repo, "a",
+        "first-seen repo wins the carrier (deterministic)"
+    );
 }
 
 // ─── Affected has expected shape ────────────────────────────────────
