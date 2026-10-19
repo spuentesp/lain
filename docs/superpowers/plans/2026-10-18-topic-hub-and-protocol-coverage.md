@@ -244,6 +244,17 @@ git add -A src/server/federation/contracts src/server/mcp/contract_tools docs/to
 git commit -m "feat: bindings and check_binding accept topic/rpc/ws/table keys"
 ```
 
+**Decision carried from Task 1's review (hub `path`/service attribution):**
+the hub record's `path` is a real site file — the MIN `site.path` among
+its `Produces`/`Consumes` legs (deterministic; `prune_orphans` is
+path-keyed so the record cannot use the id anchor). `assign_services`
+maps services by `node.path` prefix, so the hub's service attribution is
+that file's service. **T3 must NOT assume hub service == publisher
+service** — in a path-scoped monorepo a same-repo cross-service
+publisher/consumer pair can lose its bind to `resolve_by_key`'s
+own-service skip (the hub is one endpoint entry). Same-repo cross-service
+pub/con may need multi-service endpoint entries; decide in T3.
+
 ### Task 4: Protocol coverage matrix — the escape-proof test
 
 **Files:**

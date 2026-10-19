@@ -484,6 +484,31 @@ impl Freshness {
     }
 }
 
+/// Dedup identity for graph edges.
+///
+/// Most types are pair-scoped: one edge per `(source, target,
+/// edge_type)`, whatever `site` says. That is the historical contract —
+/// `Contains` / `Calls` re-emits collapse (`None == None`), and the SQL
+/// sensor's site-bearing `ReadsTable` / `WritesTable` edges deliberately
+/// collapse to one per `(function, table)`
+/// (`tests/sql_tables.rs::d4_cte_subselect_join_emit_reads_to_every_table`).
+///
+/// The exception is the per-SITE leg types `Produces` / `Consumes`:
+/// their `SourceSite` IS the provenance contract (one edge per
+/// publish/subscribe site, `tests/event_hub_e2e.rs`), so `site` is part
+/// of their identity and two sites on one `(source, target)` both
+/// survive. `insert_edges_batch` and `upsert_edge` (WAL replay) share
+/// this rule — a looser key on either path silently drops a site.
+fn same_edge_identity(existing: &GraphEdge, incoming: &GraphEdge) -> bool {
+    if existing.edge_type != incoming.edge_type {
+        return false;
+    }
+    match incoming.edge_type {
+        EdgeType::Produces | EdgeType::Consumes => existing.site == incoming.site,
+        _ => true,
+    }
+}
+
 impl GraphDatabase {
     pub fn new(memory_path: &Path) -> Result<Self, LainError> {
         let db = Self::empty(memory_path);
@@ -1402,14 +1427,17 @@ impl GraphDatabase {
                         .get(&edge.target_id)
                         .map(|r| *r.value())
                         .unwrap();
-                    // One edge per (source, target, type). Re-inserting an
-                    // existing edge — every incremental pass re-emits the
-                    // folder `Contains` edges it keeps, and re-resolving
-                    // unchanged callers re-emits their calls — piled up
-                    // duplicates that inflated every count.
+                    // One edge per `same_edge_identity`: pair-scope for
+                    // most types (re-inserting an existing edge — every
+                    // incremental pass re-emits the folder `Contains`
+                    // edges it keeps, and re-resolving unchanged callers
+                    // re-emits their calls — piled up duplicates that
+                    // inflated every count), plus `site` for the
+                    // per-SITE `Produces`/`Consumes` legs so a second
+                    // site's `SourceSite` is not silently dropped.
                     let exists = graph
                         .edges_connecting(s, t)
-                        .any(|e| e.weight().edge_type == edge.edge_type);
+                        .any(|e| same_edge_identity(e.weight(), edge));
                     if !exists {
                         graph.add_edge(s, t, edge.clone());
                     }
@@ -1442,12 +1470,15 @@ impl GraphDatabase {
         std::mem::take(&mut *self.pending_external_edges.lock())
     }
 
-    /// Insert an edge idempotently: same `(source, target, edge_type)`
-    /// triple is added at most once. `project_repo` runs on every
+    /// Insert an edge idempotently per `same_edge_identity` (pair +
+    /// type for most edges, plus `site` for the per-SITE
+    /// `Produces`/`Consumes` legs). `project_repo` runs on every
     /// add_repo / reload / watcher-triggered index, so without dedup
     /// the federation backend accumulates N copies of each edge over
     /// the lifetime of the server (observed: `total_edges` = 127k
-    /// instead of the per-repo 15k on the lain repo itself).
+    /// instead of the per-repo 15k on the lain repo itself). WAL
+    /// replay routes `UpsertEdge` through here, so this predicate is
+    /// deliberately the same one `insert_edges_batch` uses.
     pub fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         let graph = self.graph.read();
         let source_idx = self.index_map.get(&edge.source_id).map(|r| *r.value());
@@ -1455,7 +1486,7 @@ impl GraphDatabase {
         if let (Some(s), Some(t)) = (source_idx, target_idx) {
             if graph
                 .edges_connecting(s, t)
-                .any(|e| e.weight().edge_type == edge.edge_type)
+                .any(|e| same_edge_identity(e.weight(), &edge))
             {
                 return Ok(());
             }
@@ -4585,6 +4616,75 @@ mod survivor_pin_tests {
         );
     }
 
+    /// `site` is in the dedup identity for the per-SITE leg types:
+    /// two `Produces`/`Consumes` legs of the same (pair, type) must
+    /// BOTH survive, or the second site's `SourceSite` is silently
+    /// dropped. The identical leg (same site) still dedupes.
+    #[test]
+    fn insert_edges_batch_keeps_site_variants_on_the_same_pair() {
+        use crate::federation::contracts::model::SourceSite;
+        let g = db("batch_dedup_sites");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Topic, "kafka/t".into(), "src/a.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        let leg = |line: u32| {
+            let mut e = GraphEdge::new(EdgeType::Produces, a_id.clone(), b_id.clone());
+            e.site = Some(SourceSite {
+                path: "src/a.rs".into(),
+                line,
+            });
+            e
+        };
+        g.insert_edges_batch(&[leg(2)]).unwrap();
+        g.insert_edges_batch(&[leg(3)]).unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "one edge per site: a second site's SourceSite must not be \
+             collapsed into the first"
+        );
+
+        g.insert_edges_batch(&[leg(3)]).unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "the identical leg (same site) must still dedupe"
+        );
+    }
+
+    /// Pair-scope for non-leg types is unchanged even when they carry
+    /// a `site`: the SQL sensor's `ReadsTable`/`WritesTable` contract
+    /// is ONE edge per `(function, table)` regardless of which
+    /// statement's site landed on it
+    /// (`tests/sql_tables.rs::d4_cte_subselect_join_emit_reads_to_every_table`).
+    #[test]
+    fn insert_edges_batch_collapses_site_variants_for_pair_scoped_types() {
+        use crate::federation::contracts::model::SourceSite;
+        let g = db("batch_dedup_pair_scope");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Table, "users".into(), "src/a.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        let leg = |line: u32| {
+            let mut e = GraphEdge::new(EdgeType::ReadsTable, a_id.clone(), b_id.clone());
+            e.site = Some(SourceSite {
+                path: "src/a.rs".into(),
+                line,
+            });
+            e
+        };
+        g.insert_edges_batch(&[leg(2)]).unwrap();
+        g.insert_edges_batch(&[leg(3)]).unwrap();
+        assert_eq!(
+            g.edge_count(),
+            1,
+            "a pair-scoped type must still collapse across sites"
+        );
+    }
+
     /// `upsert_edge` is idempotent per (pair, type) and still admits
     /// a different type between the same two nodes.
     #[test]
@@ -4614,6 +4714,38 @@ mod survivor_pin_tests {
             2,
             "a different edge type must not be treated as a duplicate"
         );
+    }
+
+    /// `upsert_edge` shares `same_edge_identity` with
+    /// `insert_edges_batch` — WAL replay routes `UpsertEdge` through
+    /// this method, so a looser key here would silently drop a per-site
+    /// leg on every crash recovery.
+    #[test]
+    fn upsert_edge_keeps_site_variants_on_the_same_pair() {
+        use crate::federation::contracts::model::SourceSite;
+        let g = db("upsert_sites");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Topic, "kafka/t".into(), "src/a.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        let leg = |line: u32| {
+            let mut e = GraphEdge::new(EdgeType::Produces, a_id.clone(), b_id.clone());
+            e.site = Some(SourceSite {
+                path: "src/a.rs".into(),
+                line,
+            });
+            e
+        };
+        g.upsert_edge(leg(2)).unwrap();
+        g.upsert_edge(leg(3)).unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "replay must keep both per-site legs on the same pair"
+        );
+        g.upsert_edge(leg(3)).unwrap();
+        assert_eq!(g.edge_count(), 2, "the identical leg must still dedupe");
     }
 
     /// `find_path` reports the path it actually walked.

@@ -52,6 +52,10 @@ sensor, and that sensor must be the only one that retracts it.
   `insert_edges_batch` drops an edge whose endpoints aren't in the
   graph (`graph/mod.rs:1156`) without failing, so an unmaterialized
   endpoint makes the edge vanish rather than error.
+- Topic hubs (`event_sensor`) are id-anchored on `"<topics>"` (one node
+  per `{broker}/{topic}` per repo), but the hub record's `path` must
+  name a real site file: `prune_orphans` is path-keyed and deletes any
+  node whose `path` is not a tracked file — hub edges go with it.
 - The name guards are a **migration** path, not decoration: a pre-fix
   graph carries its fact on a real symbol node, which must not be
   retracted. Those stale facts stay in `ContractIndex` until

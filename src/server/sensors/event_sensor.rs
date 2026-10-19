@@ -143,6 +143,35 @@ pub fn scan_workspace_event(
         all_edges.extend(edges);
     }
 
+    // Deterministic hub path. A hub is minted at whichever site the
+    // walk reaches first, but walk order is not stable — and both
+    // `prune_orphans` (path-keyed) and the joiner's `assign_services`
+    // (path-prefix keyed) read this field. Rewrite each hub's path to
+    // the min `site.path` among its own `Produces`/`Consumes` legs:
+    // deterministic, and still a real file the orphan sweep keeps.
+    let mut hub_paths: BTreeMap<String, String> = BTreeMap::new();
+    for e in &all_edges {
+        if !matches!(e.edge_type, EdgeType::Produces | EdgeType::Consumes) {
+            continue;
+        }
+        let Some(site) = &e.site else { continue };
+        hub_paths
+            .entry(e.target_id.clone())
+            .and_modify(|p| {
+                if site.path < *p {
+                    *p = site.path.clone();
+                }
+            })
+            .or_insert_with(|| site.path.clone());
+    }
+    for n in &mut all_nodes {
+        if n.node_type == NodeType::Topic {
+            if let Some(p) = hub_paths.get(&n.id) {
+                n.path = p.clone();
+            }
+        }
+    }
+
     // Payload schemas ride the same EventSensor batch, scanned after
     // site emission so a schema's `topic` can bind to a `Topic` node
     // minted in this very scan.
@@ -693,13 +722,16 @@ fn emit_sites(
             namespace,
         );
         if emitted_topic_ids.insert(topic_id.clone()) {
-            // `path` is the minting site's file, NOT the id anchor:
+            // `path` is a real site file, NOT the id anchor:
             // `prune_orphans` (ingestion orphan sweep) drops every node
             // whose `path` is not a git-tracked file, and a dropped hub
             // takes its `Produces`/`Consumes` edges with it. Same
             // convention as `sql_sensor`'s `Table` nodes (file-anchored
-            // record, line-less id). `line_start` stays `None` like the
-            // id — the site lines live on the edges' `site` field.
+            // record, line-less id). The scan-wide pass in
+            // `scan_workspace_event` then rewrites it to the MIN site
+            // path among the hub's legs so it does not depend on walk
+            // order. `line_start` stays `None` like the id — the site
+            // lines live on the edges' `site` field.
             let mut node =
                 GraphNode::new(NodeType::Topic, topic_label.clone(), graph_path.to_string());
             node.id = topic_id.clone();

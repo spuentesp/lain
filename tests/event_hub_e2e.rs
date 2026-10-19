@@ -121,10 +121,13 @@ fn two_sites_one_topic_mint_exactly_one_hub_node() {
     );
 }
 
-/// Site provenance survives hub convergence: one `Produces` edge per
-/// site, each carrying its own `SourceSite` — not one deduped edge.
+/// Site provenance survives hub convergence for top-level sites (each
+/// anchored on its own synthetic node): one `Produces` edge per site,
+/// each carrying its own `SourceSite` — not one deduped edge. The
+/// harder same-anchor case (two sites inside ONE function) is pinned
+/// by `hub_keeps_one_produces_edge_per_site` below.
 #[test]
-fn hub_keeps_one_produces_edge_per_site() {
+fn hub_keeps_one_produces_edge_per_top_level_site() {
     let root = fixture_repo_with(
         "per_site",
         "src/producer.ts",
@@ -153,6 +156,77 @@ fn hub_keeps_one_produces_edge_per_site() {
         lines,
         BTreeSet::from([1, 2]),
         "each site keeps its own provenance (lines 1 and 2)"
+    );
+}
+
+/// Review Focus #2's real pin: two same-direction sites for ONE topic
+/// inside ONE function share the edge anchor (the enclosing symbol),
+/// so both legs have the same `(source, target, Produces)` triple and
+/// only `SourceSite` tells them apart. Both must survive — the edge
+/// layer's dedup key includes `site` precisely so the second site's
+/// provenance is not silently dropped.
+#[test]
+fn hub_keeps_one_produces_edge_per_site() {
+    let root = fixture_repo_with(
+        "shared_symbol",
+        "src/producer.ts",
+        "async function publish() {\n\
+         \x20 await producer.send({ topic: 'orders.created', messages: [] });\n\
+         \x20 await producer.send({ topic: 'orders.created', messages: [] });\n\
+         }\n",
+    );
+    let ns = RepoNamespace::for_test();
+    let graph = GraphDatabase::new(&root.join("graph.bin")).expect("open graph");
+    // The enclosing symbol both sites hang off — minted explicitly (no
+    // tree-sitter indexer in `scan_workspace_event`), so both edges
+    // source from the SAME node and the dedup key is actually exercised.
+    let mut fn_node = GraphNode::new(
+        NodeType::Function,
+        "publish".into(),
+        "src/producer.ts".into(),
+    );
+    fn_node.id = GraphNode::generate_id(
+        &NodeType::Function,
+        "src/producer.ts",
+        "publish",
+        Some(1),
+        &ns,
+    );
+    fn_node.line_start = Some(1);
+    fn_node.line_end = Some(4);
+    graph
+        .upsert_node(fn_node.clone())
+        .expect("seed enclosing symbol");
+
+    scan_workspace_event(&graph, &root, &ns).expect("event scan");
+
+    let hub = topic_nodes(&graph).remove(0);
+    let produces: Vec<_> = graph
+        .all_edges()
+        .into_iter()
+        .filter(|e| e.edge_type == EdgeType::Produces && e.target_id == hub.id)
+        .collect();
+    assert!(
+        produces.iter().all(|e| e.source_id == fn_node.id),
+        "both sites must hang off the shared symbol — else this test \
+         does not exercise the shared-anchor dedup: {produces:?}"
+    );
+    assert_eq!(
+        produces.len(),
+        2,
+        "one edge per SITE, even on a shared anchor — got {produces:?}"
+    );
+    let sites: BTreeSet<(String, u32)> = produces
+        .iter()
+        .filter_map(|e| e.site.as_ref().map(|s| (s.path.clone(), s.line)))
+        .collect();
+    assert_eq!(
+        sites,
+        BTreeSet::from([
+            ("src/producer.ts".to_string(), 2),
+            ("src/producer.ts".to_string(), 3)
+        ]),
+        "each edge must carry its own SourceSite (lines 2 and 3)"
     );
 }
 
@@ -264,6 +338,11 @@ fn rescan_retracts_old_per_site_topic_nodes() {
         "exactly one hub must remain, got {topics:?}"
     );
     assert_eq!(topics[0].id, hub, "the survivor must be the canonical hub");
+    assert_eq!(
+        topics[0].path, "src/extra.ts",
+        "the hub path must be the MIN site path among its legs \
+         (deterministic), not whichever site the walk reached first"
+    );
     for id in &old_ids {
         assert!(
             !graph.get_all_nodes().iter().any(|n| n.id == *id),
