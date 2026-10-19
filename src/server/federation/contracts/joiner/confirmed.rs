@@ -111,14 +111,21 @@ pub(crate) fn apply_confirmed_binding(
         // topics, and a `TableConsumerFact` lists several tables, so
         // the binding's key may match any of them (not only the
         // first fact). HTTP / GraphQL / Topic / Rpc / WebSocket /
-        // Table all map through `ContractFact::consumer_keys`.
-        let mut node_keys: Vec<ContractKey> = Vec::new();
-        let mut reads_complete = true;
+        // Table all map through `ContractFact::consumer_keys`. Each
+        // key travels with its own fact's `reads_complete`: the §6.5
+        // escape flag lives on `Consumer` (HTTP) only — every other
+        // consumer kind is recorded fully read — and a mixed node
+        // (an HTTP call that escapes tracking plus a topic
+        // subscription) must not inherit the wrong fact's flag.
+        let mut node_keys: Vec<(ContractKey, bool)> = Vec::new();
         for fact in &node.contract {
-            if let ContractFact::Consumer(consumer) = fact {
-                reads_complete = consumer.reads_complete;
+            let reads_complete = match fact {
+                ContractFact::Consumer(consumer) => consumer.reads_complete,
+                _ => true,
+            };
+            for key in fact.consumer_keys() {
+                node_keys.push((key, reads_complete));
             }
-            node_keys.extend(fact.consumer_keys());
         }
         if node_keys.is_empty() {
             continue;
@@ -136,9 +143,10 @@ pub(crate) fn apply_confirmed_binding(
         if symbol_name != binding.consumer.symbol {
             continue;
         }
-        if !node_keys.contains(&consumer_key) {
+        let Some((_, reads_complete)) = node_keys.iter().find(|(k, _)| k == &consumer_key) else {
             continue;
-        }
+        };
+        let reads_complete = *reads_complete;
         matched_any = true;
         let own_svc = assignments
             .get(node.id.as_str())

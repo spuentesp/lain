@@ -18,9 +18,10 @@ All notable changes to LAIN are documented here. Versions follow
   `websocket:<route>`). Topic/RPC keys use one split discipline: the
   wire form splits at the first `/` (the name may carry further `/`
   and `:` — Redis `orders:created`, MQTT `sensors/temp`), the colon
-  form takes exactly two (resp. three) non-empty components, and a
-  string that would read under both shapes (`topic:a:b/c`) is
-  rejected as ambiguous rather than guessed. `check_binding`'s
+  form takes exactly two (resp. three) non-empty components (`topic:a:b:c`
+  and `rpc:a:b:c:d` are rejected for their arity), and a string that
+  would read under both shapes (`topic:a:b/c`) is rejected as
+  ambiguous rather than guessed. `check_binding`'s
   verdict reuses the existing reason values — cross-kind →
   `method_mismatch`, same-kind mismatch → `template_mismatch` — so
   the tool schemas and `docs/tool-schema.json` are unchanged. Grammar
@@ -61,7 +62,9 @@ All notable changes to LAIN are documented here. Versions follow
   when it is bound to a **different** endpoint: confirming the exact
   pair the joiner already inferred is idempotent (the joiner records
   the entry with `Confirmed` provenance; a newly created `Binds` edge
-  is written with it) instead of a hard `already_bound` refusal.
+  is written with it) instead of a hard `already_bound` refusal. A
+  `Binds` edge the auto-join already wrote keeps its `Static`
+  provenance — only the joiner's index verdict flips to `Confirmed`.
   Re-pointing a bound consumer at another endpoint still fails with
   `already_bound`.
 - Topic nodes are now canonical hubs: `event_sensor` mints ONE `Topic`

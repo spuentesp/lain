@@ -2954,10 +2954,10 @@ mod task6_check_binding_yaml_round_trip {
     //! provider key space so the remaining service owns the `(op,
     //! field)` pair.
     //!
-    //! Ordering note: `check_binding` refuses an already-bound
-    //! consumer (`already_bound`), so the tool round-trip runs while
-    //! the fixture is still ambiguous — before the `provides_graphql`
-    //! flip.
+    //! Ordering note: `check_binding` refuses a consumer bound to a
+    //! DIFFERENT endpoint (`already_bound`), so the tool round-trip
+    //! runs while the fixture is still ambiguous — before the
+    //! `provides_graphql` flip.
 
     use super::pr14_check_binding_graphql::{build_graphql_federation, graphql_federation_config};
     use super::*;

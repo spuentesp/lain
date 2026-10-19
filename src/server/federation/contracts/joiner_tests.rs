@@ -983,6 +983,145 @@ fn confirmed_binding_matches_consumer_and_records_provenance() {
 }
 
 #[test]
+fn confirmed_binding_reads_complete_comes_from_the_matched_fact() {
+    // A mixed node — an HTTP call whose response escapes tracking
+    // (`reads_complete: false`) plus a topic subscription on the
+    // same symbol — must carry the MATCHED fact's `reads_complete`.
+    // `TopicConsumerFact` has no §6.5 escape flag (the protocol
+    // resolvers record it fully read), so confirming the topic key
+    // is `reads_complete: true` even though the node's HTTP fact
+    // says otherwise; confirming the HTTP key on the same node is
+    // the HTTP fact's `false`.
+    let mut p = GraphNode::new_in(
+        NodeType::Topic,
+        "kafka/orders".into(),
+        "src/events.rs".into(),
+        &repo_ns(),
+    );
+    p.repo_id = Some("orders".into());
+    p.id = make_id(
+        "orders",
+        NodeType::Topic,
+        "src/events.rs",
+        "kafka/orders",
+        5,
+    );
+    p.line_start = Some(5);
+    p.contract = vec![ContractFact::Provider(ProviderFact {
+        method: HttpMethod::Any,
+        template: "orders".to_string(),
+        handler: None,
+        operation_id: None,
+        origin: ProviderOrigin::Code,
+    })];
+
+    let mut c = GraphNode::new_in(
+        NodeType::Function,
+        "on_orders".into(),
+        "src/sub.py".into(),
+        &repo_ns(),
+    );
+    c.repo_id = Some("billing".into());
+    c.id = make_id("billing", NodeType::Function, "src/sub.py", "on_orders", 10);
+    c.line_start = Some(10);
+    c.contract = vec![
+        ContractFact::Consumer(ConsumerFact {
+            method: MethodSpec::Known(HttpMethod::Post),
+            url: url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders")),
+            via: CallVia::Library {
+                name: "requests".into(),
+            },
+            url_expr: "".to_string(),
+            reads_complete: false,
+        }),
+        ContractFact::TopicConsumer(TopicConsumerFact {
+            broker: "kafka".into(),
+            name: "orders".into(),
+            kind: TopicConsumerKind::Subscription,
+        }),
+    ];
+    // The HTTP leg's provider, so the `POST /api/orders` binding has
+    // an endpoint to land on (the topic hub alone owns the topic key).
+    let http_p = provider_node(
+        "orders",
+        "src/api.py",
+        "create_order",
+        20,
+        HttpMethod::Post,
+        "/api/orders",
+    );
+
+    let make_cfg = |key: &str| ContractFederationConfig {
+        services: multi_service_config(&[("orders", &[]), ("billing", &[])]).services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "billing".into(),
+                path: "src/sub.py".into(),
+                symbol: "on_orders".into(),
+                key: key.to_string(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "orders".into(),
+                key: key.to_string(),
+            },
+        }],
+        databases: vec![],
+    };
+    let cid = GlobalId::parse(&c.id).expect("global id parse");
+
+    let topic_out = ContractJoiner::run(
+        &[p.clone(), http_p.clone(), c.clone()],
+        &[],
+        &make_cfg("topic:kafka/orders"),
+    );
+    assert_eq!(topic_out.binds.len(), 1, "{:?}", topic_out.binds);
+    assert!(matches!(
+        topic_out.binds[0].provenance,
+        EdgeProvenance::Confirmed { .. }
+    ));
+    assert!(
+        topic_out.index.stale_bindings.is_empty(),
+        "{:?}",
+        topic_out.index.stale_bindings
+    );
+    let topic_res = topic_out
+        .index
+        .consumer(&cid)
+        .expect("topic-confirmed resolution");
+    assert!(
+        topic_res.reads_complete,
+        "the topic fact carries no §6.5 escape flag — the confirmed resolution must be \
+         fully read, not the HTTP fact's false"
+    );
+
+    let http_out = ContractJoiner::run(&[p, http_p, c], &[], &make_cfg("POST /api/orders"));
+    // The topic leg's auto-join edge is still in the set; the
+    // confirmed HTTP edge is the one under test.
+    let confirmed: Vec<_> = http_out
+        .binds
+        .iter()
+        .filter(|b| matches!(b.provenance, EdgeProvenance::Confirmed { .. }))
+        .collect();
+    assert_eq!(confirmed.len(), 1, "{:?}", http_out.binds);
+    assert!(
+        http_out.index.stale_bindings.is_empty(),
+        "{:?}",
+        http_out.index.stale_bindings
+    );
+    let http_res = http_out
+        .index
+        .consumer(&cid)
+        .expect("http-confirmed resolution");
+    assert!(
+        !http_res.reads_complete,
+        "confirming the HTTP key must carry the HTTP fact's reads_complete: false"
+    );
+}
+
+#[test]
 fn confirmed_binding_no_endpoint_marks_stale() {
     let cfg = ContractFederationConfig {
         services: default_config().services,

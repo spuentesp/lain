@@ -460,11 +460,12 @@ further `/` and `:` (Redis `orders:created`, MQTT `sensors/temp`),
 while `<broker>` (resp. `<service>`) may not contain `:`. The
 **bindings form** takes exactly two (resp. three) non-empty
 `:`-separated components — `topic:a:b:c` and `rpc:a:b:c:d` are
-rejected as ambiguous, not guessed. A string that would read under
-both shapes (e.g. `topic:a:b/c`, whose slash-form broker would be
-`a:b`) is rejected with an "ambiguous" error; so is any empty
-component. Broker (resp. service) names containing `/` are not
-representable — none of the supported brokers have one.
+rejected for their arity ("takes exactly two/three components"). A
+string that would read under both shapes (e.g. `topic:a:b/c`, whose
+slash-form broker would be `a:b`) is rejected as **ambiguous** with
+a typed error. Empty components are rejected in both shapes. Broker
+(resp. service) names containing `/` are not representable — none
+of the supported brokers have one.
 
 `consumer.key` and `provider.key` must form a well-formed pair in
 the `check_binding` (§12) sense: the same key kind; for HTTP,
