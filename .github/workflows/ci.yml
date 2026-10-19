@@ -692,7 +692,7 @@ jobs:
       # Pinned: the gate's `--in-diff` semantics were verified against
       # this exact version (scripts/mutation-gate.sh header).
       - name: Install cargo-mutants (pinned 27.1.0)
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-mutants@27.1.0
       # Warm dependency artifacts into the shared target dir so the first
@@ -816,7 +816,7 @@ jobs:
           save-always: true
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-llvm-cov
 
