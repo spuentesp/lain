@@ -215,6 +215,29 @@ All notable changes to LAIN are documented here. Versions follow
   Tool output (`coverage_to_value`) and the schema
   (`docs/tool-schema.json`) get the new `unresolved_refs` field
   on `get_coverage`'s data envelope.
+- `apply_confirmed_binding` now MERGES into the existing
+  `consumers[gid]` vec rather than wholesale replacing it with a
+  single-resolution vec. A node carrying two+ consumer facts
+  (`topic-read:<path>:<line>` subscribing to two topics on one
+  line, a synthetic `sql-read:` reading two tables, a mixed HTTP
+  + topic node) had its non-confirmed resolutions wiped whenever
+  any one of them was operator-confirmed: the new key override
+  took the whole slot. The fix filters out only the resolution
+  whose `bound_endpoints` names the same `provider_key` the
+  binding covers (the safety net for repeated bindings), keeps
+  every other fact's resolution, and inserts the new confirmed
+  resolution at the FRONT of the vec so `consumer(&gid)`
+  (`index.rs:60`, `first()`) keeps returning the operator truth
+  for the queried key. `binds` already accumulated per-binding
+  without dedup, so multi-binding matches on the same node
+  correctly grow the edge set — no change there. Pinned by the
+  new `confirmed_binding_merges_into_multi_fact_consumers_vec`
+  test (one node, two topic subscriptions on one line, confirmed
+  binding for one topic — both resolutions survive; the
+  confirmed one is `first()`; the other carries the auto-join or
+  Unresolved for the un-confirmed topic) and the existing
+  `confirmed_binding_reads_complete_comes_from_the_matched_fact`
+  which covers the mixed HTTP+topic case.
 
 ## 0.10.0 — 2026-10-13
 

@@ -166,24 +166,53 @@ pub(crate) fn apply_confirmed_binding(
             route_match: RouteMatch::Exact,
             stripped_prefix: None,
         });
-        // An operator confirmation overrides whatever the joiner
-        // inferred for this call site, so the entry is replaced
-        // wholesale rather than appended to.
-        consumers.insert(
-            gid.clone(),
-            vec![ConsumerResolution {
-                call_id: gid,
-                service: own_svc,
-                target: Some(ConsumerTarget::Binds {
-                    provenance: EdgeProvenance::Confirmed { source },
-                    confidence: 1.0,
-                    route_match: RouteMatch::Exact,
-                    stripped_prefix: None,
-                }),
-                bound_endpoints: vec![(provider_svc.clone(), provider_key.clone())],
-                reads_complete,
-            }],
-        );
+        // F3 (multi-fact consumers merge-into-vec): the node may
+        // carry more than one consumer fact — `topic-read:<path>:<line>`
+        // subscribes to every topic on its line, a synthetic
+        // `sql-read:` node reads every table in its statement, a
+        // mixed node may carry an HTTP `Consumer` plus a topic
+        // subscription. The joiner pre-pass already built one
+        // `ConsumerResolution` per fact in `consumers[gid]`; an
+        // operator confirmation must override ONLY the resolution
+        // whose key this binding names — the others stay.
+        //
+        // We keep every existing resolution whose target is NOT a
+        // `Binds` whose `bound_endpoints` names the same
+        // `provider_key` we're about to confirm (the slot the
+        // binding covers; any prior confirmed resolution of the
+        // same shape is overwritten). The new confirmed resolution
+        // is inserted at the FRONT — `consumer(&gid)` returns the
+        // first resolution (`index.rs:60`), and an operator
+        // confirmation is the primary truth for that key.
+        //
+        // `binds` does not need this — it accumulates per-binding
+        // without dedup, so multi-binding matches on the same node
+        // correctly grow the edge set.
+        let new_resolution = ConsumerResolution {
+            call_id: gid.clone(),
+            service: own_svc,
+            target: Some(ConsumerTarget::Binds {
+                provenance: EdgeProvenance::Confirmed { source },
+                confidence: 1.0,
+                route_match: RouteMatch::Exact,
+                stripped_prefix: None,
+            }),
+            bound_endpoints: vec![(provider_svc.clone(), provider_key.clone())],
+            reads_complete,
+        };
+        let entry = consumers.entry(gid).or_default();
+        entry.retain(|existing| {
+            !matches!(
+                &existing.target,
+                Some(ConsumerTarget::Binds { .. })
+                    if existing
+                        .bound_endpoints
+                        .first()
+                        .map(|e| &e.1 == &provider_key)
+                        .unwrap_or(false)
+            )
+        });
+        entry.insert(0, new_resolution);
     }
     if !matched_any {
         stale_bindings.push(StaleBinding {

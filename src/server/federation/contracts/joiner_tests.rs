@@ -1441,6 +1441,168 @@ fn confirmed_binding_equivalent_key_spelling_binds() {
     assert!(out.index.stale_bindings.is_empty());
 }
 
+/// A node carrying TWO consumer facts — `topic-read:<path>:<line>`
+/// subscribing to two topics on one line — must keep BOTH
+/// resolutions after one of them is operator-confirmed. Pre-F3,
+/// `apply_confirmed_binding` wholesale replaced `consumers[gid]`
+/// with a single-resolution vec, so the second topic's resolution
+/// (Unresolved or auto-Binds) vanished. Pinned end-to-end: the
+/// joiner produces 2 `ConsumerResolution`s from the sensor's 2
+/// facts; the confirmed entry overrides ONLY the resolution
+/// whose key the binding names; the other stays.
+#[test]
+fn confirmed_binding_merges_into_multi_fact_consumers_vec() {
+    use crate::federation::contracts::model::{TopicConsumerFact, TopicConsumerKind};
+
+    // A topic hub for `orders.created` so the binding has a real
+    // endpoint to land on. (Topic hubs live on the provider side —
+    // see F2a's hub model.)
+    let hub_topic = topic_provider_node("orders", "src/p.rs", "publish", 1, "orders.created");
+
+    // A second topic hub for `audit.logged` — distinct topic, so
+    // the second subscription on the same line binds to a DIFFERENT
+    // provider. Without the F3 fix, the confirmed binding for the
+    // first topic wipes the second subscription's resolution.
+    let hub_audit = topic_provider_node("orders", "src/p.rs", "audit", 30, "audit.logged");
+
+    // One consumer node, two TopicConsumerFacts — two subscriptions
+    // on one line. The sensor emits this exact shape
+    // (`event_sensor.rs:881-887`).
+    let mut c = GraphNode::new_in(
+        NodeType::Function,
+        "sub_two".into(),
+        "src/sub.py".into(),
+        &repo_ns(),
+    );
+    c.repo_id = Some("billing".into());
+    c.id = make_id("billing", NodeType::Function, "src/sub.py", "sub_two", 12);
+    c.line_start = Some(12);
+    c.contract = vec![
+        ContractFact::TopicConsumer(TopicConsumerFact {
+            broker: "kafka".into(),
+            name: "orders.created".into(),
+            kind: TopicConsumerKind::Subscription,
+        }),
+        ContractFact::TopicConsumer(TopicConsumerFact {
+            broker: "kafka".into(),
+            name: "audit.logged".into(),
+            kind: TopicConsumerKind::Subscription,
+        }),
+    ];
+
+    let cfg = ContractFederationConfig {
+        services: multi_service_config(&[("orders", &[]), ("billing", &[])]).services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        // Confirm ONLY the orders.created key. The audit.logged
+        // subscription must survive.
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "billing".into(),
+                path: "src/sub.py".into(),
+                symbol: "sub_two".into(),
+                key: "topic:kafka/orders.created".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "orders".into(),
+                key: "topic:kafka/orders.created".into(),
+            },
+        }],
+        databases: vec![],
+    };
+
+    let out = ContractJoiner::run(&[hub_topic, hub_audit, c], &[], &cfg);
+    let cid = GlobalId::parse(&make_id(
+        "billing",
+        NodeType::Function,
+        "src/sub.py",
+        "sub_two",
+        12,
+    ))
+    .expect("global id parse");
+
+    // The confirmed key produced one BindsEdge.
+    let confirmed_binds: Vec<_> = out
+        .binds
+        .iter()
+        .filter(|b| matches!(b.provenance, EdgeProvenance::Confirmed { .. }))
+        .collect();
+    assert_eq!(
+        confirmed_binds.len(),
+        1,
+        "exactly one confirmed BindsEdge; got: {:?}",
+        out.binds
+    );
+
+    // The vec carries BOTH resolutions — the confirmed one in
+    // front (operator truth), the auto-join for `audit.logged`
+    // behind. `consumer(&cid)` returns the first (the confirmed
+    // one), and the vec's `len()` is 2.
+    let resolutions = out
+        .index
+        .consumers
+        .get(&cid)
+        .expect("consumer resolutions present");
+    assert_eq!(
+        resolutions.len(),
+        2,
+        "F3 must keep BOTH subscriptions; got: {:?}",
+        resolutions
+    );
+    let first = resolutions.first().expect("first resolution");
+    assert!(
+        matches!(
+            &first.target,
+            Some(ConsumerTarget::Binds {
+                provenance: EdgeProvenance::Confirmed { .. },
+                ..
+            })
+        ),
+        "first resolution must be the operator confirmation; got: {:?}",
+        first.target
+    );
+    assert!(
+        first
+            .bound_endpoints
+            .iter()
+            .any(|(_, k)| matches!(k, ContractKey::Topic { broker, name } if broker == "kafka" && name == "orders.created")),
+        "the confirmed resolution names the orders.created topic; got: {:?}",
+        first.bound_endpoints
+    );
+
+    // The second resolution is the auto-join for `audit.logged`
+    // (the Binds of the second fact — either confirmed-shim,
+    // inferred by the dispatch chain, or Binds with
+    // provenance != Confirmed).
+    let second = &resolutions[1];
+    assert!(
+        !matches!(
+            &second.target,
+            Some(ConsumerTarget::Binds {
+                provenance: EdgeProvenance::Confirmed { .. },
+                ..
+            })
+        ),
+        "the second resolution must NOT carry the Confirmed provenance (that's the confirmed key's slot, already filled); got: {:?}",
+        second.target
+    );
+    assert!(
+        second
+            .bound_endpoints
+            .iter()
+            .any(|(_, k)| matches!(k, ContractKey::Topic { broker, name } if broker == "kafka" && name == "audit.logged"))
+            || matches!(&second.target, Some(ConsumerTarget::Unresolved { .. })),
+        "the audit.logged subscription must keep its auto-join or stay unresolved; got: {:?}",
+        second.target
+    );
+
+    assert!(
+        out.index.stale_bindings.is_empty(),
+        "no stale entries: the audit.logged resolution is not stale, it's a different key"
+    );
+}
+
 // ─── §7.8 ordering ─────────────────────────────────────────────────
 
 #[test]
