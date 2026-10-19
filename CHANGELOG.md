@@ -255,6 +255,22 @@ All notable changes to LAIN are documented here. Versions follow
   their values (file wins over the host-aware scale). Pinned by
   the new `ram_aware_cache_sizing_tests` module (8 GiB / 1 GiB /
   64 GiB / 0 MiB / Linux / non-Linux paths).
+- Readiness: `Capabilities` gains a `mirrors: Capability` field
+  (§9.7 schema extension). The per-repo mirror cache that backs
+  `git diff` / `git log` is now its own capability, surfaced so an
+  agent can tell "the mirror cache needs a rebuild" from
+  "the underlying data is broken" — the former leaves
+  `git_history` alone once the mirror is fresh, the latter knocks
+  it down too. `mirrors` is **optional** (mirrors are
+  infrastructure, not a user-visible feature) so its state never
+  gates the agent's `exit_code`; agents see the diagnosis but are
+  not blocked. As a side-effect, the live `get_capabilities`
+  tool's `git_history` field is now honest (it used to be hardcoded
+  `Ready` regardless of reality — the F2b/F5 review caught it as
+  the same class of "silent lie" the dynamic-topic and external-`$ref`
+  fixes closed). `Capabilities::readiness`'s exit-code contract
+  is preserved; a new `mirrors_state_does_not_gate_required`
+  test pins the optional guarantee.
 
 ## 0.10.0 — 2026-10-13
 

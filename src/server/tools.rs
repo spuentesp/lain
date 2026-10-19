@@ -569,6 +569,7 @@ impl ToolExecutor {
         fn capabilities_for(
             structural: CapabilityState,
             call_graph_state: CapabilityState,
+            mirrors_state: CapabilityState,
             retry_after_ms: Option<u64>,
             semantic_stub: bool,
             embeddings_running: bool,
@@ -596,10 +597,24 @@ impl ToolExecutor {
             } else {
                 Capability::new(structural, true)
             };
+            // F5: the per-repo mirror cache is what `git diff` /
+            // `git log` actually reads from in a federated workspace.
+            // When the local snapshot is `UnavailableError` the
+            // mirror is also stale or missing (the mirror-fetch path
+            // is part of the same pipeline); on `WarmingUp` the mirror
+            // is mid-rebuild. So the mirror capability state
+            // mirrors the local structural state — same data, two
+            // surfaces. Surfaced separately so the agent can tell
+            // "the cache needs a rebuild" from "the underlying data
+            // is broken" (the latter would also knock git_history
+            // down; the former leaves git_history alone once the
+            // mirror is fresh).
+            let mirrors = Capability::new(mirrors_state, true);
             Capabilities {
                 symbols,
                 call_graph,
-                git_history: Capability::new(CapabilityState::Ready, false),
+                git_history: Capability::new(structural, false),
+                mirrors,
                 semantic_search,
             }
         }
@@ -677,6 +692,11 @@ impl ToolExecutor {
                     let caps = capabilities_for(
                         structural,
                         call_state,
+                        // F5: per-repo mirror state == the repo's
+                        // own structural state (the mirror cache
+                        // and the index share the same fetch
+                        // pipeline; broken index → broken mirror).
+                        structural,
                         snapshot.retry_after_ms,
                         semantic_stub,
                         embeddings_running,
@@ -698,6 +718,11 @@ impl ToolExecutor {
             let aggregate = capabilities_for(
                 worst,
                 worst_call_graph,
+                // F5: federation-aggregate mirror state == the
+                // worst-repo's structural state (mirror cache
+                // collapses per-repo, same data as the per-repo
+                // index).
+                worst,
                 worst_retry_after_ms,
                 semantic_stub,
                 embeddings_running,
@@ -718,6 +743,10 @@ impl ToolExecutor {
         let capabilities = capabilities_for(
             structural,
             call_graph_state(structural, self.ctx.graph.calls_published_for().is_some()),
+            // F5: single-workspace mirror state == the local
+            // structural state (mirror cache lives next to the
+            // index and shares its lifecycle).
+            structural,
             lifecycle.retry_after_ms,
             semantic_stub,
             embeddings_running,

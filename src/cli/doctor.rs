@@ -487,6 +487,11 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
             symbols: Capability::new(CapabilityState::UnavailableError, false),
             call_graph: Capability::new(CapabilityState::UnavailableError, false),
             git_history: Capability::new(CapabilityState::UnavailableError, false),
+            // F5: in the "no snapshot yet" state the mirror cache is
+            // unknown — surface as `UnavailableOptional` so an
+            // operator sees "you may have a cache problem" without
+            // it gating the agent.
+            mirrors: Capability::new(CapabilityState::UnavailableOptional, true),
             semantic_search: Capability::new(CapabilityState::UnavailableOptional, true),
         },
         transport: TransportReport {

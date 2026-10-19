@@ -510,6 +510,16 @@ pub struct Capabilities {
     pub symbols: Capability,
     pub call_graph: Capability,
     pub git_history: Capability,
+    /// F5: per-repo mirror-cache health. The same mirror that
+    /// backs `git diff` / `git log` also backs the `repo_health`
+    /// fields used by every federated tool — when the mirror is
+    /// missing or stale, `git_history` collapses too. Surfaced
+    /// separately so an agent can tell whether the GAP is the
+    /// mirror cache (rebuildable via `lain reindex`) or the
+    /// underlying data (`git_history` itself broken). Optional —
+    /// mirrors are infrastructure, not user-visible features, so
+    /// their failure does not block the agent.
+    pub mirrors: Capability,
     pub semantic_search: Capability,
 }
 
@@ -579,6 +589,7 @@ mod tests {
             symbols: Capability::new(CapabilityState::Ready, false),
             call_graph: Capability::new(CapabilityState::Ready, false),
             git_history: Capability::new(CapabilityState::Ready, false),
+            mirrors: Capability::new(CapabilityState::Ready, true),
             semantic_search: Capability::new(CapabilityState::Ready, true),
         }
     }
@@ -594,7 +605,13 @@ mod tests {
             UnavailableError,
         ];
         // Exercise each required capability independently and all combinations,
-        // including simultaneous required and optional failures.
+        // including simultaneous required and optional failures. The
+        // 4-D grid (5^4 = 625 iterations) pins the contract for
+        // symbols / call_graph / git_history / semantic_search. The
+        // `mirrors` capability is optional and its state never gates
+        // the 2-exit-code path (the only consumer of `mirrors` is the
+        // agent's diagnostic UI); its independent state coverage is
+        // pinned by `mirrors_state_does_not_gate_required` below.
         for symbols in states {
             for calls in states {
                 for git in states {
@@ -603,6 +620,7 @@ mod tests {
                             symbols: Capability::new(symbols, false),
                             call_graph: Capability::new(calls, false),
                             git_history: Capability::new(git, false),
+                            mirrors: Capability::new(Ready, true),
                             semantic_search: Capability::new(semantic, true),
                         };
                         let required = [symbols, calls, git];
@@ -623,6 +641,41 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// F5 — the new `mirrors` capability is optional. Every state
+    /// value, including `UnavailableError`, must leave the agent
+    /// usable when symbols / call_graph / git_history are `Ready`.
+    /// The mirrors field is a diagnostic — operators look at it to
+    /// decide whether to rebuild the mirror cache, not to gate the
+    /// agent's answers.
+    #[test]
+    fn mirrors_state_does_not_gate_required() {
+        use CapabilityState::*;
+        for mirror_state in [
+            Ready,
+            WarmingUp,
+            StaleUsable,
+            UnavailableOptional,
+            UnavailableError,
+        ] {
+            let caps = Capabilities {
+                symbols: Capability::new(Ready, false),
+                call_graph: Capability::new(Ready, false),
+                git_history: Capability::new(Ready, false),
+                mirrors: Capability::new(mirror_state, true),
+                semantic_search: Capability::new(Ready, true),
+            };
+            // All required are Ready, semantic is Ready, transport
+            // healthy → exit 0 (Ready). Mirrors must not pull this
+            // down to Degraded (exit 1) or Unusable (exit 2).
+            assert_eq!(
+                caps.readiness(true),
+                Readiness::Ready,
+                "mirror state {mirror_state:?} must not gate readiness"
+            );
+            assert_eq!(caps.readiness(true).exit_code(), 0);
         }
     }
 
@@ -652,6 +705,7 @@ mod tests {
             "symbols": {"state": "ready", "optional": false},
             "call_graph": {"state": "ready", "optional": false},
             "git_history": {"state": "ready", "optional": false},
+            "mirrors": {"state": "ready", "optional": true},
             "semantic_search": {"state": "unavailable_optional", "optional": true}
         });
         assert_eq!(serde_json::to_value(&capabilities).unwrap(), expected);
