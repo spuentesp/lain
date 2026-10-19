@@ -3524,8 +3524,9 @@ mod pr15_check_binding_keys {
     use lain::federation::contracts::config::ContractFederationConfig;
     use lain::federation::contracts::index::ConsumerTarget;
     use lain::federation::contracts::model::{
-        ContractFact, ContractKey, HttpMethod, ProviderFact, ProviderOrigin, TopicConsumerFact,
-        TopicConsumerKind,
+        ContractFact, ContractKey, HostPart, HttpMethod, NormalizedUrl, ProviderFact,
+        ProviderOrigin, RpcConsumerFact, RpcProviderFact, RpcSystem, Table, TableConsumerFact,
+        TopicConsumerFact, TopicConsumerKind, WebSocketConsumerFact, WebSocketProviderFact,
     };
     use std::str::FromStr;
 
@@ -3899,6 +3900,447 @@ mod pr15_check_binding_keys {
         // above (`ConsumerTarget::Binds { provenance: Confirmed }`)
         // is the confirmation's source of truth. (Pre-existing gap,
         // equally reachable for a hand-written HTTP binding.)
+    }
+
+    // ─── Task 4 carry-forward: per-kind round-trip table ───────────    //
+    // The topic round-trip above proves the chain for one fact-keyed
+    // kind only. This table drives the same chain — entry YAML →
+    // `load_from_str` → `validate` → `apply_confirmed_binding` →
+    // `Binds`/`Confirmed` — for `rpc:<system>:<service>:<method>`,
+    // `ws:<route>` and `table:<name>`, and for BOTH key spellings:
+    // the `check_binding`-emitted entry (Display/wire form) and a
+    // hand-written entry in the documented `repos.yaml#bindings`
+    // grammar. Every fixture leaves its consumer unresolved by the
+    // rules first, so the entry — not an invented join — is what
+    // binds it.
+
+    #[derive(Clone, Copy)]
+    enum FactKind {
+        Rpc,
+        Ws,
+        Table,
+    }
+
+    /// One row of the per-kind round-trip table. `endpoint_key` is the
+    /// `repos.yaml#bindings` grammar form an operator writes; `entry_key`
+    /// is the Display/wire form `check_binding` renders into
+    /// `bindings_entry`.
+    struct RoundTripCase {
+        kind: FactKind,
+        label: &'static str,
+        endpoint_key: &'static str,
+        entry_key: &'static str,
+        symbol: &'static str,
+        path: &'static str,
+    }
+
+    const ROUND_TRIP_CASES: &[RoundTripCase] = &[
+        RoundTripCase {
+            kind: FactKind::Rpc,
+            label: "rpc",
+            endpoint_key: "rpc:grpc:orders.v1:Get",
+            entry_key: "rpc:orders.v1/Get",
+            symbol: "get_order",
+            path: "src/c.py",
+        },
+        RoundTripCase {
+            kind: FactKind::Ws,
+            label: "ws",
+            endpoint_key: "ws:/realtime",
+            entry_key: "websocket:/realtime",
+            symbol: "dial",
+            path: "src/w.py",
+        },
+        RoundTripCase {
+            kind: FactKind::Table,
+            label: "table",
+            endpoint_key: "table:public.orders",
+            entry_key: "table:public.orders",
+            symbol: "read_orders",
+            path: "src/s.py",
+        },
+    ];
+
+    /// A contract-bearing node with exactly one fact, id minted the
+    /// same way the sensors mint synthetic site ids.
+    fn fact_node(
+        ty: NodeType,
+        repo: &str,
+        path: &str,
+        name: &str,
+        line: u32,
+        fact: ContractFact,
+    ) -> GraphNode {
+        let ns = RepoNamespace::for_test();
+        let id = GlobalId::new(
+            &RepoId::new(repo).unwrap(),
+            ty.clone(),
+            path,
+            name,
+            Some(line),
+        )
+        .as_str()
+        .to_string();
+        let mut n = GraphNode::new_in(ty, name.to_string(), path.to_string(), &ns);
+        n.repo_id = Some(repo.to_string());
+        n.id = id;
+        n.line_start = Some(line);
+        n.line_end = Some(line);
+        n.contract = vec![fact];
+        n
+    }
+
+    /// Provider node in `orders` carrying the kind's provider fact —
+    /// the endpoint `check_binding` confirms against.
+    fn provider_node_for(case: &RoundTripCase) -> GraphNode {
+        match case.kind {
+            FactKind::Rpc => fact_node(
+                NodeType::Module,
+                "orders",
+                "src/orders.rs",
+                "orders.v1.Get",
+                5,
+                ContractFact::RpcProvider(RpcProviderFact {
+                    system: RpcSystem::Grpc,
+                    service: "orders.v1".into(),
+                    method: "Get".into(),
+                    request_type: "GetRequest".into(),
+                    response_type: "GetResponse".into(),
+                    handler: None,
+                }),
+            ),
+            FactKind::Ws => fact_node(
+                NodeType::HttpRoute,
+                "orders",
+                "src/rt.ts",
+                "ws:server:/realtime",
+                5,
+                ContractFact::WebSocketProvider(WebSocketProviderFact {
+                    route: "/realtime".into(),
+                    handler: None,
+                }),
+            ),
+            FactKind::Table => fact_node(
+                NodeType::Table,
+                "orders",
+                "src/schema.sql",
+                "public.orders",
+                5,
+                ContractFact::Table(Table {
+                    service: String::new(),
+                    name: "public.orders".into(),
+                }),
+            ),
+        }
+    }
+
+    /// Consumer node in `billing`. Each fact is shaped so the joiner's
+    /// resolver refuses to invent a bind: rpc and ws dial a host no
+    /// service declares; the table reader also reads `private.audit`,
+    /// which owns no endpoint, and the table resolver is all-or-nothing.
+    fn consumer_node_for(case: &RoundTripCase) -> GraphNode {
+        match case.kind {
+            FactKind::Rpc => fact_node(
+                NodeType::Function,
+                "billing",
+                case.path,
+                case.symbol,
+                10,
+                ContractFact::RpcConsumer(RpcConsumerFact {
+                    system: RpcSystem::Grpc,
+                    service: "orders.v1".into(),
+                    method: "Get".into(),
+                    channel_target: Some("orders:50051".into()),
+                    channel_host_part: HostPart::Literal("orders".into()),
+                }),
+            ),
+            FactKind::Ws => fact_node(
+                NodeType::Function,
+                "billing",
+                case.path,
+                case.symbol,
+                10,
+                ContractFact::WebSocketConsumer(WebSocketConsumerFact {
+                    url: NormalizedUrl {
+                        host: HostPart::Literal("orders".into()),
+                        template: Some("/realtime".into()),
+                    },
+                    route: "/realtime".into(),
+                }),
+            ),
+            FactKind::Table => fact_node(
+                NodeType::Function,
+                "billing",
+                case.path,
+                case.symbol,
+                10,
+                ContractFact::TableConsumer(TableConsumerFact {
+                    tables: vec!["public.orders".into(), "private.audit".into()],
+                }),
+            ),
+        }
+    }
+
+    /// Two repos (`orders` / `billing`), one unscoped service each,
+    /// the case's provider node in `orders` and consumer node in
+    /// `billing`, both registered as contract nodes. Returns the
+    /// federation and the consumer's GlobalId string.
+    async fn build_kind_binding_federation(
+        root: &Path,
+        case: &RoundTripCase,
+    ) -> (Arc<FederatedIndex>, String) {
+        let orders_dir = root.join("orders");
+        let billing_dir = root.join("billing");
+        for d in [&orders_dir, &billing_dir] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("src/.keep"), b"").unwrap();
+            git_init_committed(d);
+        }
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let backend: Arc<dyn lain::federation::graph_backend::GraphBackend> =
+            Arc::new(PetgraphBackend::new(&data_dir).expect("backend"));
+        let fed = Arc::new(FederatedIndex::new(backend));
+
+        let cfg = ContractFederationConfig {
+            services: fixture_services(),
+            ..Default::default()
+        };
+        fed.set_contract_config(cfg);
+
+        let orders_id = RepoId::new("orders").unwrap();
+        let billing_id = RepoId::new("billing").unwrap();
+        for (repo_id, dir) in [
+            (orders_id.clone(), orders_dir.clone()),
+            (billing_id.clone(), billing_dir.clone()),
+        ] {
+            let src: Box<dyn lain::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::with_config(
+                    repo_id.clone(),
+                    dir.clone(),
+                    lain::federation::config::SourceConfig::WorkspaceDir { path: dir.clone() },
+                )
+                .unwrap(),
+            );
+            src.fetch().await.unwrap();
+            fed.add_repo(src, &data_dir).await.unwrap();
+            fed.get_repo(&repo_id)
+                .unwrap()
+                .set_health(RepoHealth::Ready);
+        }
+
+        let orders_g = fed.get_repo(&orders_id).unwrap().db().clone();
+        let billing_g = fed.get_repo(&billing_id).unwrap().db().clone();
+
+        let provider = provider_node_for(case);
+        let consumer = consumer_node_for(case);
+        let provider_id = provider.id.clone();
+        let consumer_id = consumer.id.clone();
+        orders_g
+            .insert_nodes_batch(std::slice::from_ref(&provider))
+            .unwrap();
+        billing_g
+            .insert_nodes_batch(std::slice::from_ref(&consumer))
+            .unwrap();
+
+        fed.register_contract_node_for_test(orders_id, provider_id);
+        fed.register_contract_node_for_test(billing_id, consumer_id.clone());
+        fed.mark_contracts_dirty();
+        for id in [
+            RepoId::new("orders").unwrap(),
+            RepoId::new("billing").unwrap(),
+        ] {
+            fed.project_repo(&id).await.expect("project_repo");
+        }
+        fed.rejoin_contracts_if_dirty().expect("rejoin");
+        (fed, consumer_id)
+    }
+
+    /// Post-condition shared by every chain half: the consumer's
+    /// verdict is `Binds` carrying `Confirmed` provenance sourced at
+    /// `repos.yaml#bindings`, there is exactly one `Binds` edge, and
+    /// no binding went stale.
+    fn assert_confirmed(
+        fed: &Arc<FederatedIndex>,
+        consumer_id: &str,
+        case: &RoundTripCase,
+        half: &str,
+    ) {
+        let tag = format!("[{}/{}]", case.label, half);
+        let index = fed.contract_index().expect("contract index after join");
+        let cid = GlobalId::from_canonical(consumer_id);
+        let after = index.consumer(&cid).expect("consumer resolution");
+        let Some(ConsumerTarget::Binds { provenance, .. }) = after.target.as_ref() else {
+            panic!(
+                "{tag} confirmed binding must bind the consumer, got {:?}",
+                after.target
+            );
+        };
+        let EdgeProvenance::Confirmed { source } = provenance else {
+            panic!("{tag} bind must carry Confirmed provenance, got {provenance:?}");
+        };
+        assert!(
+            source.contains("repos.yaml#bindings"),
+            "{tag} provenance must name the bindings entry, got {source}"
+        );
+        assert!(
+            index.stale_bindings.is_empty(),
+            "{tag} the entry matched its consumer: {:?}",
+            index.stale_bindings
+        );
+        let binds: Vec<GraphEdge> = fed
+            .backend()
+            .all_edges()
+            .expect("edges")
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::Binds)
+            .collect();
+        assert_eq!(
+            binds.len(),
+            1,
+            "{tag} exactly one Binds edge expected: {binds:?}"
+        );
+        assert_eq!(binds[0].source_id, consumer_id, "{tag} Binds source");
+    }
+
+    #[tokio::test]
+    async fn pr15_bindings_entry_round_trip_confirms_rpc_ws_table_consumers() {
+        for case in ROUND_TRIP_CASES {
+            let tmp = tempfile::tempdir().unwrap();
+            let (fed, consumer_id) = build_kind_binding_federation(tmp.path(), case).await;
+
+            // Pre-condition — "no invented bindings": the rules leave
+            // the consumer unresolved (rpc/ws dial a host no service
+            // declares; the table reader reads a second, unowned table
+            // and the table resolver is all-or-nothing), so nothing is
+            // bound until the operator's entry says so.
+            {
+                let index = fed.contract_index().expect("contract index");
+                let before = index
+                    .consumer(&GlobalId::from_canonical(&consumer_id))
+                    .expect("consumer resolution");
+                assert!(
+                    matches!(&before.target, Some(ConsumerTarget::Unresolved { .. })),
+                    "[{}] fixture must start unresolved, got {:?}",
+                    case.label,
+                    before.target
+                );
+                assert!(before.bound_endpoints.is_empty());
+            }
+
+            // (1) Tool half: `check_binding` accepts the bindings-grammar
+            // endpoint key and emits a legal `bindings:` item whose keys
+            // are the Display/wire form of the same key.
+            assert_eq!(
+                ContractKey::from_str(case.endpoint_key).expect("endpoint key parses"),
+                ContractKey::from_str(case.entry_key).expect("entry key parses"),
+                "[{}] binding form and wire form must name one key",
+                case.label
+            );
+            let outcome = check_binding_handle(
+                &{
+                    let _status = Box::leak(Box::new(
+                        lain::server::mcp::handler::HandlerStatus::for_test(),
+                    ));
+                    ctx_for(&fed, _status)
+                },
+                json!({
+                    "snapshot": "live",
+                    "consumer": consumer_id,
+                    "endpoint": {"service": "orders-svc", "key": case.endpoint_key}
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(
+                !outcome.is_error,
+                "[{}] errors: {:?}",
+                case.label, outcome.structured["error"]
+            );
+            let data = &outcome.structured["data"];
+            assert_eq!(
+                data["valid"],
+                json!(true),
+                "[{}] check_binding must accept the link: {data:?}",
+                case.label
+            );
+            let entry = data["bindings_entry"]
+                .as_str()
+                .expect("bindings_entry")
+                .to_string();
+            assert!(
+                entry.contains(&format!("key: \"{}\"", case.entry_key)),
+                "[{}] emitted entry must carry the wire form: {entry}",
+                case.label
+            );
+
+            // (2) Round-trip, config half — the emitted entry (wire
+            // form) parses and survives validate_key.
+            let parsed = ContractFederationConfig::load_from_str(&format!("bindings:\n{entry}"))
+                .expect("emitted entry must parse as a bindings item");
+            assert_eq!(
+                parsed.bindings.len(),
+                1,
+                "[{}] emitted entry: {entry}",
+                case.label
+            );
+            let binding = &parsed.bindings[0];
+            assert_eq!(binding.consumer.repo, "billing", "[{}]", case.label);
+            assert_eq!(binding.consumer.path, case.path, "[{}]", case.label);
+            assert_eq!(binding.consumer.symbol, case.symbol, "[{}]", case.label);
+            assert_eq!(binding.consumer.key, case.entry_key, "[{}]", case.label);
+            assert_eq!(binding.provider.service, "orders-svc", "[{}]", case.label);
+            assert_eq!(binding.provider.key, case.entry_key, "[{}]", case.label);
+
+            let mut join_cfg = ContractFederationConfig {
+                services: fixture_services(),
+                ..Default::default()
+            };
+            join_cfg.bindings = parsed.bindings.clone();
+            join_cfg
+                .validate(&["orders".to_string(), "billing".to_string()])
+                .expect("emitted keys must survive validate_key");
+
+            // (3) Round-trip, join half: `apply_confirmed_binding`
+            // turns the entry into a Confirmed Binds verdict.
+            fed.set_contract_config(join_cfg);
+            fed.rejoin_contracts_if_dirty().expect("rejoin");
+            assert_confirmed(&fed, &consumer_id, case, "tool-emitted entry");
+
+            // (4) The documented `repos.yaml#bindings` grammar form
+            // drives the same chain: hand-written entry in binding
+            // form → parse → validate → Confirmed. This is the
+            // per-kind proof behind the coverage matrix's
+            // `binding_supported` column.
+            let hand_written = format!(
+                "- consumer: {{ repo: billing, path: {}, symbol: {}, key: \"{}\" }}\n  provider: {{ service: orders-svc, key: \"{}\" }}\n",
+                case.path, case.symbol, case.endpoint_key, case.endpoint_key
+            );
+            let parsed =
+                ContractFederationConfig::load_from_str(&format!("bindings:\n{hand_written}"))
+                    .expect("binding-form entry must parse as a bindings item");
+            assert_eq!(
+                parsed.bindings.len(),
+                1,
+                "[{}] hand entry: {hand_written}",
+                case.label
+            );
+            let binding = &parsed.bindings[0];
+            assert_eq!(binding.consumer.key, case.endpoint_key, "[{}]", case.label);
+            assert_eq!(binding.provider.key, case.endpoint_key, "[{}]", case.label);
+
+            let mut join_cfg = ContractFederationConfig {
+                services: fixture_services(),
+                ..Default::default()
+            };
+            join_cfg.bindings = parsed.bindings.clone();
+            join_cfg
+                .validate(&["orders".to_string(), "billing".to_string()])
+                .expect("binding-form keys must survive validate_key");
+            fed.set_contract_config(join_cfg);
+            fed.rejoin_contracts_if_dirty().expect("rejoin");
+            assert_confirmed(&fed, &consumer_id, case, "binding-form entry");
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Protocol coverage matrix — one row per [`ContractKey`] kind, the
+//! Protocol coverage matrix — one row per [`ContractKey`](crate::federation::contracts::model::ContractKey) kind, the
 //! audit that lets no protocol escape detection, joining, manual
 //! confirmation, or dashboard visualization.
 //!
@@ -26,10 +26,8 @@
 //! `ContractKey` variant breaks its exhaustive `match` at compile
 //! time, so the author must declare the kind's coverage row.
 
-use crate::federation::contracts::model::ContractKey;
-
 /// One row of the protocol coverage matrix. `kind` is the
-/// [`ContractKey::kind`] tag for the variant the row describes.
+/// [`ContractKey::kind`](crate::federation::contracts::model::ContractKey::kind) tag for the variant the row describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtocolCoverage {
     /// `ContractKey::kind()` tag (`"http"` / `"graphql"` / `"topic"` /
@@ -53,7 +51,7 @@ pub struct ProtocolCoverage {
     pub view_edges: &'static [&'static str],
 }
 
-/// The protocol coverage matrix: one row per [`ContractKey`] kind, in
+/// The protocol coverage matrix: one row per `ContractKey` kind, in
 /// the audit table's order (http, graphql, topic, rpc, websocket,
 /// table).
 pub fn coverage_matrix() -> Vec<ProtocolCoverage> {
@@ -118,7 +116,7 @@ pub fn coverage_matrix() -> Vec<ProtocolCoverage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::federation::contracts::model::{GraphqlOp, MethodSpec, RpcSystem};
+    use crate::federation::contracts::model::{ContractKey, GraphqlOp, MethodSpec, RpcSystem};
     use crate::server::mcp::federation_tools::WORKSPACE_GRAPH_EDGE_TYPES;
 
     #[test]
