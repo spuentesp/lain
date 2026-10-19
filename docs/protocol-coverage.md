@@ -198,7 +198,10 @@ the above mechanically:
   (topic) and
   `pr15_bindings_entry_round_trip_confirms_rpc_ws_table_consumers`
   (rpc, ws, table) in `tests/federation_contracts_e2e.rs`, plus
-  `task6_check_binding_yaml_round_trip` (graphql).
+  `task6_check_binding_yaml_round_trip` (graphql). HTTP's
+  `binding_supported` evidence predates this plan — pinned by the
+  `pr13_check_binding_*` HTTP binding tests in the same file, with no
+  dedicated round-trip test name like the four above.
 
 ## Backlog
 
