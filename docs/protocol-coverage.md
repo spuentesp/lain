@@ -213,27 +213,196 @@ referenced (never copied) by the coverage matrix.
 ### Bus and job-queue systems (detection patterns only)
 
 None of these is a `ContractKey` problem — `Topic { broker, name }`
-is broker-generic, and the binding grammar is already there. Each
-is a pure detection-pattern addition to `event_sensor`'s
-declarative pattern list:
+is broker-generic, the binding grammar (`topic:<broker>:<name>`) is
+already there, and the hub model (one canonical hub per
+`(broker, topic)`, per-site `Produces`/`Consumes`, `PayloadSchema`)
+is broker-agnostic. Every entry below is **detection pattern only —
+no new contract kind needed**; each maps to `Topic { broker, name }`.
+The recipe for adding any of them without new design is the next
+section.
 
-- MQTT (paho, mqtt.js)
-- NATS (nats.py, nats.js)
-- Redis pub/sub and Streams (redis-py, ioredis)
-- AWS SQS / SNS (boto3, aws-sdk)
-- Amazon Kinesis
-- Amazon EventBridge
-- Apache Pulsar
-- ZeroMQ
-- Google Cloud Pub/Sub
-- Job queues: Temporal, Sidekiq, Resque, Dramatiq, Huey
-- Quartz (Java `@Scheduled`)
-- Inngest
-- Debezium / CDC output topics
+- **MQTT** (paho-mqtt / Eclipse Paho, mqtt.js) —
+  `client.publish(topic, …)`, `client.subscribe(topic)` /
+  `subscribe([topic, …])`, `client.unsubscribe(topic)`, and paho's
+  positional `publish(topic, payload, qos, retain)`.
+  *(detection pattern only — no new contract kind needed)*
+- **NATS** (nats.py / `nats.aio`, nats.js, nats.go) —
+  `nc.publish(subject, …)`, `nc.subscribe(subject, …)`,
+  `nc.request(subject, …)`; JetStream `js.publish(subj, …)` /
+  `js.subscribe(subj, …)`. Subject is the topic name.
+  *(detection pattern only — no new contract kind needed)*
+- **Redis pub/sub and Streams** (redis-py / `redis`, ioredis,
+  go-redis) — `r.publish(channel, …)`, `pubsub.subscribe(channel)` /
+  `psubscribe(pattern)`; Streams `r.xadd(stream, …)`,
+  `r.xread({stream: …})`, `r.xreadgroup(group, consumer, …)`,
+  `r.xgroup_create(stream, group, …)`.
+  *(detection pattern only — no new contract kind needed)*
+- **AWS SQS / SNS** (boto3, aws-sdk v2/v3) —
+  `sqs.send_message(QueueUrl=…)` / `send_message_batch` /
+  `receive_message(QueueUrl=…)`, `sns.publish(TopicArn=…)` /
+  `sns.subscribe(TopicArn=…)`; JS `SendMessageCommand` /
+  `ReceiveMessageCommand` / `PublishCommand` with `QueueUrl` /
+  `TopicArn`. Queue URL or topic ARN is the name.
+  *(detection pattern only — no new contract kind needed)*
+- **Amazon Kinesis** (boto3, aws-sdk) —
+  `kinesis.put_record(StreamName=…)` / `put_records`,
+  `get_shard_iterator(StreamName=…)` / `get_records`; JS
+  `PutRecordCommand({ StreamName })`. Stream name is the topic.
+  *(detection pattern only — no new contract kind needed)*
+- **Amazon EventBridge** (boto3, aws-sdk) —
+  `events.put_events(Entries=[{Source, DetailType, EventBusName}])`;
+  JS `PutEventsCommand({ Entries })`. Bus identity is `EventBusName`
+  (default bus when absent); event identity is `Source`/`DetailType`.
+  *(detection pattern only — no new contract kind needed)*
+- **Apache Pulsar** (pulsar-client Python/Node/Java/Go) —
+  `client.create_producer(topic=…)` / `producer.send(…)`,
+  `client.subscribe(topic, subscription_name=…)`; Java
+  `newProducer().topic("…").create()` /
+  `newConsumer().topic("…").subscribe()`.
+  *(detection pattern only — no new contract kind needed)*
+- **ZeroMQ** (pyzmq, zeromq.js, zmq, cppzmq) — topics are PUB/SUB
+  filter prefixes, not broker names:
+  `sock.setsockopt(zmq.SUBSCRIBE, prefix)`,
+  `sock.send_multipart([topic, …])`, `sock.send_string("topic …")`.
+  *(detection pattern only — no new contract kind needed)*
+- **Google Cloud Pub/Sub** (google-cloud-pubsub, `@google-cloud/pubsub`)
+  — `publisher.publish(topic_path, data)`,
+  `publisher.topic_path(project, topic)`,
+  `subscriber.subscribe(subscription_path, callback)`; Node
+  `pubsub.topic(name).publishMessage({ data })`.
+  *(detection pattern only — no new contract kind needed)*
+- **Temporal** (temporalio, `@temporalio/*`, Go SDK) —
+  `Worker(client, task_queue=…)`,
+  `client.start_workflow(…, task_queue=…)` /
+  `execute_workflow(…)`; Go `worker.New(client, "task-queue", …)`,
+  `StartWorkflowOptions{TaskQueue: …}`. Task queue is the topic.
+  *(detection pattern only — no new contract kind needed)*
+- **Sidekiq** (Ruby) — `Sidekiq::Client.push('class' => …, 'queue' =>
+  …)`, `MyWorker.perform_async(…)` / `perform_in` / `perform_at`,
+  `sidekiq_options queue: '…'`. Queue is the topic.
+  *(detection pattern only — no new contract kind needed)*
+- **Resque** (Ruby) — `Resque.enqueue(MyJob, …)`,
+  `Resque.enqueue_to('queue', MyJob, …)`, `@queue = '…'` in the job
+  class. *(detection pattern only — no new contract kind needed)*
+- **Dramatiq** (Python) — `@dramatiq.actor(queue_name="…")`,
+  `actor.send(…)` / `send_with_countdown(…)`; broker ctor
+  (`RabbitmqBroker`, `RedisBroker`) names the transport.
+  *(detection pattern only — no new contract kind needed)*
+- **Huey** (Python) — `@huey.task()` /
+  `@huey.periodic_task(crontab(…))`, `task(…)`,
+  `huey.enqueue(task)`; `RedisHuey('queue-name')`. The Huey
+  instance name is the topic.
+  *(detection pattern only — no new contract kind needed)*
+- **Quartz** (Java `@Scheduled`) — `@Scheduled(cron = "…")` /
+  `fixedRate` / `fixedDelay` (Spring), `scheduler.scheduleJob(job,
+  trigger)`, `JobBuilder.newJob(…).withIdentity("…")`. This is the
+  `scheduled` shape (Celery / NestJS `@Cron` arm), not produce/
+  consume. *(detection pattern only — no new contract kind needed)*
+- **Inngest** — `inngest.send({ name: "…", data })`,
+  `inngest.createFunction({ triggers: [{ event: "…" }] })` / `on: {
+  event: "…" }`. The event name is the topic.
+  *(detection pattern only — no new contract kind needed)*
+- **Debezium / CDC** — connector configs (`topic.prefix`,
+  `table.include.list`), Kafka Connect REST `POST /connectors` with
+  `connector.class=io.debezium.…`, embedded
+  `DebeziumEngine.create(…)`. Output topics follow
+  `<topic.prefix>.<db>.<table>`; consuming them is an ordinary
+  consumer idiom on the underlying broker, so the gap is the naming
+  convention and connector-config-derived names.
+  *(detection pattern only — no new contract kind needed)*
 
-Adding a system is data, not code: a pattern entry whose captures
-map to `SiteKind::Produces` / `SiteKind::Consumes`. Names read from
-literals or same-file constants; dynamic names land in
-`coverage.unnormalized`. The hub model needs nothing new — any
-broker is `Topic { broker, name }`. Adding systems is backlog by
-design.
+## Recipe: adding a bus without new design
+
+Adding one of the systems above is a pattern entry, a name rule, and
+tests. None of the six `ContractKey` kinds, the joiner, or the hub
+model changes — `coverage_matrix()`'s exhaustive match stays closed.
+
+**(a) Pattern entries, not code.** Detection lives in the
+declarative pattern list `src/server/sensors/patterns/frameworks.yaml`
+— the `topic_producer` / `topic_consumer` / `scheduled` entries under
+each language key, consumed by `event_sensor` through
+`Patterns::topic_producer_patterns` / `topic_consumer_patterns` /
+`scheduled_patterns` and `util::topic_idioms_for`. Two real entries
+as the template:
+
+```yaml
+    - id: pika-publish
+      kind: topic_producer
+      path_regex: '\.basic_publish\s*\([^)]*?routing_key\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kafkajs-consumer
+      kind: topic_consumer
+      # Group 1: string-literal topic name in the topics array.
+      path_regex: '\.(?:run|subscribe)\s*\(\s*\{[^}]*?topics?\s*:\s*\[\s*["'']([^"'']+)["'']'
+```
+
+The `kind` is the site kind: `topic_producer` →
+`SiteKind::Produces`, `topic_consumer` → `SiteKind::Consumes`,
+`scheduled` → `SiteKind::Scheduled` (emitted as a `Consumes` leg with
+`TopicConsumerKind::Scheduled`). Capture group 1 is the name; an
+optional group 2 is a bare identifier (see (b)). The broker label
+follows the matched framework id, never the filename (`broker_for`
+in `event_sensor.rs`): `pika*` / `amqplib*` mint `amqp/<queue>`,
+everything else `kafka/<topic>`. A bus with its own broker label
+extends that one mapping today; the follow-up below moves the label
+onto the YAML entry.
+
+**(b) Names from string literals or same-file constants.**
+`resolve_idiom_capture` in `event_sensor.rs` applies §6.7: a quoted
+string is the name as-is; a bare identifier resolves against the
+file's `const` / `let` table; anything else is a **dynamic** name —
+`None` is returned and the emitter skips the site rather than minting
+a hub, so per the sensor's contract those calls surface in
+`coverage.unnormalized` (the §9.7 unnormalized bucket) instead of
+inventing a topic. Pinned by `dynamic_topic_arg_does_not_emit_topic_node`
+in the same file. So shape the regex to capture literal-or-identifier
+(as `pika-publish` above); a pattern that captures an expression
+contributes nothing.
+
+**(c) The hub model needs nothing new.** Any broker is
+`Topic { broker, name }`: hub identity (label alone, `TOPIC_ANCHOR`),
+the per-site `Produces` / `Consumes` legs, and the payload arm
+(`*.avsc` / `*.schema.json` → `Schema` + `PayloadSchema`) are all
+broker-agnostic. The joiner parses the label prefix back into
+`ContractKey::Topic { broker, .. }` (`default_broker_for`), and
+`topic:<broker>:<name>` / `topic:<broker>/<name>` already confirm any
+broker by hand — Redis `orders:created`, MQTT `sensors/temp` are named
+in the topic section's grammar above. No new `ContractKey` kind, no
+joiner change, no binding-grammar change.
+
+**(d) Tests follow `tests/event_hub_e2e.rs`.** Put the new call shape
+in a fixture file (`fixture_repo_with` / `write_file`), run
+`scan_workspace_event` (`scan_events`), and assert the hub contract
+that file pins: one `Topic` node per `(broker, topic)`
+(`two_sites_one_topic_mint_exactly_one_hub_node`), one
+`Produces` / `Consumes` edge per site
+(`hub_keeps_one_produces_edge_per_top_level_site`), and the canonical
+hub id (`hub_id` / `TOPIC_ANCHOR` literal). Name resolution (literal,
+same-file constant, dynamic drop) is pinned in `event_sensor`'s
+`#[cfg(test)]` module (`ts_constant_topic_name_is_resolved`,
+`dynamic_topic_arg_does_not_emit_topic_node`) — extend that shape for
+the new entry.
+
+### Standing follow-up: patterns as config
+
+The pattern list is already declarative YAML, but bus knowledge still
+leaks into code in two places, and the standing directive is that
+detection patterns must be **data, not scattered literals**
+(`src/server/sensors/AGENTS.md`,
+`docs/CONTRIBUTING_AGENTS.md` "sensor pattern"):
+
+1. `event_sensor` reads the **bundled** `Patterns::patterns()`
+   singleton, while the per-repo override surface
+   (`Patterns::with_overrides` → `load_overrides`, which layers
+   `<repo>/.lain/patterns/*.yaml` and already appends fresh-`id`
+   entries to a language's list) is what `entry_point_sensor` and
+   `http_client_sensor` use. Wiring the event sensor to
+   `with_overrides` lets a repo add a bus as config, no rebuild.
+2. `broker_for`'s framework-id → broker mapping (`pika*` /
+   `amqplib*` → `amqp`, else `kafka`) is a hardcoded arm list. Move
+   the broker label onto the YAML entry so pattern and broker travel
+   as one data record.
+
+Until both land, adding a bus is a `frameworks.yaml` entry plus at
+most one `broker_for` arm — still no new design, but a code change
+rather than a data change. Extracting the patterns to the
+`<repo>/.lain/patterns` surface makes adding a bus data end to end.

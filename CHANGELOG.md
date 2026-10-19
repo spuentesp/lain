@@ -10,7 +10,11 @@ All notable changes to LAIN are documented here. Versions follow
 - `docs/protocol-coverage.md`: the protocol coverage audit as
   maintained prose — one section per `ContractKey` kind (sensors,
   joiner resolver, `check_binding`/`bindings` grammar, dashboard
-  view edges) plus the bus/system detection backlog. The
+  view edges), a bus/system detection backlog (one line per missing
+  system — MQTT, NATS, Redis, SQS/SNS, Kinesis, EventBridge, Pulsar,
+  ZeroMQ, Pub/Sub, job queues, Quartz, Inngest, Debezium — with the
+  client call shapes to look for), and a recipe for adding any of
+  them as pure detection patterns (no new contract kind). The
   machine-readable twin is `federation::contracts::coverage_matrix`,
   whose exhaustive `match` over `ContractKey` fails to compile when a
   new kind appears without a coverage row.

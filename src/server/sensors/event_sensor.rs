@@ -40,6 +40,13 @@
 //! gets the `Topic → Schema` `PayloadSchema` edge that feeds the
 //! payload arm of the contract join (`field_join.rs`).
 //!
+//! Adding another bus or job queue (MQTT, NATS, Redis, SQS, …) is a
+//! detection-pattern addition only — the hub model is broker-generic
+//! (`Topic { broker, name }`). The recipe, with a real pattern-entry
+//! template and the tests to mirror, lives in
+//! `docs/protocol-coverage.md` ("Recipe: adding a bus without new
+//! design"), which also names the config-extraction follow-up.
+//!
 //! The sensor runs at phase 2 so `Topic` nodes exist before the
 //! joiner binds consumer services to producer services (§7.7). It
 //! publishes through `replace_sensor_output(EventSensor, …)` so a
