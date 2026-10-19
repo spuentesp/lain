@@ -3801,6 +3801,20 @@ mod pr15_check_binding_keys {
             reasons.contains(&"method_mismatch"),
             "cross-kind pairs surface as method_mismatch: {data:?}"
         );
+        // The verdict fields must agree with that verdict. The guard
+        // used to fire before the HTTP arm computed them, so the
+        // vacuous `Unknown`/no-template comparison reported a match
+        // beside a mismatch reason.
+        assert_eq!(
+            data["method_match"],
+            json!(false),
+            "cross-kind guard: method_match must agree with the verdict: {data:?}"
+        );
+        assert_eq!(
+            data["template_match"],
+            json!("none"),
+            "cross-kind guard: template_match must agree with the verdict: {data:?}"
+        );
     }
 
     #[tokio::test]

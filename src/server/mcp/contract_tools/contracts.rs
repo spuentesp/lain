@@ -632,14 +632,18 @@ async fn run_check_binding(
     // is the existing `method_mismatch` (the wrong-shape axis) — no
     // new reason value. `graphql:` endpoint keys are already
     // rejected by the GraphQL arm's name parse below.
-    if matches!(key, ContractKey::Http { .. })
+    //
+    // The guard fires inside the HTTP arm, where it can return the
+    // verdict fields that agree with the reason — `(false, "none")`,
+    // the fact-keyed arm's cross-kind shape. Pushed before the match
+    // (as this used to be), the vacuous HTTP comparison reported
+    // `method_match: true, template_match: "pattern"` beside a
+    // `method_mismatch` reason.
+    let cross_kind_http_pair = matches!(key, ContractKey::Http { .. })
         && fact_keys
             .iter()
             .any(|k| matches!(k.kind(), "topic" | "rpc" | "websocket" | "table"))
-        && !fact_keys.iter().any(|k| k.kind() == key.kind())
-    {
-        reasons.push("method_mismatch");
-    }
+        && !fact_keys.iter().any(|k| k.kind() == key.kind());
     let (consumer_method, consumer_template) = parse_consumer_call_shape(&consumer_id);
     let (method_match, template_match) = match &key {
         ContractKey::Http { method, template } => {
@@ -654,6 +658,15 @@ async fn run_check_binding(
                 // instead of a misleading `template_mismatch`.
                 reasons.push("op_mismatch");
                 reasons.push("field_mismatch");
+                (false, "none")
+            } else if cross_kind_http_pair {
+                // Cross-kind guard (see `cross_kind_http_pair` above):
+                // the reason is `method_mismatch` and the verdict
+                // fields say the same — `(false, "none")`, matching the
+                // fact-keyed arm's cross-kind shape — instead of the
+                // vacuous `Unknown`/no-template comparison's
+                // `(true, "pattern")`.
+                reasons.push("method_mismatch");
                 (false, "none")
             } else {
                 let mm = methods_compatible(&consumer_method, method);

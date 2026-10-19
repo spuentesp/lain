@@ -295,4 +295,59 @@ mod tests {
             );
         }
     }
+
+    /// The `get_workspace_graph` tool description hardcodes the two
+    /// filter lists in prose ("Filters to A/B/C + D/E/F") while the
+    /// allowlist lives in the two exported sets — same drift risk the
+    /// coverage matrix's copied literals had, with no compile error to
+    /// catch it. Pin the prose lists to the sets in BOTH directions
+    /// (a new allowlist entry must be advertised; a reworded
+    /// description must not invent or drop one) and keep every
+    /// advertised name a real schema variant, so the two guards cannot
+    /// each cover only half the picture.
+    #[test]
+    fn workspace_graph_description_advertises_the_real_filter_sets() {
+        use crate::server::mcp::definitions::WORKSPACE_TOOL_DEFS;
+
+        let desc = WORKSPACE_TOOL_DEFS
+            .iter()
+            .find(|d| d.name == "get_workspace_graph")
+            .expect("get_workspace_graph is advertised")
+            .description;
+        let lists = desc
+            .split_once("Filters to ")
+            .expect("description advertises its type filters")
+            .1
+            .split_once('.')
+            .expect("the filter sentence ends at the first period")
+            .0;
+        let (nodes_part, edges_part) = lists.split_once(" + ").expect("node list ` + ` edge list");
+        let prose_nodes: Vec<&str> = nodes_part.split('/').collect();
+        let prose_edges: Vec<&str> = edges_part.split('/').collect();
+
+        assert_eq!(
+            prose_nodes, WORKSPACE_GRAPH_NODE_TYPES,
+            "the description's node list drifted from WORKSPACE_GRAPH_NODE_TYPES"
+        );
+        assert_eq!(
+            prose_edges, WORKSPACE_GRAPH_EDGE_TYPES,
+            "the description's edge list drifted from WORKSPACE_GRAPH_EDGE_TYPES"
+        );
+        for name in &prose_nodes {
+            assert!(
+                crate::schema::NodeType::all()
+                    .iter()
+                    .any(|k| format!("{k:?}") == **name),
+                "the description advertises node type `{name}`, which is not a NodeType variant"
+            );
+        }
+        for name in &prose_edges {
+            assert!(
+                crate::schema::EdgeType::all()
+                    .iter()
+                    .any(|k| format!("{k:?}") == **name),
+                "the description advertises edge type `{name}`, which is not an EdgeType variant"
+            );
+        }
+    }
 }
