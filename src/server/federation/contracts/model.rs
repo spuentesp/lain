@@ -878,7 +878,7 @@ impl std::str::FromStr for ContractKey {
 ///   is rejected as ambiguous rather than guessed.
 /// * **bindings form** `topic:<broker>:<name>` — exactly two
 ///   non-empty `:`-separated components. Three or more components
-///   (`topic:a:b:c`) is ambiguous and rejected.
+///   (`topic:a:b:c`) is rejected — the colon form takes exactly two.
 ///
 /// A body with neither separator is rejected. Empty components are
 /// rejected in both shapes.

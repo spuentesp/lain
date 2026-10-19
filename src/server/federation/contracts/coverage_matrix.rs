@@ -24,7 +24,10 @@
 //!
 //! The [`tests`] module is the escape-proof half: adding a
 //! `ContractKey` variant breaks its exhaustive `match` at compile
-//! time, so the author must declare the kind's coverage row.
+//! time, and each arm binds its variant to the kind's coverage row.
+//! The compile break alone is not the guard — a bare `=> ()` arm
+//! would satisfy it — so the arm's assert (driven by the per-variant
+//! exemplars) is what fails the test until the row is declared.
 
 /// One row of the protocol coverage matrix. `kind` is the
 /// [`ContractKey::kind`](crate::federation::contracts::model::ContractKey::kind) tag for the variant the row describes.
@@ -119,19 +122,76 @@ mod tests {
     use crate::federation::contracts::model::{ContractKey, GraphqlOp, MethodSpec, RpcSystem};
     use crate::server::mcp::federation_tools::WORKSPACE_GRAPH_EDGE_TYPES;
 
+    /// One constructed value per `ContractKey` variant — the driver
+    /// that exercises every arm of the exhaustive `match` below. A new
+    /// variant needs an entry here (and its arm) or the binding
+    /// assert never fires for it.
+    fn exemplars() -> [ContractKey; 6] {
+        [
+            ContractKey::Http {
+                method: MethodSpec::Unknown,
+                template: String::new(),
+            },
+            ContractKey::Graphql {
+                op: GraphqlOp::Query,
+                field: String::new(),
+            },
+            ContractKey::Topic {
+                broker: String::new(),
+                name: String::new(),
+            },
+            ContractKey::Rpc {
+                system: RpcSystem::Grpc,
+                service: String::new(),
+                method: String::new(),
+            },
+            ContractKey::WebSocket {
+                route: String::new(),
+            },
+            ContractKey::Table {
+                name: String::new(),
+            },
+        ]
+    }
+
     #[test]
     fn every_contract_kind_has_sensor_resolver_and_declared_binding_support() {
-        // Exhaustive match: adding a ContractKey variant must break compilation
-        // here, forcing the author to declare its coverage row.
+        // Exhaustive match: adding a ContractKey variant must break
+        // compilation here. The compile break alone is NOT the guard —
+        // a bare `=> ()` arm would satisfy it with no row declared —
+        // so every arm also BINDS its variant to the kind's coverage
+        // row. The arms are driven from `exemplars()` below, so a new
+        // kind whose row is missing fails the test, not just the build.
         let rows = coverage_matrix();
-        let _ = |k: &ContractKey| match k {
-            ContractKey::Http { .. } => (),
-            ContractKey::Topic { .. } => (),
-            ContractKey::Rpc { .. } => (),
-            ContractKey::Graphql { .. } => (),
-            ContractKey::WebSocket { .. } => (),
-            ContractKey::Table { .. } => (),
+        let assert_row = |k: &ContractKey| match k {
+            ContractKey::Http { .. } => assert!(
+                rows.iter().any(|r| r.kind == "http"),
+                "ContractKey::Http has no `http` coverage row"
+            ),
+            ContractKey::Topic { .. } => assert!(
+                rows.iter().any(|r| r.kind == "topic"),
+                "ContractKey::Topic has no `topic` coverage row"
+            ),
+            ContractKey::Rpc { .. } => assert!(
+                rows.iter().any(|r| r.kind == "rpc"),
+                "ContractKey::Rpc has no `rpc` coverage row"
+            ),
+            ContractKey::Graphql { .. } => assert!(
+                rows.iter().any(|r| r.kind == "graphql"),
+                "ContractKey::Graphql has no `graphql` coverage row"
+            ),
+            ContractKey::WebSocket { .. } => assert!(
+                rows.iter().any(|r| r.kind == "websocket"),
+                "ContractKey::WebSocket has no `websocket` coverage row"
+            ),
+            ContractKey::Table { .. } => assert!(
+                rows.iter().any(|r| r.kind == "table"),
+                "ContractKey::Table has no `table` coverage row"
+            ),
         };
+        for key in &exemplars() {
+            assert_row(key);
+        }
         assert_eq!(rows.len(), 6);
         for row in &rows {
             assert!(
@@ -157,32 +217,7 @@ mod tests {
         // produces for that variant, and each variant must own exactly
         // one row.
         let rows = coverage_matrix();
-        let exemplars = [
-            ContractKey::Http {
-                method: MethodSpec::Unknown,
-                template: String::new(),
-            },
-            ContractKey::Graphql {
-                op: GraphqlOp::Query,
-                field: String::new(),
-            },
-            ContractKey::Topic {
-                broker: String::new(),
-                name: String::new(),
-            },
-            ContractKey::Rpc {
-                system: RpcSystem::Grpc,
-                service: String::new(),
-                method: String::new(),
-            },
-            ContractKey::WebSocket {
-                route: String::new(),
-            },
-            ContractKey::Table {
-                name: String::new(),
-            },
-        ];
-        for key in &exemplars {
+        for key in &exemplars() {
             let matches: Vec<_> = rows.iter().filter(|r| r.kind == key.kind()).collect();
             assert_eq!(
                 matches.len(),

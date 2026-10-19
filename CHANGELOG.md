@@ -16,8 +16,11 @@ All notable changes to LAIN are documented here. Versions follow
   client call shapes to look for), and a recipe for adding any of
   them as pure detection patterns (no new contract kind). The
   machine-readable twin is `federation::contracts::coverage_matrix`,
-  whose exhaustive `match` over `ContractKey` fails to compile when a
-  new kind appears without a coverage row.
+  whose exhaustive `match` over `ContractKey` binds every variant to
+  its coverage row: a new kind breaks the match at compile time, and
+  the arm's assert — driven by the per-variant exemplars — fails the
+  test until the row is declared (a bare `=> ()` arm would satisfy
+  only the compiler).
 
 - `repos.yaml#bindings` and the `check_binding` MCP tool accept
   `topic:` / `rpc:` / `ws:` (and `websocket:`) / `table:` keys, and
@@ -75,8 +78,9 @@ All notable changes to LAIN are documented here. Versions follow
   pair the joiner already inferred is idempotent (the joiner records
   the entry with `Confirmed` provenance; a newly created `Binds` edge
   is written with it) instead of a hard `already_bound` refusal. A
-  `Binds` edge the auto-join already wrote keeps its `Static`
-  provenance — only the joiner's index verdict flips to `Confirmed`.
+  `Binds` edge the auto-join already wrote keeps its existing
+  provenance (`Static`/`Heuristic`) — only the joiner's index verdict
+  flips to `Confirmed`.
   Re-pointing a bound consumer at another endpoint still fails with
   `already_bound`.
 - Topic nodes are now canonical hubs: `event_sensor` mints ONE `Topic`

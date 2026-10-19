@@ -105,7 +105,9 @@ each kind and are backlog, not silence.
   linked. All three are in the dashboard filter. The same
   `broker/topic` in two repos is two hubs: per-repo identity is
   kept, and the contract layer is what links them cross-repo.
-- **Status.** Complete.
+- **Status.** Complete. One caveat: same-repo cross-service pairs may
+  need a hand-written binding when the hub's path lands in the
+  consumer's service.
 
 ## rpc
 
@@ -179,9 +181,12 @@ each kind and are backlog, not silence.
 the above mechanically:
 
 - `every_contract_kind_has_sensor_resolver_and_declared_binding_support`
-  holds an exhaustive `match` over `ContractKey`. Adding a seventh
-  variant fails to compile there until its coverage row is declared
-  — a new protocol cannot skip detection, joining, or confirmation
+  holds an exhaustive `match` over `ContractKey` whose arms bind each
+  variant to its coverage row. Adding a seventh variant breaks the
+  match at compile time, and the new arm's assert — driven by the
+  per-variant exemplars — fails the test until its coverage row is
+  declared (a bare `=> ()` arm would satisfy only the compiler).
+  A new protocol cannot skip detection, joining, or confirmation
   by accident.
 - `coverage_view_edges_reference_the_real_workspace_filter_set`
   checks every `view_edges` name against the real

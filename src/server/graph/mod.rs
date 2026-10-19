@@ -503,10 +503,52 @@ fn same_edge_identity(existing: &GraphEdge, incoming: &GraphEdge) -> bool {
     if existing.edge_type != incoming.edge_type {
         return false;
     }
-    match incoming.edge_type {
-        EdgeType::Produces | EdgeType::Consumes => existing.site == incoming.site,
-        _ => true,
+    if site_is_identity(&incoming.edge_type) {
+        existing.site == incoming.site
+    } else {
+        true
     }
+}
+
+/// Whether `site` is part of this edge type's identity: the per-SITE
+/// `Produces` / `Consumes` legs only. Single switch behind both
+/// [`same_edge_identity`] and [`edge_identity_key`] so the pair-scoped
+/// / per-site split cannot drift between the WAL dedup path and the
+/// federation reconcile.
+fn site_is_identity(edge_type: &EdgeType) -> bool {
+    matches!(edge_type, EdgeType::Produces | EdgeType::Consumes)
+}
+
+/// Set-membership form of [`same_edge_identity`]: the key two edges
+/// must share to be the same edge — `(edge_type, source_id,
+/// target_id)`, plus `site` for the per-SITE `Produces` / `Consumes`
+/// legs (`None` elsewhere, where `site` is not identity).
+///
+/// The federation reconcile (`FederatedIndex::project_edges`) diffs
+/// the backend's repo-owned edges against the incoming projection
+/// with this key. A looser triple-only key leaves a moved
+/// site-variant (same `(source, target)`, new `SourceSite`) alive
+/// beside the new leg — the phantom duplicate only a full reindex
+/// healed.
+pub(crate) fn edge_identity_key(
+    edge: &GraphEdge,
+) -> (
+    EdgeType,
+    String,
+    String,
+    Option<crate::federation::contracts::model::SourceSite>,
+) {
+    let site = if site_is_identity(&edge.edge_type) {
+        edge.site.clone()
+    } else {
+        None
+    };
+    (
+        edge.edge_type.clone(),
+        edge.source_id.clone(),
+        edge.target_id.clone(),
+        site,
+    )
 }
 
 impl GraphDatabase {

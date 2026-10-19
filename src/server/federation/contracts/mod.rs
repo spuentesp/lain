@@ -51,8 +51,10 @@
 //!   joiner resolver, `check_binding`/`bindings` support, and the
 //!   workspace-graph edges that surface the kind in the dashboard.
 //!   The `#[cfg(test)]` exhaustive `match` over `ContractKey` is the
-//!   escape-proof guard: a new variant without a coverage row fails
-//!   to compile. Prose twin: `docs/protocol-coverage.md`.
+//!   escape-proof guard: its arms bind each variant to the kind's
+//!   coverage row, so a new variant without a row fails the test.
+//!   The compile break alone is not the guard — a bare `=> ()` arm
+//!   would satisfy the compiler. Prose twin: `docs/protocol-coverage.md`.
 
 pub mod changed_files;
 pub mod clients;

@@ -610,3 +610,152 @@ fn query_graph_type_selector_finds_topic_hubs() {
         .collect();
     assert_eq!(hits.len(), 1, "find type:Topic must return the hub: {v}");
 }
+
+// ─── Federated reconcile honors site identity ────────────────────────
+//
+// `project_edges` used to diff the federated edge set against the
+// incoming projection by `(edge_type, source_id, target_id)` only,
+// while `Produces`/`Consumes` identity includes `site`. A leg that
+// MOVED lines (any edit above a publish/subscribe site) kept its old
+// site-variant alive — the triple matched — and the new one stacked
+// beside it: a phantom duplicate leg in the dashboard this branch
+// ships, healed only by a full reindex.
+
+/// Two projections with a leg that MOVED lines: the federated edge
+/// count for that pair must stay 1, asserted on `fed.backend()` (the
+/// dashboard's data source) and on `get_workspace_graph` itself. The
+/// enclosing symbol is line-stable (its id carries line 1, and the
+/// edit lands inside its body), so the pair identity is unchanged and
+/// only the leg's `SourceSite` moves — the exact shape the loose
+/// reconcile key used to miss.
+#[tokio::test]
+async fn moved_leg_keeps_exactly_one_federated_edge_for_its_pair() {
+    let root = fixture_repo_with(
+        "moved_leg",
+        "src/producer.ts",
+        "async function publish() {\n\
+         \x20 await producer.send({ topic: 'orders.created', messages: [] });\n\
+         }\n",
+    );
+    let ns = RepoNamespace::for_test();
+
+    let data = tempfile::tempdir().expect("federation data dir");
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(data.path()).expect("petgraph backend"));
+    let fed = FederatedIndex::new(backend.clone());
+    git2::Repository::init(&root).expect("fixture root opens as a git repo");
+    let rid = RepoId::new("a").expect("valid repo id");
+    let source =
+        Box::new(WorkspaceDirSource::new(rid.clone(), root.clone()).expect("workspace source"));
+    fed.add_repo(source, data.path()).await.expect("add_repo");
+    let idx = fed.get_repo(&rid).expect("registered repo");
+
+    // The enclosing symbol both projections hang the leg on — minted
+    // explicitly (no tree-sitter indexer in `scan_workspace_event`),
+    // with a line-stable id so moving the site inside its body does
+    // not move the pair.
+    let mut fn_node = GraphNode::new(
+        NodeType::Function,
+        "publish".into(),
+        "src/producer.ts".into(),
+    );
+    fn_node.id = GraphNode::generate_id(
+        &NodeType::Function,
+        "src/producer.ts",
+        "publish",
+        Some(1),
+        &ns,
+    );
+    fn_node.line_start = Some(1);
+    fn_node.line_end = Some(10);
+    idx.db()
+        .upsert_node(fn_node.clone())
+        .expect("seed enclosing symbol");
+
+    // Projection 1: the publish site sits at line 2.
+    scan_workspace_event(idx.db(), &root, &ns).expect("event scan");
+    fed.project_repo(&rid).await.expect("first projection");
+
+    let produces = |edges: &[GraphEdge]| -> Vec<GraphEdge> {
+        edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Produces)
+            .cloned()
+            .collect()
+    };
+    let before = produces(&backend.all_edges().expect("edges"));
+    assert_eq!(before.len(), 1, "one site, one leg: {before:?}");
+    let pair = (before[0].source_id.clone(), before[0].target_id.clone());
+    assert_eq!(
+        before[0].site.as_ref().map(|s| (s.path.as_str(), s.line)),
+        Some(("src/producer.ts", 2)),
+        "harness precondition: the leg carries its SourceSite"
+    );
+
+    // Move the leg: an edit above the site (inside the function) shifts
+    // it to line 3. The pair is unchanged; only `site` moves.
+    write_file(
+        &root,
+        "src/producer.ts",
+        "async function publish() {\n\
+         \x20 const before = 1; // edit above the site\n\
+         \x20 await producer.send({ topic: 'orders.created', messages: [] });\n\
+         }\n",
+    );
+    scan_workspace_event(idx.db(), &root, &ns).expect("rescan");
+    // Harness precondition: the per-repo side holds exactly one leg,
+    // at the new site — a red run must mean the FEDERATION duplicated,
+    // not that the sensor did.
+    let local_legs: Vec<GraphEdge> = idx
+        .db()
+        .all_edges()
+        .into_iter()
+        .filter(|e| e.edge_type == EdgeType::Produces)
+        .collect();
+    assert_eq!(
+        local_legs
+            .iter()
+            .map(|e| e.site.as_ref().map(|s| s.line))
+            .collect::<Vec<_>>(),
+        vec![Some(3)],
+        "rescan replaces the sensor's own output: one leg at line 3, got {local_legs:?}"
+    );
+    fed.project_repo(&rid).await.expect("second projection");
+
+    let after = produces(&backend.all_edges().expect("edges"));
+    let for_pair: Vec<GraphEdge> = after
+        .iter()
+        .filter(|e| (e.source_id.clone(), e.target_id.clone()) == pair)
+        .cloned()
+        .collect();
+    assert_eq!(
+        for_pair.len(),
+        1,
+        "the moved leg must retract its old site-variant, not stack beside \
+         it — the reconcile key includes `site` for Produces/Consumes: {for_pair:?}"
+    );
+    assert_eq!(
+        for_pair[0].site.as_ref().map(|s| (s.path.as_str(), s.line)),
+        Some(("src/producer.ts", 3)),
+        "the surviving leg is the moved one"
+    );
+
+    // The dashboard path renders from the same backend — the phantom
+    // must not surface there either.
+    let workspaces = WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "hub-view".into(),
+            description: None,
+            source: None,
+            members: vec!["a".to_string()],
+        }],
+    };
+    let out = get_workspace_graph(&fed, &workspaces, None).expect("workspace graph");
+    let legs: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Produces)
+        .collect();
+    assert_eq!(legs.len(), 1, "dashboard must render one leg, got {legs:?}");
+}

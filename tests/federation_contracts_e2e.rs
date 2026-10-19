@@ -3896,7 +3896,8 @@ mod pr15_check_binding_keys {
         // contract: the rejoin diff keys `Binds` edges on
         // `(source, target)` only and `upsert_edge` short-circuits
         // on `same_edge_identity`, so an edge the auto-join already
-        // wrote keeps its `Static` provenance. The joiner's verdict
+        // wrote keeps its existing provenance (`Static`/`Heuristic`).
+        // The joiner's verdict
         // above (`ConsumerTarget::Binds { provenance: Confirmed }`)
         // is the confirmation's source of truth. (Pre-existing gap,
         // equally reachable for a hand-written HTTP binding.)
