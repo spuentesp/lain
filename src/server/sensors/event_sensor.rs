@@ -466,14 +466,36 @@ fn detect_sites(
             }
         }
         for m in util::walk_idioms(&consumers, line, line_num) {
-            if let Some(value) = resolve_idiom_capture(&m, constants) {
-                out.push(DetectedSite {
+            match resolve_idiom_capture(&m, constants) {
+                Some(value) => out.push(DetectedSite {
                     kind: SiteKind::Consumes,
                     topic: Some(value),
                     broker: broker_for(&m).into(),
                     line: line_num,
                     owner_name: None,
-                });
+                }),
+                None => {
+                    // Dynamic topic on the consumer side: the walker
+                    // matched a subscribe/consume call but the topic
+                    // arg could not be resolved (parameter, f-string,
+                    // identifier without a same-file const, ...).
+                    // `emit_sites` emits a synthetic per-site node
+                    // carrying `TopicConsumerFact { name:
+                    // TOPIC_DYNAMIC_SENTINEL, .. }` and the joiner
+                    // surfaces it in `coverage.unnormalized` with
+                    // `reason: DynamicTopic`. Producer-side dynamic
+                    // topics are still dropped at `detect_sites` —
+                    // there is no `(broker, name)` to anchor a hub on
+                    // and a hub with the sentinel would falsely
+                    // advertise a provider that never resolves.
+                    out.push(DetectedSite {
+                        kind: SiteKind::Consumes,
+                        topic: None,
+                        broker: broker_for(&m).into(),
+                        line: line_num,
+                        owner_name: None,
+                    });
+                }
             }
         }
         for m in util::walk_idioms(&scheduled, line, line_num) {
@@ -531,8 +553,13 @@ fn ext_to_lang(ext: &str) -> Option<Lang> {
 /// - `identifier` set: the source had a bare identifier (e.g.
 ///   `topic: TOPIC_NAME`); try to resolve it against the
 ///   same-file constants table. If the constant is missing,
-///   return `None` (a dynamic topic — the emitter drops it
-///   silently; surfacing it in `coverage.unnormalized` is backlog).
+///   return `None` (a dynamic topic). On the consumer side the
+///   emitter falls through to the dynamic-topic path: a synthetic
+///   per-site node carrying `TopicConsumerFact { name:
+///   TOPIC_DYNAMIC_SENTINEL, .. }`, which the joiner surfaces in
+///   `coverage.unnormalized` with `reason: DynamicTopic`. The
+///   producer side stays a pure drop — there is no
+///   `(broker, name)` to anchor a hub on.
 fn resolve_idiom_capture(
     m: &util::IdiomMatch,
     constants: &BTreeMap<String, String>,
@@ -1090,6 +1117,87 @@ mod tests {
                 .any(|e| e.edge_type == EdgeType::Consumes && e.target_id == topic.id),
             "pika basic_consume must emit a Consumes edge to the amqp topic"
         );
+    }
+
+    /// `ch.basic_consume(queue=QUEUE_NAME)` where `QUEUE_NAME` is a
+    /// bare identifier without a same-file `const` (or imported
+    /// from another module — the constants table is per-file).
+    /// The walker yields `IdiomMatch { literal: None, identifier:
+    /// Some("QUEUE_NAME") }`, `resolve_idiom_capture` returns `None`
+    /// because the constants table does not name it, and the
+    /// emitter falls through to the dynamic-topic path: a
+    /// synthetic per-site `Function` node carrying a
+    /// `TopicConsumerFact` whose `name` is `TOPIC_DYNAMIC_SENTINEL`,
+    /// no `Topic` hub (the literal-name form would have produced
+    /// `amqp/<QUEUE_NAME>`, but there is no `QUEUE_NAME` to anchor
+    /// on). Pinned end-to-end through the sensor — the joiner test
+    /// `topic_join_dynamic_sentinel_is_unnormalized` exercises the
+    /// dispatch path with a hand-built node, not the walker.
+    #[test]
+    fn dynamic_topic_on_consumer_emits_sentinel_synthetic_node_and_no_topic_hub() {
+        use crate::federation::contracts::model::{ContractFact, TopicConsumerFact, TopicConsumerKind};
+        use crate::server::sensors::util::TOPIC_DYNAMIC_SENTINEL;
+        let dir = tempfile::tempdir().unwrap();
+        // `QUEUE_NAME` is a bare identifier with no same-file const
+        // — the constants table has no entry for it, so
+        // `resolve_idiom_capture` returns `None` for the consumer
+        // walker.
+        std::fs::write(
+            dir.path().join("ledger.py"),
+            "import pika\n\
+             ch = conn.channel()\n\
+             ch.basic_consume(queue=QUEUE_NAME, on_message_callback=cb)\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let topic_nodes: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .collect();
+        assert!(
+            topic_nodes.is_empty(),
+            "a dynamic-topic consumer must NOT mint a Topic hub (no broker/name to anchor); got {topic_nodes:?}"
+        );
+
+        let synthetic: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| {
+                n.node_type == NodeType::Function
+                    && n.name.starts_with(crate::server::sensors::util::TOPIC_READ_PREFIX)
+                    && n.contract.iter().any(|f| {
+                        matches!(f, ContractFact::TopicConsumer(TopicConsumerFact { name, broker: b, .. })
+                            if name == TOPIC_DYNAMIC_SENTINEL && b == "amqp")
+                    })
+            })
+            .collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "the consumer-side dynamic topic must emit exactly one synthetic per-site node carrying the sentinel fact; got {synthetic:?}"
+        );
+        // Exactly one fact on the node (the subscription).
+        let contract = &synthetic[0].contract;
+        assert_eq!(
+            contract.len(),
+            1,
+            "the sentinel fact is the only contract fact on the synthetic node; got {contract:?}"
+        );
+        match &contract[0] {
+            ContractFact::TopicConsumer(TopicConsumerFact { broker, name, kind }) => {
+                assert_eq!(broker, "amqp", "pika broker label, not kafka");
+                assert_eq!(name, TOPIC_DYNAMIC_SENTINEL);
+                assert!(
+                    matches!(kind, TopicConsumerKind::Subscription),
+                    "basic_consume is a subscription"
+                );
+            }
+            other => panic!("expected TopicConsumer with sentinel, got {other:?}"),
+        }
     }
 
     /// pika `channel.queue_bind(queue=..., exchange=..., routing_key=...)`
