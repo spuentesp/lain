@@ -371,7 +371,7 @@ sensor's contract *claims* these calls surface in
 (`UnresolvedReason::Unnormalized` from the HTTP ladder — the topic
 side constructs none), so a dynamic topic name is currently visible
 nowhere. Routing it into `coverage.unnormalized` (or a dedicated
-bucket) is backlog — see below. So shape the regex to capture
+bucket) is backlog — see Backlog → Dynamic topic names above. So shape the regex to capture
 literal-or-identifier (as `pika-publish` above); a pattern that
 captures an expression contributes nothing.
 
