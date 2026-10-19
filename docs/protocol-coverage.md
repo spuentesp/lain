@@ -221,14 +221,18 @@ referenced (never copied) by the coverage matrix.
 ### Dynamic topic names
 
 A publish/subscribe site whose name is neither a string literal nor a
-same-file constant is dropped at the sensor (see the recipe's (b)):
-no hub, no edge, no record. The sensor contract claims such calls
-surface in `coverage.unnormalized`, but that bucket is fed by HTTP
-rule 5 only (`UnresolvedReason::Unnormalized` comes from the HTTP
-ladder; the topic side constructs none), so a dynamic topic name is
-visible nowhere today. Backlog: route dynamic topic names into
-`coverage.unnormalized` or a dedicated bucket so a reader of an
-unknown topic cannot pass unseen.
+same-file constant is dropped at the producer side (no `(broker, name)`
+to anchor a `Topic` hub on — a hub with the sentinel would falsely
+advertise a provider that never resolves). On the consumer side it IS
+recorded: the synthetic per-site consumer node carries a
+`TopicConsumerFact` whose `name` is `TOPIC_DYNAMIC_SENTINEL`
+(`<dynamic>`); `TopicDispatch` recognises it and returns
+`Unresolved { reason: DynamicTopic, target_service: None }`, which the
+joiner pushes onto `coverage.unnormalized` next to the existing HTTP
+`Unnormalized` arm. So a dynamic topic name is visible today: every
+subscriber whose topic argument was not a literal lands in
+`coverage.unnormalized` with `reason: DynamicTopic`. The producer side
+stays a pure drop.
 
 ### Bus and job-queue systems (detection patterns only)
 
@@ -369,19 +373,20 @@ onto the YAML entry.
 **(b) Names from string literals or same-file constants.**
 `resolve_idiom_capture` in `event_sensor.rs` applies §6.7: a quoted
 string is the name as-is; a bare identifier resolves against the
-file's `const` / `let` table; anything else is a **dynamic** name —
-`None` is returned and the emitter drops the site silently rather
-than minting a hub (pinned by
-`dynamic_topic_arg_does_not_emit_topic_node`, which asserts the
-drop: zero `Topic` nodes). The drop really is silent today: the
-sensor's contract *claims* these calls surface in
-`coverage.unnormalized`, but that bucket is fed by HTTP rule 5 only
-(`UnresolvedReason::Unnormalized` from the HTTP ladder — the topic
-side constructs none), so a dynamic topic name is currently visible
-nowhere. Routing it into `coverage.unnormalized` (or a dedicated
-bucket) is backlog — see Backlog → Dynamic topic names above. So shape the regex to capture
-literal-or-identifier (as `pika-publish` above); a pattern that
-captures an expression contributes nothing.
+file's `const` / `let` table; anything else is a **dynamic** name.
+The producer side of a dynamic name is dropped (no `(broker, name)`
+to anchor a hub on); the consumer side is recorded as a
+`TopicConsumerFact` carrying the `TOPIC_DYNAMIC_SENTINEL`
+(`<dynamic>`) name, and `TopicDispatch` returns
+`Unresolved { reason: DynamicTopic, target_service: None }` for it
+— the joiner pushes that call onto `coverage.unnormalized` so the
+operator sees the gap (pinned by
+`topic_join_dynamic_sentinel_is_unnormalized`, which asserts both
+the verdict and the bucket; the producer drop stays pinned by
+`dynamic_topic_arg_does_not_emit_topic_node`). Shape the regex to
+capture literal-or-identifier (as `pika-publish` above); a pattern
+that captures an expression contributes nothing for the producer
+side and an unnormalized entry for the consumer side.
 
 **(c) The hub model needs nothing new.** Any broker is
 `Topic { broker, name }`: hub identity (label alone, `TOPIC_ANCHOR`),

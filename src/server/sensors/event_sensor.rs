@@ -30,10 +30,16 @@
 //! `Consumes` (subscribers) edge with `SourceSite` provenance off that
 //! hub. Topic names are extracted from string literals and same-file
 //! `const` / `let` constant assignments (§6.7 "same-file constants").
-//! Dynamic topic names are dropped silently — no node, no record.
-//! Routing them into `coverage.unnormalized` is backlog: that bucket
-//! is fed by HTTP rule 5 only today (see `docs/protocol-coverage.md`,
-//! "Dynamic topic names").
+//! Dynamic topic names are NOT silently invisible: a producer-side
+//! dynamic name is dropped (no `(broker, name)` to anchor a hub on —
+//! a hub with the sentinel would falsely advertise a provider that
+//! never resolves); a consumer-side dynamic name emits a synthetic
+//! per-site `Function` node carrying a `TopicConsumerFact` whose
+//! `name` is [`TOPIC_DYNAMIC_SENTINEL`] (`<dynamic>`), and
+//! `TopicDispatch` returns `Unresolved { reason: DynamicTopic, .. }`
+//! for it — the joiner pushes that call onto
+//! `coverage.unnormalized` next to the existing HTTP `Unnormalized`
+//! arm. See `docs/protocol-coverage.md`, "Dynamic topic names".
 //!
 //! After site emission the sensor also walks payload schema files
 //! (`*.avsc`, `*.schema.json`): each parses into a `Schema` node with
@@ -708,13 +714,30 @@ fn emit_sites(
     let mut edges: Vec<GraphEdge> = Vec::new();
 
     for site in sites {
+        // The discriminator for the "dynamic topic" path. Producer
+        // sites with a non-literal name stay dropped (we have no `Topic`
+        // hub to hang the `Produces` edge off — `prune_orphans` would
+        // kill a hub without a real site path anyway). Consumer sites
+        // with a non-literal name ARE recorded: a subscriber whose
+        // topic argument is dynamic is a coverage gap the operator
+        // cannot see otherwise, and the synthetic per-site node below
+        // carries a `ContractFact::TopicConsumer` with the dynamic
+        // sentinel as its `name`. `TopicDispatch` recognises the
+        // sentinel and returns
+        // `Unresolved { reason: DynamicTopic, target_service: None }`,
+        // which the joiner pushes onto `coverage.unnormalized` — see
+        // `joiner/mod.rs:390` (the `Unnormalized` arm) and the new
+        // sibling arm for `DynamicTopic`. The `Produces` side stays a
+        // pure drop, same as today.
+        let dynamic_topic = site.topic.is_none()
+            && matches!(
+                site.kind,
+                SiteKind::Consumes | SiteKind::Scheduled
+            );
         let topic_name = match site.topic.clone() {
             Some(n) => n,
-            None => {
-                // Dynamic topic — dropped, nothing to emit. Nothing
-                // records it either: unnormalized is HTTP rule-5 only.
-                continue;
-            }
+            None if !dynamic_topic => continue,
+            None => crate::server::sensors::util::TOPIC_DYNAMIC_SENTINEL.to_string(),
         };
 
         // One canonical hub per (broker, name) per repo: identity is
@@ -722,15 +745,20 @@ fn emit_sites(
         // every site — in this file or any other — converges on the
         // same node. The scan-scoped set pushes the node once; a hub
         // already emitted contributes only the site's edge below.
+        //
+        // Skipped for the dynamic-topic case: there is no real
+        // `(broker, name)` to anchor on, and a hub with the
+        // `TOPIC_DYNAMIC_SENTINEL` name would falsely advertise a
+        // provider that never resolves. The synthetic per-site node
+        // below is still emitted so the `TopicConsumerFact` reaches
+        // the joiner.
         let topic_label = format!("{}/{}", site.broker, topic_name);
-        let topic_id = GraphNode::generate_id(
-            &NodeType::Topic,
-            TOPIC_ANCHOR,
-            &topic_label,
-            None,
-            namespace,
-        );
-        if emitted_topic_ids.insert(topic_id.clone()) {
+        let topic_id = if dynamic_topic {
+            String::new()
+        } else {
+            GraphNode::generate_id(&NodeType::Topic, TOPIC_ANCHOR, &topic_label, None, namespace)
+        };
+        if !dynamic_topic && emitted_topic_ids.insert(topic_id.clone()) {
             // `path` is a real site file, NOT the id anchor:
             // `prune_orphans` (ingestion orphan sweep) drops every node
             // whose `path` is not a git-tracked file, and a dropped hub
@@ -797,21 +825,28 @@ fn emit_sites(
             SiteKind::Consumes | SiteKind::Scheduled => EdgeType::Consumes,
         };
 
-        edges.push(GraphEdge {
-            edge_type,
-            source_id: source_id.clone(),
-            target_id: topic_id.clone(),
-            weight: Some(1.0),
-            cross_repo: false,
-            provenance: Some(EdgeProvenance::Static {
-                source: crate::schema::StaticSource::Regex,
-            }),
-            site: Some(SourceSite {
-                path: graph_path.to_string(),
-                line: site.line,
-            }),
-            detail: None,
-        });
+        // Dynamic-topic case has no hub to hang the edge on — the
+        // synthetic per-site node carries the `TopicConsumerFact`, and
+        // `TopicDispatch` decides the verdict from the sentinel. Skip
+        // the edge emission here; without a `target_id`, the edge
+        // would dangle and `insert_edges_batch` would drop it silently.
+        if !dynamic_topic {
+            edges.push(GraphEdge {
+                edge_type,
+                source_id: source_id.clone(),
+                target_id: topic_id.clone(),
+                weight: Some(1.0),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Static {
+                    source: crate::schema::StaticSource::Regex,
+                }),
+                site: Some(SourceSite {
+                    path: graph_path.to_string(),
+                    line: site.line,
+                }),
+                detail: None,
+            });
+        }
 
         // Emit the synthetic node when it is either the edge anchor or
         // the fact carrier. A producer site whose enclosing function IS

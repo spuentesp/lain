@@ -304,6 +304,22 @@ impl ContractJoiner {
                         &mut unresolved_env_vars,
                         &mut binds,
                     );
+                    // `coverage.unnormalized` (§9.7) covers every
+                    // protocol layer whose consumer was rejected by a
+                    // gap reason (HTTP rule 5 + topic `DynamicTopic`
+                    // — see `TopicDispatch::dispatch`); the HTTP
+                    // branch below applies the same rule to its own
+                    // resolutions.
+                    if matches!(
+                        resolution.target,
+                        Some(ConsumerTarget::Unresolved {
+                            reason: UnresolvedReason::Unnormalized
+                                | UnresolvedReason::DynamicTopic,
+                            ..
+                        })
+                    ) {
+                        unnormalized.push(call_id.clone());
+                    }
                     consumers
                         .entry(call_id.clone())
                         .or_default()
@@ -390,7 +406,8 @@ impl ContractJoiner {
             if matches!(
                 resolution.target,
                 Some(ConsumerTarget::Unresolved {
-                    reason: UnresolvedReason::Unnormalized,
+                    reason: UnresolvedReason::Unnormalized
+                        | UnresolvedReason::DynamicTopic,
                     ..
                 })
             ) {

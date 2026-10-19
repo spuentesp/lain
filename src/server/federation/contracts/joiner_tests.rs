@@ -2363,6 +2363,57 @@ fn topic_join_same_broker_same_name_binds() {
     assert_eq!(res.bound_endpoints.len(), 1);
 }
 
+/// A subscriber whose topic argument was not a literal the
+/// `event_sensor` could resolve (parameter, f-string, identifier
+/// without a same-file const, ...) carries the
+/// `TOPIC_DYNAMIC_SENTINEL` sentinel as `TopicConsumerFact::name`.
+/// `TopicDispatch` recognises the sentinel and returns
+/// `Unresolved { reason: DynamicTopic, target_service: None }`, which
+/// the joiner pushes onto `coverage.unnormalized` so the operator
+/// sees the gap (it was silently dropped before F2a). The producer
+/// side stays a pure drop — there is no `(broker, name)` to anchor a
+/// `Topic` hub on, and a hub with the sentinel would falsely advertise
+/// a provider that never resolves.
+#[test]
+fn topic_join_dynamic_sentinel_is_unnormalized() {
+    use crate::server::sensors::util::TOPIC_DYNAMIC_SENTINEL;
+    let consumer = topic_consumer_node(
+        "billing",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "kafka",
+        TOPIC_DYNAMIC_SENTINEL,
+    );
+    let cfg = two_service_topic_config();
+    let out = ContractJoiner::run(&[consumer.clone()], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "a dynamic topic must NOT bind; got {:?}",
+        out.binds
+    );
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
+    match &res.target {
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::DynamicTopic,
+            target_service,
+        }) => {
+            assert!(
+                target_service.is_none(),
+                "a dynamic topic has no candidate service; got {target_service:?}"
+            );
+        }
+        other => panic!("expected Unresolved {{ DynamicTopic, None }}, got {other:?}"),
+    }
+    assert!(
+        out.index.unnormalized.contains(&cid),
+        "the joiner must surface the dynamic-topic consumer in `unnormalized` \
+         (the bucket §9.7 reads as `coverage.unnormalized`); got {:?}",
+        out.index.unnormalized
+    );
+}
+
 #[test]
 fn topic_join_different_broker_is_unresolved() {
     let provider = topic_provider_node("orders", "src/p.rs", "publish", 1, "orders.created");

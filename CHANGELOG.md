@@ -164,6 +164,22 @@ All notable changes to LAIN are documented here. Versions follow
   same-`op` endpoints when any exist, else all GraphQL endpoints —
   instead of every HTTP endpoint in the index. HTTP consumers are
   unchanged.
+- `coverage.unnormalized` now reports subscribers whose topic
+  argument was not a literal the `event_sensor` could resolve
+  (parameter, f-string, identifier without a same-file const, ...).
+  Previously the comment at `event_sensor.rs:712` claimed the
+  bucket recorded them; it did not — they were dropped silently.
+  The synthetic per-site consumer node now carries a
+  `TopicConsumerFact` whose `name` is the new
+  `TOPIC_DYNAMIC_SENTINEL` (`<dynamic>`); `TopicDispatch` recognises
+  the sentinel and returns `Unresolved { reason: DynamicTopic, .. }`,
+  which the joiner pushes onto `coverage.unnormalized` next to the
+  existing HTTP `Unnormalized` arm. Producer-side dynamic topics are
+  still dropped — there is no `(broker, name)` to anchor a `Topic`
+  hub on, and a hub with the sentinel would falsely advertise a
+  provider that never resolves. The matching protocol-coverage doc
+  caveat (the "Dynamic topic names are dropped silently" note) is
+  deleted; the bucket is now the source of truth.
 
 ## 0.10.0 — 2026-10-13
 

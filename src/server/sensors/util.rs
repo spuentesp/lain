@@ -517,6 +517,16 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
 pub const SQL_READ_PREFIX: &str = "sql-read:";
 /// See [`SQL_READ_PREFIX`]. Carries `TopicConsumerFact`.
 pub const TOPIC_READ_PREFIX: &str = "topic-read:";
+/// Sentinel for a topic name that the extractor could not resolve to
+/// a literal (parameter, f-string, identifier without a same-file
+/// const, ...). The synthetic per-site consumer node carries a
+/// `TopicConsumerFact` whose `name` is this sentinel; `TopicDispatch`
+/// (see `protocol_dispatch.rs`) recognises it and returns
+/// `Unresolved { reason: DynamicTopic, .. }`, which the joiner pushes
+/// onto `coverage.unnormalized` — see the sibling arm in
+/// `joiner/mod.rs:390`. Producer sites with this name are dropped (no
+/// hub to anchor on).
+pub const TOPIC_DYNAMIC_SENTINEL: &str = "<dynamic>";
 /// See [`SQL_READ_PREFIX`]. Carries `RpcConsumerFact`.
 pub const RPC_CALL_PREFIX: &str = "rpc-call:";
 /// See [`SQL_READ_PREFIX`]. Carries `GraphqlConsumerFact`.
