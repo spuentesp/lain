@@ -210,6 +210,18 @@ the filter set is backlog by decision — the shipped set is pinned
 by name in `src/server/mcp/federation_tools/workspace.rs` and
 referenced (never copied) by the coverage matrix.
 
+### Dynamic topic names
+
+A publish/subscribe site whose name is neither a string literal nor a
+same-file constant is dropped at the sensor (see the recipe's (b)):
+no hub, no edge, no record. The sensor contract claims such calls
+surface in `coverage.unnormalized`, but that bucket is fed by HTTP
+rule 5 only (`UnresolvedReason::Unnormalized` comes from the HTTP
+ladder; the topic side constructs none), so a dynamic topic name is
+visible nowhere today. Backlog: route dynamic topic names into
+`coverage.unnormalized` or a dedicated bucket so a reader of an
+unknown topic cannot pass unseen.
+
 ### Bus and job-queue systems (detection patterns only)
 
 None of these is a `ContractKey` problem — `Topic { broker, name }`
@@ -350,13 +362,18 @@ onto the YAML entry.
 `resolve_idiom_capture` in `event_sensor.rs` applies §6.7: a quoted
 string is the name as-is; a bare identifier resolves against the
 file's `const` / `let` table; anything else is a **dynamic** name —
-`None` is returned and the emitter skips the site rather than minting
-a hub, so per the sensor's contract those calls surface in
-`coverage.unnormalized` (the §9.7 unnormalized bucket) instead of
-inventing a topic. Pinned by `dynamic_topic_arg_does_not_emit_topic_node`
-in the same file. So shape the regex to capture literal-or-identifier
-(as `pika-publish` above); a pattern that captures an expression
-contributes nothing.
+`None` is returned and the emitter drops the site silently rather
+than minting a hub (pinned by
+`dynamic_topic_arg_does_not_emit_topic_node`, which asserts the
+drop: zero `Topic` nodes). The drop really is silent today: the
+sensor's contract *claims* these calls surface in
+`coverage.unnormalized`, but that bucket is fed by HTTP rule 5 only
+(`UnresolvedReason::Unnormalized` from the HTTP ladder — the topic
+side constructs none), so a dynamic topic name is currently visible
+nowhere. Routing it into `coverage.unnormalized` (or a dedicated
+bucket) is backlog — see below. So shape the regex to capture
+literal-or-identifier (as `pika-publish` above); a pattern that
+captures an expression contributes nothing.
 
 **(c) The hub model needs nothing new.** Any broker is
 `Topic { broker, name }`: hub identity (label alone, `TOPIC_ANCHOR`),
@@ -387,16 +404,17 @@ the new entry.
 The pattern list is already declarative YAML, but bus knowledge still
 leaks into code in two places, and the standing directive is that
 detection patterns must be **data, not scattered literals**
-(`src/server/sensors/AGENTS.md`,
-`docs/CONTRIBUTING_AGENTS.md` "sensor pattern"):
+(`src/server/sensors/AGENTS.md`, "Detection patterns belong in
+config/templates, not in code"):
 
 1. `event_sensor` reads the **bundled** `Patterns::patterns()`
    singleton, while the per-repo override surface
    (`Patterns::with_overrides` → `load_overrides`, which layers
    `<repo>/.lain/patterns/*.yaml` and already appends fresh-`id`
-   entries to a language's list) is what `entry_point_sensor` and
-   `http_client_sensor` use. Wiring the event sensor to
-   `with_overrides` lets a repo add a bus as config, no rebuild.
+   entries to a language's list) is what `entry_point_sensor`,
+   `http_client_sensor`, `http_sensor`, and `field_access_sensor`
+   already use. Wiring the event sensor to `with_overrides` lets a
+   repo add a bus as config, no rebuild.
 2. `broker_for`'s framework-id → broker mapping (`pika*` /
    `amqplib*` → `amqp`, else `kafka`) is a hardcoded arm list. Move
    the broker label onto the YAML entry so pattern and broker travel

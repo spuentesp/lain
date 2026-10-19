@@ -30,8 +30,10 @@
 //! `Consumes` (subscribers) edge with `SourceSite` provenance off that
 //! hub. Topic names are extracted from string literals and same-file
 //! `const` / `let` constant assignments (§6.7 "same-file constants").
-//! Dynamic topic names are recorded but skipped from the graph so they
-//! surface in `coverage.unnormalized`.
+//! Dynamic topic names are dropped silently — no node, no record.
+//! Routing them into `coverage.unnormalized` is backlog: that bucket
+//! is fed by HTTP rule 5 only today (see `docs/protocol-coverage.md`,
+//! "Dynamic topic names").
 //!
 //! After site emission the sensor also walks payload schema files
 //! (`*.avsc`, `*.schema.json`): each parses into a `Schema` node with
@@ -524,7 +526,7 @@ fn ext_to_lang(ext: &str) -> Option<Lang> {
 ///   `topic: TOPIC_NAME`); try to resolve it against the
 ///   same-file constants table. If the constant is missing,
 ///   return `None` (a dynamic topic — the emitter drops it
-///   and the joiner surfaces it in `coverage.unnormalized`).
+///   silently; surfacing it in `coverage.unnormalized` is backlog).
 fn resolve_idiom_capture(
     m: &util::IdiomMatch,
     constants: &BTreeMap<String, String>,
@@ -709,8 +711,8 @@ fn emit_sites(
         let topic_name = match site.topic.clone() {
             Some(n) => n,
             None => {
-                // Dynamic topic — `coverage.unnormalized` materializes
-                // this in the index; nothing to emit.
+                // Dynamic topic — dropped, nothing to emit. Nothing
+                // records it either: unnormalized is HTTP rule-5 only.
                 continue;
             }
         };
@@ -1438,8 +1440,8 @@ mod tests {
         );
     }
 
-    /// Dynamic topic arg (`topic: variable`) is skipped — the joiner
-    /// surfaces those calls in `coverage.unnormalized`.
+    /// Dynamic topic arg (`topic: variable`) is dropped silently —
+    /// no Topic node is emitted (nothing else records the call today).
     #[test]
     fn dynamic_topic_arg_does_not_emit_topic_node() {
         let dir = tempfile::tempdir().unwrap();
