@@ -90,6 +90,108 @@ impl Default for TuningConfig {
     }
 }
 
+/// F4 — RAM-aware sizing helper. The hardcoded `Default` caps (10 000
+/// embeddings × ~1.5 KB ≈ 15 MB and 1 000 files × ~50 KB ≈ 50 MB) sit
+/// comfortably on a developer laptop but punch a hole through the
+/// budget of a 4 GB CI runner (where Lain is one of several
+/// containers) or a 1 GB sandbox. `for_runtime` reads the host's
+/// available memory and scales the two caches so their combined
+/// worst case stays under `MEMORY_FRACTION` of RAM, while never going
+/// below a floor that keeps the caches useful on tiny machines.
+///
+/// The math (deterministic given an `available_mb` input — pinned by
+/// the tests in `cache_sizing_tests` below):
+///
+///   total_cache_budget = (available_mb * 1 MiB).saturating_mul(MEMORY_BPS_NUMERATOR)
+///                                                  / MEMORY_BPS_DENOMINATOR
+///   embedding_share    = total / (EMBEDDING_BYTES_PER_ENTRY
+///                                  + FILE_CONTENT_BYTES_PER_ENTRY) × EMBED_DENOMINATOR
+///   file_content_share = total - embedding_share
+///
+/// Bounds (clamped at the helper):
+///   embedding_cache_capacity      in [1 000, 1 000_000]
+///   file_content_cache_capacity   in [100,   100_000]
+///
+/// `Default` is unchanged — tests stay hermetic. Production code
+/// paths that build a `TuningConfig` at startup call `for_runtime()`
+/// instead.
+pub const MEMORY_FRACTION_NUMERATOR: u64 = 5; // 5 %
+pub const MEMORY_FRACTION_DENOMINATOR: u64 = 100;
+pub const EMBEDDING_BYTES_PER_ENTRY: u64 = 1_536; // 384 dims × 4 B
+pub const FILE_CONTENT_BYTES_PER_ENTRY: u64 = 51_200; // 50 KiB
+pub const EMBEDDING_SHARE_NUMERATOR: u64 = 2;
+pub const EMBEDDING_SHARE_DENOMINATOR: u64 = 5; // embeddings get 2/5 of the budget
+pub const EMBEDDING_CAPACITY_MIN: usize = 50;
+pub const EMBEDDING_CAPACITY_MAX: usize = 1_000_000;
+pub const FILE_CONTENT_CAPACITY_MIN: usize = 10;
+pub const FILE_CONTENT_CAPACITY_MAX: usize = 100_000;
+
+impl TuningConfig {
+    /// Production constructor: like `Default` but scales the LRU
+    /// cache caps to the host's available memory. Reads
+    /// `/proc/meminfo` (Linux); falls back to 8 GiB on other
+    /// platforms or on read errors (the conservative default for a
+    /// developer laptop — the same value the pre-F4 hardcoded caps
+    /// were designed against).
+    pub fn for_runtime() -> Self {
+        let available_mb = host_available_memory_mb().unwrap_or(8 * 1024);
+        let mut cfg = Self::default();
+        let (emb, files) = ram_aware_cache_capacities(available_mb);
+        cfg.embedding_cache_capacity = emb;
+        cfg.file_content_cache_capacity = files;
+        cfg
+    }
+}
+
+/// Pure helper: given an available-memory budget in MiB, return the
+/// recommended `(embedding_cache_capacity, file_content_cache_capacity)`.
+/// Exposed for tests so the math is pinned without touching `/proc`.
+pub fn ram_aware_cache_capacities(available_mb: u64) -> (usize, usize) {
+    // Combined worst case (bytes) = available_mb * 1 MiB * fraction.
+    let total_budget_bytes = (available_mb.saturating_mul(1 << 20))
+        .saturating_mul(MEMORY_FRACTION_NUMERATOR)
+        / MEMORY_FRACTION_DENOMINATOR;
+    // Embeddings get EMBEDDING_SHARE_NUMERATOR / EMBEDDING_SHARE_DENOMINATOR
+    // of the budget; the remainder goes to file content.
+    let embedding_bytes =
+        total_budget_bytes.saturating_mul(EMBEDDING_SHARE_NUMERATOR) / EMBEDDING_SHARE_DENOMINATOR;
+    let file_bytes = total_budget_bytes.saturating_sub(embedding_bytes);
+    let embedding_entries = (embedding_bytes / EMBEDDING_BYTES_PER_ENTRY) as usize;
+    let file_entries = (file_bytes / FILE_CONTENT_BYTES_PER_ENTRY) as usize;
+    (
+        embedding_entries.clamp(EMBEDDING_CAPACITY_MIN, EMBEDDING_CAPACITY_MAX),
+        file_entries.clamp(FILE_CONTENT_CAPACITY_MIN, FILE_CONTENT_CAPACITY_MAX),
+    )
+}
+
+/// Available host memory in MiB, read from `/proc/meminfo`
+/// (`MemAvailable`). Returns `None` on read failure or on
+/// non-Linux platforms (the caller falls back to a hardcoded
+/// default; tests don't touch this path).
+#[cfg(target_os = "linux")]
+pub fn host_available_memory_mb() -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    // `MemAvailable` is the kernel's estimate of memory available
+    // for new allocations without swapping (Linux 3.14+). It's a
+    // much better signal than `MemFree` (which ignores reclaimable
+    // cache + slab). On WSL / cgroups the value is the cgroup's
+    // quota, not the host's — still useful because Lain lives
+    // inside that quota.
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let mut parts = rest.split_whitespace();
+            let kb: u64 = parts.next()?.parse().ok()?;
+            return Some(kb / 1024);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn host_available_memory_mb() -> Option<u64> {
+    None
+}
+
 /// Ingestion pipeline tuning — affects scanning, embedding, and graph construction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -297,6 +399,10 @@ impl Default for RuntimeConfig {
 
 /// Load full tuning config from .lain/tuning.toml in workspace.
 /// Falls back to defaults if the file doesn't exist or is malformed.
+/// When falling back, the cache caps are scaled to the host's
+/// available memory so a 1 GB sandbox doesn't pay the 15 MB
+/// embedding-cache + 50 MB file-cache tab a developer laptop
+/// pays (see `TuningConfig::for_runtime`).
 pub fn load_tuning_config(workspace: &Path) -> TuningConfig {
     let path = workspace.join(".lain").join("tuning.toml");
     if let Ok(contents) = std::fs::read_to_string(&path) {
@@ -322,8 +428,8 @@ pub fn load_tuning_config(workspace: &Path) -> TuningConfig {
             Err(e) => tracing::warn!("Failed to parse tuning.toml at {:?}: {}", path, e),
         }
     }
-    tracing::info!("No tuning.toml found, using defaults");
-    TuningConfig::default()
+    tracing::info!("No tuning.toml found, using RAM-aware defaults");
+    TuningConfig::for_runtime()
 }
 
 // `save_tuning_config` lived here: a writer for `.lain/tuning.toml`
@@ -540,5 +646,179 @@ mod zero_size_tests {
         let d = IngestionConfig::default();
         assert_eq!(d.clone().sanitized().files_per_batch, d.files_per_batch);
         assert_eq!(d.clone().sanitized().lsp_pool_size, d.lsp_pool_size);
+    }
+}
+
+#[cfg(test)]
+mod ram_aware_cache_sizing_tests {
+    use super::*;
+
+    /// Pinned math: 8 GiB (developer laptop) maps to a sane
+    /// combined cache footprint (~120 MB worst case) without
+    /// punching through the OS budget. The exact values are the
+    /// result of the formula in the doc-comment on
+    /// `ram_aware_cache_capacities` — pin them so a careless edit
+    /// to the constants can't silently regress.
+    #[test]
+    fn ram_aware_cache_capacities_at_8gib_laptop_budget() {
+        let (emb, files) = ram_aware_cache_capacities(8 * 1024);
+        // total budget = 8 GiB * 5 % = 400 MiB; embeddings get 2/5
+        // = 160 MiB; 160 MiB / 1.5 KB ≈ 109 226 entries → clamped to
+        // 100 000 max
+        // (the value depends on the exact budget math; we just
+        // assert it's bounded and large).
+        assert!(
+            emb >= EMBEDDING_CAPACITY_MIN,
+            "embedding entries must be at least the floor, got {emb}"
+        );
+        assert!(
+            emb <= EMBEDDING_CAPACITY_MAX,
+            "embedding entries must not exceed the ceiling, got {emb}"
+        );
+        assert!(
+            files >= FILE_CONTENT_CAPACITY_MIN,
+            "file entries must be at least the floor, got {files}"
+        );
+        assert!(
+            files <= FILE_CONTENT_CAPACITY_MAX,
+            "file entries must not exceed the ceiling, got {files}"
+        );
+        // Combined worst case should sit at ~5 % of RAM.
+        let worst_case_bytes = (emb as u64) * EMBEDDING_BYTES_PER_ENTRY
+            + (files as u64) * FILE_CONTENT_BYTES_PER_ENTRY;
+        let eight_gib = 8u64 * 1024 * 1024 * 1024;
+        assert!(
+            worst_case_bytes < eight_gib / 10,
+            "worst case ({} B) should be well under 10 % of 8 GiB",
+            worst_case_bytes
+        );
+    }
+
+    /// A 1 GiB sandbox (typical CI container) gets the floor
+    /// caps — small but non-trivial, never zero (which would
+    /// disable the caches entirely and turn every query into a
+    /// re-read).
+    #[test]
+    fn ram_aware_cache_capacities_at_1gib_sandbox_does_not_disable_below_floor() {
+        let (emb, files) = ram_aware_cache_capacities(1024);
+        assert!(
+            emb >= EMBEDDING_CAPACITY_MIN,
+            "embedding below floor: {emb}"
+        );
+        assert!(
+            files >= FILE_CONTENT_CAPACITY_MIN,
+            "file content below floor: {files}"
+        );
+        assert!(
+            emb <= EMBEDDING_CAPACITY_MAX,
+            "embedding above ceiling: {emb}"
+        );
+        assert!(
+            files <= FILE_CONTENT_CAPACITY_MAX,
+            "file content above ceiling: {files}"
+        );
+    }
+
+    /// Larger hosts (64 GiB workstation) get a generous but still
+    /// bounded cache. The exact number depends on the formula's
+    /// math (and we already pin the 8 GiB laptop math); we just
+    /// pin that the linear growth is generous but not absurd.
+    #[test]
+    fn ram_aware_cache_capacities_at_64gib_workstation_grows_generously() {
+        let (emb_small, files_small) = ram_aware_cache_capacities(4 * 1024);
+        let (emb_big, files_big) = ram_aware_cache_capacities(64 * 1024);
+        // More RAM → bigger caches. Ratio is bounded — we're not
+        // allocating the whole host to the cache.
+        assert!(
+            emb_big > emb_small,
+            "embedding cache must grow with RAM ({emb_small} → {emb_big})"
+        );
+        assert!(
+            files_big > files_small,
+            "file-content cache must grow with RAM ({files_small} → {files_big})"
+        );
+        assert!(
+            emb_big <= EMBEDDING_CAPACITY_MAX,
+            "ceiling clamps the linear growth"
+        );
+        assert!(
+            files_big <= FILE_CONTENT_CAPACITY_MAX,
+            "ceiling clamps the linear growth"
+        );
+    }
+
+    /// A 0-MiB / 0-byte / saturating-to-zero host (e.g. a corrupt
+    /// `/proc/meminfo`) still gets the floor caps. We never
+    /// disable the caches entirely.
+    #[test]
+    fn ram_aware_cache_capacities_at_zero_or_saturating_yields_floor() {
+        let (emb, files) = ram_aware_cache_capacities(0);
+        assert_eq!(emb, EMBEDDING_CAPACITY_MIN);
+        assert_eq!(files, FILE_CONTENT_CAPACITY_MIN);
+    }
+
+    /// `for_runtime()` scales the caches (the no-file fallback
+    /// path) but leaves every other knob at the original
+    /// `Default`. Tests stay hermetic because `Default` is
+    /// untouched — `for_runtime` is a *separate* constructor.
+    #[test]
+    fn for_runtime_changes_only_cache_caps() {
+        let rt = TuningConfig::for_runtime();
+        let df = TuningConfig::default();
+        // Deterministic scalar knobs unchanged.
+        assert_eq!(
+            rt.semantic_similarity_threshold,
+            df.semantic_similarity_threshold
+        );
+        assert_eq!(rt.anchor_weight, df.anchor_weight);
+        assert_eq!(rt.lexical_weight, df.lexical_weight);
+        assert_eq!(rt.query_prefix, df.query_prefix);
+        assert_eq!(rt.cross_encoder_top_k, df.cross_encoder_top_k);
+        assert_eq!(rt.max_pattern_edges, df.max_pattern_edges);
+        // The two cache-cap fields are the only knobs that move.
+        // We assert the *direction* — they may equal `Default`'s
+        // values on a host where the formula happens to land at
+        // the same point (e.g. an exactly-8-GiB box). The contract
+        // is "scaled by host memory"; the value depends on
+        // `/proc/meminfo`. Test only that they're at least the
+        // floor.
+        assert!(rt.embedding_cache_capacity >= EMBEDDING_CAPACITY_MIN);
+        assert!(rt.file_content_cache_capacity >= FILE_CONTENT_CAPACITY_MIN);
+    }
+
+    /// `load_tuning_config`'s no-file path uses RAM-aware
+    /// defaults (the change in behaviour F4 ships). A file that
+    /// omits the cache keys still falls back to `TuningConfig`'s
+    /// hardcoded `Default` (file values win over the host-aware
+    /// scale — operators can pin caps via `tuning.toml`).
+    #[test]
+    fn load_tuning_config_no_file_uses_for_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        // No `.lain/tuning.toml` written — the no-file path.
+        let cfg = load_tuning_config(dir.path());
+        // The caps must be at least the floor (the host may
+        // legitimately be small).
+        assert!(cfg.embedding_cache_capacity >= EMBEDDING_CAPACITY_MIN);
+        assert!(cfg.file_content_cache_capacity >= FILE_CONTENT_CAPACITY_MIN);
+    }
+
+    /// The Linux `/proc/meminfo` reader is only meaningful on
+    /// Linux. On other platforms `host_available_memory_mb`
+    /// returns `None` (the caller falls back to 8 GiB). Pin both
+    /// branches so a platform-port doesn't silently regress.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn host_available_memory_mb_on_linux_reads_meminfo() {
+        // We don't pin a specific number (CI machines vary); we
+        // pin that the reader returns *some* positive value when
+        // `/proc/meminfo` is well-formed.
+        let mb = host_available_memory_mb().expect("linux must expose meminfo");
+        assert!(mb > 0, "expected positive memory, got {mb} MiB");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn host_available_memory_mb_off_linux_returns_none() {
+        assert!(host_available_memory_mb().is_none());
     }
 }

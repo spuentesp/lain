@@ -238,6 +238,23 @@ All notable changes to LAIN are documented here. Versions follow
   Unresolved for the un-confirmed topic) and the existing
   `confirmed_binding_reads_complete_comes_from_the_matched_fact`
   which covers the mixed HTTP+topic case.
+- Tuning config: the no-`tuning.toml` fallback now scales the
+  `embedding_cache_capacity` and `file_content_cache_capacity`
+  caps to the host's available memory (`MemAvailable` from
+  `/proc/meminfo`, with an 8 GiB fallback on non-Linux or read
+  errors). The hardcoded `Default` (10 000 embeddings / 1 000
+  files — designed for an 8 GiB developer laptop) punched
+  through the budget on a 1 GiB CI sandbox or a 4 GB container
+  where Lain runs alongside other workloads. The new
+  `TuningConfig::for_runtime()` constructor caps the two caches
+  at 5 % of RAM (embeddings get 2/5 of the budget, file content
+  gets the rest), clamped to a floor that keeps the caches useful
+  on tiny machines and a ceiling that prevents one huge host
+  from spending the whole box. `Default` is unchanged — tests
+  stay hermetic. Operators who pin the caps via `tuning.toml` keep
+  their values (file wins over the host-aware scale). Pinned by
+  the new `ram_aware_cache_sizing_tests` module (8 GiB / 1 GiB /
+  64 GiB / 0 MiB / Linux / non-Linux paths).
 
 ## 0.10.0 — 2026-10-13
 
