@@ -7,6 +7,14 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- `docs/protocol-coverage.md`: the protocol coverage audit as
+  maintained prose — one section per `ContractKey` kind (sensors,
+  joiner resolver, `check_binding`/`bindings` grammar, dashboard
+  view edges) plus the bus/system detection backlog. The
+  machine-readable twin is `federation::contracts::coverage_matrix`,
+  whose exhaustive `match` over `ContractKey` fails to compile when a
+  new kind appears without a coverage row.
+
 - `repos.yaml#bindings` and the `check_binding` MCP tool accept
   `topic:` / `rpc:` / `ws:` (and `websocket:`) / `table:` keys, and
   the confirmed-binding matcher resolves those consumer facts — all
