@@ -3522,7 +3522,7 @@ mod pr15_check_binding_keys {
 
     use super::*;
     use lain::federation::contracts::config::ContractFederationConfig;
-    use lain::federation::contracts::index::ConsumerTarget;
+    use lain::federation::contracts::index::{ConsumerTarget, UnresolvedReason};
     use lain::federation::contracts::model::{
         ContractFact, ContractKey, HostPart, HttpMethod, NormalizedUrl, ProviderFact,
         ProviderOrigin, RpcConsumerFact, RpcProviderFact, RpcSystem, Table, TableConsumerFact,
@@ -3925,7 +3925,11 @@ mod pr15_check_binding_keys {
     /// One row of the per-kind round-trip table. `endpoint_key` is the
     /// `repos.yaml#bindings` grammar form an operator writes; `entry_key`
     /// is the Display/wire form `check_binding` renders into
-    /// `bindings_entry`.
+    /// `bindings_entry`. `unresolved_reason` is the class the fixture's
+    /// consumer must land in BEFORE the operator's entry binds it — the
+    /// rules must leave it unresolved, not invent a join, and "some
+    /// Unresolved" is not the same claim (a resolver bug that fell
+    /// through to `NoMatch` everywhere would pass that).
     struct RoundTripCase {
         kind: FactKind,
         label: &'static str,
@@ -3933,6 +3937,7 @@ mod pr15_check_binding_keys {
         entry_key: &'static str,
         symbol: &'static str,
         path: &'static str,
+        unresolved_reason: UnresolvedReason,
     }
 
     const ROUND_TRIP_CASES: &[RoundTripCase] = &[
@@ -3943,6 +3948,10 @@ mod pr15_check_binding_keys {
             entry_key: "rpc:orders.v1/Get",
             symbol: "get_order",
             path: "src/c.py",
+            // The channel dials `orders:50051`; no `services[].hosts`
+            // entry names that host, so the gRPC resolver cannot name
+            // a provider (`resolve_rpc_consumer`'s stub-unknown path).
+            unresolved_reason: UnresolvedReason::RpcStubUnknown,
         },
         RoundTripCase {
             kind: FactKind::Ws,
@@ -3951,6 +3960,10 @@ mod pr15_check_binding_keys {
             entry_key: "websocket:/realtime",
             symbol: "dial",
             path: "src/w.py",
+            // Same host evidence rule as gRPC: a literal host that
+            // names no configured service leaves the federation, and
+            // the WebSocket resolver says so as `NoMatch`.
+            unresolved_reason: UnresolvedReason::NoMatch,
         },
         RoundTripCase {
             kind: FactKind::Table,
@@ -3959,6 +3972,10 @@ mod pr15_check_binding_keys {
             entry_key: "table:public.orders",
             symbol: "read_orders",
             path: "src/s.py",
+            // All-or-nothing: the reader also reads `private.audit`,
+            // which no endpoint owns, so the whole consumer is
+            // `NoMatch` — not a partial bind to `public.orders`.
+            unresolved_reason: UnresolvedReason::NoMatch,
         },
     ];
 
@@ -4214,16 +4231,23 @@ mod pr15_check_binding_keys {
             // the consumer unresolved (rpc/ws dial a host no service
             // declares; the table reader reads a second, unowned table
             // and the table resolver is all-or-nothing), so nothing is
-            // bound until the operator's entry says so.
+            // bound until the operator's entry says so. Matched on the
+            // case's reason class, not on `Unresolved { .. }` alone —
+            // see the `task6` graphql round-trip for the same shape.
             {
                 let index = fed.contract_index().expect("contract index");
                 let before = index
                     .consumer(&GlobalId::from_canonical(&consumer_id))
                     .expect("consumer resolution");
                 assert!(
-                    matches!(&before.target, Some(ConsumerTarget::Unresolved { .. })),
-                    "[{}] fixture must start unresolved, got {:?}",
+                    matches!(
+                        &before.target,
+                        Some(ConsumerTarget::Unresolved { reason, .. })
+                            if *reason == case.unresolved_reason
+                    ),
+                    "[{}] fixture must start unresolved in the {:?} class, got {:?}",
                     case.label,
+                    case.unresolved_reason,
                     before.target
                 );
                 assert!(before.bound_endpoints.is_empty());

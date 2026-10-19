@@ -602,12 +602,16 @@ fn query_graph_type_selector_finds_topic_hubs() {
     )
     .expect("query_graph");
     let v: Value = serde_json::from_str(&text).expect("query_graph returns JSON");
-    let hits: Vec<_> = v["nodes"]
-        .as_array()
-        .expect("nodes array")
-        .iter()
-        .filter(|n| n["type"] == "Topic")
-        .collect();
+    let nodes = v["nodes"].as_array().expect("nodes array");
+    // Exclusivity, on the UNFILTERED result: a selector that ignored
+    // `type` and leaked every node would still satisfy the filtered
+    // count below (the hub is among them). One node in, one Topic out.
+    assert_eq!(
+        nodes.len(),
+        1,
+        "find type:Topic must be exclusive, not a superset: {v}"
+    );
+    let hits: Vec<_> = nodes.iter().filter(|n| n["type"] == "Topic").collect();
     assert_eq!(hits.len(), 1, "find type:Topic must return the hub: {v}");
 }
 
@@ -758,4 +762,144 @@ async fn moved_leg_keeps_exactly_one_federated_edge_for_its_pair() {
         .filter(|e| e.edge_type == EdgeType::Produces)
         .collect();
     assert_eq!(legs.len(), 1, "dashboard must render one leg, got {legs:?}");
+}
+
+/// Two publish sites on one (symbol, topic) pair, one deleted between
+/// projections: the federated edge count for the pair must drop to 1
+/// (the survivor). This is the N-sites-one-deleted shape the reconcile
+/// comment claims (`project_edges`): the stale site-variant shares its
+/// `(source, target, type)` triple with the survivor, so `remove_edges`
+/// takes BOTH and the batch upsert re-materializes the survivor — the
+/// count of 1 pins the retract-then-UPsert ordering as well as the
+/// site-aware identity key (a triple-only key would leave the deleted
+/// leg standing at 2; upsert-then-retract would end at 0).
+#[tokio::test]
+async fn one_deleted_site_leaves_exactly_one_federated_edge_for_its_pair() {
+    let root = fixture_repo_with(
+        "deleted_site",
+        "src/producer.ts",
+        "async function publish() {\n\
+         \x20 await producer.send({ topic: 'orders.created', messages: [] });\n\
+         \x20 await producer.send({ topic: 'orders.created', messages: [] });\n\
+         }\n",
+    );
+    let ns = RepoNamespace::for_test();
+
+    let data = tempfile::tempdir().expect("federation data dir");
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(data.path()).expect("petgraph backend"));
+    let fed = FederatedIndex::new(backend.clone());
+    git2::Repository::init(&root).expect("fixture root opens as a git repo");
+    let rid = RepoId::new("a").expect("valid repo id");
+    let source =
+        Box::new(WorkspaceDirSource::new(rid.clone(), root.clone()).expect("workspace source"));
+    fed.add_repo(source, data.path()).await.expect("add_repo");
+    let idx = fed.get_repo(&rid).expect("registered repo");
+
+    // The enclosing symbol both sites hang off — minted explicitly (no
+    // tree-sitter indexer in `scan_workspace_event`), with a
+    // line-stable id so the pair identity is the same in both
+    // projections and only the leg count changes.
+    let mut fn_node = GraphNode::new(
+        NodeType::Function,
+        "publish".into(),
+        "src/producer.ts".into(),
+    );
+    fn_node.id = GraphNode::generate_id(
+        &NodeType::Function,
+        "src/producer.ts",
+        "publish",
+        Some(1),
+        &ns,
+    );
+    fn_node.line_start = Some(1);
+    fn_node.line_end = Some(10);
+    idx.db()
+        .upsert_node(fn_node.clone())
+        .expect("seed enclosing symbol");
+
+    // Projection 1: two publish sites — lines 2 and 3 — one pair.
+    scan_workspace_event(idx.db(), &root, &ns).expect("event scan");
+    fed.project_repo(&rid).await.expect("first projection");
+
+    let produces = |edges: &[GraphEdge]| -> Vec<GraphEdge> {
+        edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Produces)
+            .cloned()
+            .collect()
+    };
+    let before = produces(&backend.all_edges().expect("edges"));
+    assert_eq!(before.len(), 2, "two sites, two legs: {before:?}");
+    let pair = (before[0].source_id.clone(), before[0].target_id.clone());
+    assert!(
+        before
+            .iter()
+            .all(|e| (e.source_id.clone(), e.target_id.clone()) == pair),
+        "both legs must be site-variants of ONE pair: {before:?}"
+    );
+    let mut sites: Vec<(String, u32)> = before
+        .iter()
+        .map(|e| {
+            let s = e.site.as_ref().expect("leg carries its SourceSite");
+            (s.path.as_str().to_string(), s.line)
+        })
+        .collect();
+    sites.sort();
+    assert_eq!(
+        sites,
+        vec![
+            ("src/producer.ts".to_string(), 2),
+            ("src/producer.ts".to_string(), 3)
+        ],
+        "harness precondition: one leg per site"
+    );
+
+    // Delete one site (the line-3 call). The survivor keeps its
+    // original site — a pure deletion, no move mixed in.
+    write_file(
+        &root,
+        "src/producer.ts",
+        "async function publish() {\n\
+         \x20 await producer.send({ topic: 'orders.created', messages: [] });\n\
+         }\n",
+    );
+    scan_workspace_event(idx.db(), &root, &ns).expect("rescan");
+    // Harness precondition: the per-repo side holds exactly the
+    // survivor — a red run must mean the FEDERATION kept the deleted
+    // leg, not that the sensor resurrected it.
+    let local_legs: Vec<GraphEdge> = idx
+        .db()
+        .all_edges()
+        .into_iter()
+        .filter(|e| e.edge_type == EdgeType::Produces)
+        .collect();
+    assert_eq!(
+        local_legs
+            .iter()
+            .map(|e| e.site.as_ref().map(|s| s.line))
+            .collect::<Vec<_>>(),
+        vec![Some(2)],
+        "rescan replaces the sensor's own output: one leg at line 2, got {local_legs:?}"
+    );
+    fed.project_repo(&rid).await.expect("second projection");
+
+    let after = produces(&backend.all_edges().expect("edges"));
+    let for_pair: Vec<GraphEdge> = after
+        .iter()
+        .filter(|e| (e.source_id.clone(), e.target_id.clone()) == pair)
+        .cloned()
+        .collect();
+    assert_eq!(
+        for_pair.len(),
+        1,
+        "the deleted site's leg must retract, leaving the survivor — not \
+         stack at 2 (triple-only reconcile key) and not drop to 0 (upsert \
+         before retract): {for_pair:?}"
+    );
+    assert_eq!(
+        for_pair[0].site.as_ref().map(|s| (s.path.as_str(), s.line)),
+        Some(("src/producer.ts", 2)),
+        "the surviving leg is the kept site"
+    );
 }
