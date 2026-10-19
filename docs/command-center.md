@@ -132,7 +132,8 @@ flowchart TB
   (`get_federation_health`) in a single view.
 - **Graph** — *(see [Tour step 7](#tour) for what this looks like)* D3 force-directed graph of the active workspace.
 - **Graph tab** — D3 force-directed graph of the active workspace, drawn from
-  `get_workspace_graph` (Function/Method/Class nodes, Calls/Imports edges,
+  `get_workspace_graph` (Function/Method/Class/Topic/Schema nodes,
+  Calls/Imports/CrossRepoSameSymbol/Produces/Consumes/PayloadSchema edges,
   capped at 5000 nodes / 10000 edges server-side). Cross-repo edges are drawn
   in the warning colour; hovering a node shows its name, repo, kind and path;
   nodes are draggable. Labels are drawn only when the graph has 150 nodes or

@@ -154,7 +154,7 @@ pub const WORKSPACE_TOOL_DEFS: &[ToolDef] = &[
     ),
     ToolDef::legacy(
         "get_workspace_graph",
-        "Per-workspace graph for the dashboard. Returns {nodes: [...], edges: [...], truncated: bool}. Filters to Function/Method/Class + Calls/Imports. Optional filter: substring match against node name + path. Cross-repo Calls edges are marked cross_repo: true.",
+        "Per-workspace graph for the dashboard. Returns {nodes: [...], edges: [...], truncated: bool}. Filters to Function/Method/Class/Topic/Schema + Calls/Imports/CrossRepoSameSymbol/Produces/Consumes/PayloadSchema. Optional filter: substring match against node name + path. Cross-repo edges are marked cross_repo: true. Topic hubs keep per-repo identity: the same broker/topic in two repos is two Topic nodes, linked at the contract layer.",
         &[],
         &["filter"],
     ),

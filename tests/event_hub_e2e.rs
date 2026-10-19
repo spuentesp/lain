@@ -19,13 +19,25 @@
 use lain::federation::contracts::model::{
     ContractFact, HttpMethod, ProviderFact, ProviderOrigin, SourceSite,
 };
+use lain::federation::federated_index::FederatedIndex;
+use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+use lain::federation::repo_id::RepoId;
+use lain::federation::repo_source::WorkspaceDirSource;
+use lain::federation::workspace::{WorkspaceSpec, WorkspacesFile};
 use lain::graph::GraphDatabase;
+use lain::mcp::federation_tools::{get_workspace_graph, WorkspaceGraph};
+use lain::nlp::NlpEmbedder;
 use lain::schema::{
     EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, StaticSource,
 };
+use lain::server::coordination::CoordinationProxy;
+use lain::server::presence::PresenceRegistry;
 use lain::server::sensors::event_sensor::scan_workspace_event;
+use lain::tools::handlers::query::query_graph;
+use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The hub identity anchor: hub ids carry no path and no line, so
 /// every site converges on one node per `(broker, topic)` per repo.
@@ -373,4 +385,228 @@ fn rescan_retracts_old_per_site_topic_nodes() {
             e.target_id
         );
     }
+}
+
+// ─── Hub visibility in the dashboard workspace graph (Task 2) ────────
+//
+// `get_workspace_graph` feeds the dashboard's force-directed map and
+// filters to an explicit node/edge allowlist. Before this change the
+// canonical `Topic` hubs and their `Produces`/`Consumes` legs were
+// invisible there. These tests drive the production visibility path —
+// `event_sensor` → per-repo graph → `project_repo` → federated
+// backend → `get_workspace_graph` — and pin what the view must (and
+// must not) show. The LSP-driven index pipeline is skipped on
+// purpose: its sensor invocation is Task 1's contract (pinned above),
+// and the view filter is what this section pins.
+
+/// Boot a federation whose member repos are `repos` (`id`, scan root),
+/// run the event sensor over each root into that repo's graph, project
+/// into the federated backend, and return the dashboard view. Each
+/// root is opened as a git repo because `RepoIndex::new` instantiates
+/// a `GitSensor` against it.
+async fn call_get_workspace_graph(repos: &[(&str, &Path)], filter: Option<&str>) -> WorkspaceGraph {
+    let data = tempfile::tempdir().expect("federation data dir");
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(data.path()).expect("petgraph backend"));
+    let fed = FederatedIndex::new(backend);
+    let mut members = Vec::new();
+    for (id, root) in repos {
+        git2::Repository::init(root).expect("fixture root opens as a git repo");
+        let rid = RepoId::new(id).expect("valid repo id");
+        let source = Box::new(
+            WorkspaceDirSource::new(rid.clone(), root.to_path_buf()).expect("workspace source"),
+        );
+        fed.add_repo(source, data.path()).await.expect("add_repo");
+        let idx = fed.get_repo(&rid).expect("registered repo");
+        scan_workspace_event(idx.db(), root, &RepoNamespace::for_test()).expect("event scan");
+        fed.project_repo(&rid).await.expect("project_repo");
+        members.push((*id).to_string());
+    }
+    let workspaces = WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "hub-view".into(),
+            description: None,
+            source: None,
+            members,
+        }],
+    };
+    let out = get_workspace_graph(&fed, &workspaces, filter).expect("workspace graph");
+    // Harness precondition: the hubs must have reached the federated
+    // backend before the view filters them — a red run must mean "the
+    // view filter dropped them", not "projection never wrote them".
+    let projected = fed
+        .backend()
+        .list_nodes()
+        .expect("list_nodes")
+        .iter()
+        .filter(|n| n.node_type == NodeType::Topic)
+        .count();
+    assert!(projected > 0, "harness precondition: hubs not projected");
+    out
+}
+
+/// The dashboard map must show the hub with BOTH legs — the
+/// publisher's `Produces` and the subscriber's `Consumes`. Sites sit
+/// at file top level, so both legs hang off the sensor's `topic-read:`
+/// synthetic anchors (the "no enclosing symbol" source path).
+#[tokio::test]
+async fn workspace_graph_shows_topic_hub_with_its_legs() {
+    let root = fixture_repo_with(
+        "ws_graph_legs",
+        "src/events.ts",
+        "producer.send({ topic: 'orders.created' });\n\
+         consumer.run({ topics: ['orders.created'], eachMessage: handler });\n",
+    );
+    // A payload schema linked to the same topic: `PayloadSchema` must
+    // ride along whenever a schema is linked (interface contract).
+    write_file(
+        &root,
+        "schemas/order.avsc",
+        "{\"type\": \"record\", \"name\": \"Order\", \"topic\": \"orders.created\", \
+         \"fields\": [{\"name\": \"customer_id\", \"type\": \"string\"}]}",
+    );
+    let out = call_get_workspace_graph(&[("a", root.as_path())], None).await;
+
+    let topics: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.node_type == NodeType::Topic)
+        .collect();
+    assert_eq!(topics.len(), 1);
+    assert_eq!(topics[0].name, "kafka/orders.created");
+    let legs: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Produces || e.edge_type == EdgeType::Consumes)
+        .collect();
+    assert_eq!(legs.len(), 2, "hub must show publisher and subscriber legs");
+    assert!(
+        legs.iter().any(|e| e.edge_type == EdgeType::Produces)
+            && legs.iter().any(|e| e.edge_type == EdgeType::Consumes),
+        "one leg per direction, got {legs:?}"
+    );
+    // `PayloadSchema` shows when a schema is linked — with its `Schema`
+    // endpoint, since the view keeps an edge only when both of its
+    // endpoints are admitted.
+    let schema_id = out
+        .nodes
+        .iter()
+        .find(|n| n.node_type == NodeType::Schema)
+        .map(|n| n.id.clone())
+        .expect("linked Schema endpoint must show");
+    assert!(
+        out.edges
+            .iter()
+            .any(|e| e.edge_type == EdgeType::PayloadSchema && e.target_id == schema_id),
+        "hub -> Schema PayloadSchema link missing: {:?}",
+        out.edges
+    );
+}
+
+/// Review Focus #3 (cross-repo): the same `broker/topic` in two repos
+/// is TWO hubs (per-repo identity), linked at the contract layer —
+/// the view must NOT merge them.
+#[tokio::test]
+async fn cross_repo_same_topic_stays_two_hubs() {
+    let pub_root = fixture_repo_with(
+        "cross_pub",
+        "src/publisher.ts",
+        "producer.send({ topic: 'orders' });\n",
+    );
+    let sub_root = fixture_repo_with(
+        "cross_sub",
+        "src/subscriber.ts",
+        "consumer.run({ topics: ['orders'], eachMessage: handler });\n",
+    );
+    let out = call_get_workspace_graph(
+        &[("a", pub_root.as_path()), ("b", sub_root.as_path())],
+        None,
+    )
+    .await;
+
+    let topics: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|n| n.node_type == NodeType::Topic)
+        .collect();
+    assert_eq!(
+        topics.len(),
+        2,
+        "per-repo identity: one hub per repo, never merged in the view: {topics:?}"
+    );
+    assert!(
+        topics.iter().all(|n| n.name == "kafka/orders"),
+        "both hubs name the same broker/topic: {topics:?}"
+    );
+    let hub_repos: BTreeSet<String> = topics.iter().filter_map(|n| n.repo_id.clone()).collect();
+    assert_eq!(
+        hub_repos,
+        BTreeSet::from(["a".to_string(), "b".to_string()]),
+        "one hub per member repo"
+    );
+    let legs: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Produces || e.edge_type == EdgeType::Consumes)
+        .collect();
+    assert_eq!(
+        legs.len(),
+        2,
+        "one leg per hub — a merge would drop or double one: {legs:?}"
+    );
+    assert!(
+        out.edges
+            .iter()
+            .any(|e| e.edge_type == EdgeType::Consumes && !e.cross_repo),
+        "each hub keeps its own legs inside its repo"
+    );
+    assert!(
+        legs.iter().all(|e| !e.cross_repo),
+        "hub legs are intra-repo by construction; cross-repo linking \
+         belongs to the contract layer"
+    );
+}
+
+/// `query_graph`'s `find` type selector must flow `Topic` hubs through
+/// (`type: "Topic"`). The selector path is type-generic and needed no
+/// change for the hub model — this assert keeps that claim honest.
+#[test]
+fn query_graph_type_selector_finds_topic_hubs() {
+    let root = fixture_repo_with(
+        "query_topic",
+        "src/producer.ts",
+        "producer.send({ topic: 'orders.created' });\n",
+    );
+    let graph = scan_events(&root);
+    let embedder = NlpEmbedder::new_stub();
+    let cache = Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(16).unwrap(),
+    )));
+    let presence = PresenceRegistry::new();
+    let occupancy = CoordinationProxy::new(std::env::temp_dir());
+    let mut args = Map::new();
+    args.insert(
+        "query".to_string(),
+        serde_json::json!({"ops": [{"op": "find", "type": "Topic"}]}),
+    );
+    let text = query_graph(
+        Path::new(""),
+        &graph,
+        &embedder,
+        &cache,
+        &presence,
+        &occupancy,
+        Some(&args),
+        100,
+    )
+    .expect("query_graph");
+    let v: Value = serde_json::from_str(&text).expect("query_graph returns JSON");
+    let hits: Vec<_> = v["nodes"]
+        .as_array()
+        .expect("nodes array")
+        .iter()
+        .filter(|n| n["type"] == "Topic")
+        .collect();
+    assert_eq!(hits.len(), 1, "find type:Topic must return the hub: {v}");
 }

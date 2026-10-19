@@ -120,23 +120,55 @@ pub fn get_workspace(
 const GRAPH_NODE_CAP: usize = 5000;
 const GRAPH_EDGE_CAP: usize = 10000;
 
+/// Node types the dashboard's [`get_workspace_graph`] admits, as their
+/// schema/`Debug` names (the same spelling `NodeType`'s `Display`
+/// prints and `query_graph`'s `type:` selector takes). Named — not
+/// inlined into the filter — so the protocol-coverage matrix can
+/// reference the shipped set instead of re-describing it as string
+/// literals that can drift.
+///
+/// `Schema` rides along so a hub's `PayloadSchema` link has a visible
+/// endpoint: the edge filter keeps an edge only when both endpoints
+/// are admitted (see `WORKSPACE_GRAPH_EDGE_TYPES`).
+pub const WORKSPACE_GRAPH_NODE_TYPES: &[&str] = &["Function", "Method", "Class", "Topic", "Schema"];
+
+/// Edge types [`get_workspace_graph`] admits — the call/import spine
+/// plus the topic-hub legs (`Produces` / `Consumes`) and the hub's
+/// `PayloadSchema` link to its payload definition. Same naming rule
+/// as [`WORKSPACE_GRAPH_NODE_TYPES`]; the protocol-coverage matrix
+/// references this set for its `view_edges` rows.
+pub const WORKSPACE_GRAPH_EDGE_TYPES: &[&str] = &[
+    "Calls",
+    "Imports",
+    "CrossRepoSameSymbol",
+    "Produces",
+    "Consumes",
+    "PayloadSchema",
+];
+
 fn node_kind_str(s: &str) -> bool {
-    matches!(s, "Function" | "Method" | "Class")
+    WORKSPACE_GRAPH_NODE_TYPES.contains(&s)
 }
 
 fn edge_kind_str(s: &str) -> bool {
-    matches!(s, "Calls" | "Imports" | "CrossRepoSameSymbol")
+    WORKSPACE_GRAPH_EDGE_TYPES.contains(&s)
 }
 
 /// Per-workspace graph data for the dashboard's D3 force-directed view.
 ///
-/// Filters to `Function` / `Method` / `Class` nodes and `Calls` /
-/// `Imports` / `CrossRepoSameSymbol` edges (per the spec's "filtered
-/// Functions + Calls + cross-repo" scope — `CrossRepoSameSymbol` is
-/// the cross-repo peer-symbol edge type and was missing from this
-/// allowlist, so it was silently dropped here even once the backend
-/// produced it). Marks edges as `cross_repo: true` when source's
-/// repo_id differs from target's. Caps at 5000 nodes / 10000 edges.
+/// Filters to [`WORKSPACE_GRAPH_NODE_TYPES`] /
+/// [`WORKSPACE_GRAPH_EDGE_TYPES`] — today `Function` / `Method` /
+/// `Class` / `Topic` / `Schema` nodes and `Calls` / `Imports` /
+/// `CrossRepoSameSymbol` / `Produces` / `Consumes` / `PayloadSchema`
+/// edges. `CrossRepoSameSymbol` is the cross-repo peer-symbol edge
+/// type and was missing from this allowlist, so it was silently
+/// dropped here even once the backend produced it; `Topic` hubs and
+/// their `Produces` / `Consumes` legs were dropped the same way until
+/// the hub model landed. Hubs keep per-repo identity in this view: the
+/// same `broker/topic` in two repos is two `Topic` nodes, linked at
+/// the contract layer, not merged here. Marks edges as
+/// `cross_repo: true` when source's repo_id differs from target's.
+/// Caps at 5000 nodes / 10000 edges.
 pub fn get_workspace_graph(
     fed: &FederatedIndex,
     workspaces: &WorkspacesFile,
@@ -232,4 +264,35 @@ pub fn get_workspace_graph(
         edges,
         truncated,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WORKSPACE_GRAPH_EDGE_TYPES, WORKSPACE_GRAPH_NODE_TYPES};
+
+    /// The allowlist names are compared against `Debug`/`Display`
+    /// strings at filter time, so a typo — or a renamed variant —
+    /// would silently drop every node/edge of that kind instead of
+    /// failing. The protocol-coverage matrix references these consts
+    /// by name, which makes a silent rename twice as costly; this is
+    /// the guard that turns it into a test failure.
+    #[test]
+    fn filter_set_names_are_real_schema_variants() {
+        for name in WORKSPACE_GRAPH_NODE_TYPES {
+            assert!(
+                crate::schema::NodeType::all()
+                    .iter()
+                    .any(|k| format!("{k:?}") == *name),
+                "WORKSPACE_GRAPH_NODE_TYPES names `{name}`, which is not a NodeType variant"
+            );
+        }
+        for name in WORKSPACE_GRAPH_EDGE_TYPES {
+            assert!(
+                crate::schema::EdgeType::all()
+                    .iter()
+                    .any(|k| format!("{k:?}") == *name),
+                "WORKSPACE_GRAPH_EDGE_TYPES names `{name}`, which is not an EdgeType variant"
+            );
+        }
+    }
 }

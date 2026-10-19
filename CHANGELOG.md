@@ -50,6 +50,15 @@ All notable changes to LAIN are documented here. Versions follow
   run **`lain reindex`** to rebuild cleanly. `CONTRACT_ANALYZER_REV`
   is bumped (5 → 6) because the analyzer's graph output changed, so
   contract caches keyed on the old revision are ignored and rebuilt.
+- The dashboard workspace graph (`get_workspace_graph`) now shows topic
+  hubs and their legs: `Topic` nodes with `Produces`/`Consumes` edges
+  (plus `Schema` nodes and their hub `PayloadSchema` links) join the
+  Function/Method/Class + Calls/Imports scope. Hubs keep per-repo
+  identity in the view — the same `broker/topic` in two repos is two
+  `Topic` nodes, linked at the contract layer, never merged — and hub
+  legs are never drawn cross-repo. The node/edge allowlists are named
+  (`WORKSPACE_GRAPH_NODE_TYPES` / `WORKSPACE_GRAPH_EDGE_TYPES`) so the
+  protocol-coverage matrix can reference the shipped set.
 - `lain mcp --daemon` boots the resolved workspace set as a federation
   (synthesized `repos.yaml` under the runtime dir, set-hash keyed) so
   the served set can grow in hot via `add_workspaces`; idle-exit and
