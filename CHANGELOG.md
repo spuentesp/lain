@@ -3,7 +3,16 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## 0.10.0 — 2026-10-13
+
+> **MINOR bump — the coordination contract changed.** Lain's
+> coordination core is now delegated to
+> [`zoanthrope`](https://github.com/spuentesp/zoanthrope) as an
+> external dependency, and three arbitration semantics changed with
+> it (listed plainly under **Contract deltas** below). Tool names and
+> response shapes are unchanged; the deltas are in *what a claim
+> covers, who wins a conflict, and when a claim expires*. This is why
+> 0.10.0 is a minor release and not 0.9.2.
 
 ## 0.11.0 — 2026-10-20
 
