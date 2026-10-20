@@ -5,6 +5,8 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+## 0.11.0 — 2026-10-20
+
 ### Added
 
 - `docs/protocol-coverage.md`: the protocol coverage audit as

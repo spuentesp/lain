@@ -1,5 +1,47 @@
 # Release audit — v0.11.0 (zero-pending record)
 
+## Release-candidate re-audit — 2026-10-20
+
+The owner authorized the release after #338 and #339 merged. The code base is
+`dev` @ `35eee009bdd5ebbd26ff2ac0ead13c72d87a234e`, tree
+`483028d5a63211932d8c0fa38b2b8bacb1953e50`. The older audit below remains
+historical evidence, not a claim that its earlier commit is the release tree.
+
+- **Worktrees:** all five registered worktrees were clean before the release
+  branch was created. No WIP was discarded or folded into this release.
+- **Issues/registers:** #328 remains the sole open issue, with the existing
+  written deferral below. The acceptance findings and scope-outs below remain
+  unchanged. No acceptance-program issue is open.
+- **Dependency PRs:** #305 and #332–#337 are explicitly outside this feature
+  release. They are separate dependency migrations/maintenance updates, not
+  prerequisites for the accepted features; #305 retains its API-migration
+  deferral. None is represented as merged or validated here.
+- **Known flakes:** the HTTP auth-test fixture lifetime failure found during
+  #339 was fixed before merge. Its 11 failure-mode tests passed locally, and
+  the full PR CI passed. No remaining known test flake is accepted.
+- **Exact-code CI:** [dev run 39511328557](https://github.com/spuentesp/lain/actions/runs/39511328557)
+  passed on `35eee009`: **3490 tests across 93 targets**, lint, schema drift,
+  npm shim and capability checks. `demo.sh`: **164 passed, 0 failed, 3 skipped**.
+  Two skips need the optional NLP model; the third had no coupling-explorer
+  session link. These are explicit coverage gaps, not successful assertions.
+- **Formal/contracts:** 39 TLA+ specs, 0 unexpected outcomes; 45 Python
+  release/metadata contract tests; npm installer/launcher checks; and the
+  acceptance-metrics self-test all passed locally on that code base.
+- **Mutation:** #338: 6 caught, 1 unviable, 0 missed/timeouts. #339: all 17
+  caught, 0 missed/timeouts. Both PRs have no unresolved review threads.
+- **Release checks:** the version-only release tree must pass the full
+  main-target PR matrix, followed by successful push-to-main CI on the exact
+  merged commit, before tagging. Metadata validation is recorded in the PR.
+- **Publishing order:** badge default stays on published `v0.10.0`; formula
+  hashes are replaced only after the `v0.11.0` assets and SHA256SUMS publish.
+  Existing hashes are not claimed to validate the unpublished archives.
+
+The new release also includes the later protocol binding/coverage, topic hub,
+readiness, pattern override validation and shared comment-parser work described
+in CHANGELOG.md. The previous scope-outs below are carried forward explicitly.
+
+## Historical audit — 2026-10-17
+
 **Date:** 2026-10-17
 **Tree:** `dev` @ `026d4283` (= `chore/sync-dev-v0.10.0` after absorbing
 `origin/dev` @ `6c392158` — the twin of our sync base — via merge
