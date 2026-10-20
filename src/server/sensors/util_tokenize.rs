@@ -19,28 +19,25 @@
 
 /// Return the prefix before the first unquoted `//` or `#` comment.
 /// Single, double, and backtick quotes protect comment markers; backslash
-/// escapes protect the next byte inside a quoted string. This single-line
+/// escapes protect the next character inside a quoted string. This single-line
 /// helper does not parse block comments or multiline string state.
 pub(crate) fn strip_line_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
+    let mut chars = line.char_indices().peekable();
     let mut quote = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
+    while let Some((i, ch)) = chars.next() {
         match quote {
-            Some(_) if b == b'\\' => {
-                i += 2;
-                continue;
+            Some(_) if ch == '\\' => {
+                let _ = chars.next();
             }
-            Some(q) if b == q => quote = None,
-            Some(_) => {}
-            None if matches!(b, b'"' | b'\'' | b'`') => quote = Some(b),
-            None if b == b'#' || (b == b'/' && bytes.get(i + 1) == Some(&b'/')) => {
+            Some(q) if ch == q => quote = None,
+            None if matches!(ch, '"' | '\'' | '`') => quote = Some(ch),
+            None if ch == '#'
+                || (ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '/')) =>
+            {
                 return &line[..i];
             }
             _ => {}
         }
-        i += 1;
     }
     line
 }
