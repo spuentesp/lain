@@ -1,4 +1,4 @@
-//! Hand-rolled tokenizer plumbing shared by SQL / proto /
+//! Hand-rolled tokenizer plumbing shared by event / SQL / proto /
 //! GraphQL sensors.
 //!
 //! Each sensor provides its own grammar (the protocol-specific
@@ -16,6 +16,31 @@
 //! hand-rolled byte-walk, but the scaffolding below it is shared.
 
 // ─── Comment-stripping ─────────────────────────────────────────────────
+
+/// Return the prefix before the first unquoted `//` or `#` comment.
+/// Single, double, and backtick quotes protect comment markers; backslash
+/// escapes protect the next character inside a quoted string. This single-line
+/// helper does not parse block comments or multiline string state.
+pub(crate) fn strip_line_comment(line: &str) -> &str {
+    let mut chars = line.char_indices().peekable();
+    let mut quote = None;
+    while let Some((i, ch)) = chars.next() {
+        match quote {
+            Some(_) if ch == '\\' => {
+                let _ = chars.next();
+            }
+            Some(q) if ch == q => quote = None,
+            None if matches!(ch, '"' | '\'' | '`') => quote = Some(ch),
+            None if ch == '#'
+                || (ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '/')) =>
+            {
+                return &line[..i];
+            }
+            _ => {}
+        }
+    }
+    line
+}
 
 /// Which comment syntax `strip_comments` should recognise.
 ///
@@ -448,6 +473,50 @@ fn is_ident_continue(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_comments_keep_quoted_markers_and_unicode() {
+        for (input, expected) in [
+            ("", ""),
+            ("plain / text", "plain / text"),
+            ("# comment", ""),
+            ("// comment", ""),
+            ("café # comment", "café "),
+            ("é / 日 // comment", "é / 日 "),
+            (
+                r#"'https://host/#topic' // comment"#,
+                r#"'https://host/#topic' "#,
+            ),
+            (
+                r#""https://host/#topic" # comment"#,
+                r#""https://host/#topic" "#,
+            ),
+            ("`https://host/#topic` // comment", "`https://host/#topic` "),
+            ("'unterminated // #", "'unterminated // #"),
+        ] {
+            assert_eq!(strip_line_comment(input), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn line_comments_respect_escape_parity_for_each_quote() {
+        for quote in ['\'', '"', '`'] {
+            for backslashes in 0..=5 {
+                let prefix = format!("{quote}topic{}{quote}", "\\".repeat(backslashes));
+                for marker in ["//", "#"] {
+                    let input = format!("{prefix} {marker} comment");
+                    let expected = if backslashes % 2 == 0 {
+                        format!("{prefix} ")
+                    } else {
+                        input.clone()
+                    };
+                    assert_eq!(strip_line_comment(&input), expected, "{input:?}");
+                }
+            }
+            let dangling = format!("{quote}topic\\");
+            assert_eq!(strip_line_comment(&dangling), dangling);
+        }
+    }
 
     #[test]
     fn strip_c_style_preserves_line_numbers() {

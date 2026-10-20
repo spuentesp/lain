@@ -48,6 +48,7 @@ use crate::federation::contracts::model::{
 };
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::util_tokenize::strip_line_comment;
 use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -918,40 +919,6 @@ fn extract_string_literal(s: &str) -> Option<String> {
     crate::server::sensors::util_tokenize::extract_string_literal(s, 0).map(|(_, lit)| lit)
 }
 
-/// Strip line comments from the line (same shape as
-/// `event_sensor::strip_line_comment` — kept here as a small
-/// per-file helper so each sensor's text rules stand alone).
-fn strip_line_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut in_string: Option<u8> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match in_string {
-            Some(q) if b == q => {
-                if i > 0 && bytes[i - 1] == b'\\' {
-                    i += 1;
-                    continue;
-                }
-                in_string = None;
-            }
-            Some(_) => {}
-            None if b == b'"' || b == b'\'' || b == b'`' => {
-                in_string = Some(b);
-            }
-            None if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                return &line[..i];
-            }
-            None if b == b'#' => {
-                return &line[..i];
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    line
-}
-
 // ─── Graph emission ───────────────────────────────────────────────────
 
 /// Resolve the source for a `ReadsTable` / `WritesTable` edge.
@@ -1099,6 +1066,17 @@ fn build_graph(
 mod tests {
     use super::*;
     use crate::schema::RepoNamespace;
+
+    #[test]
+    fn escaped_backslash_before_comment_does_not_emit_phantom_sql() {
+        let src = r#"let path = "C:\\"; // sqlx::query("SELECT id FROM ghost")
+sqlx::query("SELECT id FROM orders")
+"#;
+        let sites = detect_in_file(src, "rs");
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].stmt.tables, vec!["orders".to_string()]);
+        assert_eq!(sites[0].line, 2);
+    }
 
     #[test]
     fn extract_string_literal_handles_double_single_backtick() {

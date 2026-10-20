@@ -67,6 +67,7 @@ use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, Re
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::payload_schema::{parse_avro_schema, parse_json_schema};
 use crate::server::sensors::util::{self, Lang};
+use crate::server::sensors::util_tokenize::strip_line_comment;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -394,44 +395,6 @@ fn is_ident(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// Strip a line comment marker. `//` covers TypeScript, JavaScript,
-/// Rust, Go; `#` covers Python. The cut is at the first occurrence
-/// outside of any string literal. Cheap approximation: we cut at the
-/// first `//` or `#` that isn't inside a quote — correct for the
-/// event-sensor's input shape (topic arg always comes before any
-/// comment marker on the line).
-fn strip_line_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut in_string: Option<u8> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match in_string {
-            Some(q) if b == q => {
-                // Closing quote — only honor if not escaped.
-                if i > 0 && bytes[i - 1] == b'\\' {
-                    i += 1;
-                    continue;
-                }
-                in_string = None;
-            }
-            Some(_) => {}
-            None if b == b'"' || b == b'\'' || b == b'`' => {
-                in_string = Some(b);
-            }
-            None if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                return &line[..i];
-            }
-            None if b == b'#' => {
-                return &line[..i];
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    line
 }
 
 fn detect_sites(
@@ -950,6 +913,27 @@ mod tests {
         let p = dir.path().join(name);
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    #[test]
+    fn escaped_backslash_before_comment_does_not_emit_phantom_topic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("producer.ts"),
+            r#"const path = "C:\\"; // producer.send({ topic: 'ghost' });
+producer.send({ topic: 'orders.created' });
+"#,
+        )
+        .unwrap();
+        let graph = empty_db();
+        scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test()).unwrap();
+        let topics: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .map(|n| n.name)
+            .collect();
+        assert_eq!(topics, vec!["kafka/orders.created".to_string()]);
     }
 
     /// kafkajs `producer.send({ topic: 'orders.created' })` must emit

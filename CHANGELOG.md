@@ -133,6 +133,9 @@ All notable changes to LAIN are documented here. Versions follow
   their missing stamp; the loader retries the pre-stamp layout and
   falls back to the old `last_commit` inference) — no `lain reindex`
   required, and `PATH_FORMAT_VERSION` is unchanged.
+- Event and SQL sensors share one line-comment tokenizer. Quotes preceded
+  by an even number of backslashes now close correctly, so a following
+  commented-out publish or SQL call cannot produce phantom graph nodes.
 - `relink_cross_repo` takes part in the same clear/mark lifecycle as
   the indexing passes: the gate is cleared while the cross-repo `Calls`
   edges are re-resolved and re-stamped for the indexed commit when they

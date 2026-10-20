@@ -100,55 +100,19 @@ impl std::ops::DerefMut for ServerFixture {
 }
 
 fn boot_server_fixture(port: u16) -> ServerFixture {
-    let (guard, project, state, xdg_config) = boot_server(port);
-    ServerFixture {
-        guard,
-        _project: project,
-        _state: state,
-        _xdg_config: xdg_config,
-    }
-}
-
-/// Thin wrapper around [`boot_server_with`] that passes no extra
-/// args / env. Existing tests that don't vary `--bind` or `LAIN_API_KEYS`
-/// use this directly.
-fn boot_server(
-    port: u16,
-) -> (
-    ServerGuard,
-    tempfile::TempDir,
-    tempfile::TempDir,
-    tempfile::TempDir,
-) {
     boot_server_with(port, &[], &[])
-        .map(|(guard, _stderr_path, project, state, xdg_config)| {
-            (guard, project, state, xdg_config)
-        })
         .expect("boot_server_with")
+        .0
 }
 
-/// Like [`boot_server`] but appends the given CLI args and sets the
-/// given extra environment variables on the spawned child. Each entry
-/// in `extra_env` is `(name, value)`. Returns `(ServerGuard, stderr_path,
-/// project, state, xdg_config)` so callers that need to inspect startup
-/// logs (the auth/bind regression tests below) can read them; the path
-/// points at the file the spawned child is still writing to, so it is
-/// safe to read after the child exits.
-#[allow(clippy::type_complexity)]
+/// Boot a server with extra CLI args and environment variables. The fixture
+/// owns every temporary directory and stops the server before dropping them.
+/// Return the stderr path separately for startup-log assertions.
 fn boot_server_with(
     port: u16,
     extra_args: &[&str],
     extra_env: &[(&str, &str)],
-) -> Result<
-    (
-        ServerGuard,
-        std::path::PathBuf,
-        tempfile::TempDir,
-        tempfile::TempDir,
-        tempfile::TempDir,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<(ServerFixture, std::path::PathBuf), Box<dyn std::error::Error>> {
     let project = tempfile::tempdir().unwrap();
     let repo_dir = project.path().join("repo");
     std::fs::create_dir_all(&repo_dir).unwrap();
@@ -256,7 +220,15 @@ fn boot_server_with(
     // read timeouts under load) are retries; only the child dying is
     // fatal. See `common::wait_for_health_of`.
     common::wait_for_health_of(&mut guard, &host, Duration::from_secs(60));
-    Ok((guard, stderr_path, project, state, xdg_config))
+    Ok((
+        ServerFixture {
+            guard,
+            _project: project,
+            _state: state,
+            _xdg_config: xdg_config,
+        },
+        stderr_path,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -940,7 +912,7 @@ fn server_logs_dropped_messages_gracefully() {
 #[test]
 fn http_default_is_loopback() {
     let port = free_port();
-    let (_server, stderr_path, ..) = boot_server_with(port, &[], &[]).expect("boot_server_with");
+    let (_server, stderr_path) = boot_server_with(port, &[], &[]).expect("boot_server_with");
 
     // The startup log line lives in the stderr file the helper
     // captured. Tracing is async so allow a short window for the
@@ -1090,7 +1062,7 @@ fn http_public_bind_without_auth_refuses_to_start() {
 fn http_public_bind_with_auth_requires_bearer() {
     let port = free_port();
     let api_key = "f02-test-key";
-    let (_server, _stderr_path, ..) =
+    let (_server, _stderr_path) =
         boot_server_with(port, &["--bind", "0.0.0.0"], &[("LAIN_API_KEYS", api_key)])
             .expect("boot_server_with");
     let host = format!("127.0.0.1:{port}");
