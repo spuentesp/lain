@@ -903,3 +903,199 @@ async fn one_deleted_site_leaves_exactly_one_federated_edge_for_its_pair() {
         "the surviving leg is the kept site"
     );
 }
+
+// ─── F6 leg-vs-pair audit: Consumes ────────────────────────────────
+//
+/// The producer-side leg count (`hub_keeps_one_produces_edge_per_site`,
+/// `hub_keeps_one_produces_edge_per_top_level_site`) is pinned by
+/// two tests above. The CONSUMER side has no equivalent pin — every
+/// existing test exercises the joiner or workspace graph view, not
+/// the per-site Consumes edge count. Same shape, opposite site; the
+/// pair must hold. The audit: two top-level consumer sites for one
+/// topic must yield two `Consumes` edges hanging off the same hub;
+/// two same-line sites inside one symbol must yield two `Consumes`
+/// edges with the SAME `(source, target)` triple and distinct
+/// `site` provenance. If the consume-side dedup key dropped the
+/// second leg, one of these tests fails.
+
+#[test]
+fn hub_keeps_one_consumes_edge_per_top_level_site() {
+    let root = fixture_repo_with(
+        "consume_top",
+        "consumer.ts",
+        "consumer.run({ topics: ['orders.created'], eachMessage: handler });\n\
+         consumer.run({ topics: ['orders.created'], eachMessage: handler });\n",
+    );
+    let graph = scan_events(&root);
+
+    let hub = topic_nodes(&graph).remove(0);
+    let consumes: Vec<_> = graph
+        .all_edges()
+        .into_iter()
+        .filter(|e| e.edge_type == EdgeType::Consumes && e.target_id == hub.id)
+        .collect();
+    assert_eq!(
+        consumes.len(),
+        2,
+        "two top-level subscriber sites must yield two Consumes edges; got {consumes:?}"
+    );
+    assert!(consumes.iter().all(|e| e.site.is_some()));
+    let lines: BTreeSet<u32> = consumes
+        .iter()
+        .filter_map(|e| e.site.as_ref().map(|s| s.line))
+        .collect();
+    assert_eq!(
+        lines,
+        BTreeSet::from([1, 2]),
+        "each subscriber keeps its own site provenance (lines 1 and 2)"
+    );
+}
+
+/// Two same-shape subscribes inside ONE function share the edge
+/// anchor (the enclosing symbol), so both legs have the same
+/// `(source, target, Consumes)` triple and only `SourceSite`
+/// distinguishes them. Both must survive — the edge layer's dedup
+/// key includes `site` precisely so the second subscriber's
+/// provenance is not silently dropped. Mirrors the
+/// producer-side `hub_keeps_one_produces_edge_per_site` test.
+#[test]
+fn hub_keeps_one_consumes_edge_per_site() {
+    let root = fixture_repo_with(
+        "consume_same_line",
+        "consumer.ts",
+        "async function start() {\n\
+         \x20 await consumer.run({ topics: ['orders.created'], eachMessage: handler });\n\
+         \x20 await consumer.run({ topics: ['orders.created'], eachMessage: handler });\n\
+         }\n",
+    );
+    let ns = RepoNamespace::for_test();
+    let graph = GraphDatabase::new(&root.join("graph.bin")).expect("open graph");
+    let mut fn_node = GraphNode::new(NodeType::Function, "start".into(), "consumer.ts".into());
+    fn_node.id = GraphNode::generate_id(&NodeType::Function, "consumer.ts", "start", Some(2), &ns);
+    fn_node.line_start = Some(2);
+    fn_node.line_end = Some(5);
+    graph.upsert_node(fn_node.clone()).expect("seed symbol");
+
+    scan_workspace_event(&graph, &root, &ns).expect("event scan");
+
+    let hub = topic_nodes(&graph).remove(0);
+    let consumes: Vec<_> = graph
+        .all_edges()
+        .into_iter()
+        .filter(|e| e.edge_type == EdgeType::Consumes && e.target_id == hub.id)
+        .collect();
+    assert_eq!(
+        consumes.len(),
+        2,
+        "two same-line subscriber sites must yield two Consumes edges; got {consumes:?}"
+    );
+    // Both edges ride the same enclosing symbol.
+    assert!(
+        consumes.iter().all(|e| e.source_id == fn_node.id),
+        "both edges source from the enclosing symbol; got: {:?}",
+        consumes.iter().map(|e| &e.source_id).collect::<Vec<_>>()
+    );
+    // Site provenance distinguishes them (line 2 vs line 3 inside
+    // the function — the synthetic per-site node is the carrier
+    // and the edge's `source_id` may go through it instead of the
+    // enclosing symbol, so we don't pin the source_id here).
+    let lines: BTreeSet<u32> = consumes
+        .iter()
+        .filter_map(|e| e.site.as_ref().map(|s| s.line))
+        .collect();
+    assert_eq!(
+        lines,
+        BTreeSet::from([2, 3]),
+        "each subscriber keeps its own site provenance (lines 2 and 3)"
+    );
+}
+
+/// Cross-pair symmetry check: the same shape that pins
+/// `Produces` survives a deleted-site reconcile must also pin
+/// `Consumes`. Pre-F6 this was asserted only on the producer
+/// side (`one_deleted_site_leaves_exactly_one_federated_edge_for_its_pair`).
+/// A subscriber that deletes one of two sites must leave exactly
+/// one Consumes leg, mirroring the producer contract.
+#[tokio::test]
+async fn deleted_consumer_site_leaves_exactly_one_federated_consumes_leg() {
+    let root = fixture_repo_with(
+        "consumer_delete",
+        "src/sub.ts",
+        "async function start() {\n\
+         \x20 await consumer.run({ topics: ['orders.created'], eachMessage: handler });\n\
+         \x20 await consumer.run({ topics: ['orders.created'], eachMessage: handler });\n\
+         }\n",
+    );
+    let ns = RepoNamespace::for_test();
+    let data = tempfile::tempdir().expect("federation data dir");
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(data.path()).expect("petgraph backend"));
+    let fed = FederatedIndex::new(backend.clone());
+    git2::Repository::init(&root).expect("fixture root opens as a git repo");
+    let rid = RepoId::new("a").expect("valid repo id");
+    let source =
+        Box::new(WorkspaceDirSource::new(rid.clone(), root.clone()).expect("workspace source"));
+    fed.add_repo(source, data.path()).await.expect("add_repo");
+    let idx = fed.get_repo(&rid).expect("registered repo");
+
+    // Enclosing symbol both subscribes hang off — line-stable id so
+    // the pair identity is the same in both projections.
+    let mut fn_node = GraphNode::new(NodeType::Function, "start".into(), "src/sub.ts".into());
+    fn_node.id = GraphNode::generate_id(&NodeType::Function, "src/sub.ts", "start", Some(1), &ns);
+    fn_node.line_start = Some(1);
+    fn_node.line_end = Some(5);
+    idx.db().upsert_node(fn_node.clone()).expect("seed symbol");
+
+    scan_workspace_event(idx.db(), &root, &ns).expect("event scan");
+    fed.project_repo(&rid).await.expect("first projection");
+
+    let consumes = |edges: &[GraphEdge]| -> Vec<GraphEdge> {
+        edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Consumes)
+            .cloned()
+            .collect()
+    };
+    let before = consumes(&backend.all_edges().expect("edges"));
+    assert_eq!(before.len(), 2, "two sites, two Consumes legs: {before:?}");
+
+    // Delete one site (line 3). The survivor keeps its original
+    // site — a pure deletion, no move mixed in.
+    write_file(
+        &root,
+        "src/sub.ts",
+        "async function start() {\n\
+         \x20 await consumer.run({ topics: ['orders.created'], eachMessage: handler });\n\
+         }\n",
+    );
+    scan_workspace_event(idx.db(), &root, &ns).expect("rescan");
+    let local_legs: Vec<GraphEdge> = idx
+        .db()
+        .all_edges()
+        .into_iter()
+        .filter(|e| e.edge_type == EdgeType::Consumes)
+        .collect();
+    assert_eq!(
+        local_legs
+            .iter()
+            .map(|e| e.site.as_ref().map(|s| s.line))
+            .collect::<Vec<_>>(),
+        vec![Some(2)],
+        "rescan replaces the sensor's own output: one Consumes leg at line 2, got {local_legs:?}"
+    );
+    fed.project_repo(&rid).await.expect("second projection");
+
+    let after = consumes(&backend.all_edges().expect("edges"));
+    assert_eq!(
+        after.len(),
+        1,
+        "the deleted subscriber site must retract its Consumes leg, leaving \
+         exactly one (the survivor) — not stack at 2 (triple-only reconcile \
+         key) and not drop to 0 (upsert before retract): {after:?}"
+    );
+    assert_eq!(
+        after[0].site.as_ref().map(|s| s.line),
+        Some(2),
+        "the surviving leg is the kept site (line 2)"
+    );
+}

@@ -271,6 +271,18 @@ All notable changes to LAIN are documented here. Versions follow
   fixes closed). `Capabilities::readiness`'s exit-code contract
   is preserved; a new `mirrors_state_does_not_gate_required`
   test pins the optional guarantee.
+- Tests: the producer-side leg count for `Topic` hubs had two
+  pins (`hub_keeps_one_produces_edge_per_top_level_site`,
+  `hub_keeps_one_produces_edge_per_site`); the consumer side
+  had none — every existing event_hub_e2e test exercised the
+  joiner or workspace view, never the per-site Consumes count.
+  F6 audit adds the pair: two new tests (`hub_keeps_one_consumes_edge_per_top_level_site`,
+  `hub_keeps_one_consumes_edge_per_site`) and the cross-reconcile
+  pin (`deleted_consumer_site_leaves_exactly_one_federated_consumes_leg`,
+  the consumer-side mirror of
+  `one_deleted_site_leaves_exactly_one_federated_edge_for_its_pair`).
+  The audit proves the edge layer's dedup key (which includes
+  `site`) does not silently drop the second leg on either side.
 
 ## 0.10.0 — 2026-10-13
 
