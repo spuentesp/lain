@@ -1099,3 +1099,100 @@ async fn deleted_consumer_site_leaves_exactly_one_federated_consumes_leg() {
         "the surviving leg is the kept site (line 2)"
     );
 }
+
+/// Repo-local patterns extend detection without affecting other repositories.
+#[test]
+fn per_repo_pattern_override_reaches_event_sensor() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "bus.publish_custom('orders.created')\nbus.consume_custom('orders.created')\n";
+    write_file(dir.path(), "p.py", source);
+    let graph = scan_events(dir.path());
+    assert!(
+        topic_nodes(&graph).is_empty(),
+        "bundled patterns must not match"
+    );
+
+    write_file(
+        dir.path(),
+        ".lain/patterns/custom.yaml",
+        r#"languages:
+  python:
+    - id: custom-producer
+      kind: topic_producer
+      path_regex: "publish_custom\\('([^']+)'"
+    - id: custom-consumer
+      kind: topic_consumer
+      path_regex: "consume_custom\\('([^']+)'"
+"#,
+    );
+    scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test()).unwrap();
+    let topics = topic_nodes(&graph);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(topics[0].name, "kafka/orders.created");
+    for kind in [EdgeType::Produces, EdgeType::Consumes] {
+        let edges: Vec<_> = graph
+            .all_edges()
+            .into_iter()
+            .filter(|e| e.edge_type == kind)
+            .collect();
+        assert_eq!(edges.len(), 1, "{kind:?} must reach the topic hub");
+    }
+
+    let other = tempfile::tempdir().unwrap();
+    write_file(other.path(), "p.py", source);
+    assert!(
+        topic_nodes(&scan_events(other.path())).is_empty(),
+        "repo-local patterns must not leak through the singleton"
+    );
+}
+
+/// A malformed override fails before replacing the last successful scan.
+#[test]
+fn invalid_event_override_preserves_previous_output() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "p.py",
+        "producer.send('orders.created')\nconsumer.subscribe(['orders.created'])\n",
+    );
+    let graph = scan_events(dir.path());
+    assert_eq!(topic_nodes(&graph).len(), 1);
+    assert_eq!(graph.all_edges().len(), 2);
+    let snapshot = || {
+        let mut nodes: Vec<_> = graph
+            .get_all_nodes()
+            .iter()
+            .map(|n| serde_json::to_string(n).unwrap())
+            .collect();
+        let mut edges: Vec<_> = graph
+            .all_edges()
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect();
+        nodes.sort();
+        edges.sort();
+        (nodes, edges)
+    };
+    let before = snapshot();
+    let mut invalid = vec!["languages: [".to_string()];
+    for (id, kind) in [
+        ("aiohttp-send", "topic_producer"),
+        ("aiokafka-consumer", "topic_consumer"),
+        ("celery-task", "scheduled"),
+    ] {
+        invalid.push(format!(
+            "languages:\n  python:\n    - id: {id}\n      kind: {kind}\n      path_regex: '['\n"
+        ));
+    }
+    for body in invalid {
+        write_file(dir.path(), ".lain/patterns/broken.yaml", &body);
+        let error = scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test())
+            .expect_err("invalid YAML or regex must fail before replacing sensor output");
+        assert!(error.to_string().contains("patterns override"), "{error}");
+        assert_eq!(
+            snapshot(),
+            before,
+            "failed scan must preserve all nodes and edges"
+        );
+    }
+}

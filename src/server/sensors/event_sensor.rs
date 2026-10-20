@@ -131,6 +131,9 @@ pub fn scan_workspace_event(
         return Ok(0);
     }
 
+    // Load once per scan so every site uses the same repo-local patterns.
+    let patterns = Patterns::with_overrides(root)?;
+
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     // Hub ids minted in this scan. One `Topic` node per (broker, topic)
@@ -151,7 +154,7 @@ pub fn scan_workspace_event(
         let ext = ext.as_str();
         let path_str = graph_path(root, &path);
         let constants = collect_same_file_constants(&content, ext);
-        let sites = detect_sites(&content, ext, &constants);
+        let sites = detect_sites(&content, ext, &constants, &patterns);
         let (nodes, edges) =
             emit_sites(&sites, &path_str, namespace, graph, &mut emitted_topic_ids);
         all_nodes.extend(nodes);
@@ -435,13 +438,13 @@ fn detect_sites(
     content: &str,
     ext: &str,
     constants: &BTreeMap<String, String>,
+    patterns: &Patterns,
 ) -> Vec<DetectedSite> {
     let mut out: Vec<DetectedSite> = Vec::new();
     let lang = match ext_to_lang(ext) {
         Some(l) => l,
         None => return out,
     };
-    let patterns = Patterns::patterns();
     let (producers, consumers, scheduled) = util::topic_idioms_for(patterns, lang);
     let lines: Vec<&str> = content.lines().collect();
     for (idx, raw) in lines.iter().enumerate() {
