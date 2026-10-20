@@ -3,17 +3,6 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## 0.10.0 — 2026-10-13
-
-> **MINOR bump — the coordination contract changed.** Lain's
-> coordination core is now delegated to
-> [`zoanthrope`](https://github.com/spuentesp/zoanthrope) as an
-> external dependency, and three arbitration semantics changed with
-> it (listed plainly under **Contract deltas** below). Tool names and
-> response shapes are unchanged; the deltas are in *what a claim
-> covers, who wins a conflict, and when a claim expires*. This is why
-> 0.10.0 is a minor release and not 0.9.2.
-
 ## 0.11.0 — 2026-10-20
 
 ### Added
@@ -81,6 +70,29 @@ All notable changes to LAIN are documented here. Versions follow
   historical fallback path even when a covering shared daemon exists. A
   daemon spawned for a no-share instance carries `share: false` in its
   synthesized config.
+- query: `query_graph` results now carry `edges` and `paths` when the
+  reported nodes came from a `connect` step. `paths` holds one selected
+  shortest matching-edge path per reported node (parallel to `nodes`,
+  seed first) and `edges` the deduplicated union of the walked edges on
+  those paths, sorted by `(from, to, type)`. Tie-breaks — fewest hops,
+  then the outgoing walk, then the lowest seed id, then the lowest-id
+  equal-distance predecessor per hop — are documented in
+  `docs/query-language.md`. Find/filter-only results omit both fields
+  (skip-if-empty), as before. `QueryResult` itself is unchanged; the
+  executor's unused `TraversalResult` alias is gone.
+- config: `services[].provides_graphql` scopes which services mint
+  GraphQL provider endpoints; set `false` for repos that only carry
+  SDL copies. No migration needed (default `true` preserves prior
+  behavior).
+- config: `bindings[].{consumer,provider}.key` accepts
+  `graphql:op:field` keys (previously HTTP-only grammar).
+- bindings: `repos.yaml#bindings` entries can pin GraphQL consumers
+  (keys `graphql:op:field`, consumer `symbol` = node name
+  `graphql-call:{op}:{field}`). No migration needed.
+- contracts: `check_binding` accepts GraphQL endpoints
+  (`graphql:op:field`); new reasons `op_mismatch`/`field_mismatch`.
+  Tool schema updated — regenerate `docs/tool-schema.json` consumers
+  if you mirror it.
 
 ### Changed
 
@@ -121,6 +133,16 @@ All notable changes to LAIN are documented here. Versions follow
   open-connection pinning are unchanged. Explicit `lain mcp --socket
   PATH` (without `--daemon`) keeps its historical meaning: a private
   server that also binds that socket.
+- query: `QueryMeta.plan` is removed from the Rust `QueryMeta` struct.
+  It was always `None` and never appeared on the wire, so JSON clients
+  see no change; Rust consumers constructing `QueryMeta` must drop the
+  field.
+- query: `connect` hop counts (`depth`) are now shortest
+  matching-edge distances, and a query's start nodes are never
+  reported — not even back through a cycle. On multi-path graphs a
+  `depth` range can now return nodes the old walk missed (it reported
+  first-discovery depths) and stop returning a seed that only appeared
+  via a loop.
 
 ### Fixed
 
@@ -327,6 +349,38 @@ All notable changes to LAIN are documented here. Versions follow
   Quint / TLC setup required — the Rust code that translates the
   spec IS the system under test, and the invariant is encoded as
   Rust types the proptest can construct directly.
+- contracts: a `bindings` entry whose `consumer.key` and
+  `provider.key` are not a well-formed pair — cross-kind
+  (`graphql:…` vs `http:…`), HTTP methods/templates
+  `check_binding` would reject, or differing GraphQL `op`/`field` —
+  is now a config error at load, and the joiner never binds it (it
+  is recorded as an `ill_formed_keys` stale binding if an
+  unvalidated config slips through). Previously a cross-kind entry
+  could pin a consumer to an endpoint of a different kind (I1,
+  "no invented bindings"). Same-kind HTTP template bridges (e.g.
+  `GET /v1/api/orders/{}` → `GET /api/orders/{}`) stay supported.
+  Recovery: make the pair well-formed (same key kind;
+  `check_binding`-compatible methods and templates; equal GraphQL
+  `op`/`field`).
+- contracts: `check_binding` with a GraphQL consumer and an HTTP
+  endpoint key used to return `valid: true` with an unusable
+  `bindings_entry` (pre-existing vacuous-match bug); it now returns
+  `valid: false` with `op_mismatch`/`field_mismatch`. Re-validate any
+  `bindings_entry` saved from the old behavior.
+- query: a top-level `find.id` now selects exactly that node. It was
+  parsed and then ignored, so `{"op":"find","id":"..."}` answered with
+  every match of the other (usually absent) filters — the whole graph.
+  `connect.target.id` was already honoured.
+- query: `{"not": [...]}` is now a valid wire form for `label` and
+  `edge` selectors (e.g. `{"label": {"not": ["deprecated"]}}`). The
+  untagged enums rejected the object at parse, so the NOT variants
+  were unreachable from JSON.
+- query: label selectors match the node's actual label (`test` and
+  other attribute-derived labels), not only the `deprecated` flag, and
+  results surface that label. `describe_schema` stops advertising the
+  labels `async` and `generated` — no producer emits either — and `File`
+  nodes no longer advertise `generated`/`test`, which nothing attaches to
+  a `File`.
 
 ## 0.10.0 — 2026-10-13
 
@@ -339,65 +393,7 @@ All notable changes to LAIN are documented here. Versions follow
 > covers, who wins a conflict, and when a claim expires*. This is why
 > 0.10.0 is a minor release and not 0.9.2.
 
-### Added
-
-- query: `query_graph` results now carry `edges` and `paths` when the
-  reported nodes came from a `connect` step. `paths` holds one selected
-  shortest matching-edge path per reported node (parallel to `nodes`,
-  seed first) and `edges` the deduplicated union of the walked edges on
-  those paths, sorted by `(from, to, type)`. Tie-breaks — fewest hops,
-  then the outgoing walk, then the lowest seed id, then the lowest-id
-  equal-distance predecessor per hop — are documented in
-  `docs/query-language.md`. Find/filter-only results omit both fields
-  (skip-if-empty), as before. `QueryResult` itself is unchanged; the
-  executor's unused `TraversalResult` alias is gone.
-- config: `services[].provides_graphql` scopes which services mint
-  GraphQL provider endpoints; set `false` for repos that only carry
-  SDL copies. No migration needed (default `true` preserves prior
-  behavior).
-- config: `bindings[].{consumer,provider}.key` accepts
-  `graphql:op:field` keys (previously HTTP-only grammar).
-- bindings: `repos.yaml#bindings` entries can pin GraphQL consumers
-  (keys `graphql:op:field`, consumer `symbol` = node name
-  `graphql-call:{op}:{field}`). No migration needed.
-- contracts: `check_binding` accepts GraphQL endpoints
-  (`graphql:op:field`); new reasons `op_mismatch`/`field_mismatch`.
-  Tool schema updated — regenerate `docs/tool-schema.json` consumers
-  if you mirror it.
-
-- **Topology detection layer** (acceptance program, #304 — code
-  landed in the 0.9.1 tree; written up here because the 0.9.1 entry
-  predated the work). Coupling that used to leave the graph silent is
-  now minted as edges:
-  - **Bus/topic sensors** cover `confluent_kafka` topic usage, AMQP
-    (pika/amqplib publish and `queue_bind`/`bindQueue` consumer
-    idioms → `amqp/<queue>` topics), Avro/JSON-Schema payload edges
-    (`Topic → Schema`), Java/Go env-host dials and RPC env-dial
-    shapes.
-  - **Heuristic edge-minting** (`anchor_miner`): anchors, co-change
-    and commit-ref edges are mined from the same signals agents use
-    and marked heuristic — never presented as verified provenance.
-    Generated-code anchors let stub type names join proto services;
-    author-aware co-change stops bot noise from minting edges; anchor
-    twins are suppressed when a typed bus edge already covers the
-    pair; the mint pass reconciles its own edges (obsolete
-    anchor/co-change/commit-ref edges are retracted, synthesized
-    anchor endpoints survive reprojection).
-  - Docs: `docs/acceptance/FINDINGS-2026-10-11.md` records the
-    program's frame — Lain as an organizational code topology server.
-
 ### Changed
-
-- query: `QueryMeta.plan` is removed from the Rust `QueryMeta` struct.
-  It was always `None` and never appeared on the wire, so JSON clients
-  see no change; Rust consumers constructing `QueryMeta` must drop the
-  field.
-- query: `connect` hop counts (`depth`) are now shortest
-  matching-edge distances, and a query's start nodes are never
-  reported — not even back through a cycle. On multi-path graphs a
-  `depth` range can now return nodes the old walk missed (it reported
-  first-discovery depths) and stop returning a seed that only appeared
-  via a loop.
 
 - **Coordination core moved to zoanthrope.** Lain's claims registry,
   filesystem lease layer (`presence_lock`), and intent storage are
@@ -439,40 +435,30 @@ All notable changes to LAIN are documented here. Versions follow
      the wire but no longer expires a claim; zoanthrope's presence
      TTL governs claim lifetime.
 
-### Fixed
+### Added
 
-- contracts: a `bindings` entry whose `consumer.key` and
-  `provider.key` are not a well-formed pair — cross-kind
-  (`graphql:…` vs `http:…`), HTTP methods/templates
-  `check_binding` would reject, or differing GraphQL `op`/`field` —
-  is now a config error at load, and the joiner never binds it (it
-  is recorded as an `ill_formed_keys` stale binding if an
-  unvalidated config slips through). Previously a cross-kind entry
-  could pin a consumer to an endpoint of a different kind (I1,
-  "no invented bindings"). Same-kind HTTP template bridges (e.g.
-  `GET /v1/api/orders/{}` → `GET /api/orders/{}`) stay supported.
-  Recovery: make the pair well-formed (same key kind;
-  `check_binding`-compatible methods and templates; equal GraphQL
-  `op`/`field`).
-- contracts: `check_binding` with a GraphQL consumer and an HTTP
-  endpoint key used to return `valid: true` with an unusable
-  `bindings_entry` (pre-existing vacuous-match bug); it now returns
-  `valid: false` with `op_mismatch`/`field_mismatch`. Re-validate any
-  `bindings_entry` saved from the old behavior.
-- query: a top-level `find.id` now selects exactly that node. It was
-  parsed and then ignored, so `{"op":"find","id":"..."}` answered with
-  every match of the other (usually absent) filters — the whole graph.
-  `connect.target.id` was already honoured.
-- query: `{"not": [...]}` is now a valid wire form for `label` and
-  `edge` selectors (e.g. `{"label": {"not": ["deprecated"]}}`). The
-  untagged enums rejected the object at parse, so the NOT variants
-  were unreachable from JSON.
-- query: label selectors match the node's actual label (`test` and
-  other attribute-derived labels), not only the `deprecated` flag, and
-  results surface that label. `describe_schema` stops advertising the
-  labels `async` and `generated` — no producer emits either — and `File`
-  nodes no longer advertise `generated`/`test`, which nothing attaches to
-  a `File`.
+- **Topology detection layer** (acceptance program, #304 — code
+  landed in the 0.9.1 tree; written up here because the 0.9.1 entry
+  predated the work). Coupling that used to leave the graph silent is
+  now minted as edges:
+  - **Bus/topic sensors** cover `confluent_kafka` topic usage, AMQP
+    (pika/amqplib publish and `queue_bind`/`bindQueue` consumer
+    idioms → `amqp/<queue>` topics), Avro/JSON-Schema payload edges
+    (`Topic → Schema`), Java/Go env-host dials and RPC env-dial
+    shapes.
+  - **Heuristic edge-minting** (`anchor_miner`): anchors, co-change
+    and commit-ref edges are mined from the same signals agents use
+    and marked heuristic — never presented as verified provenance.
+    Generated-code anchors let stub type names join proto services;
+    author-aware co-change stops bot noise from minting edges; anchor
+    twins are suppressed when a typed bus edge already covers the
+    pair; the mint pass reconciles its own edges (obsolete
+    anchor/co-change/commit-ref edges are retracted, synthesized
+    anchor endpoints survive reprojection).
+  - Docs: `docs/acceptance/FINDINGS-2026-10-11.md` records the
+    program's frame — Lain as an organizational code topology server.
+
+### Fixed
 
 - **`claim_files` / `release_files` survive state-lock contention** (#323).
   Under load the presence critical section (which shells out to

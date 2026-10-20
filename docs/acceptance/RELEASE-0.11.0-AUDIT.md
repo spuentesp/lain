@@ -10,8 +10,10 @@ historical evidence, not a claim that its earlier commit is the release tree.
 - **Worktrees:** all five registered worktrees were clean before the release
   branch was created. No WIP was discarded or folded into this release.
 - **Issues/registers:** #328 remains the sole open issue, with the existing
-  written deferral below. The acceptance findings and scope-outs below remain
-  unchanged. No acceptance-program issue is open.
+  written deferral below. The acceptance findings and scope-outs 1–5 below
+  remain unchanged; historical scope-out #6 (`list_unresolved` `candidates` for
+  GraphQL consumers) was subsequently fixed in `ca59f8b3` / `57387ec5` and
+  ships in `v0.11.0`. No acceptance-program issue is open.
 - **Dependency PRs:** #305 and #332–#337 are explicitly outside this feature
   release. They are separate dependency migrations/maintenance updates, not
   prerequisites for the accepted features; #305 retains its API-migration
@@ -123,9 +125,10 @@ New this cycle:
    `free_port` registry removes intra-binary collisions; a colliding
    external allocation now fails loudly with `EADDRINUSE` instead of
    flaking. Residual risk is bounded and loud.
-6. **`list_unresolved` `candidates` for GraphQL consumers** lists every
-   HTTP endpoint (name-grammar artifact) — cosmetic, documented in the
-   query-engine truth-up, out of scope by design.
+6. ~~**`list_unresolved` `candidates` for GraphQL consumers** lists every
+   HTTP endpoint (name-grammar artifact)~~ — **closed in `ca59f8b3` / `57387ec5`**:
+   GraphQL consumers now receive only GraphQL endpoint candidates (same-`op`
+   when present, else all GraphQL endpoints) and honor `target_service` (`161e946d`).
 
 ## What ships (v0.11.0)
 
