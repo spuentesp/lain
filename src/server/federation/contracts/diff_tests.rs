@@ -4267,6 +4267,7 @@ fn handler_changed_with_no_consumers_is_never_no_known_impact() {
 // same as the spec's I3 invariant — restated in Rust terms below.
 
 #[test]
+#[allow(unnameable_test_items)] // proptest! generates an inner `#[test]` that Rust can't see through; suppress at fn level so the lint doesn't escape into `-D warnings`.
 fn no_known_impact_sound_for_arbitrary_repos_and_changes() {
     use proptest::prelude::*;
 
@@ -4323,6 +4324,7 @@ fn no_known_impact_sound_for_arbitrary_repos_and_changes() {
         }
     }
 
+    #[allow(unnameable_test_items)] // `#[test]` inside `proptest!` is a no-op marker; proptest generates the real test fn
     proptest! {
         // The strategy: a random vector of repos, each randomly
         // complete/incomplete/erroring/drifting. We then exercise
