@@ -426,26 +426,25 @@ the new entry.
 
 ### Standing follow-up: patterns as config
 
-The pattern list is already declarative YAML, but bus knowledge still
-leaks into code in two places, and the standing directive is that
+The event sensor now loads `Patterns::with_overrides` once per scan,
+like `entry_point_sensor`, `http_client_sensor`, `http_sensor`, and
+`field_access_sensor`. Repository-local `.lain/patterns/*.yaml` files
+replace matching framework ids or append fresh ones, without changing
+the bundled singleton. Event and HTTP regression tests exercise custom
+patterns and isolation between repositories; malformed event overrides
+leave the last successful scan intact.
+
+One follow-up remains: bus knowledge still leaks into code, and the
+standing directive is that
 detection patterns must be **data, not scattered literals**
 (`src/server/sensors/AGENTS.md`, "Detection patterns belong in
 config/templates, not in code"):
 
-1. `event_sensor` reads the **bundled** `Patterns::patterns()`
-   singleton, while the per-repo override surface
-   (`Patterns::with_overrides` → `load_overrides`, which layers
-   `<repo>/.lain/patterns/*.yaml` and already appends fresh-`id`
-   entries to a language's list) is what `entry_point_sensor`,
-   `http_client_sensor`, `http_sensor`, and `field_access_sensor`
-   already use. Wiring the event sensor to `with_overrides` lets a
-   repo add a bus as config, no rebuild.
-2. `broker_for`'s framework-id → broker mapping (`pika*` /
-   `amqplib*` → `amqp`, else `kafka`) is a hardcoded arm list. Move
-   the broker label onto the YAML entry so pattern and broker travel
-   as one data record.
+`broker_for`'s framework-id → broker mapping (`pika*` / `amqplib*` →
+`amqp`, else `kafka`) is a hardcoded arm list. Move the broker label
+onto the YAML entry so pattern and broker travel as one data record.
 
-Until both land, adding a bus is a `frameworks.yaml` entry plus at
-most one `broker_for` arm — still no new design, but a code change
+Until that lands, adding a bus with a new broker label is a YAML entry
+plus at most one `broker_for` arm — still no new design, but a code change
 rather than a data change. Extracting the patterns to the
 `<repo>/.lain/patterns` surface makes adding a bus data end to end.

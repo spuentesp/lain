@@ -1099,3 +1099,66 @@ async fn deleted_consumer_site_leaves_exactly_one_federated_consumes_leg() {
         "the surviving leg is the kept site (line 2)"
     );
 }
+
+/// Repo-local patterns extend detection without affecting other repositories.
+#[test]
+fn per_repo_pattern_override_reaches_event_sensor() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "bus.publish_custom('orders.created')\nbus.consume_custom('orders.created')\n";
+    write_file(dir.path(), "p.py", source);
+    let graph = scan_events(dir.path());
+    assert!(
+        topic_nodes(&graph).is_empty(),
+        "bundled patterns must not match"
+    );
+
+    write_file(
+        dir.path(),
+        ".lain/patterns/custom.yaml",
+        r#"languages:
+  python:
+    - id: custom-producer
+      kind: topic_producer
+      path_regex: "publish_custom\\('([^']+)'"
+    - id: custom-consumer
+      kind: topic_consumer
+      path_regex: "consume_custom\\('([^']+)'"
+"#,
+    );
+    scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test()).unwrap();
+    let topics = topic_nodes(&graph);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(topics[0].name, "kafka/orders.created");
+    for kind in [EdgeType::Produces, EdgeType::Consumes] {
+        let edges: Vec<_> = graph
+            .all_edges()
+            .into_iter()
+            .filter(|e| e.edge_type == kind)
+            .collect();
+        assert_eq!(edges.len(), 1, "{kind:?} must reach the topic hub");
+    }
+
+    let other = tempfile::tempdir().unwrap();
+    write_file(other.path(), "p.py", source);
+    assert!(
+        topic_nodes(&scan_events(other.path())).is_empty(),
+        "repo-local patterns must not leak through the singleton"
+    );
+}
+
+/// A malformed override fails before replacing the last successful scan.
+#[test]
+fn invalid_event_override_preserves_previous_output() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "p.py", "producer.send('orders.created')\n");
+    let graph = scan_events(dir.path());
+    let before = topic_nodes(&graph);
+    assert_eq!(before.len(), 1);
+    write_file(dir.path(), ".lain/patterns/broken.yaml", "languages: [");
+    let error = scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test())
+        .expect_err("invalid YAML must fail the scan");
+    assert!(error.to_string().contains("patterns override"), "{error}");
+    let after = topic_nodes(&graph);
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, before[0].id);
+}
