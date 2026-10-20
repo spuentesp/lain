@@ -113,6 +113,10 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- Event and SQL sensors share one line-comment tokenizer. Quotes preceded
+  by an even number of backslashes now close correctly, so a following
+  commented-out publish or SQL call cannot produce phantom graph nodes.
+
 - call-graph readiness survives a restart honestly. The
   `calls_published` marker is now persisted with the graph and restored
   on load, so a warm boot after a kill/SIGPIPE mid-index no longer
