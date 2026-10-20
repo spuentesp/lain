@@ -283,6 +283,28 @@ All notable changes to LAIN are documented here. Versions follow
   `one_deleted_site_leaves_exactly_one_federated_edge_for_its_pair`).
   The audit proves the edge layer's dedup key (which includes
   `site`) does not silently drop the second leg on either side.
+- F6b: the TLA+ `CoverageClaim.tla` invariant I3
+  (`NoKnownImpactSound` — `claim_fired => \A r \in change_in_scope :
+  RepoComplete(r)`) is now pinned by a proptest in
+  `diff_tests::no_known_impact_sound_for_arbitrary_repos_and_changes`
+  (32 cases × 3 change kinds = 96 evaluations per run). The
+  proptest samples random repo counts (1..=5), per-repo
+  completeness (complete / carries an unresolved record so
+  `is_complete` returns false), and three §9.2 change kinds
+  (EndpointAdded / EndpointRemoved / PathChanged) that drive the
+  `NoKnownImpact` verdict on `ContractSurface::default()`. Whenever
+  `evaluate` returns `Class::NoKnownImpact`, the test asserts
+  every in-scope `RepoCoverage::is_complete` returns true — the
+  Rust restatement of the spec invariant. TLC's exhaustive check
+  is bounded by the .cfg file (2 repos × 2 sensors × 4 langs × 6
+  families); the proptest samples a larger state space so any
+  regression in the `NoKnownImpactSound` guard at `diff.rs:1930`
+  gets caught even when TLC's bounded model would still pass. The
+  spec restated inline in the test doc-comment; the proptest
+  `PROPT_SEED` env var pins failures to a reproducible case. No
+  Quint / TLC setup required — the Rust code that translates the
+  spec IS the system under test, and the invariant is encoded as
+  Rust types the proptest can construct directly.
 
 ## 0.10.0 — 2026-10-13
 
