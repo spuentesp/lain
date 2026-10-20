@@ -229,6 +229,30 @@ impl YamlFile {
                 source: e,
             })?;
             let doc: YamlFile = serde_yaml::from_str(&text)?;
+            // Reject malformed event regexes before any override can reach
+            // the registry. The idiom compiler otherwise drops them silently.
+            for (language, definitions) in &doc.languages {
+                for definition in definitions {
+                    if !matches!(
+                        definition.kind,
+                        FrameworkKind::TopicProducer
+                            | FrameworkKind::TopicConsumer
+                            | FrameworkKind::Scheduled
+                    ) {
+                        continue;
+                    }
+                    if let Some(pattern) = &definition.path_regex {
+                        regex::Regex::new(pattern).map_err(|source| {
+                            PatternsError::OverrideRegexSyntax {
+                                path: path.clone(),
+                                language: language.clone(),
+                                framework: definition.id.clone(),
+                                source,
+                            }
+                        })?;
+                    }
+                }
+            }
             out.merge_from(doc);
         }
         Ok(out)
@@ -805,7 +829,7 @@ impl Patterns {
     /// `&Patterns` signature they had pre-wire-in.
     ///
     /// `Err` propagates a `load_overrides` failure (malformed YAML,
-    /// malformed `.scm` body, unreadable override directory).
+    /// event regex, or `.scm` body; unreadable override directory).
     pub fn with_overrides(root: &Path) -> Result<Cow<'_, Patterns>, PatternsError> {
         let dir = root.join(".lain").join("patterns");
         if !dir.exists() {
@@ -1144,8 +1168,8 @@ impl Patterns {
         // every later consumer sees a stable, ordered view.
         pending_scml.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Step 2: parse + apply. Validation here only catches YAML
-        // structure errors; the `.scm` validation already ran above.
+        // Step 2: parse and validate all YAML and event regexes before
+        // applying any entries. The `.scm` validation already ran above.
         let overrides = YamlFile::load_from_dir(&dir)?;
         let YamlFile {
             languages: override_langs,
@@ -1219,6 +1243,14 @@ impl Patterns {
 pub enum PatternsError {
     #[error("malformed frameworks YAML: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    #[error("invalid event path_regex in override {path:?} for {language}/{framework}: {source}")]
+    OverrideRegexSyntax {
+        path: PathBuf,
+        language: String,
+        framework: String,
+        #[source]
+        source: regex::Error,
+    },
     #[error("could not read override directory {path:?}: {source}")]
     OverrideRead {
         path: PathBuf,
@@ -1663,6 +1695,49 @@ fn build_route_patterns(registry: &Patterns) -> BTreeMap<String, RoutePattern> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_event_regex_rejects_the_entire_override() {
+        for (framework, kind) in [
+            ("aiohttp-send", "topic_producer"),
+            ("aiokafka-consumer", "topic_consumer"),
+            ("celery-task", "scheduled"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join(".lain/patterns");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("invalid.yaml");
+            std::fs::write(
+                &path,
+                format!(
+                    "languages:\n  python:\n    - id: fresh-before-invalid\n      kind: outbound\n    - id: {framework}\n      kind: {kind}\n      path_regex: '['\n"
+                ),
+            ).unwrap();
+            let mut patterns = Patterns::clone_default();
+            let before = patterns.framework(framework).unwrap().clone();
+            let error = patterns.load_overrides(root.path()).unwrap_err();
+            match error {
+                PatternsError::OverrideRegexSyntax {
+                    path: error_path,
+                    language,
+                    framework: error_framework,
+                    ..
+                } => {
+                    assert_eq!(error_path, path);
+                    assert_eq!(language, "python");
+                    assert_eq!(error_framework, framework);
+                }
+                other => panic!("expected event regex error, got {other}"),
+            }
+            assert!(patterns.framework("fresh-before-invalid").is_none());
+            assert_eq!(patterns.framework(framework), Some(&before));
+            assert!(!patterns.overrides_applied());
+            assert!(matches!(
+                Patterns::with_overrides(root.path()),
+                Err(PatternsError::OverrideRegexSyntax { .. })
+            ));
+        }
+    }
 
     #[test]
     fn lang_key_handles_every_variant() {

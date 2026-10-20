@@ -115,8 +115,10 @@ All notable changes to LAIN are documented here. Versions follow
 
 - The event sensor now loads repository-local `.lain/patterns/*.yaml`
   overrides once per scan, so custom topic producer, consumer, and
-  scheduled patterns reach graph extraction. Invalid overrides fail
-  before replacing the previous sensor output. Regression coverage also
+  scheduled patterns reach graph extraction. Malformed YAML or event
+  regexes fail before replacing the previous sensor output. Regex errors
+  identify the override file and framework; failed loads apply no entries.
+  Regression coverage also
   verifies the existing HTTP override path and isolation between repos.
 
 - call-graph readiness survives a restart honestly. The

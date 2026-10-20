@@ -1150,15 +1150,49 @@ fn per_repo_pattern_override_reaches_event_sensor() {
 #[test]
 fn invalid_event_override_preserves_previous_output() {
     let dir = tempfile::tempdir().unwrap();
-    write_file(dir.path(), "p.py", "producer.send('orders.created')\n");
+    write_file(
+        dir.path(),
+        "p.py",
+        "producer.send('orders.created')\nconsumer.subscribe(['orders.created'])\n",
+    );
     let graph = scan_events(dir.path());
-    let before = topic_nodes(&graph);
-    assert_eq!(before.len(), 1);
-    write_file(dir.path(), ".lain/patterns/broken.yaml", "languages: [");
-    let error = scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test())
-        .expect_err("invalid YAML must fail the scan");
-    assert!(error.to_string().contains("patterns override"), "{error}");
-    let after = topic_nodes(&graph);
-    assert_eq!(after.len(), 1);
-    assert_eq!(after[0].id, before[0].id);
+    assert_eq!(topic_nodes(&graph).len(), 1);
+    assert_eq!(graph.all_edges().len(), 2);
+    let snapshot = || {
+        let mut nodes: Vec<_> = graph
+            .get_all_nodes()
+            .iter()
+            .map(|n| serde_json::to_string(n).unwrap())
+            .collect();
+        let mut edges: Vec<_> = graph
+            .all_edges()
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect();
+        nodes.sort();
+        edges.sort();
+        (nodes, edges)
+    };
+    let before = snapshot();
+    let mut invalid = vec!["languages: [".to_string()];
+    for (id, kind) in [
+        ("aiohttp-send", "topic_producer"),
+        ("aiokafka-consumer", "topic_consumer"),
+        ("celery-task", "scheduled"),
+    ] {
+        invalid.push(format!(
+            "languages:\n  python:\n    - id: {id}\n      kind: {kind}\n      path_regex: '['\n"
+        ));
+    }
+    for body in invalid {
+        write_file(dir.path(), ".lain/patterns/broken.yaml", &body);
+        let error = scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test())
+            .expect_err("invalid YAML or regex must fail before replacing sensor output");
+        assert!(error.to_string().contains("patterns override"), "{error}");
+        assert_eq!(
+            snapshot(),
+            before,
+            "failed scan must preserve all nodes and edges"
+        );
+    }
 }
