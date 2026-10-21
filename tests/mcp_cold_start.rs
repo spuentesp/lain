@@ -424,12 +424,18 @@ fn capabilities_changed_notification_fires_on_startup_completion() {
             .pointer("/indexing/state")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        if state == "ready" || state == "unavailable_error" {
+        let has_notification = child.notifications.iter().any(|n| {
+            n.get("method").and_then(|m| m.as_str())
+                == Some("notifications/lain/capabilities_changed")
+        });
+        if (state == "ready" || state == "unavailable_error") && has_notification {
             break;
         }
         assert!(
             poll_start.elapsed() < budget,
-            "indexing never reached a terminal state within {budget:?}; last capabilities: {value}"
+            "indexing never reached a terminal state (with capabilities_changed notification) \
+             within {budget:?}; last capabilities: {value}; notifications: {:?}",
+            child.notifications
         );
         std::thread::sleep(Duration::from_millis(100));
     }
