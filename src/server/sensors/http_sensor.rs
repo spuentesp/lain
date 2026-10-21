@@ -42,6 +42,7 @@ use crate::server::sensors::patterns::{Patterns, RoutePattern};
 use crate::server::sensors::util::{parse_for_lang, Lang};
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 use tree_sitter::{StreamingIterator, Tree};
 
 // Test-only instrumentation for the per-call-loop hoist. The
@@ -52,6 +53,15 @@ use tree_sitter::{StreamingIterator, Tree};
 thread_local! {
     pub(crate) static SCAN_PARSE_COUNT: Cell<usize> = const { Cell::new(0) };
 }
+
+// Count actual query compilation at its process-local resource boundary.
+// A workspace scan must pay this cost per framework, not per source file.
+#[cfg(test)]
+thread_local! {
+    static QUERY_COMPILE_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+type RouteQueries = BTreeMap<String, Option<tree_sitter::Query>>;
 
 /// Current value of the per-thread parse counter. Tests read
 /// `before` and `after` around a scan call to compute the delta.
@@ -192,6 +202,18 @@ pub fn scan_file_for_routes(
     content: &str,
     patterns: &Patterns,
 ) -> Vec<HttpRoute> {
+    scan_file_for_routes_with_queries(path, content, patterns, &mut RouteQueries::new())
+}
+
+// Owned by one workspace scan and its fixed Patterns instance. A rescan
+// rebuilds the cache after loading overrides, so no query can outlive its
+// configuration or leak into another repository.
+fn scan_file_for_routes_with_queries(
+    path: &std::path::Path,
+    content: &str,
+    patterns: &Patterns,
+    queries: &mut RouteQueries,
+) -> Vec<HttpRoute> {
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let all_patterns = get_route_patterns(patterns);
@@ -260,7 +282,8 @@ pub fn scan_file_for_routes(
         // the regex missed. An empty body (just a comment line)
         // skips tree-sitter entirely. The pre-parsed tree is
         // reused — `parse_for_lang` ran exactly once above.
-        if let Some(ts) = try_treesitter_extract(patterns, key, content, path, parsed_tree.as_ref())
+        if let Some(ts) =
+            try_treesitter_extract(patterns, key, content, path, parsed_tree.as_ref(), queries)
         {
             for mut r in ts {
                 if let Some(prefix) = router_prefix_for_receiver(&r, &router_prefixes) {
@@ -298,6 +321,7 @@ fn try_treesitter_extract(
     content: &str,
     path: &std::path::Path,
     tree: Option<&Tree>,
+    queries: &mut RouteQueries,
 ) -> Option<Vec<HttpRoute>> {
     let (lang_yaml, framework) = pattern_key.split_once('-')?;
     let lang = lang_for_yaml_key(lang_yaml)?;
@@ -325,10 +349,17 @@ fn try_treesitter_extract(
         return None;
     }
 
-    let grammar = crate::server::sensors::util::language_for(lang);
-    let query = tree_sitter::Query::new(&grammar, body).ok()?;
+    let query = queries
+        .entry(scm_key)
+        .or_insert_with(|| {
+            #[cfg(test)]
+            QUERY_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
+            let grammar = crate::server::sensors::util::language_for(lang);
+            tree_sitter::Query::new(&grammar, body).ok()
+        })
+        .as_ref()?;
     let mut cursor = tree_sitter::QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), content.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), content.as_bytes());
 
     let mut routes = Vec::new();
     let mut path_idx: Option<u32> = None;
@@ -428,33 +459,37 @@ fn extract_router_prefixes(content: &str, extension: &str) -> BTreeMap<String, S
 
     if extension == "py" {
         // FastAPI: `router = APIRouter(prefix="/api/v1")`
-        let re = regex::Regex::new(r#"(\w+)\s*=\s*APIRouter\s*\(\s*prefix\s*=\s*["']([^"']+)["']"#)
-            .unwrap();
-        for cap in re.captures_iter(content) {
+        static FASTAPI_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r#"(\w+)\s*=\s*APIRouter\s*\(\s*prefix\s*=\s*["']([^"']+)["']"#)
+                .unwrap()
+        });
+        for cap in FASTAPI_PREFIX.captures_iter(content) {
             out.insert(cap[1].to_string(), cap[2].to_string());
         }
 
         // Flask: `bp = Blueprint("name", __name__, url_prefix="/api")`
-        let re = regex::Regex::new(
-            r#"(\w+)\s*=\s*Blueprint\s*\([^)]*url_prefix\s*=\s*["']([^"']+)["']"#,
-        )
-        .unwrap();
-        for cap in re.captures_iter(content) {
+        static FLASK_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r#"(\w+)\s*=\s*Blueprint\s*\([^)]*url_prefix\s*=\s*["']([^"']+)["']"#)
+                .unwrap()
+        });
+        for cap in FLASK_PREFIX.captures_iter(content) {
             out.insert(cap[1].to_string(), cap[2].to_string());
         }
     } else if extension == "rs" {
         // axum: `.nest("/api", router)` where `router` is defined
         // in the same file. Match `let router = Router::new()...`
         // for the receiver name; the prefix is from `.nest("…", router)`.
-        let def_re = regex::Regex::new(r"let\s+(\w+)\s*=\s*Router::new").unwrap();
-        let nest_re =
-            regex::Regex::new(r#"\.nest\s*\(\s*["']([^"']+)["']\s*,\s*(\w+)\s*\)"#).unwrap();
-        for nest_cap in nest_re.captures_iter(content) {
+        static ROUTER_DEFINITION: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"let\s+(\w+)\s*=\s*Router::new").unwrap());
+        static ROUTER_NEST: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r#"\.nest\s*\(\s*["']([^"']+)["']\s*,\s*(\w+)\s*\)"#).unwrap()
+        });
+        for nest_cap in ROUTER_NEST.captures_iter(content) {
             let prefix = &nest_cap[1];
             let receiver = &nest_cap[2];
             // Only apply when the receiver is bound to `Router::new()`
             // in this file.
-            if def_re.is_match(content) {
+            if ROUTER_DEFINITION.is_match(content) {
                 out.entry(receiver.to_string())
                     .or_insert_with(|| prefix.to_string());
             }
@@ -467,8 +502,10 @@ fn extract_router_prefixes(content: &str, extension: &str) -> BTreeMap<String, S
         // braces; this is a coarse approximation but covers the
         // common shape. The matcher's prefix tolerance (§7.4) is the
         // broader net when this approximation misses.
-        let scope_re = regex::Regex::new(r#"web::scope\s*\(\s*["']([^"']+)["']\s*\)"#).unwrap();
-        for scope_cap in scope_re.captures_iter(content) {
+        static ACTIX_SCOPE: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r#"web::scope\s*\(\s*["']([^"']+)["']\s*\)"#).unwrap()
+        });
+        for scope_cap in ACTIX_SCOPE.captures_iter(content) {
             // Map the prefix to a sentinel key — the regex-based
             // extraction below only attaches the prefix to handlers
             // declared inside `scope("/prefix")`. We use the prefix
@@ -642,11 +679,12 @@ pub fn scan_workspace_routes(
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     let patterns = Patterns::with_overrides(root)?;
     let patterns: &Patterns = &patterns;
+    let mut queries = RouteQueries::new();
 
     for (path, content, _) in crate::server::sensors::util::scan_files(root, |p| {
         crate::server::sensors::util::ext_in(p, crate::server::sensors::util::SOURCE_EXTS)
     }) {
-        let mut routes = scan_file_for_routes(&path, &content, patterns);
+        let mut routes = scan_file_for_routes_with_queries(&path, &content, patterns, &mut queries);
         for r in &mut routes {
             r.handler_path = crate::graph::graph_path(root, std::path::Path::new(&r.handler_path));
         }
@@ -1413,6 +1451,84 @@ fun Application.module() {
         );
     }
 
+    #[test]
+    fn workspace_processes_every_file_with_bounded_query_compilation() {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..16 {
+            std::fs::write(
+                root.path().join(format!("routes_{i}.py")),
+                format!("@app.get(\"/route{i}\")\ndef handler_{i}():\n    pass\n"),
+            )
+            .unwrap();
+        }
+        let overrides = root.path().join(".lain/patterns/python");
+        std::fs::create_dir_all(&overrides).unwrap();
+        // A query-only route makes cache invalidation observable in the graph,
+        // independently of the regex route path and compilation counter.
+        std::fs::write(
+            root.path().join("query_only.py"),
+            "register_extra(\"/query-only\", query_handler)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            overrides.join("fastapi-route.scm"),
+            r#"
+(call
+  function: (identifier) @_callee
+  arguments: (argument_list (string) @path (identifier) @handler)
+  (#eq? @_callee "register_extra"))
+"#,
+        )
+        .unwrap();
+        let graph = GraphDatabase::new(&root.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+        let repo = RepoId::new("query-reuse").unwrap();
+        let frameworks = get_route_patterns(Patterns::patterns())
+            .keys()
+            .filter(|key| key.starts_with("python-"))
+            .count();
+        QUERY_COMPILE_COUNT.with(|count| count.set(0));
+        assert_eq!(
+            scan_workspace_routes(&graph, root.path(), &ns, &repo).unwrap(),
+            17
+        );
+        let compilations = QUERY_COMPILE_COUNT.with(Cell::get);
+        assert!(
+            compilations > 0 && compilations <= frameworks,
+            "{compilations} query compilations for {frameworks} frameworks and 16 files"
+        );
+        assert_eq!(
+            graph
+                .get_all_nodes()
+                .iter()
+                .filter(|node| node.node_type == NodeType::HttpRoute)
+                .count(),
+            17
+        );
+
+        // A new scan observes new .scm bodies instead of reusing stale queries.
+        for framework in ["fastapi", "flask", "django"] {
+            std::fs::write(
+                overrides.join(format!("{framework}-route.scm")),
+                "; no supplementary query\n",
+            )
+            .unwrap();
+        }
+        QUERY_COMPILE_COUNT.with(|count| count.set(0));
+        assert_eq!(
+            scan_workspace_routes(&graph, root.path(), &ns, &repo).unwrap(),
+            16
+        );
+        assert_eq!(QUERY_COMPILE_COUNT.with(Cell::get), 0);
+        assert!(
+            !graph
+                .get_all_nodes()
+                .iter()
+                .any(|node| node.name.contains("/query-only")),
+            "changing the .scm override must retract the old supplementary route"
+        );
+    }
+
     /// An override `.scm` body that is only comments (or blank
     /// lines) carries no query: the walker returns `None` instead
     /// of compiling an empty query.
@@ -1441,6 +1557,7 @@ fun Application.module() {
             content,
             std::path::Path::new("app.py"),
             Some(&tree),
+            &mut RouteQueries::new(),
         );
         assert!(
             out.is_none(),

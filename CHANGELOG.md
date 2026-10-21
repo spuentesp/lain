@@ -3,6 +3,21 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Large-workspace indexing: GraphQL SDL keyword probes now reuse validated
+  strings instead of validating the entire schema for every token. HTTP route
+  and client scans reuse compiled tree-sitter queries per framework within a
+  scan, and rebuild them after loading each scan's configuration. Fixed router
+  prefix regexes and bundled WebSocket idioms compile once instead of once
+  per file. Event scans compile topic and schedule idioms once per language
+  per scan, preserving repository-local overrides. Field-access scans collect
+  outbound call sites once instead of cloning the graph for each file. Source
+  locations, provider/consumer facts and per-repository overrides retain their
+  existing semantics.
+
 ## 0.11.0 — 2026-10-20
 
 ### Added

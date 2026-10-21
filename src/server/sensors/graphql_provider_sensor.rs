@@ -35,6 +35,7 @@ use crate::federation::contracts::model::{
 };
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::util_tokenize::starts_with_keyword;
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -318,7 +319,7 @@ fn extract_root_type_blocks(content: &str) -> Vec<RootTypeBlock> {
             i += 1;
             continue;
         }
-        if starts_with_keyword(bytes, i, "type") {
+        if starts_with_keyword(content, i, "type") {
             // Consume `type`.
             i += "type".len();
             while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
@@ -341,7 +342,7 @@ fn extract_root_type_blocks(content: &str) -> Vec<RootTypeBlock> {
             // `implements A & B` clause between the type name
             // and the `{`. Consume them before requiring the
             // opening brace.
-            let Some(brace_pos) = skip_type_modifiers(bytes, i, &mut line_no) else {
+            let Some(brace_pos) = skip_type_modifiers(content, i, &mut line_no) else {
                 continue;
             };
             i = brace_pos;
@@ -418,7 +419,7 @@ pub fn extract_object_type_blocks(content: &str) -> Vec<ObjectTypeBlock> {
             i += 1;
             continue;
         }
-        if starts_with_keyword(bytes, i, "type") {
+        if starts_with_keyword(&joined, i, "type") {
             i += "type".len();
             while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
                 if bytes[i] == b'\n' {
@@ -442,7 +443,7 @@ pub fn extract_object_type_blocks(content: &str) -> Vec<ObjectTypeBlock> {
             }
             // Federation SDL allows `@directive(...)` and
             // `implements A & B` between the name and the `{`.
-            let Some(brace_pos) = skip_type_modifiers(bytes, i, &mut line_no) else {
+            let Some(brace_pos) = skip_type_modifiers(&joined, i, &mut line_no) else {
                 continue;
             };
             i = brace_pos;
@@ -484,24 +485,6 @@ pub fn extract_object_type_blocks(content: &str) -> Vec<ObjectTypeBlock> {
     out
 }
 
-/// True when `bytes[at..]` starts with `kw` and the surrounding
-/// characters are word boundaries (the byte before is not
-/// alphanumeric / `_`, and the byte after is not alphanumeric /
-/// `_`). The graphql SDL grammar is open enough that
-/// `starts_with_keyword(bytes, 0, "type")` must not match
-/// `types` or `atype` — without the boundary check those would
-/// land in the field-parser's identifier path and yield junk.
-/// Thin wrapper around
-/// `crate::server::sensors::util_tokenize::starts_with_keyword` so
-/// the per-sensor API stays unchanged.
-fn starts_with_keyword(bytes: &[u8], at: usize, kw: &str) -> bool {
-    let s = match std::str::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    crate::server::sensors::util_tokenize::starts_with_keyword(s, at, kw)
-}
-
 fn is_ident_continue(b: u8) -> bool {
     (b as char).is_ascii_alphanumeric() || b == b'_'
 }
@@ -513,7 +496,8 @@ fn is_ident_continue(b: u8) -> bool {
 /// the type-name reader must allow it. Returns the position of
 /// the `{` on success, or `None` when the next non-space byte
 /// is neither a directive, an `implements` clause, nor `{`.
-fn skip_type_modifiers(bytes: &[u8], at: usize, line_no: &mut u32) -> Option<usize> {
+fn skip_type_modifiers(content: &str, at: usize, line_no: &mut u32) -> Option<usize> {
+    let bytes = content.as_bytes();
     let mut i = at;
     let mut consumed = false;
     loop {
@@ -558,7 +542,7 @@ fn skip_type_modifiers(bytes: &[u8], at: usize, line_no: &mut u32) -> Option<usi
             consumed = true;
             continue;
         }
-        if starts_with_keyword(bytes, i, "implements") {
+        if starts_with_keyword(content, i, "implements") {
             i += "implements".len();
             loop {
                 while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
@@ -730,6 +714,33 @@ fn parse_field_decls(from: &str) -> Vec<FieldDecl> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_large_sdl_without_revalidating_the_document_per_token() {
+        // Large schemas have many non-root declarations. A whole-document
+        // UTF-8 check at every keyword probe made this input quadratic.
+        let mut source =
+            String::from("\"\"\"Catalog description: café ☕\"\"\"\n# schema documentation\n");
+        for i in 0..65_536 {
+            source.push_str(&format!("scalar Scalar{i}\n"));
+        }
+        source.push_str("type Query { product: Product }\ntype Product { id: ID! }\n");
+        let started = std::time::Instant::now();
+        let providers = parse_sdl_providers(&source, "large.graphql");
+        let objects = extract_object_type_blocks(&source);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].field, "product");
+        assert_eq!(providers[0].site.path, "large.graphql");
+        assert!(providers[0].site.line > 65_536);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].name, "Product");
+        assert_eq!(objects[0].fields[0].name, "id");
+        assert_eq!(objects[0].fields[0].return_type, "ID!");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a 1 MiB SDL must parse within five seconds, including in debug builds"
+        );
+    }
 
     #[test]
     fn parses_query_root_fields() {

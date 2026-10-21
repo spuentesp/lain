@@ -174,6 +174,7 @@ pub fn scan_workspace_field_access(
     // we collect them here so rule 5/6 can find the calling /
     // callee relationships.
     let calls_by_function: BTreeMap<String, BTreeSet<String>> = collect_calls_by_function(graph);
+    let http_calls = collect_http_calls(graph);
 
     // Wrap the per-file emission + scope walk in
     // `with_current_patterns` so the deep walker helpers
@@ -186,12 +187,11 @@ pub fn scan_workspace_field_access(
         let by_lang = |p: &Path| lang_for_path(&p.to_string_lossy());
         for (path, content, lang) in super::util::scan_files(root, by_lang) {
             let path_str = graph_path(root, &path);
-            emissions.extend(detect_emissions(
+            emissions.extend(detect_emissions_with_http_calls(
                 &path_str,
                 &content,
                 lang,
-                graph,
-                &calls_by_function,
+                &http_calls,
             ));
         }
 
@@ -335,6 +335,11 @@ struct CallSite {
     consumer_line: u32,
 }
 
+#[cfg(test)]
+thread_local! {
+    static HTTP_CALL_COLLECTION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Discover every outbound HTTP call site in this repo. We look up
 /// the `SendsHttp` edges the http_client_sensor wrote in phase one
 /// and record the call id plus the source path and line. Used both
@@ -343,6 +348,8 @@ struct CallSite {
 ///
 /// Reserved for PR 9.
 fn collect_http_calls(graph: &GraphDatabase) -> BTreeMap<String, CallSite> {
+    #[cfg(test)]
+    HTTP_CALL_COLLECTION_COUNT.with(|count| count.set(count.get() + 1));
     let mut out: BTreeMap<String, CallSite> = BTreeMap::new();
     let nodes = graph.get_all_nodes();
     let calls: BTreeMap<String, String> = nodes
@@ -402,13 +409,21 @@ pub fn detect_emissions(
     graph: &GraphDatabase,
     _calls_by_function: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<FieldAccessEmission> {
+    detect_emissions_with_http_calls(path, content, lang, &collect_http_calls(graph))
+}
+
+fn detect_emissions_with_http_calls(
+    path: &str,
+    content: &str,
+    lang: Lang,
+    calls: &BTreeMap<String, CallSite>,
+) -> Vec<FieldAccessEmission> {
     let Some(tree) = parse(lang, content) else {
         return Vec::new();
     };
     let src = content.as_bytes();
-    let calls = collect_http_calls(graph);
     let mut emissions: Vec<FieldAccessEmission> = Vec::new();
-    for (function_id, call_site) in &calls {
+    for (function_id, call_site) in calls {
         // Only call sites that live in the file being scanned —
         // anything else would analyze this file's tree against
         // another file's call line.
@@ -6111,7 +6126,20 @@ async function fetch_data() { return await fetch(\"/a\"); }
             call_line,
         );
         let repo_id = RepoId::new("fixture").unwrap();
+        for index in 0..16 {
+            write_py(
+                root,
+                &format!("src/extra{index}.py"),
+                "def local():\n    return 1\n",
+            );
+        }
+        HTTP_CALL_COLLECTION_COUNT.with(|count| count.set(0));
         scan_workspace_field_access(&graph, root, &ns, &repo_id).unwrap();
+        assert_eq!(
+            HTTP_CALL_COLLECTION_COUNT.with(|count| count.get()),
+            1,
+            "workspace scan must collect the graph's HTTP calls once, regardless of file count"
+        );
 
         // Gap 1: the caller frame's read landed — S's own frame
         // never touches `customer_id`, so this FieldRef can only come

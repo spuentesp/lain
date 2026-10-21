@@ -56,6 +56,13 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
+type OutboundQueries = BTreeMap<String, Option<Query>>;
+
+#[cfg(test)]
+thread_local! {
+    static QUERY_COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 // ─── Public sensor shape ───────────────────────────────────────────────
 
 /// One HTTP consumer call site, pre-graph-emission. Public so callers
@@ -120,6 +127,7 @@ pub fn scan_workspace_clients(
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     let patterns = Patterns::with_overrides(root)?;
     let patterns: &Patterns = &patterns;
+    let mut queries = OutboundQueries::new();
 
     let by_lang = |p: &Path| match p.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "py" => Some(Lang::Python),
@@ -133,7 +141,7 @@ pub fn scan_workspace_clients(
         _ => None,
     };
     for (path, content, lang) in crate::server::sensors::util::scan_files(root, by_lang) {
-        let calls = detect_calls(&path, &content, lang, patterns);
+        let calls = detect_calls_with_queries(&path, &content, lang, patterns, &mut queries);
         for mut call in calls {
             call.path = graph_path(root, Path::new(&call.path));
             let (nodes, edges) = build_graph(graph, &call, namespace);
@@ -179,6 +187,18 @@ pub fn detect_calls(
     lang: Lang,
     patterns: &Patterns,
 ) -> Vec<HttpClientCall> {
+    detect_calls_with_queries(path, content, lang, patterns, &mut OutboundQueries::new())
+}
+
+// A cache belongs to one scan's immutable Patterns, never to a process or
+// pointer address. The next scan loads overrides before creating a new cache.
+fn detect_calls_with_queries(
+    path: &Path,
+    content: &str,
+    lang: Lang,
+    patterns: &Patterns,
+    queries: &mut OutboundQueries,
+) -> Vec<HttpClientCall> {
     let Some(tree) = parse_for_lang(lang, content) else {
         return Vec::new();
     };
@@ -205,7 +225,16 @@ pub fn detect_calls(
         if !has_query_content(body) {
             continue;
         }
-        let Ok(query) = Query::new(&grammar, body) else {
+        let key = format!("{lang_yaml}/{}", framework.id);
+        let Some(query) = queries
+            .entry(key)
+            .or_insert_with(|| {
+                #[cfg(test)]
+                QUERY_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
+                Query::new(&grammar, body).ok()
+            })
+            .as_ref()
+        else {
             continue;
         };
 
@@ -216,7 +245,7 @@ pub fn detect_calls(
         let url_idx = query.capture_index_for_name("url");
 
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&query, tree.root_node(), src);
+        let mut matches = cursor.matches(query, tree.root_node(), src);
 
         while let Some(m) = matches.next() {
             let call_node = call_idx.and_then(|i| m.nodes_for_capture_index(i).next());
@@ -1972,6 +2001,67 @@ fn enclosing_sends_http_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_reuses_outbound_queries_and_reloads_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..16 {
+            std::fs::write(
+                root.path().join(format!("client_{i}.py")),
+                format!(
+                    "import requests\nresponse = requests.get(\"http://orders/api/order{i}\")\n"
+                ),
+            )
+            .unwrap();
+        }
+        let graph = GraphDatabase::new(&root.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+        let repo = RepoId::new("outbound-query-reuse").unwrap();
+        let patterns = Patterns::patterns();
+        let frameworks: Vec<_> = patterns.outbound_patterns(Lang::Python).collect();
+        QUERY_COMPILE_COUNT.with(|count| count.set(0));
+        assert_eq!(
+            scan_workspace_clients(&graph, root.path(), &ns, &repo).unwrap(),
+            16
+        );
+        let compilations = QUERY_COMPILE_COUNT.with(std::cell::Cell::get);
+        assert!(
+            compilations > 0 && compilations <= frameworks.len(),
+            "{compilations} compilations for {} frameworks and 16 files",
+            frameworks.len()
+        );
+        assert_eq!(
+            graph
+                .get_all_nodes()
+                .iter()
+                .filter(|node| node.node_type == NodeType::HttpClientCall)
+                .count(),
+            16
+        );
+
+        let overrides = root.path().join(".lain/patterns/python");
+        std::fs::create_dir_all(&overrides).unwrap();
+        for framework in frameworks {
+            std::fs::write(
+                overrides.join(format!("{}.scm", framework.id)),
+                "; no outbound query\n",
+            )
+            .unwrap();
+        }
+        QUERY_COMPILE_COUNT.with(|count| count.set(0));
+        assert_eq!(
+            scan_workspace_clients(&graph, root.path(), &ns, &repo).unwrap(),
+            0
+        );
+        assert_eq!(QUERY_COMPILE_COUNT.with(std::cell::Cell::get), 0);
+        assert!(
+            !graph
+                .get_all_nodes()
+                .iter()
+                .any(|node| node.node_type == NodeType::HttpClientCall),
+            "updated .scm bodies must retract the previous consumer facts"
+        );
+    }
 
     #[test]
     fn truncate_url_expr_caps_at_200_chars() {
