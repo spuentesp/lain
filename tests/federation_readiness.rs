@@ -363,9 +363,22 @@ fn truthfulness_fixture(root: &std::path::Path) {
 }
 
 fn truthfulness_lib_source() -> String {
-    "pub fn entry() -> u32 { callee(1) + 2 }\n\
-     pub fn callee(x: u32) -> u32 { x + 1 }\n"
-        .to_string()
+    let mut src = String::from(
+        "pub fn entry() -> u32 { callee(1) + 2 }\n\
+         pub fn callee(x: u32) -> u32 { x + 1 }\n\
+         pub fn pad_target(x: u32) -> u32 { x + 1 }\n",
+    );
+    // Enough symbols and call edges that a pure tree-sitter re-scan (e.g.
+    // Windows CI where rust-analyzer is not preinstalled) stays in the
+    // `clear_calls_published() .. mark_calls_published()` window across
+    // multiple 256-node ingest batches instead of finishing in sub-ms
+    // time between two loopback HTTP polls.
+    for i in 0..600 {
+        src.push_str(&format!(
+            "pub fn pad_{i:03}(x: u32) -> u32 {{ pad_target(x) + {i} }}\n"
+        ));
+    }
+    src
 }
 
 fn caps_json(host: &str) -> serde_json::Value {
@@ -460,14 +473,19 @@ fn call_graph_ready_implies_call_answers_are_complete() {
     // edit disables `index_forced`'s cycle suppression, so the next
     // notify event re-scans the tree — the window in which the graph
     // is half-built (nodes replaced, `Calls` edges not yet re-inserted).
-    std::fs::write(
-        fixture.join("src/lib.rs"),
-        format!(
-            "{}// touched: force a watcher re-index\n",
-            truthfulness_lib_source()
-        ),
-    )
-    .unwrap();
+    let mut touch_seq = 0usize;
+    let touch_worktree = |seq: usize| {
+        std::fs::write(
+            fixture.join("src/lib.rs"),
+            format!(
+                "{}// touched: force a watcher re-index #{seq}\n",
+                truthfulness_lib_source()
+            ),
+        )
+        .unwrap();
+    };
+    touch_worktree(touch_seq);
+    let mut last_touch = std::time::Instant::now();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut violations: Vec<String> = Vec::new();
@@ -477,13 +495,17 @@ fn call_graph_ready_implies_call_answers_are_complete() {
         let caps = caps_json(&host);
         let s = cap_state(&caps, "symbols");
         let g = cap_state(&caps, "call_graph");
-        let out = call_sites(&host, "callee");
         if g == "ready" {
+            let out = call_sites(&host, "callee");
             if !out.contains("entry") {
                 violations.push(format!("symbols={s} call_graph={g}: {}", out.trim()));
             } else if saw_rebuild {
                 // Rebuild signalled honestly and is complete again.
                 break;
+            } else if last_touch.elapsed() >= std::time::Duration::from_millis(400) {
+                touch_seq += 1;
+                touch_worktree(touch_seq);
+                last_touch = std::time::Instant::now();
             }
         } else {
             saw_rebuild = true;

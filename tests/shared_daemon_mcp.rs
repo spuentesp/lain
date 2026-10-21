@@ -582,7 +582,8 @@ fn late_client_hands_config_and_it_is_added() {
         })
         .unwrap_or_default();
     assert!(
-        served.contains(&ws1.display().to_string()) && served.contains(&ws2.display().to_string()),
+        served.contains(&ws1.canonicalize().unwrap().display().to_string())
+            && served.contains(&ws2.canonicalize().unwrap().display().to_string()),
         "daemon must report both workspaces after add_workspaces; got {served:?}"
     );
 
