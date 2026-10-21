@@ -843,6 +843,7 @@ mod tests {
             env: Vec::new(),
             base_path: None,
             route_prefixes: Vec::new(),
+            provides_graphql: true,
         };
         services.name = "orders".into();
         let config = ContractFederationConfig {
@@ -1580,6 +1581,7 @@ mod tests {
                     env: vec![],
                     base_path: None,
                     route_prefixes: vec![],
+                    provides_graphql: true,
                 })
                 .collect(),
             http_clients: vec![],
@@ -1609,6 +1611,7 @@ mod tests {
                     env: vec![],
                     base_path: None,
                     route_prefixes: vec![],
+                    provides_graphql: true,
                 })
                 .collect(),
             http_clients: vec![],

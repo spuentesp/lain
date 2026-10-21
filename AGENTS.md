@@ -6,13 +6,13 @@ Two-branch model:
 
 - **`dev`** — integration. Default branch. PRs target `dev`.
   CI: fast lane (Ubuntu tests, lint, npm-shim, schema-drift,
-  health-badge, capability suite). ~5 min.
+  health-badge, capability suite, mutation gate). ~5 min.
 - **`main`** — release line. Receives changes only via reviewed
   PRs from `dev`, and only when cutting a new release.
   CI: full hardened battery (all OSes, capability suite, coverage,
   release contracts). ~20 min.
 
-**Always open PRs against `dev`. Never target `main` directly.**
+**Feature branches are cut from `dev` and merged back into `dev`. Never target `main` directly.**
 
 dev → main is **release-only**, not a routine merge:
 
@@ -85,11 +85,12 @@ cancels superseded runs for the same ref.
 | `test-cross` (macOS + Windows) | — | ✓ |
 | `lint`, `npm-shim`, `schema-drift`, `health-badge` | ✓ | ✓ |
 | `capability` (demo.sh) | ✓ | ✓ |
+| `mutation` (two-phase, incremental, PRs to `dev` only) | ✓ | — |
 | `coverage`, `version-drift`, `action-contracts` | — | ✓ |
 
 ## Conventions for AI agents
 
-- Open PRs against `dev`. Never target `main` directly.
+- Feature branches: cut from `dev`, merge back into `dev`. Never target `main` directly.
 - Don't bump versions in feature PRs — that's the release PR's job.
 - Don't commit secrets, even test fixtures. Use `hooks/<agent>/` to
   claim files before editing.

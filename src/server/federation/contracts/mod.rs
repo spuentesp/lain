@@ -10,6 +10,11 @@
 //!   functions; no graph or config dependencies.
 //! - `route_match` (PR 5): provider template ↔ consumer template
 //!   matching (§7.4). Pure logic; used by the joiner in PR 7.
+//! - `key_compat`: the key-pair well-formedness rules a
+//!   `bindings` entry must satisfy (`methods_compatible` /
+//!   `templates_compatible` / `keys_compatible` — §7.6 / §12).
+//!   Shared by `mcp/contract_tools/contracts.rs` (`check_binding`)
+//!   and the confirmed-binding layers.
 //! - `config` (PR 7): `ContractFederationConfig` (§7.1) — the
 //!   parsed-and-validated form of the contract-federation sections
 //!   in `repos.yaml`. Pure data + validation; no graph or sensor
@@ -42,17 +47,27 @@
 //!   `embedding`). Used by
 //!   `tests/contracts_analyzer_digest.rs` to pin the
 //!   sensor / normalizer / joiner output shape.
+//! - `coverage_matrix`: one row per `ContractKey` kind — sensors,
+//!   joiner resolver, `check_binding`/`bindings` support, and the
+//!   workspace-graph edges that surface the kind in the dashboard.
+//!   The `#[cfg(test)]` exhaustive `match` over `ContractKey` is the
+//!   escape-proof guard: its arms bind each variant to the kind's
+//!   coverage row, so a new variant without a row fails the test.
+//!   The compile break alone is not the guard — a bare `=> ()` arm
+//!   would satisfy the compiler. Prose twin: `docs/protocol-coverage.md`.
 
 pub mod changed_files;
 pub mod clients;
 pub mod config;
 pub mod coverage;
+pub mod coverage_matrix;
 pub mod diff;
 pub mod digest;
 pub mod field_join;
 pub mod index;
 pub mod index_cache;
 pub mod joiner;
+pub mod key_compat;
 pub mod mirrors;
 pub mod model;
 pub mod normalize;
@@ -83,7 +98,7 @@ pub mod url_resolution;
 /// combines the build version and the analyzer revision. Two
 /// different builds of the same analyzer revision share a cache
 /// entry; one analyzer revision's cache is invisible to the next.
-pub const CONTRACT_ANALYZER_REV: u32 = 5;
+pub const CONTRACT_ANALYZER_REV: u32 = 6;
 
 /// Build the analyzer-version string used as the cache-entry name
 /// suffix and embedded in the snapshot record (`§8.3` + `§8.4`).

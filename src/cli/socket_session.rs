@@ -20,6 +20,12 @@ use std::time::Duration;
 pub fn connect(path: &std::path::Path) -> Result<SocketSession> {
     let stream = UnixStream::connect(path)
         .with_context(|| format!("connect to socket {}", path.display()))?;
+    from_stream(stream)
+}
+
+/// Wrap an already-connected stream (e.g. one that won a daemon start
+/// race) as a session.
+pub fn from_stream(stream: UnixStream) -> Result<SocketSession> {
     let read_half = stream
         .try_clone()
         .context("clone unix stream for read half")?;

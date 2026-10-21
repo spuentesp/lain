@@ -3,6 +3,385 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.11.0 — 2026-10-20
+
+### Added
+
+- `docs/protocol-coverage.md`: the protocol coverage audit as
+  maintained prose — one section per `ContractKey` kind (sensors,
+  joiner resolver, `check_binding`/`bindings` grammar, dashboard
+  view edges), a bus/system detection backlog (one line per missing
+  system — MQTT, NATS, Redis, SQS/SNS, Kinesis, EventBridge, Pulsar,
+  ZeroMQ, Pub/Sub, job queues, Quartz, Inngest, Debezium — with the
+  client call shapes to look for), and a recipe for adding any of
+  them as pure detection patterns (no new contract kind). The
+  machine-readable twin is `federation::contracts::coverage_matrix`,
+  whose exhaustive `match` over `ContractKey` binds every variant to
+  its coverage row: a new kind breaks the match at compile time, and
+  the arm's assert — driven by the per-variant exemplars — fails the
+  test until the row is declared (a bare `=> ()` arm would satisfy
+  only the compiler).
+
+- `repos.yaml#bindings` and the `check_binding` MCP tool accept
+  `topic:` / `rpc:` / `ws:` (and `websocket:`) / `table:` keys, and
+  the confirmed-binding matcher resolves those consumer facts — all
+  six `ContractKey` kinds can now be manually confirmed, not just
+  HTTP and GraphQL. The four new kinds take the colon forms
+  (`topic:<broker>:<name>`, `rpc:<system>:<service>:<method>`,
+  `ws:<route>`, `table:<name>`) and keep the sensor wire forms
+  (`topic:<broker>/<name>`, `rpc:<service>/<method>`,
+  `websocket:<route>`). Topic/RPC keys use one split discipline: the
+  wire form splits at the first `/` (the name may carry further `/`
+  and `:` — Redis `orders:created`, MQTT `sensors/temp`), the colon
+  form takes exactly two (resp. three) non-empty components (`topic:a:b:c`
+  and `rpc:a:b:c:d` are rejected for their arity), and a string that
+  would read under both shapes (`topic:a:b/c`) is rejected as
+  ambiguous rather than guessed. `check_binding`'s
+  verdict reuses the existing reason values — cross-kind →
+  `method_mismatch`, same-kind mismatch → `template_mismatch` — so
+  the tool schemas and `docs/tool-schema.json` are unchanged. Grammar
+  reference: `docs/REPOS_YAML.md` (`bindings`).
+
+- Zero-config multi-agent shared daemon: `lain mcp` (stdio) now
+  attaches to — or starts — one resident `lain mcp --daemon` per
+  machine and bridges stdin↔socket JSON-RPC to it transparently. The
+  daemon is keyed by the resolved workspace **set** (sorted canonical
+  paths → short hash; a singleton set keeps the historical
+  `oneshot` socket key), a live daemon whose served set is a superset
+  covers subset clients, and N agents share one index and one memory
+  with no configuration. `LAIN_MCP_NO_SHARE=1` opts out; every failure
+  path still falls back to the historical private server.
+- `add_workspaces` daemon-side MCP tool (`paths: [string]`): hot-adds
+  workspace paths to the served federation — the same path
+  `workspaces.yaml`/`repos.yaml` reload uses (per-repo index, cross-repo
+  relink, watchers) — and returns per-repo indexing status. Idempotent
+  (`already` for known paths); typed errors for non-repo or unreadable
+  paths. A late `lain mcp` client whose workspaces are not covered calls
+  it automatically before bridging, so the daemon serves the union.
+- `no share` as a configurable per-instance property (default stays the
+  shared daemon above). Three surfaces, one property: `share: false` in
+  `repos.yaml` (flat key, default `true`; non-bool is a config error),
+  `lain mcp --no-share`, and `LAIN_MCP_NO_SHARE=1` (the hard override;
+  its client-side behavior is unchanged — the env now also drives
+  daemon-side config synthesis). A no-share instance reports `shared: false` on
+  `lain/daemon_info`, is skipped by discovery (never attached to, never
+  grown), and refuses `add_workspaces` with the typed `not_shared`
+  error before any mutation; a no-share client serves privately on the
+  historical fallback path even when a covering shared daemon exists. A
+  daemon spawned for a no-share instance carries `share: false` in its
+  synthesized config.
+- query: `query_graph` results now carry `edges` and `paths` when the
+  reported nodes came from a `connect` step. `paths` holds one selected
+  shortest matching-edge path per reported node (parallel to `nodes`,
+  seed first) and `edges` the deduplicated union of the walked edges on
+  those paths, sorted by `(from, to, type)`. Tie-breaks — fewest hops,
+  then the outgoing walk, then the lowest seed id, then the lowest-id
+  equal-distance predecessor per hop — are documented in
+  `docs/query-language.md`. Find/filter-only results omit both fields
+  (skip-if-empty), as before. `QueryResult` itself is unchanged; the
+  executor's unused `TraversalResult` alias is gone.
+- config: `services[].provides_graphql` scopes which services mint
+  GraphQL provider endpoints; set `false` for repos that only carry
+  SDL copies. No migration needed (default `true` preserves prior
+  behavior).
+- config: `bindings[].{consumer,provider}.key` accepts
+  `graphql:op:field` keys (previously HTTP-only grammar).
+- bindings: `repos.yaml#bindings` entries can pin GraphQL consumers
+  (keys `graphql:op:field`, consumer `symbol` = node name
+  `graphql-call:{op}:{field}`). No migration needed.
+- contracts: `check_binding` accepts GraphQL endpoints
+  (`graphql:op:field`); new reasons `op_mismatch`/`field_mismatch`.
+  Tool schema updated — regenerate `docs/tool-schema.json` consumers
+  if you mirror it.
+
+### Changed
+
+- `check_binding` treats an already-bound consumer as a conflict only
+  when it is bound to a **different** endpoint: confirming the exact
+  pair the joiner already inferred is idempotent (the joiner records
+  the entry with `Confirmed` provenance; a newly created `Binds` edge
+  is written with it) instead of a hard `already_bound` refusal. A
+  `Binds` edge the auto-join already wrote keeps its existing
+  provenance (`Static`/`Heuristic`) — only the joiner's index verdict
+  flips to `Confirmed`.
+  Re-pointing a bound consumer at another endpoint still fails with
+  `already_bound`.
+- Topic nodes are now canonical hubs: `event_sensor` mints ONE `Topic`
+  node per `(broker, topic)` per repo (identity: the `broker/topic`
+  label alone — no path, no line) instead of one node per publish/
+  subscribe *site*, so a topic used from several files no longer
+  fragments into one node per file. Each site keeps its own
+  `Produces`/`Consumes` edge on the hub with `SourceSite { path, line }`
+  provenance. Existing graphs still load (node ids are content, not
+  format — `FEDERATION_GRAPH_VERSION` unchanged), but they carry the
+  old per-site `Topic` nodes and their ids until the repo is re-indexed;
+  run **`lain reindex`** to rebuild cleanly. `CONTRACT_ANALYZER_REV`
+  is bumped (5 → 6) because the analyzer's graph output changed, so
+  contract caches keyed on the old revision are ignored and rebuilt.
+- The dashboard workspace graph (`get_workspace_graph`) now shows topic
+  hubs and their legs: `Topic` nodes with `Produces`/`Consumes` edges
+  (plus `Schema` nodes and their hub `PayloadSchema` links) join the
+  Function/Method/Class + Calls/Imports scope. Hubs keep per-repo
+  identity in the view — the same `broker/topic` in two repos is two
+  `Topic` nodes, linked at the contract layer, never merged — and hub
+  legs are never drawn cross-repo. The node/edge allowlists are named
+  (`WORKSPACE_GRAPH_NODE_TYPES` / `WORKSPACE_GRAPH_EDGE_TYPES`) so the
+  protocol-coverage matrix can reference the shipped set.
+- `lain mcp --daemon` boots the resolved workspace set as a federation
+  (synthesized `repos.yaml` under the runtime dir, set-hash keyed) so
+  the served set can grow in hot via `add_workspaces`; idle-exit and
+  open-connection pinning are unchanged. Explicit `lain mcp --socket
+  PATH` (without `--daemon`) keeps its historical meaning: a private
+  server that also binds that socket.
+- query: `QueryMeta.plan` is removed from the Rust `QueryMeta` struct.
+  It was always `None` and never appeared on the wire, so JSON clients
+  see no change; Rust consumers constructing `QueryMeta` must drop the
+  field.
+- query: `connect` hop counts (`depth`) are now shortest
+  matching-edge distances, and a query's start nodes are never
+  reported — not even back through a cycle. On multi-path graphs a
+  `depth` range can now return nodes the old walk missed (it reported
+  first-discovery depths) and stop returning a seed that only appeared
+  via a loop.
+
+### Fixed
+
+- The event sensor now loads repository-local `.lain/patterns/*.yaml`
+  overrides once per scan, so custom topic producer, consumer, and
+  scheduled patterns reach graph extraction. Malformed YAML or event
+  regexes fail before replacing the previous sensor output. Regex errors
+  identify the override file and framework; failed loads apply no entries.
+  Regression coverage also
+  verifies the existing HTTP override path and isolation between repos.
+
+- call-graph readiness survives a restart honestly. The
+  `calls_published` marker is now persisted with the graph and restored
+  on load, so a warm boot after a kill/SIGPIPE mid-index no longer
+  reports `call_graph: ready` over a torn `graph.bin` (the map phase
+  saves after every batch flush — before the resolve phases re-insert
+  `Calls` edges — and the old loader inferred the marker from
+  `last_commit`, which still named the previous complete commit).
+  Graphs written before the marker existed still load (bincode is
+  positional, so a trailing `#[serde(default)]` field cannot express
+  their missing stamp; the loader retries the pre-stamp layout and
+  falls back to the old `last_commit` inference) — no `lain reindex`
+  required, and `PATH_FORMAT_VERSION` is unchanged.
+- Event and SQL sensors share one line-comment tokenizer. Quotes preceded
+  by an even number of backslashes now close correctly, so a following
+  commented-out publish or SQL call cannot produce phantom graph nodes.
+- `relink_cross_repo` takes part in the same clear/mark lifecycle as
+  the indexing passes: the gate is cleared while the cross-repo `Calls`
+  edges are re-resolved and re-stamped for the indexed commit when they
+  land. Previously it was a fourth `Calls`-edge producer outside the
+  lifecycle, so `call_graph` kept claiming `ready` during the startup
+  relink while cross-repo callers answered as false "leaf".
+- capability readiness is truthful — `call_graph` reports ready only
+  once call edges are served; queries at the ready-transition no longer
+  see empty/leaf answers. A re-index pass replaces nodes (taking their
+  incident `Calls` edges with them) and only re-inserts them in its
+  resolve phase, but the capability kept claiming `ready` for the whole
+  rebuild, so `get_call_sites` / `get_blast_radius` answered real
+  callers as "leaf" until the pass finished. The serving graph now
+  carries a per-pass `calls_published` marker (stamped when the pass's
+  call-edge insert phases land, cleared when a pass starts rewriting
+  nodes) and `get_capabilities` maps `call_graph` to `ready` only while
+  it is set. `symbols` semantics are unchanged.
+- contracts: `list_unresolved` candidates honor the item's
+  `target_service` — the §9.7 could-match gate (`diff.rs::could_match`'s
+  service-name condition). When the resolver named one
+  (HTTP `no_route_in_service`, GraphQL `route_owner`), candidates
+  come only from that service's endpoints, still subject to the
+  per-kind key rules (HTTP method/template matching, GraphQL
+  same-op preference within the named service); items without one
+  keep listing the whole index, and candidate order is unchanged.
+- contracts: `list_unresolved` candidate `reason` now emits
+  `prefix_stripped` when the consumer's template matches the endpoint
+  only under the §7.4 route matcher's prefix-strip rule (the
+  gateway-bridge shape, e.g. `GET /v1/api/orders/{}` →
+  `GET /api/orders/{}`). Labels reuse the route matcher's classifier:
+  a truly equal key is `same_key`, any other route match is `pattern`,
+  and a prefix-bridge match is `prefix_stripped`. Previously every
+  route match was labeled `same_key`, so the enum's `prefix_stripped`
+  value was never emitted. GraphQL candidate labels are unchanged.
+- contracts: `list_unresolved` now lists GraphQL endpoints as
+  `candidates` for GraphQL consumers (`graphql-call:{op}:{field}`) —
+  same-`op` endpoints when any exist, else all GraphQL endpoints —
+  instead of every HTTP endpoint in the index. HTTP consumers are
+  unchanged.
+- `coverage.unnormalized` now reports subscribers whose topic
+  argument was not a literal the `event_sensor` could resolve
+  (parameter, f-string, identifier without a same-file const, ...).
+  Previously the comment at `event_sensor.rs:712` claimed the
+  bucket recorded them; it did not — they were dropped silently.
+  `detect_sites` now pushes a `DetectedSite { topic: None,
+  kind: Consumes, .. }` for the consumer side when the walker
+  matches but the resolve fails, so the dynamic-topic path is
+  actually reachable through the sensor (not just through a
+  hand-built node in a joiner test). The synthetic per-site
+  consumer node then carries a `TopicConsumerFact` whose `name`
+  is the new `TOPIC_DYNAMIC_SENTINEL` (`<dynamic>`); `TopicDispatch`
+  recognises the sentinel and returns
+  `Unresolved { reason: DynamicTopic, .. }`, which the joiner
+  pushes onto `coverage.unnormalized` next to the existing HTTP
+  `Unnormalized` arm. Producer-side dynamic topics are still
+  dropped — there is no `(broker, name)` to anchor a `Topic` hub
+  on, and a hub with the sentinel would falsely advertise a
+  provider that never resolves. The matching protocol-coverage doc
+  caveat (the "Dynamic topic names are dropped silently" note) is
+  deleted; the bucket is now the source of truth. Pinned end-to-end
+  by `dynamic_topic_on_consumer_emits_sentinel_synthetic_node_and_no_topic_hub`
+  (full sensor path: `ch.basic_consume(queue=QUEUE_NAME)` →
+  walker → synthetic node → sentinel fact) and the existing
+  `topic_join_dynamic_sentinel_is_unnormalized` (dispatch path).
+- `coverage.unresolved_refs` is a new sibling bucket of
+  `coverage` (§9.7) that records external OpenAPI `$ref`s the
+  sensor could not resolve because the body lives outside the
+  workspace (`$ref: 'other.yaml#/components/schemas/Foo'`). The
+  `OpenApiSensor`'s per-flatten `unresolved_refs` accumulator —
+  present since the openapi sensor shipped but discarded by every
+  caller — is now wired: the sensor is converted from the
+  macro form to a direct `impl Sensor` (overriding
+  `scan_with_report`) so the per-repo coverage ledger records
+  one `UnresolvedRecord { reason: ExternalSchemaRef, count,
+  sample_ids }` per unique foreign URL, and `build_coverage`
+  aggregates those into the new bucket (one `UnresolvedRef` per
+  URL across the federation, `count` summed across repos). It
+  is NOT the same bucket as `unnormalized`: an external `$ref`
+  is not a consumer-shaped gap (no caller symbol), so the
+  existing `claims_from_coverage` "unnormalized consumer url"
+  note doesn't apply; `claims_from_coverage` adds a fourth
+  bucket that emits `missing` evidence with the foreign URL as
+  the file path. Pinned end-to-end by
+  `external_ref_yields_unresolved_record_in_scan_report` (sensor
+  path: spec → walker → `ScanReport.unresolved`) and
+  `build_coverage_aggregates_external_schema_refs` (coverage
+  build path: per-repo records → `Coverage.unresolved_refs`).
+  Tool output (`coverage_to_value`) and the schema
+  (`docs/tool-schema.json`) get the new `unresolved_refs` field
+  on `get_coverage`'s data envelope.
+- `apply_confirmed_binding` now MERGES into the existing
+  `consumers[gid]` vec rather than wholesale replacing it with a
+  single-resolution vec. A node carrying two+ consumer facts
+  (`topic-read:<path>:<line>` subscribing to two topics on one
+  line, a synthetic `sql-read:` reading two tables, a mixed HTTP
+  + topic node) had its non-confirmed resolutions wiped whenever
+  any one of them was operator-confirmed: the new key override
+  took the whole slot. The fix filters out only the resolution
+  whose `bound_endpoints` names the same `provider_key` the
+  binding covers (the safety net for repeated bindings), keeps
+  every other fact's resolution, and inserts the new confirmed
+  resolution at the FRONT of the vec so `consumer(&gid)`
+  (`index.rs:60`, `first()`) keeps returning the operator truth
+  for the queried key. `binds` already accumulated per-binding
+  without dedup, so multi-binding matches on the same node
+  correctly grow the edge set — no change there. Pinned by the
+  new `confirmed_binding_merges_into_multi_fact_consumers_vec`
+  test (one node, two topic subscriptions on one line, confirmed
+  binding for one topic — both resolutions survive; the
+  confirmed one is `first()`; the other carries the auto-join or
+  Unresolved for the un-confirmed topic) and the existing
+  `confirmed_binding_reads_complete_comes_from_the_matched_fact`
+  which covers the mixed HTTP+topic case.
+- Tuning config: the no-`tuning.toml` fallback now scales the
+  `embedding_cache_capacity` and `file_content_cache_capacity`
+  caps to the host's available memory (`MemAvailable` from
+  `/proc/meminfo`, with an 8 GiB fallback on non-Linux or read
+  errors). The hardcoded `Default` (10 000 embeddings / 1 000
+  files — designed for an 8 GiB developer laptop) punched
+  through the budget on a 1 GiB CI sandbox or a 4 GB container
+  where Lain runs alongside other workloads. The new
+  `TuningConfig::for_runtime()` constructor caps the two caches
+  at 5 % of RAM (embeddings get 2/5 of the budget, file content
+  gets the rest), clamped to a floor that keeps the caches useful
+  on tiny machines and a ceiling that prevents one huge host
+  from spending the whole box. `Default` is unchanged — tests
+  stay hermetic. Operators who pin the caps via `tuning.toml` keep
+  their values (file wins over the host-aware scale). Pinned by
+  the new `ram_aware_cache_sizing_tests` module (8 GiB / 1 GiB /
+  64 GiB / 0 MiB / Linux / non-Linux paths).
+- Readiness: `Capabilities` gains a `mirrors: Capability` field
+  (§9.7 schema extension). The per-repo mirror cache that backs
+  `git diff` / `git log` is now its own capability, surfaced so an
+  agent can tell "the mirror cache needs a rebuild" from
+  "the underlying data is broken" — the former leaves
+  `git_history` alone once the mirror is fresh, the latter knocks
+  it down too. `mirrors` is **optional** (mirrors are
+  infrastructure, not a user-visible feature) so its state never
+  gates the agent's `exit_code`; agents see the diagnosis but are
+  not blocked. As a side-effect, the live `get_capabilities`
+  tool's `git_history` field is now honest (it used to be hardcoded
+  `Ready` regardless of reality — the F2b/F5 review caught it as
+  the same class of "silent lie" the dynamic-topic and external-`$ref`
+  fixes closed). `Capabilities::readiness`'s exit-code contract
+  is preserved; a new `mirrors_state_does_not_gate_required`
+  test pins the optional guarantee.
+- Tests: the producer-side leg count for `Topic` hubs had two
+  pins (`hub_keeps_one_produces_edge_per_top_level_site`,
+  `hub_keeps_one_produces_edge_per_site`); the consumer side
+  had none — every existing event_hub_e2e test exercised the
+  joiner or workspace view, never the per-site Consumes count.
+  F6 audit adds the pair: two new tests (`hub_keeps_one_consumes_edge_per_top_level_site`,
+  `hub_keeps_one_consumes_edge_per_site`) and the cross-reconcile
+  pin (`deleted_consumer_site_leaves_exactly_one_federated_consumes_leg`,
+  the consumer-side mirror of
+  `one_deleted_site_leaves_exactly_one_federated_edge_for_its_pair`).
+  The audit proves the edge layer's dedup key (which includes
+  `site`) does not silently drop the second leg on either side.
+- F6b: the TLA+ `CoverageClaim.tla` invariant I3
+  (`NoKnownImpactSound` — `claim_fired => \A r \in change_in_scope :
+  RepoComplete(r)`) is now pinned by a proptest in
+  `diff_tests::no_known_impact_sound_for_arbitrary_repos_and_changes`
+  (32 cases × 3 change kinds = 96 evaluations per run). The
+  proptest samples random repo counts (1..=5), per-repo
+  completeness (complete / carries an unresolved record so
+  `is_complete` returns false), and three §9.2 change kinds
+  (EndpointAdded / EndpointRemoved / PathChanged) that drive the
+  `NoKnownImpact` verdict on `ContractSurface::default()`. Whenever
+  `evaluate` returns `Class::NoKnownImpact`, the test asserts
+  every in-scope `RepoCoverage::is_complete` returns true — the
+  Rust restatement of the spec invariant. TLC's exhaustive check
+  is bounded by the .cfg file (2 repos × 2 sensors × 4 langs × 6
+  families); the proptest samples a larger state space so any
+  regression in the `NoKnownImpactSound` guard at `diff.rs:1930`
+  gets caught even when TLC's bounded model would still pass. The
+  spec restated inline in the test doc-comment; the proptest
+  `PROPT_SEED` env var pins failures to a reproducible case. No
+  Quint / TLC setup required — the Rust code that translates the
+  spec IS the system under test, and the invariant is encoded as
+  Rust types the proptest can construct directly.
+- contracts: a `bindings` entry whose `consumer.key` and
+  `provider.key` are not a well-formed pair — cross-kind
+  (`graphql:…` vs `http:…`), HTTP methods/templates
+  `check_binding` would reject, or differing GraphQL `op`/`field` —
+  is now a config error at load, and the joiner never binds it (it
+  is recorded as an `ill_formed_keys` stale binding if an
+  unvalidated config slips through). Previously a cross-kind entry
+  could pin a consumer to an endpoint of a different kind (I1,
+  "no invented bindings"). Same-kind HTTP template bridges (e.g.
+  `GET /v1/api/orders/{}` → `GET /api/orders/{}`) stay supported.
+  Recovery: make the pair well-formed (same key kind;
+  `check_binding`-compatible methods and templates; equal GraphQL
+  `op`/`field`).
+- contracts: `check_binding` with a GraphQL consumer and an HTTP
+  endpoint key used to return `valid: true` with an unusable
+  `bindings_entry` (pre-existing vacuous-match bug); it now returns
+  `valid: false` with `op_mismatch`/`field_mismatch`. Re-validate any
+  `bindings_entry` saved from the old behavior.
+- query: a top-level `find.id` now selects exactly that node. It was
+  parsed and then ignored, so `{"op":"find","id":"..."}` answered with
+  every match of the other (usually absent) filters — the whole graph.
+  `connect.target.id` was already honoured.
+- query: `{"not": [...]}` is now a valid wire form for `label` and
+  `edge` selectors (e.g. `{"label": {"not": ["deprecated"]}}`). The
+  untagged enums rejected the object at parse, so the NOT variants
+  were unreachable from JSON.
+- query: label selectors match the node's actual label (`test` and
+  other attribute-derived labels), not only the `deprecated` flag, and
+  results surface that label. `describe_schema` stops advertising the
+  labels `async` and `generated` — no producer emits either — and `File`
+  nodes no longer advertise `generated`/`test`, which nothing attaches to
+  a `File`.
+
 ## 0.10.0 — 2026-10-13
 
 > **MINOR bump — the coordination contract changed.** Lain's

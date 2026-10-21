@@ -126,6 +126,7 @@ fn main() -> Result<()> {
             owner_url,
             socket,
             daemon,
+            no_share,
         }) => {
             // `lain mcp` — MCP server on stdio. Resolves the workspace
             // list from `--workspace` (repeatable), the `LAIN_WORKSPACE`
@@ -160,6 +161,7 @@ fn main() -> Result<()> {
                     reindex_timeout.map(std::time::Duration::from_secs),
                     socket.as_deref(),
                     daemon,
+                    no_share,
                 )),
             }
         }

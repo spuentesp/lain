@@ -169,29 +169,33 @@ async fn lain_server_reload_bus_returns_same_handle() {
 ///
 /// One writer fires 100 `set_workspace` calls in rapid succession;
 /// one reader spins holding the *same* lock and samples what the
-/// next dispatch would see. The test passes iff (a) every write goes
-/// through to the shared cell (every step 1..=NUM_WRITES is observed
-/// at least once by the reader) and (b) the read guard never holds a
-/// stale value past a more recent write — i.e. the writer's and
-/// reader's `Arc<RwLock<...>>` point at the **same** inner cell.
+/// next dispatch would see. The test passes iff (a) the reader
+/// observes the pre-write state and the writer's final state through
+/// the shared cell and (b) the read guard never holds a stale value
+/// past a more recent write — i.e. the writer's and reader's
+/// `Arc<RwLock<...>>` point at the **same** inner cell.
 ///
 /// Before the fix the LainMcpServer kept a clone of the
 /// `Arc<WorkspacesFile>` captured at construction time, so the
 /// reader saw `count == 1` for the entire run — this test would
-/// fail immediately at the writer's first swap.
+/// fail at the reader's no-progress deadline or the final-state
+/// assertion.
 ///
-/// CI gating: on macOS the reader can collapse to a single distinct
-/// count because the writer does 100 synchronous `set_workspace`
-/// calls with no `.await` between them. On Linux + Windows the
-/// scheduler interleaves the writer and reader naturally; on macOS's
-/// kqueue-based scheduler the writer can monopolize its worker
-/// thread for the entire burst, leaving the reader to wake up only
-/// after the writer finishes. The `tokio::task::yield_now().await`
-/// insert in the writer loop closes this starvation window on every
-/// platform. Skip on macOS remains until a real macOS runner
-/// confirms the `yield_now` mitigation removes the flake — the
-/// speculation is "starvation under synchronous bursts", not a
-/// snapshot bug.
+/// Sequencing is deterministic, not scheduler-luck: the writer holds
+/// off until the reader has sampled the pre-write state, so the
+/// observed set always contains both endpoints even when the writer's
+/// burst completes between two of the reader's polls (the failure
+/// mode this test showed under parallel `cargo test` load: the
+/// reader's first poll saw only the final count and the old
+/// "must observe intermediate states" assertion fired). The reader's
+/// watchdog is progress-based — it fails only when the shared cell
+/// stops advancing for a generous window — so machine load can slow
+/// the test but never fail it.
+///
+/// CI gating: still skipped on macOS. The remaining assertions are
+/// scheduler-independent (deterministic handshake + final state), but
+/// no macOS runner has confirmed the redesigned test end-to-end, so
+/// the platform skip stays until one does.
 #[cfg_attr(target_os = "macos", ignore)]
 #[tokio::test(flavor = "multi_thread")]
 async fn set_workspace_stress_visible_to_shared_lock() {
@@ -264,102 +268,120 @@ async fn set_workspace_stress_visible_to_shared_lock() {
     // snapshot forever.
     let server = std::sync::Arc::new(server);
     let writer_server = std::sync::Arc::clone(&server);
-    let writer = tokio::spawn(async move {
-        for step in 0..NUM_WRITES {
-            let ws = Arc::new(WorkspacesFile {
-                default: None,
-                workspaces: (0..step + 1)
-                    .map(|n| WorkspaceSpec {
-                        name: format!("s{step}-w{n}"),
-                        description: None,
-                        source: None,
-                        members: vec!["repo-a".into()],
-                    })
-                    .collect(),
-            });
-            writer_server.set_workspace(ws);
-            // Yield between writes so the reader task (also on the
-            // multi_thread runtime) gets scheduled. Without this,
-            // the 100-call synchronous burst can monopolize the
-            // worker's time-slice on macOS's kqueue-based scheduler,
-            // leaving the reader to observe only the final state and
-            // collapsing `observed.len()` to 1. Cheap on Linux
-            // (negligible yield cost); closes the starvation window
-            // on macOS without changing the assertion surface.
-            tokio::task::yield_now().await;
+    // Deterministic sequencing: the writer must not swap anything
+    // until the reader has sampled the pre-write state, otherwise
+    // "the reader observed both endpoints" would depend on the two
+    // tasks being interleaved by the scheduler (it isn't under load).
+    let reader_sampled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = tokio::spawn({
+        let reader_sampled = std::sync::Arc::clone(&reader_sampled);
+        async move {
+            let wait_deadline = Instant::now() + Duration::from_secs(60);
+            while !reader_sampled.load(std::sync::atomic::Ordering::SeqCst) {
+                assert!(
+                    Instant::now() < wait_deadline,
+                    "reader task never took its first sample of the shared lock",
+                );
+                tokio::task::yield_now().await;
+            }
+            for step in 0..NUM_WRITES {
+                let ws = Arc::new(WorkspacesFile {
+                    default: None,
+                    workspaces: (0..step + 1)
+                        .map(|n| WorkspaceSpec {
+                            name: format!("s{step}-w{n}"),
+                            description: None,
+                            source: None,
+                            members: vec!["repo-a".into()],
+                        })
+                        .collect(),
+                });
+                writer_server.set_workspace(ws);
+                // Yield between writes so the reader task (also on
+                // the multi_thread runtime) gets scheduled during the
+                // burst and the monotonicity invariant below is
+                // exercised mid-flight, not only at the endpoints.
+                tokio::task::yield_now().await;
+            }
         }
     });
 
-    // --- reader: polls the shared lock and verifies that every step
-    //     from 1..=NUM_WRITES is observable. `RwLockReadGuard` is
-    //     `!Send`, so the guard never crosses an `.await` boundary.
+    // --- reader: polls the shared lock and verifies that writes
+    //     propagate through the shared cell without regression.
+    //     `RwLockReadGuard` is `!Send`, so the guard never crosses
+    //     an `.await` boundary.
     // ---
     let reader_lock = std::sync::Arc::clone(&shared_lock);
-    let high_water: std::sync::Arc<parking_lot::Mutex<usize>> =
-        std::sync::Arc::new(parking_lot::Mutex::new(0));
-    let reader_water = std::sync::Arc::clone(&high_water);
-    let reader = tokio::spawn(async move {
-        let mut observed_counts: std::collections::BTreeSet<usize> =
-            std::collections::BTreeSet::new();
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut last_count: usize = 0;
-        loop {
-            let count = {
-                let guard = reader_lock.read();
-                guard.workspaces.len()
-            };
-            observed_counts.insert(count);
-            {
-                let mut hw = reader_water.lock();
-                if count > *hw {
-                    *hw = count;
+    let reader = tokio::spawn({
+        async move {
+            let mut observed_counts: std::collections::BTreeSet<usize> =
+                std::collections::BTreeSet::new();
+            let mut last_count: usize = 0;
+            // Progress-based watchdog: the shared cell must keep
+            // advancing. A wall-clock deadline is not load-proof —
+            // under parallel builds the tasks can be starved for a
+            // while without anything being wrong — so only *stall*
+            // (no new count for a generous window) fails the test.
+            let mut last_progress = Instant::now();
+            loop {
+                let count = {
+                    let guard = reader_lock.read();
+                    guard.workspaces.len()
+                };
+                let is_new = observed_counts.insert(count);
+                if is_new {
+                    last_progress = Instant::now();
                 }
-            }
-            // Strict-progress invariant (the punchline of the test):
-            // the count must monotonically non-decrease. A regression
-            // means the reader is looking at a *different* cell than
-            // the writer — exactly the snapshot divergence the fix
-            // closes.
-            assert!(
-                count >= last_count,
-                "reader regressed: count dropped from {} to {} \
-                 (the writer and reader are observing different cells)",
-                last_count,
-                count,
-            );
-            last_count = count;
-            if count >= NUM_WRITES {
-                break;
-            }
-            if Instant::now() > deadline {
-                panic!(
-                    "reader stuck at count={} after 15s — set_workspace \
-                     writes are not propagating through the shared lock. \
-                     observed distinct counts: {:?} (need 1..={NUM_WRITES})",
-                    count, observed_counts,
+                // Publish the pre-write sample so the writer may start.
+                reader_sampled.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Strict-progress invariant (the punchline of the test):
+                // the count must monotonically non-decrease. A regression
+                // means the reader is looking at a *different* cell than
+                // the writer — exactly the snapshot divergence the fix
+                // closes.
+                assert!(
+                    count >= last_count,
+                    "reader regressed: count dropped from {} to {} \
+                     (the writer and reader are observing different cells)",
+                    last_count,
+                    count,
                 );
+                last_count = count;
+                if count >= NUM_WRITES {
+                    break;
+                }
+                if last_progress.elapsed() > Duration::from_secs(60) {
+                    panic!(
+                        "reader stuck at count={} with no progress for 60s — \
+                         set_workspace writes are not propagating through the \
+                         shared lock. observed distinct counts: {:?} \
+                         (need 1..={NUM_WRITES})",
+                        count, observed_counts,
+                    );
+                }
+                tokio::time::sleep(Duration::from_micros(500)).await;
             }
-            tokio::time::sleep(Duration::from_micros(500)).await;
+            observed_counts
         }
-        observed_counts
     });
 
     writer.await.expect("writer task should complete");
     let observed = reader.await.expect("reader task should complete");
 
-    // The reader may legitimately *skip* intermediate counts when the
-    // writer races ahead — that's just normal scheduling. Without
-    // the fix, however, the reader would see the construction-time
-    // count of `1` for the *entire* test run, because the LainMcpServer
-    // held an independent snapshot. The punched-line assertions:
+    // The writer held off until the reader sampled the pre-write
+    // state, and the reader runs until it sees the final state, so
+    // both endpoints are in `observed` by construction — the
+    // assertions below are deterministic, not scheduler luck. Without
+    // the fix, the reader would see the construction-time count of
+    // `1` for the *entire* test run, because the LainMcpServer held
+    // an independent snapshot — the no-progress watchdog would fire.
     //
-    // (1) the reader sees the writer's final state — proves writes
-    //     reach the lock cell the dispatch path reads through.
-    // (2) the reader sees a strictly greater max than the original
-    //     count of `1` (this is implied by (1) but the `observed.len()`
-    //     assertion below makes it crisp).
-    // (3) the observed set is non-trivial — a snapshot bug would
-    //     collapse it to a single value.
+    // The two assertions below guard the handshake and the fixture
+    // shape (a broken handshake, or a fixture without a distinct
+    // pre-write state, surfaces here) — the reader's control flow
+    // already implies both. The real detectors of the snapshot bug
+    // are the monotonicity assert and the stall watchdog in the
+    // reader, plus the exact final-state check after these.
     let max_seen = *observed.iter().max().unwrap_or(&0);
     assert!(
         max_seen >= NUM_WRITES,
@@ -371,12 +393,12 @@ async fn set_workspace_stress_visible_to_shared_lock() {
     );
     assert!(
         observed.len() >= 2,
-        "reader saw only {} distinct counts ({:?}); with NUM_WRITES={} \
-         rapid writes the reader must observe several different \
-         states — collapsing to one is the snapshot bug",
+        "reader saw only {} distinct counts ({:?}); the deterministic \
+         handshake guarantees the pre-write count (1) and the final \
+         count ({NUM_WRITES}) are both observed through the shared \
+         cell",
         observed.len(),
         observed,
-        NUM_WRITES,
     );
 
     // Belt-and-braces: the final state is exactly what the writer wrote last.

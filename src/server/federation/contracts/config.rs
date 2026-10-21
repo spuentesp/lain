@@ -15,7 +15,9 @@
 //! key on it.
 
 use crate::error::LainError;
-use crate::federation::contracts::model::service_name_is_valid;
+use crate::federation::contracts::joiner::parse_contract_key;
+use crate::federation::contracts::key_compat::keys_compatible;
+use crate::federation::contracts::model::{service_name_is_valid, ContractKey};
 use crate::federation::contracts::normalize;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -70,6 +72,23 @@ pub struct ServiceDecl {
     pub base_path: Option<String>,
     #[serde(default)]
     pub route_prefixes: Vec<RoutePrefix>,
+    /// Whether this service's `.graphql`/`.gql` SDL files mint GraphQL
+    /// provider endpoints. Set `false` for repos that only carry schema
+    /// copies (codegen inputs) so they do not pollute the `(op, field)`
+    /// provider key space. Defaults to `true`.
+    #[serde(
+        default = "default_provides_graphql",
+        skip_serializing_if = "is_default_provides_graphql"
+    )]
+    pub provides_graphql: bool,
+}
+
+fn default_provides_graphql() -> bool {
+    true
+}
+
+fn is_default_provides_graphql(value: &bool) -> bool {
+    *value
 }
 
 /// One cross-file router mount. The provider declares a route under
@@ -104,11 +123,14 @@ pub struct SchemaDecl {
 }
 
 /// One person-confirmed binding (`repos.yaml#bindings[<i>]`). The
-/// consumer matches every `HttpClientCall` in `repo/path` whose
+/// consumer matches every consumer-fact node in `repo/path` whose
 /// enclosing symbol's name (or `Container.name`) is `symbol` and
-/// whose `ContractKey` equals `key`. The provider is the endpoint
-/// `(service, key)`. The `key` for both sides is the same wire
-/// grammar (`<METHOD> <template>`).
+/// which carries a `ContractKey` equal to `key` — an
+/// `HttpClientCall` (`<METHOD> <template>`), a GraphQL call
+/// (`graphql:op:field`), or a Topic / Rpc / WebSocket / Table
+/// consumer (`topic:…` / `rpc:…` / `ws:…` / `table:…`). The
+/// provider is the endpoint `(service, key)`. The `key` for both
+/// sides follows the same grammar (`docs/REPOS_YAML.md`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfirmedBinding {
     pub consumer: ConfirmedBindingConsumer,
@@ -393,10 +415,48 @@ impl ContractFederationConfig {
         }
 
         // Rule 8: malformed key — every entry that carries one must
-        // parse as `<METHOD> <template>` and survive normalization.
+        // parse as `<METHOD> <template>` (or `graphql:op:field`) and
+        // survive normalization.
         for b in &self.bindings {
             validate_key("bindings.consumer.key", &b.consumer.key)?;
             validate_key("bindings.provider.key", &b.provider.key)?;
+        }
+        // A confirmed binding may only join a consumer to an
+        // endpoint whose key is compatible with the consumer's key
+        // (I1a — no invented bindings,
+        // `docs/formal/ConsumerBinding.tla`). The rules are
+        // `check_binding`'s (`key_compat::keys_compatible`, §12):
+        // same key kind; for HTTP, compatible methods and templates
+        // (a same-kind template bridge like `GET /v1/api/orders/{}`
+        // → `GET /api/orders/{}` is fine); for GraphQL, equal
+        // `(op, field)`; for Topic/Rpc/WebSocket/Table, exact key
+        // equality (broker+name / system+service+method / route /
+        // name). Ill-formed pairs — cross-kind
+        // (`graphql:…` vs `http:…`) above all — are rejected here
+        // so the operator learns at load. The joiner
+        // (`joiner/confirmed.rs::apply_confirmed_binding`) records
+        // the same pair as an `IllFormedKeys` stale binding if an
+        // unvalidated config slips through.
+        for (i, b) in self.bindings.iter().enumerate() {
+            let consumer_key = parse_contract_key(&b.consumer.key).map_err(|e| {
+                LainError::Config(format!(
+                    "bindings[{i}] consumer key '{key}': {e}",
+                    key = b.consumer.key
+                ))
+            })?;
+            let provider_key = parse_contract_key(&b.provider.key).map_err(|e| {
+                LainError::Config(format!(
+                    "bindings[{i}] provider key '{key}': {e}",
+                    key = b.provider.key
+                ))
+            })?;
+            if !keys_compatible(&consumer_key, &provider_key) {
+                return Err(LainError::Config(format!(
+                    "bindings[{i}]: consumer key '{c}' and provider key '{p}' are not a well-formed pair — cross-kind or incompatible methods/templates",
+                    c = b.consumer.key,
+                    p = b.provider.key
+                )));
+            }
         }
         // Generic keys follow the same grammar (§7.1: "it must parse
         // as <METHOD> <template> and survive normalization
@@ -583,8 +643,38 @@ fn path_prefixes_overlap(a: &str, b: &str) -> bool {
 /// `http:<METHOD> <template>` and the shortened form
 /// `<METHOD> <template>` used by `generic_keys` and the consumer key
 /// inside `bindings`. The shortened form is the §7.1 config shape;
-/// the full form is what `ContractKey::from_str` requires.
+/// the full form is what `ContractKey::from_str` requires. Keys
+/// prefixed `graphql:` instead carry the
+/// `graphql:<query|mutation|subscription>:<field>` grammar and skip
+/// the HTTP normalization path. The fact-keyed kinds —
+/// `topic:` (`topic:<broker>/<name>` or `topic:<broker>:<name>`),
+/// `rpc:` (`rpc:<service>/<method>` or
+/// `rpc:<system>:<service>:<method>`), `ws:` / `websocket:`
+/// (`ws:<route>`), and `table:` (`table:<name>`) — parse through
+/// `ContractKey::from_str`, which rejects empty components and
+/// ambiguous separator mixes.
 fn validate_key(field: &str, key: &str) -> Result<(), LainError> {
+    if key.starts_with("graphql:") {
+        match ContractKey::from_str(key) {
+            Ok(ContractKey::Graphql { field, .. }) if !field.is_empty() => return Ok(()),
+            Ok(_) => {
+                return Err(LainError::Config(format!(
+                    "{field}: '{key}' is not a graphql key"
+                )))
+            }
+            Err(e) => return Err(LainError::Config(format!("{field} '{key}': {e}"))),
+        }
+    }
+    if key.starts_with("topic:")
+        || key.starts_with("rpc:")
+        || key.starts_with("ws:")
+        || key.starts_with("websocket:")
+        || key.starts_with("table:")
+    {
+        return ContractKey::from_str(key)
+            .map(|_| ())
+            .map_err(|e| LainError::Config(format!("{field} '{key}': {e}")));
+    }
     // Strip the optional `http:` prefix that the wire grammar
     // uses. Config keys are written without it.
     let body = key.strip_prefix("http:").unwrap_or(key);
@@ -731,6 +821,95 @@ services:
     }
 
     #[test]
+    fn parses_provides_graphql_default_true() {
+        let yaml = r#"
+services:
+  - name: orders
+    repo: alpha
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        assert!(cfg.services.iter().all(|s| s.provides_graphql));
+    }
+
+    #[test]
+    fn parses_provides_graphql_false() {
+        let yaml = r#"
+services:
+  - name: orders
+    repo: alpha
+    provides_graphql: false
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        assert!(!cfg.services[0].provides_graphql);
+    }
+
+    #[test]
+    fn config_hash_ignores_explicit_default_provides_graphql() {
+        // The default `provides_graphql: true` must not change the
+        // canonical form: an upgraded config that spells the default
+        // out keeps its pre-upgrade hash.
+        let without = r#"
+services:
+  - name: orders
+    repo: alpha
+"#;
+        let with_explicit_default = r#"
+services:
+  - name: orders
+    repo: alpha
+    provides_graphql: true
+"#;
+        let h1 = ContractFederationConfig::load_from_str(without)
+            .unwrap()
+            .config_hash();
+        let h2 = ContractFederationConfig::load_from_str(with_explicit_default)
+            .unwrap()
+            .config_hash();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn config_hash_reflects_provides_graphql_false() {
+        let without = r#"
+services:
+  - name: orders
+    repo: alpha
+"#;
+        let disabled = r#"
+services:
+  - name: orders
+    repo: alpha
+    provides_graphql: false
+"#;
+        let h1 = ContractFederationConfig::load_from_str(without)
+            .unwrap()
+            .config_hash();
+        let h2 = ContractFederationConfig::load_from_str(disabled)
+            .unwrap()
+            .config_hash();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn provides_graphql_survives_serde_round_trip() {
+        for value in [true, false] {
+            let yaml = format!(
+                r#"
+services:
+  - name: orders
+    repo: alpha
+    provides_graphql: {value}
+"#
+            );
+            let cfg = ContractFederationConfig::load_from_str(&yaml).unwrap();
+            let reserialized = serde_yaml::to_string(&cfg).unwrap();
+            let back: ContractFederationConfig = serde_yaml::from_str(&reserialized).unwrap();
+            assert_eq!(back.services[0].provides_graphql, value);
+            assert_eq!(back, cfg);
+        }
+    }
+
+    #[test]
     fn rejects_overlapping_paths_in_one_repo() {
         let yaml = r#"
 services:
@@ -810,6 +989,17 @@ services:
                 .contains("host 'api.example.com' is listed by both"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_key_accepts_graphql_key() {
+        assert!(validate_key("bindings.consumer.key", "graphql:query:product").is_ok());
+    }
+
+    #[test]
+    fn validate_key_rejects_graphql_key_with_unknown_op() {
+        let err = validate_key("bindings.consumer.key", "graphql:queryish:product").unwrap_err();
+        assert!(err.to_string().contains("unknown graphql op"), "got: {err}");
     }
 
     #[test]
@@ -901,6 +1091,69 @@ bindings:
         let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
         let err = cfg.validate(&repo_ids()).unwrap_err();
         assert!(err.to_string().contains("unknown repo"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_binding_cross_kind_keys() {
+        // A confirmed binding may only join a consumer to an endpoint
+        // of the same key kind (I1a — no invented bindings), so a
+        // cross-kind pair is rejected at load with both keys named.
+        let yaml = r#"
+bindings:
+  - consumer: { repo: beta, path: src/gql.ts, symbol: "graphql-call:query:product", key: "graphql:query:product" }
+    provider: { service: alpha, key: "http:POST /graphql" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        let err = cfg.validate(&repo_ids()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bindings[0]"), "got: {msg}");
+        assert!(msg.contains("graphql:query:product"), "got: {msg}");
+        assert!(msg.contains("http:POST /graphql"), "got: {msg}");
+    }
+
+    #[test]
+    fn accepts_binding_http_template_bridge() {
+        // Same-kind HTTP template bridges are supported: the call
+        // goes through a gateway `/v1` prefix, the endpoint does not
+        // (§15.2 ground truth scenario 10).
+        let yaml = r#"
+bindings:
+  - consumer: { repo: beta, path: src/orders_api.py, symbol: create_order, key: "GET /v1/api/orders/{}" }
+    provider: { service: alpha, key: "GET /api/orders/{}" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        cfg.validate(&repo_ids()).unwrap();
+    }
+
+    #[test]
+    fn rejects_binding_incompatible_http_keys() {
+        // Same-kind is not enough: `check_binding`'s method and
+        // template rules still apply.
+        let yaml = r#"
+bindings:
+  - consumer: { repo: beta, path: src/orders_api.py, symbol: create_order, key: "GET /api/users/{}" }
+    provider: { service: alpha, key: "POST /api/orders/{}" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        let err = cfg.validate(&repo_ids()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bindings[0]"), "got: {msg}");
+        assert!(msg.contains("GET /api/users/{}"), "got: {msg}");
+        assert!(msg.contains("POST /api/orders/{}"), "got: {msg}");
+    }
+
+    #[test]
+    fn allows_binding_equivalent_key_spelling() {
+        // The well-formedness rules run on the parsed `ContractKey`s,
+        // not the raw strings: the wire prefix `http:` may be spelled
+        // out on one side only.
+        let yaml = r#"
+bindings:
+  - consumer: { repo: beta, path: src/orders_api.py, symbol: create_order, key: "POST /api/orders" }
+    provider: { service: alpha, key: "http:POST /api/orders" }
+"#;
+        let cfg = ContractFederationConfig::load_from_str(yaml).unwrap();
+        cfg.validate(&repo_ids()).unwrap();
     }
 
     #[test]

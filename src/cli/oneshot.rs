@@ -71,35 +71,17 @@ fn start_shared_daemon(
     socket_path: &std::path::Path,
     wait: Duration,
 ) -> Option<crate::cli::socket_session::SocketSession> {
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-    let exe = std::env::current_exe().ok()?;
-    let mut child = Command::new(exe)
-        .arg("mcp")
-        .arg("--workspace")
-        .arg(workspace)
-        .arg("--socket")
-        .arg(socket_path)
-        .arg("--daemon")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + wait;
-    while std::time::Instant::now() < deadline {
-        if let Some(session) = connect_shared(socket_path) {
-            return Some(session);
-        }
-        // The daemon died (e.g. another one won the start race and this one
-        // exited, or startup failed): stop waiting, the caller falls back.
-        if let Ok(Some(_)) = child.try_wait() {
-            return connect_shared(socket_path);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    None
+    // Generalized over workspace sets in `cli::shared_daemon` (the
+    // zero-config multi-agent path spawns the same daemon shape).
+    let stream = crate::cli::shared_daemon::start_detached_daemon(
+        std::slice::from_ref(&workspace.to_path_buf()),
+        socket_path,
+        wait,
+        None,
+        None,
+        false,
+    )?;
+    crate::cli::socket_session::from_stream(stream).ok()
 }
 
 /// Shut the session down and build an error carrying whatever it
@@ -356,6 +338,10 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         .arg("mcp")
         .arg("--workspace")
         .arg(&workspace)
+        // This IS the private path (opted out of sharing above, or a
+        // platform without sockets): the spawned `lain mcp` must not
+        // bridge out to a shared daemon either.
+        .env("LAIN_MCP_NO_SHARE", "1")
         .env("RUST_LOG", "lain=debug");
     let mut session = StdioSession::spawn(command, true).context("spawn `lain mcp`")?;
 

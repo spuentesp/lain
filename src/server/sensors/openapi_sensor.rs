@@ -50,7 +50,32 @@ use super::openapi_schema::flatten_schema;
 /// registry to edit.
 pub struct OpenApiSensor;
 
-crate::server::sensors::register_sensor!(OpenApiSensor, "openapi", Openapi, scan_workspace);
+impl crate::server::sensors::Sensor for OpenApiSensor {
+    fn name(&self) -> &'static str {
+        "openapi"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::Openapi
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &crate::schema::RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace(graph, root, namespace)
+    }
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &crate::schema::RepoNamespace,
+    ) -> Result<crate::server::sensors::ScanReport, LainError> {
+        scan_workspace_with_report(graph, root, namespace)
+    }
+}
+
+inventory::submit!(crate::server::sensors::SensorEntry(&OpenApiSensor));
 
 // ─── Spec parsing ────────────────────────────────────────────────────
 
@@ -307,6 +332,7 @@ pub fn scan_workspace(
 
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
+    let mut all_unresolved: Vec<String> = Vec::new();
 
     for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
@@ -325,9 +351,10 @@ pub fn scan_workspace(
             continue;
         }
         match enrich_with_openapi_dry(graph, path, root, namespace) {
-            Ok((nodes, edges)) => {
+            Ok((nodes, edges, unresolved_refs)) => {
                 all_nodes.extend(nodes);
                 all_edges.extend(edges);
+                all_unresolved.extend(unresolved_refs);
             }
             Err(e) => tracing::warn!("Failed to parse {:?}: {}", path, e),
         }
@@ -335,6 +362,110 @@ pub fn scan_workspace(
 
     graph.replace_sensor_output(SensorOwner::OpenApiSensor, &all_nodes, &all_edges)?;
     Ok(all_nodes.len())
+}
+
+/// Same as [`scan_workspace`] but additionally returns a
+/// [`crate::server::sensors::ScanReport`] carrying the per-repo
+/// external-`$ref` accumulator (`reason: ExternalSchemaRef`). The
+/// coverage-ledger consumer (`coverage_from_reports`) folds the
+/// `unresolved` records into the per-repo `RepoCoverage` and the
+/// `build_coverage` aggregator surfaces them as
+/// `Coverage.unresolved_refs` (sibling of `unnormalized`, not the
+/// same bucket — an external `$ref` is not a consumer-shaped gap).
+pub fn scan_workspace_with_report(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &crate::schema::RepoNamespace,
+) -> Result<crate::server::sensors::ScanReport, LainError> {
+    if graph.is_read_only() {
+        return Ok(crate::server::sensors::ScanReport {
+            emitted: 0,
+            ..Default::default()
+        });
+    }
+
+    let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
+    let mut all_unresolved: Vec<String> = Vec::new();
+
+    for entry in crate::server::sensors::util::walk_workspace(root) {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        let named_like_a_spec = name.contains("openapi") || name.contains("swagger");
+        let spec_extension = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("yaml" | "yml" | "json")
+        );
+        if !named_like_a_spec && !spec_extension {
+            continue;
+        }
+
+        if !sniff_is_openapi(path) {
+            continue;
+        }
+        match enrich_with_openapi_dry(graph, path, root, namespace) {
+            Ok((nodes, edges, unresolved_refs)) => {
+                all_nodes.extend(nodes);
+                all_edges.extend(edges);
+                all_unresolved.extend(unresolved_refs);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse {:?}: {}", path, e);
+                return Ok(crate::server::sensors::ScanReport {
+                    emitted: all_nodes.len(),
+                    error: Some(e.to_string()),
+                    unresolved: Vec::new(),
+                });
+            }
+        }
+    }
+
+    graph.replace_sensor_output(SensorOwner::OpenApiSensor, &all_nodes, &all_edges)?;
+    let unresolved = build_unresolved_records(&all_unresolved);
+    Ok(crate::server::sensors::ScanReport {
+        emitted: all_nodes.len(),
+        error: None,
+        unresolved,
+    })
+}
+
+/// Fold the per-spec `unresolved_refs` accumulator into
+/// [`crate::server::sensors::ScanReport::unresolved`] records —
+/// one [`crate::federation::contracts::coverage::UnresolvedRecord`]
+/// per unique `$ref` URL, carrying the count + up to 5 sample paths
+/// (the spec the `$ref` came from; the operator decides whether to
+/// inline the foreign schema or onboard the foreign file).
+fn build_unresolved_records(
+    refs: &[String],
+) -> Vec<crate::federation::contracts::coverage::UnresolvedRecord> {
+    use crate::federation::contracts::coverage::{UnresolvedReason, UnresolvedRecord};
+    use std::collections::BTreeMap;
+    let mut by_ref: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for r in refs {
+        // The accumulator carries the foreign URL as a string;
+        // sample_paths is per-record's spec provenance. We do not
+        // have per-$ref provenance here (the spec-level walk didn't
+        // tag each accumulator push), so the sample_ids list is the
+        // foreign URL itself — operators onboarding a foreign
+        // schema need the URL, not the spec it was referenced from.
+        by_ref.entry(r.as_str()).or_default().push(r.clone());
+    }
+    by_ref
+        .into_iter()
+        .map(|(_url, mut samples)| UnresolvedRecord {
+            reason: UnresolvedReason::ExternalSchemaRef,
+            count: samples.len(),
+            sample_ids: {
+                samples.dedup();
+                samples.truncate(5);
+                samples
+            },
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        // Stable order: by URL.
+        .collect()
 }
 
 /// Build the per-spec nodes/edges for a spec, without writing them
@@ -345,7 +476,7 @@ fn enrich_with_openapi_dry(
     spec_path: &Path,
     root: &Path,
     namespace: &crate::schema::RepoNamespace,
-) -> Result<(Vec<GraphNode>, Vec<GraphEdge>), LainError> {
+) -> Result<(Vec<GraphNode>, Vec<GraphEdge>, Vec<String>), LainError> {
     let content = std::fs::read_to_string(spec_path)?;
     let graph_path = crate::graph::graph_path(root, spec_path);
     let parsed = parse_spec(&content);
@@ -353,6 +484,7 @@ fn enrich_with_openapi_dry(
 
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
+    let mut unresolved_refs: Vec<String> = Vec::new();
 
     for (path, entry) in &parsed.paths {
         let prefix = if parsed.servers_prefix.is_empty() {
@@ -403,6 +535,7 @@ fn enrich_with_openapi_dry(
             emit_schemas(
                 &mut nodes,
                 &mut edges,
+                &mut unresolved_refs,
                 &route_id,
                 method,
                 &template,
@@ -427,7 +560,7 @@ fn enrich_with_openapi_dry(
         }
     }
 
-    Ok((nodes, edges))
+    Ok((nodes, edges, unresolved_refs))
 }
 
 fn method_label(m: &str) -> HttpMethod {
@@ -469,6 +602,7 @@ fn http_method_str(m: HttpMethod) -> &'static str {
 fn emit_schemas(
     nodes: &mut Vec<GraphNode>,
     edges: &mut Vec<GraphEdge>,
+    unresolved_refs: &mut Vec<String>,
     route_id: &str,
     method: HttpMethod,
     template: &str,
@@ -496,6 +630,7 @@ fn emit_schemas(
         emit_response_union(
             nodes,
             edges,
+            unresolved_refs,
             route_id,
             method,
             template,
@@ -523,6 +658,7 @@ fn emit_schemas(
         emit_request_schema(
             nodes,
             edges,
+            unresolved_refs,
             route_id,
             method,
             template,
@@ -575,6 +711,7 @@ fn pick_json_schema(body: &YamlValue) -> Option<&YamlValue> {
 fn emit_response_union(
     nodes: &mut Vec<GraphNode>,
     edges: &mut Vec<GraphEdge>,
+    unresolved_refs: &mut Vec<String>,
     route_id: &str,
     method: HttpMethod,
     template: &str,
@@ -632,6 +769,7 @@ fn emit_response_union(
             &[],
             components,
         );
+        unresolved_refs.extend(result.unresolved_refs);
         for field in result.fields {
             *field_seen.entry(field.path.clone()).or_insert(0) += 1;
             match by_path.get(&field.path) {
@@ -734,6 +872,7 @@ fn method_str_lower(m: HttpMethod) -> &'static str {
 fn emit_request_schema(
     nodes: &mut Vec<GraphNode>,
     edges: &mut Vec<GraphEdge>,
+    unresolved_refs: &mut Vec<String>,
     route_id: &str,
     method: HttpMethod,
     template: &str,
@@ -800,6 +939,7 @@ fn emit_request_schema(
             &[],
             components,
         );
+        unresolved_refs.extend(result.unresolved_refs);
         for field in result.fields {
             edges.push(GraphEdge::new(
                 EdgeType::HasField,
@@ -1302,6 +1442,65 @@ paths:
             response_schema.is_some(),
             "Schema{{Response}} still emitted"
         );
+    }
+
+    /// End-to-end: a spec whose response schema is an external `$ref`
+    /// yields exactly one `UnresolvedRecord { reason: ExternalSchemaRef,
+    /// count: 1, sample_ids: [foreign_url] }` in the `ScanReport`.
+    /// The coverage-ledger consumer (`build_coverage` →
+    /// `aggregate_unresolved_refs`) folds this into a single
+    /// `UnresolvedRef` entry whose `ref_url` is the foreign file
+    /// and whose `count` is the sum across repos.
+    #[test]
+    fn external_ref_yields_unresolved_record_in_scan_report() {
+        use crate::federation::contracts::coverage::UnresolvedReason;
+        use crate::federation::contracts::model::UnresolvedReason as ModelReason;
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path();
+        let spec = "\
+openapi: 3.0.0
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: 'other.yaml#/components/schemas/Foo'
+";
+        std::fs::write(dir_path.join("a.yaml"), spec).unwrap();
+        let tmp_graph = std::env::temp_dir().join("openapi_external_ref_report_db");
+        let _ = std::fs::remove_dir_all(&tmp_graph);
+        let graph = GraphDatabase::new(&tmp_graph).unwrap();
+        let report =
+            scan_workspace_with_report(&graph, dir_path, &crate::schema::RepoNamespace::for_test())
+                .expect("scan_workspace_with_report");
+        let external_refs: Vec<_> = report
+            .unresolved
+            .iter()
+            .filter(|u| matches!(u.reason, ModelReason::ExternalSchemaRef))
+            .collect();
+        assert_eq!(
+            external_refs.len(),
+            1,
+            "exactly one ExternalSchemaRef record per unique foreign URL; got: {:?}",
+            report.unresolved
+        );
+        assert_eq!(external_refs[0].count, 1, "one site referenced this URL");
+        assert!(
+            external_refs[0]
+                .sample_ids
+                .iter()
+                .any(|s| s.contains("other.yaml#/components/schemas/Foo")),
+            "sample_ids carries the foreign URL; got: {:?}",
+            external_refs[0].sample_ids
+        );
+        // Sanity: the variant enum is unified across the ledger
+        // (`coverage::UnresolvedReason`) and the model
+        // (`model::UnresolvedReason`) — they're the same type.
+        let _ = UnresolvedReason::ExternalSchemaRef;
     }
 
     // Keep the unused-import warning quiet.

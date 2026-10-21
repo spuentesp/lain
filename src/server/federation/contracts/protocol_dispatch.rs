@@ -108,6 +108,31 @@ impl ProtocolDispatch for TopicDispatch {
         let ContractFact::TopicConsumer(topic_consumer) = fact else {
             unreachable!("TopicDispatch::dispatch called with non-TopicConsumer fact")
         };
+        // Dynamic topic sentinel (set by `event_sensor` when the topic
+        // argument was not a literal/identifier the same-file const table
+        // could resolve). The joiner treats this as a coverage gap
+        // (§6.7): the `TopicConsumerFact` was emitted so the operator
+        // sees a subscriber they cannot statically name, but no
+        // `(broker, name)` key can match a real provider. The
+        // `Unresolved { reason: DynamicTopic, target_service: None }`
+        // verdict is what `joiner/mod.rs:390` looks for to push this
+        // consumer onto `coverage.unnormalized`. Producer sites with
+        // the same sentinel are dropped at the sensor — only consumers
+        // reach the dispatch.
+        if topic_consumer.name == crate::server::sensors::util::TOPIC_DYNAMIC_SENTINEL {
+            return ConsumerResolution {
+                call_id: call_id.clone(),
+                service: own_service.clone(),
+                target: Some(
+                    crate::federation::contracts::index::ConsumerTarget::Unresolved {
+                        reason: crate::federation::contracts::model::UnresolvedReason::DynamicTopic,
+                        target_service: None,
+                    },
+                ),
+                bound_endpoints: Vec::new(),
+                reads_complete: true,
+            };
+        }
         resolve_topic_consumer(call_id, topic_consumer, own_service, endpoints, binds)
     }
 }

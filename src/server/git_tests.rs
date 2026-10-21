@@ -1,21 +1,36 @@
 use crate::git::GitSensor;
 use std::path::{Path, PathBuf};
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// A tempdir git repo with one committed file (`keep.txt`), returned with
+/// its `TempDir` guard and the repo root. Every git test builds its own:
+/// cargo-mutants runs tests in a copied scratch tree with no `.git`, so
+/// opening the workspace root is not hermetic.
+fn seeded_repo() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let repo = git2::Repository::init(&root).unwrap();
+    std::fs::write(root.join("keep.txt"), "a\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("keep.txt")).unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("t", "t@t").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+    (dir, root)
 }
 
 #[test]
 fn test_git_sensor_new_valid_repo() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root);
+    let (_tmp, root) = seeded_repo();
+    let sensor = GitSensor::new(&root);
     assert!(sensor.is_ok());
 }
 
 #[test]
 fn test_git_sensor_is_valid() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root).unwrap();
+    let (_tmp, root) = seeded_repo();
+    let sensor = GitSensor::new(&root).unwrap();
     assert!(sensor.is_valid());
 }
 
@@ -27,58 +42,78 @@ fn test_git_sensor_new_invalid_path() {
 
 #[test]
 fn test_git_sensor_get_tracked_files() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root).unwrap();
+    let (_tmp, root) = seeded_repo();
+    let sensor = GitSensor::new(&root).unwrap();
     let files = sensor.get_all_tracked_files();
     assert!(files.is_ok());
-    assert!(!files.unwrap().is_empty()); // This repo has files
+    assert!(!files.unwrap().is_empty()); // The fixture commits keep.txt
 }
 
 #[test]
 fn test_git_sensor_is_ignored() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root).unwrap();
-    // .git directory should be ignored
-    let is_ignored = sensor.is_ignored(Path::new(".git"));
-    assert!(is_ignored.is_ok());
+    let (_tmp, root) = seeded_repo();
+    let sensor = GitSensor::new(&root).unwrap();
+    // .git is matched by libgit2's built-in ignore rules
+    // (`GIT_IGNORE_DEFAULT_RULES` includes `.git`).
+    let is_ignored = sensor.is_ignored(Path::new(".git")).unwrap();
+    assert!(is_ignored, ".git must read as ignored");
 }
 
 #[test]
 fn test_git_sensor_is_ignored_target_dir() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root).unwrap();
+    let (_tmp, root) = seeded_repo();
+    // Fixture matches the comment: a real target/ dir ignored by rule.
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target").join("out.o"), "o").unwrap();
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    let sensor = GitSensor::new(&root).unwrap();
     // target directory (rust build output) should be ignored
-    let is_ignored = sensor.is_ignored(Path::new("target"));
-    assert!(is_ignored.is_ok());
+    let is_ignored = sensor.is_ignored(Path::new("target")).unwrap();
+    assert!(is_ignored, "target/ must read as ignored via .gitignore");
 }
 
 #[test]
 fn test_git_sensor_is_ignored_nonexistent() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root).unwrap();
-    // A nonexistent path may or may not be ignored depending on gitignore rules
+    let (_tmp, root) = seeded_repo();
+    let sensor = GitSensor::new(&root).unwrap();
+    // No ignore rule matches this name, extant or not.
     let result = sensor.is_ignored(Path::new("nonexistent_file_xyz123.txt"));
-    assert!(result.is_ok());
+    assert!(!result.unwrap(), "unmatched path must not read as ignored");
 }
 
 #[test]
 fn test_git_sensor_get_uncommitted_changes_none() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root).unwrap();
+    let (_tmp, root) = seeded_repo();
+    let sensor = GitSensor::new(&root).unwrap();
     // Clean working tree (after sync_state)
     let changes = sensor.get_uncommitted_changes();
     assert!(changes.is_ok());
-    // Changes may be empty or may have staged changes depending on state
     let changes_vec = changes.unwrap();
-    // Just verify it's a valid vec
-    println!("Uncommitted changes: {}", changes_vec.len());
+    assert!(
+        changes_vec.is_empty(),
+        "clean fixture must report no changes: {changes_vec:?}"
+    );
 }
 
 #[test]
 fn test_git_sensor_get_uncommitted_changes_staged() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root).unwrap();
+    let (_tmp, root) = seeded_repo();
+    // Stage a modification so the change loop has a real entry.
+    std::fs::write(root.join("keep.txt"), "a2\n").unwrap();
+    {
+        let repo = git2::Repository::open(&root).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("keep.txt")).unwrap();
+        index.write().unwrap();
+    }
+    let sensor = GitSensor::new(&root).unwrap();
     let changes = sensor.get_uncommitted_changes().unwrap();
+    assert!(
+        changes
+            .iter()
+            .any(|c| c.path.ends_with("keep.txt") && c.staged),
+        "staged keep.txt must appear as a staged entry: {changes:?}"
+    );
     for change in changes {
         println!("Change: {:?} at {:?}", change.change_type, change.path);
     }
@@ -86,14 +121,21 @@ fn test_git_sensor_get_uncommitted_changes_staged() {
 
 #[test]
 fn test_git_sensor_get_file_diff_on_clean_file() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root).unwrap();
+    let (_tmp, root) = seeded_repo();
+    let sensor = GitSensor::new(&root).unwrap();
     let files = sensor.get_all_tracked_files().unwrap();
-    if let Some(file) = files.first() {
-        let diff = sensor.get_file_diff(file);
-        // File might not have unstaged changes, but call should succeed
-        assert!(diff.is_ok());
-    }
+    // GitSensor canonicalizes its workspace through `dunce` (no `\\?\`
+    // prefix on Windows); compare on the same footing.
+    let expected = dunce::canonicalize(&root).unwrap().join("keep.txt");
+    assert_eq!(
+        files,
+        vec![expected],
+        "seeded fixture must track exactly keep.txt: {files:?}"
+    );
+    // The fixture is hermetic: keep.txt is committed and unmodified, so
+    // the index-to-workdir diff is deterministically empty.
+    let diff = sensor.get_file_diff(&files[0]).unwrap();
+    assert_eq!(diff, "", "clean tracked file must produce an empty diff");
 }
 
 #[test]
@@ -232,8 +274,8 @@ fn test_repo_identity_invalid() {
 
 #[test]
 fn test_git_sensor_get_repo_identity() {
-    let repo_root = repo_root();
-    let sensor = GitSensor::new(&repo_root).unwrap();
+    let (_tmp, root) = seeded_repo();
+    let sensor = GitSensor::new(&root).unwrap();
     let identity = sensor.get_repo_identity();
     // May be None if no origin remote or not GitHub
     assert!(identity.is_ok());

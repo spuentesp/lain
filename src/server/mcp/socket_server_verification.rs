@@ -7,6 +7,15 @@ fn sock(dir: &Path) -> PathBuf {
     dir.join("s.sock")
 }
 
+/// An `Activity` counter with no open connections — for `dispatch`
+/// unit calls that run outside the accept loop.
+fn idle_activity() -> Arc<Activity> {
+    Arc::new(Activity {
+        open: AtomicUsize::new(0),
+        last: parking_lot::Mutex::new(Instant::now()),
+    })
+}
+
 /// A concurrent test's fork() can briefly hold a copy of a just-dropped
 /// listener's fd (until its exec closes it), making the socket look live.
 /// Wait for the kernel to see it as dead before asserting on it.
@@ -493,7 +502,8 @@ mod surface {
             .run(&strategy, |(method, params, id)| {
                 let server = server.clone();
                 let (m, p, i) = (method.clone(), params, id.clone());
-                let resp = rt.block_on(async move { dispatch(&m, p, i, &server).await });
+                let activity = idle_activity();
+                let resp = rt.block_on(async move { dispatch(&m, p, i, &server, &activity).await });
                 if method == "notifications/initialized" {
                     prop_assert_eq!(resp, Value::Null);
                     return Ok(());
@@ -878,7 +888,8 @@ async fn dispatch_methods_have_their_documented_results() {
     let d = |m: &str, p: Value| {
         let server = server.clone();
         let m = m.to_string();
-        async move { dispatch(&m, p, json!(9), &server).await }
+        let activity = idle_activity();
+        async move { dispatch(&m, p, json!(9), &server, &activity).await }
     };
     let init = d("initialize", Value::Null).await;
     assert_eq!(init["id"], 9);
@@ -898,7 +909,24 @@ async fn dispatch_methods_have_their_documented_results() {
 
     let list = d("tools/list", Value::Null).await;
     let tools = list["result"]["tools"].as_array().expect("tools array");
-    assert!(tools.len() > 50);
+    // Surface parity with stdio/HTTP: the socket must serve exactly
+    // the shared advertised surface (`handler::advertised_tools_json`
+    // — inert-tool + tool-profile filtering included). This used to
+    // assert `> 50` tools, which only held for the old unfiltered
+    // dump and hid the divergence a bridged client would see.
+    let expected = crate::server::mcp::handler::advertised_tools_json(
+        server.ingest().tool_executor(),
+        server.federation().map(|f| f.as_ref()),
+        server.workspaces_handle().is_some(),
+    );
+    assert_eq!(
+        tools, &expected,
+        "socket tools/list must match the shared advertised surface"
+    );
+    assert!(
+        !tools.is_empty(),
+        "the advertised surface must not be empty"
+    );
     assert!(tools
         .iter()
         .all(|t| t["name"].is_string() && t["inputSchema"].is_object()));

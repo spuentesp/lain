@@ -44,6 +44,7 @@ block startup.
 data_dir: <path>                    # optional, default: ./.lain/federation (relative to this file)
 max_concurrent_indexers: <usize>    # optional, default: 8
 ready_threshold: <float 0.0..1.0>   # optional, default: 0.8
+share: <bool>                       # optional, default: true (false = private instance)
 repos:
   - id: <string>                    # required
     source: <SourceConfig>          # required (see "Source kinds")
@@ -54,6 +55,7 @@ repos:
 | `data_dir`             | path string      | no       | `./.lain/federation`   | Per-repo clones and `.lain/graph.bin`-style state files live here. Each repo gets a subdirectory named after its `id`. |
 | `max_concurrent_indexers` | unsigned int  | no       | `8`                    | Caps how many repos index in parallel at startup. |
 | `ready_threshold`      | float 0.0–1.0    | no       | `0.8`                  | Fraction of repos that must reach `Ready` health before the federation reports `healthy`. |
+| `share`                | bool             | no       | `true`                 | Whether the instance takes part in the shared-daemon pool (pinned at startup — edit + restart to change). `false` = private instance: `lain mcp` discovery skips it (it reports `shared: false` on `lain/daemon_info` and is never attached to) and `add_workspaces` refuses the workspace handoff with a typed `not_shared` error. Same property as `lain mcp --no-share` / `LAIN_MCP_NO_SHARE=1`. A non-bool value is a config error. |
 | `repos`                | list of `RepoConfig` | yes   | —                      | At least one repo is required for a useful federation. |
 
 ### `RepoConfig`
@@ -282,6 +284,9 @@ repos:
   directory. The federation loader does not verify the directory is a git
   working tree; if it isn't, the repo will degrade to `Degraded` health
   during indexing rather than failing at startup.
+- `share`: must be a bool when present (`true` / `false`). `false` marks
+  a private instance — see the schema table. A non-bool value
+  (e.g. `share: "yes"`) is a config error.
 - All other fields are optional and fall back to the defaults in the
   table above.
 
@@ -374,8 +379,22 @@ services:
     base_path: /api             # prefix the service is reached under
     route_prefixes:             # cross-file router mounts (§6.2)
       - { path: src/routers/admin.py, prefix: /admin }
+    provides_graphql: true      # mint GraphQL provider endpoints from this service's SDL (default true)
   - { name: shipping, repo: platform, paths: [services/shipping/] }
   - { name: inventory, repo: platform, paths: [services/inventory/] }
+```
+
+Set `provides_graphql: false` for repos that only carry schema
+copies (codegen inputs), so their `.graphql`/`.gql` SDL does not
+duplicate every `(op, field)` provider key and push consumers into
+`graphql_no_op`:
+
+```yaml
+services:
+  - name: saleor-dashboard
+    repo: saleor-dashboard
+    # Schema copies only (codegen inputs) — not a GraphQL provider.
+    provides_graphql: false
 ```
 
 ### `http_clients` (list)
@@ -412,11 +431,51 @@ schemas:
 ### `bindings` (list)
 
 Person-confirmed consumer → provider links (§7.6). A binding's
-`(repo, path, symbol, key)` matches one `HttpClientCall` in the
-consumer repo and joins it to the named endpoint with
-`Confirmed { source: "repos.yaml#bindings[<i>]" }` provenance.
-Bindings that match no consumer or whose endpoint does not exist
-appear in `coverage.stale_bindings` and contribute nothing.
+`(repo, path, symbol, key)` matches one consumer call site in the
+consumer repo — an HTTP call, a GraphQL call, or a Topic / RPC /
+WebSocket / Table consumer — and joins it to the named endpoint
+with `Confirmed { source: "repos.yaml#bindings[<i>]" }`
+provenance. Bindings that match no consumer or whose endpoint does
+not exist appear in `coverage.stale_bindings` and contribute
+nothing.
+
+A binding `key` follows the same grammar `check_binding` accepts
+for an `endpoint.key` — one of:
+
+- `"<METHOD> <template>"` or `"http:<METHOD> <template>"` (HTTP);
+- `"graphql:<query|mutation|subscription>:<field>"`, where
+  `<field>` is the operation's root field, not its name (e.g.
+  operation `ProductDetails` with root field `product` →
+  `"graphql:query:product"`);
+- `"topic:<broker>:<name>"` or the wire form
+  `"topic:<broker>/<name>"`;
+- `"rpc:<system>:<service>:<method>"` or the wire form
+  `"rpc:<service>/<method>"` (`system` is `grpc`);
+- `"ws:<route>"` or the wire form `"websocket:<route>"`;
+- `"table:<name>"`.
+
+Topic and RPC keys use one split discipline. The **wire form**
+splits at the first `/`; `<name>` (resp. `<method>`) may contain
+further `/` and `:` (Redis `orders:created`, MQTT `sensors/temp`),
+while `<broker>` (resp. `<service>`) may not contain `:`. The
+**bindings form** takes exactly two (resp. three) non-empty
+`:`-separated components — `topic:a:b:c` and `rpc:a:b:c:d` are
+rejected for their arity ("takes exactly two/three components"). A
+string that would read under both shapes (e.g. `topic:a:b/c`, whose
+slash-form broker would be `a:b`) is rejected as **ambiguous** with
+a typed error. Empty components are rejected in both shapes. Broker
+(resp. service) names containing `/` are not representable — none
+of the supported brokers have one.
+
+`consumer.key` and `provider.key` must form a well-formed pair in
+the `check_binding` (§12) sense: the same key kind; for HTTP,
+compatible methods and templates (`exact` / `pattern` /
+`prefix_stripped` — so `GET /v1/api/orders/{}` may bridge to
+`GET /api/orders/{}`); for GraphQL, the same `op` and `field`; for
+Topic / RPC / WebSocket / Table, exact key equality
+(`broker`+`name` / `system`+`service`+`method` / `route` /
+`name`). Cross-kind pairs (e.g. `graphql:query:product` →
+`http:POST /graphql`) are a config error and never bind.
 
 ```yaml
 bindings:
@@ -445,8 +504,14 @@ The config load fails with a precise message for each of:
   neither declared nor implicit.
 - Same `env` name listed by two services.
 - Same exact `hosts` entry listed by two services.
-- A `key` that does not parse as `<METHOD> <template>` or that does
-  not survive normalization unchanged.
+- A `key` that parses as none of the documented grammars (`<METHOD>
+  <template>`, `graphql:…`, `topic:…`, `rpc:…`, `ws:`/`websocket:…`,
+  `table:…`), a Topic/RPC key whose shape is ambiguous (see the
+  `bindings` split discipline above), an empty key component, or an
+  HTTP template that does not survive normalization unchanged.
+- A `bindings` entry whose `consumer.key` and `provider.key` are
+  not a well-formed pair (the message names `bindings[<i>]` and
+  both keys).
 - `path_arg > 5`.
 - Upper-case host or service-name entries.
 

@@ -40,4 +40,7 @@ pub use federation::{
 };
 pub use recent_projects::list_recent_projects;
 pub use server_status::{get_reload_status, get_server_status, request_reload};
-pub use workspace::{get_active_workspace, get_workspace, get_workspace_graph, list_workspaces};
+pub use workspace::{
+    get_active_workspace, get_workspace, get_workspace_graph, list_workspaces,
+    WORKSPACE_GRAPH_EDGE_TYPES, WORKSPACE_GRAPH_NODE_TYPES,
+};

@@ -30,7 +30,36 @@ lain --help
 | Mode | When | MCP config |
 |------|------|------------|
 | **Single-repo** (`lain mcp`) | One repo, "just works" | `{"command":"lain","args":["mcp"]}` |
+| **Multi-repo** (`lain mcp --workspace …`) | N checkouts in one process, no config file | `{"command":"lain","args":["mcp","--workspace","/abs/repo-a","--workspace","/abs/repo-b"]}` |
 | **Federation** (`lain server --config repos.yaml`) | N repos, org-wide questions | `{"command":"lain","args":["server","--config","./repos.yaml","--transport","stdio"]}` |
+
+The `lain mcp` entries share one **resident daemon** per machine: the
+first client starts it, later clients attach to it and talk over a
+Unix socket (one index, one memory, N agents). A late agent that needs
+*other* workspaces hands them to the running daemon, which indexes
+them in hot — after which any agent whose set is covered attaches
+automatically. Zero configuration; and the daemon exits by itself
+after an idle window.
+
+**Isolating an instance (opt-in).** The shared daemon is the default —
+it is a service that goes away when nobody is connected. To make one
+instance *private*, set `share: false` in its `repos.yaml`, launch it
+with `lain mcp --no-share`, or set `LAIN_MCP_NO_SHARE=1`. A no-share
+instance is never discovered by other clients (nobody attaches to it
+or hands it workspaces) and refuses the `add_workspaces` handoff; a
+no-share client serves privately on the historical per-client path.
+
+Multi-repo notes: `--workspace` takes **paths** (repeat the flag once per
+checkout; or set `LAIN_WORKSPACE=/abs/a,/abs/b`). It is not a
+`workspaces.yaml` name — a name fails with
+`no .git found at <name> (or any parent)`. With more than one workspace,
+`lain mcp` synthesizes a federation config internally (same tool surface as
+`lain server`). With one workspace the *private fallback* serves the
+light per-repo surface; under the shared daemon the same client gets
+the daemon's federation surface (per-repo tools plus `list_repos`,
+`search_org`, …). Every transport applies the same `tools/list`
+filtering (tool profile, mode-inert tools), so a bridged client sees
+the same effective surface a private one would.
 
 ```mermaid
 flowchart LR
@@ -125,7 +154,8 @@ curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
 | Federation won't start | `lain doctor` |
 | Agents not seeing each other's claims | Check `list_active_agents`; they must share `~/.config/lain/state/` |
 | `lain oneshot ... \| head -N` killed the indexer | `head` closes the pipe when it exits, sending `SIGPIPE` upstream; on a cold graph the long-running `lain mcp` aborts mid-reindex and leaves a partial `graph.bin`. Either pipe to a file (`> /tmp/lain.log`) or to a tool that reads to EOF (`jq`, `tee`, `wc -l`). The footgun is logged in `DOGFOODING_REPORT.md` (2026-10-04, B7). |
-| `get_health` shows **⚠ call graph is empty — `Calls` is 0** | The persistent `graph.bin` was written by a build that didn't extract `Calls` edges, or by a partial reindex that timed out. Every `get_blast_radius` / `get_call_chain` / `assess_change` answer will be empty until this is fixed. **Recipe:** from inside the repo, run `lain reindex` to rebuild the graph from source. The first reindex takes ~5 min for a 41k-LOC repo (LSP prewarm is the dominant cost). See `DOGFOODING_REPORT.md` (2026-10-04, B3). |
+| `get_health` shows **⚠ call graph is empty — `Calls` is 0** | The persistent `graph.bin` was written by a build that didn't extract `Calls` edges, or by a partial reindex that timed out. Every `get_blast_radius` / `get_call_chain` / `assess_change` answer will be empty until this is fixed. **Recipe:** from inside the repo, run `lain reindex` to rebuild the graph from source. The first reindex takes ~5 min for a 41k-LOC repo (LSP prewarm is the dominant cost). See `DOGFOODING_REPORT.md` (2026-10-04, B3). Note: since the readiness-truthfulness fix, `get_capabilities.call_graph` reports `ready` only once the call edges for the indexed commit are actually served — a false "leaf" answer at the ready-transition (the old premature-ready window) is fixed, so an empty call graph you still see is this genuinely-partial-graph case. |
+| `get_call_sites` says a real caller "is a leaf" while `call_graph` says `warming_up` | Expected during a re-index (the pass replaces nodes and re-inserts `Calls` edges at the end) or a cross-repo relink (the startup pass that links calls between repos; its gate is down while it works). Poll `get_capabilities` and retry when `call_graph` reaches `ready` — that state now means the call answers are complete for the indexed commit. A warm boot after a mid-index kill keeps the gate down too: the stamp is persisted with the graph, so `ready` is never claimed over a torn `graph.bin`. |
 
 ## Next
 

@@ -42,12 +42,17 @@ use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
 use crate::federation::contracts::index::{
     ConsumerResolution, ConsumerTarget, ContractIndex, Endpoint, EndpointId, UnresolvedReason,
 };
+use crate::federation::contracts::key_compat::{
+    keys_compatible, methods_compatible, templates_compatible,
+};
 use crate::federation::contracts::model::MethodSpec;
 use crate::federation::contracts::model::{ContractKey, Direction, ServiceName};
-use crate::federation::contracts::route_match::match_route;
+use crate::federation::contracts::route_match::{match_route, MatchOutcome};
+use crate::federation::graph_backend::GraphBackend;
 use crate::federation::repo_id::GlobalId;
 use crate::schema::{EdgeProvenance, RouteMatch};
 use crate::server::mcp::handler::McpContext;
+use crate::server::sensors::util::GRAPHQL_CALL_PREFIX;
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::time::Instant;
@@ -608,34 +613,133 @@ async fn run_check_binding(
             reasons.push("same_service");
         }
         if let Some(ConsumerTarget::Binds { .. }) = &res.target {
-            reasons.push("already_bound");
+            // Confirming the endpoint the consumer is already bound
+            // to is idempotent — the joiner records the entry with
+            // `Confirmed` provenance. The conflict is re-pointing at
+            // a *different* endpoint.
+            if !res.bound_endpoints.iter().any(|e| e == &endpoint_id) {
+                reasons.push("already_bound");
+            }
         }
     }
     let _ = (); // sentinel — keep the binding site stable
+    let fact_keys = consumer_fact_keys(resolved.backend().as_ref(), &consumer_id);
+    // Cross-kind guard for fact-keyed consumers (Topic/Rpc/
+    // WebSocket/Table) against an `http:` endpoint key: the HTTP arm
+    // below treats a call-site name with no method/template as a
+    // pattern match (`Unknown` / no template), so an ill-formed
+    // cross-kind pair would otherwise validate vacuously. The reason
+    // is the existing `method_mismatch` (the wrong-shape axis) — no
+    // new reason value. `graphql:` endpoint keys are already
+    // rejected by the GraphQL arm's name parse below.
+    //
+    // The guard fires inside the HTTP arm, where it can return the
+    // verdict fields that agree with the reason — `(false, "none")`,
+    // the fact-keyed arm's cross-kind shape. Pushed before the match
+    // (as this used to be), the vacuous HTTP comparison reported
+    // `method_match: true, template_match: "pattern"` beside a
+    // `method_mismatch` reason.
+    let cross_kind_http_pair = matches!(key, ContractKey::Http { .. })
+        && fact_keys
+            .iter()
+            .any(|k| matches!(k.kind(), "topic" | "rpc" | "websocket" | "table"))
+        && !fact_keys.iter().any(|k| k.kind() == key.kind());
     let (consumer_method, consumer_template) = parse_consumer_call_shape(&consumer_id);
-    let (provider_method, provider_template) = match &key {
-        ContractKey::Http { method, template } => (method.clone(), template.clone()),
-        _ => {
-            return Err(error_outcome(
-                "invalid_argument",
-                "topic endpoints not supported in 0.9",
-                Some(json!({"arg": "endpoint.key"})),
-                &snap_label,
-                started,
-            ));
+    let (method_match, template_match) = match &key {
+        ContractKey::Http { method, template } => {
+            if consumer_id
+                .name()
+                .is_some_and(|n| n.starts_with(GRAPHQL_CALL_PREFIX))
+            {
+                // Key-kind mismatch: a `graphql-call:{op}:{field}`
+                // node carries no HTTP method/template, so the HTTP
+                // comparison would be vacuous (`Unknown`/`None` always
+                // "match"). Report the GraphQL pair as unmatched
+                // instead of a misleading `template_mismatch`.
+                reasons.push("op_mismatch");
+                reasons.push("field_mismatch");
+                (false, "none")
+            } else if cross_kind_http_pair {
+                // Cross-kind guard (see `cross_kind_http_pair` above):
+                // the reason is `method_mismatch` and the verdict
+                // fields say the same — `(false, "none")`, matching the
+                // fact-keyed arm's cross-kind shape — instead of the
+                // vacuous `Unknown`/no-template comparison's
+                // `(true, "pattern")`.
+                reasons.push("method_mismatch");
+                (false, "none")
+            } else {
+                let mm = methods_compatible(&consumer_method, method);
+                if !mm {
+                    reasons.push("method_mismatch");
+                }
+                let (tc, label) = templates_compatible(consumer_template.as_deref(), template);
+                if !tc {
+                    reasons.push("template_mismatch");
+                }
+                (mm, label)
+            }
+        }
+        ContractKey::Graphql { op, field } => {
+            // GraphQL consumers are synthetic nodes named
+            // `graphql-call:{op}:{field}`; `parse_consumer_call_shape`
+            // cannot see them (no whitespace in the name). Compare
+            // `(op, field)` against the name directly and reuse the
+            // same verdict fields: `method_match` is op equality,
+            // `template_match` is `exact`/`none` on field equality.
+            // A non-GraphQL consumer name falls through the prefix
+            // strip to empty parts and mismatches cleanly on both.
+            let name = consumer_id.name().unwrap_or_default();
+            let rest = name.strip_prefix(GRAPHQL_CALL_PREFIX).unwrap_or("");
+            let (cop, cfield) = rest.split_once(':').unwrap_or((rest, ""));
+            let op_ok = cop == op.to_string();
+            let field_ok = cfield == field;
+            if !op_ok {
+                reasons.push("op_mismatch");
+            }
+            if !field_ok {
+                reasons.push("field_mismatch");
+            }
+            (op_ok, if field_ok { "exact" } else { "none" })
+        }
+        key @ (ContractKey::Topic { .. }
+        | ContractKey::Rpc { .. }
+        | ContractKey::WebSocket { .. }
+        | ContractKey::Table { .. }) => {
+            // Fact-keyed kinds: the consumer's key comes from its
+            // contract fact(s) (`consumer_fact_keys`), not its name.
+            // A well-formed pair is same-kind + `keys_compatible`'s
+            // equality semantics (broker+name / system+service+method
+            // / route / name). Reason mapping reuses the HTTP labels:
+            // cross-kind → `method_mismatch` (the shape axis),
+            // same-kind key mismatch → `template_mismatch` (the leaf
+            // axis). A graphql-call consumer carries no such key —
+            // report the GraphQL pair as unmatched (the HTTP arm's
+            // rule) instead of misleading labels.
+            if consumer_id
+                .name()
+                .is_some_and(|n| n.starts_with(GRAPHQL_CALL_PREFIX))
+            {
+                reasons.push("op_mismatch");
+                reasons.push("field_mismatch");
+                (false, "none")
+            } else {
+                let same_kind: Vec<&ContractKey> = fact_keys
+                    .iter()
+                    .filter(|k| k.kind() == key.kind())
+                    .collect();
+                if same_kind.is_empty() {
+                    reasons.push("method_mismatch");
+                    (false, "none")
+                } else if same_kind.iter().any(|ck| keys_compatible(ck, key)) {
+                    (true, "exact")
+                } else {
+                    reasons.push("template_mismatch");
+                    (true, "none")
+                }
+            }
         }
     };
-
-    let method_match = methods_compatible(&consumer_method, &provider_method);
-    if !method_match {
-        reasons.push("method_mismatch");
-    }
-    let (template_compatible, match_label) =
-        templates_compatible(consumer_template.as_deref(), &provider_template);
-    let template_match = match_label;
-    if !template_compatible {
-        reasons.push("template_mismatch");
-    }
     let valid = reasons.is_empty() && endpoint_def.is_some();
 
     let data = if valid {
@@ -951,6 +1055,7 @@ pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         ExternalRef => "external_ref",
         DynamicSql => "dynamic_sql",
         OrmDynamicQuery => "orm_dynamic_query",
+        ExternalSchemaRef => "external_schema_ref",
     }
 }
 
@@ -1014,11 +1119,73 @@ fn provenance_to_json(p: &EdgeProvenance) -> Value {
 fn candidate_endpoints_for(
     view: &ContractIndex,
     call_id: &GlobalId,
-    _resolution: &ConsumerResolution,
+    resolution: &ConsumerResolution,
 ) -> Vec<Value> {
+    // §9.7 gating: a `target_service` the resolver named (HTTP
+    // `no_route_in_service`, GraphQL `route_owner`) means the
+    // consumer could match only that service's endpoints; without
+    // one the whole index is in play. The gate is a filter over the
+    // existing listing rules, so `BTreeMap` key order is unchanged.
+    let target_service: Option<&ServiceName> = match &resolution.target {
+        Some(ConsumerTarget::Unresolved { target_service, .. }) => target_service.as_ref(),
+        _ => None,
+    };
+    let in_target = |ep_id: &EndpointId| match target_service {
+        Some(ts) => &ep_id.0 == ts,
+        None => true,
+    };
+    // GraphQL consumers (`graphql-call:{op}:{field}`) carry no HTTP
+    // method/template: `parse_consumer_call_shape` reads their name
+    // as `Unknown`/no template, so the HTTP filter below would admit
+    // every `ContractKey::Http` endpoint (pure noise). Their
+    // candidates are the GraphQL endpoints in the index instead:
+    // the same-`op` set when non-empty (a `query` consumer's
+    // candidates are query endpoints), else every GraphQL endpoint.
+    // HTTP endpoints are never listed. Reason labels stay on the
+    // wire vocabulary (`list_unresolved.out.json`): `same_key` for an
+    // exact `(op, field)` pair, `pattern` for any other GraphQL
+    // candidate. Ordering is the index's `BTreeMap` key order.
+    if call_id
+        .name()
+        .is_some_and(|n| n.starts_with(GRAPHQL_CALL_PREFIX))
+    {
+        let name = call_id.name().unwrap_or_default();
+        let rest = name.strip_prefix(GRAPHQL_CALL_PREFIX).unwrap_or("");
+        let (cop, cfield) = rest.split_once(':').unwrap_or((rest, ""));
+        let same_op_present = view.endpoints.keys().any(|ep_id| {
+            in_target(ep_id)
+                && matches!(&ep_id.1, ContractKey::Graphql { op, .. } if op.to_string() == cop)
+        });
+        let mut out: Vec<Value> = Vec::new();
+        for ep_id in view.endpoints.keys() {
+            if !in_target(ep_id) {
+                continue;
+            }
+            if let ContractKey::Graphql { op, field } = &ep_id.1 {
+                let same_op = op.to_string() == cop;
+                if same_op_present && !same_op {
+                    continue;
+                }
+                let reason = if same_op && field == cfield {
+                    "same_key"
+                } else {
+                    "pattern"
+                };
+                out.push(json!({
+                    "endpoint": {"service": ep_id.0 .0, "key": ep_id.1.to_string()},
+                    "reason": reason,
+                }));
+            }
+        }
+        return out;
+    }
+
     let mut out: Vec<Value> = Vec::new();
     let (consumer_method, consumer_template) = parse_consumer_call_shape(call_id);
     for ep_id in view.endpoints.keys() {
+        if !in_target(ep_id) {
+            continue;
+        }
         if let ContractKey::Http { method, template } = &ep_id.1 {
             let same_method = match (&consumer_method, method) {
                 (
@@ -1040,16 +1207,33 @@ fn candidate_endpoints_for(
                                 crate::federation::contracts::model::HttpMethod::Any
                             }
                         };
-                    let r = match_route(consumer_method.clone(), t, provider_method, template);
-                    if r.is_match() {
-                        (true, "same_key")
-                    } else {
-                        (false, "pattern")
+                    match match_route(consumer_method.clone(), t, provider_method, template) {
+                        MatchOutcome::Match(detail) => {
+                            // Candidate labels reuse the §7.4
+                            // classifier (`match_route`'s
+                            // `RouteMatch` kind — the taxonomy
+                            // `route_match_label` renders as
+                            // `exact|pattern|prefix_stripped`):
+                            // `same_key` only for a truly equal key,
+                            // `prefix_stripped` when the match needed
+                            // the matcher's gateway-prefix strip,
+                            // `pattern` for any other route match.
+                            let keys_identical =
+                                &consumer_method == method && t == template.as_str();
+                            let reason = if keys_identical {
+                                "same_key"
+                            } else if matches!(detail.kind, RouteMatch::PrefixStripped) {
+                                "prefix_stripped"
+                            } else {
+                                "pattern"
+                            };
+                            (true, reason)
+                        }
+                        MatchOutcome::NoMatch => (false, "pattern"),
                     }
                 }
                 None => (true, "pattern"),
             };
-            let _ = ok;
             if ok {
                 out.push(json!({
                     "endpoint": {"service": ep_id.0 .0, "key": ep_id.1.to_string()},
@@ -1059,6 +1243,23 @@ fn candidate_endpoints_for(
         }
     }
     out
+}
+
+/// The [`ContractKey`]s a consumer node names, taken from its
+/// contract facts. The HTTP/GraphQL arms read the key from the
+/// call-site name (`GET /path`, `graphql-call:{op}:{field}`); the
+/// fact-keyed kinds (Topic/Rpc/WebSocket/Table) are ordinary
+/// symbols whose key lives in the fact (`TopicConsumerFact`, …), so
+/// `check_binding` has to open the node. Empty when the node is
+/// gone or carries no consumer fact.
+fn consumer_fact_keys(backend: &dyn GraphBackend, id: &GlobalId) -> Vec<ContractKey> {
+    let Ok(Some(node)) = backend.get_node(id.as_str()) else {
+        return Vec::new();
+    };
+    node.contract
+        .iter()
+        .flat_map(|f| f.consumer_keys())
+        .collect()
 }
 
 fn parse_consumer_call_shape(
@@ -1097,38 +1298,6 @@ fn parse_consumer_call_shape(
         _ => crate::federation::contracts::model::MethodSpec::Unknown,
     };
     (method, parts.get(1).map(|s| s.to_string()))
-}
-
-fn methods_compatible(
-    cm: &crate::federation::contracts::model::MethodSpec,
-    pm: &crate::federation::contracts::model::MethodSpec,
-) -> bool {
-    use crate::federation::contracts::model::{HttpMethod, MethodSpec};
-    match (cm, pm) {
-        (MethodSpec::Known(a), MethodSpec::Known(b)) => {
-            a == b || matches!(b, HttpMethod::Any) || matches!(a, HttpMethod::Any)
-        }
-        (MethodSpec::Unknown, _) | (_, MethodSpec::Unknown) => true,
-    }
-}
-
-fn templates_compatible(consumer: Option<&str>, provider: &str) -> (bool, &'static str) {
-    let Some(c) = consumer else {
-        return (true, "pattern");
-    };
-    let r = match_route(
-        crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Any,
-        ),
-        c,
-        crate::federation::contracts::model::HttpMethod::Any,
-        provider,
-    );
-    if r.is_match() {
-        (true, "exact")
-    } else {
-        (false, "none")
-    }
 }
 
 fn render_bindings_entry(
@@ -1233,7 +1402,7 @@ fn render_check_binding(data: &Value) -> String {
 mod tests {
     use super::*;
     use crate::federation::contracts::index::EndpointId;
-    use crate::federation::contracts::model::{HttpMethod, MethodSpec};
+    use crate::federation::contracts::model::{GraphqlOp, HttpMethod, MethodSpec};
     use crate::federation::repo_id::RepoId;
 
     #[test]
@@ -1252,32 +1421,6 @@ mod tests {
             MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Get)
         ));
         assert_eq!(t.as_deref(), Some("/api/orders/{}"));
-    }
-
-    #[test]
-    fn methods_compatible_handles_any() {
-        let g = MethodSpec::Known(HttpMethod::Get);
-        let a = MethodSpec::Known(HttpMethod::Any);
-        let u = MethodSpec::Unknown;
-        assert!(methods_compatible(&g, &a));
-        assert!(methods_compatible(&a, &g));
-        assert!(methods_compatible(&u, &g));
-        let p = MethodSpec::Known(HttpMethod::Post);
-        assert!(!methods_compatible(&g, &p));
-    }
-
-    #[test]
-    fn templates_compatible_returns_exact_when_paths_match() {
-        let (ok, label) = templates_compatible(Some("/api/orders/{}"), "/api/orders/{}");
-        assert!(ok);
-        assert_eq!(label, "exact");
-    }
-
-    #[test]
-    fn templates_compatible_returns_none_on_mismatch() {
-        let (ok, label) = templates_compatible(Some("/api/users/{}"), "/api/orders/{}");
-        assert!(!ok);
-        assert_eq!(label, "none");
     }
 
     #[test]
@@ -1364,6 +1507,499 @@ mod tests {
         assert_eq!(
             o.structured["error"]["details"]["reason"],
             json!("cursor_mismatch")
+        );
+    }
+
+    fn graphql_key(op: GraphqlOp, field: &str) -> ContractKey {
+        ContractKey::Graphql {
+            op,
+            field: field.to_string(),
+        }
+    }
+
+    fn http_key(method: HttpMethod, template: &str) -> ContractKey {
+        ContractKey::Http {
+            method: MethodSpec::Known(method),
+            template: template.to_string(),
+        }
+    }
+
+    fn insert_ep(view: &mut ContractIndex, service: &str, key: ContractKey) {
+        let id: EndpointId = (ServiceName(service.to_string()), key);
+        view.endpoints.insert(
+            id.clone(),
+            Endpoint {
+                id,
+                method: HttpMethod::Any,
+                template: String::new(),
+                providers: Vec::new(),
+                schemas: Default::default(),
+            },
+        );
+    }
+
+    fn call_id(repo: &str, name: &str) -> GlobalId {
+        let id = GlobalId::new(
+            &RepoId::new(repo).unwrap(),
+            crate::schema::NodeType::Function,
+            "src/calls.ts",
+            name,
+            Some(10),
+        );
+        GlobalId::from_canonical(id.as_str())
+    }
+
+    fn candidate_triples(view: &ContractIndex, id: &GlobalId) -> Vec<(String, String, String)> {
+        candidate_triples_for(view, id, None)
+    }
+
+    fn candidate_triples_for(
+        view: &ContractIndex,
+        id: &GlobalId,
+        target_service: Option<&ServiceName>,
+    ) -> Vec<(String, String, String)> {
+        let res = ConsumerResolution {
+            call_id: id.clone(),
+            service: ServiceName("storefront".to_string()),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: target_service.cloned(),
+            }),
+            bound_endpoints: Vec::new(),
+            reads_complete: true,
+        };
+        candidate_endpoints_for(view, id, &res)
+            .into_iter()
+            .map(|c| {
+                (
+                    c["endpoint"]["service"].as_str().unwrap().to_string(),
+                    c["endpoint"]["key"].as_str().unwrap().to_string(),
+                    c["reason"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// A `graphql-call:{op}:{field}` consumer must see the GraphQL
+    /// endpoints in the index — never the HTTP endpoints the
+    /// method/template filter used to admit wholesale (the consumer
+    /// name has no whitespace, so it parsed as `Unknown`/no template
+    /// and matched every `ContractKey::Http`).
+    #[test]
+    fn graphql_consumer_candidates_are_graphql_endpoints_only() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "somethingElse"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Mutation, "updateProduct"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            http_key(HttpMethod::Post, "/graphql"),
+        );
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+
+        let gid = call_id("storefront", "graphql-call:query:product");
+        let got = candidate_triples(&view, &gid);
+        assert!(!got.is_empty(), "graphql endpoints must be candidates");
+        for (svc, key, _) in &got {
+            assert!(
+                key.starts_with("graphql:"),
+                "graphql consumer must not see http endpoints: {svc} {key}"
+            );
+        }
+        let keys: Vec<&str> = got.iter().map(|(_, k, _)| k.as_str()).collect();
+        assert!(
+            keys.iter().any(|k| *k == "graphql:query:product"),
+            "the consumer's own (op, field) endpoint must be a candidate: {keys:?}"
+        );
+    }
+
+    /// Same-`op` GraphQL endpoints are the candidates while any exist
+    /// (a `query` consumer's candidates are query endpoints); with no
+    /// same-op endpoint the consumer falls back to every GraphQL
+    /// endpoint. Reason labels stay on the wire vocabulary: `same_key`
+    /// for an exact `(op, field)` pair, `pattern` otherwise.
+    #[test]
+    fn graphql_consumer_candidates_prefer_same_op() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "somethingElse"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Mutation, "updateProduct"),
+        );
+
+        let gid = call_id("storefront", "graphql-call:query:product");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:product".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:somethingElse".to_string(),
+                    "pattern".to_string(),
+                ),
+            ],
+            "a query consumer lists query endpoints only"
+        );
+
+        // No subscription endpoint in the index — fall back to every
+        // GraphQL key, never to HTTP.
+        let gid = call_id("storefront", "graphql-call:subscription:tick");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:product".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:somethingElse".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:mutation:updateProduct".to_string(),
+                    "pattern".to_string(),
+                ),
+            ],
+            "with no same-op endpoints every graphql endpoint is a candidate"
+        );
+    }
+
+    /// HTTP consumers keep the pre-existing candidate behavior —
+    /// method/template matching over HTTP endpoints only, with the
+    /// `same_key` / `pattern` reason labels — so the GraphQL fix
+    /// cannot drift the HTTP path. "Unchanged" means: the inclusion
+    /// rule (method gate + §7.4 `match_route`, `BTreeMap` key order),
+    /// a truly equal key still labeled `same_key`, and a consumer
+    /// with no template still listed `pattern`. The ONLY pin this
+    /// test adjusts is the gateway-bridge case appended below: its
+    /// label moves from the pre-fix `same_key` (every route match
+    /// collapsed to it) to `prefix_stripped`.
+    #[test]
+    fn http_consumer_candidates_unchanged() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/users/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Post, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "shipping",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+
+        // `GET /api/orders/{}` → route-matching GET endpoints, `same_key`.
+        let gid = call_id("billing", "GET /api/orders/{}");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "orders".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "shipping".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "same_key".to_string(),
+                ),
+            ]
+        );
+
+        // No consumer template (`GET`) → every GET endpoint, `pattern`.
+        let gid = call_id("billing", "GET");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "orders".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "orders".to_string(),
+                    "http:GET /api/users/{}".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "shipping".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "pattern".to_string(),
+                ),
+            ]
+        );
+
+        // The one adjusted pin: the gateway-bridge shape (the §15.2
+        // scenario-10 pair the `list_unresolved` golden carries,
+        // `GET /v1/api/orders/{}` → `GET /api/orders/{}`) used to be
+        // labeled `same_key` like every other route match; it is now
+        // `prefix_stripped`.
+        let gid = call_id("billing", "GET /v1/api/orders/{}");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "orders".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "prefix_stripped".to_string(),
+                ),
+                (
+                    "shipping".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "prefix_stripped".to_string(),
+                ),
+            ],
+            "bridge matches must be labeled prefix_stripped"
+        );
+    }
+
+    /// Candidate `reason` labels reuse the §7.4 route matcher's
+    /// classifier (`match_route` / `RouteMatch` — the
+    /// `exact|pattern|prefix_stripped` taxonomy `route_match_label`
+    /// renders for bound consumers) instead of a second matcher:
+    /// `same_key` only when the consumer's key equals the endpoint
+    /// key, `prefix_stripped` when the templates match only after
+    /// the matcher strips the consumer's gateway prefix (the
+    /// bridge shape), and `pattern` for every other route match
+    /// (literal-vs-placeholder, wildcard).
+    #[test]
+    fn prefix_stripped_candidate_label_for_bridge_templates() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+
+        // Truly equal key → `same_key`.
+        let gid = call_id("billing", "GET /api/orders/{}");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![(
+                "orders".to_string(),
+                "http:GET /api/orders/{}".to_string(),
+                "same_key".to_string(),
+            )],
+            "an identical key stays same_key"
+        );
+
+        // Wildcard/pattern match (literal id vs `{}`) → `pattern`.
+        let gid = call_id("billing", "GET /api/orders/42");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![(
+                "orders".to_string(),
+                "http:GET /api/orders/{}".to_string(),
+                "pattern".to_string(),
+            )],
+            "a placeholder match is not the same key — pattern"
+        );
+
+        // Gateway-bridge shape: the consumer template matches the
+        // endpoint template only after `match_route` strips the
+        // consumer's leading literal (`/v1`) — `RouteMatch::PrefixStripped`.
+        let gid = call_id("billing", "GET /v1/api/orders/{}");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![(
+                "orders".to_string(),
+                "http:GET /api/orders/{}".to_string(),
+                "prefix_stripped".to_string(),
+            )],
+            "a prefix-bridge match is prefix_stripped, not same_key"
+        );
+
+        // Boundary: `GET /v1/orders` is NOT a §7.4 match for
+        // `GET /api/orders` — prefix tolerance strips only the
+        // CONSUMER's leading literals, and after dropping `/v1` the
+        // consumer is `/orders`, one segment short of `/api/orders`
+        // (`segments_match` requires equal segment counts). The pair
+        // is not a candidate at all; the bridge that does classify
+        // as `PrefixStripped` is the one above (`/v1/api/orders/…`).
+        let gid = call_id("billing", "GET /v1/orders");
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            Vec::new(),
+            "no §7.4 match → no candidate (see the bridge pair above)"
+        );
+    }
+
+    /// §9.7 gating: when the item carries a `target_service` (the
+    /// HTTP `no_route_in_service` resolver named one, or GraphQL's
+    /// `route_owner`), candidates come only from THAT service's
+    /// endpoints — still subject to the per-kind key rules (HTTP
+    /// method/template matching, GraphQL same-op preference, which
+    /// now applies within the named service). Without one, the whole
+    /// index stays in play. `BTreeMap` key order is unchanged.
+    #[test]
+    fn candidates_respect_target_service() {
+        let mut view = ContractIndex::default();
+        insert_ep(
+            &mut view,
+            "orders",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "shipping",
+            http_key(HttpMethod::Get, "/api/orders/{}"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-api",
+            graphql_key(GraphqlOp::Query, "somethingElse"),
+        );
+        insert_ep(
+            &mut view,
+            "saleor-catalog",
+            graphql_key(GraphqlOp::Query, "product"),
+        );
+
+        // HTTP: `target_service = orders` lists only orders' endpoint,
+        // even though shipping exposes the same key.
+        let gid = call_id("billing", "GET /api/orders/{}");
+        assert_eq!(
+            candidate_triples_for(&view, &gid, Some(&ServiceName("orders".to_string()))),
+            vec![(
+                "orders".to_string(),
+                "http:GET /api/orders/{}".to_string(),
+                "same_key".to_string(),
+            )],
+            "a named target_service rules other services out (§9.7)"
+        );
+        // No target_service → both services, as before.
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "orders".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "shipping".to_string(),
+                    "http:GET /api/orders/{}".to_string(),
+                    "same_key".to_string(),
+                ),
+            ],
+            "without a target_service every service is listed"
+        );
+
+        // GraphQL `route_owner` gating: the same-op preference still
+        // applies, within the named service — saleor-catalog's
+        // `query:product` is not a candidate for a `route_owner =
+        // saleor-api` item.
+        let gid = call_id("storefront", "graphql-call:query:product");
+        assert_eq!(
+            candidate_triples_for(&view, &gid, Some(&ServiceName("saleor-api".to_string()))),
+            vec![
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:product".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:somethingElse".to_string(),
+                    "pattern".to_string(),
+                ),
+            ],
+            "route_owner gating keeps only that service's graphql endpoints"
+        );
+        // Without a route_owner the whole GraphQL set is listed.
+        assert_eq!(
+            candidate_triples(&view, &gid),
+            vec![
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:product".to_string(),
+                    "same_key".to_string(),
+                ),
+                (
+                    "saleor-api".to_string(),
+                    "graphql:query:somethingElse".to_string(),
+                    "pattern".to_string(),
+                ),
+                (
+                    "saleor-catalog".to_string(),
+                    "graphql:query:product".to_string(),
+                    "same_key".to_string(),
+                ),
+            ],
+            "without a route_owner every graphql endpoint is listed"
+        );
+
+        // Same-op preference is computed within the named service:
+        // `saleor-catalog` has no mutation endpoint, so a mutation
+        // consumer gated to it falls back to that service's GraphQL
+        // endpoints (`pattern`), not to another service's mutations.
+        let gid = call_id("storefront", "graphql-call:mutation:updateProduct");
+        assert_eq!(
+            candidate_triples_for(
+                &view,
+                &gid,
+                Some(&ServiceName("saleor-catalog".to_string()))
+            ),
+            vec![(
+                "saleor-catalog".to_string(),
+                "graphql:query:product".to_string(),
+                "pattern".to_string(),
+            )],
+            "same-op fallback runs inside the target_service's endpoints"
         );
     }
 }

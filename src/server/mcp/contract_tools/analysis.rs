@@ -1666,6 +1666,12 @@ fn coverage_to_value(c: &DiffCoverage) -> Value {
         "external": c.external.iter().map(|(h, n)| json!({"host": h, "calls": n})).collect::<Vec<_>>(),
         "stale_bindings": c.stale_bindings,
         "schemaless_endpoints": c.schemaless_endpoints.iter().map(|e| json!({"service": e.0.0, "key": e.1.to_string()})).collect::<Vec<_>>(),
+        "unresolved_refs": c.unresolved_refs.iter().map(|u| json!({
+            "repo": u.repo,
+            "ref_url": u.ref_url,
+            "count": u.count,
+            "sample_paths": u.sample_paths,
+        })).collect::<Vec<_>>(),
     })
 }
 

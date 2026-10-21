@@ -10,7 +10,7 @@
       "type": "array",
       "items": {
         "type": "string",
-        "enum": ["not_a_consumer", "method_mismatch", "template_mismatch", "same_service", "already_bound"]
+        "enum": ["not_a_consumer", "method_mismatch", "template_mismatch", "same_service", "already_bound", "op_mismatch", "field_mismatch"]
       }
     },
     "method_match": { "type": "boolean" },

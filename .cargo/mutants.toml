@@ -1,7 +1,21 @@
-# cargo-mutants configuration (see `make mutants`).
+# cargo-mutants configuration (shared by `make mutants` and
+# `scripts/mutation-gate.sh`; this is the default tree config path for
+# cargo-mutants 27.1.0 — `cargo mutants --emit-schema config` is the
+# authority on what may appear here).
+#
+# Timeouts are deliberately NOT set here: the schema has no absolute
+# timeout keys (only multipliers, which need a measured baseline), and
+# both users run `--baseline skip`. `scripts/mutation-gate.sh` passes
+# `--timeout 300 --build-timeout 600` on the command line; `make
+# mutants` passes its own `--timeout 120`.
 #
 # Mutants that cannot change observable behaviour in a normal build are
 # excluded with the reason, so a "missed" mutant always means a real test gap.
+# (The mutation gate adds no exclusions of its own: nothing generated or
+# dump-like is in cargo-mutants' examine set — see `cargo mutants
+# --list-files`; its bin-target scope filter lives on the
+# scripts/mutation-gate.sh command line, not here. New entries must justify
+# themselves here; never add one to turn a MISSED mutant green.)
 exclude_re = [
     # Test-only helper module inside lsp.rs.
     'test_support::',
@@ -33,7 +47,6 @@ exclude_re = [
     # read_exact on a regular file fails only with UnexpectedEof; another kind
     # cannot be produced by a test.
     'wal\.rs.*UnexpectedEof with true in replay_inner',
-    # `on_disk > good_end` vs `>=`: equal lengths make set_len a no-op.
     # Same wall-clock boundary as the presence lock guard.
     'socket_server\.rs:97.*replace > with >= in StartGuard::take',
     # `recursive(true)` create of an existing directory is a no-op.
@@ -43,11 +56,14 @@ exclude_re = [
     # A file entry has agents iff it has symbols (a file-level claim records the
     # `__file_level__` scope), so `&&` and `||` agree.
     'presence\.rs.*replace && with \|\| in OccupancyMap::release',
-    # The retain predicate's `&&` vs `||`: rows `||` would additionally drop are
-    # dropped by their own to_drop entry in the same pass.
     # `now < claimed_at` vs `<=`: equality of two wall-clock readings.
     'presence\.rs:1690.*replace < with <= in OccupancyMap::expire_by_ttl',
+    # The retain predicate's `&&` vs `||`: rows `||` would additionally drop are
+    # dropped by their own to_drop entry in the same pass.
     'presence\.rs:17(35|41).*replace && with \|\| in OccupancyMap::expire_by_ttl',
+    # `on_disk > good_end` vs `>=`: equal lengths make set_len a no-op.
     'wal\.rs:355.*replace > with >= in replay_inner',
+    # Drop's final fsync is power-loss durability only — unobservable without a
+    # crash (same class as the `created` guard above).
     'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
 ]

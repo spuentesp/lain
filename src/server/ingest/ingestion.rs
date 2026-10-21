@@ -118,6 +118,9 @@ impl LainServer {
         // Held to the end of the pass (any exit, incl. `?` and cancellation):
         // an overlapping pass that finishes first must not publish `ready`.
         let _pass = self.readiness().begin_pass();
+        // This pass rewrites nodes (and their incident `Calls` edges);
+        // call answers are incomplete until its resolve phases land.
+        self.ingest().graph().clear_calls_published();
 
         // 1. Parallel Map Phase: Scan files for structure and external references
         let files = if let Some(ref last) = last_commit {
@@ -154,6 +157,11 @@ impl LainServer {
                 self.ingest().graph(),
                 self.ingest().git(),
             );
+            // The sweep completed, so call answers for the surviving code
+            // are complete again: stamp before the cancellation check, or a
+            // cancel that lands after a finished sweep leaves the gate
+            // cleared for work that is already done.
+            self.ingest().graph().mark_calls_published(&latest_commit);
             if cancel.is_cancelled() {
                 info!("build_core_memory: cancelled after orphan sweep");
                 return Err(LainError::Cancelled);
@@ -694,6 +702,17 @@ impl LainServer {
             pattern_edges.len()
         );
         insert_edges_reporting(self.ingest().graph(), &pattern_edges, "pattern")?;
+
+        // Every `Calls`-edge producer of this pass has now landed in the
+        // serving table (LSP references → "call", tree-sitter refs →
+        // "static", string-literal links → "pattern"). Publish that fact
+        // for `get_capabilities`'s `call_graph` capability — but only for
+        // a complete pass: a capped/timed-out pass leaves whole files
+        // unscanned, so its call answers are still incomplete even for
+        // the refs it did resolve.
+        if !partial {
+            self.ingest().graph().mark_calls_published(&latest_commit);
+        }
 
         // 3d. Protocol sensors: HTTP routes, OpenAPI, proto, GraphQL,
         // WebSocket. Runs after the symbol nodes exist, because
@@ -1388,6 +1407,15 @@ fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &AnyGitSensor) {
 /// persisted per repo, so a warm restart lost them too. Running this after
 /// every repo is indexed covers both. Only edges whose target lies in
 /// another repo are added; local resolution already happened.
+///
+/// This is a fourth `Calls`-edge producer, so it takes part in the same
+/// clear/mark lifecycle as the indexing passes: the gate is cleared while
+/// it works (cross-repo callers answer as false "leaf" until the relink
+/// lands, and the startup relink runs after warm-boot readiness) and
+/// re-stamped for the graph's indexed commit when the edges are in. A
+/// relink that fails part-way leaves the gate down — honest, since the
+/// cross-repo link was not completed — until a later relink or indexing
+/// pass completes.
 pub async fn relink_cross_repo(
     path: &Path,
     graph: &GraphDatabase,
@@ -1396,6 +1424,10 @@ pub async fn relink_cross_repo(
     source_repo: &crate::federation::repo_id::RepoId,
     cancel: &CancellationToken,
 ) -> Result<usize, LainError> {
+    // Fourth `Calls`-edge producer, same clear/mark lifecycle as the
+    // indexing passes: the gate goes down while this pass re-resolves the
+    // cross-repo edges and comes back up once they are in the table.
+    graph.clear_calls_published();
     let git_sensor = Arc::clone(git);
     let files = offthread(cancel.clone(), move || {
         git_sensor.try_get_all_tracked_files()
@@ -1448,6 +1480,13 @@ pub async fn relink_cross_repo(
             .collect();
     let n = external.len();
     graph.insert_edges_batch(&external)?;
+    // The relink pass is complete — same stamp semantics as the indexing
+    // passes, for the commit the graph is indexed at. `Ok(0)` re-stamps
+    // too: a relink that found no cross-repo edges still finished. A graph
+    // with no recorded commit has nothing to publish for.
+    if let Ok(Some(commit)) = graph.get_last_commit() {
+        graph.mark_calls_published(&commit);
+    }
     Ok(n)
 }
 
@@ -1615,6 +1654,11 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         "[federation] Building core topology for {:?} at commit {}",
         path, latest_commit
     );
+    // This pass rewrites nodes in place — `replace_nodes_for_paths`
+    // takes the old nodes' incident `Calls` edges with them — so call
+    // answers are incomplete until the resolve phases below re-insert
+    // them. `get_capabilities` gates `call_graph` on this marker.
+    graph.clear_calls_published();
 
     // `force=true` means the caller has independent evidence the
     // worktree changed (a kernel `notify` event, an explicit reindex
@@ -1651,6 +1695,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
             return Err(LainError::Cancelled);
         }
         sweep_orphans(path, graph, git);
+        // Deletion-only commit: nothing rewrote the surviving call
+        // graph, only pruned the deleted files' nodes (with their
+        // edges). Call answers for the surviving code are complete.
+        graph.mark_calls_published(&latest_commit);
         graph.set_last_commit(latest_commit)?;
         if let Err(e) = graph.save_to_disk_sync() {
             warn!("could not persist the graph ({e}); serving it from memory only");
@@ -1865,6 +1913,11 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         pattern_edges.len()
     );
     graph.insert_edges_batch(&pattern_edges)?;
+    // The pass's `Calls`-edge insert phases (call → static → pattern)
+    // have all landed in the serving table; call answers for
+    // `latest_commit` are complete again. `get_capabilities` reports
+    // `call_graph: ready` only once this marker is set.
+    graph.mark_calls_published(&latest_commit);
 
     // Refresh the federation's symbol index so the just-populated
     // per-repo DB is visible to subsequent cross-repo lookups in
@@ -2904,6 +2957,132 @@ mod nlp_offthread_tests {
     fn tuning_config_default_is_available() {
         let _t: TuningConfig = TuningConfig::default();
         let _arc: Arc<TuningConfig> = Arc::new(TuningConfig::default());
+    }
+}
+
+#[cfg(test)]
+mod relink_calls_published_tests {
+    //! `relink_cross_repo` is a fourth `Calls`-edge producer; it must take
+    //! part in the clear/mark lifecycle of the `call_graph` readiness gate,
+    //! or warm boot publishes `ready` while the startup relink is still
+    //! adding the cross-repo edges (the window where cross-repo callers
+    //! answer as false "leaf").
+    use super::*;
+    use crate::federation::cross_repo::CrossRepoResolver;
+    use crate::federation::repo_id::{GlobalId, RepoId};
+    use crate::git::GitSensorMode;
+    use crate::schema::{GraphNode, NodeType};
+
+    /// Resolves one known foreign name and records the gate's state at the
+    /// moment the resolve phase consulted it — the only deterministic way
+    /// to observe "during relink".
+    struct ProbeResolver {
+        graph: GraphDatabase,
+        gate_during_resolve: parking_lot::Mutex<Option<Option<String>>>,
+    }
+
+    impl CrossRepoResolver for ProbeResolver {
+        fn resolve_cross_repo(
+            &self,
+            _source_repo: &RepoId,
+            name: Option<&str>,
+            _hint_path: Option<&Path>,
+            _hint_line: Option<u32>,
+        ) -> Option<GlobalId> {
+            *self.gate_during_resolve.lock() = Some(self.graph.calls_published_for());
+            match name {
+                Some("foreign_callee") => Some(GlobalId::from_canonical(
+                    "other:Function:src/other.rs:foreign_callee:1",
+                )),
+                _ => None,
+            }
+        }
+    }
+
+    fn git_fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(root.path())
+            .status()
+            .unwrap()
+            .success());
+        for (k, v) in [
+            ("user.email", "relink-test@lain"),
+            ("user.name", "relink-test"),
+        ] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+        }
+        std::fs::write(
+            root.path().join("lib.rs"),
+            "pub fn entry() -> u32 { foreign_callee(1) + 2 }\n",
+        )
+        .unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "fixture"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        root
+    }
+
+    /// The gate is down while the relink pass works and back up — for the
+    /// graph's indexed commit — once its `Calls` edges are in. RED before
+    /// the fix: relink left the marker exactly as it found it, so a warm
+    /// boot's startup relink ran under a stale `ready`.
+    #[tokio::test]
+    async fn relink_clears_the_gate_during_the_pass_and_re_stamps_it_after() {
+        let root = git_fixture();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).expect("db");
+
+        // A committed graph whose call answers are published for the
+        // indexed commit — the warm-boot state the startup relink runs on.
+        let rel = graph_path(root.path(), &root.path().join("lib.rs"));
+        let file = GraphNode::new(NodeType::File, "lib.rs".into(), rel);
+        db.insert_nodes_batch(&[file]).expect("insert");
+        db.mark_calls_published("commit-a");
+        db.set_last_commit("commit-a".into()).expect("commit");
+
+        let resolver = ProbeResolver {
+            graph: db.clone(),
+            gate_during_resolve: parking_lot::Mutex::new(None),
+        };
+        let git = Arc::new(AnyGitSensor::new(root.path(), GitSensorMode::InProcess).expect("git"));
+        let source_repo = RepoId::new("source").expect("repo id");
+        let cancel = CancellationToken::new();
+
+        let n = relink_cross_repo(root.path(), &db, &git, &resolver, &source_repo, &cancel)
+            .await
+            .expect("relink");
+
+        let during = resolver.gate_during_resolve.lock().clone().expect(
+            "the resolver must have been consulted (the fixture references foreign_callee)",
+        );
+        assert_eq!(
+            during, None,
+            "the gate must be cleared while relink re-resolves cross-repo call edges"
+        );
+        assert!(
+            n >= 1,
+            "the fixture's foreign call must produce a cross-repo edge, got {n}"
+        );
+        assert_eq!(
+            db.calls_published_for().as_deref(),
+            Some("commit-a"),
+            "relink must re-stamp the gate for the graph's indexed commit when it finishes"
+        );
     }
 }
 

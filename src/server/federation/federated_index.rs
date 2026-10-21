@@ -614,8 +614,10 @@ impl FederatedIndex {
     /// 1. **Intra-repo edges** — both endpoints rewritten to the
     ///    calling repo's global-id form, so the prefix `id:` appears
     ///    in both `source_id` and `target_id`. Reconciled against the
-    ///    current per-repo DB: a stale edge (one no longer in the DB)
-    ///    is retracted via `remove_edges`, endpoints left intact.
+    ///    current per-repo DB by `edge_identity_key` (pair + `site`
+    ///    for the per-site `Produces`/`Consumes` legs): a stale edge
+    ///    (one no longer in the DB) is retracted via `remove_edges`,
+    ///    endpoints left intact.
     /// 2. **Cross-repo outgoing `Calls`** — `source_id` rewritten to
     ///    the calling repo's prefix; `target_id` already global,
     ///    owned by a foreign repo. **Not** reconciled: the source of
@@ -844,6 +846,15 @@ impl FederatedIndex {
         // federated edge alive as long as its endpoints were still
         // indexed — `project_edges` only upserted.
         //
+        // The diff key is `edge_identity_key`, NOT the bare
+        // `(edge_type, source_id, target_id)` triple: `Produces` /
+        // `Consumes` identity includes `site` (one leg per
+        // publish/subscribe site), so a leg that MOVED lines — or one
+        // of N sites deleted — must retract its old site-variant. A
+        // triple-only key matched the moved leg's new site and left the
+        // old one standing beside it; the dashboard rendered the
+        // phantom duplicate until a full reindex.
+        //
         // Cross-repo outgoing `Calls` edges are excluded from the
         // diff: the resolve-phase stash that produced them is one-shot,
         // so a no-op reproject would otherwise treat them as stale and
@@ -852,16 +863,8 @@ impl FederatedIndex {
         // `remove_node` takes incident edges with it) or the entire
         // source repo is removed.
         let prefix = format!("{}:", id.as_str());
-        let new_keys: std::collections::HashSet<(crate::schema::EdgeType, String, String)> = batch
-            .iter()
-            .map(|e| {
-                (
-                    e.edge_type.clone(),
-                    e.source_id.clone(),
-                    e.target_id.clone(),
-                )
-            })
-            .collect();
+        let new_keys: std::collections::HashSet<_> =
+            batch.iter().map(crate::graph::edge_identity_key).collect();
         let stale: Vec<crate::schema::GraphEdge> = self
             .backend
             .all_edges()?
@@ -887,15 +890,14 @@ impl FederatedIndex {
             // them. The mint pass reconciles its own set (adds and
             // retracts) when it runs.
             .filter(|e| !crate::federation::anchor_miner::is_minted_edge(e))
-            .filter(|e| {
-                !new_keys.contains(&(
-                    e.edge_type.clone(),
-                    e.source_id.clone(),
-                    e.target_id.clone(),
-                ))
-            })
+            .filter(|e| !new_keys.contains(&crate::graph::edge_identity_key(e)))
             .collect();
         if !stale.is_empty() {
+            // `remove_edges` matches on `(source_id, target_id,
+            // edge_type)`, so a stale site-variant sharing its triple
+            // with a surviving leg takes the survivor with it — the
+            // batch upsert below re-materializes the survivor, which
+            // is why the retract must stay ordered BEFORE the upsert.
             let removed = self.backend.remove_edges(&stale)?;
             tracing::info!(
                 "[federation] {:?}: retracted {removed} stale edge(s) during reconciliation",

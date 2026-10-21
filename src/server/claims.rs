@@ -307,11 +307,13 @@ pub fn missing_claim_for_node(node: &GraphNode, repo_fallback: &str, note: &str)
 
 /// Known-unknowns from a `get_coverage` / `diff_contracts` coverage
 /// view: consumers the graph saw but could not resolve, plus the
-/// ambiguous and unnormalized ones. These are named `missing` so an
-/// agent says "the information is not in the graph" instead of
-/// claiming "no impact".
+/// ambiguous and unnormalized ones, plus external openapi `$ref`s
+/// the operator can close. These are named `missing` so an agent
+/// says "the information is not in the graph" instead of claiming
+/// "no impact".
 pub fn claims_from_coverage(coverage: &Coverage) -> Vec<Claim> {
-    let buckets: [(&Vec<_>, &str); 3] = [
+    use crate::federation::contracts::diff::UnresolvedRef;
+    let consumer_buckets: [(&Vec<_>, &str); 3] = [
         (
             &coverage.unresolved_consumers,
             "unresolved consumer — target is not in the graph",
@@ -320,7 +322,7 @@ pub fn claims_from_coverage(coverage: &Coverage) -> Vec<Claim> {
         (&coverage.unnormalized, "unnormalized consumer url"),
     ];
     let mut out = Vec::new();
-    for (keys, note) in buckets {
+    for (keys, note) in consumer_buckets {
         for key in keys {
             if let Some(claim) = Claim::new(
                 key.caller.repo.as_str(),
@@ -330,6 +332,26 @@ pub fn claims_from_coverage(coverage: &Coverage) -> Vec<Claim> {
             ) {
                 out.push(claim.with_note(note));
             }
+        }
+    }
+    // The fourth bucket (Phase F2b) is openapi-shaped, not
+    // consumer-shaped: there's no caller symbol — the carrier is
+    // the foreign file the operator would inline or onboard. The
+    // claim's `repo` is the repo whose spec named the `$ref`;
+    // the file is the foreign URL (`ref_url`) — it's a path-like
+    // string for the grader's parser, and it lives in `note` so
+    // the line "AFFECTED: <repo>:<ref_url>  EVIDENCE: missing"
+    // stays whitespace-clean (see `AFFECTED_RE` in
+    // `scripts/acceptance/contract_task.py`).
+    for UnresolvedRef {
+        repo,
+        ref_url,
+        count,
+        ..
+    } in &coverage.unresolved_refs
+    {
+        if let Some(claim) = Claim::new(repo.as_str(), ref_url.as_str(), "", Evidence::Missing) {
+            out.push(claim.with_note(format!("unresolved external schema ref (count: {count})")));
         }
     }
     out

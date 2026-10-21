@@ -8,19 +8,53 @@ use crate::query::spec::{
     GroupBy, GroupOp, LimitOp, QueryGroup, QueryMeta, QueryMode, QueryResult, QuerySpec,
     SemanticFilterOp, SortDirection, SortField, SortOp,
 };
+use crate::schema::GraphEdge;
 use crate::tools::utils::{build_enriched_text, cosine_similarity};
 use parking_lot::Mutex;
 use petgraph::Direction as PetDirection;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// The three collections produced by a graph traversal. A named result keeps
-/// traversal APIs readable and gives callers one stable shape to extend.
-pub type TraversalResult = (Vec<GraphNodeRef>, Vec<GraphEdgeRef>, Vec<GraphPath>);
 pub type EmbeddingCache = Arc<Mutex<lru::LruCache<String, Vec<f32>>>>;
-type TraversalQueueItem = (String, Vec<String>, Vec<(String, String)>);
+
+/// A node reported by one pure walk, paired with that walk's selected
+/// shortest path. Several walks can report the same node; `execute_connect`
+/// merges the candidates under the documented tie-break.
+struct TraversalCandidate {
+    node: GraphNodeRef,
+    /// Hop count of the walk's shortest matching-edge path to the node.
+    hops: u32,
+    /// The seed this walk started from — the path's first node.
+    seed_id: String,
+    direction: PetDirection,
+    path: GraphPath,
+}
+
+impl TraversalCandidate {
+    /// The documented selection order: fewest hops wins; on equal hops the
+    /// outgoing walk beats the incoming one; on a further tie the lower seed
+    /// id wins. `true` when `self` should replace `prev`.
+    fn beats(&self, prev: &Self) -> bool {
+        (
+            self.hops,
+            direction_rank(self.direction),
+            self.seed_id.as_str(),
+        ) < (
+            prev.hops,
+            direction_rank(prev.direction),
+            prev.seed_id.as_str(),
+        )
+    }
+}
+
+fn direction_rank(direction: PetDirection) -> u8 {
+    match direction {
+        PetDirection::Outgoing => 0,
+        PetDirection::Incoming => 1,
+    }
+}
 
 /// Executor for running queries against the graph
 pub struct Executor<'a> {
@@ -118,21 +152,24 @@ impl<'a> Executor<'a> {
         }
 
         let mut current_nodes: Vec<GraphNodeRef> = Vec::new();
-        let mut current_edges: Vec<GraphEdgeRef> = Vec::new();
-        let mut current_paths: Vec<GraphPath> = Vec::new();
+        // Selected shortest path per working node, from the most recent
+        // `connect`. The wire-level `edges`/`paths` are derived from this
+        // after the whole pipeline, so they always describe exactly the
+        // reported nodes — filters, `limit`, and the default cap included.
+        let mut current_paths: HashMap<String, GraphPath> = HashMap::new();
         let mut groups: Option<Vec<QueryGroup>> = None;
 
         for op in &spec.ops {
             match op {
                 crate::query::spec::GraphOp::Find(find) => {
                     current_nodes = self.execute_find(find)?;
-                    current_edges.clear();
+                    // A find replaces the working set, so no reported node
+                    // came from a walk and there is nothing left to report.
                     current_paths.clear();
                 }
                 crate::query::spec::GraphOp::Connect(connect) => {
-                    let (nodes, edges, paths) = self.execute_connect(&current_nodes, connect)?;
+                    let (nodes, paths) = self.execute_connect(&current_nodes, connect)?;
                     current_nodes = nodes;
-                    current_edges = edges;
                     current_paths = paths;
                 }
                 crate::query::spec::GraphOp::Filter(filter) => {
@@ -149,7 +186,6 @@ impl<'a> Executor<'a> {
                 }
                 crate::query::spec::GraphOp::Limit(limit) => {
                     self.apply_limit(&mut current_nodes, limit);
-                    self.apply_limit_edges(&mut current_edges, limit);
                 }
             }
         }
@@ -172,19 +208,40 @@ impl<'a> Executor<'a> {
             truncated = true;
         }
 
+        // `edges`/`paths` describe exactly the *reported* nodes: one path
+        // per node (parallel to `nodes`), and the deduplicated union of the
+        // edges on those paths in (from, to, type) order. A find/filter-only
+        // pipeline walked no edges, so both stay empty and the skip-if-empty
+        // attributes keep them off the wire.
+        let mut paths: Vec<GraphPath> = Vec::new();
+        let mut edge_set: BTreeMap<(String, String, String), GraphEdgeRef> = BTreeMap::new();
+        for node in &current_nodes {
+            // `current_paths` is written only by `connect` (which covers
+            // every node it reports) and cleared by `find` (which replaces
+            // the working set), so each remaining node has its path.
+            let Some(path) = current_paths.get(&node.id) else {
+                continue;
+            };
+            for edge in &path.edges {
+                edge_set
+                    .entry((edge.from.clone(), edge.to.clone(), edge.edge_type.clone()))
+                    .or_insert_with(|| edge.clone());
+            }
+            paths.push(path.clone());
+        }
+
         let exec_us = start.elapsed().as_micros() as u64;
         let count = current_nodes.len();
 
         Ok(QueryResult {
             nodes: current_nodes,
-            edges: current_edges,
-            paths: current_paths,
+            edges: edge_set.into_values().collect(),
+            paths,
             count,
             legacy: false,
             meta: Some(QueryMeta {
                 exec_us,
                 nodes_visited: self.nodes_visited,
-                plan: None,
                 truncated,
                 matched_before_limit: truncated.then_some(matched),
             }),
@@ -202,12 +259,20 @@ impl<'a> Executor<'a> {
 
     fn execute_find(&mut self, find: &FindOp) -> Result<Vec<GraphNodeRef>, LainError> {
         check_node_types(find)?;
-        let nodes = self.graph.query_nodes(
+        let mut nodes = self.graph.query_nodes(
             find.type_selector.as_ref(),
             find.name.as_ref(),
             find.label_selector.as_ref(),
             find.path.as_deref(),
         );
+        // `id` selects exactly one node — at top level too. It used to be
+        // honoured only inside a `connect` `target`, so a top-level
+        // `{"op":"find","id":"..."}` parsed the id and then ignored it,
+        // answering with every match of the other (often absent) filters:
+        // the whole graph, for a query that asked for one node.
+        if let Some(want) = &find.id {
+            nodes.retain(|n| &n.id == want);
+        }
 
         self.nodes_visited += nodes.len();
 
@@ -217,11 +282,11 @@ impl<'a> Executor<'a> {
                 id: n.id.clone(),
                 node_type: n.node_type.to_string(),
                 name: n.name.clone(),
-                label: if n.is_deprecated {
-                    Some("deprecated".into())
-                } else {
-                    None
-                },
+                // Surface the node's query label, not just `deprecated`:
+                // producers attach `test` and attribute-derived labels too,
+                // and a `filter` on one of those needs to see them. The old
+                // mapping collapsed everything else to `None`.
+                label: n.query_label().map(str::to_string),
             })
             .collect();
 
@@ -232,40 +297,47 @@ impl<'a> Executor<'a> {
         &mut self,
         start_nodes: &[GraphNodeRef],
         connect: &ConnectOp,
-    ) -> Result<TraversalResult, LainError> {
+    ) -> Result<(Vec<GraphNodeRef>, HashMap<String, GraphPath>), LainError> {
         if start_nodes.is_empty() {
-            return Ok((Vec::new(), Vec::new(), Vec::new()));
+            return Ok((Vec::new(), HashMap::new()));
         }
 
         let depth_range = connect.depth.to_range();
 
-        // Handle Direction::Both by traversing both directions and merging
+        // Handle Direction::Both by traversing both directions and merging:
+        // each direction is its own pure walk, so no path ever mixes them.
         let directions: Vec<PetDirection> = match connect.direction {
             Direction::Both => vec![PetDirection::Outgoing, PetDirection::Incoming],
             _ => vec![connect.direction.into()],
         };
 
-        let mut found_nodes = Vec::new();
-        let mut found_edges = Vec::new();
-        let mut found_paths = Vec::new();
+        // One selected candidate per reported node — the best walk's path
+        // under the documented tie-break (`TraversalCandidate::beats`).
+        // `order` keeps first-report order across the walk loop.
+        let mut best: HashMap<String, TraversalCandidate> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
 
         for direction in directions {
             for start_node in start_nodes {
-                let (nodes, edges, paths) = self.bfs_traverse(
+                for cand in self.bfs_traverse(
                     &start_node.id,
                     &connect.edge,
                     depth_range.clone(),
                     direction,
-                )?;
-
-                found_nodes.extend(nodes);
-                found_edges.extend(edges);
-                found_paths.extend(paths);
+                )? {
+                    let replace = match best.get(&cand.node.id) {
+                        None => {
+                            order.push(cand.node.id.clone());
+                            true
+                        }
+                        Some(prev) => cand.beats(prev),
+                    };
+                    if replace {
+                        best.insert(cand.node.id.clone(), cand);
+                    }
+                }
             }
         }
-
-        let mut unique_ids = HashMap::new();
-        found_nodes.retain(|n| unique_ids.insert(n.id.clone(), true).is_none());
 
         // `target`: keep only the reached nodes it selects.
         if let Some(target) = connect.target.as_deref() {
@@ -282,21 +354,34 @@ impl<'a> Executor<'a> {
                 .map(|n| n.id.clone())
                 .filter(|id| target.id.as_ref().is_none_or(|want| want == id))
                 .collect();
-            found_nodes.retain(|n| allowed.contains(&n.id));
+            order.retain(|id| allowed.contains(id));
         }
 
-        self.nodes_visited += found_nodes.len();
+        self.nodes_visited += order.len();
 
-        Ok((found_nodes, found_edges, found_paths))
+        let mut nodes = Vec::with_capacity(order.len());
+        let mut paths = HashMap::with_capacity(order.len());
+        for id in order {
+            if let Some(cand) = best.remove(&id) {
+                nodes.push(cand.node);
+                paths.insert(id, cand.path);
+            }
+        }
+        Ok((nodes, paths))
     }
 
+    /// One pure walk from `start_id` (never mixed-direction): plain BFS
+    /// recording every node's shortest matching-edge hop count, then one
+    /// [`TraversalCandidate`] per node whose hops fall inside the reported
+    /// range. Hops obey the same `depth` filter as node reporting; the walk
+    /// itself runs to `max`, and the start (hop 0) is never reported.
     fn bfs_traverse(
         &mut self,
         start_id: &str,
         edge_selector: &EdgeSelector,
         depth_range: RangeInclusive<u32>,
         direction: PetDirection,
-    ) -> Result<TraversalResult, LainError> {
+    ) -> Result<Vec<TraversalCandidate>, LainError> {
         // Reject an edge name that is not a real EdgeType rather than
         // traversing and returning nothing. A silent empty answer reads
         // as "no such relationship in this codebase" when it actually
@@ -315,29 +400,22 @@ impl<'a> Executor<'a> {
             )));
         }
 
-        let mut found_nodes = Vec::new();
+        // Plain BFS, with the start seeded at hop 0. This used to walk the
+        // queue as a LIFO stack, so a node reachable by paths of different
+        // lengths was reported at its *first-discovery* depth rather than
+        // its shortest hop count — `depth: 2` could miss a node two hops
+        // away that the walk happened to reach via a three-hop detour first,
+        // and "hops exactly 3" could report a node two hops away. The start
+        // was also missing from `visited`, so a cycle or self-loop
+        // re-reported the start node at its loop depth even though start
+        // nodes are never reported (`docs/query-language.md`).
+        let mut hops: HashMap<String, u32> = HashMap::new();
+        let mut discovery: Vec<String> = Vec::new();
+        hops.insert(start_id.to_string(), 0);
+        let mut queue: VecDeque<String> = VecDeque::from([start_id.to_string()]);
 
-        let mut visited = HashMap::new();
-        let mut queue: Vec<TraversalQueueItem> =
-            vec![(start_id.into(), vec![start_id.into()], vec![])];
-
-        while let Some((current_id, path_ids, path_edges)) = queue.pop() {
-            let current_depth = path_ids.len() - 1;
-
-            if depth_range.contains(&(current_depth as u32)) && path_ids.len() > 1 {
-                if let Some(node) = self.graph.get_node(&current_id)? {
-                    found_nodes.push(GraphNodeRef {
-                        id: node.id.clone(),
-                        node_type: node.node_type.to_string(),
-                        name: node.name.clone(),
-                        label: if node.is_deprecated {
-                            Some("deprecated".into())
-                        } else {
-                            None
-                        },
-                    });
-                }
-            }
+        while let Some(current_id) = queue.pop_front() {
+            let depth = hops[&current_id];
 
             // Keep walking while the next hop is within `max`. This used
             // to require the next depth to be *inside* the whole range,
@@ -349,33 +427,126 @@ impl<'a> Executor<'a> {
             // is documented in `docs/query-language.md`, and it answered
             // empty rather than erroring, so it read as "no such
             // relationship" instead of "this never worked".
-            if (current_depth as u32).saturating_add(1) > *depth_range.end() {
+            if depth.saturating_add(1) > *depth_range.end() {
                 continue;
             }
 
-            let neighbors = self.graph.get_neighbors(&current_id, direction);
-
-            for (neighbor, edge) in neighbors {
+            for (neighbor, edge) in self.graph.get_neighbors(&current_id, direction) {
                 if !edge_selector.matches(&edge.edge_type.to_string()) {
                     continue;
                 }
-
-                if visited.contains_key(&neighbor.id) {
+                if hops.contains_key(&neighbor.id) {
                     continue;
                 }
-                visited.insert(neighbor.id.clone(), true);
-
-                let edge_key = (edge.source_id.clone(), edge.target_id.clone());
-                let mut new_path_ids = path_ids.clone();
-                new_path_ids.push(neighbor.id.clone());
-                let mut new_path_edges = path_edges.clone();
-                new_path_edges.push(edge_key);
-
-                queue.push((neighbor.id, new_path_ids, new_path_edges));
+                hops.insert(neighbor.id.clone(), depth + 1);
+                discovery.push(neighbor.id.clone());
+                queue.push_back(neighbor.id.clone());
             }
         }
 
-        Ok((found_nodes, Vec::new(), Vec::new()))
+        let mut found = Vec::new();
+        for id in discovery {
+            let depth = hops[&id];
+            if !depth_range.contains(&depth) {
+                continue;
+            }
+            let path = self.shortest_walk_path(start_id, &id, &hops, edge_selector, direction)?;
+            let Some(node) = self.graph.get_node(&id)? else {
+                continue;
+            };
+            found.push(TraversalCandidate {
+                node: GraphNodeRef {
+                    id: node.id.clone(),
+                    node_type: node.node_type.to_string(),
+                    name: node.name.clone(),
+                    label: node.query_label().map(str::to_string),
+                },
+                hops: depth,
+                seed_id: start_id.to_string(),
+                direction,
+                path,
+            });
+        }
+        Ok(found)
+    }
+
+    /// The walk's selected shortest path from `start_id` to `target_id`,
+    /// built backwards one hop at a time. Each hop goes to the **lowest-id**
+    /// predecessor sitting at the next-lower hop count — the documented
+    /// tie-break — and among parallel matching edges on that pair the
+    /// lexicographically smallest edge type name. Hop counts strictly
+    /// decrease and only the seed sits at hop 0, so the chain terminates at
+    /// `start_id`.
+    fn shortest_walk_path(
+        &self,
+        start_id: &str,
+        target_id: &str,
+        hops: &HashMap<String, u32>,
+        edge_selector: &EdgeSelector,
+        direction: PetDirection,
+    ) -> Result<GraphPath, LainError> {
+        // The walk moves `current -> neighbour` along `direction`; walking
+        // it backwards flips the direction.
+        let backwards = match direction {
+            PetDirection::Outgoing => PetDirection::Incoming,
+            PetDirection::Incoming => PetDirection::Outgoing,
+        };
+
+        let mut node_ids = vec![target_id.to_string()];
+        let mut edge_refs = Vec::new();
+        let mut current = target_id.to_string();
+        while current != start_id {
+            let depth = *hops.get(&current).ok_or_else(|| {
+                LainError::Graph(format!("node {current} was not reached by this walk"))
+            })?;
+            let mut best: Option<(String, GraphEdge)> = None;
+            for (pred, edge) in self.graph.get_neighbors(&current, backwards) {
+                if !edge_selector.matches(&edge.edge_type.to_string()) {
+                    continue;
+                }
+                if hops.get(&pred.id).copied() != Some(depth - 1) {
+                    continue;
+                }
+                let better = match &best {
+                    None => true,
+                    Some((best_id, best_edge)) => {
+                        (pred.id.as_str(), edge.edge_type.to_string())
+                            < (best_id.as_str(), best_edge.edge_type.to_string())
+                    }
+                };
+                if better {
+                    best = Some((pred.id.clone(), edge));
+                }
+            }
+            let Some((pred_id, edge)) = best else {
+                return Err(LainError::Graph(format!(
+                    "no matching predecessor at hop {} on the walk to {target_id}",
+                    depth - 1
+                )));
+            };
+            edge_refs.push(edge_ref(&edge));
+            node_ids.push(pred_id.clone());
+            current = pred_id;
+        }
+        node_ids.reverse();
+        edge_refs.reverse();
+
+        let mut nodes = Vec::with_capacity(node_ids.len());
+        for id in &node_ids {
+            let Some(node) = self.graph.get_node(id)? else {
+                return Err(LainError::Graph(format!("path node {id} vanished")));
+            };
+            nodes.push(GraphNodeRef {
+                id: node.id.clone(),
+                node_type: node.node_type.to_string(),
+                name: node.name.clone(),
+                label: node.query_label().map(str::to_string),
+            });
+        }
+        Ok(GraphPath {
+            nodes,
+            edges: edge_refs,
+        })
     }
 
     fn apply_filter(&self, nodes: &mut Vec<GraphNodeRef>, filter: &FilterOp) {
@@ -525,12 +696,6 @@ impl<'a> Executor<'a> {
             nodes.drain(limit.count..);
         }
     }
-
-    fn apply_limit_edges(&self, edges: &mut Vec<GraphEdgeRef>, limit: &LimitOp) {
-        let start = limit.offset.min(edges.len());
-        let end = (limit.offset.saturating_add(limit.count)).min(edges.len());
-        edges.drain(start..end);
-    }
     // `explain` built a `QueryExplanation` describing a query plan. It had
     // no caller and no test, and nothing else ever constructed the type, so
     // the whole explain path was unreachable.
@@ -543,6 +708,17 @@ impl From<Direction> for PetDirection {
             Direction::Incoming => PetDirection::Incoming,
             Direction::Both => PetDirection::Outgoing,
         }
+    }
+}
+
+/// Wire ref for an edge: `id` is the `(from, to, type)` key, so the same
+/// physical edge always carries the same id wherever it appears.
+fn edge_ref(edge: &GraphEdge) -> GraphEdgeRef {
+    GraphEdgeRef {
+        id: format!("{}->{}:{}", edge.source_id, edge.target_id, edge.edge_type),
+        edge_type: edge.edge_type.to_string(),
+        from: edge.source_id.clone(),
+        to: edge.target_id.clone(),
     }
 }
 

@@ -1362,6 +1362,57 @@ fun Application.module() {
         );
     }
 
+    /// Workspace scans load custom routes and keep them isolated per repo.
+    #[test]
+    fn per_repo_pattern_override_reaches_http_sensor() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "register_custom(\"/custom\", handler)\n";
+        std::fs::write(root.path().join("app.py"), source).unwrap();
+        let graph = GraphDatabase::new(&root.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+        let repo = RepoId::new("http-override-test").unwrap();
+        assert_eq!(
+            scan_workspace_routes(&graph, root.path(), &ns, &repo).unwrap(),
+            0
+        );
+
+        let overrides = root.path().join(".lain/patterns");
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(
+            overrides.join("custom.yaml"),
+            r#"languages:
+  python:
+    - id: custom-route
+      kind: route
+      path_regex: 'register_custom\("([^"]+)"'
+      handler_regex: ',\s*(\w+)\)'
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            scan_workspace_routes(&graph, root.path(), &ns, &repo).unwrap(),
+            1
+        );
+        let routes: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::HttpRoute)
+            .collect();
+        assert_eq!(routes.len(), 1);
+        let Some(ContractFact::Provider(provider)) = routes[0].contract.first() else {
+            panic!("route must carry a provider fact");
+        };
+        assert_eq!(provider.template, "/custom");
+
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("app.py"), source).unwrap();
+        let other_graph = GraphDatabase::new(&other.path().join("graph.bin")).unwrap();
+        assert_eq!(
+            scan_workspace_routes(&other_graph, other.path(), &ns, &repo).unwrap(),
+            0
+        );
+    }
+
     /// An override `.scm` body that is only comments (or blank
     /// lines) carries no query: the walker returns `None` instead
     /// of compiling an empty query.

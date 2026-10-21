@@ -8,10 +8,11 @@ The Command Center Graph tab calls `get_workspace_graph`, not `query_graph`.
 
 - `get_workspace_graph` (`src/server/mcp/definitions.rs:129`) is described as
   "per-workspace graph for the dashboard". It returns `{nodes, edges, truncated}`
-  in a single call, pre-filtered to `Function`/`Method`/`Class` nodes and
-  `Calls`/`Imports` edges, capped at 5000 nodes / 10000 edges
-  (`src/server/mcp/federation_tools/workspace.rs:118-119`), and marks
-  cross-repo edges with `cross_repo: true`.
+  in a single call, pre-filtered to `Function`/`Method`/`Class`/`Topic`/`Schema`
+  nodes and `Calls`/`Imports`/`CrossRepoSameSymbol`/`Produces`/`Consumes`/
+  `PayloadSchema` edges (the named allowlists in
+  `src/server/mcp/federation_tools/workspace.rs`), capped at 5000 nodes /
+  10000 edges, and marks cross-repo edges with `cross_repo: true`.
 - `query_graph` only runs `find` ops over node types and returns no edge set.
   Building a force-directed graph from it would need one call per node to
   discover edges — an N+1 against a tool that was never meant for it.

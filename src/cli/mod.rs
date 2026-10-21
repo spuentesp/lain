@@ -16,6 +16,8 @@ pub mod repos;
 pub mod schema;
 pub mod server;
 pub mod setup;
+#[cfg(unix)]
+pub mod shared_daemon;
 pub mod signal;
 #[cfg(unix)]
 pub mod socket_session;
@@ -256,6 +258,19 @@ pub enum Commands {
         /// `lain oneshot` so the next call reuses the warm graph.
         #[arg(long, hide = true, requires = "socket")]
         daemon: bool,
+        /// Run this instance as a **no-share** (private) instance.
+        /// Client side: never attach to a shared daemon and never hand
+        /// it `add_workspaces` — serve privately on the historical
+        /// fallback path. Daemon side (`--daemon`, or a daemon spawned
+        /// on this instance's behalf): the daemon inherits the
+        /// property (`share: false` in its synthesized config), reports
+        /// `shared: false` on `lain/daemon_info`, is skipped by
+        /// discovery, and refuses `add_workspaces` with `not_shared`.
+        /// `LAIN_MCP_NO_SHARE=1` is the env equivalent. Default is
+        /// shared: one resident daemon per workspace set that exits
+        /// when idle.
+        #[arg(long)]
+        no_share: bool,
     },
     /// Scaffold a `repos.yaml` for the current directory. Walks up for
     /// `.git` (same as `lain mcp`), then writes a minimal

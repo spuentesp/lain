@@ -7,8 +7,15 @@
 //! ## Protocol
 //! Newline-delimited JSON-RPC 2.0, one frame per line, same as stdio. Handled:
 //! `initialize`, `notifications/initialized`, `ping`, `tools/list`,
-//! `tools/call`. `tools/call` runs the same readiness-gate → dispatch →
-//! envelope pipeline as the stdio and HTTP transports
+//! `tools/call`, plus two daemon-only methods the zero-config
+//! multi-agent path (2026-10-17) needs: `lain/daemon_info` (pid +
+//! served workspace set + open connections + `shared` — how a
+//! `lain mcp` client decides to attach; a no-share instance reports
+//! `shared: false` and is skipped) and `tools/call add_workspaces`
+//! (hot-add workspace paths to the served federation, see
+//! [`crate::server::mcp::daemon_tools`]). `tools/call` runs the same
+//! readiness-gate → dispatch → envelope pipeline as the stdio and HTTP
+//! transports
 //! ([`crate::server::mcp::handler::call_tool_in_process`]).
 //!
 //! ## Safety properties (checked by tests below)
@@ -255,9 +262,10 @@ async fn accept_loop(
         let (stream, _addr) = accepted.with_context(|| "accept on shared mcp socket")?;
         let guard = ConnectionGuard::new(&activity);
         let server = server.clone();
+        let activity = activity.clone();
         tokio::spawn(async move {
             let _guard = guard;
-            if let Err(e) = handle_connection(stream, server).await {
+            if let Err(e) = handle_connection(stream, server, activity).await {
                 tracing::debug!("socket connection closed: {e}");
             }
         });
@@ -288,7 +296,11 @@ async fn read_frame_limited<R: AsyncBufReadExt + Unpin>(
     Ok(Some(()))
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream, server: Arc<LainServer>) -> Result<()> {
+async fn handle_connection(
+    stream: tokio::net::UnixStream,
+    server: Arc<LainServer>,
+    activity: Arc<Activity>,
+) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
@@ -330,14 +342,27 @@ async fn handle_connection(stream: tokio::net::UnixStream, server: Arc<LainServe
         let params = request.get("params").cloned().unwrap_or(Value::Null);
         // A notification has no id and expects no response.
         let is_notification = id.is_none();
-        let response = dispatch(method, params, id.unwrap_or(Value::Null), &server).await;
+        let response = dispatch(
+            method,
+            params,
+            id.unwrap_or(Value::Null),
+            &server,
+            &activity,
+        )
+        .await;
         if !is_notification {
             write_frame(&mut write_half, &response).await?;
         }
     }
 }
 
-async fn dispatch(method: &str, params: Value, id: Value, server: &Arc<LainServer>) -> Value {
+async fn dispatch(
+    method: &str,
+    params: Value,
+    id: Value,
+    server: &Arc<LainServer>,
+    activity: &Arc<Activity>,
+) -> Value {
     let mut response = json!({"jsonrpc": "2.0", "id": id});
 
     match method {
@@ -357,18 +382,37 @@ async fn dispatch(method: &str, params: Value, id: Value, server: &Arc<LainServe
         "ping" => {
             response["result"] = json!({});
         }
+        // Discovery handshake for the zero-config attach-or-start path:
+        // who is behind this socket and which workspaces does it serve.
+        // `shared` (from the instance's own `repos.yaml`) marks a
+        // no-share instance: discovery must skip it and never hand it
+        // `add_workspaces`. Not part of the MCP surface — bridges never
+        // forward it.
+        "lain/daemon_info" => {
+            let workspaces: Vec<Value> =
+                crate::server::mcp::daemon_tools::served_workspaces(server)
+                    .iter()
+                    .map(|p| json!(p.display().to_string()))
+                    .collect();
+            response["result"] = json!({
+                "pid": std::process::id(),
+                "version": env!("CARGO_PKG_VERSION"),
+                "workspaces": workspaces,
+                "open_connections": activity.open.load(Ordering::SeqCst),
+                "shared": crate::server::mcp::daemon_tools::instance_shared(server),
+            });
+        }
         "tools/list" => {
-            let tool_defs = crate::server::mcp::definitions::dump_tools_schema(&[]);
-            let tools: Vec<Value> = tool_defs
-                .into_iter()
-                .map(|def| {
-                    json!({
-                        "name": def.get("name").cloned().unwrap_or(Value::Null),
-                        "description": def.get("description").cloned().unwrap_or(Value::Null),
-                        "inputSchema": def.get("inputSchema").cloned().unwrap_or(json!({})),
-                    })
-                })
-                .collect();
+            // Same surface builder as stdio and HTTP
+            // (`handler::advertised_tools_json`): inert-tool filter,
+            // repo-scope advertising, conditional groups, and the
+            // `LAIN_TOOL_PROFILE` gate. A bridged client must see
+            // exactly what a privately served one would.
+            let tools = crate::server::mcp::handler::advertised_tools_json(
+                server.ingest().tool_executor(),
+                server.federation().map(|f| f.as_ref()),
+                server.workspaces_handle().is_some(),
+            );
             response["result"] = json!({"tools": tools});
         }
         "tools/call" => {
@@ -382,14 +426,44 @@ async fn dispatch(method: &str, params: Value, id: Value, server: &Arc<LainServe
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let result =
-                crate::server::mcp::handler::call_tool_in_process(server, &name, arguments).await;
-            response["result"] = serde_json::to_value(&result).unwrap_or_else(|e| {
-                json!({
-                    "content": [{"type": "text", "text": format!("could not serialize result: {e}")}],
-                    "isError": true,
-                })
-            });
+            // Daemon-side `add_workspaces`: hot-add workspace paths to
+            // the served federation. Handled here (not in
+            // `dispatch_tool_call`) because it is socket-transport
+            // specific, async, and intentionally unadvertised — see
+            // `daemon_tools`' module docs.
+            if name == "add_workspaces" {
+                let args = Value::Object(arguments);
+                let outcome =
+                    crate::server::mcp::daemon_tools::run_add_workspaces(server, &args).await;
+                let (text, is_error) = match outcome {
+                    Ok(v) => (
+                        serde_json::to_string(&v).unwrap_or_else(|e| {
+                            format!("{{\"ok\":false,\"message\":\"serialize: {e}\"}}")
+                        }),
+                        false,
+                    ),
+                    Err(v) => (
+                        serde_json::to_string(&v).unwrap_or_else(|e| {
+                            format!("{{\"ok\":false,\"message\":\"serialize: {e}\"}}")
+                        }),
+                        true,
+                    ),
+                };
+                response["result"] = json!({
+                    "content": [{"type": "text", "text": text}],
+                    "isError": is_error,
+                });
+            } else {
+                let result =
+                    crate::server::mcp::handler::call_tool_in_process(server, &name, arguments)
+                        .await;
+                response["result"] = serde_json::to_value(&result).unwrap_or_else(|e| {
+                    json!({
+                        "content": [{"type": "text", "text": format!("could not serialize result: {e}")}],
+                        "isError": true,
+                    })
+                });
+            }
         }
         _ => {
             response["error"] = json!({

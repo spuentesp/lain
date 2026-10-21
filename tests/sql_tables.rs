@@ -564,6 +564,7 @@ def find_users():
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "inventory_svc".into(),
@@ -573,6 +574,7 @@ def find_users():
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
         ],
         databases: vec![DatabaseDecl {

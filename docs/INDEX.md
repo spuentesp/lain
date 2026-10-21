@@ -26,6 +26,9 @@ single-repository setup, federation, and basic troubleshooting.
 ## Understand and maintain it
 
 - [Architecture](ARCHITECTURE.md): system boundaries and design choices
+- [Protocol coverage](protocol-coverage.md): per-`ContractKey` kind
+  sensors, joiner resolvers, binding grammar, and dashboard visibility —
+  plus the bus/system detection backlog
 - [Technical reference](TECHNICAL.md): modules, data structures, and internals
 - [CI](CI.md): checks run in continuous integration
 - [Branching](BRANCHING.md): integration, release, and protection policy

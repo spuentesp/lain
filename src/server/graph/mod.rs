@@ -400,6 +400,21 @@ pub struct GraphDatabase {
     /// durable graph state. Cleared by a later successful pass and by
     /// [`Self::reset`].
     cochange_failure: Arc<RwLock<Option<String>>>,
+    /// The commit whose `Calls` edges are fully present in this serving
+    /// table. A mutating indexing pass replaces nodes in place —
+    /// `replace_nodes_for_paths` takes every incident edge with the old
+    /// node — and only re-inserts `Calls` edges in its resolve phase, so
+    /// mid-pass this graph answers `get_call_sites` with false
+    /// "leaf"/empty verdicts while the nodes themselves still resolve.
+    /// Ingest clears the marker when a pass starts rewriting nodes and
+    /// stamps it again once the pass's call-edge insert phases have
+    /// landed; `get_capabilities` maps `call_graph` to `ready` only while
+    /// it is set, so a client that trusts the capability never queries a
+    /// half-built call graph. Persisted with the graph (`persist::GraphState`)
+    /// and restored on load — a save that lands mid-pass records a cleared
+    /// stamp, so a warm boot does not publish `ready` over the torn graph.
+    /// Shared across clones.
+    calls_published_for: Arc<RwLock<Option<String>>>,
 }
 
 /// RAII marker for "a mutating indexing pass is running on this graph".
@@ -469,6 +484,73 @@ impl Freshness {
     }
 }
 
+/// Dedup identity for graph edges.
+///
+/// Most types are pair-scoped: one edge per `(source, target,
+/// edge_type)`, whatever `site` says. That is the historical contract —
+/// `Contains` / `Calls` re-emits collapse (`None == None`), and the SQL
+/// sensor's site-bearing `ReadsTable` / `WritesTable` edges deliberately
+/// collapse to one per `(function, table)`
+/// (`tests/sql_tables.rs::d4_cte_subselect_join_emit_reads_to_every_table`).
+///
+/// The exception is the per-SITE leg types `Produces` / `Consumes`:
+/// their `SourceSite` IS the provenance contract (one edge per
+/// publish/subscribe site, `tests/event_hub_e2e.rs`), so `site` is part
+/// of their identity and two sites on one `(source, target)` both
+/// survive. `insert_edges_batch` and `upsert_edge` (WAL replay) share
+/// this rule — a looser key on either path silently drops a site.
+fn same_edge_identity(existing: &GraphEdge, incoming: &GraphEdge) -> bool {
+    if existing.edge_type != incoming.edge_type {
+        return false;
+    }
+    if site_is_identity(&incoming.edge_type) {
+        existing.site == incoming.site
+    } else {
+        true
+    }
+}
+
+/// Whether `site` is part of this edge type's identity: the per-SITE
+/// `Produces` / `Consumes` legs only. Single switch behind both
+/// [`same_edge_identity`] and [`edge_identity_key`] so the pair-scoped
+/// / per-site split cannot drift between the WAL dedup path and the
+/// federation reconcile.
+fn site_is_identity(edge_type: &EdgeType) -> bool {
+    matches!(edge_type, EdgeType::Produces | EdgeType::Consumes)
+}
+
+/// Set-membership form of [`same_edge_identity`]: the key two edges
+/// must share to be the same edge — `(edge_type, source_id,
+/// target_id)`, plus `site` for the per-SITE `Produces` / `Consumes`
+/// legs (`None` elsewhere, where `site` is not identity).
+///
+/// The federation reconcile (`FederatedIndex::project_edges`) diffs
+/// the backend's repo-owned edges against the incoming projection
+/// with this key. A looser triple-only key leaves a moved
+/// site-variant (same `(source, target)`, new `SourceSite`) alive
+/// beside the new leg — the phantom duplicate only a full reindex
+/// healed.
+pub(crate) fn edge_identity_key(
+    edge: &GraphEdge,
+) -> (
+    EdgeType,
+    String,
+    String,
+    Option<crate::federation::contracts::model::SourceSite>,
+) {
+    let site = if site_is_identity(&edge.edge_type) {
+        edge.site.clone()
+    } else {
+        None
+    };
+    (
+        edge.edge_type.clone(),
+        edge.source_id.clone(),
+        edge.target_id.clone(),
+        site,
+    )
+}
+
 impl GraphDatabase {
     pub fn new(memory_path: &Path) -> Result<Self, LainError> {
         let db = Self::empty(memory_path);
@@ -521,6 +603,7 @@ impl GraphDatabase {
             pending_external_edges: Arc::new(parking_lot::Mutex::new(Vec::new())),
             write_pass_active: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cochange_failure: Arc::new(RwLock::new(None)),
+            calls_published_for: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -1386,14 +1469,17 @@ impl GraphDatabase {
                         .get(&edge.target_id)
                         .map(|r| *r.value())
                         .unwrap();
-                    // One edge per (source, target, type). Re-inserting an
-                    // existing edge — every incremental pass re-emits the
-                    // folder `Contains` edges it keeps, and re-resolving
-                    // unchanged callers re-emits their calls — piled up
-                    // duplicates that inflated every count.
+                    // One edge per `same_edge_identity`: pair-scope for
+                    // most types (re-inserting an existing edge — every
+                    // incremental pass re-emits the folder `Contains`
+                    // edges it keeps, and re-resolving unchanged callers
+                    // re-emits their calls — piled up duplicates that
+                    // inflated every count), plus `site` for the
+                    // per-SITE `Produces`/`Consumes` legs so a second
+                    // site's `SourceSite` is not silently dropped.
                     let exists = graph
                         .edges_connecting(s, t)
-                        .any(|e| e.weight().edge_type == edge.edge_type);
+                        .any(|e| same_edge_identity(e.weight(), edge));
                     if !exists {
                         graph.add_edge(s, t, edge.clone());
                     }
@@ -1426,12 +1512,15 @@ impl GraphDatabase {
         std::mem::take(&mut *self.pending_external_edges.lock())
     }
 
-    /// Insert an edge idempotently: same `(source, target, edge_type)`
-    /// triple is added at most once. `project_repo` runs on every
+    /// Insert an edge idempotently per `same_edge_identity` (pair +
+    /// type for most edges, plus `site` for the per-SITE
+    /// `Produces`/`Consumes` legs). `project_repo` runs on every
     /// add_repo / reload / watcher-triggered index, so without dedup
     /// the federation backend accumulates N copies of each edge over
     /// the lifetime of the server (observed: `total_edges` = 127k
-    /// instead of the per-repo 15k on the lain repo itself).
+    /// instead of the per-repo 15k on the lain repo itself). WAL
+    /// replay routes `UpsertEdge` through here, so this predicate is
+    /// deliberately the same one `insert_edges_batch` uses.
     pub fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         let graph = self.graph.read();
         let source_idx = self.index_map.get(&edge.source_id).map(|r| *r.value());
@@ -1439,7 +1528,7 @@ impl GraphDatabase {
         if let (Some(s), Some(t)) = (source_idx, target_idx) {
             if graph
                 .edges_connecting(s, t)
-                .any(|e| e.weight().edge_type == edge.edge_type)
+                .any(|e| same_edge_identity(e.weight(), &edge))
             {
                 return Ok(());
             }
@@ -1754,14 +1843,14 @@ impl GraphDatabase {
                         return false;
                     }
                 }
-                // Label filter (is_deprecated is the only label for now)
+                // Label filter. Matches the node's query label —
+                // `deprecated` when `is_deprecated` is set, else whatever
+                // attribute-derived label it carries (`test`, …). It used
+                // to see only the `deprecated` flag, so a `find` by any
+                // other label answered `count: 0` on a graph full of
+                // matching nodes.
                 if let Some(sel) = label_selector {
-                    let label = if n.is_deprecated {
-                        Some("deprecated")
-                    } else {
-                        None
-                    };
-                    if !sel.matches(label) {
+                    if !sel.matches(n.query_label()) {
                         return false;
                     }
                 }
@@ -2236,6 +2325,32 @@ impl GraphDatabase {
         self.cochange_failure.read().clone()
     }
 
+    /// The commit whose `Calls` edges are currently all served by this
+    /// graph, or `None` while a mutating pass is between "nodes are being
+    /// replaced" and "call edges re-inserted". `get_capabilities` gates
+    /// the `call_graph` capability on this so `ready` never claims more
+    /// than the graph can answer. The commit key is informational at read
+    /// time (consumers check `.is_some()`); it must be compared against
+    /// the serving commit if concurrency ever loosens.
+    pub fn calls_published_for(&self) -> Option<String> {
+        self.calls_published_for.read().clone()
+    }
+
+    /// Called when a mutating indexing pass starts rewriting nodes. The
+    /// replaced nodes take their incident `Calls` edges with them, so any
+    /// previously published commit is no longer fully answered until the
+    /// pass's resolve phases finish ([`Self::mark_calls_published`]).
+    pub fn clear_calls_published(&self) {
+        *self.calls_published_for.write() = None;
+    }
+
+    /// Called once a pass's call-edge insert phases have landed for
+    /// `commit`: `get_call_sites` answers for that commit are complete
+    /// again (relative to what the pass scanned).
+    pub fn mark_calls_published(&self, commit: &str) {
+        *self.calls_published_for.write() = Some(commit.to_string());
+    }
+
     pub fn get_last_commit(&self) -> Result<Option<String>, LainError> {
         Ok(self.last_commit.read().clone())
     }
@@ -2277,6 +2392,9 @@ impl GraphDatabase {
         // A wiped graph will be rebuilt by a fresh analysis pass; a
         // stale failure from before the reset must not outlive it.
         self.clear_cochange_failure();
+        // Same for the call-graph publication marker: nothing is
+        // answered until the rebuild's resolve phases land.
+        self.clear_calls_published();
         Ok(())
     }
 
@@ -2426,14 +2544,27 @@ impl GraphDatabase {
     /// Build a snapshot of this graph in its on-disk representation.
     /// Used by the save/load/export paths to keep the snapshot
     /// construction in one place.
+    ///
+    /// Everything is sampled under ONE `graph.read()` guard: mutations
+    /// hold `graph.write()` while they touch `index_map`, `last_commit`
+    /// and the publication stamp, so a snapshot can never mix a torn
+    /// graph with a stale stamp (the periodic WAL checkpoint raced that
+    /// pairing) nor a graph with dangling `index_map` entries.
     fn build_state(&self) -> persist::GraphState {
+        let graph_guard = self.graph.read();
+        let graph = graph_guard.clone();
         let index_map: HashMap<String, NodeIndex> = self
             .index_map
             .iter()
             .map(|r| (r.key().clone(), *r.value()))
             .collect();
         let last_commit = self.last_commit.read().clone();
-        persist::GraphState::new(self.graph.read().clone(), index_map, last_commit)
+        // The stamp is written as *present* even when cleared: a save that
+        // lands mid-pass records `Some(None)`, which the loader must read
+        // as "do not publish" rather than as a pre-stamp file.
+        let calls_published_for = self.calls_published_for.read().clone();
+        drop(graph_guard);
+        persist::GraphState::new(graph, index_map, last_commit, calls_published_for)
     }
 
     /// Save graph to disk asynchronously (non-blocking)
@@ -2653,6 +2784,17 @@ impl GraphDatabase {
             self.name_index.insert(k, v);
         }
         drop(graph);
+        // Trust the persisted stamp when the file carried one: `None` there
+        // means the save landed mid-pass — nodes replaced, `Calls` edges not
+        // yet re-inserted — and publishing would hand out false "leaf"
+        // answers. Files written before the stamp existed decode without it
+        // (`persist::decode_state`'s pre-stamp fallback); for those, fall
+        // back to the pre-stamp inference — a persisted graph was treated as
+        // complete for its `last_commit` — so existing warm boots are not
+        // stuck at `WarmingUp`.
+        *self.calls_published_for.write() = state
+            .calls_published_for
+            .unwrap_or_else(|| state.last_commit.clone());
         *self.last_commit.write() = state.last_commit;
         Ok(())
     }
@@ -3899,6 +4041,158 @@ mod load_from_disk_name_index_tests {
     }
 }
 
+// ─── Call-graph publication stamp across save/load ─────────────────────────
+//
+// The stamp (`calls_published_for`) is the honesty gate behind
+// `get_capabilities.call_graph`. A persist can land mid-pass — the map
+// phase saves after every batch flush, before the resolve phases re-insert
+// `Calls` edges — so the on-disk graph may hold replaced nodes without
+// their call edges. A warm boot must restore the stamp the save recorded,
+// never infer `ready` from `last_commit`.
+
+#[cfg(test)]
+mod calls_published_persist_tests {
+    use super::*;
+    use crate::schema::{GraphNode, NodeType};
+
+    fn caller_callee() -> (GraphNode, GraphNode) {
+        let caller = GraphNode::new(NodeType::Function, "caller".into(), "src/a.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "callee".into(), "src/b.rs".into());
+        (caller, callee)
+    }
+
+    /// A kill mid-reduce, simulated deterministically at the state level:
+    /// a complete pass is committed and saved, then a second pass clears
+    /// the stamp and replaces nodes (taking their `Calls` edges) before its
+    /// resolve phase runs — and the process dies at the batch flush's save.
+    /// The warm boot must NOT report the call graph published: the loaded
+    /// graph answers `get_call_sites("callee")` with a false leaf, so the
+    /// capability must stay `warming_up` until a pass completes.
+    ///
+    /// RED before the persisted stamp: `apply_state_loaded` inferred the
+    /// stamp from `last_commit` (the previous complete commit), so the
+    /// warm boot published `ready` over the torn graph — the bug on the
+    /// restart path.
+    #[test]
+    fn a_mid_pass_save_does_not_publish_call_graph_on_warm_boot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        let (caller, callee) = caller_callee();
+
+        // Complete pass at commit-a: nodes + `Calls` edge + stamp + commit.
+        let db = GraphDatabase::new(&path).expect("db");
+        db.insert_nodes_batch(&[caller.clone(), callee.clone()])
+            .expect("insert");
+        db.insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            caller.id.clone(),
+            callee.id.clone(),
+        ))
+        .expect("call edge");
+        db.mark_calls_published("commit-a");
+        db.set_last_commit("commit-a".into()).expect("commit");
+        db.save_to_disk_sync().expect("save complete pass");
+        assert_eq!(db.calls_published_for().as_deref(), Some("commit-a"));
+
+        // Second pass starts rewriting nodes for commit-b: the stamp is
+        // cleared at pass start, `replace_nodes_for_paths` takes the old
+        // node's incident `Calls` edge with it, and the batch flush saves
+        // before the resolve phase re-inserts call edges.
+        db.clear_calls_published();
+        let mut caller_b = caller.clone();
+        caller_b.line_start = Some(1);
+        db.replace_nodes_for_paths(&[caller.path.clone()], &[caller_b])
+            .expect("replace caller");
+        assert!(
+            db.get_edges_from(&caller.id).unwrap().is_empty(),
+            "precondition: the replacement dropped the Calls edge"
+        );
+        db.save_to_disk_sync().expect("mid-pass save");
+        drop(db);
+
+        // Warm boot after the kill: the persisted graph is torn and the
+        // stamp was cleared when it was written.
+        let booted = GraphDatabase::new(&path).expect("warm boot");
+        assert_eq!(
+            booted.get_last_commit().expect("last_commit").as_deref(),
+            Some("commit-a"),
+            "precondition: last_commit still names the previous complete commit"
+        );
+        assert_eq!(
+            booted.calls_published_for(),
+            None,
+            "warm boot must not publish the call graph over a mid-pass save: \
+             the loaded graph answers get_call_sites('callee') as a false leaf"
+        );
+    }
+
+    /// The restore path consults the persisted stamp, not `last_commit`:
+    /// a state whose stamp names a different commit than `last_commit`
+    /// reloads with the stamp it was saved under. RED before the persisted
+    /// stamp, which unconditionally overwrote the gate with `last_commit`.
+    #[test]
+    fn warm_boot_restores_the_persisted_stamp_not_last_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        let (caller, callee) = caller_callee();
+
+        let db = GraphDatabase::new(&path).expect("db");
+        db.insert_nodes_batch(&[caller, callee]).expect("insert");
+        db.mark_calls_published("stamp-commit");
+        db.set_last_commit("last-commit".into()).expect("commit");
+        db.save_to_disk_sync().expect("save");
+        drop(db);
+
+        let booted = GraphDatabase::new(&path).expect("warm boot");
+        assert_eq!(
+            booted.calls_published_for().as_deref(),
+            Some("stamp-commit")
+        );
+        assert_eq!(
+            booted.get_last_commit().expect("last_commit").as_deref(),
+            Some("last-commit")
+        );
+    }
+
+    /// A state WITHOUT the stamp field — the bytes an older Lain wrote —
+    /// loads cleanly and falls back to the pre-stamp inference (published
+    /// for `last_commit`), so existing graphs are not stuck at `WarmingUp`
+    /// on every warm boot. This is the old-format-load proof: no
+    /// `PATH_FORMAT_VERSION` bump, no `lain reindex` required.
+    #[test]
+    fn a_pre_stamp_graph_loads_and_infers_publication_from_last_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        let (caller, callee) = caller_callee();
+
+        let db = GraphDatabase::new(&path).expect("db");
+        db.insert_nodes_batch(&[caller, callee]).expect("insert");
+        db.mark_calls_published("commit-a");
+        db.set_last_commit("commit-a".into()).expect("commit");
+
+        // Rewrite the file in the pre-stamp wire layout, exactly as an
+        // older Lain would have left it.
+        let state = db.build_state();
+        let bytes = persist::encode_pre_stamp_state_for_tests(
+            state.graph,
+            state.index_map,
+            state.last_commit,
+        )
+        .expect("encode pre-stamp");
+        std::fs::write(&path, &bytes).expect("write pre-stamp graph");
+        drop(db);
+
+        let booted = GraphDatabase::new(&path).expect("warm boot pre-stamp");
+        assert_eq!(
+            booted.calls_published_for().as_deref(),
+            Some("commit-a"),
+            "a pre-stamp graph must fall back to the last_commit inference, \
+             not stay unpublished"
+        );
+        assert_eq!(booted.node_count(), 2);
+    }
+}
+
 // ─── Task 9 — BFS depth-gate regression tests
 //
 //     The mutation harness reports 4 survivors in
@@ -4364,6 +4658,75 @@ mod survivor_pin_tests {
         );
     }
 
+    /// `site` is in the dedup identity for the per-SITE leg types:
+    /// two `Produces`/`Consumes` legs of the same (pair, type) must
+    /// BOTH survive, or the second site's `SourceSite` is silently
+    /// dropped. The identical leg (same site) still dedupes.
+    #[test]
+    fn insert_edges_batch_keeps_site_variants_on_the_same_pair() {
+        use crate::federation::contracts::model::SourceSite;
+        let g = db("batch_dedup_sites");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Topic, "kafka/t".into(), "src/a.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        let leg = |line: u32| {
+            let mut e = GraphEdge::new(EdgeType::Produces, a_id.clone(), b_id.clone());
+            e.site = Some(SourceSite {
+                path: "src/a.rs".into(),
+                line,
+            });
+            e
+        };
+        g.insert_edges_batch(&[leg(2)]).unwrap();
+        g.insert_edges_batch(&[leg(3)]).unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "one edge per site: a second site's SourceSite must not be \
+             collapsed into the first"
+        );
+
+        g.insert_edges_batch(&[leg(3)]).unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "the identical leg (same site) must still dedupe"
+        );
+    }
+
+    /// Pair-scope for non-leg types is unchanged even when they carry
+    /// a `site`: the SQL sensor's `ReadsTable`/`WritesTable` contract
+    /// is ONE edge per `(function, table)` regardless of which
+    /// statement's site landed on it
+    /// (`tests/sql_tables.rs::d4_cte_subselect_join_emit_reads_to_every_table`).
+    #[test]
+    fn insert_edges_batch_collapses_site_variants_for_pair_scoped_types() {
+        use crate::federation::contracts::model::SourceSite;
+        let g = db("batch_dedup_pair_scope");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Table, "users".into(), "src/a.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        let leg = |line: u32| {
+            let mut e = GraphEdge::new(EdgeType::ReadsTable, a_id.clone(), b_id.clone());
+            e.site = Some(SourceSite {
+                path: "src/a.rs".into(),
+                line,
+            });
+            e
+        };
+        g.insert_edges_batch(&[leg(2)]).unwrap();
+        g.insert_edges_batch(&[leg(3)]).unwrap();
+        assert_eq!(
+            g.edge_count(),
+            1,
+            "a pair-scoped type must still collapse across sites"
+        );
+    }
+
     /// `upsert_edge` is idempotent per (pair, type) and still admits
     /// a different type between the same two nodes.
     #[test]
@@ -4393,6 +4756,38 @@ mod survivor_pin_tests {
             2,
             "a different edge type must not be treated as a duplicate"
         );
+    }
+
+    /// `upsert_edge` shares `same_edge_identity` with
+    /// `insert_edges_batch` — WAL replay routes `UpsertEdge` through
+    /// this method, so a looser key here would silently drop a per-site
+    /// leg on every crash recovery.
+    #[test]
+    fn upsert_edge_keeps_site_variants_on_the_same_pair() {
+        use crate::federation::contracts::model::SourceSite;
+        let g = db("upsert_sites");
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/a.rs".into());
+        let b = GraphNode::new(NodeType::Topic, "kafka/t".into(), "src/a.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        let leg = |line: u32| {
+            let mut e = GraphEdge::new(EdgeType::Produces, a_id.clone(), b_id.clone());
+            e.site = Some(SourceSite {
+                path: "src/a.rs".into(),
+                line,
+            });
+            e
+        };
+        g.upsert_edge(leg(2)).unwrap();
+        g.upsert_edge(leg(3)).unwrap();
+        assert_eq!(
+            g.edge_count(),
+            2,
+            "replay must keep both per-site legs on the same pair"
+        );
+        g.upsert_edge(leg(3)).unwrap();
+        assert_eq!(g.edge_count(), 2, "the identical leg must still dedupe");
     }
 
     /// `find_path` reports the path it actually walked.

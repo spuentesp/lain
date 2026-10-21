@@ -681,9 +681,9 @@ When `lain server --transport http` is running, the Command Center at
 `GET /` shows:
 - Active workspace panel (name + members + their paths/healths)
 - Config panel (paths + repo counts)
-- Per-workspace D3 force-directed graph view (Functions/Methods/Classes
-  + Calls/Imports, color by `repo_id`, dashed lines for cross-repo
-  Calls)
+- Per-workspace D3 force-directed graph view (Functions/Methods/Classes,
+  Topic hubs and their Produces/Consumes legs, + Calls/Imports, color by
+  `repo_id`, dashed lines for cross-repo Calls)
 
 See [`docs/command-center.md`](command-center.md).
 

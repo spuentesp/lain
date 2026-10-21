@@ -121,6 +121,7 @@ fn orders_config() -> ContractFederationConfig {
             env: vec![],
             base_path: None,
             route_prefixes: vec![],
+            provides_graphql: true,
         }],
         http_clients: vec![],
         generic_keys: vec![],

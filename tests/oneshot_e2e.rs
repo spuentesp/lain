@@ -236,6 +236,17 @@ fn oneshot_exits_nonzero_on_tool_error() {
 /// B1: the first `oneshot` leaves a shared daemon behind, the second reuses
 /// it, and the daemon removes itself after the idle window. Isolated run dir
 /// (short path: `sun_path` is ~104 bytes) so nothing leaks into the user's.
+///
+/// Timing is deterministic, not wall-clock luck: a holder connection is
+/// opened the moment the daemon's socket appears and kept open through
+/// both calls — the daemon's idle shutdown requires zero open
+/// connections, so it cannot exit mid-assertions no matter how the test
+/// thread is scheduled. Dropping the holder is what *starts* the idle
+/// window; socket removal and process death are then observed by
+/// polling with generous bounded deadlines (no fixed sleeps).
+/// `LAIN_SHARED_IDLE_SECS=30` so the daemon cannot idle-exit in the gap
+/// between the first call's connection closing and the holder
+/// connecting, even if the test thread is starved under load.
 #[cfg(unix)]
 #[test]
 fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
@@ -259,19 +270,30 @@ fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
             .env("XDG_RUNTIME_DIR", run.path())
             .env("HOME", home.path())
             .env("XDG_STATE_HOME", home.path())
-            .env("LAIN_SHARED_IDLE_SECS", "3")
+            .env("LAIN_SHARED_IDLE_SECS", "30")
             .stderr(Stdio::null())
             .output()
             .unwrap();
         assert!(out.status.success(), "oneshot failed");
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
+    // The daemon's MCP socket is `lain-mcp-<16hex>.sock`. The run dir
+    // also holds the daemon's hot-reload signal socket
+    // (`lain-daemon-…`), so "first .sock" is not good enough — the
+    // holder must pin (and ping) the MCP socket specifically.
+    fn is_mcp_sock(p: &std::path::Path) -> bool {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("lain-mcp-"))
+            .and_then(|s| s.strip_suffix(".sock"))
+            .is_some_and(|stem| stem.len() == 16 && stem.chars().all(|c| c.is_ascii_alphanumeric()))
+    }
     let socket = || {
         std::fs::read_dir(&sock_dir)
             .ok()?
             .flatten()
             .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|x| x == "sock"))
+            .find(|p| is_mcp_sock(p))
     };
 
     // The daemon must not outlive this test: under `cargo llvm-cov` a process
@@ -303,8 +325,38 @@ fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
     }
     let mut reaper = ReapDaemon(None);
 
+    // Pre-armed holder: connect to the daemon's socket the moment it
+    // exists (it is created at bind time, while the first call is still
+    // in flight) and keep the connection open. An open connection keeps
+    // the daemon's activity counter non-zero, which pins the idle
+    // shutdown off until we deliberately drop it below.
+    let holder = {
+        let sock_dir = sock_dir.clone();
+        std::thread::spawn(move || -> Option<UnixStream> {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let found = std::fs::read_dir(&sock_dir).ok().and_then(|entries| {
+                    entries.flatten().map(|e| e.path()).find(|p| is_mcp_sock(p))
+                });
+                if let Some(s) = found {
+                    if let Ok(stream) = UnixStream::connect(&s) {
+                        return Some(stream);
+                    }
+                }
+                if Instant::now() > deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+
     let first = oneshot();
-    let sock = socket().expect("first call must leave a shared server's socket behind");
+    let held = holder
+        .join()
+        .expect("holder thread must not panic")
+        .expect("first call must leave a shared server's socket behind");
+    let sock = socket().expect("the socket file must exist while the holder is connected");
     let pid_file = std::path::PathBuf::from(format!("{}.pid", sock.display()));
     reaper.0 = std::fs::read_to_string(&pid_file)
         .ok()
@@ -313,21 +365,46 @@ fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
         reaper.0.is_some(),
         "the daemon must record its pid at {pid_file:?}"
     );
-    assert!(
-        UnixStream::connect(&sock).is_ok(),
-        "the shared server must still be alive after the first call"
-    );
+
+    // The shared server must still be alive after the first call — proven
+    // by a round-trip on the held connection (the daemon must answer a
+    // ping), not by a bare connect that only shows the kernel queued us.
+    {
+        use std::io::{BufRead, BufReader, Write};
+        let mut writer = held.try_clone().expect("clone held stream");
+        let mut reader = BufReader::new(held.try_clone().expect("clone held stream"));
+        writer
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+            .expect("write ping");
+        writer.flush().expect("flush ping");
+        reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("set read timeout");
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .expect("shared daemon must answer the ping");
+        assert!(
+            line.contains("\"result\""),
+            "shared daemon must answer ping with a result; got: {line:?}"
+        );
+    }
 
     let second = oneshot();
     assert_eq!(first, second, "the shared server must answer the same");
 
-    // Idle shutdown. Do NOT probe the socket while waiting: every connection
-    // counts as activity and would keep the daemon alive. Wait out the idle
-    // window (3s) plus margin, then check once.
-    std::thread::sleep(Duration::from_secs(8));
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Drop the held connection: this is the deterministic start of the
+    // idle window (LAIN_SHARED_IDLE_SECS=30). Do NOT probe the socket
+    // after this point: every connection counts as activity and would
+    // keep the daemon alive.
+    drop(held);
+
+    // Idle shutdown, observed by polling for the socket's removal with a
+    // generous bounded deadline (file checks only — no connects).
+    let deadline = Instant::now() + Duration::from_secs(90);
     while sock.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(250)); // file check only: no connect
+        std::thread::sleep(Duration::from_millis(250));
     }
     assert!(
         !sock.exists(),
@@ -340,7 +417,7 @@ fn shared_daemon_outlives_the_first_call_and_exits_when_idle() {
     // Removing the socket is not exiting: wait for the process itself to be
     // gone, so its coverage profile is fully written before the harness moves on.
     let pid = reaper.0.clone().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while alive(&pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }

@@ -1,22 +1,38 @@
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Write `bytes` to `path` atomically by writing to a sibling temp
-/// file first and renaming it over `path`. Creates the parent
-/// directory if it doesn't exist. The temp file uses
-/// `path.with_extension("tmp")` for compatibility with every
-/// existing caller (the prior `repos.rs::write_atomic` used
-/// `.{name}.tmp`; the canonical helper uses `with_extension` to
-/// match `state.rs` and `presence.rs`, and the rename semantics
-/// are equivalent).
+/// Unique sibling temp file for an atomic write. The name carries the
+/// pid and a per-process counter: two concurrent writers of the same
+/// target used to share `path.with_extension("tmp")` and tear each
+/// other's file apart on the rename.
+fn tmp_sibling(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(
+        ".tmp.{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    path.with_file_name(name)
+}
+
+/// Write `bytes` to `path` atomically by writing to a uniquely named
+/// sibling temp file first and renaming it over `path`. Creates the
+/// parent directory if it doesn't exist. The rename is atomic, so a
+/// reader never sees a torn file and concurrent writers cannot clobber
+/// each other's temp file.
 pub fn write_file_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
-    let tmp = path.with_extension("tmp");
+    let tmp = tmp_sibling(path);
     fs::write(&tmp, bytes)?;
     fs::rename(&tmp, path)
 }
@@ -30,7 +46,7 @@ pub async fn tokio_write_file_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> io
             tokio::fs::create_dir_all(parent).await?;
         }
     }
-    let tmp = path.with_extension("tmp");
+    let tmp = tmp_sibling(path);
     tokio::fs::write(&tmp, bytes).await?;
     tokio::fs::rename(&tmp, path).await
 }
@@ -69,8 +85,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("f.txt");
         write_file_atomic(&path, b"ok").unwrap();
-        // The .tmp sibling should be gone (rename moved it).
-        assert!(!path.with_extension("tmp").exists());
+        // The .tmp.<pid>-<n> sibling should be gone (rename moved it).
+        let leftovers: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("f.txt.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp siblings left behind: {leftovers:?}"
+        );
     }
 
     #[tokio::test]
@@ -81,7 +106,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"\x01\x02\x03");
-        assert!(!path.with_extension("tmp").exists());
+        let leftovers: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("graph.bin.tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "tmp siblings left behind: {leftovers:?}"
+        );
     }
 
     #[tokio::test]

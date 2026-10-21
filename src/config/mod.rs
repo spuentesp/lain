@@ -37,12 +37,41 @@ pub fn lain_git_sha() -> &'static str {
 /// process is dead. The TLA+ spec at
 /// `docs/formal/OneshotSharedServer.tla` defines the lifecycle.
 pub fn oneshot_socket_path(workspace: &std::path::Path) -> PathBuf {
+    shared_socket_path(std::slice::from_ref(&workspace.to_path_buf()))
+}
+
+/// Per-workspace-SET socket path for the shared `lain mcp` daemon
+/// (zero-config multi-agent, 2026-10-17). The hash covers every
+/// resolved workspace path, sorted and deduplicated, so the same set
+/// always maps to the same socket regardless of flag order or path
+/// spelling — two agents resolving the same workspaces find each
+/// other's daemon, and a singleton set hashes exactly what
+/// [`oneshot_socket_path`] always hashed (so `lain oneshot` and
+/// `lain mcp` keep sharing one daemon).
+///
+/// The 16-hex stem keeps the path inside the Unix-socket `sun_path`
+/// budget for any sane runtime dir; callers still check
+/// [`crate::server::mcp::socket_server::path_fits`] before binding.
+pub fn shared_socket_path(workspaces: &[PathBuf]) -> PathBuf {
     use blake3::Hasher;
-    let canonical = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut canonical: Vec<String> = workspaces
+        .iter()
+        .map(|w| {
+            w.canonicalize()
+                .unwrap_or_else(|_| w.clone())
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    canonical.sort();
+    canonical.dedup();
     let mut hasher = Hasher::new();
-    hasher.update(canonical.to_string_lossy().as_bytes());
+    for (i, path) in canonical.iter().enumerate() {
+        if i > 0 {
+            hasher.update(b"\n");
+        }
+        hasher.update(path.as_bytes());
+    }
     let digest = hasher.finalize();
     let stem = digest.to_hex();
     let stem = &stem[..16];
@@ -78,6 +107,27 @@ mod socket_path_tests {
         let p = oneshot_socket_path(tmp.path());
         assert!(p.starts_with(run_dir()));
     }
+
+    #[test]
+    fn set_key_is_order_independent_and_singleton_compatible() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let pa = a.path().to_path_buf();
+        let pb = b.path().to_path_buf();
+        // Same set, different order / duplication → same socket.
+        assert_eq!(
+            shared_socket_path(&[pa.clone(), pb.clone()]),
+            shared_socket_path(&[pb.clone(), pa.clone(), pa.clone()])
+        );
+        // A singleton set must hash exactly what `oneshot_socket_path`
+        // hashes, so oneshot and mcp keep sharing one daemon.
+        assert_eq!(shared_socket_path(&[pa.clone()]), oneshot_socket_path(&pa));
+        // A different set must get a different socket.
+        assert_ne!(
+            shared_socket_path(&[pa.clone()]),
+            shared_socket_path(&[pa, pb])
+        );
+    }
 }
 
 /// Return the path to the user config dir (`~/.config/lain`).
@@ -91,6 +141,21 @@ pub fn config_dir() -> PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(".config").join("lain")
+}
+
+/// Return the persistent Lain home (`$LAIN_HOME` or `~/.local/lain`).
+/// State that must survive reboots and runtime-dir cleanups lives
+/// here — notably the shared daemon's federation data dir (per-repo
+/// graphs), so a daemon respawned after a reboot starts warm instead
+/// of re-indexing. Mirrors the resolution `lain workspaces init` uses.
+pub fn lain_home() -> PathBuf {
+    if let Ok(home) = std::env::var("LAIN_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local").join("lain")
 }
 
 /// Return the path to the lain runtime dir (`~/.local/lain/run`).

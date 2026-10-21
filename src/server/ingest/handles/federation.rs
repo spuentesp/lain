@@ -4,6 +4,7 @@
 //! `Arc<FederationHandle>` in PR 3.7b and forward the 12 federation
 //! methods through.
 
+use crate::server::federation::config::FederationConfig;
 use crate::server::federation::config::RepoConfig;
 use crate::server::federation::federated_index::FederatedIndex;
 use crate::server::federation::repo_id::RepoId;
@@ -24,6 +25,12 @@ pub struct FederationHandle {
     pub(crate) federation_port: Option<u16>,
     pub(crate) federation_bind: Option<IpAddr>,
     pub(crate) repos_yaml: Option<PathBuf>,
+    /// The instance's `share` property, pinned at construction (boot)
+    /// from the launch config — see [`FederationHandle::new`]. Never
+    /// re-read: an isolation property must not flip to shared on a
+    /// later config read error, nor to no-share (which would hide a
+    /// shared daemon).
+    share: bool,
     /// Workspace this federation was loaded scoped to (`lain server
     /// --workspace <name>` or `auto`). Hot reload re-scopes membership to
     /// this workspace's members; `None` means every repo in `repos.yaml`.
@@ -45,6 +52,19 @@ impl FederationHandle {
         federation_bind: Option<IpAddr>,
         repos_yaml: Option<PathBuf>,
     ) -> Self {
+        // Pin `share` once, here, at boot: the launch config has just
+        // been written and parsed successfully, so this read is
+        // authoritative. Later read errors keep the pinned value — a
+        // broken config must not make a no-share instance discoverable
+        // again (fail-open would), and must not make a shared daemon
+        // undiscoverable (fail-closed would). A config that cannot be
+        // read even now falls open to `true`: the property is opt-out
+        // and the shipped default is the shared ephemeral service.
+        let share = repos_yaml
+            .as_deref()
+            .and_then(|p| FederationConfig::load(p).ok())
+            .map(|c| c.share)
+            .unwrap_or(true);
         Self {
             federation,
             federation_workspaces,
@@ -52,6 +72,7 @@ impl FederationHandle {
             federation_port,
             federation_bind,
             repos_yaml,
+            share,
             workspace_scope: RwLock::new(None),
             snapshots: RwLock::new(None),
         }
@@ -100,6 +121,15 @@ impl FederationHandle {
     /// `None` for single-workspace servers.
     pub fn repos_yaml(&self) -> Option<&Path> {
         self.repos_yaml.as_deref()
+    }
+
+    /// The instance's `share` property, pinned at construction from the
+    /// launch config (`share`, default `true`). `false` = private
+    /// (no-share) instance: discovery must skip it and the
+    /// `add_workspaces` handoff is refused. Never re-read — see
+    /// [`FederationHandle::new`].
+    pub fn share(&self) -> bool {
+        self.share
     }
 
     /// Number of repos in the live federation, or 0 for single-workspace
@@ -470,5 +500,51 @@ mod tests {
         let handle = FederationHandle::new(None, None, None, None, None, None);
         let res = handle.remove_repo("any");
         assert!(res.is_err());
+    }
+
+    /// The `share` property is an instance property pinned at boot: a
+    /// config read error AFTER construction must not flip it back to
+    /// the shared default (that would make a no-share instance
+    /// discoverable and handoff-able again), nor a shared instance
+    /// no-share.
+    #[test]
+    fn share_is_pinned_at_boot_and_survives_later_read_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("repos.yaml");
+        std::fs::write(&cfg, "share: false\nrepos: []\n").unwrap();
+        let handle = FederationHandle::new(None, None, None, None, None, Some(cfg.clone()));
+        assert!(!handle.share(), "boot config must pin share: false");
+        // Corrupt the file after boot: a later read error keeps the pin.
+        std::fs::write(&cfg, "share: \"yes\"\nnot: valid: [yaml").unwrap();
+        assert!(
+            !handle.share(),
+            "a later config read error must not flip the pin to shared"
+        );
+        // Deleting the file is the same story.
+        std::fs::remove_file(&cfg).unwrap();
+        assert!(!handle.share(), "a missing config must not flip the pin");
+
+        // Converse: the default pins true and stays true.
+        std::fs::write(&cfg, "repos: []\n").unwrap();
+        let shared = FederationHandle::new(None, None, None, None, None, Some(cfg.clone()));
+        assert!(shared.share(), "share must default to true");
+        std::fs::write(&cfg, "garbage: [").unwrap();
+        assert!(
+            shared.share(),
+            "a later read error must not flip to no-share"
+        );
+    }
+
+    /// Fail-open at pin time only: a config that cannot be read even at
+    /// construction defaults to shared (the property is opt-out). Never
+    /// fail closed — that would hide a shared daemon when its config
+    /// breaks.
+    #[test]
+    fn unreadable_boot_config_pins_shared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("repos.yaml");
+        std::fs::write(&cfg, "share: \"yes\"\nnot: valid: [yaml").unwrap();
+        let handle = FederationHandle::new(None, None, None, None, None, Some(cfg));
+        assert!(handle.share(), "an unreadable boot config must pin shared");
     }
 }

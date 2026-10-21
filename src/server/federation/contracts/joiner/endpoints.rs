@@ -38,6 +38,20 @@ pub struct EndpointProviderRecord {
     pub method: HttpMethod,
 }
 
+/// Whether `svc`'s `.graphql`/`.gql` SDL files mint GraphQL provider
+/// endpoints. `services[].provides_graphql: false` suppresses the
+/// service's provider surface so schema copies (codegen inputs) do
+/// not pollute the `(op, field)` key space. Services without a
+/// `ServiceDecl` (implicit repo-id services) keep the default `true`.
+fn service_provides_graphql(config: &ContractFederationConfig, svc: &ServiceName) -> bool {
+    config
+        .services
+        .iter()
+        .find(|s| s.name == svc.0)
+        .map(|s| s.provides_graphql)
+        .unwrap_or(true)
+}
+
 /// Build the per-service endpoint table from the projected
 /// contract nodes. See module docs for the §7.2 grouping rules.
 pub(crate) fn build_endpoints(
@@ -69,6 +83,7 @@ pub(crate) fn build_endpoints(
                         env: Vec::new(),
                         base_path: None,
                         route_prefixes: Vec::new(),
+                        provides_graphql: true,
                     });
                 let full_template = endpoint_template_for(provider, &node.path, &service_decl);
                 let method = match &provider.method {
@@ -123,6 +138,16 @@ pub(crate) fn build_endpoints(
                     });
             }
             Some(ContractFact::GraphqlProvider(graphql_provider)) => {
+                // `services[].provides_graphql: false` suppresses the
+                // service's GraphQL provider surface entirely (schema
+                // copies / codegen inputs), so its SDL does not
+                // duplicate `(op, field)` keys. Nodes that fall
+                // through to the implicit repo-id service keep the
+                // default `true` — a repo with no `ServiceDecl` still
+                // exposes its SDL.
+                if !service_provides_graphql(config, svc) {
+                    continue;
+                }
                 let key = ContractKey::Graphql {
                     op: graphql_provider.op,
                     field: graphql_provider.field.clone(),
@@ -252,6 +277,7 @@ pub(crate) fn resolve_service_decl(
             env: Vec::new(),
             base_path: None,
             route_prefixes: Vec::new(),
+            provides_graphql: true,
         })
 }
 

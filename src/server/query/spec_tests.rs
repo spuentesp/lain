@@ -78,6 +78,30 @@ fn test_label_selector_not() {
 }
 
 #[test]
+fn test_label_selector_wire_shapes() {
+    // The NOT form is a `{"not": [...]}` object; the untagged derive made
+    // it unreachable from JSON (a JSON object matches no untagged variant).
+    let not: LabelSelector = serde_json::from_str(r#"{"not":["deprecated"]}"#).unwrap();
+    match not {
+        LabelSelector::Not(v) => assert_eq!(v, vec!["deprecated".to_string()]),
+        other => panic!("expected Not, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_string(&LabelSelector::Not(vec!["deprecated".into()])).unwrap(),
+        r#"{"not":["deprecated"]}"#
+    );
+    // The existing string and array forms keep working.
+    let single: LabelSelector = serde_json::from_str(r#""deprecated""#).unwrap();
+    assert!(matches!(single, LabelSelector::Single(_)));
+    let or: LabelSelector = serde_json::from_str(r#"["a","b"]"#).unwrap();
+    assert!(matches!(or, LabelSelector::Or(_)));
+    assert_eq!(serde_json::to_string(&single).unwrap(), r#""deprecated""#);
+    assert_eq!(serde_json::to_string(&or).unwrap(), r#"["a","b"]"#);
+    // Unknown object keys are rejected, not silently misread.
+    assert!(serde_json::from_str::<LabelSelector>(r#"{"nope":["a"]}"#).is_err());
+}
+
+#[test]
 fn test_edge_selector_single() {
     let es = EdgeSelector::Single("Calls".to_string());
     assert!(es.matches("Calls"));
@@ -99,6 +123,24 @@ fn test_edge_selector_not() {
     assert!(es.matches("Contains"));
     assert!(!es.matches("Calls"));
     assert!(!es.matches("Imports"));
+}
+
+#[test]
+fn test_edge_selector_wire_shapes() {
+    let not: EdgeSelector = serde_json::from_str(r#"{"not":["Calls"]}"#).unwrap();
+    match not {
+        EdgeSelector::Not(v) => assert_eq!(v, vec!["Calls".to_string()]),
+        other => panic!("expected Not, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_string(&EdgeSelector::Not(vec!["Calls".into()])).unwrap(),
+        r#"{"not":["Calls"]}"#
+    );
+    let single: EdgeSelector = serde_json::from_str(r#""Calls""#).unwrap();
+    assert!(matches!(single, EdgeSelector::Single(_)));
+    let or: EdgeSelector = serde_json::from_str(r#"["A","B"]"#).unwrap();
+    assert!(matches!(or, EdgeSelector::Or(_)));
+    assert!(serde_json::from_str::<EdgeSelector>(r#"{"nope":["A"]}"#).is_err());
 }
 
 #[test]
@@ -634,4 +676,23 @@ fn test_group_by_serde() {
     assert_eq!(json, "\"type\"");
     let back: GroupBy = serde_json::from_str("\"label\"").unwrap();
     assert_eq!(back, GroupBy::Label);
+}
+
+#[test]
+fn test_query_meta_has_no_plan_field() {
+    // `plan` was always `None` and skip-if-none kept it off the wire; the
+    // field itself is gone from the struct and must stay gone.
+    let meta = QueryMeta {
+        exec_us: 1,
+        nodes_visited: 2,
+        truncated: false,
+        matched_before_limit: None,
+    };
+    let json = serde_json::to_value(&meta).unwrap();
+    assert!(
+        json.get("plan").is_none(),
+        "meta must not resurrect `plan`: {json}"
+    );
+    assert_eq!(json["exec_us"], 1);
+    assert_eq!(json["nodes_visited"], 2);
 }

@@ -10,7 +10,7 @@ use crate::federation::contracts::config::{
 use crate::federation::contracts::index::{
     ConsumerTarget, EndpointId, FieldRefResolution, StaleReason, UnresolvedReason,
 };
-use crate::federation::contracts::joiner::{ContractJoiner, JoinOutput};
+use crate::federation::contracts::joiner::{parse_contract_key, ContractJoiner, JoinOutput};
 use crate::federation::contracts::model::{
     CallVia, ConsumerFact, ContractFact, ContractKey, Direction, FieldMeta, FieldReadFact,
     GraphqlConsumerFact, GraphqlOp, GraphqlProviderFact, HostPart, HttpMethod, JsonPath,
@@ -102,6 +102,7 @@ fn default_config() -> ContractFederationConfig {
             env: vec!["ORDERS_URL".into()],
             base_path: None,
             route_prefixes: vec![],
+            provides_graphql: true,
         }],
         http_clients: vec![],
         generic_keys: vec![],
@@ -982,6 +983,145 @@ fn confirmed_binding_matches_consumer_and_records_provenance() {
 }
 
 #[test]
+fn confirmed_binding_reads_complete_comes_from_the_matched_fact() {
+    // A mixed node — an HTTP call whose response escapes tracking
+    // (`reads_complete: false`) plus a topic subscription on the
+    // same symbol — must carry the MATCHED fact's `reads_complete`.
+    // `TopicConsumerFact` has no §6.5 escape flag (the protocol
+    // resolvers record it fully read), so confirming the topic key
+    // is `reads_complete: true` even though the node's HTTP fact
+    // says otherwise; confirming the HTTP key on the same node is
+    // the HTTP fact's `false`.
+    let mut p = GraphNode::new_in(
+        NodeType::Topic,
+        "kafka/orders".into(),
+        "src/events.rs".into(),
+        &repo_ns(),
+    );
+    p.repo_id = Some("orders".into());
+    p.id = make_id(
+        "orders",
+        NodeType::Topic,
+        "src/events.rs",
+        "kafka/orders",
+        5,
+    );
+    p.line_start = Some(5);
+    p.contract = vec![ContractFact::Provider(ProviderFact {
+        method: HttpMethod::Any,
+        template: "orders".to_string(),
+        handler: None,
+        operation_id: None,
+        origin: ProviderOrigin::Code,
+    })];
+
+    let mut c = GraphNode::new_in(
+        NodeType::Function,
+        "on_orders".into(),
+        "src/sub.py".into(),
+        &repo_ns(),
+    );
+    c.repo_id = Some("billing".into());
+    c.id = make_id("billing", NodeType::Function, "src/sub.py", "on_orders", 10);
+    c.line_start = Some(10);
+    c.contract = vec![
+        ContractFact::Consumer(ConsumerFact {
+            method: MethodSpec::Known(HttpMethod::Post),
+            url: url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders")),
+            via: CallVia::Library {
+                name: "requests".into(),
+            },
+            url_expr: "".to_string(),
+            reads_complete: false,
+        }),
+        ContractFact::TopicConsumer(TopicConsumerFact {
+            broker: "kafka".into(),
+            name: "orders".into(),
+            kind: TopicConsumerKind::Subscription,
+        }),
+    ];
+    // The HTTP leg's provider, so the `POST /api/orders` binding has
+    // an endpoint to land on (the topic hub alone owns the topic key).
+    let http_p = provider_node(
+        "orders",
+        "src/api.py",
+        "create_order",
+        20,
+        HttpMethod::Post,
+        "/api/orders",
+    );
+
+    let make_cfg = |key: &str| ContractFederationConfig {
+        services: multi_service_config(&[("orders", &[]), ("billing", &[])]).services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "billing".into(),
+                path: "src/sub.py".into(),
+                symbol: "on_orders".into(),
+                key: key.to_string(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "orders".into(),
+                key: key.to_string(),
+            },
+        }],
+        databases: vec![],
+    };
+    let cid = GlobalId::parse(&c.id).expect("global id parse");
+
+    let topic_out = ContractJoiner::run(
+        &[p.clone(), http_p.clone(), c.clone()],
+        &[],
+        &make_cfg("topic:kafka/orders"),
+    );
+    assert_eq!(topic_out.binds.len(), 1, "{:?}", topic_out.binds);
+    assert!(matches!(
+        topic_out.binds[0].provenance,
+        EdgeProvenance::Confirmed { .. }
+    ));
+    assert!(
+        topic_out.index.stale_bindings.is_empty(),
+        "{:?}",
+        topic_out.index.stale_bindings
+    );
+    let topic_res = topic_out
+        .index
+        .consumer(&cid)
+        .expect("topic-confirmed resolution");
+    assert!(
+        topic_res.reads_complete,
+        "the topic fact carries no §6.5 escape flag — the confirmed resolution must be \
+         fully read, not the HTTP fact's false"
+    );
+
+    let http_out = ContractJoiner::run(&[p, http_p, c], &[], &make_cfg("POST /api/orders"));
+    // The topic leg's auto-join edge is still in the set; the
+    // confirmed HTTP edge is the one under test.
+    let confirmed: Vec<_> = http_out
+        .binds
+        .iter()
+        .filter(|b| matches!(b.provenance, EdgeProvenance::Confirmed { .. }))
+        .collect();
+    assert_eq!(confirmed.len(), 1, "{:?}", http_out.binds);
+    assert!(
+        http_out.index.stale_bindings.is_empty(),
+        "{:?}",
+        http_out.index.stale_bindings
+    );
+    let http_res = http_out
+        .index
+        .consumer(&cid)
+        .expect("http-confirmed resolution");
+    assert!(
+        !http_res.reads_complete,
+        "confirming the HTTP key must carry the HTTP fact's reads_complete: false"
+    );
+}
+
+#[test]
 fn confirmed_binding_no_endpoint_marks_stale() {
     let cfg = ContractFederationConfig {
         services: default_config().services,
@@ -1047,6 +1187,420 @@ fn confirmed_binding_no_consumer_marks_stale() {
         out.index.stale_bindings[0].reason,
         StaleReason::NoConsumer
     ));
+}
+
+/// Shared config for the GraphQL confirmed-binding tests: service
+/// `api` (repo `api`) exposes `query product` and service
+/// `storefront` pins its `graphql-call:query:product` call site to
+/// it via `bindings[0]`.
+fn config_with_graphql_binding() -> ContractFederationConfig {
+    ContractFederationConfig {
+        services: multi_service_config(&[("api", &[]), ("storefront", &[])]).services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "storefront".into(),
+                path: "src/gql.ts".into(),
+                symbol: "graphql-call:query:product".into(),
+                key: "graphql:query:product".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "api".into(),
+                key: "graphql:query:product".into(),
+            },
+        }],
+        databases: vec![],
+    }
+}
+
+#[test]
+fn confirmed_graphql_binding_binds_consumer_to_provider_service() {
+    let provider = graphql_provider_node("api", "schema.graphql", GraphqlOp::Query, "product", 10);
+    let consumer =
+        graphql_consumer_node("storefront", "src/gql.ts", GraphqlOp::Query, "product", 20);
+    let cfg = config_with_graphql_binding();
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    assert_eq!(out.binds.len(), 1);
+    let edge = &out.binds[0];
+    assert!(matches!(edge.provenance, EdgeProvenance::Confirmed { .. }));
+    assert!((edge.confidence - 1.0).abs() < f32::EPSILON);
+    assert!(out.index.stale_bindings.is_empty());
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
+    assert!(matches!(
+        res.target,
+        Some(ConsumerTarget::Binds {
+            provenance: EdgeProvenance::Confirmed { .. },
+            ..
+        })
+    ));
+    assert_eq!(res.bound_endpoints.len(), 1);
+}
+
+#[test]
+fn confirmed_graphql_binding_no_consumer_marks_stale() {
+    let provider = graphql_provider_node("api", "schema.graphql", GraphqlOp::Query, "product", 10);
+    let cfg = config_with_graphql_binding();
+    let out = ContractJoiner::run(&[provider], &[], &cfg);
+    assert!(out.binds.is_empty());
+    assert_eq!(out.index.stale_bindings.len(), 1);
+    assert!(matches!(
+        out.index.stale_bindings[0].reason,
+        StaleReason::NoConsumer
+    ));
+}
+
+#[test]
+fn confirmed_graphql_binding_no_endpoint_marks_stale() {
+    let consumer =
+        graphql_consumer_node("storefront", "src/gql.ts", GraphqlOp::Query, "product", 20);
+    let cfg = config_with_graphql_binding();
+    let out = ContractJoiner::run(&[consumer], &[], &cfg);
+    assert!(out.binds.is_empty());
+    assert_eq!(out.index.stale_bindings.len(), 1);
+    assert!(matches!(
+        out.index.stale_bindings[0].reason,
+        StaleReason::NoEndpoint
+    ));
+}
+
+#[test]
+fn confirmed_binding_cross_kind_keys_marks_stale_and_does_not_bind() {
+    // A confirmed binding may only join a consumer to an endpoint
+    // of the same key kind (I1a — no invented bindings). A
+    // hand-written binding with `consumer.key:
+    // graphql:query:product` and `provider.key: http:POST /graphql`
+    // must therefore bind NOTHING: the node walk and the endpoint
+    // lookup would otherwise pin the call site to an endpoint of a
+    // different kind.
+    let provider = provider_node(
+        "api",
+        "src/graphql_route.py",
+        "graphql_route",
+        10,
+        HttpMethod::Post,
+        "/graphql",
+    );
+    let consumer =
+        graphql_consumer_node("storefront", "src/gql.ts", GraphqlOp::Query, "product", 20);
+    let cfg = ContractFederationConfig {
+        services: multi_service_config(&[("api", &[]), ("storefront", &[])]).services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "storefront".into(),
+                path: "src/gql.ts".into(),
+                symbol: "graphql-call:query:product".into(),
+                key: "graphql:query:product".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "api".into(),
+                key: "http:POST /graphql".into(),
+            },
+        }],
+        databases: vec![],
+    };
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "cross-kind binding must not invent a Binds edge: {:?}",
+        out.binds
+    );
+    assert_eq!(out.index.stale_bindings.len(), 1);
+    assert!(matches!(
+        out.index.stale_bindings[0].reason,
+        StaleReason::IllFormedKeys
+    ));
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
+    assert!(
+        !matches!(res.target, Some(ConsumerTarget::Binds { .. })),
+        "consumer must keep the ladder verdict, got {:?}",
+        res.target
+    );
+}
+
+#[test]
+fn confirmed_binding_template_bridge_binds() {
+    // Same-kind HTTP template bridges are supported (§15.2 ground
+    // truth scenario 10): the call site's key carries the gateway
+    // `/v1` prefix, the endpoint's key does not. The binding's two
+    // keys differ but form a well-formed pair (`check_binding`'s
+    // rules), so it binds with `Confirmed` provenance.
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "get_order",
+        10,
+        HttpMethod::Get,
+        "/api/orders/{}",
+    );
+    let mut c = consumer_node(
+        "billing",
+        "src/orders_api.py",
+        "create_order",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(HostPart::None, Some("/v1/api/orders/{}")),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    c.container = Some("create_order".into());
+    let cfg = ContractFederationConfig {
+        services: default_config().services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "billing".into(),
+                path: "src/orders_api.py".into(),
+                symbol: "create_order".into(),
+                key: "GET /v1/api/orders/{}".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "orders".into(),
+                key: "GET /api/orders/{}".into(),
+            },
+        }],
+        databases: vec![],
+    };
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
+    assert_eq!(out.binds.len(), 1, "bridge must bind: {:?}", out.binds);
+    let edge = &out.binds[0];
+    assert!(matches!(edge.provenance, EdgeProvenance::Confirmed { .. }));
+    assert_eq!(
+        edge.target_endpoint,
+        (
+            ServiceName("orders".into()),
+            ContractKey::Http {
+                method: MethodSpec::Known(HttpMethod::Get),
+                template: "/api/orders/{}".into(),
+            }
+        )
+    );
+    assert!(out.index.stale_bindings.is_empty());
+}
+
+#[test]
+fn confirmed_binding_equivalent_key_spelling_binds() {
+    // The well-formedness rules run on the parsed `ContractKey`s,
+    // not the raw strings: "POST /api/orders" and
+    // "http:POST /api/orders" are the same key and the binding
+    // still applies.
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "create_order",
+        10,
+        HttpMethod::Post,
+        "/api/orders",
+    );
+    let mut c = consumer_node(
+        "billing",
+        "src/orders_api.py",
+        "create_order",
+        1,
+        MethodSpec::Known(HttpMethod::Post),
+        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders")),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    c.container = Some("create_order".into());
+    let cfg = ContractFederationConfig {
+        services: default_config().services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "billing".into(),
+                path: "src/orders_api.py".into(),
+                symbol: "create_order".into(),
+                key: "POST /api/orders".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "orders".into(),
+                key: "http:POST /api/orders".into(),
+            },
+        }],
+        databases: vec![],
+    };
+    let out = ContractJoiner::run(&[p, c], &[], &cfg);
+    assert_eq!(out.binds.len(), 1);
+    assert!(matches!(
+        out.binds[0].provenance,
+        EdgeProvenance::Confirmed { .. }
+    ));
+    assert!(out.index.stale_bindings.is_empty());
+}
+
+/// A node carrying TWO consumer facts — `topic-read:<path>:<line>`
+/// subscribing to two topics on one line — must keep BOTH
+/// resolutions after one of them is operator-confirmed. Pre-F3,
+/// `apply_confirmed_binding` wholesale replaced `consumers[gid]`
+/// with a single-resolution vec, so the second topic's resolution
+/// (Unresolved or auto-Binds) vanished. Pinned end-to-end: the
+/// joiner produces 2 `ConsumerResolution`s from the sensor's 2
+/// facts; the confirmed entry overrides ONLY the resolution
+/// whose key the binding names; the other stays.
+#[test]
+fn confirmed_binding_merges_into_multi_fact_consumers_vec() {
+    use crate::federation::contracts::model::{TopicConsumerFact, TopicConsumerKind};
+
+    // A topic hub for `orders.created` so the binding has a real
+    // endpoint to land on. (Topic hubs live on the provider side —
+    // see F2a's hub model.)
+    let hub_topic = topic_provider_node("orders", "src/p.rs", "publish", 1, "orders.created");
+
+    // A second topic hub for `audit.logged` — distinct topic, so
+    // the second subscription on the same line binds to a DIFFERENT
+    // provider. Without the F3 fix, the confirmed binding for the
+    // first topic wipes the second subscription's resolution.
+    let hub_audit = topic_provider_node("orders", "src/p.rs", "audit", 30, "audit.logged");
+
+    // One consumer node, two TopicConsumerFacts — two subscriptions
+    // on one line. The sensor emits this exact shape
+    // (`event_sensor.rs:881-887`).
+    let mut c = GraphNode::new_in(
+        NodeType::Function,
+        "sub_two".into(),
+        "src/sub.py".into(),
+        &repo_ns(),
+    );
+    c.repo_id = Some("billing".into());
+    c.id = make_id("billing", NodeType::Function, "src/sub.py", "sub_two", 12);
+    c.line_start = Some(12);
+    c.contract = vec![
+        ContractFact::TopicConsumer(TopicConsumerFact {
+            broker: "kafka".into(),
+            name: "orders.created".into(),
+            kind: TopicConsumerKind::Subscription,
+        }),
+        ContractFact::TopicConsumer(TopicConsumerFact {
+            broker: "kafka".into(),
+            name: "audit.logged".into(),
+            kind: TopicConsumerKind::Subscription,
+        }),
+    ];
+
+    let cfg = ContractFederationConfig {
+        services: multi_service_config(&[("orders", &[]), ("billing", &[])]).services,
+        http_clients: vec![],
+        generic_keys: vec![],
+        schemas: vec![],
+        // Confirm ONLY the orders.created key. The audit.logged
+        // subscription must survive.
+        bindings: vec![ConfirmedBinding {
+            consumer: ConfirmedBindingConsumer {
+                repo: "billing".into(),
+                path: "src/sub.py".into(),
+                symbol: "sub_two".into(),
+                key: "topic:kafka/orders.created".into(),
+            },
+            provider: ConfirmedBindingProvider {
+                service: "orders".into(),
+                key: "topic:kafka/orders.created".into(),
+            },
+        }],
+        databases: vec![],
+    };
+
+    let out = ContractJoiner::run(&[hub_topic, hub_audit, c], &[], &cfg);
+    let cid = GlobalId::parse(&make_id(
+        "billing",
+        NodeType::Function,
+        "src/sub.py",
+        "sub_two",
+        12,
+    ))
+    .expect("global id parse");
+
+    // The confirmed key produced one BindsEdge.
+    let confirmed_binds: Vec<_> = out
+        .binds
+        .iter()
+        .filter(|b| matches!(b.provenance, EdgeProvenance::Confirmed { .. }))
+        .collect();
+    assert_eq!(
+        confirmed_binds.len(),
+        1,
+        "exactly one confirmed BindsEdge; got: {:?}",
+        out.binds
+    );
+
+    // The vec carries BOTH resolutions — the confirmed one in
+    // front (operator truth), the auto-join for `audit.logged`
+    // behind. `consumer(&cid)` returns the first (the confirmed
+    // one), and the vec's `len()` is 2.
+    let resolutions = out
+        .index
+        .consumers
+        .get(&cid)
+        .expect("consumer resolutions present");
+    assert_eq!(
+        resolutions.len(),
+        2,
+        "F3 must keep BOTH subscriptions; got: {:?}",
+        resolutions
+    );
+    let first = resolutions.first().expect("first resolution");
+    assert!(
+        matches!(
+            &first.target,
+            Some(ConsumerTarget::Binds {
+                provenance: EdgeProvenance::Confirmed { .. },
+                ..
+            })
+        ),
+        "first resolution must be the operator confirmation; got: {:?}",
+        first.target
+    );
+    assert!(
+        first
+            .bound_endpoints
+            .iter()
+            .any(|(_, k)| matches!(k, ContractKey::Topic { broker, name } if broker == "kafka" && name == "orders.created")),
+        "the confirmed resolution names the orders.created topic; got: {:?}",
+        first.bound_endpoints
+    );
+
+    // The second resolution is the auto-join for `audit.logged`
+    // (the Binds of the second fact — either confirmed-shim,
+    // inferred by the dispatch chain, or Binds with
+    // provenance != Confirmed).
+    let second = &resolutions[1];
+    assert!(
+        !matches!(
+            &second.target,
+            Some(ConsumerTarget::Binds {
+                provenance: EdgeProvenance::Confirmed { .. },
+                ..
+            })
+        ),
+        "the second resolution must NOT carry the Confirmed provenance (that's the confirmed key's slot, already filled); got: {:?}",
+        second.target
+    );
+    assert!(
+        second
+            .bound_endpoints
+            .iter()
+            .any(|(_, k)| matches!(k, ContractKey::Topic { broker, name } if broker == "kafka" && name == "audit.logged"))
+            || matches!(&second.target, Some(ConsumerTarget::Unresolved { .. })),
+        "the audit.logged subscription must keep its auto-join or stay unresolved; got: {:?}",
+        second.target
+    );
+
+    assert!(
+        out.index.stale_bindings.is_empty(),
+        "no stale entries: the audit.logged resolution is not stale, it's a different key"
+    );
 }
 
 // ─── §7.8 ordering ─────────────────────────────────────────────────
@@ -1239,6 +1793,18 @@ fn contract_key_display_round_trip_table() {
     assert!(s.starts_with("table:"));
 }
 
+#[test]
+fn parse_contract_key_accepts_graphql_prefix() {
+    let key = parse_contract_key("graphql:query:product").unwrap();
+    assert_eq!(
+        key,
+        ContractKey::Graphql {
+            op: GraphqlOp::Query,
+            field: "product".into()
+        }
+    );
+}
+
 // ─── Task 9 — pin `is_suffix` boundary cases under the
 //     `joiner_tests` filter (the field_join::tests::is_suffix_*
 //     cases exist in field_join.rs but are not run by the
@@ -1343,6 +1909,7 @@ fn t9_consumer_protocol_websocket_foreign_host_no_endpoint_pair() {
             env: Vec::new(),
             base_path: None,
             route_prefixes: Vec::new(),
+            provides_graphql: true,
         }],
         http_clients: Vec::new(),
         generic_keys: Vec::new(),
@@ -1389,6 +1956,7 @@ fn t9_consumer_protocol_websocket_two_providers_ambiguous() {
                 env: Vec::new(),
                 base_path: None,
                 route_prefixes: Vec::new(),
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "notifications".into(),
@@ -1398,6 +1966,7 @@ fn t9_consumer_protocol_websocket_two_providers_ambiguous() {
                 env: Vec::new(),
                 base_path: None,
                 route_prefixes: Vec::new(),
+                provides_graphql: true,
             },
         ],
         http_clients: Vec::new(),
@@ -1888,6 +2457,7 @@ fn two_service_topic_config() -> ContractFederationConfig {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "billing".into(),
@@ -1897,6 +2467,7 @@ fn two_service_topic_config() -> ContractFederationConfig {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
         ],
         http_clients: vec![],
@@ -1952,6 +2523,57 @@ fn topic_join_same_broker_same_name_binds() {
         other => panic!("expected Binds, got {other:?}"),
     }
     assert_eq!(res.bound_endpoints.len(), 1);
+}
+
+/// A subscriber whose topic argument was not a literal the
+/// `event_sensor` could resolve (parameter, f-string, identifier
+/// without a same-file const, ...) carries the
+/// `TOPIC_DYNAMIC_SENTINEL` sentinel as `TopicConsumerFact::name`.
+/// `TopicDispatch` recognises the sentinel and returns
+/// `Unresolved { reason: DynamicTopic, target_service: None }`, which
+/// the joiner pushes onto `coverage.unnormalized` so the operator
+/// sees the gap (it was silently dropped before F2a). The producer
+/// side stays a pure drop — there is no `(broker, name)` to anchor a
+/// `Topic` hub on, and a hub with the sentinel would falsely advertise
+/// a provider that never resolves.
+#[test]
+fn topic_join_dynamic_sentinel_is_unnormalized() {
+    use crate::server::sensors::util::TOPIC_DYNAMIC_SENTINEL;
+    let consumer = topic_consumer_node(
+        "billing",
+        "src/c.rs",
+        "subscribe",
+        5,
+        "kafka",
+        TOPIC_DYNAMIC_SENTINEL,
+    );
+    let cfg = two_service_topic_config();
+    let out = ContractJoiner::run(&[consumer.clone()], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "a dynamic topic must NOT bind; got {:?}",
+        out.binds
+    );
+    let cid = GlobalId::parse(&consumer.id).expect("global id parse");
+    let res = out.index.consumer(&cid).expect("consumer resolution");
+    match &res.target {
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::DynamicTopic,
+            target_service,
+        }) => {
+            assert!(
+                target_service.is_none(),
+                "a dynamic topic has no candidate service; got {target_service:?}"
+            );
+        }
+        other => panic!("expected Unresolved {{ DynamicTopic, None }}, got {other:?}"),
+    }
+    assert!(
+        out.index.unnormalized.contains(&cid),
+        "the joiner must surface the dynamic-topic consumer in `unnormalized` \
+         (the bucket §9.7 reads as `coverage.unnormalized`); got {:?}",
+        out.index.unnormalized
+    );
 }
 
 #[test]
@@ -2074,6 +2696,7 @@ fn topic_join_same_topic_in_two_services_binds_to_both() {
         env: vec![],
         base_path: None,
         route_prefixes: vec![],
+        provides_graphql: true,
     });
     let out = ContractJoiner::run(&[provider1, provider2, consumer], &[], &cfg);
     assert_eq!(
@@ -2106,6 +2729,7 @@ fn topic_join_skips_own_service_endpoint() {
             env: vec![],
             base_path: None,
             route_prefixes: vec![],
+            provides_graphql: true,
         }],
         http_clients: vec![],
         generic_keys: vec![],
@@ -2441,6 +3065,7 @@ fn ws_config(service: &str, host: &str) -> ContractFederationConfig {
             env: vec![],
             base_path: None,
             route_prefixes: vec![],
+            provides_graphql: true,
         }],
         http_clients: vec![],
         generic_keys: vec![],
@@ -2490,6 +3115,7 @@ fn ws_consumer_with_two_matching_providers_stays_unresolved() {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "billing".into(),
@@ -2499,6 +3125,7 @@ fn ws_consumer_with_two_matching_providers_stays_unresolved() {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
         ],
         http_clients: vec![],
@@ -2591,6 +3218,7 @@ fn table_shared_with_widens_ownership_to_named_service() {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "analytics".into(),
@@ -2600,6 +3228,7 @@ fn table_shared_with_widens_ownership_to_named_service() {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
         ],
         http_clients: vec![],
@@ -2656,6 +3285,7 @@ fn table_ownership_keys_on_db_name_not_just_table_name() {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
             ServiceDecl {
                 name: "analytics".into(),
@@ -2665,6 +3295,7 @@ fn table_ownership_keys_on_db_name_not_just_table_name() {
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             },
         ],
         http_clients: vec![],
@@ -2977,6 +3608,7 @@ fn topic_payload_schema_binds_when_schema_repo_differs_from_service_name() {
             env: vec![],
             base_path: None,
             route_prefixes: vec![],
+            provides_graphql: true,
         }],
         http_clients: vec![],
         generic_keys: vec![],
@@ -3224,6 +3856,7 @@ fn multi_service_config(services: &[(&str, &[&str])]) -> ContractFederationConfi
                 env: vec![],
                 base_path: None,
                 route_prefixes: vec![],
+                provides_graphql: true,
             })
             .collect(),
         http_clients: vec![],

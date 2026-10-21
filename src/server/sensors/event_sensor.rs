@@ -24,11 +24,22 @@
 //! - NestJS (TypeScript): `@Cron('0 0 * * *')` decorator marks the
 //!   following function as a scheduled topic.
 //!
-//! Each detected site emits a `Topic` node plus a `Produces` (publishers)
-//! or `Consumes` (subscribers) edge. Topic names are extracted from
-//! string literals and same-file `const` / `let` constant assignments
-//! (§6.7 "same-file constants"). Dynamic topic names are recorded but
-//! skipped from the graph so they surface in `coverage.unnormalized`.
+//! Each `(broker, topic)` pair mints ONE canonical `Topic` hub node per
+//! repo (id anchored on [`TOPIC_ANCHOR`] with the label alone — no path,
+//! no line) and each detected site hangs a `Produces` (publishers) or
+//! `Consumes` (subscribers) edge with `SourceSite` provenance off that
+//! hub. Topic names are extracted from string literals and same-file
+//! `const` / `let` constant assignments (§6.7 "same-file constants").
+//! Dynamic topic names are NOT silently invisible: a producer-side
+//! dynamic name is dropped (no `(broker, name)` to anchor a hub on —
+//! a hub with the sentinel would falsely advertise a provider that
+//! never resolves); a consumer-side dynamic name emits a synthetic
+//! per-site `Function` node carrying a `TopicConsumerFact` whose
+//! `name` is [`TOPIC_DYNAMIC_SENTINEL`] (`<dynamic>`), and
+//! `TopicDispatch` returns `Unresolved { reason: DynamicTopic, .. }`
+//! for it — the joiner pushes that call onto
+//! `coverage.unnormalized` next to the existing HTTP `Unnormalized`
+//! arm. See `docs/protocol-coverage.md`, "Dynamic topic names".
 //!
 //! After site emission the sensor also walks payload schema files
 //! (`*.avsc`, `*.schema.json`): each parses into a `Schema` node with
@@ -36,6 +47,13 @@
 //! proto messages), and a schema that names an already-emitted topic
 //! gets the `Topic → Schema` `PayloadSchema` edge that feeds the
 //! payload arm of the contract join (`field_join.rs`).
+//!
+//! Adding another bus or job queue (MQTT, NATS, Redis, SQS, …) is a
+//! detection-pattern addition only — the hub model is broker-generic
+//! (`Topic { broker, name }`). The recipe, with a real pattern-entry
+//! template and the tests to mirror, lives in
+//! `docs/protocol-coverage.md` ("Recipe: adding a bus without new
+//! design"), which also names the config-extraction follow-up.
 //!
 //! The sensor runs at phase 2 so `Topic` nodes exist before the
 //! joiner binds consumer services to producer services (§7.7). It
@@ -49,10 +67,22 @@ use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, Re
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::payload_schema::{parse_avro_schema, parse_json_schema};
 use crate::server::sensors::util::{self, Lang};
+use crate::server::sensors::util_tokenize::strip_line_comment;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const DEFAULT_BROKER: &str = "kafka";
+
+/// Hub identity anchor — the `path` component of the hub's ID only.
+/// A `Topic` hub's id is
+/// `generate_id(Topic, TOPIC_ANCHOR, "{broker}/{topic}", None, ns)` —
+/// the label alone — so every publish/subscribe site in the repo
+/// converges on ONE node per `(broker, topic)`. Site provenance lives
+/// on the `Produces`/`Consumes` edges (`site: SourceSite { path, line }`),
+/// one edge per site. The node RECORD keeps `path` = a real site file
+/// (see `emit_sites`): `prune_orphans` drops nodes whose path is not a
+/// tracked file. `tests/event_hub_e2e.rs` pins this literal.
+const TOPIC_ANCHOR: &str = "<topics>";
 
 /// What the regex extractor finds in a single file. `topic` is the
 /// literal name when extractable; `dynamic` means the topic arg is a
@@ -102,8 +132,16 @@ pub fn scan_workspace_event(
         return Ok(0);
     }
 
+    // Load once per scan so every site uses the same repo-local patterns.
+    let patterns = Patterns::with_overrides(root)?;
+
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
+    // Hub ids minted in this scan. One `Topic` node per (broker, topic)
+    // per repo — pushed once no matter how many sites reference it
+    // (per REPO scan, not per file: two files publishing one topic
+    // share the hub).
+    let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
 
     let any_ext = |p: &Path| {
         Some(
@@ -117,10 +155,40 @@ pub fn scan_workspace_event(
         let ext = ext.as_str();
         let path_str = graph_path(root, &path);
         let constants = collect_same_file_constants(&content, ext);
-        let sites = detect_sites(&content, ext, &constants);
-        let (nodes, edges) = emit_sites(&sites, &path_str, namespace, graph);
+        let sites = detect_sites(&content, ext, &constants, &patterns);
+        let (nodes, edges) =
+            emit_sites(&sites, &path_str, namespace, graph, &mut emitted_topic_ids);
         all_nodes.extend(nodes);
         all_edges.extend(edges);
+    }
+
+    // Deterministic hub path. A hub is minted at whichever site the
+    // walk reaches first, but walk order is not stable — and both
+    // `prune_orphans` (path-keyed) and the joiner's `assign_services`
+    // (path-prefix keyed) read this field. Rewrite each hub's path to
+    // the min `site.path` among its own `Produces`/`Consumes` legs:
+    // deterministic, and still a real file the orphan sweep keeps.
+    let mut hub_paths: BTreeMap<String, String> = BTreeMap::new();
+    for e in &all_edges {
+        if !matches!(e.edge_type, EdgeType::Produces | EdgeType::Consumes) {
+            continue;
+        }
+        let Some(site) = &e.site else { continue };
+        hub_paths
+            .entry(e.target_id.clone())
+            .and_modify(|p| {
+                if site.path < *p {
+                    *p = site.path.clone();
+                }
+            })
+            .or_insert_with(|| site.path.clone());
+    }
+    for n in &mut all_nodes {
+        if n.node_type == NodeType::Topic {
+            if let Some(p) = hub_paths.get(&n.id) {
+                n.path = p.clone();
+            }
+        }
     }
 
     // Payload schemas ride the same EventSensor batch, scanned after
@@ -232,19 +300,18 @@ fn scan_payload_schemas(
 
         if let Some(topic_name) = &ps.topic {
             let topic_label = format!("{DEFAULT_BROKER}/{topic_name}");
-            // One edge per emitted `Topic` node with this name: the
-            // same topic can be declared in several files, and the
-            // joiner assigns a service only to nodes whose paths match
-            // a `ServiceDecl` — binding just the first (walk-order)
-            // node would silently drop the payload join when an
-            // unassigned file comes first. Both endpoints are in this
-            // batch, so no edge dangles either way.
-            let topic_ids: Vec<String> = nodes
+            // One hub per (broker, topic) per repo (`TOPIC_ANCHOR`), so
+            // this is a single `PayloadSchema` edge — the fan-out over
+            // per-site nodes is gone. The lookup reads the pending
+            // batch (not the graph) because a previous scan's `Topic`
+            // nodes are retracted in the same `replace_sensor_output`
+            // call — binding to one would mint an edge toward a stale
+            // id. Both endpoints are in this batch, so no edge dangles.
+            if let Some(topic_id) = nodes
                 .iter()
-                .filter(|n| n.node_type == NodeType::Topic && n.name == topic_label)
+                .find(|n| n.node_type == NodeType::Topic && n.name == topic_label)
                 .map(|n| n.id.clone())
-                .collect();
-            for topic_id in topic_ids {
+            {
                 edges.push(GraphEdge {
                     edge_type: EdgeType::PayloadSchema,
                     source_id: topic_id,
@@ -330,55 +397,17 @@ fn is_ident(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Strip a line comment marker. `//` covers TypeScript, JavaScript,
-/// Rust, Go; `#` covers Python. The cut is at the first occurrence
-/// outside of any string literal. Cheap approximation: we cut at the
-/// first `//` or `#` that isn't inside a quote — correct for the
-/// event-sensor's input shape (topic arg always comes before any
-/// comment marker on the line).
-fn strip_line_comment(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut in_string: Option<u8> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match in_string {
-            Some(q) if b == q => {
-                // Closing quote — only honor if not escaped.
-                if i > 0 && bytes[i - 1] == b'\\' {
-                    i += 1;
-                    continue;
-                }
-                in_string = None;
-            }
-            Some(_) => {}
-            None if b == b'"' || b == b'\'' || b == b'`' => {
-                in_string = Some(b);
-            }
-            None if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                return &line[..i];
-            }
-            None if b == b'#' => {
-                return &line[..i];
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    line
-}
-
 fn detect_sites(
     content: &str,
     ext: &str,
     constants: &BTreeMap<String, String>,
+    patterns: &Patterns,
 ) -> Vec<DetectedSite> {
     let mut out: Vec<DetectedSite> = Vec::new();
     let lang = match ext_to_lang(ext) {
         Some(l) => l,
         None => return out,
     };
-    let patterns = Patterns::patterns();
     let (producers, consumers, scheduled) = util::topic_idioms_for(patterns, lang);
     let lines: Vec<&str> = content.lines().collect();
     for (idx, raw) in lines.iter().enumerate() {
@@ -403,14 +432,36 @@ fn detect_sites(
             }
         }
         for m in util::walk_idioms(&consumers, line, line_num) {
-            if let Some(value) = resolve_idiom_capture(&m, constants) {
-                out.push(DetectedSite {
+            match resolve_idiom_capture(&m, constants) {
+                Some(value) => out.push(DetectedSite {
                     kind: SiteKind::Consumes,
                     topic: Some(value),
                     broker: broker_for(&m).into(),
                     line: line_num,
                     owner_name: None,
-                });
+                }),
+                None => {
+                    // Dynamic topic on the consumer side: the walker
+                    // matched a subscribe/consume call but the topic
+                    // arg could not be resolved (parameter, f-string,
+                    // identifier without a same-file const, ...).
+                    // `emit_sites` emits a synthetic per-site node
+                    // carrying `TopicConsumerFact { name:
+                    // TOPIC_DYNAMIC_SENTINEL, .. }` and the joiner
+                    // surfaces it in `coverage.unnormalized` with
+                    // `reason: DynamicTopic`. Producer-side dynamic
+                    // topics are still dropped at `detect_sites` —
+                    // there is no `(broker, name)` to anchor a hub on
+                    // and a hub with the sentinel would falsely
+                    // advertise a provider that never resolves.
+                    out.push(DetectedSite {
+                        kind: SiteKind::Consumes,
+                        topic: None,
+                        broker: broker_for(&m).into(),
+                        line: line_num,
+                        owner_name: None,
+                    });
+                }
             }
         }
         for m in util::walk_idioms(&scheduled, line, line_num) {
@@ -468,8 +519,13 @@ fn ext_to_lang(ext: &str) -> Option<Lang> {
 /// - `identifier` set: the source had a bare identifier (e.g.
 ///   `topic: TOPIC_NAME`); try to resolve it against the
 ///   same-file constants table. If the constant is missing,
-///   return `None` (a dynamic topic — the emitter drops it
-///   and the joiner surfaces it in `coverage.unnormalized`).
+///   return `None` (a dynamic topic). On the consumer side the
+///   emitter falls through to the dynamic-topic path: a synthetic
+///   per-site node carrying `TopicConsumerFact { name:
+///   TOPIC_DYNAMIC_SENTINEL, .. }`, which the joiner surfaces in
+///   `coverage.unnormalized` with `reason: DynamicTopic`. The
+///   producer side stays a pure drop — there is no
+///   `(broker, name)` to anchor a hub on.
 fn resolve_idiom_capture(
     m: &util::IdiomMatch,
     constants: &BTreeMap<String, String>,
@@ -626,7 +682,9 @@ fn parse_def_name(line: &str) -> Option<String> {
 
 // ─── Emission ────────────────────────────────────────────────────────
 
-/// Emit one `Topic` node plus a `Produces`/`Consumes` edge per site.
+/// Emit the canonical `Topic` hub (one node per `(broker, topic)` per
+/// repo) plus one `Produces`/`Consumes` edge per site — the edge's
+/// `site` field is the per-site provenance.
 ///
 /// Edge-source invariant: the source is either an already-indexed
 /// enclosing symbol, or the per-site synthetic node that the consumer
@@ -639,6 +697,7 @@ fn emit_sites(
     graph_path: &str,
     namespace: &RepoNamespace,
     graph: &GraphDatabase,
+    emitted_topic_ids: &mut BTreeSet<String>,
 ) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     use crate::federation::contracts::model::{
         ContractFact as CF, TopicConsumerFact, TopicConsumerKind,
@@ -646,32 +705,69 @@ fn emit_sites(
 
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut edges: Vec<GraphEdge> = Vec::new();
-    let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
 
     for site in sites {
+        // The discriminator for the "dynamic topic" path. Producer
+        // sites with a non-literal name stay dropped (we have no `Topic`
+        // hub to hang the `Produces` edge off — `prune_orphans` would
+        // kill a hub without a real site path anyway). Consumer sites
+        // with a non-literal name ARE recorded: a subscriber whose
+        // topic argument is dynamic is a coverage gap the operator
+        // cannot see otherwise, and the synthetic per-site node below
+        // carries a `ContractFact::TopicConsumer` with the dynamic
+        // sentinel as its `name`. `TopicDispatch` recognises the
+        // sentinel and returns
+        // `Unresolved { reason: DynamicTopic, target_service: None }`,
+        // which the joiner pushes onto `coverage.unnormalized` — see
+        // `joiner/mod.rs:390` (the `Unnormalized` arm) and the new
+        // sibling arm for `DynamicTopic`. The `Produces` side stays a
+        // pure drop, same as today.
+        let dynamic_topic =
+            site.topic.is_none() && matches!(site.kind, SiteKind::Consumes | SiteKind::Scheduled);
         let topic_name = match site.topic.clone() {
             Some(n) => n,
-            None => {
-                // Dynamic topic — `coverage.unnormalized` materializes
-                // this in the index; nothing to emit.
-                continue;
-            }
+            None if !dynamic_topic => continue,
+            None => crate::server::sensors::util::TOPIC_DYNAMIC_SENTINEL.to_string(),
         };
 
-        // One `Topic` node per unique `(broker, name)` per file.
+        // One canonical hub per (broker, name) per repo: identity is
+        // the label alone (id anchored on `TOPIC_ANCHOR`, no line), so
+        // every site — in this file or any other — converges on the
+        // same node. The scan-scoped set pushes the node once; a hub
+        // already emitted contributes only the site's edge below.
+        //
+        // Skipped for the dynamic-topic case: there is no real
+        // `(broker, name)` to anchor on, and a hub with the
+        // `TOPIC_DYNAMIC_SENTINEL` name would falsely advertise a
+        // provider that never resolves. The synthetic per-site node
+        // below is still emitted so the `TopicConsumerFact` reaches
+        // the joiner.
         let topic_label = format!("{}/{}", site.broker, topic_name);
-        let topic_id = GraphNode::generate_id(
-            &NodeType::Topic,
-            graph_path,
-            &topic_label,
-            Some(site.line),
-            namespace,
-        );
-        if emitted_topic_ids.insert(topic_id.clone()) {
+        let topic_id = if dynamic_topic {
+            String::new()
+        } else {
+            GraphNode::generate_id(
+                &NodeType::Topic,
+                TOPIC_ANCHOR,
+                &topic_label,
+                None,
+                namespace,
+            )
+        };
+        if !dynamic_topic && emitted_topic_ids.insert(topic_id.clone()) {
+            // `path` is a real site file, NOT the id anchor:
+            // `prune_orphans` (ingestion orphan sweep) drops every node
+            // whose `path` is not a git-tracked file, and a dropped hub
+            // takes its `Produces`/`Consumes` edges with it. Same
+            // convention as `sql_sensor`'s `Table` nodes (file-anchored
+            // record, line-less id). The scan-wide pass in
+            // `scan_workspace_event` then rewrites it to the MIN site
+            // path among the hub's legs so it does not depend on walk
+            // order. `line_start` stays `None` like the id — the site
+            // lines live on the edges' `site` field.
             let mut node =
                 GraphNode::new(NodeType::Topic, topic_label.clone(), graph_path.to_string());
             node.id = topic_id.clone();
-            node.line_start = Some(site.line);
             node.contract = vec![CF::Provider(
                 crate::federation::contracts::model::ProviderFact {
                     method: crate::federation::contracts::model::HttpMethod::Any,
@@ -725,21 +821,28 @@ fn emit_sites(
             SiteKind::Consumes | SiteKind::Scheduled => EdgeType::Consumes,
         };
 
-        edges.push(GraphEdge {
-            edge_type,
-            source_id: source_id.clone(),
-            target_id: topic_id.clone(),
-            weight: Some(1.0),
-            cross_repo: false,
-            provenance: Some(EdgeProvenance::Static {
-                source: crate::schema::StaticSource::Regex,
-            }),
-            site: Some(SourceSite {
-                path: graph_path.to_string(),
-                line: site.line,
-            }),
-            detail: None,
-        });
+        // Dynamic-topic case has no hub to hang the edge on — the
+        // synthetic per-site node carries the `TopicConsumerFact`, and
+        // `TopicDispatch` decides the verdict from the sentinel. Skip
+        // the edge emission here; without a `target_id`, the edge
+        // would dangle and `insert_edges_batch` would drop it silently.
+        if !dynamic_topic {
+            edges.push(GraphEdge {
+                edge_type,
+                source_id: source_id.clone(),
+                target_id: topic_id.clone(),
+                weight: Some(1.0),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Static {
+                    source: crate::schema::StaticSource::Regex,
+                }),
+                site: Some(SourceSite {
+                    path: graph_path.to_string(),
+                    line: site.line,
+                }),
+                detail: None,
+            });
+        }
 
         // Emit the synthetic node when it is either the edge anchor or
         // the fact carrier. A producer site whose enclosing function IS
@@ -810,6 +913,27 @@ mod tests {
         let p = dir.path().join(name);
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    #[test]
+    fn escaped_backslash_before_comment_does_not_emit_phantom_topic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("producer.ts"),
+            r#"const path = "C:\\"; // producer.send({ topic: 'ghost' });
+producer.send({ topic: 'orders.created' });
+"#,
+        )
+        .unwrap();
+        let graph = empty_db();
+        scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test()).unwrap();
+        let topics: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .map(|n| n.name)
+            .collect();
+        assert_eq!(topics, vec!["kafka/orders.created".to_string()]);
     }
 
     /// kafkajs `producer.send({ topic: 'orders.created' })` must emit
@@ -983,6 +1107,89 @@ mod tests {
                 .any(|e| e.edge_type == EdgeType::Consumes && e.target_id == topic.id),
             "pika basic_consume must emit a Consumes edge to the amqp topic"
         );
+    }
+
+    /// `ch.basic_consume(queue=QUEUE_NAME)` where `QUEUE_NAME` is a
+    /// bare identifier without a same-file `const` (or imported
+    /// from another module — the constants table is per-file).
+    /// The walker yields `IdiomMatch { literal: None, identifier:
+    /// Some("QUEUE_NAME") }`, `resolve_idiom_capture` returns `None`
+    /// because the constants table does not name it, and the
+    /// emitter falls through to the dynamic-topic path: a
+    /// synthetic per-site `Function` node carrying a
+    /// `TopicConsumerFact` whose `name` is `TOPIC_DYNAMIC_SENTINEL`,
+    /// no `Topic` hub (the literal-name form would have produced
+    /// `amqp/<QUEUE_NAME>`, but there is no `QUEUE_NAME` to anchor
+    /// on). Pinned end-to-end through the sensor — the joiner test
+    /// `topic_join_dynamic_sentinel_is_unnormalized` exercises the
+    /// dispatch path with a hand-built node, not the walker.
+    #[test]
+    fn dynamic_topic_on_consumer_emits_sentinel_synthetic_node_and_no_topic_hub() {
+        use crate::federation::contracts::model::{
+            ContractFact, TopicConsumerFact, TopicConsumerKind,
+        };
+        use crate::server::sensors::util::TOPIC_DYNAMIC_SENTINEL;
+        let dir = tempfile::tempdir().unwrap();
+        // `QUEUE_NAME` is a bare identifier with no same-file const
+        // — the constants table has no entry for it, so
+        // `resolve_idiom_capture` returns `None` for the consumer
+        // walker.
+        std::fs::write(
+            dir.path().join("ledger.py"),
+            "import pika\n\
+             ch = conn.channel()\n\
+             ch.basic_consume(queue=QUEUE_NAME, on_message_callback=cb)\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let topic_nodes: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .collect();
+        assert!(
+            topic_nodes.is_empty(),
+            "a dynamic-topic consumer must NOT mint a Topic hub (no broker/name to anchor); got {topic_nodes:?}"
+        );
+
+        let synthetic: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| {
+                n.node_type == NodeType::Function
+                    && n.name.starts_with(crate::server::sensors::util::TOPIC_READ_PREFIX)
+                    && n.contract.iter().any(|f| {
+                        matches!(f, ContractFact::TopicConsumer(TopicConsumerFact { name, broker: b, .. })
+                            if name == TOPIC_DYNAMIC_SENTINEL && b == "amqp")
+                    })
+            })
+            .collect();
+        assert_eq!(
+            synthetic.len(),
+            1,
+            "the consumer-side dynamic topic must emit exactly one synthetic per-site node carrying the sentinel fact; got {synthetic:?}"
+        );
+        // Exactly one fact on the node (the subscription).
+        let contract = &synthetic[0].contract;
+        assert_eq!(
+            contract.len(),
+            1,
+            "the sentinel fact is the only contract fact on the synthetic node; got {contract:?}"
+        );
+        match &contract[0] {
+            ContractFact::TopicConsumer(TopicConsumerFact { broker, name, kind }) => {
+                assert_eq!(broker, "amqp", "pika broker label, not kafka");
+                assert_eq!(name, TOPIC_DYNAMIC_SENTINEL);
+                assert!(
+                    matches!(kind, TopicConsumerKind::Subscription),
+                    "basic_consume is a subscription"
+                );
+            }
+            other => panic!("expected TopicConsumer with sentinel, got {other:?}"),
+        }
     }
 
     /// pika `channel.queue_bind(queue=..., exchange=..., routing_key=...)`
@@ -1368,8 +1575,8 @@ mod tests {
         );
     }
 
-    /// Dynamic topic arg (`topic: variable`) is skipped — the joiner
-    /// surfaces those calls in `coverage.unnormalized`.
+    /// Dynamic topic arg (`topic: variable`) is dropped silently —
+    /// no Topic node is emitted (nothing else records the call today).
     #[test]
     fn dynamic_topic_arg_does_not_emit_topic_node() {
         let dir = tempfile::tempdir().unwrap();

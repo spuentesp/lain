@@ -1110,6 +1110,28 @@ print('  %-30s n=%-3d  p50 %5d ms   p95 %5d ms   max %5d ms%s'
          '' if bad==0 else '   !! %d ERRORED' % bad))
 "
       }
+      # Symbols and call-graph edges index in the background after
+      # /health is already up (the full LAIN checkout needs ~2 min to
+      # symbols-ready; `call_graph` is a SEPARATE capability that can lag
+      # it). The content checks below need both: a call-site answer
+      # during the Calls-gap window reports real callers as "leaf".
+      # Poll the gate's own contract (get_capabilities) until both are
+      # ready.
+      sstate=warming_up
+      for _ in $(seq 1 60); do
+        sstate=$(_parse_mcp_resp 'import json,sys
+d=json.load(sys.stdin); t=(d.get("result",{}).get("content") or [{}])[0].get("text","")
+c=json.loads(t).get("capabilities",{})
+s=c.get("symbols",{}).get("state","?"); g=c.get("call_graph",{}).get("state","?")
+print("ready" if s == "ready" and g == "ready" else f"symbols={s},call_graph={g}")' \
+          -s -m 15 -X POST "$SMCP" -H 'Content-Type: application/json' \
+          -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_capabilities","arguments":{}}}')
+        [ "$sstate" = "ready" ] && break
+        sleep 10
+      done
+      if [ "$sstate" != "ready" ]; then
+        skip "scale server answers about its own code" "capabilities not ready: $sstate"
+      else
       # Gate the timings on a fact that is true of this repo. Without
       # this the numbers could be measuring a broken request loop —
       # which is exactly what happened once: a mangled payload made
@@ -1130,6 +1152,7 @@ print((r.get("content") or [{}])[0].get("text",""))' \
       sbench "find_anchors"        find_anchors     '{}' 8
       sbench "find_dead_code"      find_dead_code   '{}' 3
       [ -n "${MODEL_ARGS[*]:-}" ] && sbench "semantic_search" semantic_search '{"query":"claim a file before editing"}' 3
+      fi
     else
       printf '  %sscale run skipped: second server never became healthy%s\n' "$YEL" "$RST"
     fi

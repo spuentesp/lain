@@ -225,13 +225,77 @@ impl TypeSelector {
     }
 }
 
-/// Label selector - supports single, OR, or NOT
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+/// Label selector - supports single, OR, or NOT.
+///
+/// Wire forms: `"deprecated"` (exact), `["a", "b"]` (any-of), and
+/// `{"not": ["a"]}` (none-of). The `Not` variant used to sit in an
+/// untagged enum alongside `Single`/`Or`, where a JSON object matches
+/// no variant at all — so `{"not": [...]}` was rejected at parse and
+/// the variant was unreachable from JSON even though the in-memory
+/// enum could express it. The hand-written pair below gives each
+/// variant a distinguishable shape.
+#[derive(Debug, Clone)]
 pub enum LabelSelector {
     Single(String),
     Or(Vec<String>),
     Not(Vec<String>),
+}
+
+impl Serialize for LabelSelector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            LabelSelector::Single(label) => serializer.serialize_str(label),
+            LabelSelector::Or(labels) => labels.serialize(serializer),
+            LabelSelector::Not(labels) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("not", labels)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LabelSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(value) => Ok(LabelSelector::Single(value)),
+            serde_json::Value::Array(values) => {
+                selector_string_list(values).map(LabelSelector::Or)
+            }
+            serde_json::Value::Object(object) if object.len() == 1 => {
+                let (key, value) = object
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| D::Error::custom("expected one label selector key"))?;
+                if key != "not" {
+                    return Err(D::Error::custom(format!(
+                        "unknown label selector `{key}`; expected not"
+                    )));
+                }
+                match value {
+                    serde_json::Value::Array(values) => {
+                        selector_string_list(values).map(LabelSelector::Not)
+                    }
+                    _ => Err(D::Error::custom(
+                        "label selector `not` value must be an array of strings",
+                    )),
+                }
+            }
+            serde_json::Value::Object(_) => Err(D::Error::custom(
+                "label selector object must contain exactly one key",
+            )),
+            _ => Err(D::Error::custom(
+                "label selector must be a string, an array of strings, or a {\"not\": [...]} object",
+            )),
+        }
+    }
 }
 
 impl LabelSelector {
@@ -258,13 +322,71 @@ impl LabelSelector {
 // Edge Selector
 // =============================================================================
 
-/// Edge selector - supports single, OR, or NOT
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+/// Edge selector - supports single, OR, or NOT.
+///
+/// Wire forms mirror [`LabelSelector`]: `"Calls"`, `["A", "B"]`, and
+/// `{"not": ["Calls"]}`. The untagged derive made `Not` unreachable
+/// from JSON for the same reason as on `LabelSelector`.
+#[derive(Debug, Clone)]
 pub enum EdgeSelector {
     Single(String),
     Or(Vec<String>),
     Not(Vec<String>),
+}
+
+impl Serialize for EdgeSelector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            EdgeSelector::Single(edge) => serializer.serialize_str(edge),
+            EdgeSelector::Or(edges) => edges.serialize(serializer),
+            EdgeSelector::Not(edges) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("not", edges)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EdgeSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(value) => Ok(EdgeSelector::Single(value)),
+            serde_json::Value::Array(values) => selector_string_list(values).map(EdgeSelector::Or),
+            serde_json::Value::Object(object) if object.len() == 1 => {
+                let (key, value) = object
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| D::Error::custom("expected one edge selector key"))?;
+                if key != "not" {
+                    return Err(D::Error::custom(format!(
+                        "unknown edge selector `{key}`; expected not"
+                    )));
+                }
+                match value {
+                    serde_json::Value::Array(values) => {
+                        selector_string_list(values).map(EdgeSelector::Not)
+                    }
+                    _ => Err(D::Error::custom(
+                        "edge selector `not` value must be an array of strings",
+                    )),
+                }
+            }
+            serde_json::Value::Object(_) => Err(D::Error::custom(
+                "edge selector object must contain exactly one key",
+            )),
+            _ => Err(D::Error::custom(
+                "edge selector must be a string, an array of strings, or a {\"not\": [...]} object",
+            )),
+        }
+    }
 }
 
 impl EdgeSelector {
@@ -405,6 +527,20 @@ where
             "name selector `{key}` value must be a string"
         ))),
     }
+}
+
+/// Every entry of an OR/NOT selector list must be a string.
+fn selector_string_list<E>(values: Vec<serde_json::Value>) -> Result<Vec<String>, E>
+where
+    E: DeError,
+{
+    values
+        .into_iter()
+        .map(|value| match value {
+            serde_json::Value::String(value) => Ok(value),
+            _ => Err(E::custom("selector list entries must be strings")),
+        })
+        .collect()
 }
 
 impl NameSelector {
@@ -690,9 +826,18 @@ pub struct QueryResult {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<GraphNodeRef>,
 
+    /// The edges walked to reach the reported nodes: the deduplicated
+    /// union of the edges on [`Self::paths`], one entry per
+    /// (from, to, type), sorted by those three fields. Only populated when
+    /// the reported nodes came from a `connect` step; find/filter-only
+    /// pipelines leave it empty (and the JSON omits it).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<GraphEdgeRef>,
 
+    /// One selected shortest path per reported node, parallel to
+    /// [`Self::nodes`] (`paths[i]` leads to `nodes[i]`). See [`GraphPath`]
+    /// for the shape and `docs/query-language.md` for the selection rule.
+    /// Same population rule as [`Self::edges`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<GraphPath>,
 
@@ -716,6 +861,9 @@ pub struct GraphNodeRef {
     pub label: Option<String>,
 }
 
+/// A reference to one graph edge on the wire. `id` is the
+/// `{from}->{to}:{type}` key, so the same physical edge always carries the
+/// same id wherever it appears.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphEdgeRef {
     pub id: String,
@@ -725,6 +873,11 @@ pub struct GraphEdgeRef {
     pub to: String,
 }
 
+/// The selected shortest matching-edge path to one reported node: `nodes`
+/// in walk order (seed first, reported node last) and one entry of
+/// [`GraphEdgeRef`] per hop. `edges[k]` joins `nodes[k]` to `nodes[k+1]`
+/// and carries the edge's stored direction — on an `incoming` walk the edge
+/// points from the later node to the earlier one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphPath {
     pub nodes: Vec<GraphNodeRef>,
@@ -735,8 +888,6 @@ pub struct GraphPath {
 pub struct QueryMeta {
     pub exec_us: u64,
     pub nodes_visited: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plan: Option<String>,
     /// Set when the default result cap trimmed the answer. A query that
     /// specifies its own `limit` never sets this.
     ///
@@ -761,7 +912,10 @@ pub struct QueryGroup {
 // `QueryExplanation` was only ever constructed by `Executor::explain`,
 // which had no caller and no test. With that gone the type could not be
 // produced by anything, so it went with it rather than staying as a
-// re-exported shape no code path can return.
+// re-exported shape no code path can return. `QueryMeta::plan` — an
+// `Option<String>` that every construction site filled with `None` —
+// went at the same time: skip-if-none kept it invisible on the wire, so
+// only the Rust struct changes.
 
 #[cfg(test)]
 mod tests {

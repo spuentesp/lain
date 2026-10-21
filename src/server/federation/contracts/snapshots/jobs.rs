@@ -370,14 +370,16 @@ fn run_job_inner(
         // serialize and rename the bytes into the cache entry's
         // `graph.bin` and never leave the temp file behind (the
         // `RunJobCleanup` block below removes any residue).
+        static JOB_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = JOB_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let short_sha = &sha[..sha.len().min(12)];
         let tmp = std::env::temp_dir().join(format!(
-            "lain-snapshot-job-{}-{}-{}",
+            "lain-snapshot-job-{}-{}-{}-{}-{}",
             spec.repo,
-            sha,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+            short_sha,
+            std::process::id(),
+            seq,
+            uuid::Uuid::new_v4().simple(),
         ));
         let _ = std::fs::create_dir_all(&tmp);
 

@@ -17,7 +17,7 @@ reference, tuning options, and day-to-day operating notes.
 
 | Command | Purpose |
 |---|---|
-| `lain mcp` | Start a single-repository MCP server on stdio. It walks up from the current directory to find `.git`; no `repos.yaml` is required. |
+| `lain mcp` | Start an MCP server on stdio. Zero-args: walks up from the current directory to find `.git`. Repeat `--workspace <PATH>` (or set `LAIN_WORKSPACE=a,b`) to serve several checkouts in one process; no `repos.yaml` is required. |
 | `lain setup` | Configure an MCP client and verify the connection. `--dry-run` and `--print-config` don't write files. |
 | `lain oneshot` | Call one tool, print the answer, and exit. The first call starts a background `lain mcp` for the repository (it exits on its own after 15 idle minutes, `LAIN_SHARED_IDLE_SECS`); later calls reuse its warm graph. `LAIN_ONESHOT_NO_SHARE=1` forces a private server. Example: `lain oneshot get_blast_radius validate_token`. |
 | `lain server` | Start the federation server and, with HTTP transport, the Command Center. |
@@ -43,6 +43,10 @@ Run `lain <command> --help` for flags. The generated MCP tool schema lives at
 Lain advertises a small tool surface and keeps the rest registered
 but hidden — advertising is not dispatch, so hook scripts can call
 hidden tools (claims, heartbeat) whether or not the model sees them.
+The shared daemon adds `add_workspaces` (`paths: [string]`) on its
+Unix socket only — the tool a late `lain mcp` client uses to hand a
+running daemon more workspaces; it is deliberately unadvertised and
+daemon-side.
 Everything is organized into **capability packages** — small skills,
 each with a pitch, a level, and a "when to reach for it" per tool.
 `list_packages` renders the whole menu at runtime; `load_package`
@@ -206,6 +210,28 @@ one repo. With a single repo nothing to choose. Relative paths
 resolve against that repo's checkout.
 
 ## Multi-agent coordination
+
+**N agents share one resident daemon automatically.** `lain mcp` is
+zero-config multi-agent: the first client starts a shared daemon keyed
+by its resolved workspace set, later clients attach to it, and a late
+agent that needs other workspaces hands them to the running daemon
+(`add_workspaces`), which indexes them in hot — after which subset
+clients attach automatically. One index, one memory, one process group
+per machine; the daemon exits after an idle window.
+
+**Isolating an instance.** The shared daemon is the default — it is a
+service that runs while somebody is connected and exits when idle. To
+make one instance private instead, set `share: false` in its
+`repos.yaml`, pass `lain mcp --no-share`, or set
+`LAIN_MCP_NO_SHARE=1`. All three mark the same property: discovery
+skips the instance (it reports `shared: false` and is never attached
+to), `add_workspaces` is refused with a typed `not_shared` error, and
+a no-share client serves privately (the historical one-server-per-client
+path) even when a covering shared daemon exists. The `share` property is
+pinned at startup (edit + restart to change it). Note: spawned daemons
+inherit their environment, so an ambient `LAIN_MCP_NO_SHARE=1` also
+marks warm daemons started in that shell (e.g. `lain oneshot`'s)
+no-share — unset it there to keep those shared.
 
 Four-call dance per agent (sequence diagram in [multiplayer.md](multiplayer.md#agent-quickstart)):
 

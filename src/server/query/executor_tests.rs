@@ -144,6 +144,37 @@ fn test_execute_find_by_name() {
 }
 
 #[test]
+fn test_execute_find_by_id() {
+    let graph = make_test_graph();
+    let (embedder, cache) = make_test_executor_params();
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+
+    let by_name = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        name: Some(NameSelector::Exact("main".to_string())),
+        ..Default::default()
+    })]);
+    let main_id = exec.execute(&by_name).unwrap().nodes[0].id.clone();
+
+    // A top-level `find.id` selects exactly that node. It used to be
+    // parsed and then ignored, answering with the whole graph.
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        id: Some(main_id.clone()),
+        ..Default::default()
+    })]);
+    let res = exec.execute(&spec).unwrap();
+    assert_eq!(res.count, 1);
+    assert_eq!(res.nodes[0].id, main_id);
+
+    // And a wrong id selects nothing, not everything.
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        id: Some("no-such-node".to_string()),
+        ..Default::default()
+    })]);
+    let res = exec.execute(&spec).unwrap();
+    assert_eq!(res.count, 0);
+}
+
+#[test]
 fn test_execute_find_empty_result() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
@@ -556,6 +587,80 @@ fn test_execute_with_label_filter_deprecated() {
     let res = result.unwrap();
     assert_eq!(res.count, 1);
     assert_eq!(res.nodes[0].name, "deprecated_fn");
+}
+
+#[test]
+fn every_advertised_label_is_selectable() {
+    // Whatever `describe_schema` advertises as a node type's labels must
+    // actually be selectable: a `find` for that type + label returns the
+    // fixture node carrying it. Labels no producer can attach must be
+    // absent from the advertisement instead — `async` and `generated` were
+    // listed before this and could only ever answer `count: 0`, because
+    // the ingest producers attach `deprecated`, `test`, and other
+    // attribute identifiers (`src/server/ingest/scan.rs`), never those.
+    let tmp = std::env::temp_dir().join("test_advertised_labels");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    let desc = crate::query::schema::describe_schema();
+    let mut fixtures: Vec<(String, String, String)> = Vec::new(); // (type, label, node id)
+    for type_desc in &desc.node_types {
+        let Some(node_type) = NodeType::all()
+            .iter()
+            .find(|t| t.to_string() == type_desc.name)
+            .cloned()
+        else {
+            panic!("describe_schema advertises unknown type {}", type_desc.name);
+        };
+        for (i, label) in type_desc.labels.iter().enumerate() {
+            // The shape the producers leave behind: `deprecated` comes
+            // with `is_deprecated` set, every other label rides in
+            // `GraphNode::label`.
+            let mut node = GraphNode::new(
+                node_type.clone(),
+                format!("advertised_{}_{}", type_desc.name, label),
+                format!("/src/advertised_{}_{}.rs", type_desc.name, i),
+            );
+            if label == "deprecated" {
+                node.is_deprecated = true;
+                node.label = Some("deprecated".to_string());
+            } else {
+                node.label = Some(label.clone());
+            }
+            let id = node.id.clone();
+            graph.upsert_node(node).unwrap();
+            fixtures.push((type_desc.name.clone(), label.clone(), id));
+        }
+    }
+
+    let (embedder, cache) = make_test_executor_params();
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+    for (type_name, label, id) in &fixtures {
+        let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+            type_selector: Some(TypeSelector::Single(type_name.clone())),
+            label_selector: Some(LabelSelector::Single(label.clone())),
+            ..Default::default()
+        })]);
+        let res = exec.execute(&spec).unwrap();
+        assert!(
+            res.nodes.iter().any(|n| &n.id == id),
+            "describe_schema advertises label `{label}` on {type_name}, \
+             but find selects nothing for it"
+        );
+    }
+
+    let advertised: std::collections::HashSet<&str> = desc
+        .node_types
+        .iter()
+        .flat_map(|t| t.labels.iter().map(|l| l.as_str()))
+        .collect();
+    for gone in ["async", "generated"] {
+        assert!(
+            !advertised.contains(gone),
+            "`{gone}` has no producer in this codebase; advertising it \
+             promises selection that can only answer count: 0"
+        );
+    }
 }
 
 #[test]

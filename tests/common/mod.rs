@@ -104,13 +104,108 @@ pub fn call_graph_fixture() -> (GraphDatabase, VolatileOverlay) {
 // exposes the same JSON-RPC surface that real agents hit.
 // ---------------------------------------------------------------------------
 
-/// Find a free TCP port by binding + releasing. The OS reuses it on
-/// the next bind unless a race occurs; on a CI runner with no other
-/// listeners this is reliable. If the race does occur, the server's
-/// bind will fail and the test will panic with that error.
+/// Find a free TCP port by binding + releasing.
+///
+/// The OS may hand the same released port to the next `bind(:0)` — two
+/// test threads calling this in parallel could both be told "P" before
+/// either server has bound it, one server then dies on `EADDRINUSE`
+/// and the other test's health probe connects to a stranger (observed
+/// in the field as `health probe error: Connection reset by peer`).
+/// A process-wide registry makes every handout unique for the life of
+/// the test binary, so concurrent boots cannot collide. Ports are
+/// never returned to the registry: a test binary runs each test once,
+/// and a dead server's port must not be re-issued while a stale probe
+/// could still reach it.
 pub fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    static TAKEN: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
+    // Bounded: 32 consecutive already-registered picks means something
+    // other than this registry is eating the ephemeral space — fail
+    // loudly instead of spinning forever.
+    for _ in 0..32 {
+        // Bind (and its unwrap) outside the registry lock: a panic
+        // while the mutex is held would poison the static and fail
+        // every later test in this binary.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut guard = TAKEN.lock().unwrap();
+        if guard.get_or_insert_with(HashSet::new).insert(port) {
+            return port;
+        }
+    }
+    panic!(
+        "free_port: the kernel handed out already-registered ports on \
+         32 consecutive binds — this test binary's ephemeral space is \
+         exhausted or another component is stealing picks"
+    );
+}
+
+/// Poll `GET /health` on `host` until it answers 200 with no repo
+/// still `indexing`, or until `deadline` elapses — and fail at once if
+/// the server process dies first (reported with its stderr, which is
+/// what tells a bind collision from a crash).
+///
+/// Every connection-level error is a *retry*, not a verdict: during
+/// startup under load the probe can see `ConnectionReset`, a read
+/// timeout, or a truncated response while the accept loop spins up —
+/// panicking on the first one of those is a wall-clock flake (this is
+/// the `health probe error: Connection reset by peer` failure class).
+/// See also [`wait_for_health`], the guard-free variant used by the
+/// callers that keep their own spawn handle elsewhere.
+pub fn wait_for_health_of(server: &mut ServerGuard, host: &str, deadline: Duration) {
+    let start = Instant::now();
+    loop {
+        if let Err((status, stderr)) = server.exit_diag() {
+            panic!(
+                "server process exited during startup ({status:?}) on {host}; stderr:\n{stderr}"
+            );
+        }
+        if start.elapsed() > deadline {
+            let log = std::fs::read_to_string(&server.stderr_path).unwrap_or_default();
+            panic!(
+                "server did not become healthy on {host} within {deadline:?}; last stderr:\n{log}"
+            );
+        }
+        let attempt = (|| -> std::io::Result<(u16, String)> {
+            let mut stream = TcpStream::connect(host)?;
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.write_all(
+                format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            let status_line = response.lines().next().unwrap_or("");
+            let status: u16 = status_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let body_start = response
+                .find("\r\n\r\n")
+                .map(|i| i + 4)
+                .unwrap_or(response.len());
+            Ok((status, response[body_start..].to_string()))
+        })();
+        match attempt {
+            // The server answers while it indexes in the background; wait
+            // until no repo reports `indexing`.
+            Ok((200, body)) if !health_reports_indexing(&body) => return,
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// True while the `/health` body reports a federation repo as `indexing`.
+pub fn health_reports_indexing(health_body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(health_body)
+        .ok()
+        .and_then(|v| v["federation"]["repos"].as_array().cloned())
+        .is_some_and(|repos| repos.iter().any(|r| r["health"] == "indexing"))
 }
 
 /// Minimal HTTP request helper — issues one request, reads the full

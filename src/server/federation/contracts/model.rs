@@ -131,6 +131,53 @@ pub enum ContractFact {
     TableConsumer(TableConsumerFact),
 }
 
+impl ContractFact {
+    /// The [`ContractKey`]s one consumer-side fact names. A node may
+    /// carry several facts (`topic-read:<path>:<line>` subscribing to
+    /// two topics is the canonical case) and a `TableConsumerFact`
+    /// lists several tables, so this is a list: `check_binding` and
+    /// the confirmed-binding matcher treat a pair as well-formed when
+    /// **any** of the node's keys matches. Non-consumer facts yield
+    /// an empty list.
+    pub fn consumer_keys(&self) -> Vec<ContractKey> {
+        match self {
+            ContractFact::Consumer(c) => c
+                .url
+                .template
+                .clone()
+                .map(|template| {
+                    vec![ContractKey::Http {
+                        method: c.method.clone(),
+                        template,
+                    }]
+                })
+                .unwrap_or_default(),
+            ContractFact::TopicConsumer(t) => vec![ContractKey::Topic {
+                broker: t.broker.clone(),
+                name: t.name.clone(),
+            }],
+            ContractFact::RpcConsumer(r) => vec![ContractKey::Rpc {
+                system: r.system,
+                service: r.service.clone(),
+                method: r.method.clone(),
+            }],
+            ContractFact::GraphqlConsumer(g) => vec![ContractKey::Graphql {
+                op: g.op,
+                field: g.field.clone(),
+            }],
+            ContractFact::WebSocketConsumer(w) => vec![ContractKey::WebSocket {
+                route: w.route.clone(),
+            }],
+            ContractFact::TableConsumer(t) => t
+                .tables
+                .iter()
+                .map(|name| ContractKey::Table { name: name.clone() })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
 // ─── HTTP provider ────────────────────────────────────────────────────
 
 /// One provider endpoint declaration. Emitted by `http_sensor` and
@@ -770,25 +817,10 @@ impl std::str::FromStr for ContractKey {
             });
         }
         if let Some(rest) = s.strip_prefix("topic:") {
-            // "broker/name"
-            let (broker, name) = rest
-                .split_once('/')
-                .ok_or_else(|| format!("malformed topic key: {s:?}"))?;
-            return Ok(ContractKey::Topic {
-                broker: broker.to_string(),
-                name: name.to_string(),
-            });
+            return parse_topic_body(s, rest);
         }
         if let Some(rest) = s.strip_prefix("rpc:") {
-            // "<service>/<method>" (service is package-qualified).
-            let (service, method) = rest
-                .split_once('/')
-                .ok_or_else(|| format!("malformed rpc key: {s:?}"))?;
-            return Ok(ContractKey::Rpc {
-                system: RpcSystem::Grpc,
-                service: service.to_string(),
-                method: method.to_string(),
-            });
+            return parse_rpc_body(s, rest);
         }
         if let Some(rest) = s.strip_prefix("graphql:") {
             // "<op>:<field>" — op is `query` | `mutation` | `subscription`.
@@ -807,17 +839,148 @@ impl std::str::FromStr for ContractKey {
             });
         }
         if let Some(route) = s.strip_prefix("websocket:") {
+            if route.is_empty() {
+                return Err(format!("malformed websocket key (empty route): {s:?}"));
+            }
+            return Ok(ContractKey::WebSocket {
+                route: route.to_string(),
+            });
+        }
+        if let Some(route) = s.strip_prefix("ws:") {
+            // Short form of `websocket:` — the `repos.yaml#bindings`
+            // grammar; same key.
+            if route.is_empty() {
+                return Err(format!("malformed ws key (empty route): {s:?}"));
+            }
             return Ok(ContractKey::WebSocket {
                 route: route.to_string(),
             });
         }
         if let Some(name) = s.strip_prefix("table:") {
+            if name.is_empty() {
+                return Err(format!("malformed table key (empty name): {s:?}"));
+            }
             return Ok(ContractKey::Table {
                 name: name.to_string(),
             });
         }
         Err(format!("unknown contract key kind: {s:?}"))
     }
+}
+
+/// `topic:` body parser (the part after the `topic:` prefix). Two
+/// accepted shapes, disambiguated by the separators present:
+///
+/// * **wire form** `topic:<broker>/<name>` — split at the FIRST
+///   `/`; `<name>` may carry further `/` and `:` (Redis
+///   `orders:created`, MQTT `sensors/temp`). `<broker>` may not
+///   contain `:` — such a string also reads as the colon form and
+///   is rejected as ambiguous rather than guessed.
+/// * **bindings form** `topic:<broker>:<name>` — exactly two
+///   non-empty `:`-separated components. Three or more components
+///   (`topic:a:b:c`) is rejected — the colon form takes exactly two.
+///
+/// A body with neither separator is rejected. Empty components are
+/// rejected in both shapes.
+fn parse_topic_body(full: &str, body: &str) -> Result<ContractKey, String> {
+    if body.contains('/') {
+        let (broker, name) = body.split_once('/').expect("body contains '/'");
+        if broker.is_empty() || name.is_empty() {
+            return Err(format!(
+                "malformed topic key (empty broker or name): {full:?}"
+            ));
+        }
+        if broker.contains(':') {
+            return Err(format!(
+                "ambiguous topic key {full:?}: the slash form's broker would contain ':' \
+                 (the string also reads as `topic:<broker>:<name>`) — use a broker free of ':' \
+                 or the colon form with components free of '/'"
+            ));
+        }
+        return Ok(ContractKey::Topic {
+            broker: broker.to_string(),
+            name: name.to_string(),
+        });
+    }
+    if body.contains(':') {
+        let parts: Vec<&str> = body.split(':').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "malformed topic key {full:?}: the colon form takes exactly two components \
+                 (topic:<broker>:<name>), found {}",
+                parts.len()
+            ));
+        }
+        if parts[0].is_empty() || parts[1].is_empty() {
+            return Err(format!(
+                "malformed topic key (empty broker or name): {full:?}"
+            ));
+        }
+        return Ok(ContractKey::Topic {
+            broker: parts[0].to_string(),
+            name: parts[1].to_string(),
+        });
+    }
+    Err(format!(
+        "malformed topic key {full:?}: expected `topic:<broker>/<name>` or `topic:<broker>:<name>`"
+    ))
+}
+
+/// `rpc:` body parser — the same discipline as
+/// [`parse_topic_body`]: wire form `rpc:<service>/<method>`
+/// (split at the first `/`; `system` defaults to the only family,
+/// gRPC) or bindings form `rpc:<system>:<service>:<method>`
+/// (exactly three non-empty components). A slash-form service that
+/// would contain `:` is ambiguous and rejected.
+fn parse_rpc_body(full: &str, body: &str) -> Result<ContractKey, String> {
+    if body.contains('/') {
+        let (service, method) = body.split_once('/').expect("body contains '/'");
+        if service.is_empty() || method.is_empty() {
+            return Err(format!(
+                "malformed rpc key (empty service or method): {full:?}"
+            ));
+        }
+        if service.contains(':') {
+            return Err(format!(
+                "ambiguous rpc key {full:?}: the slash form's service would contain ':' \
+                 (the string also reads as `rpc:<system>:<service>:<method>`) — use a service \
+                 free of ':' or the colon form with components free of '/'"
+            ));
+        }
+        return Ok(ContractKey::Rpc {
+            system: RpcSystem::Grpc,
+            service: service.to_string(),
+            method: method.to_string(),
+        });
+    }
+    if body.contains(':') {
+        let parts: Vec<&str> = body.split(':').collect();
+        if parts.len() != 3 {
+            return Err(format!(
+                "malformed rpc key {full:?}: the colon form takes exactly three components \
+                 (rpc:<system>:<service>:<method>), found {}",
+                parts.len()
+            ));
+        }
+        if parts.iter().any(|p| p.is_empty()) {
+            return Err(format!(
+                "malformed rpc key (empty system, service, or method): {full:?}"
+            ));
+        }
+        let system = match parts[0] {
+            "grpc" => RpcSystem::Grpc,
+            other => return Err(format!("unknown rpc system in key: {other:?}")),
+        };
+        return Ok(ContractKey::Rpc {
+            system,
+            service: parts[1].to_string(),
+            method: parts[2].to_string(),
+        });
+    }
+    Err(format!(
+        "malformed rpc key {full:?}: expected `rpc:<service>/<method>` or \
+         `rpc:<system>:<service>:<method>`"
+    ))
 }
 
 fn method_label(method: &MethodSpec) -> &'static str {
@@ -934,6 +1097,17 @@ pub enum UnresolvedReason {
     /// federation (rule 4: `External`); the ledger records the
     /// reference so an operator can decide whether to onboard it.
     ExternalRef,
+    /// Phase F2b (spec §6.4 "external `$ref`"): an OpenAPI spec
+    /// resolves a `$ref` to a foreign file (`other.yaml#/...`)
+    /// whose body is not part of this workspace. The route is
+    /// emitted, but the schema fields downstream of the `$ref`
+    /// are not — a coverage gap the operator can close by
+    /// inlining the external schema or onboarding the foreign
+    /// file. Recorded by the `OpenApiSensor` per-repo ledger and
+    /// aggregated into `coverage.unresolved_refs` (sibling of
+    /// `unnormalized`, not the same bucket — an external
+    /// `$ref` is not a consumer-shaped gap).
+    ExternalSchemaRef,
     /// Phase D (spec §7): the SQL call shape was recognised but
     /// the literal argument was non-literal (parameter, `format!`,
     /// f-string, …) or the parser could not classify the

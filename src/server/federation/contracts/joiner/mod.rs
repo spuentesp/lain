@@ -304,6 +304,21 @@ impl ContractJoiner {
                         &mut unresolved_env_vars,
                         &mut binds,
                     );
+                    // `coverage.unnormalized` (§9.7) covers every
+                    // protocol layer whose consumer was rejected by a
+                    // gap reason (HTTP rule 5 + topic `DynamicTopic`
+                    // — see `TopicDispatch::dispatch`); the HTTP
+                    // branch below applies the same rule to its own
+                    // resolutions.
+                    if matches!(
+                        resolution.target,
+                        Some(ConsumerTarget::Unresolved {
+                            reason: UnresolvedReason::Unnormalized | UnresolvedReason::DynamicTopic,
+                            ..
+                        })
+                    ) {
+                        unnormalized.push(call_id.clone());
+                    }
                     consumers
                         .entry(call_id.clone())
                         .or_default()
@@ -390,7 +405,7 @@ impl ContractJoiner {
             if matches!(
                 resolution.target,
                 Some(ConsumerTarget::Unresolved {
-                    reason: UnresolvedReason::Unnormalized,
+                    reason: UnresolvedReason::Unnormalized | UnresolvedReason::DynamicTopic,
                     ..
                 })
             ) {
@@ -780,9 +795,18 @@ pub(super) fn parse_method(s: &str) -> Option<HttpMethod> {
 /// Generic keys (and `bindings[*].provider.key`) are written in
 /// the shortened `<METHOD> <template>` form, not the
 /// `http:<METHOD> <template>` wire form, so we normalize them
-/// here.
+/// here. Keys that already carry their kind prefix
+/// (`http:`, `topic:`, `graphql:`, `rpc:`, `ws:`/`websocket:`,
+/// `table:`) pass through untouched.
 pub(super) fn parse_contract_key(s: &str) -> Result<ContractKey, String> {
-    let normalized = if s.starts_with("http:") || s.starts_with("topic:") {
+    let normalized = if s.starts_with("http:")
+        || s.starts_with("topic:")
+        || s.starts_with("graphql:")
+        || s.starts_with("rpc:")
+        || s.starts_with("ws:")
+        || s.starts_with("websocket:")
+        || s.starts_with("table:")
+    {
         s.to_string()
     } else {
         format!("http:{s}")
