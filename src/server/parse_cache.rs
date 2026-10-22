@@ -158,7 +158,10 @@ mod tests {
         cache.insert(key(b"c"), tree.clone(), 100);
 
         assert!(cache.used <= 250, "used {} over budget", cache.used);
-        assert!(cache.get(&key(b"b")).is_none(), "LRU entry should be evicted");
+        assert!(
+            cache.get(&key(b"b")).is_none(),
+            "LRU entry should be evicted"
+        );
         assert!(cache.get(&key(b"a")).is_some());
         assert!(cache.get(&key(b"c")).is_some());
     }

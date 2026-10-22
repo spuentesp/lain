@@ -354,11 +354,10 @@ pub fn resolve_static_edges(
             ));
         }
         containers.insert(node.id.clone(), node.container.clone());
-        name_index.entry(node.name.clone()).or_default().push((
-            node.id,
-            node.node_type,
-            node.path,
-        ));
+        name_index
+            .entry(node.name.clone())
+            .or_default()
+            .push((node.id, node.node_type, node.path));
     }
 
     let mut edges: Vec<GraphEdge> = Vec::new();
@@ -378,7 +377,11 @@ pub fn resolve_static_edges(
                     .min_by_key(|(s, e, _)| e.saturating_sub(*s))
                     .map(|(_, _, id)| id.as_str())
             })
-            .or_else(|| file_id_by_path.get(sr.file_path.as_str()).map(String::as_str))
+            .or_else(|| {
+                file_id_by_path
+                    .get(sr.file_path.as_str())
+                    .map(String::as_str)
+            })
         else {
             continue;
         };

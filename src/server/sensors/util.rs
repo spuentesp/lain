@@ -317,7 +317,12 @@ pub fn walk_workspace(root: &Path) -> impl Iterator<Item = WalkedFile> {
             .filter(|c| c.root == root)
             .and_then(|c| c.walked_files.clone())
     }) {
-        return cached.iter().cloned().collect::<Vec<_>>().into_iter().map(WalkedFile);
+        return cached
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(WalkedFile);
     }
 
     let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();

@@ -785,10 +785,12 @@ impl FederatedIndex {
             .iter()
             .filter(|(rid, _)| *rid != id)
             .flat_map(|(rid, idx)| {
-                idx.nodes_of_types(candidate_types).into_iter().map(move |mut n| {
-                    n.id = global_id_str(rid, &n);
-                    n
-                })
+                idx.nodes_of_types(candidate_types)
+                    .into_iter()
+                    .map(move |mut n| {
+                        n.id = global_id_str(rid, &n);
+                        n
+                    })
             })
             .collect();
         // Collect matched edges and the peer nodes they target, then write
@@ -847,12 +849,9 @@ impl FederatedIndex {
                 // appearance; if it already has been, this just re-writes
                 // the same data.
                 if let Some(target_node) = matcher.node_by_id(&target_gid) {
-                    let needs_upsert = self
-                        .backend
-                        .get_node(&target_gid)?
-                        .is_none_or(|existing| {
-                            existing.signature.is_none() && target_node.signature.is_some()
-                        });
+                    let needs_upsert = self.backend.get_node(&target_gid)?.is_none_or(|existing| {
+                        existing.signature.is_none() && target_node.signature.is_some()
+                    });
                     if needs_upsert {
                         target_nodes.insert(target_gid.clone(), target_node.clone());
                     }
