@@ -54,7 +54,7 @@ pub struct FederatedIndex {
     /// checkout failed), with the reason. They are left out rather than
     /// stopping the server, and reported by `get_health`.
     load_errors: RwLock<Vec<(String, String)>>,
-    repos: RwLock<HashMap<RepoId, Arc<RepoIndex>>>,
+    repos: RwLock<std::collections::BTreeMap<RepoId, Arc<RepoIndex>>>,
     backend: Arc<dyn GraphBackend>,
     symbol_to_repos: DashMap<String, Vec<RepoId>>,
     /// Shared `VolatileOverlay` installed into each `RepoIndex` on
@@ -177,7 +177,7 @@ impl FederatedIndex {
 
     pub fn new(backend: Arc<dyn GraphBackend>) -> Self {
         Self {
-            repos: RwLock::new(HashMap::new()),
+            repos: RwLock::new(std::collections::BTreeMap::new()),
             backend,
             symbol_to_repos: DashMap::new(),
             federation_overlay: RwLock::new(None),
@@ -814,8 +814,8 @@ impl FederatedIndex {
         let _ = batch_nodes_owned;
         let batch_nodes_owned: Vec<GraphNode> = batch_nodes_owned;
         let matcher = CrossRepoMatcher::new(&other_nodes);
-        let mut target_nodes: std::collections::HashMap<String, GraphNode> =
-            std::collections::HashMap::new();
+        let mut target_nodes: std::collections::BTreeMap<String, GraphNode> =
+            std::collections::BTreeMap::new();
         for new_node in &batch_nodes_owned {
             let matches = matcher.find_matches(new_node, 5, 0.5);
             for (target_gid, sim, _confidence) in matches {
@@ -1729,19 +1729,23 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                     let indices = db.find_indices_by_name(name);
                     if !indices.is_empty() {
                         let g = db.graph_ref_for_read();
-                        for node_idx in indices {
-                            if let Some(node) = g.node_weight(node_idx) {
-                                if node.name == name {
-                                    return Some(GlobalId::new(
-                                        rid,
-                                        node.node_type.clone(),
-                                        &node.path,
-                                        &node.name,
-                                        node.line_start,
-                                    ));
-                                }
-                            }
-                        }
+                        // Several nodes can share the name. Take the smallest id
+                        // rather than whichever the index yields first, since
+                        // index order depends on how the graph was built.
+                        return indices
+                            .into_iter()
+                            .filter_map(|node_idx| g.node_weight(node_idx))
+                            .filter(|node| node.name == name)
+                            .map(|node| {
+                                GlobalId::new(
+                                    rid,
+                                    node.node_type.clone(),
+                                    &node.path,
+                                    &node.name,
+                                    node.line_start,
+                                )
+                            })
+                            .min_by(|a, b| a.as_str().cmp(b.as_str()));
                     }
                 }
             }

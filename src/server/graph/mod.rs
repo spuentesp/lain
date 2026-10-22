@@ -865,7 +865,13 @@ impl GraphDatabase {
         {
             let mut graph = self.graph.write();
 
-            for path in paths {
+            // Remove in sorted path order. `StableGraph` reuses vacated slots,
+            // so the removal order decides the node indices that later
+            // inserts get, and callers pass paths in hash order.
+            let mut ordered_paths: Vec<&String> = paths.iter().collect();
+            ordered_paths.sort_unstable();
+            ordered_paths.dedup();
+            for path in ordered_paths {
                 // Drop the old nodes for this path, keeping Namespace nodes.
                 let old = self
                     .path_index
@@ -1336,12 +1342,15 @@ impl GraphDatabase {
 
         // Iterate the per-path index rather than every node: distinct paths are
         // a fraction of node count, and each stale one drops as a whole bucket.
-        let stale: Vec<String> = self
+        // Sorted: the map's iteration order is per-process random, and the
+        // removal order decides which node slots later inserts reuse.
+        let mut stale: Vec<String> = self
             .path_index
             .iter()
             .map(|r| r.key().clone())
             .filter(|key| !tracked.contains(key))
             .collect();
+        stale.sort_unstable();
 
         // Directories that still hold a tracked file: their Namespace nodes
         // stay. Any other stale key is a deleted file or an emptied
@@ -2687,7 +2696,8 @@ impl GraphDatabase {
     fn build_state(&self) -> persist::GraphState {
         let graph_guard = self.graph.read();
         let graph = graph_guard.clone();
-        let index_map: HashMap<String, NodeIndex> = self
+        // Ordered, so the same graph always encodes to the same bytes.
+        let index_map: std::collections::BTreeMap<String, NodeIndex> = self
             .index_map
             .iter()
             .map(|r| (r.key().clone(), *r.value()))

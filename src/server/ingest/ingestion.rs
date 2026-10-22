@@ -416,7 +416,12 @@ impl LainServer {
         // at the end of the `scan_file_batch` JoinSet drain below.
         let lsp_cache = std::sync::Arc::new(crate::server::ingest::scan::LspScanCache::default());
         let mut set = tokio::task::JoinSet::new();
-        for chunk in file_chunks {
+        // Results are applied in chunk order, not completion order, so the
+        // graph is built the same way on every run. A panicked task is found
+        // again through its task id.
+        let mut index_of_task: std::collections::HashMap<tokio::task::Id, usize> =
+            std::collections::HashMap::new();
+        for (chunk_index, chunk) in file_chunks.into_iter().enumerate() {
             // AGENT_UX_ROADMAP.md M4 follow-up: cancel between batches.
             // Spawning new work after a cancel would keep the runtime
             // busy past the shutdown budget.
@@ -438,20 +443,24 @@ impl LainServer {
             // every chunk shares the same cache instance.
             let lsp_cache_for_task = std::sync::Arc::clone(&lsp_cache);
 
-            set.spawn(async move {
-                scan_file_batch(
-                    chunk,
-                    workspace,
-                    Some(lsp),
-                    lsp_sync_time,
-                    git_time,
-                    commit_hash,
-                    &namespace,
-                    cancel_for_spawn,
-                    Some(&*lsp_cache_for_task),
+            let task = set.spawn(async move {
+                (
+                    chunk_index,
+                    scan_file_batch(
+                        chunk,
+                        workspace,
+                        Some(lsp),
+                        lsp_sync_time,
+                        git_time,
+                        commit_hash,
+                        &namespace,
+                        cancel_for_spawn,
+                        Some(&*lsp_cache_for_task),
+                    )
+                    .await,
                 )
-                .await
             });
+            index_of_task.insert(task.id(), chunk_index);
         }
 
         // 2. Reduce Phase: Incremental flush — write partial results as tasks complete
@@ -478,6 +487,8 @@ impl LainServer {
                 files.len()
             );
         }
+        let mut in_order = std::collections::BTreeMap::new();
+        let mut next_chunk = 0usize;
         let scan_timeout =
             std::time::Duration::from_secs(self.ingest().tuning().ingestion.scan_timeout_secs);
 
@@ -502,74 +513,87 @@ impl LainServer {
                 set.abort_all();
                 break;
             }
-            match res {
-                Ok(batch_results) => {
-                    // Process each file result in this batch
-                    for file_result in batch_results {
-                        match file_result {
-                            Ok(scan_result) => {
-                                scanned += 1;
-                                batch_nodes.extend(scan_result.nodes);
-                                batch_edges.extend(scan_result.edges);
-                                all_external_refs.extend(scan_result.external_references);
-                                all_static_refs.extend(scan_result.static_refs);
-                                all_pattern_refs.extend(scan_result.pattern_refs);
-                            }
-                            Err(e) => {
-                                failed += 1;
-                                warn!("File scan error: {}", e);
+            let (index, outcome) = match res {
+                Ok((index, batch_results)) => (index, Ok(batch_results)),
+                // Every spawned task is in `index_of_task`, so a panicked one
+                // still lands in its own slot and the queue cannot stall.
+                Err(e) => (
+                    index_of_task.get(&e.id()).copied().unwrap_or(usize::MAX),
+                    Err(e),
+                ),
+            };
+            in_order.insert(index, outcome);
+            while let Some(outcome) = in_order.remove(&next_chunk) {
+                next_chunk += 1;
+                match outcome {
+                    Ok(batch_results) => {
+                        // Process each file result in this batch
+                        for file_result in batch_results {
+                            match file_result {
+                                Ok(scan_result) => {
+                                    scanned += 1;
+                                    batch_nodes.extend(scan_result.nodes);
+                                    batch_edges.extend(scan_result.edges);
+                                    all_external_refs.extend(scan_result.external_references);
+                                    all_static_refs.extend(scan_result.static_refs);
+                                    all_pattern_refs.extend(scan_result.pattern_refs);
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    warn!("File scan error: {}", e);
+                                }
                             }
                         }
-                    }
-                    debug!(
-                        "Batch completed: {} files scanned, {} failed in batch",
-                        scanned, failed
-                    );
-
-                    // Incremental flush every batch_size files
-                    if batch_nodes.len() >= batch_size {
-                        info!(
-                            "Flush phase 1: writing {} nodes ({} files scanned)",
-                            batch_nodes.len(),
-                            scanned
+                        debug!(
+                            "Batch completed: {} files scanned, {} failed in batch",
+                            scanned, failed
                         );
-                        // Replace rather than insert, so a re-scan drops the
-                        // symbols a file no longer defines instead of layering
-                        // new nodes on top of stale ones. Scan results arrive
-                        // whole-file and this flush runs between chunks, so
-                        // every path here has all of its nodes in this batch.
-                        // One call per flush, not per file: per-file would take
-                        // a write lock hundreds of times while readers query.
-                        let paths: Vec<String> = batch_nodes
-                            .iter()
-                            .map(|n| n.path.clone())
-                            .collect::<HashSet<_>>()
-                            .into_iter()
-                            .collect();
-                        if let Err(e) = self
-                            .ingest()
-                            .graph()
-                            .replace_nodes_for_paths(&paths, &batch_nodes)
-                        {
-                            warn!("Batch node write error: {}", e);
+
+                        // Incremental flush every batch_size files
+                        if batch_nodes.len() >= batch_size {
+                            info!(
+                                "Flush phase 1: writing {} nodes ({} files scanned)",
+                                batch_nodes.len(),
+                                scanned
+                            );
+                            // Replace rather than insert, so a re-scan drops the
+                            // symbols a file no longer defines instead of layering
+                            // new nodes on top of stale ones. Scan results arrive
+                            // whole-file and this flush runs between chunks, so
+                            // every path here has all of its nodes in this batch.
+                            // One call per flush, not per file: per-file would take
+                            // a write lock hundreds of times while readers query.
+                            let paths: Vec<String> = batch_nodes
+                                .iter()
+                                .map(|n| n.path.clone())
+                                .collect::<HashSet<_>>()
+                                .into_iter()
+                                .collect();
+                            if let Err(e) = self
+                                .ingest()
+                                .graph()
+                                .replace_nodes_for_paths(&paths, &batch_nodes)
+                            {
+                                warn!("Batch node write error: {}", e);
+                            }
+                            insert_edges_best_effort(self.ingest().graph(), &batch_edges, "batch");
+                            // Durably persist the flush. The in-memory inserts above
+                            // are lost if the outer re-index timeout drops this task,
+                            // which is why a 90s budget could never converge: every
+                            // batch of parsing was discarded. Writing here means a
+                            // killed run still leaves progress on disk and successive
+                            // runs converge instead of restarting from the same graph.
+                            if let Err(e) = self.ingest().graph().save_to_disk().await {
+                                warn!("Batch persist error: {}", e);
+                            }
+                            batch_nodes.clear();
+                            batch_edges.clear();
                         }
-                        insert_edges_best_effort(self.ingest().graph(), &batch_edges, "batch");
-                        // Durably persist the flush. The in-memory inserts above
-                        // are lost if the outer re-index timeout drops this task,
-                        // which is why a 90s budget could never converge: every
-                        // batch of parsing was discarded. Writing here means a
-                        // killed run still leaves progress on disk and successive
-                        // runs converge instead of restarting from the same graph.
-                        if let Err(e) = self.ingest().graph().save_to_disk().await {
-                            warn!("Batch persist error: {}", e);
-                        }
-                        batch_nodes.clear();
-                        batch_edges.clear();
                     }
-                }
-                Err(e) => {
-                    failed += 1;
-                    warn!("Task join error: {}", e);
+                    Err(e) => {
+                        failed += 1;
+                        warn!("Task join error: {}", e);
+                    }
                 }
             }
             // Published once per completed batch. `files_completed` counts
