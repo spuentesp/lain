@@ -907,14 +907,38 @@ fn mask_outside_scripts(source: &str) -> (String, bool) {
 }
 
 fn parse(language: &Language, source: &str) -> Option<tree_sitter::Tree> {
-    PARSER.with(|parser| {
-        let mut parser = parser.lock();
-        parser.set_language(language).ok()?;
-        parser.parse(source, None)
+    crate::server::parse_cache::get_or_parse(language, source, || {
+        PARSER.with(|parser| {
+            let mut parser = parser.lock();
+            parser.set_language(language).ok()?;
+            parser.parse(source, None)
+        })
     })
 }
 
 // ── References ───────────────────────────────────────────────────────────────
+
+/// Extract definitions, references, and string literals from a single tree-sitter parse.
+pub fn extract_all(
+    path: &Path,
+    source: &str,
+) -> (Vec<SymbolDef>, Vec<StaticRef>, Vec<StringLiteral>) {
+    let Some((spec, text)) = script_view(path, source) else {
+        return (vec![], vec![], vec![]);
+    };
+    let Some(c) = compiled(spec) else {
+        return (vec![], vec![], vec![]);
+    };
+    let Some(tree) = parse(&c.language, &text) else {
+        return (vec![], vec![], vec![]);
+    };
+    let src_bytes = text.as_bytes();
+    let defs = extract_definitions_from_tree(spec, c, &tree, src_bytes);
+    let locals: HashSet<String> = defs.iter().map(|d| d.name.clone()).collect();
+    let refs = extract_refs_from_tree(spec, c, &tree, src_bytes, &locals);
+    let strings = extract_strings_from_tree(c, &tree, src_bytes);
+    (defs, refs, strings)
+}
 
 /// Extract all call and type-usage references from a source file.
 /// Returns an empty vec for unsupported file types.
@@ -924,11 +948,21 @@ fn parse(language: &Language, source: &str) -> Option<tree_sitter::Tree> {
 /// `Validator::assert` is called as `$this->assert(…)`, and with no locals
 /// the builtin blocklist dropped every such call.
 pub fn extract_refs(path: &Path, source: &str) -> Vec<StaticRef> {
-    let locals: HashSet<String> = extract_definitions(path, source)
+    let Some((spec, text)) = script_view(path, source) else {
+        return vec![];
+    };
+    let Some(c) = compiled(spec) else {
+        return vec![];
+    };
+    let Some(tree) = parse(&c.language, &text) else {
+        return vec![];
+    };
+    let src_bytes = text.as_bytes();
+    let locals: HashSet<String> = extract_definitions_from_tree(spec, c, &tree, src_bytes)
         .into_iter()
         .map(|d| d.name)
         .collect();
-    extract_refs_with_locals(path, source, &locals)
+    extract_refs_from_tree(spec, c, &tree, src_bytes, &locals)
 }
 
 /// Extract references with knowledge of locally-defined symbols.
@@ -948,7 +982,16 @@ pub fn extract_refs_with_locals(
     let Some(tree) = parse(&c.language, &text) else {
         return vec![];
     };
-    let src_bytes = text.as_bytes();
+    extract_refs_from_tree(spec, c, &tree, text.as_bytes(), local_definitions)
+}
+
+fn extract_refs_from_tree(
+    spec: &'static LangSpec,
+    c: &Compiled,
+    tree: &tree_sitter::Tree,
+    src_bytes: &[u8],
+    local_definitions: &HashSet<String>,
+) -> Vec<StaticRef> {
     let mut refs = Vec::new();
 
     let mut collect = |query: &Query, edge_type: EdgeType, keep: &dyn Fn(&str) -> bool| {
@@ -1280,13 +1323,23 @@ pub fn extract_strings(path: &Path, source: &str) -> Vec<StringLiteral> {
     let Some(c) = compiled(spec) else {
         return vec![];
     };
-    let Some(query) = &c.strings else {
+    if c.strings.is_none() {
         return vec![];
-    };
+    }
     let Some(tree) = parse(&c.language, &text) else {
         return vec![];
     };
-    let src_bytes = text.as_bytes();
+    extract_strings_from_tree(c, &tree, text.as_bytes())
+}
+
+fn extract_strings_from_tree(
+    c: &Compiled,
+    tree: &tree_sitter::Tree,
+    src_bytes: &[u8],
+) -> Vec<StringLiteral> {
+    let Some(query) = &c.strings else {
+        return vec![];
+    };
     let mut literals = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), src_bytes);
@@ -1372,7 +1425,15 @@ pub fn extract_definitions(path: &Path, source: &str) -> Vec<SymbolDef> {
     let Some(tree) = parse(&c.language, &text) else {
         return vec![];
     };
-    let src_bytes = text.as_bytes();
+    extract_definitions_from_tree(spec, c, &tree, text.as_bytes())
+}
+
+fn extract_definitions_from_tree(
+    spec: &'static LangSpec,
+    c: &Compiled,
+    tree: &tree_sitter::Tree,
+    src_bytes: &[u8],
+) -> Vec<SymbolDef> {
     let d_idx = c.defs.capture_index_for_name("d");
     let name_idx = c.defs.capture_index_for_name("name");
     let mut defs = Vec::new();

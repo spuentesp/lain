@@ -415,6 +415,12 @@ pub struct GraphDatabase {
     /// stamp, so a warm boot does not publish `ready` over the torn graph.
     /// Shared across clones.
     calls_published_for: Arc<RwLock<Option<String>>>,
+    /// Cached tree-sitter static references extracted during the most recent
+    /// full/incremental scan of this repo (`index_one_repo`), so
+    /// `relink_cross_repo` can resolve cross-repo calls in memory without
+    /// re-reading and re-parsing every tracked source file with tree-sitter.
+    cached_static_refs:
+        Arc<parking_lot::Mutex<Option<Vec<crate::server::ingest::scan::StaticFileRef>>>>,
 }
 
 /// RAII marker for "a mutating indexing pass is running on this graph".
@@ -604,6 +610,7 @@ impl GraphDatabase {
             write_pass_active: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cochange_failure: Arc::new(RwLock::new(None)),
             calls_published_for: Arc::new(RwLock::new(None)),
+            cached_static_refs: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -1230,12 +1237,12 @@ impl GraphDatabase {
             // 3. Special case: EntryPointSensor wipes `entry` on
             //    every node before re-applying its own.
             if matches!(owner, SensorOwner::EntryPointSensor) {
-                for idx in 0..graph.node_count() {
-                    let nidx = petgraph::stable_graph::NodeIndex::new(idx);
-                    if let Some(n) = graph.node_weight_mut(nidx) {
-                        n.entry = None;
-                    }
+                for n in graph.node_weights_mut() {
+                    n.entry = None;
                 }
+            }
+            if !removed_ids.is_empty() {
+                self.log_op(wal::GraphOp::RemoveNodesByIds(removed_ids.clone()))?;
             }
             removed_ids.len()
         };
@@ -1243,8 +1250,8 @@ impl GraphDatabase {
         // 4. Insert the new nodes and edges (uses the existing
         //    batch insert; edges whose endpoints aren't present are
         //    dropped — same contract as `insert_edges_batch`).
-        for node in nodes {
-            self.upsert_node(node.clone())?;
+        if !nodes.is_empty() {
+            self.insert_nodes_batch(nodes)?;
         }
         if !edges.is_empty() {
             self.insert_edges_batch(edges)?;
@@ -1359,10 +1366,7 @@ impl GraphDatabase {
     }
 
     pub fn upsert_nodes_batch(&self, new_nodes: Vec<GraphNode>) -> Result<(), LainError> {
-        for node in new_nodes {
-            self.upsert_node(node)?;
-        }
-        Ok(())
+        self.insert_nodes_batch(&new_nodes)
     }
 
     pub fn insert_edge(&self, edge: &GraphEdge) -> Result<(), LainError> {
@@ -1540,6 +1544,109 @@ impl GraphDatabase {
         // edge already exists, so we only append on the
         // insert path.
         self.insert_edge(&edge)
+    }
+
+    /// Bulk idempotent edge upsert with strict endpoint validation
+    /// (returns `LainError::NotFound` if any endpoint is missing,
+    /// matching [`Self::upsert_edge`]). Acquires the graph write lock
+    /// and appends to the WAL once for the whole batch instead of once
+    /// per edge.
+    pub fn upsert_edges_batch_strict(&self, edges: &[GraphEdge]) -> Result<(), LainError> {
+        self.check_writable()?;
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let mut graph = self.graph.write();
+        let mut resolved: Vec<(NodeIndex, NodeIndex, &GraphEdge)> = Vec::with_capacity(edges.len());
+        for edge in edges {
+            let source_idx = self
+                .index_map
+                .get(&edge.source_id)
+                .map(|r| *r.value())
+                .ok_or_else(|| {
+                    LainError::NotFound(format!("Source node {} not found", edge.source_id))
+                })?;
+            let target_idx = self
+                .index_map
+                .get(&edge.target_id)
+                .map(|r| *r.value())
+                .ok_or_else(|| {
+                    LainError::NotFound(format!("Target node {} not found", edge.target_id))
+                })?;
+            resolved.push((source_idx, target_idx, edge));
+        }
+
+        let mut to_insert: Vec<(NodeIndex, NodeIndex, GraphEdge)> = Vec::new();
+        let mut batch_seen: HashSet<(
+            EdgeType,
+            String,
+            String,
+            Option<crate::federation::contracts::model::SourceSite>,
+        )> = HashSet::with_capacity(resolved.len());
+        for (s, t, edge) in resolved {
+            let key = edge_identity_key(edge);
+            if !batch_seen.insert(key) {
+                continue;
+            }
+            let exists = graph
+                .edges_connecting(s, t)
+                .any(|e| same_edge_identity(e.weight(), edge));
+            if !exists {
+                to_insert.push((s, t, edge.clone()));
+            }
+        }
+
+        if !to_insert.is_empty() {
+            let wal_ops: Vec<wal::GraphOp> = to_insert
+                .iter()
+                .map(|(_, _, e)| wal::GraphOp::UpsertEdge(e.clone()))
+                .collect();
+            self.log_ops(&wal_ops)?;
+            for (s, t, edge) in to_insert {
+                graph.add_edge(s, t, edge);
+            }
+        }
+        Ok(())
+    }
+
+    /// O(1) existence check via `index_map` without cloning `GraphNode`.
+    pub fn has_node(&self, id: &str) -> bool {
+        self.index_map.contains_key(id)
+    }
+
+    /// Store or update the cached `StaticFileRef`s for this repo so
+    /// `relink_cross_repo` can resolve cross-repo calls without
+    /// re-parsing every tracked file with tree-sitter.
+    pub(crate) fn set_cached_static_refs(
+        &self,
+        refs: Vec<crate::server::ingest::scan::StaticFileRef>,
+    ) {
+        *self.cached_static_refs.lock() = Some(refs);
+    }
+
+    /// Update the cached `StaticFileRef`s for `rescanned_paths` (if a
+    /// cache is already present), replacing entries from those paths
+    /// with `new_refs` and pruning paths not in `tracked_paths`.
+    pub(crate) fn update_cached_static_refs(
+        &self,
+        rescanned_paths: &HashSet<String>,
+        tracked_paths: &HashSet<String>,
+        new_refs: &[crate::server::ingest::scan::StaticFileRef],
+    ) {
+        let mut guard = self.cached_static_refs.lock();
+        if let Some(ref mut cached) = *guard {
+            cached.retain(|r| {
+                tracked_paths.contains(&r.file_path) && !rescanned_paths.contains(&r.file_path)
+            });
+            cached.extend(new_refs.iter().cloned());
+        }
+    }
+
+    /// Return a snapshot of the cached `StaticFileRef`s if available.
+    pub(crate) fn get_cached_static_refs(
+        &self,
+    ) -> Option<Vec<crate::server::ingest::scan::StaticFileRef>> {
+        self.cached_static_refs.lock().clone()
     }
 
     pub fn get_node(&self, id: &str) -> Result<Option<GraphNode>, LainError> {
@@ -1742,6 +1849,17 @@ impl GraphDatabase {
             .collect()
     }
 
+    /// Clones only the nodes whose type is in `types`. Filters under the
+    /// read lock so callers that discard most nodes don't pay for them.
+    pub fn nodes_of_types(&self, types: &[NodeType]) -> Vec<GraphNode> {
+        let graph = self.graph.read();
+        graph
+            .node_references()
+            .filter(|(_, node)| types.contains(&node.node_type))
+            .map(|(_, node)| node.clone())
+            .collect()
+    }
+
     pub fn all_edges(&self) -> Vec<GraphEdge> {
         let graph = self.graph.read();
         graph.edge_weights().cloned().collect()
@@ -1816,6 +1934,22 @@ impl GraphDatabase {
     /// `node_weights()` scan for that.
     pub fn has_node_at_path(&self, path: &str) -> bool {
         self.path_index.get(path).is_some_and(|v| !v.is_empty())
+    }
+
+    /// Return all nodes recorded under `path` via `path_index` (O(1)
+    /// lookup in the number of files instead of scanning all nodes in
+    /// the graph).
+    pub fn get_nodes_in_path(&self, path: &str) -> Vec<GraphNode> {
+        let graph = self.graph.read();
+        self.path_index
+            .get(path)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter_map(|&idx| graph.node_weight(idx).cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Query nodes with optional filters (used by query executor)
@@ -2587,6 +2721,13 @@ impl GraphDatabase {
     }
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
+        self.save_to_disk_sync_bytes().map(|_| ())
+    }
+
+    /// Like [`Self::save_to_disk_sync`], but also returns the encoded
+    /// `GraphState` payload bytes so callers like `PetgraphBackend::save`
+    /// do not have to re-read the file from disk immediately after writing it.
+    pub(crate) fn save_to_disk_sync_bytes(&self) -> Result<Vec<u8>, LainError> {
         let _one_checkpoint_at_a_time = self.checkpoint_lock.lock();
         // Start the checkpoint under the graph write lock: every logging
         // mutator appends under that same lock, so after this point all
@@ -2615,7 +2756,7 @@ impl GraphDatabase {
             wal::discard_prev(&wal_path)
                 .map_err(|e| LainError::Database(format!("wal discard: {e}")))?;
         }
-        Ok(())
+        Ok(data)
     }
 
     pub(crate) fn validate_persisted_payload(data: &[u8]) -> Result<(), LainError> {

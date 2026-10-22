@@ -96,6 +96,10 @@ pub async fn run_reindex(config: PathBuf, workspace: Option<String>, verbose: bo
             .map_err(|e| anyhow::anyhow!("load federation: {e}"))?
     };
 
+    // Steps 3–4 write the federated graph many times. Defer the whole-graph
+    // checkpoint to one write at the end (see `FederatedIndex::begin_bulk`).
+    fed.begin_bulk();
+    let rebuilt: Result<()> = async {
     // Step 3: re-index every repo and re-project. Pattern transcribed
     // from `src/cli/server.rs:62-85` with `index()` swapped for
     // `index_forced()`. Stops on the first `index_forced` failure —
@@ -149,6 +153,16 @@ pub async fn run_reindex(config: PathBuf, workspace: Option<String>, verbose: bo
         }
         Err(e) => tracing::warn!("anchor miner after reindex failed: {e}"),
     }
+
+    Ok(())
+    }
+    .await;
+
+    // Save even when a repo failed: the partial graph is what the old
+    // per-batch saves left on disk, and the error below still reaches the caller.
+    let saved = fed.end_bulk();
+    rebuilt?;
+    saved.map_err(|e| anyhow::anyhow!("saving federated graph: {e}"))?;
 
     if verbose {
         eprintln!("re-index complete");

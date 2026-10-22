@@ -336,12 +336,28 @@ pub fn resolve_static_edges(
         HashMap::new();
     // id -> the type it is defined in (`None` for free functions).
     let mut containers: HashMap<String, Option<String>> = HashMap::new();
+    // path -> (line_start, line_end, id) for non-File nodes, and path -> file node id.
+    // Pre-indexed from the single `get_all_nodes()` snapshot so the per-ref loop
+    // does not acquire `db`'s read lock or clone `GraphNode`s 100k+ times.
+    let mut spans_by_path: HashMap<String, Vec<(u32, u32, String)>> = HashMap::new();
+    let mut file_id_by_path: HashMap<String, String> = HashMap::new();
     for node in db.get_all_nodes() {
+        if node.node_type == crate::schema::NodeType::File {
+            file_id_by_path
+                .entry(node.path.clone())
+                .or_insert_with(|| node.id.clone());
+        } else {
+            spans_by_path.entry(node.path.clone()).or_default().push((
+                node.line_start.unwrap_or(0),
+                node.line_end.unwrap_or(0),
+                node.id.clone(),
+            ));
+        }
         containers.insert(node.id.clone(), node.container.clone());
         name_index.entry(node.name.clone()).or_default().push((
-            node.id.clone(),
-            node.node_type.clone(),
-            node.path.clone(),
+            node.id,
+            node.node_type,
+            node.path,
         ));
     }
 
@@ -353,9 +369,16 @@ pub fn resolve_static_edges(
         // RSpec `describe` — is attributed to its file. Dropping it lost
         // most callers in JS/TS test suites, where nearly every call sits
         // in an anonymous callback.
-        let Some(source_node) = db
-            .get_node_at_location(&sr.file_path, sr.source_line)
-            .or_else(|| db.get_file_node(&sr.file_path))
+        let Some(source_id) = spans_by_path
+            .get(sr.file_path.as_str())
+            .and_then(|spans| {
+                spans
+                    .iter()
+                    .filter(|(s, e, _)| *s <= sr.source_line && *e >= sr.source_line)
+                    .min_by_key(|(s, e, _)| e.saturating_sub(*s))
+                    .map(|(_, _, id)| id.as_str())
+            })
+            .or_else(|| file_id_by_path.get(sr.file_path.as_str()).map(String::as_str))
         else {
             continue;
         };
@@ -365,12 +388,12 @@ pub fn resolve_static_edges(
                     resolver.resolve_cross_repo(src, Some(&sr.target_name), None, None)
                 {
                     let gid_str = gid.as_str().to_string();
-                    if gid_str != source_node.id {
-                        let key = (source_node.id.clone(), gid_str.clone());
+                    if gid_str != source_id {
+                        let key = (source_id.to_string(), gid_str.clone());
                         if seen.insert(key) {
                             edges.push(GraphEdge::new(
                                 sr.edge_type.clone(),
-                                source_node.id.clone(),
+                                source_id.to_string(),
                                 gid_str,
                             ));
                         }
@@ -425,7 +448,7 @@ pub fn resolve_static_edges(
         } else {
             candidates
         };
-        let source_container = source_node.container.clone();
+        let source_container = container_of(source_id);
         let candidates: Vec<_> = if sr.edge_type != EdgeType::Calls {
             candidates
         } else if let Some(q) = &sr.qualifier {
@@ -476,7 +499,7 @@ pub fn resolve_static_edges(
                         && container_of(id).is_none()
                         && containers.contains_key(id.as_str()))
                 })
-                .filter(|(id, _, _)| *id != source_node.id || source_container.is_some())
+                .filter(|(id, _, _)| id.as_str() != source_id || source_container.is_some())
                 .collect()
         } else {
             // A bare call. In Java, C#, Kotlin, Swift, C++, Scala and Ruby it
@@ -523,7 +546,7 @@ pub fn resolve_static_edges(
         if sr.edge_type == EdgeType::Calls
             && sr.foreign_receiver
             && source_container.is_some()
-            && candidates.iter().any(|(id, _, _)| *id == source_node.id)
+            && candidates.iter().any(|(id, _, _)| id.as_str() == source_id)
         {
             continue;
         }
@@ -568,17 +591,17 @@ pub fn resolve_static_edges(
             }
         };
         for (target_id, target_type, _) in resolved {
-            if *target_id == source_node.id {
+            if target_id.as_str() == source_id {
                 continue;
             }
             if sr.edge_type == EdgeType::Uses && !is_type_level_target(target_type) {
                 continue;
             }
-            let key = (source_node.id.clone(), (*target_id).to_string());
+            let key = (source_id.to_string(), (*target_id).to_string());
             if seen.insert(key) {
                 edges.push(GraphEdge::new(
                     sr.edge_type.clone(),
-                    source_node.id.clone(),
+                    source_id.to_string(),
                     (*target_id).to_string(),
                 ));
             }

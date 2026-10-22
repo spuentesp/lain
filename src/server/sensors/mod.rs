@@ -359,31 +359,33 @@ pub(crate) fn run_all_with_reports(
     namespace: &RepoNamespace,
     repo_id: &str,
 ) -> (SensorCounts, Vec<(&'static str, ScanReport)>) {
-    let mut counts = SensorCounts::default();
-    let mut reports = Vec::new();
-    let mut entries: Vec<&SensorEntry> = inventory::iter::<SensorEntry>().collect();
-    entries.sort_by(|a, b| {
-        let pa = a.0.phase();
-        let pb = b.0.phase();
-        pa.cmp(&pb).then_with(|| a.0.name().cmp(b.0.name()))
-    });
-    for entry in entries {
-        let sensor = entry.0;
-        let report = match sensor.scan_with_report_for_repo(graph, root, namespace, repo_id) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("{} sensor failed for {:?}: {e}", sensor.name(), root);
-                ScanReport {
-                    emitted: 0,
-                    error: Some(e.to_string()),
-                    unresolved: Vec::new(),
+    util::with_workspace_scan_cache(root, || {
+        let mut counts = SensorCounts::default();
+        let mut reports = Vec::new();
+        let mut entries: Vec<&SensorEntry> = inventory::iter::<SensorEntry>().collect();
+        entries.sort_by(|a, b| {
+            let pa = a.0.phase();
+            let pb = b.0.phase();
+            pa.cmp(&pb).then_with(|| a.0.name().cmp(b.0.name()))
+        });
+        for entry in entries {
+            let sensor = entry.0;
+            let report = match sensor.scan_with_report_for_repo(graph, root, namespace, repo_id) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("{} sensor failed for {:?}: {e}", sensor.name(), root);
+                    ScanReport {
+                        emitted: 0,
+                        error: Some(e.to_string()),
+                        unresolved: Vec::new(),
+                    }
                 }
-            }
-        };
-        counts.add(sensor.count_field(), report.emitted);
-        reports.push((sensor.name(), report));
-    }
-    (counts, reports)
+            };
+            counts.add(sensor.count_field(), report.emitted);
+            reports.push((sensor.name(), report));
+        }
+        (counts, reports)
+    })
 }
 
 #[cfg(test)]

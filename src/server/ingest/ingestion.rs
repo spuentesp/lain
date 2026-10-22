@@ -1428,55 +1428,64 @@ pub async fn relink_cross_repo(
     // indexing passes: the gate goes down while this pass re-resolves the
     // cross-repo edges and comes back up once they are in the table.
     graph.clear_calls_published();
-    let git_sensor = Arc::clone(git);
-    let files = offthread(cancel.clone(), move || {
-        git_sensor.try_get_all_tracked_files()
-    })
-    .await?;
-    let root = path.to_path_buf();
-    let refs = offthread(
-        cancel.clone(),
-        move || -> Result<Vec<StaticFileRef>, LainError> {
-            let mut refs = Vec::new();
-            for file in files {
-                let abs = if file.is_absolute() {
-                    file.clone()
-                } else {
-                    root.join(&file)
-                };
-                let indexed = abs
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(crate::treesitter::is_indexed_extension);
-                if !indexed {
-                    continue;
-                }
-                let Ok(content) = std::fs::read_to_string(&abs) else {
-                    continue;
-                };
-                let rel = graph_path(&root, &abs);
-                refs.extend(
-                    crate::treesitter::extract_refs(&abs, &content)
-                        .into_iter()
-                        .map(|r| StaticFileRef {
-                            file_path: rel.clone(),
-                            source_line: r.source_line,
-                            target_name: r.target_name,
-                            edge_type: r.edge_type,
-                            foreign_receiver: r.foreign_receiver,
-                            self_receiver: r.self_receiver,
-                            qualifier: r.qualifier.clone(),
-                        }),
-                );
-            }
-            Ok(refs)
-        },
-    )
-    .await?;
+    let refs = if let Some(cached) = graph.get_cached_static_refs() {
+        cached
+    } else {
+        let git_sensor = Arc::clone(git);
+        let files = offthread(cancel.clone(), move || {
+            git_sensor.try_get_all_tracked_files()
+        })
+        .await?;
+        let root = path.to_path_buf();
+        let extracted = offthread(
+            cancel.clone(),
+            move || -> Result<Vec<StaticFileRef>, LainError> {
+                use rayon::prelude::*;
+                let refs: Vec<StaticFileRef> = files
+                    .par_iter()
+                    .filter_map(|file| {
+                        let abs = if file.is_absolute() {
+                            file.clone()
+                        } else {
+                            root.join(file)
+                        };
+                        let indexed = abs
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(crate::treesitter::is_indexed_extension);
+                        if !indexed {
+                            return None;
+                        }
+                        let content = std::fs::read_to_string(&abs).ok()?;
+                        let rel = graph_path(&root, &abs);
+                        Some(
+                            crate::treesitter::extract_refs(&abs, &content)
+                                .into_iter()
+                                .map(|r| StaticFileRef {
+                                    file_path: rel.clone(),
+                                    source_line: r.source_line,
+                                    target_name: r.target_name,
+                                    edge_type: r.edge_type,
+                                    foreign_receiver: r.foreign_receiver,
+                                    self_receiver: r.self_receiver,
+                                    qualifier: r.qualifier.clone(),
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .flatten()
+                    .collect();
+                Ok(refs)
+            },
+        )
+        .await?;
+        graph.set_cached_static_refs(extracted.clone());
+        extracted
+    };
     let external: Vec<GraphEdge> =
         super::resolve::resolve_static_edges(graph, &refs, Some(resolver), Some(source_repo))
             .into_iter()
-            .filter(|e| graph.get_node(&e.target_id).ok().flatten().is_none())
+            .filter(|e| !graph.has_node(&e.target_id))
             .collect();
     let n = external.len();
     graph.insert_edges_batch(&external)?;
@@ -1714,8 +1723,8 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     // Tighter batches than the default tuning for federation workloads —
     // repos are loaded concurrently and we want to keep each batch's wall
     // time bounded. The full pipeline doesn't need micro-batches here.
-    const FILES_PER_BATCH: usize = 8;
-    const INGEST_BATCH_SIZE: usize = 256;
+    const FILES_PER_BATCH: usize = 32;
+    const INGEST_BATCH_SIZE: usize = 4096;
     const COCHANGE_COMMIT_WINDOW: usize = 100;
     const COCHANGE_MIN_PAIR_COUNT: usize = 2;
     const COCHANGE_MAX_COMMIT_FILES: usize = 50;
@@ -1883,7 +1892,13 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         // single-workspace pipeline for the rename that lost its callers).
         sweep_orphans(path, graph, git);
         let tracked = git.get_all_tracked_files().unwrap_or_default();
+        let scanned_rel: HashSet<String> =
+            files_to_scan.iter().map(|p| graph_path(path, p)).collect();
+        let tracked_rel: HashSet<String> = tracked.iter().map(|p| graph_path(path, p)).collect();
+        graph.update_cached_static_refs(&scanned_rel, &tracked_rel, &all_static_refs);
         all_static_refs.extend(refs_into_rescanned(path, graph, &files_to_scan, &tracked));
+    } else {
+        graph.set_cached_static_refs(all_static_refs.clone());
     }
     let static_edges = super::resolve::resolve_static_edges(
         graph,

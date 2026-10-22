@@ -12,13 +12,15 @@
 //! plan flags this as acceptable for the MVP and notes a separate name index
 //! would be the production implementation.
 use crate::error::LainError;
-use crate::federation::contracts::clients::{build_client_def, detect_clients, ClientRegistry};
+use crate::federation::contracts::clients::{
+    build_client_def, detect_clients, ClientDef, ClientRegistry,
+};
 use crate::federation::contracts::config::ContractFederationConfig;
 use crate::federation::contracts::index::ContractIndex;
 use crate::federation::contracts::joiner::ContractJoiner;
 use crate::federation::graph_backend::GraphBackend;
 use crate::federation::health::RepoHealth;
-use crate::federation::matching::find_cross_repo_matches;
+use crate::federation::matching::CrossRepoMatcher;
 use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::federation::repo_index::RepoIndex;
 use crate::federation::repo_source::RepoSource;
@@ -121,6 +123,11 @@ pub struct FederatedIndex {
     /// `contract_index`, leaving a torn-view window where a
     /// reader could observe the old index but the new binds.
     contract_snapshot: RwLock<Option<Arc<ContractSnapshot>>>,
+    /// Per-repo cache of Phase-B `ClientDef`s extracted from TS/JS
+    /// sources, invalidated when a repo is projected (`project_nodes`).
+    /// Prevents `rejoin_contracts` from walking every repo's directory
+    /// tree and re-reading every TS/JS file on every rejoin.
+    client_defs_cache: DashMap<std::path::PathBuf, Vec<ClientDef>>,
 }
 
 /// The atomic payload of `FederatedIndex::contract_snapshot`.
@@ -157,6 +164,17 @@ pub(crate) fn distinct_repos(entries: &[RepoId]) -> Vec<RepoId> {
 }
 
 impl FederatedIndex {
+    /// Defer whole-graph saves until the matching [`Self::end_bulk`].
+    /// See [`GraphBackend::begin_bulk`].
+    pub fn begin_bulk(&self) {
+        self.backend.begin_bulk();
+    }
+
+    /// Close a bulk section opened by [`Self::begin_bulk`], saving once if needed.
+    pub fn end_bulk(&self) -> Result<(), LainError> {
+        self.backend.end_bulk()
+    }
+
     pub fn new(backend: Arc<dyn GraphBackend>) -> Self {
         Self {
             repos: RwLock::new(HashMap::new()),
@@ -173,6 +191,7 @@ impl FederatedIndex {
             contract_node_ids: DashMap::new(),
             contract_config: RwLock::new(None),
             contract_snapshot: RwLock::new(None),
+            client_defs_cache: DashMap::new(),
         }
     }
 
@@ -559,6 +578,9 @@ impl FederatedIndex {
             }
         }
         self.contract_node_ids.insert(id.clone(), contract_ids);
+        if let Some(repo) = self.get_repo(id) {
+            self.client_defs_cache.remove(repo.source().local_path());
+        }
         self.contracts_dirty.mark();
 
         // Retract what this repo no longer has. Projection was upsert-only, so
@@ -754,13 +776,16 @@ impl FederatedIndex {
         // matcher's own logic: `CrossRepoSameSymbol` edges never
         // materialized. `batch_nodes` (this repo's nodes, already rewritten
         // above) and a same-rewrite over each other repo's nodes fixes it.
+        // Only candidate types can match (`find_cross_repo_matches` filters
+        // the same way), so select them before cloning the other repos.
+        let candidate_types = EdgeType::CrossRepoSameSymbol.target_types();
         let other_nodes: Vec<GraphNode> = self
             .repos
             .read()
             .iter()
             .filter(|(rid, _)| *rid != id)
             .flat_map(|(rid, idx)| {
-                idx.nodes().into_iter().map(move |mut n| {
+                idx.nodes_of_types(candidate_types).into_iter().map(move |mut n| {
                     n.id = global_id_str(rid, &n);
                     n
                 })
@@ -788,10 +813,11 @@ impl FederatedIndex {
         // already in scope from the shared projection call.
         let _ = batch_nodes_owned;
         let batch_nodes_owned: Vec<GraphNode> = batch_nodes_owned;
+        let matcher = CrossRepoMatcher::new(&other_nodes);
         let mut target_nodes: std::collections::HashMap<String, GraphNode> =
             std::collections::HashMap::new();
         for new_node in &batch_nodes_owned {
-            let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5, false);
+            let matches = matcher.find_matches(new_node, 5, 0.5);
             for (target_gid, sim, _confidence) in matches {
                 // The matched node's owning repo may not have run its own
                 // `project_repo` yet (callers project repos one at a time,
@@ -820,8 +846,16 @@ impl FederatedIndex {
                 // been projected yet, this is that node's first (complete)
                 // appearance; if it already has been, this just re-writes
                 // the same data.
-                if let Some(target_node) = other_nodes.iter().find(|n| n.id == target_gid) {
-                    target_nodes.insert(target_gid.clone(), target_node.clone());
+                if let Some(target_node) = matcher.node_by_id(&target_gid) {
+                    let needs_upsert = self
+                        .backend
+                        .get_node(&target_gid)?
+                        .is_none_or(|existing| {
+                            existing.signature.is_none() && target_node.signature.is_some()
+                        });
+                    if needs_upsert {
+                        target_nodes.insert(target_gid.clone(), target_node.clone());
+                    }
                 }
                 batch.push(GraphEdge {
                     edge_type: EdgeType::CrossRepoSameSymbol,
@@ -950,7 +984,7 @@ impl FederatedIndex {
         // post-index behavior: `project_repo` after a real `index()`
         // call still rebuilds correctly because then the per-repo
         // DB is populated.
-        if !repo.nodes().is_empty() {
+        if repo.db().node_count() > 0 {
             self.rebuild_symbol_index();
         }
         Ok(())
@@ -1061,26 +1095,37 @@ impl FederatedIndex {
         let mut env = EnvBindingIndex::default();
         for repo_root in self.repo_paths() {
             // Phase B — walk the repo and feed every TS/JS source
-            // to `detect_clients`. We restrict to the extensions
-            // `detect_clients` actually parses; other languages
-            // would only feed the `Custom` (new-Foo) branch
+            // to `detect_clients` (cached per repo_root until the
+            // next `project_nodes` invalidates it). We restrict to
+            // the extensions `detect_clients` actually parses; other
+            // languages would only feed the `Custom` (new-Foo) branch
             // with garbage, so the filter is a soundness
             // optimisation, not a correctness gate.
-            for entry in walk_workspace(&repo_root) {
-                let path = entry.path();
-                let ext = path.extension().and_then(|e| e.to_str());
-                if !matches!(ext, Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")) {
-                    continue;
+            let defs = if let Some(cached) = self.client_defs_cache.get(&repo_root) {
+                cached.value().clone()
+            } else {
+                let mut repo_defs = Vec::new();
+                for entry in walk_workspace(&repo_root) {
+                    let path = entry.path();
+                    let ext = path.extension().and_then(|e| e.to_str());
+                    if !matches!(ext, Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")) {
+                        continue;
+                    }
+                    let Ok(content) = std::fs::read_to_string(path) else {
+                        continue;
+                    };
+                    let rel = path.strip_prefix(&repo_root).unwrap_or(path);
+                    let rel_str = rel.to_string_lossy();
+                    for detected in detect_clients(&rel_str, &content) {
+                        repo_defs.push(build_client_def(&detected));
+                    }
                 }
-                let Ok(content) = std::fs::read_to_string(path) else {
-                    continue;
-                };
-                let rel = path.strip_prefix(&repo_root).unwrap_or(path);
-                let rel_str = rel.to_string_lossy();
-                for detected in detect_clients(&rel_str, &content) {
-                    let def = build_client_def(&detected);
-                    registry.insert(def);
-                }
+                self.client_defs_cache
+                    .insert(repo_root.clone(), repo_defs.clone());
+                repo_defs
+            };
+            for def in defs {
+                registry.insert(def);
             }
             // Phase C — snapshot the per-repo env bindings the
             // `env_sensor` already populated. The helper reads
@@ -1412,7 +1457,8 @@ impl FederatedIndex {
         let repo_ids: Vec<RepoId> = self.repos.read().keys().cloned().collect();
         for repo_id in &repo_ids {
             if let Some(idx) = self.get_repo(repo_id) {
-                for node in idx.nodes() {
+                let g = idx.db().graph_ref_for_read();
+                for node in g.node_weights() {
                     let entry = tmp.entry(node.name.clone()).or_default();
                     // One entry per *repo*, not per node. A name defined
                     // more than once inside a single repo — which is
@@ -1679,15 +1725,22 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
             if cross_repos.len() == 1 && self.repo_depends_on(source_repo, &cross_repos[0]) {
                 let rid = &cross_repos[0];
                 if let Some(idx) = self.get_repo(rid) {
-                    for node in idx.nodes() {
-                        if node.name == name {
-                            return Some(GlobalId::new(
-                                rid,
-                                node.node_type.clone(),
-                                &node.path,
-                                &node.name,
-                                node.line_start,
-                            ));
+                    let db = idx.db();
+                    let indices = db.find_indices_by_name(name);
+                    if !indices.is_empty() {
+                        let g = db.graph_ref_for_read();
+                        for node_idx in indices {
+                            if let Some(node) = g.node_weight(node_idx) {
+                                if node.name == name {
+                                    return Some(GlobalId::new(
+                                        rid,
+                                        node.node_type.clone(),
+                                        &node.path,
+                                        &node.name,
+                                        node.line_start,
+                                    ));
+                                }
+                            }
                         }
                     }
                 }

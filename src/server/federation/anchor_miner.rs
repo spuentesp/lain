@@ -646,8 +646,16 @@ pub fn mint_cross_repo_observations_with(
 
     // Materialize synthesized file endpoints before the edges that
     // point at them — the backend drops edges with missing endpoints.
-    for (gid, path, name) in new_file_nodes {
-        backend.upsert_node_global(&gid, NodeType::File, &path, &name)?;
+    if !new_file_nodes.is_empty() {
+        let file_nodes: Vec<GraphNode> = new_file_nodes
+            .into_iter()
+            .map(|(gid, path, name)| {
+                let mut node = GraphNode::new(NodeType::File, name, path);
+                node.id = gid;
+                node
+            })
+            .collect();
+        backend.upsert_nodes_batch(&file_nodes)?;
     }
     if !new_edges.is_empty() {
         backend.upsert_edges_batch(&new_edges)?;
@@ -972,7 +980,8 @@ pub fn scan_repo_occurrences_with(
     local_path: &Path,
     shapes: &AnchorShapes,
 ) -> Vec<AnchorOccurrence> {
-    let mut out = Vec::new();
+    use rayon::prelude::*;
+    let mut candidate_files: Vec<(std::path::PathBuf, String)> = Vec::new();
     let mut stack = vec![local_path.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1008,16 +1017,22 @@ pub fn scan_repo_occurrences_with(
             if meta.len() > MAX_SCAN_FILE_BYTES {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
             let Ok(rel) = path.strip_prefix(local_path) else {
                 continue;
             };
             let rel = rel.to_string_lossy().replace('\\', "/");
-            out.extend(extract_from_text(repo.as_str(), &rel, &content, shapes));
+            candidate_files.push((path, rel));
         }
     }
+    let repo_str = repo.as_str();
+    let mut out: Vec<AnchorOccurrence> = candidate_files
+        .par_iter()
+        .filter_map(|(path, rel)| {
+            let content = std::fs::read_to_string(path).ok()?;
+            Some(extract_from_text(repo_str, rel, &content, shapes))
+        })
+        .flatten()
+        .collect();
     out.sort_by(|a, b| (a.kind, &a.key, &a.path, a.line).cmp(&(b.kind, &b.key, &b.path, b.line)));
     out.dedup_by(|a, b| a.kind == b.kind && a.key == b.key && a.path == b.path && a.line == b.line);
     out
