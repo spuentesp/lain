@@ -52,6 +52,7 @@ use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::patterns::{FrameworkDef, Patterns};
 use crate::server::sensors::util::{language_for, parse_for_lang, Lang};
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::path::Path;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
@@ -140,13 +141,36 @@ pub fn scan_workspace_clients(
         "kt" | "kts" => Some(Lang::Kotlin),
         _ => None,
     };
-    for (path, content, lang) in crate::server::sensors::util::scan_files(root, by_lang) {
-        let calls = detect_calls_with_queries(&path, &content, lang, patterns, &mut queries);
-        for mut call in calls {
-            call.path = graph_path(root, Path::new(&call.path));
-            let (nodes, edges) = build_graph(graph, &call, namespace);
-            all_nodes.extend(nodes);
-            all_edges.extend(edges);
+    // Detection is independent per file, so each block of files runs on the
+    // rayon pool against the shared, read-only query set. Blocks keep memory
+    // bounded and come back in file order, so the graph build below sees the
+    // same sequence as the old sequential loop.
+    const DETECT_BLOCK_FILES: usize = 256;
+    let mut files = crate::server::sensors::util::scan_files(root, by_lang);
+    loop {
+        let block: Vec<_> = files.by_ref().take(DETECT_BLOCK_FILES).collect();
+        if block.is_empty() {
+            break;
+        }
+        for (_, _, lang) in &block {
+            ensure_outbound_queries(&mut queries, patterns, *lang);
+        }
+        let shared = &queries;
+        let detected: Vec<Vec<HttpClientCall>> = block
+            .par_iter()
+            .map(|(path, content, lang)| {
+                crate::server::sensors::util::with_current_patterns(patterns, || {
+                    detect_calls_with_queries(path, content, *lang, patterns, shared)
+                })
+            })
+            .collect();
+        for calls in detected {
+            for mut call in calls {
+                call.path = graph_path(root, Path::new(&call.path));
+                let (nodes, edges) = build_graph(graph, &call, namespace);
+                all_nodes.extend(nodes);
+                all_edges.extend(edges);
+            }
         }
     }
 
@@ -187,17 +211,41 @@ pub fn detect_calls(
     lang: Lang,
     patterns: &Patterns,
 ) -> Vec<HttpClientCall> {
-    detect_calls_with_queries(path, content, lang, patterns, &mut OutboundQueries::new())
+    let mut queries = OutboundQueries::new();
+    ensure_outbound_queries(&mut queries, patterns, lang);
+    detect_calls_with_queries(path, content, lang, patterns, &queries)
 }
 
 // A cache belongs to one scan's immutable Patterns, never to a process or
 // pointer address. The next scan loads overrides before creating a new cache.
+/// Compile every outbound query for `lang` that is not compiled yet. Runs on
+/// the scan's own thread, before the parallel detection that reads the set, so
+/// each query compiles once per scan.
+fn ensure_outbound_queries(queries: &mut OutboundQueries, patterns: &Patterns, lang: Lang) {
+    let grammar = language_for(lang);
+    let lang_yaml = lang_yaml_key(lang);
+    for framework in patterns.outbound_patterns(lang) {
+        let Some(body) = compiled_query_body(patterns, lang_yaml, framework.id.as_str()) else {
+            continue;
+        };
+        if !has_query_content(body) {
+            continue;
+        }
+        let key = format!("{lang_yaml}/{}", framework.id);
+        queries.entry(key).or_insert_with(|| {
+            #[cfg(test)]
+            QUERY_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
+            Query::new(&grammar, body).ok()
+        });
+    }
+}
+
 fn detect_calls_with_queries(
     path: &Path,
     content: &str,
     lang: Lang,
     patterns: &Patterns,
-    queries: &mut OutboundQueries,
+    queries: &OutboundQueries,
 ) -> Vec<HttpClientCall> {
     let Some(tree) = parse_for_lang(lang, content) else {
         return Vec::new();
@@ -207,7 +255,6 @@ fn detect_calls_with_queries(
     let ctx = FileContext::collect(tree.root_node(), src, lang);
 
     let mut calls: Vec<HttpClientCall> = Vec::new();
-    let grammar = language_for(lang);
     let lang_yaml = lang_yaml_key(lang);
 
     // Track calls we've already emitted by (path, line) so the
@@ -226,15 +273,7 @@ fn detect_calls_with_queries(
             continue;
         }
         let key = format!("{lang_yaml}/{}", framework.id);
-        let Some(query) = queries
-            .entry(key)
-            .or_insert_with(|| {
-                #[cfg(test)]
-                QUERY_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
-                Query::new(&grammar, body).ok()
-            })
-            .as_ref()
-        else {
+        let Some(query) = queries.get(&key).and_then(Option::as_ref) else {
             continue;
         };
 
