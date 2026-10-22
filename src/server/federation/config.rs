@@ -16,6 +16,12 @@ pub struct FederationConfig {
     pub max_concurrent_indexers: usize,
     #[serde(default = "default_ready_threshold")]
     pub ready_threshold: f32,
+    /// Budget in MB for the shared tree-sitter parse cache (ingestion and
+    /// sensors reuse trees for identical text). `0`, the default, disables it.
+    /// Opt-in: on a 3-repo Saleor federation it added ~1.2 GB RSS with no
+    /// measurable speedup. See `server::parse_cache`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub parse_cache_mb: usize,
     /// Whether this instance takes part in the shared-daemon pool
     /// (zero-config multi-agent, 2026-10-18). `false` = private
     /// instance: discovery skips it and `add_workspaces` refuses the
@@ -51,6 +57,7 @@ impl Default for FederationConfig {
             data_dir: default_data_dir(),
             max_concurrent_indexers: default_max_concurrent_indexers(),
             ready_threshold: default_ready_threshold(),
+            parse_cache_mb: 0,
             share: true,
             git_sensor: None,
             repos: Vec::new(),
@@ -82,6 +89,10 @@ fn default_share() -> bool {
 /// instance cannot flip shared on the next `add_workspaces` reload.
 fn is_true(b: &bool) -> bool {
     *b
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -126,6 +137,7 @@ impl FederationConfig {
     pub fn load_from_str(s: &str) -> Result<Self, LainError> {
         let mut cfg: FederationConfig =
             serde_yaml::from_str(s).map_err(|e| LainError::Config(format!("yaml: {e}")))?;
+        crate::server::parse_cache::configure(cfg.parse_cache_mb);
         let top_level_contract = ContractFederationConfig::load_from_str(s)?;
         if is_contract_block_default(&cfg.contract) {
             cfg.contract = top_level_contract;
