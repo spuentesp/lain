@@ -5142,3 +5142,88 @@ mod cochange_failure_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod mutant_kills {
+    use super::*;
+    use crate::server::ingest::scan::StaticFileRef;
+
+    fn db() -> (tempfile::TempDir, GraphDatabase) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        (dir, db)
+    }
+
+    fn node(id: &str, kind: NodeType, path: &str) -> GraphNode {
+        let mut n = GraphNode::new(kind, id.into(), path.into());
+        n.id = id.into();
+        n
+    }
+
+    fn static_ref(file: &str, name: &str) -> StaticFileRef {
+        StaticFileRef {
+            file_path: file.into(),
+            source_line: 1,
+            target_name: name.into(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
+        }
+    }
+
+    #[test]
+    fn has_node_and_upsert_nodes_batch_see_inserted_nodes() {
+        let (_dir, db) = db();
+        assert!(!db.has_node("a"));
+        db.upsert_nodes_batch(vec![node("a", NodeType::Function, "src/a.rs")])
+            .unwrap();
+        assert!(db.has_node("a"));
+        assert!(!db.has_node("b"));
+    }
+
+    #[test]
+    fn nodes_of_types_returns_only_the_requested_types() {
+        let (_dir, db) = db();
+        db.upsert_nodes_batch(vec![
+            node("f", NodeType::Function, "src/a.rs"),
+            node("file", NodeType::File, "src/a.rs"),
+        ])
+        .unwrap();
+        let functions = db.nodes_of_types(&[NodeType::Function]);
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].id, "f");
+        assert!(db.nodes_of_types(&[]).is_empty());
+    }
+
+    #[test]
+    fn cached_static_refs_round_trip_and_update_only_when_present() {
+        let (_dir, db) = db();
+        assert!(db.get_cached_static_refs().is_none());
+        // Updating without a cache does nothing.
+        db.update_cached_static_refs(
+            &HashSet::new(),
+            &HashSet::new(),
+            &[static_ref("src/a.rs", "f")],
+        );
+        assert!(db.get_cached_static_refs().is_none());
+
+        db.set_cached_static_refs(vec![
+            static_ref("src/a.rs", "f"),
+            static_ref("src/b.rs", "g"),
+            static_ref("src/c.rs", "h"),
+        ]);
+        assert_eq!(db.get_cached_static_refs().unwrap().len(), 3);
+
+        // Rescan a.rs, keep b.rs tracked, and drop c.rs from the tracked set.
+        let rescanned: HashSet<String> = ["src/a.rs".to_string()].into();
+        let tracked: HashSet<String> = ["src/a.rs".to_string(), "src/b.rs".to_string()].into();
+        db.update_cached_static_refs(&rescanned, &tracked, &[static_ref("src/a.rs", "f2")]);
+        let refs = db.get_cached_static_refs().unwrap();
+        let names: Vec<&str> = refs.iter().map(|r| r.target_name.as_str()).collect();
+        assert!(names.contains(&"g"), "{names:?}");
+        assert!(names.contains(&"f2"), "{names:?}");
+        assert!(!names.contains(&"f"), "rescanned refs are replaced: {names:?}");
+        assert!(!names.contains(&"h"), "untracked refs are pruned: {names:?}");
+    }
+}

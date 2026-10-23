@@ -360,3 +360,75 @@ impl<'a> CrossRepoMatcher<'a> {
         scored
     }
 }
+
+#[cfg(test)]
+mod mutant_kills {
+    use super::*;
+    use crate::schema::NodeType;
+
+    fn node(id: &str, sig: Option<&str>) -> GraphNode {
+        let mut n = GraphNode::new(NodeType::Function, "f".into(), "src/f.rs".into());
+        n.id = id.into();
+        n.signature = sig.map(str::to_string);
+        n
+    }
+
+    #[test]
+    fn node_by_id_finds_only_known_candidates() {
+        let cands = vec![node("repoB:Function:src/b.rs:g:3", Some("alpha gamma"))];
+        let m = CrossRepoMatcher::new(&cands);
+        assert!(m.node_by_id("repoB:Function:src/b.rs:g:3").is_some());
+        assert!(m.node_by_id("missing").is_none());
+    }
+
+    #[test]
+    fn identical_signature_from_another_repo_scores_one_and_same_repo_is_excluded() {
+        let cands = vec![
+            node("repoB:Function:src/b.rs:g:3", Some("alpha beta")),
+            node("repoA:Function:src/a.rs:g:3", Some("alpha beta")),
+        ];
+        let m = CrossRepoMatcher::new(&cands);
+        let source = node("repoA:Function:src/src.rs:f:1", Some("alpha beta"));
+        let hits = m.find_matches(&source, 5, 0.5);
+        assert_eq!(hits.len(), 1, "same-repo candidate is excluded: {hits:?}");
+        assert_eq!(hits[0].0, "repoB:Function:src/b.rs:g:3");
+        assert!((hits[0].1 - 1.0).abs() < 1e-6, "similarity {}", hits[0].1);
+    }
+
+    #[test]
+    fn similarity_is_cosine_over_token_counts_and_threshold_is_inclusive() {
+        let cands = vec![node("repoB:Function:src/b.rs:g:3", Some("alpha gamma"))];
+        let m = CrossRepoMatcher::new(&cands);
+        // One shared token out of two on each side: cosine 1 / (√2 · √2) = 0.5.
+        let source = node("repoA:Function:src/src.rs:f:1", Some("alpha beta"));
+        let at = m.find_matches(&source, 5, 0.5);
+        assert_eq!(at.len(), 1, "a score equal to the threshold is kept");
+        assert!((at[0].1 - 0.5).abs() < 1e-6, "similarity {}", at[0].1);
+        assert!(m.find_matches(&source, 5, 0.51).is_empty());
+    }
+
+    #[test]
+    fn repeated_tokens_weigh_by_count() {
+        let cands = vec![node("repoB:Function:src/b.rs:g:3", Some("alpha beta"))];
+        let m = CrossRepoMatcher::new(&cands);
+        // Counts: source alpha=2, beta=1 (‖a‖ = √5); candidate alpha=1, beta=1 (‖b‖ = √2).
+        // Dot product 2·1 + 1·1 = 3, so cosine = 3 / √10 ≈ 0.9487.
+        let source = node("repoA:Function:src/src.rs:f:1", Some("alpha alpha beta"));
+        let hits = m.find_matches(&source, 5, 0.0);
+        assert_eq!(hits.len(), 1);
+        let expected = 3.0_f32 / 10.0_f32.sqrt();
+        assert!((hits[0].1 - expected).abs() < 1e-5, "similarity {}", hits[0].1);
+    }
+
+    #[test]
+    fn nodes_without_a_signature_or_of_another_type_do_not_match() {
+        let cands = vec![node("repoB:Function:src/b.rs:g:3", Some("alpha beta"))];
+        let m = CrossRepoMatcher::new(&cands);
+        assert!(m
+            .find_matches(&node("repoA:Function:src/src.rs:f:1", None), 5, 0.0)
+            .is_empty());
+        assert!(m
+            .find_matches(&node("repoA:Function:src/src.rs:f:1", Some("")), 5, 0.0)
+            .is_empty());
+    }
+}

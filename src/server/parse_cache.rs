@@ -79,11 +79,27 @@ static BUDGET_BYTES: AtomicUsize = AtomicUsize::new(0);
 /// decides it for every federation in the process. Reloading with the same
 /// budget keeps the cached trees; a different budget drops them.
 pub fn configure(budget_mb: usize) {
-    let budget = budget_mb.saturating_mul(1024 * 1024);
-    if BUDGET_BYTES.swap(budget, Ordering::AcqRel) == budget {
+    configure_slot(&BUDGET_BYTES, &CACHE, budget_mb);
+}
+
+fn mb_to_bytes(budget_mb: usize) -> usize {
+    budget_mb.saturating_mul(1024 * 1024)
+}
+
+fn configure_slot(
+    budget_bytes: &AtomicUsize,
+    slot: &Mutex<Option<ParseCache>>,
+    budget_mb: usize,
+) {
+    let budget = mb_to_bytes(budget_mb);
+    if budget_bytes.swap(budget, Ordering::AcqRel) == budget {
         return;
     }
-    *lock(&CACHE) = (budget > 0).then(|| ParseCache::with_budget(budget));
+    *lock(slot) = (budget > 0).then(|| ParseCache::with_budget(budget));
+}
+
+fn budget_enabled(budget_bytes: &AtomicUsize) -> bool {
+    budget_bytes.load(Ordering::Acquire) > 0
 }
 
 fn lock(slot: &Mutex<Option<ParseCache>>) -> MutexGuard<'_, Option<ParseCache>> {
@@ -98,7 +114,7 @@ pub fn get_or_parse(
     source: &str,
     parse: impl FnOnce() -> Option<Tree>,
 ) -> Option<Tree> {
-    if BUDGET_BYTES.load(Ordering::Acquire) == 0 {
+    if !budget_enabled(&BUDGET_BYTES) {
         return parse();
     }
     lookup_or_parse(&CACHE, language, source, parse)
@@ -211,5 +227,112 @@ mod tests {
             });
         }
         assert_eq!(calls, 2);
+    }
+
+    fn sized_source(len: usize) -> String {
+        let unit = "fn a() {}\n";
+        let mut source = unit.repeat(len / unit.len() + 1);
+        source.truncate(len);
+        source
+    }
+
+    #[test]
+    fn insert_accepts_an_entry_exactly_at_the_budget() {
+        let mut cache = ParseCache::with_budget(100);
+        cache.insert(("rust", [1; 32]), parse_rust("fn a() {}").unwrap(), 100);
+        assert_eq!(cache.used, 100);
+        assert!(cache.get(&("rust", [1; 32])).is_some());
+    }
+
+    #[test]
+    fn replacing_an_entry_charges_only_its_new_cost() {
+        let mut cache = ParseCache::with_budget(1000);
+        let key = ("rust", [2; 32]);
+        cache.insert(key, parse_rust("fn a() {}").unwrap(), 100);
+        cache.insert(key, parse_rust("fn a() {}").unwrap(), 30);
+        assert_eq!(cache.used, 30);
+    }
+
+    #[test]
+    fn eviction_keeps_the_byte_count_exact() {
+        let mut cache = ParseCache::with_budget(250);
+        let tree = parse_rust("fn a() {}").unwrap();
+        cache.insert(("rust", [3; 32]), tree.clone(), 100);
+        cache.insert(("rust", [4; 32]), tree.clone(), 100);
+        cache.insert(("rust", [5; 32]), tree.clone(), 100);
+        assert_eq!(cache.used, 200);
+        assert_eq!(cache.entries.len(), 2);
+    }
+
+    #[test]
+    fn an_entry_that_exactly_fills_the_budget_evicts_nothing() {
+        let mut cache = ParseCache::with_budget(200);
+        let tree = parse_rust("fn a() {}").unwrap();
+        cache.insert(("rust", [6; 32]), tree.clone(), 100);
+        cache.insert(("rust", [7; 32]), tree.clone(), 100);
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.used, 200);
+    }
+
+    #[test]
+    fn budget_is_megabytes() {
+        assert_eq!(mb_to_bytes(1), 1024 * 1024);
+        assert_eq!(mb_to_bytes(0), 0);
+    }
+
+    #[test]
+    fn configure_keeps_entries_for_the_same_budget_and_drops_them_otherwise() {
+        let budget = AtomicUsize::new(0);
+        let slot = Mutex::new(None);
+        configure_slot(&budget, &slot, 1);
+        assert_eq!(budget.load(Ordering::Acquire), 1024 * 1024);
+        lock(&slot)
+            .as_mut()
+            .unwrap()
+            .insert(("rust", [8; 32]), parse_rust("fn a() {}").unwrap(), 10);
+        configure_slot(&budget, &slot, 1);
+        assert_eq!(lock(&slot).as_ref().unwrap().used, 10, "same budget keeps entries");
+        configure_slot(&budget, &slot, 2);
+        assert_eq!(lock(&slot).as_ref().unwrap().used, 0, "new budget starts empty");
+        configure_slot(&budget, &slot, 0);
+        assert!(lock(&slot).is_none(), "zero disables the cache");
+        assert!(!budget_enabled(&budget));
+    }
+
+    #[test]
+    fn budget_enabled_only_when_positive() {
+        assert!(!budget_enabled(&AtomicUsize::new(0)));
+        assert!(budget_enabled(&AtomicUsize::new(1)));
+    }
+
+    #[test]
+    fn sources_up_to_the_size_limit_are_cached_and_larger_ones_are_not() {
+        let lang: Language = tree_sitter_rust::LANGUAGE.into();
+        let limit = MAX_CACHEABLE_SOURCE_BYTES;
+        for (len, cached) in [(1_500_000usize, true), (limit, true), (limit + 1, false)] {
+            let slot = Mutex::new(Some(ParseCache::with_budget(usize::MAX / 2)));
+            let src = sized_source(len);
+            let mut calls = 0;
+            for _ in 0..2 {
+                lookup_or_parse(&slot, &lang, &src, || {
+                    calls += 1;
+                    parse_rust(&src)
+                });
+            }
+            let expected = if cached { 1 } else { 2 };
+            assert_eq!(calls, expected, "source of {len} bytes");
+        }
+    }
+
+    #[test]
+    fn a_cached_entry_is_charged_ten_bytes_per_source_byte() {
+        let lang: Language = tree_sitter_rust::LANGUAGE.into();
+        let slot = Mutex::new(Some(ParseCache::with_budget(1000)));
+        let src = "fn a() {}";
+        lookup_or_parse(&slot, &lang, src, || parse_rust(src));
+        assert_eq!(
+            lock(&slot).as_ref().unwrap().used,
+            src.len() * TREE_BYTES_PER_SOURCE_BYTE
+        );
     }
 }

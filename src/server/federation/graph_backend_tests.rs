@@ -1206,3 +1206,55 @@ mod envelope_fuzz {
         }
     }
 }
+
+#[test]
+fn bulk_section_writes_the_file_once_when_it_closes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("federated_graph.bin");
+    let b = PetgraphBackend::new(tmp.path()).unwrap();
+    b.begin_bulk();
+    b.upsert_node_global("repo1:Function:src/lib.rs:f:0", NodeType::Function, "src/lib.rs", "f")
+        .unwrap();
+    assert!(!bin.exists(), "no checkpoint while a bulk section is open");
+    assert!(b.has_node("repo1:Function:src/lib.rs:f:0").unwrap());
+    b.end_bulk().unwrap();
+    assert!(bin.exists(), "closing a dirty section writes the file");
+    drop(b);
+    let reloaded = PetgraphBackend::new(tmp.path()).unwrap();
+    assert_eq!(reloaded.node_count(), 1);
+}
+
+#[test]
+fn nested_bulk_sections_save_only_when_the_outermost_closes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("federated_graph.bin");
+    let b = PetgraphBackend::new(tmp.path()).unwrap();
+    b.begin_bulk();
+    b.begin_bulk();
+    b.upsert_node_global("repo1:Function:src/lib.rs:f:0", NodeType::Function, "src/lib.rs", "f")
+        .unwrap();
+    b.end_bulk().unwrap();
+    assert!(!bin.exists(), "the inner section must not save");
+    b.end_bulk().unwrap();
+    assert!(bin.exists(), "the outer section saves");
+}
+
+#[test]
+fn closing_a_clean_bulk_section_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("federated_graph.bin");
+    let b = PetgraphBackend::new(tmp.path()).unwrap();
+    b.begin_bulk();
+    b.end_bulk().unwrap();
+    assert!(!bin.exists(), "no writes inside the section, so nothing to save");
+}
+
+#[test]
+fn has_node_reports_only_nodes_that_exist() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = PetgraphBackend::new(tmp.path()).unwrap();
+    assert!(!b.has_node("repo1:Function:src/lib.rs:f:0").unwrap());
+    b.upsert_node_global("repo1:Function:src/lib.rs:f:0", NodeType::Function, "src/lib.rs", "f")
+        .unwrap();
+    assert!(b.has_node("repo1:Function:src/lib.rs:f:0").unwrap());
+}

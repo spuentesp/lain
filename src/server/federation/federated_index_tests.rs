@@ -1111,3 +1111,23 @@ async fn removing_a_repo_during_projection_never_resurrects_its_nodes() {
         );
     }
 }
+
+#[test]
+fn federation_bulk_section_delegates_to_the_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = FederatedIndex::new(backend.clone());
+    let bin = tmp.path().join("federated_graph.bin");
+    fed.begin_bulk();
+    backend
+        .upsert_node_global(
+            "repo-a:Function:src/lib.rs:f:0",
+            NodeType::Function,
+            "src/lib.rs",
+            "f",
+        )
+        .unwrap();
+    assert!(!bin.exists(), "the federation's bulk section defers the checkpoint");
+    fed.end_bulk().unwrap();
+    assert!(bin.exists(), "ending the federation's bulk section saves");
+}

@@ -5139,6 +5139,21 @@ mod tests {
     use super::*;
     use crate::schema::{NodeType, RepoNamespace};
 
+    #[test]
+    fn innermost_function_is_the_smallest_span_containing_the_line() {
+        // 1-based lines: outer spans 1..4, inner spans 2..3.
+        let src = "def outer():\n    def inner():\n        return 1\n    return inner\n";
+        let tree = crate::server::sensors::util::parse_for_lang(Lang::Python, src).unwrap();
+        let spans = collect_function_spans(tree.root_node());
+        assert_eq!(spans.len(), 2);
+        let row_at = |line| innermost_function_at(&spans, line).map(|n| n.start_position().row);
+        assert_eq!(row_at(0), None, "no function starts before line 1");
+        assert_eq!(row_at(1), Some(0), "the def line belongs to outer");
+        assert_eq!(row_at(3), Some(1), "line 3 is inside inner");
+        assert_eq!(row_at(4), Some(0), "line 4 is only inside outer");
+        assert_eq!(row_at(9), None, "outside every function");
+    }
+
     fn empty_db() -> GraphDatabase {
         let dir = tempfile::tempdir().expect("tempdir");
         GraphDatabase::new(&dir.path().join("graph.bin")).unwrap()
