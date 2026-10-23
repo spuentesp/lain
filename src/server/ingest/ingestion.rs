@@ -513,16 +513,24 @@ impl LainServer {
                 set.abort_all();
                 break;
             }
-            let (index, outcome) = match res {
-                Ok((index, batch_results)) => (index, Ok(batch_results)),
-                // Every spawned task is in `index_of_task`, so a panicked one
-                // still lands in its own slot and the queue cannot stall.
-                Err(e) => (
-                    index_of_task.get(&e.id()).copied().unwrap_or(usize::MAX),
-                    Err(e),
-                ),
-            };
-            in_order.insert(index, outcome);
+            match res {
+                Ok((index, batch_results)) => {
+                    in_order.insert(index, Ok(batch_results));
+                }
+                // Every task this pass spawns is in `index_of_task`, so a
+                // panicked one lands in its own slot and the queue cannot stall.
+                Err(e) => match index_of_task.get(&e.id()).copied() {
+                    Some(index) => {
+                        in_order.insert(index, Err(e));
+                    }
+                    None => {
+                        // Not one of this pass's tasks, so it has no slot to
+                        // wait for. Count it now rather than lose it silently.
+                        failed += 1;
+                        warn!("Untracked scan task failed: {e}");
+                    }
+                },
+            }
             while let Some(outcome) = in_order.remove(&next_chunk) {
                 next_chunk += 1;
                 match outcome {
@@ -603,6 +611,20 @@ impl LainServer {
                 snapshot.files_completed = (scanned + failed) as u64;
                 snapshot.files_failed = failed as u64;
             });
+        }
+
+        // Completed batches still waiting for an earlier chunk. Only a timeout
+        // or abort ends the loop early, and that pass is already partial, so
+        // these files are rescanned next time. Anything else is a bug.
+        if !in_order.is_empty() {
+            debug_assert!(
+                partial,
+                "every completed batch is applied when the scan finishes"
+            );
+            warn!(
+                "{} completed scan batch(es) were not applied before the scan ended",
+                in_order.len()
+            );
         }
 
         // Final partial flush

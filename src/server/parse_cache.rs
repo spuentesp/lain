@@ -73,11 +73,16 @@ static CACHE: Mutex<Option<ParseCache>> = Mutex::new(None);
 /// disabled path costs one atomic load.
 static BUDGET_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-/// Apply the `parse_cache_mb` setting. `0` disables the cache and drops any
-/// entries. Called when the federation config loads.
+/// Apply the `parse_cache_mb` setting. `0` disables the cache.
+///
+/// The setting is process-wide: whichever federation config loaded last
+/// decides it for every federation in the process. Reloading with the same
+/// budget keeps the cached trees; a different budget drops them.
 pub fn configure(budget_mb: usize) {
     let budget = budget_mb.saturating_mul(1024 * 1024);
-    BUDGET_BYTES.store(budget, Ordering::Release);
+    if BUDGET_BYTES.swap(budget, Ordering::AcqRel) == budget {
+        return;
+    }
     *lock(&CACHE) = (budget > 0).then(|| ParseCache::with_budget(budget));
 }
 

@@ -1728,10 +1728,12 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                     let indices = db.find_indices_by_name(name);
                     if !indices.is_empty() {
                         let g = db.graph_ref_for_read();
-                        // Several nodes can share the name. Take the smallest id
-                        // rather than whichever the index yields first, since
-                        // index order depends on how the graph was built.
-                        return indices
+                        // Only a unique name in the target repo is a decidable
+                        // link. With several definitions the call could go to
+                        // any of them, so emit nothing, as the local resolver
+                        // does in `resolve_static_edges`. This also keeps the
+                        // answer independent of index order.
+                        let mut matches = indices
                             .into_iter()
                             .filter_map(|node_idx| g.node_weight(node_idx))
                             .filter(|node| node.name == name)
@@ -1743,8 +1745,12 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                                     &node.name,
                                     node.line_start,
                                 )
-                            })
-                            .min_by(|a, b| a.as_str().cmp(b.as_str()));
+                            });
+                        let first = matches.next()?;
+                        return match matches.next() {
+                            Some(_) => None,
+                            None => Some(first),
+                        };
                     }
                 }
             }
