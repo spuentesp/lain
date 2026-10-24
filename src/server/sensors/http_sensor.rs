@@ -144,6 +144,7 @@ fn extract_routes(pattern: &RoutePattern, content: &str, file_path: &str) -> Vec
             continue;
         }
 
+        let (method, path) = split_method_prefix(method, path);
         routes.push(HttpRoute {
             method,
             path,
@@ -153,6 +154,64 @@ fn extract_routes(pattern: &RoutePattern, content: &str, file_path: &str) -> Vec
         });
     }
     routes
+}
+
+/// A verbless route whose path begins with an HTTP method (`GET /health`)
+/// takes that method. Go 1.22 mux patterns and tracing labels both carry the
+/// verb this way; the route itself is the path after it.
+fn split_method_prefix(method: HttpMethod, path: String) -> (HttpMethod, String) {
+    if method != HttpMethod::Any {
+        return (method, path);
+    }
+    for (verb, m) in [
+        ("GET ", HttpMethod::Get),
+        ("POST ", HttpMethod::Post),
+        ("PUT ", HttpMethod::Put),
+        ("PATCH ", HttpMethod::Patch),
+        ("DELETE ", HttpMethod::Delete),
+        ("HEAD ", HttpMethod::Head),
+        ("OPTIONS ", HttpMethod::Options),
+    ] {
+        if let Some(rest) = path.strip_prefix(verb) {
+            if rest.starts_with('/') {
+                return (m, rest.to_string());
+            }
+        }
+    }
+    (method, path)
+}
+
+#[cfg(test)]
+mod method_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn a_verbless_route_with_a_leading_method_takes_it() {
+        assert_eq!(
+            split_method_prefix(HttpMethod::Any, "GET /health".into()),
+            (HttpMethod::Get, "/health".into())
+        );
+    }
+
+    #[test]
+    fn a_route_with_its_own_verb_or_a_plain_path_is_unchanged() {
+        assert_eq!(
+            split_method_prefix(HttpMethod::Post, "GET /x".into()),
+            (HttpMethod::Post, "GET /x".into())
+        );
+        assert_eq!(
+            split_method_prefix(HttpMethod::Any, "/users".into()),
+            (HttpMethod::Any, "/users".into())
+        );
+    }
+
+    #[test]
+    fn a_method_word_without_a_path_is_not_split() {
+        assert_eq!(
+            split_method_prefix(HttpMethod::Any, "GET health".into()),
+            (HttpMethod::Any, "GET health".into())
+        );
+    }
 }
 
 fn method_from_str(s: String) -> HttpMethod {
@@ -428,9 +487,10 @@ fn try_treesitter_extract(
             .map(|n| n.start_position().row as u32 + 1)
             .unwrap_or(1);
 
+        let (method, route_path) = split_method_prefix(method, strip_quotes(path_text));
         routes.push(HttpRoute {
             method,
-            path: strip_quotes(path_text),
+            path: route_path,
             handler_path: path.to_string_lossy().into_owned(),
             handler_name: handler_text.to_string(),
             line,
