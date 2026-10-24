@@ -1134,3 +1134,53 @@ fn federation_bulk_section_delegates_to_the_backend() {
     fed.end_bulk().unwrap();
     assert!(bin.exists(), "ending the federation's bulk section saves");
 }
+
+#[tokio::test]
+async fn cross_repo_name_resolves_only_when_unique_in_the_target_repo() {
+    use crate::federation::cross_repo::CrossRepoResolver;
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    // Keep the source directories alive for the whole test.
+    let mut dirs = Vec::new();
+    for id in ["alpha", "beta"] {
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new(id).unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+        dirs.push(src_dir);
+    }
+    let beta = fed.get_repo(&RepoId::new("beta").unwrap()).unwrap();
+    let function = |name: &str, line: u32| {
+        let mut node = crate::schema::GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "src/b.rs".to_string(),
+        );
+        node.id = format!("beta:Function:src/b.rs:{name}:{line}");
+        node.line_start = Some(line);
+        node
+    };
+    beta.db()
+        .insert_nodes_batch(&[
+            function("unique_fn", 1),
+            function("dup_fn", 2),
+            function("dup_fn", 3),
+        ])
+        .unwrap();
+    fed.refresh();
+
+    let source = RepoId::new("alpha").unwrap();
+    let hit = fed
+        .resolve_cross_repo(&source, Some("unique_fn"), None, None)
+        .expect("a name defined once in the target repo resolves");
+    assert_eq!(hit.repo_id(), "beta");
+    assert!(
+        fed.resolve_cross_repo(&source, Some("dup_fn"), None, None)
+            .is_none(),
+        "a name defined twice in the target repo emits no edge"
+    );
+    drop(dirs);
+}
