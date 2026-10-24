@@ -1013,7 +1013,7 @@ async fn removing_repo_retracts_backend_edges_and_survives_other_projection() {
         .unwrap();
     fed.backend()
         .upsert_edge(GraphEdge::new(
-            EdgeType::Calls,
+            crate::schema::EdgeType::Calls,
             b_node.id.clone(),
             a_node.id.clone(),
         ))
@@ -1182,5 +1182,107 @@ async fn cross_repo_name_resolves_only_when_unique_in_the_target_repo() {
             .is_none(),
         "a name defined twice in the target repo emits no edge"
     );
+    drop(dirs);
+}
+
+#[tokio::test]
+async fn project_repo_writes_the_repo_edges_to_the_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = petgraph_backend(&tmp);
+    let fed = FederatedIndex::new(backend.clone());
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("alpha").unwrap(), src_dir.path().to_path_buf())
+            .unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+    let alpha = fed.get_repo(&RepoId::new("alpha").unwrap()).unwrap();
+    let function = |name: &str, line: u32| {
+        let mut node = crate::schema::GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "src/a.rs".to_string(),
+        );
+        node.id = format!("local-{name}");
+        node.line_start = Some(line);
+        node
+    };
+    alpha
+        .db()
+        .insert_nodes_batch(&[function("caller", 1), function("callee", 2)])
+        .unwrap();
+    alpha
+        .db()
+        .insert_edges_batch(&[crate::schema::GraphEdge::new(
+            crate::schema::EdgeType::Calls,
+            "local-caller".to_string(),
+            "local-callee".to_string(),
+        )])
+        .unwrap();
+    fed.project_repo(&RepoId::new("alpha").unwrap())
+        .await
+        .unwrap();
+    let calls = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.edge_type == crate::schema::EdgeType::Calls)
+        .count();
+    assert_eq!(calls, 1, "the repo's call edge reaches the federated graph");
+}
+
+#[tokio::test]
+async fn projecting_rebuilds_the_symbol_index_only_for_repos_with_nodes() {
+    use crate::federation::cross_repo::CrossRepoResolver;
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    let mut dirs = Vec::new();
+    for id in ["alpha", "beta"] {
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new(id).unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+        dirs.push(src_dir);
+    }
+    let function = |repo: &str, name: &str| {
+        let mut node = crate::schema::GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "src/b.rs".to_string(),
+        );
+        node.id = format!("{repo}:Function:src/b.rs:{name}:1");
+        node.line_start = Some(1);
+        node
+    };
+    // Beta gets its node after registration, so the symbol index is stale.
+    let beta = fed.get_repo(&RepoId::new("beta").unwrap()).unwrap();
+    beta.db()
+        .insert_nodes_batch(&[function("beta", "late_fn")])
+        .unwrap();
+    let source = RepoId::new("alpha").unwrap();
+
+    // Alpha is empty: projecting it must not rebuild the index.
+    fed.project_repo(&source).await.unwrap();
+    assert!(
+        fed.resolve_cross_repo(&source, Some("late_fn"), None, None)
+            .is_none(),
+        "an empty repo leaves the symbol index alone"
+    );
+
+    // Alpha has a node now: projecting it rebuilds the index.
+    let alpha = fed.get_repo(&source).unwrap();
+    alpha
+        .db()
+        .insert_nodes_batch(&[function("alpha", "own_fn")])
+        .unwrap();
+    fed.project_repo(&source).await.unwrap();
+    let hit = fed
+        .resolve_cross_repo(&source, Some("late_fn"), None, None)
+        .expect("a repo with nodes triggers the rebuild");
+    assert_eq!(hit.repo_id(), "beta");
     drop(dirs);
 }
