@@ -425,6 +425,26 @@ mod mutant_kills {
     }
 
     #[test]
+    fn repeated_tokens_on_the_candidate_side_weigh_by_count() {
+        let cands = vec![node(
+            "repoB:Function:src/b.rs:g:3",
+            Some("alpha alpha beta"),
+        )];
+        let m = CrossRepoMatcher::new(&cands);
+        // Source alpha=1, beta=1 (‖a‖ = √2); candidate alpha=2, beta=1 (‖b‖ = √5).
+        // Dot product 1·2 + 1·1 = 3, so cosine = 3 / √10 ≈ 0.9487.
+        let source = node("repoA:Function:src/src.rs:f:1", Some("alpha beta"));
+        let hits = m.find_matches(&source, 5, 0.0);
+        assert_eq!(hits.len(), 1);
+        let expected = 3.0_f32 / 10.0_f32.sqrt();
+        assert!(
+            (hits[0].1 - expected).abs() < 1e-5,
+            "similarity {}",
+            hits[0].1
+        );
+    }
+
+    #[test]
     fn nodes_without_a_signature_or_of_another_type_do_not_match() {
         let cands = vec![node("repoB:Function:src/b.rs:g:3", Some("alpha beta"))];
         let m = CrossRepoMatcher::new(&cands);

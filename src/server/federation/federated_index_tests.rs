@@ -1286,3 +1286,61 @@ async fn projecting_rebuilds_the_symbol_index_only_for_repos_with_nodes() {
     assert_eq!(hit.repo_id(), "beta");
     drop(dirs);
 }
+
+#[tokio::test]
+async fn a_cross_repo_target_that_already_has_a_signature_is_not_rewritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = petgraph_backend(&tmp);
+    let fed = FederatedIndex::new(backend.clone());
+    let mut dirs = Vec::new();
+    for id in ["alpha", "beta"] {
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new(id).unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+        dirs.push(src_dir);
+    }
+    let with_signature = |name: &str, path: &str, doc: &str| {
+        let mut node =
+            crate::schema::GraphNode::new(NodeType::Function, name.to_string(), path.to_string());
+        node.id = format!("local-{name}");
+        node.line_start = Some(1);
+        node.signature = Some("alpha beta".to_string());
+        node.docstring = Some(doc.to_string());
+        node
+    };
+    let alpha = fed.get_repo(&RepoId::new("alpha").unwrap()).unwrap();
+    alpha
+        .db()
+        .insert_nodes_batch(&[with_signature("f", "src/a.rs", "source doc")])
+        .unwrap();
+    let beta = fed.get_repo(&RepoId::new("beta").unwrap()).unwrap();
+    beta.db()
+        .insert_nodes_batch(&[with_signature("g", "src/b.rs", "fresh doc")])
+        .unwrap();
+
+    // The target already sits in the federated graph, complete, with its own docstring.
+    let target_id = "beta:Function:src/b.rs:g:1";
+    let mut existing =
+        crate::schema::GraphNode::new(NodeType::Function, "g".to_string(), "src/b.rs".to_string());
+    existing.id = target_id.to_string();
+    existing.line_start = Some(1);
+    existing.signature = Some("alpha beta".to_string());
+    existing.docstring = Some("stored doc".to_string());
+    backend.upsert_node(existing).unwrap();
+
+    fed.project_repo(&RepoId::new("alpha").unwrap())
+        .await
+        .unwrap();
+
+    let stored = backend.get_node(target_id).unwrap().expect("target stays");
+    assert_eq!(
+        stored.docstring.as_deref(),
+        Some("stored doc"),
+        "a complete target is not overwritten by another repo's copy"
+    );
+    drop(dirs);
+}

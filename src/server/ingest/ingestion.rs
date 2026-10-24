@@ -13,6 +13,18 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+/// Whether the pending batch is big enough to write mid-pass.
+fn should_flush(pending_nodes: usize, batch_size: usize) -> bool {
+    pending_nodes >= batch_size
+}
+
+/// Count one failed unit of scan work and log it. Shared by the scan loop so
+/// the counter and its log line cannot drift apart.
+fn record_scan_failure(failed: &mut usize, what: &str, error: impl std::fmt::Display) {
+    *failed += 1;
+    warn!("{what}: {error}");
+}
+
 impl LainServer {
     /// The "Sane" Ingestion Pipeline: Map -> Reduce -> Resolve -> Enrich.
     /// `&self` (not `&mut self`) because every field this method writes
@@ -526,8 +538,7 @@ impl LainServer {
                     None => {
                         // Not one of this pass's tasks, so it has no slot to
                         // wait for. Count it now rather than lose it silently.
-                        failed += 1;
-                        warn!("Untracked scan task failed: {e}");
+                        record_scan_failure(&mut failed, "Untracked scan task failed", &e);
                     }
                 },
             }
@@ -547,8 +558,7 @@ impl LainServer {
                                     all_pattern_refs.extend(scan_result.pattern_refs);
                                 }
                                 Err(e) => {
-                                    failed += 1;
-                                    warn!("File scan error: {}", e);
+                                    record_scan_failure(&mut failed, "File scan error", &e);
                                 }
                             }
                         }
@@ -558,7 +568,7 @@ impl LainServer {
                         );
 
                         // Incremental flush every batch_size files
-                        if batch_nodes.len() >= batch_size {
+                        if should_flush(batch_nodes.len(), batch_size) {
                             info!(
                                 "Flush phase 1: writing {} nodes ({} files scanned)",
                                 batch_nodes.len(),
@@ -599,8 +609,7 @@ impl LainServer {
                         }
                     }
                     Err(e) => {
-                        failed += 1;
-                        warn!("Task join error: {}", e);
+                        record_scan_failure(&mut failed, "Task join error", &e);
                     }
                 }
             }
@@ -2238,6 +2247,13 @@ mod readiness_progress_tests {
         let total = snapshot.files_total.unwrap_or(0);
         assert_eq!(snapshot.files_completed, total, "every chunk is applied");
         assert!(total >= FILES as u64, "all files were scanned");
+    }
+
+    #[test]
+    fn a_batch_flushes_at_exactly_the_batch_size() {
+        assert!(!should_flush(99, 100));
+        assert!(should_flush(100, 100));
+        assert!(should_flush(101, 100));
     }
 
     /// When the server's cancel token fires during the LSP
