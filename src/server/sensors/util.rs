@@ -35,7 +35,7 @@ pub fn fallback_repo_id() -> crate::federation::repo_id::RepoId {
 /// [`lang_for_path`] and [`parse_for_lang`] helpers (per sensor
 /// wrapper) keep every sensor's per-language walker pointed at the
 /// right tree-sitter grammar without duplicating the lookup table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
     Python,
     TsJs,
@@ -69,15 +69,24 @@ pub fn lang_for_path(path: &str) -> Option<Lang> {
     }
 }
 
+thread_local! {
+    static SENSOR_PARSER: std::cell::RefCell<Parser> =
+        std::cell::RefCell::new(Parser::new());
+}
+
 /// Build a tree-sitter [`Tree`] for `lang`. Each sensor's per-language
 /// parser consumes this — none of them re-implement the grammar
 /// lookup. Returns `None` when the grammar refuses to set (shouldn't
 /// happen for the ten languages above) or the parser returns no tree.
 pub fn parse_for_lang(lang: Lang, src: &str) -> Option<Tree> {
-    let mut parser = Parser::new();
     let grammar: Language = grammar_for(lang);
-    parser.set_language(&grammar).ok()?;
-    parser.parse(src, None)
+    crate::server::parse_cache::get_or_parse(&grammar, src, || {
+        SENSOR_PARSER.with(|parser_cell| {
+            let mut parser = parser_cell.borrow_mut();
+            parser.set_language(&grammar).ok()?;
+            parser.parse(src, None)
+        })
+    })
 }
 
 /// Resolve the tree-sitter [`Language`] for `lang` without parsing.
@@ -192,6 +201,69 @@ pub fn with_current_patterns<R>(patterns: &Patterns, f: impl FnOnce() -> R) -> R
     }
 }
 
+struct WorkspaceScanCache {
+    root: std::path::PathBuf,
+    walked_files: Option<std::sync::Arc<Vec<std::path::PathBuf>>>,
+    file_contents: std::collections::HashMap<std::path::PathBuf, Option<std::sync::Arc<str>>>,
+}
+
+thread_local! {
+    static WORKSPACE_SCAN_CACHE: std::cell::RefCell<Option<WorkspaceScanCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with a per-workspace file-walk and file-content cache
+/// active on the current thread. Used by `sensors::run_all_with_reports`
+/// so the 19 protocol sensors walk the workspace and git index once
+/// and read each source file from disk at most once per pipeline run.
+pub fn with_workspace_scan_cache<R>(root: &Path, f: impl FnOnce() -> R) -> R {
+    let prev = WORKSPACE_SCAN_CACHE.with(|cell| {
+        cell.replace(Some(WorkspaceScanCache {
+            root: root.to_path_buf(),
+            walked_files: None,
+            file_contents: std::collections::HashMap::new(),
+        }))
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    WORKSPACE_SCAN_CACHE.with(|cell| {
+        *cell.borrow_mut() = prev;
+    });
+    match result {
+        Ok(v) => v,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn read_cached_or_fs(root: &Path, path: &Path) -> Option<String> {
+    const MAX_CACHEABLE_BYTES: usize = 2 * 1024 * 1024;
+    let cached = WORKSPACE_SCAN_CACHE.with(|cell| {
+        let borrow = cell.borrow();
+        let cache = borrow.as_ref().filter(|c| c.root == root)?;
+        cache.file_contents.get(path).cloned()
+    });
+    if let Some(entry) = cached {
+        return entry.map(|s| s.to_string());
+    }
+    let content = std::fs::read_to_string(path).ok();
+    WORKSPACE_SCAN_CACHE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(cache) = borrow.as_mut().filter(|c| c.root == root) {
+            match &content {
+                Some(s) if s.len() <= MAX_CACHEABLE_BYTES => {
+                    cache
+                        .file_contents
+                        .insert(path.to_path_buf(), Some(std::sync::Arc::from(s.as_str())));
+                }
+                None => {
+                    cache.file_contents.insert(path.to_path_buf(), None);
+                }
+                _ => {}
+            }
+        }
+    });
+    content
+}
+
 /// A file found by [`walk_workspace`].
 pub struct WalkedFile(std::path::PathBuf);
 
@@ -224,7 +296,7 @@ pub fn scan_files<'a, T: 'a>(
     walk_workspace(root).filter_map(move |entry| {
         let path = entry.path();
         let tag = select(path)?;
-        let content = std::fs::read_to_string(path).ok()?;
+        let content = read_cached_or_fs(root, path)?;
         Some((path.to_path_buf(), content, tag))
     })
 }
@@ -238,6 +310,21 @@ pub fn scan_files<'a, T: 'a>(
 /// are flattened away — a malformed symlink or a target that vanishes
 /// mid-walk must not abort ingestion.
 pub fn walk_workspace(root: &Path) -> impl Iterator<Item = WalkedFile> {
+    if let Some(cached) = WORKSPACE_SCAN_CACHE.with(|cell| {
+        let borrow = cell.borrow();
+        borrow
+            .as_ref()
+            .filter(|c| c.root == root)
+            .and_then(|c| c.walked_files.clone())
+    }) {
+        return cached
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(WalkedFile);
+    }
+
     let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     let mut files: Vec<std::path::PathBuf> = ignore::WalkBuilder::new(root)
         .hidden(true)
@@ -277,6 +364,12 @@ pub fn walk_workspace(root: &Path) -> impl Iterator<Item = WalkedFile> {
             }
         }
     }
+    WORKSPACE_SCAN_CACHE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(cache) = borrow.as_mut().filter(|c| c.root == root) {
+            cache.walked_files = Some(std::sync::Arc::new(files.clone()));
+        }
+    });
     files.into_iter().map(WalkedFile)
 }
 
@@ -484,14 +577,14 @@ pub fn find_handler_in_graph(graph: &GraphDatabase, name: &str) -> Option<GraphN
 /// the file node itself).
 pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<GraphNode> {
     graph
-        .get_nodes_by_types(&[
-            crate::schema::NodeType::Function,
-            crate::schema::NodeType::Method,
-        ])
-        .ok()
+        .get_nodes_in_path(path)
         .into_iter()
-        .flatten()
-        .filter(|n| n.path == path)
+        .filter(|n| {
+            matches!(
+                n.node_type,
+                crate::schema::NodeType::Function | crate::schema::NodeType::Method
+            )
+        })
         .filter_map(|n| match (n.line_start, n.line_end) {
             (Some(s), Some(e)) if s <= line && e >= line => Some((n, e.saturating_sub(s))),
             _ => None,
@@ -1137,3 +1230,104 @@ mod tests {
 #[cfg(test)]
 #[path = "util_verification.rs"]
 mod verification;
+
+#[cfg(test)]
+mod read_cache_boundary_tests {
+    use super::*;
+
+    const LIMIT: usize = 2 * 1024 * 1024;
+
+    fn read_twice_around_a_change(content: &str) -> (Option<String>, Option<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, content).unwrap();
+        with_workspace_scan_cache(dir.path(), || {
+            let first = read_cached_or_fs(dir.path(), &file);
+            std::fs::write(&file, "changed on disk").unwrap();
+            let second = read_cached_or_fs(dir.path(), &file);
+            (first, second)
+        })
+    }
+
+    #[test]
+    fn small_files_are_served_from_the_cache() {
+        let (first, second) = read_twice_around_a_change("original");
+        assert_eq!(first.as_deref(), Some("original"));
+        assert_eq!(second.as_deref(), Some("original"), "cached, not re-read");
+    }
+
+    #[test]
+    fn a_file_at_the_size_limit_is_cached() {
+        let big = "a".repeat(LIMIT);
+        let (_, second) = read_twice_around_a_change(&big);
+        assert_eq!(
+            second.as_deref().map(str::len),
+            Some(LIMIT),
+            "exactly the limit is cached"
+        );
+    }
+
+    #[test]
+    fn a_file_over_the_size_limit_is_read_again() {
+        let big = "a".repeat(LIMIT + 1);
+        let (_, second) = read_twice_around_a_change(&big);
+        assert_eq!(second.as_deref(), Some("changed on disk"));
+    }
+
+    #[test]
+    fn a_missing_file_is_remembered_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("absent.txt");
+        with_workspace_scan_cache(dir.path(), || {
+            assert_eq!(read_cached_or_fs(dir.path(), &file), None);
+            std::fs::write(&file, "appeared later").unwrap();
+            assert_eq!(
+                read_cached_or_fs(dir.path(), &file),
+                None,
+                "the miss is cached"
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod walk_cache_root_tests {
+    use super::*;
+
+    fn names(files: impl Iterator<Item = WalkedFile>) -> Vec<String> {
+        let mut names: Vec<String> = files
+            .filter(|f| f.0.is_file())
+            .map(|f| f.0.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_walk_cache_belongs_to_its_own_root_only() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("only_in_a.txt"), "a").unwrap();
+        std::fs::write(b.path().join("only_in_b.txt"), "b").unwrap();
+        with_workspace_scan_cache(a.path(), || {
+            assert_eq!(names(walk_workspace(a.path())), vec!["only_in_a.txt"]);
+            // Walking another root inside the same scope must not reuse A's list.
+            assert_eq!(names(walk_workspace(b.path())), vec!["only_in_b.txt"]);
+        });
+    }
+
+    #[test]
+    fn a_walk_is_cached_for_its_root_within_the_scope() {
+        let a = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("first.txt"), "1").unwrap();
+        with_workspace_scan_cache(a.path(), || {
+            assert_eq!(names(walk_workspace(a.path())), vec!["first.txt"]);
+            std::fs::write(a.path().join("second.txt"), "2").unwrap();
+            assert_eq!(
+                names(walk_workspace(a.path())),
+                vec!["first.txt"],
+                "the second walk is served from the cache"
+            );
+        });
+    }
+}

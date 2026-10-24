@@ -96,19 +96,27 @@ fn extract_websocket_patterns(content: &str) -> Vec<(String, String, String, u32
     // `Vec<IdiomMatch>` per line; the pre-Tier-1 emission shape
     // `(client_url, server_route, handler_name, line)` is
     // preserved.
-    let patterns = Patterns::patterns();
-    let (clients, servers, handlers) = util::websocket_idioms_for(patterns);
+    // This scanner reads the immutable bundled registry, so its compiled
+    // idioms can share the same lifetime instead of recompiling per file.
+    type WebsocketIdioms = (
+        Vec<util::CompiledIdiom>,
+        Vec<util::CompiledIdiom>,
+        Vec<util::CompiledIdiom>,
+    );
+    static IDIOMS: OnceLock<WebsocketIdioms> = OnceLock::new();
+    let (clients, servers, handlers) =
+        IDIOMS.get_or_init(|| util::websocket_idioms_for(Patterns::patterns()));
 
     for (line_no, line) in content.lines().enumerate() {
         let line_num = line_no as u32 + 1;
         // Server routes
-        for m in util::walk_idioms(&servers, line, line_num) {
+        for m in util::walk_idioms(servers, line, line_num) {
             if let Some(route) = m.literal.as_deref() {
                 endpoints.push((String::new(), route.to_string(), String::new(), line_num));
             }
         }
         // Client URLs (both URL-literal and `new WebSocket(…)`).
-        for m in util::walk_idioms(&clients, line, line_num) {
+        for m in util::walk_idioms(clients, line, line_num) {
             if let Some(url) = m.literal.as_deref() {
                 endpoints.push((url.to_string(), String::new(), String::new(), line_num));
             }
@@ -119,7 +127,7 @@ fn extract_websocket_patterns(content: &str) -> Vec<(String, String, String, u32
         // `on{open,…}`) is kept in `literal` so the alternation
         // matches the four `on{…}` shapes in a single
         // non-optional branch.
-        for m in util::walk_idioms(&handlers, line, line_num) {
+        for m in util::walk_idioms(handlers, line, line_num) {
             if let Some(handler_name) = m.identifier.as_deref() {
                 endpoints.push((
                     String::new(),
@@ -308,6 +316,20 @@ mod tests {
     use super::*;
     use crate::schema::RepoNamespace;
     use tempfile::tempdir;
+
+    #[test]
+    fn repeated_websocket_extraction_reuses_registry_compilation() {
+        let source = r#"const ws = new WebSocket("ws://orders/events/stream");"#;
+        let expected = extract_websocket_patterns(source);
+        assert!(expected
+            .iter()
+            .any(|(url, _, _, _)| url == "ws://orders/events/stream"));
+        let started = std::time::Instant::now();
+        for _ in 0..1024 {
+            assert_eq!(extract_websocket_patterns(source), expected);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
 
     #[test]
     fn websocket_sensor_extracts_provider_and_consumer_facts() {

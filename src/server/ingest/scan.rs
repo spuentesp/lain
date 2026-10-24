@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 /// A raw call/type-usage reference from tree-sitter, not yet resolved to node IDs.
+#[derive(Clone, Debug)]
 pub struct StaticFileRef {
     pub file_path: String,
     pub source_line: u32,
@@ -101,10 +102,11 @@ impl LspScanCache {
 }
 
 fn extract_tree_sitter_file(path: &Path, content: &str) -> TreeSitterFile {
+    let (defs, static_refs, pattern_refs) = crate::treesitter::extract_all(path, content);
     TreeSitterFile {
-        defs: crate::treesitter::extract_definitions(path, content),
-        static_refs: crate::treesitter::extract_refs(path, content),
-        pattern_refs: crate::treesitter::extract_strings(path, content),
+        defs,
+        static_refs,
+        pattern_refs,
     }
 }
 
@@ -213,12 +215,14 @@ pub async fn scan_file_structure(
     //    tree-sitter-only walk that mirrors the LSP-fallback code
     //    path that runs tree-sitter on empty results.
     let symbols_result = {
-        // Compute the file's content hash once. `std::fs::read` is
-        // a single syscall; the LSP round trip below is orders of
-        // magnitude more expensive, so the hash is free.
-        let content_hash: Option<[u8; 32]> = std::fs::read(&path)
-            .ok()
-            .map(|bytes| *blake3::hash(&bytes).as_bytes());
+        // Compute the file's content hash only when `lsp_cache` is present.
+        let content_hash: Option<[u8; 32]> = if lsp_cache.is_some() {
+            std::fs::read(&path)
+                .ok()
+                .map(|bytes| *blake3::hash(&bytes).as_bytes())
+        } else {
+            None
+        };
         if let (Some(cache), Some(hash)) = (lsp_cache, content_hash) {
             if let Some(cached_symbols) = cache.get(&path, hash) {
                 // Cache hit. Synthesise the same shape as the LSP
@@ -286,27 +290,14 @@ pub async fn scan_file_structure(
     };
 
     let mut selection_positions: Vec<(String, u32, u32)> = Vec::new();
+    let mut needs_ts_defs = false;
 
     match symbols_result {
         Ok(symbols) => {
             if symbols.is_empty() {
                 // LSP returned nothing usable (e.g. cold-start, partial parse).
                 // Fall back to tree-sitter so the graph isn't empty.
-                add_tree_sitter_definitions(
-                    &path,
-                    ScanContext {
-                        graph_key: &relative_path,
-                        nodes: &mut nodes,
-                        edges: &mut edges,
-                        file_id: &file_id,
-                        lsp_sync,
-                        git_sync,
-                        commit_hash: commit_hash.clone(),
-                        namespace,
-                    },
-                    cancel.clone(),
-                )
-                .await;
+                needs_ts_defs = true;
             } else {
                 for symbol in symbols {
                     collect_selection_positions(&mut selection_positions, &symbol);
@@ -328,21 +319,7 @@ pub async fn scan_file_structure(
             debug!("No LSP symbols for {:?}: {}", path, e);
             // LSP unavailable (binary missing, language unsupported, etc.).
             // Fall back to tree-sitter so `find Function` etc. still works.
-            add_tree_sitter_definitions(
-                &path,
-                ScanContext {
-                    graph_key: &relative_path,
-                    nodes: &mut nodes,
-                    edges: &mut edges,
-                    file_id: &file_id,
-                    lsp_sync,
-                    git_sync,
-                    commit_hash: commit_hash.clone(),
-                    namespace,
-                },
-                cancel.clone(),
-            )
-            .await;
+            needs_ts_defs = true;
         }
     }
 
@@ -415,6 +392,21 @@ pub async fn scan_file_structure(
             }
             Err(e) => return Err(e),
         };
+        if needs_ts_defs {
+            populate_tree_sitter_definitions(
+                &ts.defs,
+                ScanContext {
+                    graph_key: &relative_path,
+                    nodes: &mut nodes,
+                    edges: &mut edges,
+                    file_id: &file_id,
+                    lsp_sync,
+                    git_sync,
+                    commit_hash: commit_hash.clone(),
+                    namespace,
+                },
+            );
+        }
         apply_attribute_labels(&ts.defs, &mut nodes);
         apply_tree_sitter_containers(&ts.defs, &mut nodes);
         let path_str = relative_path.clone();
@@ -811,33 +803,13 @@ struct ScanContext<'a> {
     namespace: &'a crate::schema::RepoNamespace,
 }
 
-async fn add_tree_sitter_definitions(
-    path: &Path,
+fn populate_tree_sitter_definitions(
+    defs: &[crate::treesitter::SymbolDef],
     context: ScanContext<'_>,
-    cancel: CancellationToken,
 ) {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return;
-    };
-    // Run the tree-sitter extraction on the blocking pool; the
-    // graph mutation below happens back on the async runtime where
-    // the GraphDatabase's tokio mutex lives. Clone the path so the
-    // offthread closure (which requires `Send + 'static`) owns its
-    // own PathBuf.
-    let path_buf = path.to_path_buf();
-    let defs = match offthread(cancel, move || {
-        Ok::<Vec<crate::treesitter::SymbolDef>, LainError>(crate::treesitter::extract_definitions(
-            &path_buf, &content,
-        ))
-    })
-    .await
-    {
-        Ok(d) => d,
-        Err(_) => return,
-    };
     for def in defs {
         let mut node = GraphNode::new_in(
-            def.kind,
+            def.kind.clone(),
             def.name.clone(),
             context.graph_key.to_string(),
             context.namespace,

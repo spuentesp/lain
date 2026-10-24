@@ -22,6 +22,11 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use lain::cli::{Args, Commands};
 
+// Indexing allocates many small nodes and strings per file; mimalloc handles
+// that churn faster than the system allocator.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> Result<()> {
     // Stamp the executable's mtime before anything can rebuild
     // underneath a long-running server, so `get_health` /

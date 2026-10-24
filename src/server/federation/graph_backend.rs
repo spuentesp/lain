@@ -6,6 +6,7 @@ use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// On-disk envelope for `federated_graph.bin`: the `LNF2` magic, then a
 /// little-endian `u32` schema version, then the payload. There is no
@@ -34,6 +35,18 @@ fn payload_path_for(bin_path: &Path) -> std::path::PathBuf {
 }
 
 pub trait GraphBackend: Send + Sync {
+    /// Open a bulk write section. Until the matching [`Self::end_bulk`],
+    /// writes do not each rewrite the backing file; `end_bulk` writes it
+    /// once. Only a full reindex should use this: a crash inside the section
+    /// leaves the previous file in place, and `lain reindex` rebuilds it.
+    /// No-op for backends without a backing file.
+    fn begin_bulk(&self) {}
+
+    /// Close a bulk section and write once if anything changed inside it.
+    fn end_bulk(&self) -> Result<(), LainError> {
+        Ok(())
+    }
+
     fn upsert_node(&self, node: GraphNode) -> Result<(), LainError>;
     fn upsert_node_global(
         &self,
@@ -135,13 +148,17 @@ pub struct PetgraphBackend {
     db: GraphDatabase,
     index: DashMap<String, GlobalId>,
     bin_path: PathBuf,
-    payload_path: PathBuf,
     /// When `true`, [`Self::save`] is a no-op and no file under
     /// `data_dir` is ever written. Snapshot federations (`§8.5`) live
     /// here: they need a real `GraphBackend` to walk, but every
     /// snapshot is built from on-disk cache entries and never persists
     /// itself.
     ephemeral: bool,
+    /// Open [`GraphBackend::begin_bulk`] sections. While non-zero, `save`
+    /// only marks the file dirty instead of rewriting the whole graph.
+    bulk_depth: AtomicUsize,
+    /// A write happened inside a bulk section; `end_bulk` saves once.
+    bulk_dirty: AtomicBool,
 }
 
 impl PetgraphBackend {
@@ -202,8 +219,9 @@ impl PetgraphBackend {
             db,
             index,
             bin_path,
-            payload_path,
             ephemeral: false,
+            bulk_depth: AtomicUsize::new(0),
+            bulk_dirty: AtomicBool::new(false),
         })
     }
 
@@ -220,8 +238,9 @@ impl PetgraphBackend {
             db,
             index: DashMap::new(),
             bin_path: data_dir.to_path_buf(),
-            payload_path: data_dir.to_path_buf(),
             ephemeral: true,
+            bulk_depth: AtomicUsize::new(0),
+            bulk_dirty: AtomicBool::new(false),
         }
     }
 
@@ -239,13 +258,21 @@ impl PetgraphBackend {
         if self.ephemeral {
             return Ok(());
         }
-        self.db.save_to_disk_sync()?;
-        let payload = std::fs::read(&self.payload_path)?;
+        if self.bulk_depth.load(Ordering::Acquire) > 0 {
+            self.bulk_dirty.store(true, Ordering::Release);
+            return Ok(());
+        }
+        self.write_file()
+    }
+
+    /// Unconditional checkpoint of the whole federated graph to `bin_path`.
+    fn write_file(&self) -> Result<(), LainError> {
+        let payload = self.db.save_to_disk_sync_bytes()?;
         let mut with_header = Vec::with_capacity(FEDERATION_GRAPH_HEADER_LEN + payload.len());
         with_header.extend_from_slice(FEDERATION_GRAPH_MAGIC);
         with_header.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
         with_header.extend_from_slice(&payload);
-        std::fs::write(&self.bin_path, &with_header)?;
+        crate::cli::io::write_file_atomic(&self.bin_path, &with_header)?;
         Ok(())
     }
 
@@ -282,6 +309,19 @@ impl PetgraphBackend {
 }
 
 impl GraphBackend for PetgraphBackend {
+    fn begin_bulk(&self) {
+        self.bulk_depth.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn end_bulk(&self) -> Result<(), LainError> {
+        let previous = self.bulk_depth.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "end_bulk without begin_bulk");
+        if previous == 1 && self.bulk_dirty.swap(false, Ordering::AcqRel) {
+            return self.write_file();
+        }
+        Ok(())
+    }
+
     fn upsert_node(&self, node: GraphNode) -> Result<(), LainError> {
         let global_id = GlobalId::parse(&node.id)?;
         self.db.upsert_node(node.clone())?;
@@ -308,9 +348,7 @@ impl GraphBackend for PetgraphBackend {
         if edges.is_empty() {
             return Ok(());
         }
-        for edge in edges {
-            self.db.upsert_edge(edge.clone())?;
-        }
+        self.db.upsert_edges_batch_strict(edges)?;
         self.save()
     }
 
@@ -318,10 +356,14 @@ impl GraphBackend for PetgraphBackend {
         if nodes.is_empty() {
             return Ok(());
         }
+        let mut parsed_ids: Vec<(String, GlobalId)> = Vec::with_capacity(nodes.len());
         for node in nodes {
             let global_id = GlobalId::parse(&node.id)?;
-            self.db.upsert_node(node.clone())?;
-            self.index.insert(node.id.clone(), global_id);
+            parsed_ids.push((node.id.clone(), global_id));
+        }
+        self.db.insert_nodes_batch(nodes)?;
+        for (id, global_id) in parsed_ids {
+            self.index.insert(id, global_id);
         }
         self.save()
     }
@@ -349,13 +391,12 @@ impl GraphBackend for PetgraphBackend {
         self.db.get_node_by_id(global_id)
     }
 
+    fn has_node(&self, global_id: &str) -> Result<bool, LainError> {
+        Ok(self.db.has_node(global_id))
+    }
+
     fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError> {
-        Ok(self
-            .db
-            .get_all_nodes()
-            .into_iter()
-            .filter(|n| n.name == name)
-            .collect())
+        Ok(self.db.find_all_nodes_by_name(name))
     }
 
     fn list_nodes(&self) -> Result<Vec<GraphNode>, LainError> {

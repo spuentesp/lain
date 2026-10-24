@@ -1013,7 +1013,7 @@ async fn removing_repo_retracts_backend_edges_and_survives_other_projection() {
         .unwrap();
     fed.backend()
         .upsert_edge(GraphEdge::new(
-            EdgeType::Calls,
+            crate::schema::EdgeType::Calls,
             b_node.id.clone(),
             a_node.id.clone(),
         ))
@@ -1110,4 +1110,237 @@ async fn removing_a_repo_during_projection_never_resurrects_its_nodes() {
             &leftover[..leftover.len().min(3)]
         );
     }
+}
+
+#[test]
+fn federation_bulk_section_delegates_to_the_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = FederatedIndex::new(backend.clone());
+    let bin = tmp.path().join("federated_graph.bin");
+    fed.begin_bulk();
+    backend
+        .upsert_node_global(
+            "repo-a:Function:src/lib.rs:f:0",
+            NodeType::Function,
+            "src/lib.rs",
+            "f",
+        )
+        .unwrap();
+    assert!(
+        !bin.exists(),
+        "the federation's bulk section defers the checkpoint"
+    );
+    fed.end_bulk().unwrap();
+    assert!(bin.exists(), "ending the federation's bulk section saves");
+}
+
+#[tokio::test]
+async fn cross_repo_name_resolves_only_when_unique_in_the_target_repo() {
+    use crate::federation::cross_repo::CrossRepoResolver;
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    // Keep the source directories alive for the whole test.
+    let mut dirs = Vec::new();
+    for id in ["alpha", "beta"] {
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new(id).unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+        dirs.push(src_dir);
+    }
+    let beta = fed.get_repo(&RepoId::new("beta").unwrap()).unwrap();
+    let function = |name: &str, line: u32| {
+        let mut node = crate::schema::GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "src/b.rs".to_string(),
+        );
+        node.id = format!("beta:Function:src/b.rs:{name}:{line}");
+        node.line_start = Some(line);
+        node
+    };
+    beta.db()
+        .insert_nodes_batch(&[
+            function("unique_fn", 1),
+            function("dup_fn", 2),
+            function("dup_fn", 3),
+        ])
+        .unwrap();
+    fed.refresh();
+
+    let source = RepoId::new("alpha").unwrap();
+    let hit = fed
+        .resolve_cross_repo(&source, Some("unique_fn"), None, None)
+        .expect("a name defined once in the target repo resolves");
+    assert_eq!(hit.repo_id(), "beta");
+    assert!(
+        fed.resolve_cross_repo(&source, Some("dup_fn"), None, None)
+            .is_none(),
+        "a name defined twice in the target repo emits no edge"
+    );
+    drop(dirs);
+}
+
+#[tokio::test]
+async fn project_repo_writes_the_repo_edges_to_the_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = petgraph_backend(&tmp);
+    let fed = FederatedIndex::new(backend.clone());
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("alpha").unwrap(), src_dir.path().to_path_buf())
+            .unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+    let alpha = fed.get_repo(&RepoId::new("alpha").unwrap()).unwrap();
+    let function = |name: &str, line: u32| {
+        let mut node = crate::schema::GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "src/a.rs".to_string(),
+        );
+        node.id = format!("local-{name}");
+        node.line_start = Some(line);
+        node
+    };
+    alpha
+        .db()
+        .insert_nodes_batch(&[function("caller", 1), function("callee", 2)])
+        .unwrap();
+    alpha
+        .db()
+        .insert_edges_batch(&[crate::schema::GraphEdge::new(
+            crate::schema::EdgeType::Calls,
+            "local-caller".to_string(),
+            "local-callee".to_string(),
+        )])
+        .unwrap();
+    fed.project_repo(&RepoId::new("alpha").unwrap())
+        .await
+        .unwrap();
+    let calls = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.edge_type == crate::schema::EdgeType::Calls)
+        .count();
+    assert_eq!(calls, 1, "the repo's call edge reaches the federated graph");
+}
+
+#[tokio::test]
+async fn projecting_rebuilds_the_symbol_index_only_for_repos_with_nodes() {
+    use crate::federation::cross_repo::CrossRepoResolver;
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    let mut dirs = Vec::new();
+    for id in ["alpha", "beta"] {
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new(id).unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+        dirs.push(src_dir);
+    }
+    let function = |repo: &str, name: &str| {
+        let mut node = crate::schema::GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "src/b.rs".to_string(),
+        );
+        node.id = format!("{repo}:Function:src/b.rs:{name}:1");
+        node.line_start = Some(1);
+        node
+    };
+    // Beta gets its node after registration, so the symbol index is stale.
+    let beta = fed.get_repo(&RepoId::new("beta").unwrap()).unwrap();
+    beta.db()
+        .insert_nodes_batch(&[function("beta", "late_fn")])
+        .unwrap();
+    let source = RepoId::new("alpha").unwrap();
+
+    // Alpha is empty: projecting it must not rebuild the index.
+    fed.project_repo(&source).await.unwrap();
+    assert!(
+        fed.resolve_cross_repo(&source, Some("late_fn"), None, None)
+            .is_none(),
+        "an empty repo leaves the symbol index alone"
+    );
+
+    // Alpha has a node now: projecting it rebuilds the index.
+    let alpha = fed.get_repo(&source).unwrap();
+    alpha
+        .db()
+        .insert_nodes_batch(&[function("alpha", "own_fn")])
+        .unwrap();
+    fed.project_repo(&source).await.unwrap();
+    let hit = fed
+        .resolve_cross_repo(&source, Some("late_fn"), None, None)
+        .expect("a repo with nodes triggers the rebuild");
+    assert_eq!(hit.repo_id(), "beta");
+    drop(dirs);
+}
+
+#[tokio::test]
+async fn a_cross_repo_target_that_already_has_a_signature_is_not_rewritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = petgraph_backend(&tmp);
+    let fed = FederatedIndex::new(backend.clone());
+    let mut dirs = Vec::new();
+    for id in ["alpha", "beta"] {
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new(id).unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+        dirs.push(src_dir);
+    }
+    let with_signature = |name: &str, path: &str, doc: &str| {
+        let mut node =
+            crate::schema::GraphNode::new(NodeType::Function, name.to_string(), path.to_string());
+        node.id = format!("local-{name}");
+        node.line_start = Some(1);
+        node.signature = Some("alpha beta".to_string());
+        node.docstring = Some(doc.to_string());
+        node
+    };
+    let alpha = fed.get_repo(&RepoId::new("alpha").unwrap()).unwrap();
+    alpha
+        .db()
+        .insert_nodes_batch(&[with_signature("f", "src/a.rs", "source doc")])
+        .unwrap();
+    let beta = fed.get_repo(&RepoId::new("beta").unwrap()).unwrap();
+    beta.db()
+        .insert_nodes_batch(&[with_signature("g", "src/b.rs", "fresh doc")])
+        .unwrap();
+
+    // The target already sits in the federated graph, complete, with its own docstring.
+    let target_id = "beta:Function:src/b.rs:g:1";
+    let mut existing =
+        crate::schema::GraphNode::new(NodeType::Function, "g".to_string(), "src/b.rs".to_string());
+    existing.id = target_id.to_string();
+    existing.line_start = Some(1);
+    existing.signature = Some("alpha beta".to_string());
+    existing.docstring = Some("stored doc".to_string());
+    backend.upsert_node(existing).unwrap();
+
+    fed.project_repo(&RepoId::new("alpha").unwrap())
+        .await
+        .unwrap();
+
+    let stored = backend.get_node(target_id).unwrap().expect("target stays");
+    assert_eq!(
+        stored.docstring.as_deref(),
+        Some("stored doc"),
+        "a complete target is not overwritten by another repo's copy"
+    );
+    drop(dirs);
 }

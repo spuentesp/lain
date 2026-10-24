@@ -17,6 +17,7 @@ pub mod events_log;
 pub mod git;
 pub mod graph;
 pub mod lsp;
+pub mod parse_cache;
 pub mod schema;
 pub mod time;
 pub mod treesitter;

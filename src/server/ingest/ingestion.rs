@@ -13,6 +13,18 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+/// Whether the pending batch is big enough to write mid-pass.
+fn should_flush(pending_nodes: usize, batch_size: usize) -> bool {
+    pending_nodes >= batch_size
+}
+
+/// Count one failed unit of scan work and log it. Shared by the scan loop so
+/// the counter and its log line cannot drift apart.
+fn record_scan_failure(failed: &mut usize, what: &str, error: impl std::fmt::Display) {
+    *failed += 1;
+    warn!("{what}: {error}");
+}
+
 impl LainServer {
     /// The "Sane" Ingestion Pipeline: Map -> Reduce -> Resolve -> Enrich.
     /// `&self` (not `&mut self`) because every field this method writes
@@ -416,7 +428,12 @@ impl LainServer {
         // at the end of the `scan_file_batch` JoinSet drain below.
         let lsp_cache = std::sync::Arc::new(crate::server::ingest::scan::LspScanCache::default());
         let mut set = tokio::task::JoinSet::new();
-        for chunk in file_chunks {
+        // Results are applied in chunk order, not completion order, so the
+        // graph is built the same way on every run. A panicked task is found
+        // again through its task id.
+        let mut index_of_task: std::collections::HashMap<tokio::task::Id, usize> =
+            std::collections::HashMap::new();
+        for (chunk_index, chunk) in file_chunks.into_iter().enumerate() {
             // AGENT_UX_ROADMAP.md M4 follow-up: cancel between batches.
             // Spawning new work after a cancel would keep the runtime
             // busy past the shutdown budget.
@@ -438,20 +455,24 @@ impl LainServer {
             // every chunk shares the same cache instance.
             let lsp_cache_for_task = std::sync::Arc::clone(&lsp_cache);
 
-            set.spawn(async move {
-                scan_file_batch(
-                    chunk,
-                    workspace,
-                    Some(lsp),
-                    lsp_sync_time,
-                    git_time,
-                    commit_hash,
-                    &namespace,
-                    cancel_for_spawn,
-                    Some(&*lsp_cache_for_task),
+            let task = set.spawn(async move {
+                (
+                    chunk_index,
+                    scan_file_batch(
+                        chunk,
+                        workspace,
+                        Some(lsp),
+                        lsp_sync_time,
+                        git_time,
+                        commit_hash,
+                        &namespace,
+                        cancel_for_spawn,
+                        Some(&*lsp_cache_for_task),
+                    )
+                    .await,
                 )
-                .await
             });
+            index_of_task.insert(task.id(), chunk_index);
         }
 
         // 2. Reduce Phase: Incremental flush — write partial results as tasks complete
@@ -478,6 +499,8 @@ impl LainServer {
                 files.len()
             );
         }
+        let mut in_order = std::collections::BTreeMap::new();
+        let mut next_chunk = 0usize;
         let scan_timeout =
             std::time::Duration::from_secs(self.ingest().tuning().ingestion.scan_timeout_secs);
 
@@ -503,73 +526,91 @@ impl LainServer {
                 break;
             }
             match res {
-                Ok(batch_results) => {
-                    // Process each file result in this batch
-                    for file_result in batch_results {
-                        match file_result {
-                            Ok(scan_result) => {
-                                scanned += 1;
-                                batch_nodes.extend(scan_result.nodes);
-                                batch_edges.extend(scan_result.edges);
-                                all_external_refs.extend(scan_result.external_references);
-                                all_static_refs.extend(scan_result.static_refs);
-                                all_pattern_refs.extend(scan_result.pattern_refs);
-                            }
-                            Err(e) => {
-                                failed += 1;
-                                warn!("File scan error: {}", e);
-                            }
-                        }
-                    }
-                    debug!(
-                        "Batch completed: {} files scanned, {} failed in batch",
-                        scanned, failed
-                    );
-
-                    // Incremental flush every batch_size files
-                    if batch_nodes.len() >= batch_size {
-                        info!(
-                            "Flush phase 1: writing {} nodes ({} files scanned)",
-                            batch_nodes.len(),
-                            scanned
-                        );
-                        // Replace rather than insert, so a re-scan drops the
-                        // symbols a file no longer defines instead of layering
-                        // new nodes on top of stale ones. Scan results arrive
-                        // whole-file and this flush runs between chunks, so
-                        // every path here has all of its nodes in this batch.
-                        // One call per flush, not per file: per-file would take
-                        // a write lock hundreds of times while readers query.
-                        let paths: Vec<String> = batch_nodes
-                            .iter()
-                            .map(|n| n.path.clone())
-                            .collect::<HashSet<_>>()
-                            .into_iter()
-                            .collect();
-                        if let Err(e) = self
-                            .ingest()
-                            .graph()
-                            .replace_nodes_for_paths(&paths, &batch_nodes)
-                        {
-                            warn!("Batch node write error: {}", e);
-                        }
-                        insert_edges_best_effort(self.ingest().graph(), &batch_edges, "batch");
-                        // Durably persist the flush. The in-memory inserts above
-                        // are lost if the outer re-index timeout drops this task,
-                        // which is why a 90s budget could never converge: every
-                        // batch of parsing was discarded. Writing here means a
-                        // killed run still leaves progress on disk and successive
-                        // runs converge instead of restarting from the same graph.
-                        if let Err(e) = self.ingest().graph().save_to_disk().await {
-                            warn!("Batch persist error: {}", e);
-                        }
-                        batch_nodes.clear();
-                        batch_edges.clear();
-                    }
+                Ok((index, batch_results)) => {
+                    in_order.insert(index, Ok(batch_results));
                 }
-                Err(e) => {
-                    failed += 1;
-                    warn!("Task join error: {}", e);
+                // Every task this pass spawns is in `index_of_task`, so a
+                // panicked one lands in its own slot and the queue cannot stall.
+                Err(e) => match index_of_task.get(&e.id()).copied() {
+                    Some(index) => {
+                        in_order.insert(index, Err(e));
+                    }
+                    None => {
+                        // Not one of this pass's tasks, so it has no slot to
+                        // wait for. Count it now rather than lose it silently.
+                        record_scan_failure(&mut failed, "Untracked scan task failed", &e);
+                    }
+                },
+            }
+            while let Some(outcome) = in_order.remove(&next_chunk) {
+                next_chunk += 1;
+                match outcome {
+                    Ok(batch_results) => {
+                        // Process each file result in this batch
+                        for file_result in batch_results {
+                            match file_result {
+                                Ok(scan_result) => {
+                                    scanned += 1;
+                                    batch_nodes.extend(scan_result.nodes);
+                                    batch_edges.extend(scan_result.edges);
+                                    all_external_refs.extend(scan_result.external_references);
+                                    all_static_refs.extend(scan_result.static_refs);
+                                    all_pattern_refs.extend(scan_result.pattern_refs);
+                                }
+                                Err(e) => {
+                                    record_scan_failure(&mut failed, "File scan error", &e);
+                                }
+                            }
+                        }
+                        debug!(
+                            "Batch completed: {} files scanned, {} failed in batch",
+                            scanned, failed
+                        );
+
+                        // Incremental flush every batch_size files
+                        if should_flush(batch_nodes.len(), batch_size) {
+                            info!(
+                                "Flush phase 1: writing {} nodes ({} files scanned)",
+                                batch_nodes.len(),
+                                scanned
+                            );
+                            // Replace rather than insert, so a re-scan drops the
+                            // symbols a file no longer defines instead of layering
+                            // new nodes on top of stale ones. Scan results arrive
+                            // whole-file and this flush runs between chunks, so
+                            // every path here has all of its nodes in this batch.
+                            // One call per flush, not per file: per-file would take
+                            // a write lock hundreds of times while readers query.
+                            let paths: Vec<String> = batch_nodes
+                                .iter()
+                                .map(|n| n.path.clone())
+                                .collect::<HashSet<_>>()
+                                .into_iter()
+                                .collect();
+                            if let Err(e) = self
+                                .ingest()
+                                .graph()
+                                .replace_nodes_for_paths(&paths, &batch_nodes)
+                            {
+                                warn!("Batch node write error: {}", e);
+                            }
+                            insert_edges_best_effort(self.ingest().graph(), &batch_edges, "batch");
+                            // Durably persist the flush. The in-memory inserts above
+                            // are lost if the outer re-index timeout drops this task,
+                            // which is why a 90s budget could never converge: every
+                            // batch of parsing was discarded. Writing here means a
+                            // killed run still leaves progress on disk and successive
+                            // runs converge instead of restarting from the same graph.
+                            if let Err(e) = self.ingest().graph().save_to_disk().await {
+                                warn!("Batch persist error: {}", e);
+                            }
+                            batch_nodes.clear();
+                            batch_edges.clear();
+                        }
+                    }
+                    Err(e) => {
+                        record_scan_failure(&mut failed, "Task join error", &e);
+                    }
                 }
             }
             // Published once per completed batch. `files_completed` counts
@@ -579,6 +620,20 @@ impl LainServer {
                 snapshot.files_completed = (scanned + failed) as u64;
                 snapshot.files_failed = failed as u64;
             });
+        }
+
+        // Completed batches still waiting for an earlier chunk. Only a timeout
+        // or abort ends the loop early, and that pass is already partial, so
+        // these files are rescanned next time. Anything else is a bug.
+        if !in_order.is_empty() {
+            debug_assert!(
+                partial,
+                "every completed batch is applied when the scan finishes"
+            );
+            warn!(
+                "{} completed scan batch(es) were not applied before the scan ended",
+                in_order.len()
+            );
         }
 
         // Final partial flush
@@ -1428,55 +1483,64 @@ pub async fn relink_cross_repo(
     // indexing passes: the gate goes down while this pass re-resolves the
     // cross-repo edges and comes back up once they are in the table.
     graph.clear_calls_published();
-    let git_sensor = Arc::clone(git);
-    let files = offthread(cancel.clone(), move || {
-        git_sensor.try_get_all_tracked_files()
-    })
-    .await?;
-    let root = path.to_path_buf();
-    let refs = offthread(
-        cancel.clone(),
-        move || -> Result<Vec<StaticFileRef>, LainError> {
-            let mut refs = Vec::new();
-            for file in files {
-                let abs = if file.is_absolute() {
-                    file.clone()
-                } else {
-                    root.join(&file)
-                };
-                let indexed = abs
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(crate::treesitter::is_indexed_extension);
-                if !indexed {
-                    continue;
-                }
-                let Ok(content) = std::fs::read_to_string(&abs) else {
-                    continue;
-                };
-                let rel = graph_path(&root, &abs);
-                refs.extend(
-                    crate::treesitter::extract_refs(&abs, &content)
-                        .into_iter()
-                        .map(|r| StaticFileRef {
-                            file_path: rel.clone(),
-                            source_line: r.source_line,
-                            target_name: r.target_name,
-                            edge_type: r.edge_type,
-                            foreign_receiver: r.foreign_receiver,
-                            self_receiver: r.self_receiver,
-                            qualifier: r.qualifier.clone(),
-                        }),
-                );
-            }
-            Ok(refs)
-        },
-    )
-    .await?;
+    let refs = if let Some(cached) = graph.get_cached_static_refs() {
+        cached
+    } else {
+        let git_sensor = Arc::clone(git);
+        let files = offthread(cancel.clone(), move || {
+            git_sensor.try_get_all_tracked_files()
+        })
+        .await?;
+        let root = path.to_path_buf();
+        let extracted = offthread(
+            cancel.clone(),
+            move || -> Result<Vec<StaticFileRef>, LainError> {
+                use rayon::prelude::*;
+                let refs: Vec<StaticFileRef> = files
+                    .par_iter()
+                    .filter_map(|file| {
+                        let abs = if file.is_absolute() {
+                            file.clone()
+                        } else {
+                            root.join(file)
+                        };
+                        let indexed = abs
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(crate::treesitter::is_indexed_extension);
+                        if !indexed {
+                            return None;
+                        }
+                        let content = std::fs::read_to_string(&abs).ok()?;
+                        let rel = graph_path(&root, &abs);
+                        Some(
+                            crate::treesitter::extract_refs(&abs, &content)
+                                .into_iter()
+                                .map(|r| StaticFileRef {
+                                    file_path: rel.clone(),
+                                    source_line: r.source_line,
+                                    target_name: r.target_name,
+                                    edge_type: r.edge_type,
+                                    foreign_receiver: r.foreign_receiver,
+                                    self_receiver: r.self_receiver,
+                                    qualifier: r.qualifier.clone(),
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .flatten()
+                    .collect();
+                Ok(refs)
+            },
+        )
+        .await?;
+        graph.set_cached_static_refs(extracted.clone());
+        extracted
+    };
     let external: Vec<GraphEdge> =
         super::resolve::resolve_static_edges(graph, &refs, Some(resolver), Some(source_repo))
             .into_iter()
-            .filter(|e| graph.get_node(&e.target_id).ok().flatten().is_none())
+            .filter(|e| !graph.has_node(&e.target_id))
             .collect();
     let n = external.len();
     graph.insert_edges_batch(&external)?;
@@ -1714,8 +1778,8 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     // Tighter batches than the default tuning for federation workloads —
     // repos are loaded concurrently and we want to keep each batch's wall
     // time bounded. The full pipeline doesn't need micro-batches here.
-    const FILES_PER_BATCH: usize = 8;
-    const INGEST_BATCH_SIZE: usize = 256;
+    const FILES_PER_BATCH: usize = 32;
+    const INGEST_BATCH_SIZE: usize = 4096;
     const COCHANGE_COMMIT_WINDOW: usize = 100;
     const COCHANGE_MIN_PAIR_COUNT: usize = 2;
     const COCHANGE_MAX_COMMIT_FILES: usize = 50;
@@ -1883,7 +1947,13 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         // single-workspace pipeline for the rename that lost its callers).
         sweep_orphans(path, graph, git);
         let tracked = git.get_all_tracked_files().unwrap_or_default();
+        let scanned_rel: HashSet<String> =
+            files_to_scan.iter().map(|p| graph_path(path, p)).collect();
+        let tracked_rel: HashSet<String> = tracked.iter().map(|p| graph_path(path, p)).collect();
+        graph.update_cached_static_refs(&scanned_rel, &tracked_rel, &all_static_refs);
         all_static_refs.extend(refs_into_rescanned(path, graph, &files_to_scan, &tracked));
+    } else {
+        graph.set_cached_static_refs(all_static_refs.clone());
     }
     let static_edges = super::resolve::resolve_static_edges(
         graph,
@@ -2132,6 +2202,58 @@ mod readiness_progress_tests {
             .unwrap()
             .success());
         root
+    }
+
+    /// More files than one scan batch: every chunk must be applied, in order,
+    /// so the progress counters cover all of them. A regression here drops the
+    /// batches after the first without any error.
+    #[tokio::test]
+    async fn build_core_memory_applies_every_chunk_in_order() {
+        let root = git_fixture_with_one_file();
+        const FILES: usize = 120;
+        for i in 0..FILES {
+            std::fs::write(
+                root.path().join(format!("f{i}.rs")),
+                format!("pub fn f{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        assert!(std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "many files"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            server.build_core_memory(),
+        )
+        .await
+        .expect("build_core_memory must not hang past the test's own budget")
+        .unwrap();
+
+        let snapshot = server.readiness().snapshot();
+        assert_eq!(snapshot.files_failed, 0);
+        let total = snapshot.files_total.unwrap_or(0);
+        assert_eq!(snapshot.files_completed, total, "every chunk is applied");
+        assert!(total >= FILES as u64, "all files were scanned");
+    }
+
+    #[test]
+    fn a_batch_flushes_at_exactly_the_batch_size() {
+        assert!(!should_flush(99, 100));
+        assert!(should_flush(100, 100));
+        assert!(should_flush(101, 100));
     }
 
     /// When the server's cancel token fires during the LSP

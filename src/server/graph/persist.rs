@@ -19,7 +19,7 @@ use petgraph::stable_graph::{NodeIndex, StableGraph};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Bumped whenever the meaning of `GraphNode.path` changes. Version 2 is
@@ -43,7 +43,7 @@ pub const PATH_FORMAT_VERSION: u32 = 5;
 #[derive(Serialize, Deserialize)]
 pub(super) struct GraphState {
     pub(super) graph: StableGraph<GraphNode, GraphEdge>,
-    pub(super) index_map: HashMap<String, NodeIndex>,
+    pub(super) index_map: BTreeMap<String, NodeIndex>,
     pub(super) last_commit: Option<String>,
     /// Absent in graphs written before the canonical-path change. Bincode
     /// is positional, so such files fail to decode entirely (see
@@ -75,7 +75,7 @@ pub(super) struct GraphState {
 #[derive(Serialize, Deserialize)]
 struct PreStampState {
     graph: StableGraph<GraphNode, GraphEdge>,
-    index_map: HashMap<String, NodeIndex>,
+    index_map: BTreeMap<String, NodeIndex>,
     last_commit: Option<String>,
     path_format_version: u32,
 }
@@ -87,7 +87,7 @@ impl GraphState {
     /// that pre-dates the stamp entirely.
     pub(super) fn new(
         graph: StableGraph<GraphNode, GraphEdge>,
-        index_map: HashMap<String, NodeIndex>,
+        index_map: BTreeMap<String, NodeIndex>,
         last_commit: Option<String>,
         calls_published_for: Option<String>,
     ) -> Self {
@@ -327,11 +327,11 @@ mod stamp_persist_tests {
 
     fn one_node() -> (
         StableGraph<GraphNode, GraphEdge>,
-        HashMap<String, NodeIndex>,
+        BTreeMap<String, NodeIndex>,
     ) {
         let mut graph = StableGraph::new();
         let node = GraphNode::new(NodeType::Function, "callee".into(), "src/b.rs".into());
-        let mut index_map = HashMap::new();
+        let mut index_map = BTreeMap::new();
         index_map.insert(node.id.clone(), graph.add_node(node));
         (graph, index_map)
     }
@@ -450,7 +450,7 @@ mod stamp_persist_tests {
 #[cfg(test)]
 pub(super) fn encode_pre_stamp_state_for_tests(
     graph: StableGraph<GraphNode, GraphEdge>,
-    index_map: HashMap<String, NodeIndex>,
+    index_map: BTreeMap<String, NodeIndex>,
     last_commit: Option<String>,
 ) -> Result<Vec<u8>, bincode::error::EncodeError> {
     bincode::serde::encode_to_vec(
@@ -467,3 +467,79 @@ pub(super) fn encode_pre_stamp_state_for_tests(
 #[cfg(test)]
 #[path = "persist_verification.rs"]
 mod verification;
+
+/// Canonical comparison of two `federated_graph.bin` files, for the
+/// determinism check. Nodes and edges are compared as sorted sets, so only
+/// the content matters, not petgraph's node-index order. The wall-clock sync
+/// stamps (`last_lsp_sync`, `last_git_sync`) are ignored: they record when a
+/// sync ran and differ on every run by design.
+///
+/// Run with:
+/// `FED_GRAPH_A=<a.bin> FED_GRAPH_B=<b.bin> cargo test --lib \
+///   canonical_federated_graph_diff -- --ignored --nocapture`
+#[cfg(test)]
+mod canonical_diff_tests {
+    use super::*;
+    use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+    use std::collections::BTreeSet;
+
+    fn canonical(path: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+        let bytes = std::fs::read(path).expect("read federated graph");
+        let header = crate::federation::graph_backend::FEDERATION_GRAPH_HEADER_LEN;
+        let (state, _) = decode_state(&bytes[header..]).expect("decode federated graph");
+        let nodes = state
+            .graph
+            .node_weights()
+            .map(|node| {
+                let mut node = node.clone();
+                node.last_lsp_sync = None;
+                node.last_git_sync = None;
+                format!("{node:?}")
+            })
+            .collect();
+        let edges = state
+            .graph
+            .edge_references()
+            .map(|edge| {
+                format!(
+                    "{:?} -> {:?} {:?}",
+                    state.graph[edge.source()].id,
+                    state.graph[edge.target()].id,
+                    edge.weight()
+                )
+            })
+            .collect();
+        (nodes, edges)
+    }
+
+    #[test]
+    #[ignore]
+    fn canonical_federated_graph_diff() {
+        let a = std::env::var("FED_GRAPH_A").expect("set FED_GRAPH_A");
+        let b = std::env::var("FED_GRAPH_B").expect("set FED_GRAPH_B");
+        let (nodes_a, edges_a) = canonical(&a);
+        let (nodes_b, edges_b) = canonical(&b);
+        let only_a_nodes = nodes_a.difference(&nodes_b).count();
+        let only_b_nodes = nodes_b.difference(&nodes_a).count();
+        let only_a_edges = edges_a.difference(&edges_b).count();
+        let only_b_edges = edges_b.difference(&edges_a).count();
+        println!(
+            "nodes: {} vs {} (only-a {only_a_nodes}, only-b {only_b_nodes}); \
+             edges: {} vs {} (only-a {only_a_edges}, only-b {only_b_edges})",
+            nodes_a.len(),
+            nodes_b.len(),
+            edges_a.len(),
+            edges_b.len()
+        );
+        for node in nodes_a.symmetric_difference(&nodes_b).take(5) {
+            println!("node differs: {node}");
+        }
+        for edge in edges_a.symmetric_difference(&edges_b).take(5) {
+            println!("edge differs: {edge}");
+        }
+        assert!(
+            nodes_a == nodes_b && edges_a == edges_b,
+            "federated graphs differ canonically"
+        );
+    }
+}

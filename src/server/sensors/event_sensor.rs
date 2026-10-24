@@ -71,6 +71,17 @@ use crate::server::sensors::util_tokenize::strip_line_comment;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+type TopicIdioms = (
+    Vec<util::CompiledIdiom>,
+    Vec<util::CompiledIdiom>,
+    Vec<util::CompiledIdiom>,
+);
+
+#[cfg(test)]
+thread_local! {
+    static IDIOM_SET_COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const DEFAULT_BROKER: &str = "kafka";
 
 /// Hub identity anchor — the `path` component of the hub's ID only.
@@ -134,6 +145,7 @@ pub fn scan_workspace_event(
 
     // Load once per scan so every site uses the same repo-local patterns.
     let patterns = Patterns::with_overrides(root)?;
+    let mut idioms: Vec<(Lang, TopicIdioms)> = Vec::new();
 
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
@@ -153,9 +165,21 @@ pub fn scan_workspace_event(
     };
     for (path, content, ext) in crate::server::sensors::util::scan_files(root, any_ext) {
         let ext = ext.as_str();
+        let Some(lang) = ext_to_lang(ext) else {
+            continue;
+        };
+        let index = idioms
+            .iter()
+            .position(|(cached_lang, _)| *cached_lang == lang)
+            .unwrap_or_else(|| {
+                #[cfg(test)]
+                IDIOM_SET_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
+                idioms.push((lang, util::topic_idioms_for(&patterns, lang)));
+                idioms.len() - 1
+            });
         let path_str = graph_path(root, &path);
         let constants = collect_same_file_constants(&content, ext);
-        let sites = detect_sites(&content, ext, &constants, &patterns);
+        let sites = detect_sites(&content, ext, &constants, &idioms[index].1);
         let (nodes, edges) =
             emit_sites(&sites, &path_str, namespace, graph, &mut emitted_topic_ids);
         all_nodes.extend(nodes);
@@ -401,14 +425,10 @@ fn detect_sites(
     content: &str,
     ext: &str,
     constants: &BTreeMap<String, String>,
-    patterns: &Patterns,
+    idioms: &TopicIdioms,
 ) -> Vec<DetectedSite> {
     let mut out: Vec<DetectedSite> = Vec::new();
-    let lang = match ext_to_lang(ext) {
-        Some(l) => l,
-        None => return out,
-    };
-    let (producers, consumers, scheduled) = util::topic_idioms_for(patterns, lang);
+    let (producers, consumers, scheduled) = idioms;
     let lines: Vec<&str> = content.lines().collect();
     for (idx, raw) in lines.iter().enumerate() {
         let line_num = idx as u32 + 1;
@@ -420,7 +440,7 @@ fn detect_sites(
         if trimmed.is_empty() {
             continue;
         }
-        for m in util::walk_idioms(&producers, line, line_num) {
+        for m in util::walk_idioms(producers, line, line_num) {
             if let Some(value) = resolve_idiom_capture(&m, constants) {
                 out.push(DetectedSite {
                     kind: SiteKind::Produces,
@@ -431,7 +451,7 @@ fn detect_sites(
                 });
             }
         }
-        for m in util::walk_idioms(&consumers, line, line_num) {
+        for m in util::walk_idioms(consumers, line, line_num) {
             match resolve_idiom_capture(&m, constants) {
                 Some(value) => out.push(DetectedSite {
                     kind: SiteKind::Consumes,
@@ -464,7 +484,7 @@ fn detect_sites(
                 }
             }
         }
-        for m in util::walk_idioms(&scheduled, line, line_num) {
+        for m in util::walk_idioms(scheduled, line, line_num) {
             // The walker returns the spec (or a Celery-marker
             // match with no spec). Project to `(topic, owner_name,
             // broker)` based on the framework id.
@@ -913,6 +933,43 @@ mod tests {
         let p = dir.path().join(name);
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    #[test]
+    fn workspace_compiles_event_idioms_once_per_language_and_reloads_on_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..16 {
+            std::fs::write(
+                dir.path().join(format!("producer{index}.ts")),
+                format!("producer.send({{ topic: 'orders.{index}' }});"),
+            )
+            .unwrap();
+        }
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        IDIOM_SET_COMPILE_COUNT.with(|count| count.set(0));
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+        assert_eq!(IDIOM_SET_COMPILE_COUNT.with(|count| count.get()), 1);
+        assert_eq!(
+            graph
+                .all_nodes()
+                .iter()
+                .filter(|n| n.node_type == NodeType::Topic)
+                .count(),
+            16
+        );
+        std::fs::write(dir.path().join("producer0.ts"), "// removed producer").unwrap();
+        IDIOM_SET_COMPILE_COUNT.with(|count| count.set(0));
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+        assert_eq!(IDIOM_SET_COMPILE_COUNT.with(|count| count.get()), 1);
+        assert_eq!(
+            graph
+                .all_nodes()
+                .iter()
+                .filter(|n| n.node_type == NodeType::Topic)
+                .count(),
+            15
+        );
     }
 
     #[test]

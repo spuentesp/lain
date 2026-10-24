@@ -174,6 +174,7 @@ pub fn scan_workspace_field_access(
     // we collect them here so rule 5/6 can find the calling /
     // callee relationships.
     let calls_by_function: BTreeMap<String, BTreeSet<String>> = collect_calls_by_function(graph);
+    let http_calls = collect_http_calls(graph);
 
     // Wrap the per-file emission + scope walk in
     // `with_current_patterns` so the deep walker helpers
@@ -183,16 +184,27 @@ pub fn scan_workspace_field_access(
     // would have no effect on field-access suppression.
     let (emissions, _) = super::util::with_current_patterns(patterns, || {
         let mut emissions: Vec<FieldAccessEmission> = Vec::new();
-        let by_lang = |p: &Path| lang_for_path(&p.to_string_lossy());
-        for (path, content, lang) in super::util::scan_files(root, by_lang) {
-            let path_str = graph_path(root, &path);
-            emissions.extend(detect_emissions(
-                &path_str,
-                &content,
-                lang,
-                graph,
-                &calls_by_function,
-            ));
+        if !http_calls.is_empty() {
+            let call_paths: BTreeSet<&str> = http_calls
+                .values()
+                .map(|c| c.consumer_path.as_str())
+                .collect();
+            let by_lang = |p: &Path| {
+                let rel = graph_path(root, p);
+                if !call_paths.contains(rel.as_str()) {
+                    return None;
+                }
+                lang_for_path(&rel)
+            };
+            for (path, content, lang) in super::util::scan_files(root, by_lang) {
+                let path_str = graph_path(root, &path);
+                emissions.extend(detect_emissions_with_http_calls(
+                    &path_str,
+                    &content,
+                    lang,
+                    &http_calls,
+                ));
+            }
         }
 
         // §6.5 interprocedural pass: extend every emission with the reads
@@ -335,6 +347,11 @@ struct CallSite {
     consumer_line: u32,
 }
 
+#[cfg(test)]
+thread_local! {
+    static HTTP_CALL_COLLECTION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Discover every outbound HTTP call site in this repo. We look up
 /// the `SendsHttp` edges the http_client_sensor wrote in phase one
 /// and record the call id plus the source path and line. Used both
@@ -343,6 +360,8 @@ struct CallSite {
 ///
 /// Reserved for PR 9.
 fn collect_http_calls(graph: &GraphDatabase) -> BTreeMap<String, CallSite> {
+    #[cfg(test)]
+    HTTP_CALL_COLLECTION_COUNT.with(|count| count.set(count.get() + 1));
     let mut out: BTreeMap<String, CallSite> = BTreeMap::new();
     let nodes = graph.get_all_nodes();
     let calls: BTreeMap<String, String> = nodes
@@ -402,13 +421,28 @@ pub fn detect_emissions(
     graph: &GraphDatabase,
     _calls_by_function: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<FieldAccessEmission> {
+    detect_emissions_with_http_calls(path, content, lang, &collect_http_calls(graph))
+}
+
+fn detect_emissions_with_http_calls(
+    path: &str,
+    content: &str,
+    lang: Lang,
+    calls: &BTreeMap<String, CallSite>,
+) -> Vec<FieldAccessEmission> {
+    if !calls
+        .values()
+        .any(|call_site| call_site.consumer_path == path)
+    {
+        return Vec::new();
+    }
     let Some(tree) = parse(lang, content) else {
         return Vec::new();
     };
     let src = content.as_bytes();
-    let calls = collect_http_calls(graph);
+    let functions = collect_function_spans(tree.root_node());
     let mut emissions: Vec<FieldAccessEmission> = Vec::new();
-    for (function_id, call_site) in &calls {
+    for (function_id, call_site) in calls {
         // Only call sites that live in the file being scanned —
         // anything else would analyze this file's tree against
         // another file's call line.
@@ -416,7 +450,7 @@ pub fn detect_emissions(
             continue;
         }
         emissions.extend(analyze_sending_function(
-            tree.root_node(),
+            &functions,
             src,
             lang,
             function_id,
@@ -439,7 +473,7 @@ fn parse(lang: Lang, src: &str) -> Option<Tree> {
 /// local to this function for now — rule 5/6 are honored by the
 /// walker seeing the calls edges and merging the scopes).
 fn analyze_sending_function(
-    root: Node,
+    functions: &[FunctionSpan],
     src: &[u8],
     lang: Lang,
     function_id: &str,
@@ -447,7 +481,7 @@ fn analyze_sending_function(
     file_path: &str,
 ) -> Vec<FieldAccessEmission> {
     // Find the function / method node that contains the call site.
-    let function_node = find_function_at_line(root, src, lang, call_site.consumer_line);
+    let function_node = innermost_function_at(functions, call_site.consumer_line);
     let Some(function_node) = function_node else {
         return Vec::new();
     };
@@ -492,15 +526,14 @@ fn analyze_sending_function(
     }]
 }
 
-fn find_function_at_line<'a>(
-    root: Node<'a>,
-    _src: &[u8],
-    _lang: Lang,
-    target_line: u32,
-) -> Option<Node<'a>> {
-    let mut best: Option<Node> = None;
-    let mut best_size: u64 = u64::MAX;
-    walk_ts(root, &mut |n: Node| match n.kind() {
+/// A function-like node with its 1-based inclusive line span, in walk order.
+type FunctionSpan<'a> = (u32, u32, Node<'a>);
+
+/// Every function-like node in `root`, collected in one walk so the caller
+/// can resolve many lines against the same tree without re-walking it.
+fn collect_function_spans<'a>(root: Node<'a>) -> Vec<FunctionSpan<'a>> {
+    let mut spans = Vec::new();
+    walk_ts(root, &mut |n: Node<'a>| match n.kind() {
         "function_definition"
         | "async_function_definition"
         | "function_declaration"
@@ -510,17 +543,37 @@ fn find_function_at_line<'a>(
         | "function_expression" => {
             let start = n.start_position().row as u32 + 1;
             let end = n.end_position().row as u32 + 1;
-            if start <= target_line && end >= target_line {
-                let size = (end - start) as u64;
-                if size < best_size {
-                    best_size = size;
-                    best = Some(n);
-                }
-            }
+            spans.push((start, end, n));
         }
         _ => {}
     });
+    spans
+}
+
+/// The smallest span containing `target_line`; on a tie the earliest in walk
+/// order wins, matching the original single-walk search.
+fn innermost_function_at<'a>(spans: &[FunctionSpan<'a>], target_line: u32) -> Option<Node<'a>> {
+    let mut best: Option<Node> = None;
+    let mut best_size: u64 = u64::MAX;
+    for &(start, end, n) in spans {
+        if start <= target_line && end >= target_line {
+            let size = (end - start) as u64;
+            if size < best_size {
+                best_size = size;
+                best = Some(n);
+            }
+        }
+    }
     best
+}
+
+fn find_function_at_line<'a>(
+    root: Node<'a>,
+    _src: &[u8],
+    _lang: Lang,
+    target_line: u32,
+) -> Option<Node<'a>> {
+    innermost_function_at(&collect_function_spans(root), target_line)
 }
 
 fn walk_ts<'a, F: FnMut(Node<'a>)>(node: Node<'a>, f: &mut F) {
@@ -3945,13 +3998,7 @@ fn build_emission(
         let reads_field_source =
             crate::server::sensors::util::enclosing_symbol(graph, &read_path, read.line)
                 .map(|n| n.id)
-                .or_else(|| {
-                    graph
-                        .get_all_nodes()
-                        .into_iter()
-                        .find(|n| n.node_type == NodeType::File && n.path == read_path)
-                        .map(|n| n.id)
-                });
+                .or_else(|| graph.get_file_node(&read_path).map(|n| n.id));
         let mut node = GraphNode::new_in(
             NodeType::FieldRef,
             read.chain.to_string(),
@@ -5092,6 +5139,82 @@ mod tests {
     use super::*;
     use crate::schema::{NodeType, RepoNamespace};
 
+    #[test]
+    fn innermost_function_keeps_the_first_of_equal_spans() {
+        // Both arrows sit on one line, so their spans are equally small. The
+        // outer arrow comes first in walk order and must win the tie.
+        let src = "const f = () => () => 1;\n";
+        let tree = crate::server::sensors::util::parse_for_lang(Lang::TsJs, src).unwrap();
+        let spans = collect_function_spans(tree.root_node());
+        assert_eq!(spans.len(), 2);
+        let found = innermost_function_at(&spans, 1).unwrap();
+        assert_eq!(
+            found.start_position().column,
+            10,
+            "outer arrow starts at column 10"
+        );
+    }
+
+    #[test]
+    fn a_consumer_call_site_yields_an_emission_for_its_sending_function() {
+        let src = "import requests\ndef load(url):\n    response = requests.get(url)\n    data = response.json()\n    return data[\"name\"]\n";
+        let mut calls = BTreeMap::new();
+        calls.insert(
+            "fn-load".to_string(),
+            CallSite {
+                call_id: "call-1".to_string(),
+                consumer_path: "client.py".to_string(),
+                consumer_line: 3,
+            },
+        );
+        let emissions = detect_emissions_with_http_calls("client.py", src, Lang::Python, &calls);
+        assert_eq!(emissions.len(), 1, "one emission per consumer call site");
+        assert_eq!(emissions[0].call_id, "call-1");
+        assert_eq!(emissions[0].sender_id, "fn-load");
+    }
+
+    #[test]
+    fn detect_emissions_reads_the_call_sites_from_the_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let call = GraphNode::new(
+            NodeType::HttpClientCall,
+            "GET /users".into(),
+            "client.py".into(),
+        );
+        let mut call = call;
+        call.id = "call-1".into();
+        let mut sender = GraphNode::new(NodeType::Function, "load".into(), "client.py".into());
+        sender.id = "fn-load".into();
+        graph.insert_nodes_batch(&[call, sender]).unwrap();
+        let mut edge = GraphEdge::new(EdgeType::SendsHttp, "fn-load".into(), "call-1".into());
+        edge.site = Some(crate::federation::contracts::model::SourceSite {
+            path: "client.py".into(),
+            line: 3,
+        });
+        graph.insert_edges_batch(&[edge]).unwrap();
+        let src = "import requests\ndef load(url):\n    response = requests.get(url)\n    data = response.json()\n    return data[\"name\"]\n";
+        let emissions = detect_emissions("client.py", src, Lang::Python, &graph, &BTreeMap::new());
+        assert_eq!(emissions.len(), 1, "one emission per consumer call site");
+        assert_eq!(emissions[0].call_id, "call-1");
+        assert_eq!(emissions[0].sender_id, "fn-load");
+    }
+
+    #[test]
+    fn innermost_function_is_the_smallest_span_containing_the_line() {
+        // 1-based lines: outer spans 1..4, inner spans 2..3.
+        let src = "def outer():\n    def inner():\n        return 1\n    return inner\n";
+        let tree = crate::server::sensors::util::parse_for_lang(Lang::Python, src).unwrap();
+        let spans = collect_function_spans(tree.root_node());
+        assert_eq!(spans.len(), 2);
+        let row_at = |line| innermost_function_at(&spans, line).map(|n| n.start_position().row);
+        assert_eq!(row_at(0), None, "no function starts before line 1");
+        assert_eq!(row_at(1), Some(0), "the def line belongs to outer");
+        assert_eq!(row_at(3), Some(1), "line 3 is inside inner");
+        assert_eq!(row_at(4), Some(0), "line 4 is only inside outer");
+        assert_eq!(row_at(9), None, "outside every function");
+    }
+
     fn empty_db() -> GraphDatabase {
         let dir = tempfile::tempdir().expect("tempdir");
         GraphDatabase::new(&dir.path().join("graph.bin")).unwrap()
@@ -6111,7 +6234,20 @@ async function fetch_data() { return await fetch(\"/a\"); }
             call_line,
         );
         let repo_id = RepoId::new("fixture").unwrap();
+        for index in 0..16 {
+            write_py(
+                root,
+                &format!("src/extra{index}.py"),
+                "def local():\n    return 1\n",
+            );
+        }
+        HTTP_CALL_COLLECTION_COUNT.with(|count| count.set(0));
         scan_workspace_field_access(&graph, root, &ns, &repo_id).unwrap();
+        assert_eq!(
+            HTTP_CALL_COLLECTION_COUNT.with(|count| count.get()),
+            1,
+            "workspace scan must collect the graph's HTTP calls once, regardless of file count"
+        );
 
         // Gap 1: the caller frame's read landed — S's own frame
         // never touches `customer_id`, so this FieldRef can only come
