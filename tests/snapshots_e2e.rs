@@ -106,6 +106,7 @@ fn federation_config(fix: &Fixture) -> FederationConfig {
         max_concurrent_indexers: 2,
         ready_threshold: 1.0,
         parse_cache_mb: 0,
+        params: Default::default(),
         share: true,
         git_sensor: None,
         repos,

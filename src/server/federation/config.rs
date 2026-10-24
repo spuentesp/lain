@@ -22,6 +22,11 @@ pub struct FederationConfig {
     /// measurable speedup. See `server::parse_cache`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub parse_cache_mb: usize,
+    /// Parameters lain runs with, as environment variables. A service's `env`
+    /// names resolve against these to the host it has in this environment
+    /// (see `contracts::service_refs::EnvScope`). Empty by default.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub params: std::collections::BTreeMap<String, String>,
     /// Whether this instance takes part in the shared-daemon pool
     /// (zero-config multi-agent, 2026-10-18). `false` = private
     /// instance: discovery skips it and `add_workspaces` refuses the
@@ -58,6 +63,7 @@ impl Default for FederationConfig {
             max_concurrent_indexers: default_max_concurrent_indexers(),
             ready_threshold: default_ready_threshold(),
             parse_cache_mb: 0,
+            params: Default::default(),
             share: true,
             git_sensor: None,
             repos: Vec::new(),

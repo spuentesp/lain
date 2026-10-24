@@ -520,6 +520,7 @@ mod tests {
                     max_concurrent_indexers: 1,
                     ready_threshold: 0.8,
                     parse_cache_mb: 0,
+                    params: Default::default(),
                     share: true,
                     git_sensor: None,
                     repos: vec![crate::server::federation::config::RepoConfig {
