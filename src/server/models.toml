@@ -1,0 +1,20 @@
+# Models lain can use. `lain models install` fetches the default one.
+# A user file at ~/.config/lain/models.toml (same format) can add models or
+# change `default`; a model there with the same name replaces this one.
+#
+# Each file is pinned by the repository revision and its SHA-256, so every
+# install loads the same bytes and an upstream change cannot alter results.
+
+default = "granite-embedding-small-english-r2"
+
+[[model]]
+name = "granite-embedding-small-english-r2"
+role = "embedding"
+repo = "onnx-community/granite-embedding-small-english-r2-ONNX"
+revision = "1dc7835ba0cb9c76a3618d0bf0c427c97671b3c8"
+license = "apache-2.0"
+files = [
+  { remote = "onnx/model.onnx", local = "model.onnx", sha256 = "cddb145cd1147ec24a3908b2ca2602b98b20a3d198365cff270b7cb26c98179e" },
+  { remote = "onnx/model.onnx_data", local = "model.onnx_data", sha256 = "86a3a705d4598615894d89540ea71a3d9bbdb17a315e79edcd5dfc737222834b" },
+  { remote = "tokenizer.json", local = "tokenizer.json", sha256 = "feeb83348dcb033bc6b9d2e1f7906ca9eb2d122845000c9416d894d7c2927149" },
+]

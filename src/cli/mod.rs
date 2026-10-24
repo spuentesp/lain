@@ -8,6 +8,7 @@ pub mod io;
 pub mod mcp;
 pub mod mcp_client;
 pub mod mcp_stdio;
+pub mod models;
 pub mod oneshot;
 pub mod query;
 pub mod readiness;
@@ -306,6 +307,11 @@ pub enum Commands {
     Schema {
         #[command(subcommand)]
         action: crate::cli::schema::SchemaAction,
+    },
+    /// List or install the embedding models declared in models.toml.
+    Models {
+        #[command(subcommand)]
+        action: crate::cli::models::ModelsAction,
     },
     /// Diagnose repository readiness without changing files.
     /// Exit codes: 0 ready, 1 usable but degraded, 2 unusable.

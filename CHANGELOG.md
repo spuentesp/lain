@@ -7,11 +7,15 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
-- Semantic search model is fetched on first use: when no embedding model is
-  named (`--embedding-model`, `LAIN_EMBEDDING_MODEL`), lain downloads the pinned
-  default (granite-embedding-small-english-r2, Apache-2.0, about 195 MB) into the
-  user cache, or `LAIN_MODEL_CACHE`. Each file is verified against its SHA-256
-  before use. Without network, semantic search stays off, as before.
+- Embedding models are declared in `models.toml` (built in; a user file at
+  `~/.config/lain/models.toml` can add models or change the default). The
+  default, granite-embedding-small-english-r2 (Apache-2.0, about 195 MB), is
+  installed with `lain models install`, which the installers run. Each file is
+  checked against its pinned SHA-256 before it is kept or loaded. The server
+  never downloads: without an installed model, semantic search is off and the
+  log says how to install one. `lain models list` and `lain models path` show
+  the state. Models install under the user data directory, or `LAIN_MODEL_DIR`.
+  Installers skip the model when `LAIN_SKIP_MODEL_INSTALL=1` is set.
 
 ### Fixed
 

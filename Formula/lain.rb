@@ -40,6 +40,10 @@ class Lain < Formula
 
       For the full subcommand list (server, mcp, workspaces, repos, query, hooks, doctor):
             lain --help
+
+      Semantic search needs an embedding model, which Homebrew does not fetch.
+      Install the default one once:
+            lain models install
     EOS
   end
 
