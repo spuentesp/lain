@@ -18,7 +18,9 @@ use regex::Regex;
 
 use crate::federation::contracts::config::ServiceDecl;
 use crate::federation::contracts::model::ServiceName;
-use crate::federation::contracts::url_resolution::host_matches_pattern;
+use crate::federation::contracts::url_resolution::{
+    endpoint_from_parts, endpoint_matches, endpoint_pattern, Endpoint,
+};
 
 /// What the reference's host identifies.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,19 +84,19 @@ impl EnvScope {
                 claims.push((h.clone(), name.clone()));
             }
             for var in &s.env {
-                if let Some(host) = params.get(var).and_then(|v| host_of(v)) {
-                    claims.push((host, name.clone()));
+                if let Some(pattern) = params.get(var).and_then(|v| endpoint_pattern(v)) {
+                    claims.push((pattern, name.clone()));
                 }
             }
         }
         Self { claims }
     }
 
-    /// Services whose hosts (declared or from the environment) claim `host`.
-    fn claimants(&self, host: &str) -> Vec<ServiceName> {
+    /// Services whose hosts (declared or from the environment) claim `ep`.
+    fn claimants(&self, ep: &Endpoint) -> Vec<ServiceName> {
         let mut out: Vec<ServiceName> = Vec::new();
         for (pattern, name) in &self.claims {
-            if host_matches_pattern(pattern, host) && !out.contains(name) {
+            if endpoint_matches(pattern, ep) && !out.contains(name) {
                 out.push(name.clone());
             }
         }
@@ -102,17 +104,13 @@ impl EnvScope {
     }
 }
 
-/// The host of a URL value such as `http://orders:8080/x`, if it has one.
-fn host_of(value: &str) -> Option<String> {
-    url_host_re().captures(value).map(|c| c[1].to_string())
-}
-
 fn url_host_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // scheme, then a host made of DNS-like characters. Stops at the
         // first character that cannot appear in a host (`/`, `:`, quote, `%`).
-        Regex::new(r#"https?://([A-Za-z0-9_][A-Za-z0-9_.\-]*)[^\s"'`<>]*"#).expect("valid regex")
+        Regex::new(r#"https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_][A-Za-z0-9_.\-]*)[^\s"'`<>]*"#)
+            .expect("valid regex")
     })
 }
 
@@ -177,7 +175,11 @@ pub fn extract_service_refs(
             .filter(|b| *b == b'\n')
             .count() as u32
             + 1;
-        let candidates = scope.claimants(&host);
+        let literal = whole.as_str();
+        let scheme = literal.split_once("://").map_or("http", |(s, _)| s);
+        let after_host = &literal[literal.find(&host).map_or(0, |i| i + host.len())..];
+        let endpoint = endpoint_from_parts(scheme, &host, after_host);
+        let candidates = scope.claimants(&endpoint);
         let self_reference = match (owner, candidates.as_slice()) {
             (Some(me), [only]) => only == me,
             _ => false,
