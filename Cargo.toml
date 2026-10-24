@@ -54,7 +54,7 @@ bincode = { version = "2", features = ["serde"] }
 # up in the Fuzz Nightly — `fuzz/` is its own workspace and re-resolved
 # the world without the root Cargo.lock. Bump deliberately, together
 # with nlp.rs, when moving past rc.13.
-ort = { version = "=2.0.0-rc.13", features = ["ndarray"] }
+ort = { version = "=2.0.0-rc.15", features = ["ndarray"] }
 # Disable tokenizers' default `esaxx_fast` feature, which pulls in
 # `esaxx-rs`'s `cc`-built C++ as a static `/MT` archive. That collides
 # at link time on Windows with `ort-sys`'s prebuilt `/MD` C++ runtime
