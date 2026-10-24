@@ -73,6 +73,7 @@ pub mod model;
 pub mod normalize;
 pub mod protocol_dispatch;
 pub mod route_match;
+pub mod service_refs;
 pub mod snapshots;
 pub mod url_resolution;
 
