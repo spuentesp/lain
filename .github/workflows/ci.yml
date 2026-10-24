@@ -15,13 +15,12 @@ name: CI
 #
 #   dev push / PR-to-dev:  ubuntu-only test + lint + npm-shim
 #                          + health-badge + schema-drift (~5 min)
-#                          + mutation gate on PRs that touch code
 #   main push / PR-to-main: full matrix + capability + coverage
 #                          + version-drift + action-contracts (~20 min)
 #
-# The mutation gate is PR-only and dev-PR-only on purpose: it is
-# incremental (`scripts/mutation-gate.sh` mutates only lines the PR
-# diff touched), so its cost scales with the PR, not with the tree.
+# The mutation gate is no longer a CI job. It runs locally before a PR is
+# merged (`scripts/mutation-gate.sh origin/dev`, in file batches), because a
+# large PR diff ran past the job's time limit on CI.
 # A PR-to-main is a release PR carrying every commit since the last
 # release -- its diff is the whole release, so re-running the
 # incremental gate there would be both the most expensive and the
@@ -648,62 +647,6 @@ jobs:
           fi
           echo "OK: docs/tool-schema.json matches the live schema"
 
-  mutation:
-    name: Incremental mutation gate
-    needs: [changes]
-    runs-on: ubuntu-latest
-    # Bounded on purpose: the mutant set scales with the PR diff. Phase 1
-    # costs a rebuild + `cargo test --lib` per mutant (~60-90s measured);
-    # phase-2 candidates (phase-1 MISSED/TIMEOUT) each pay the full
-    # `cargo test` confirm (~12 min). A diff that would exceed this cap
-    # fails the job rather than burning a runner, which is the intended
-    # signal ("split the PR").
-    timeout-minutes: 60
-    # PRs to dev only — see the workflow header for why release PRs (to
-    # main) are out of scope. Drafts skip like the other heavy jobs;
-    # docs-only diffs skip via the `changes` classifier (a tests-only diff
-    # is not docs-only, runs the job, and the script fast-exits on "no
-    # mutants in diff").
-    if: github.event_name == 'pull_request' && github.base_ref == 'dev' && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
-    permissions:
-      contents: read
-    # Absolute target dir so the mutant scratch trees and this job's
-    # warm-up build share one cache (a bare `target` would resolve inside
-    # each scratch copy).
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Full history: the gate diffs against the PR base commit.
-          fetch-depth: 0
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config cmake git
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: stable
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-always: true
-      # Pinned: the gate's `--in-diff` semantics were verified against
-      # this exact version (scripts/mutation-gate.sh header).
-      - name: Install cargo-mutants (pinned 27.1.0)
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
-        with:
-          tool: cargo-mutants@27.1.0
-      # Warm dependency artifacts into the shared target dir so the first
-      # mutant pays only the `lain` crate build. `--baseline skip` means the
-      # gate itself does not prove the tree is green — this compile plus the
-      # `test` job's full suite do.
-      - name: Warm dependency build (cargo test --lib --no-run)
-        run: cargo test --lib --no-run
-      - name: Run mutation gate on the PR diff
-        run: bash scripts/mutation-gate.sh "${{ github.event.pull_request.base.sha }}"
-
   npm-shim:
     name: npm-shim install tests
     runs-on: ubuntu-latest
@@ -938,7 +881,7 @@ jobs:
   # on every branch, with no separate trigger to go stale.
   #
   # Same aggregate rule as before: PASS iff every agent-relevant job
-  # (capability, schema-drift, npm-shim, mutation) is success or skipped.
+  # (capability, schema-drift, npm-shim) is success or skipped.
   #
   # For pull_request events from forks, GitHub downgrades the
   # default `GITHUB_TOKEN` to read-only, so the `gh api ... statuses/...`
@@ -950,7 +893,7 @@ jobs:
   # confusing CI failure.
   agent-contract:
     name: Publish agent-contract status
-    needs: [capability, schema-drift, npm-shim, mutation]
+    needs: [capability, schema-drift, npm-shim]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -963,7 +906,6 @@ jobs:
           CAPABILITY: ${{ needs.capability.result }}
           SCHEMA_DRIFT: ${{ needs.schema-drift.result }}
           NPM_SHIM: ${{ needs.npm-shim.result }}
-          MUTATION: ${{ needs.mutation.result }}
         run: |
           set -euo pipefail
 
@@ -981,7 +923,7 @@ jobs:
           status="success"
           total=0
           passed=0
-          for result in "$CAPABILITY" "$SCHEMA_DRIFT" "$NPM_SHIM" "$MUTATION"; do
+          for result in "$CAPABILITY" "$SCHEMA_DRIFT" "$NPM_SHIM"; do
             total=$((total + 1))
             if [ "$result" = "success" ] || [ "$result" = "skipped" ]; then
               passed=$((passed + 1))
