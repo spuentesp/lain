@@ -25,6 +25,7 @@ pub mod tuning;
 
 // Analytical side
 pub mod claims;
+pub mod models;
 pub mod nlp;
 pub mod overlay;
 pub mod revision_log;

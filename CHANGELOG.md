@@ -5,8 +5,24 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+### Added
+
+- Embedding models are declared in `models.toml` (built in; a user file at
+  `~/.config/lain/models.toml` can add models or change the default). The
+  default, granite-embedding-small-english-r2 (Apache-2.0, about 195 MB), is
+  installed with `lain models install`, which the installers run. Each file is
+  checked against its pinned SHA-256 before it is kept or loaded. The server
+  never downloads: without an installed model, semantic search is off and the
+  log says how to install one. `lain models list` and `lain models path` show
+  the state. Models install under the user data directory, or `LAIN_MODEL_DIR`.
+  Installers skip the model when `LAIN_SKIP_MODEL_INSTALL=1` is set.
+
 ### Fixed
 
+- Verbless HTTP routes whose path starts with a method (`GET /health`, from Go
+  1.22 mux patterns and tracing labels) take that method instead of `ANY`.
+- The embedder passes `token_type_ids` only to models that declare it, so
+  encoders without that input load instead of falling back to the stub.
 - Large-workspace indexing: GraphQL SDL keyword probes now reuse validated
   strings instead of validating the entire schema for every token. HTTP route
   and client scans reuse compiled tree-sitter queries per framework within a

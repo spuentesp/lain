@@ -261,6 +261,7 @@ pub async fn run_rebuild(
                         repos_file.repos.iter().map(|r| r.id.clone()).collect();
                     if cfg.validate(&repo_ids).is_ok() {
                         fed.set_contract_config(cfg);
+                        fed.set_service_params(repos_file.effective_params());
                     }
                 }
             }
@@ -520,6 +521,7 @@ mod tests {
                     max_concurrent_indexers: 1,
                     ready_threshold: 0.8,
                     parse_cache_mb: 0,
+                    params: Default::default(),
                     share: true,
                     git_sensor: None,
                     repos: vec![crate::server::federation::config::RepoConfig {

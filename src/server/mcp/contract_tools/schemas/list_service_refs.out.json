@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "list_service_refs data",
+  "description": "`data` field of the `list_service_refs` envelope. Items sorted by (repo, path, line, value). A reference is evidence of a target, not of a call; `linked_to_call` says whether a sensor also saw a call at that line.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "Repo-relative path."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "value": {
+            "type": "string",
+            "description": "The URL literal as written."
+          },
+          "host": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "resolved",
+                  "ambiguous",
+                  "unknown"
+                ]
+              },
+              "service": {
+                "type": "string"
+              },
+              "services": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "usage": {
+            "type": "string",
+            "enum": [
+              "production",
+              "test",
+              "configuration"
+            ]
+          },
+          "self_reference": {
+            "type": "boolean"
+          },
+          "linked_to_call": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repo",
+          "path",
+          "line",
+          "value",
+          "host",
+          "outcome",
+          "usage",
+          "self_reference",
+          "linked_to_call"
+        ]
+      }
+    },
+    "cursor": {
+      "type": "string"
+    },
+    "scope": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "items",
+    "scope"
+  ]
+}

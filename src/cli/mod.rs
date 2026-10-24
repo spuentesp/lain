@@ -8,6 +8,7 @@ pub mod io;
 pub mod mcp;
 pub mod mcp_client;
 pub mod mcp_stdio;
+pub mod models;
 pub mod oneshot;
 pub mod query;
 pub mod readiness;
@@ -74,6 +75,10 @@ pub enum Commands {
     Server {
         #[arg(long, default_value = "./repos.yaml")]
         config: PathBuf,
+        /// Run parameter `KEY=VALUE`, repeatable. A service's `env` names
+        /// resolve against these; they override `params:` in repos.yaml.
+        #[arg(long = "param", value_name = "KEY=VALUE")]
+        params: Vec<String>,
         #[arg(long, default_value = "stdio", value_parser = ["stdio", "http"])]
         transport: String,
         #[arg(long, default_value = "9999")]
@@ -303,6 +308,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::cli::schema::SchemaAction,
     },
+    /// List or install the embedding models declared in models.toml.
+    Models {
+        #[command(subcommand)]
+        action: crate::cli::models::ModelsAction,
+    },
     /// Diagnose repository readiness without changing files.
     /// Exit codes: 0 ready, 1 usable but degraded, 2 unusable.
     Doctor {
@@ -383,6 +393,10 @@ pub enum Commands {
     Reindex {
         #[arg(long, default_value = "./repos.yaml")]
         config: PathBuf,
+        /// Run parameter `KEY=VALUE`, repeatable. A service's `env` names
+        /// resolve against these; they override `params:` in repos.yaml.
+        #[arg(long = "param", value_name = "KEY=VALUE")]
+        params: Vec<String>,
         /// Workspace name. When omitted, re-indexes all workspaces
         /// configured in `repos.yaml`.
         #[arg(long)]
