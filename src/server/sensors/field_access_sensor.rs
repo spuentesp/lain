@@ -5140,6 +5140,22 @@ mod tests {
     use crate::schema::{NodeType, RepoNamespace};
 
     #[test]
+    fn innermost_function_keeps_the_first_of_equal_spans() {
+        // Both arrows sit on one line, so their spans are equally small. The
+        // outer arrow comes first in walk order and must win the tie.
+        let src = "const f = () => () => 1;\n";
+        let tree = crate::server::sensors::util::parse_for_lang(Lang::TsJs, src).unwrap();
+        let spans = collect_function_spans(tree.root_node());
+        assert_eq!(spans.len(), 2);
+        let found = innermost_function_at(&spans, 1).unwrap();
+        assert_eq!(
+            found.start_position().column,
+            10,
+            "outer arrow starts at column 10"
+        );
+    }
+
+    #[test]
     fn innermost_function_is_the_smallest_span_containing_the_line() {
         // 1-based lines: outer spans 1..4, inner spans 2..3.
         let src = "def outer():\n    def inner():\n        return 1\n    return inner\n";

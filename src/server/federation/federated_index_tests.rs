@@ -1127,7 +1127,10 @@ fn federation_bulk_section_delegates_to_the_backend() {
             "f",
         )
         .unwrap();
-    assert!(!bin.exists(), "the federation's bulk section defers the checkpoint");
+    assert!(
+        !bin.exists(),
+        "the federation's bulk section defers the checkpoint"
+    );
     fed.end_bulk().unwrap();
     assert!(bin.exists(), "ending the federation's bulk section saves");
 }

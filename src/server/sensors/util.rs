@@ -1230,3 +1230,104 @@ mod tests {
 #[cfg(test)]
 #[path = "util_verification.rs"]
 mod verification;
+
+#[cfg(test)]
+mod read_cache_boundary_tests {
+    use super::*;
+
+    const LIMIT: usize = 2 * 1024 * 1024;
+
+    fn read_twice_around_a_change(content: &str) -> (Option<String>, Option<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, content).unwrap();
+        with_workspace_scan_cache(dir.path(), || {
+            let first = read_cached_or_fs(dir.path(), &file);
+            std::fs::write(&file, "changed on disk").unwrap();
+            let second = read_cached_or_fs(dir.path(), &file);
+            (first, second)
+        })
+    }
+
+    #[test]
+    fn small_files_are_served_from_the_cache() {
+        let (first, second) = read_twice_around_a_change("original");
+        assert_eq!(first.as_deref(), Some("original"));
+        assert_eq!(second.as_deref(), Some("original"), "cached, not re-read");
+    }
+
+    #[test]
+    fn a_file_at_the_size_limit_is_cached() {
+        let big = "a".repeat(LIMIT);
+        let (_, second) = read_twice_around_a_change(&big);
+        assert_eq!(
+            second.as_deref().map(str::len),
+            Some(LIMIT),
+            "exactly the limit is cached"
+        );
+    }
+
+    #[test]
+    fn a_file_over_the_size_limit_is_read_again() {
+        let big = "a".repeat(LIMIT + 1);
+        let (_, second) = read_twice_around_a_change(&big);
+        assert_eq!(second.as_deref(), Some("changed on disk"));
+    }
+
+    #[test]
+    fn a_missing_file_is_remembered_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("absent.txt");
+        with_workspace_scan_cache(dir.path(), || {
+            assert_eq!(read_cached_or_fs(dir.path(), &file), None);
+            std::fs::write(&file, "appeared later").unwrap();
+            assert_eq!(
+                read_cached_or_fs(dir.path(), &file),
+                None,
+                "the miss is cached"
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod walk_cache_root_tests {
+    use super::*;
+
+    fn names(files: impl Iterator<Item = WalkedFile>) -> Vec<String> {
+        let mut names: Vec<String> = files
+            .filter(|f| f.0.is_file())
+            .map(|f| f.0.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_walk_cache_belongs_to_its_own_root_only() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("only_in_a.txt"), "a").unwrap();
+        std::fs::write(b.path().join("only_in_b.txt"), "b").unwrap();
+        with_workspace_scan_cache(a.path(), || {
+            assert_eq!(names(walk_workspace(a.path())), vec!["only_in_a.txt"]);
+            // Walking another root inside the same scope must not reuse A's list.
+            assert_eq!(names(walk_workspace(b.path())), vec!["only_in_b.txt"]);
+        });
+    }
+
+    #[test]
+    fn a_walk_is_cached_for_its_root_within_the_scope() {
+        let a = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("first.txt"), "1").unwrap();
+        with_workspace_scan_cache(a.path(), || {
+            assert_eq!(names(walk_workspace(a.path())), vec!["first.txt"]);
+            std::fs::write(a.path().join("second.txt"), "2").unwrap();
+            assert_eq!(
+                names(walk_workspace(a.path())),
+                vec!["first.txt"],
+                "the second walk is served from the cache"
+            );
+        });
+    }
+}

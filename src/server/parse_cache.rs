@@ -86,11 +86,7 @@ fn mb_to_bytes(budget_mb: usize) -> usize {
     budget_mb.saturating_mul(1024 * 1024)
 }
 
-fn configure_slot(
-    budget_bytes: &AtomicUsize,
-    slot: &Mutex<Option<ParseCache>>,
-    budget_mb: usize,
-) {
+fn configure_slot(budget_bytes: &AtomicUsize, slot: &Mutex<Option<ParseCache>>, budget_mb: usize) {
     let budget = mb_to_bytes(budget_mb);
     if budget_bytes.swap(budget, Ordering::AcqRel) == budget {
         return;
@@ -286,14 +282,23 @@ mod tests {
         let slot = Mutex::new(None);
         configure_slot(&budget, &slot, 1);
         assert_eq!(budget.load(Ordering::Acquire), 1024 * 1024);
-        lock(&slot)
-            .as_mut()
-            .unwrap()
-            .insert(("rust", [8; 32]), parse_rust("fn a() {}").unwrap(), 10);
+        lock(&slot).as_mut().unwrap().insert(
+            ("rust", [8; 32]),
+            parse_rust("fn a() {}").unwrap(),
+            10,
+        );
         configure_slot(&budget, &slot, 1);
-        assert_eq!(lock(&slot).as_ref().unwrap().used, 10, "same budget keeps entries");
+        assert_eq!(
+            lock(&slot).as_ref().unwrap().used,
+            10,
+            "same budget keeps entries"
+        );
         configure_slot(&budget, &slot, 2);
-        assert_eq!(lock(&slot).as_ref().unwrap().used, 0, "new budget starts empty");
+        assert_eq!(
+            lock(&slot).as_ref().unwrap().used,
+            0,
+            "new budget starts empty"
+        );
         configure_slot(&budget, &slot, 0);
         assert!(lock(&slot).is_none(), "zero disables the cache");
         assert!(!budget_enabled(&budget));

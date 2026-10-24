@@ -417,7 +417,11 @@ mod mutant_kills {
         let hits = m.find_matches(&source, 5, 0.0);
         assert_eq!(hits.len(), 1);
         let expected = 3.0_f32 / 10.0_f32.sqrt();
-        assert!((hits[0].1 - expected).abs() < 1e-5, "similarity {}", hits[0].1);
+        assert!(
+            (hits[0].1 - expected).abs() < 1e-5,
+            "similarity {}",
+            hits[0].1
+        );
     }
 
     #[test]

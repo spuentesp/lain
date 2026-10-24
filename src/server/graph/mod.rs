@@ -5223,7 +5223,13 @@ mod mutant_kills {
         let names: Vec<&str> = refs.iter().map(|r| r.target_name.as_str()).collect();
         assert!(names.contains(&"g"), "{names:?}");
         assert!(names.contains(&"f2"), "{names:?}");
-        assert!(!names.contains(&"f"), "rescanned refs are replaced: {names:?}");
-        assert!(!names.contains(&"h"), "untracked refs are pruned: {names:?}");
+        assert!(
+            !names.contains(&"f"),
+            "rescanned refs are replaced: {names:?}"
+        );
+        assert!(
+            !names.contains(&"h"),
+            "untracked refs are pruned: {names:?}"
+        );
     }
 }

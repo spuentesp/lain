@@ -240,6 +240,19 @@ impl FederationConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_cache_mb_is_written_only_when_enabled() {
+        let off = FederationConfig::default();
+        let rewritten = serde_yaml::to_string(&off).unwrap();
+        assert!(!rewritten.contains("parse_cache_mb"), "{rewritten}");
+        let on = FederationConfig {
+            parse_cache_mb: 256,
+            ..FederationConfig::default()
+        };
+        let rewritten = serde_yaml::to_string(&on).unwrap();
+        assert!(rewritten.contains("parse_cache_mb: 256"), "{rewritten}");
+    }
+
     use super::*;
 
     #[test]
