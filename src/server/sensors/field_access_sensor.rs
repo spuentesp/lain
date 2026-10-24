@@ -5174,6 +5174,33 @@ mod tests {
     }
 
     #[test]
+    fn detect_emissions_reads_the_call_sites_from_the_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let call = GraphNode::new(
+            NodeType::HttpClientCall,
+            "GET /users".into(),
+            "client.py".into(),
+        );
+        let mut call = call;
+        call.id = "call-1".into();
+        let mut sender = GraphNode::new(NodeType::Function, "load".into(), "client.py".into());
+        sender.id = "fn-load".into();
+        graph.insert_nodes_batch(&[call, sender]).unwrap();
+        let mut edge = GraphEdge::new(EdgeType::SendsHttp, "fn-load".into(), "call-1".into());
+        edge.site = Some(crate::federation::contracts::model::SourceSite {
+            path: "client.py".into(),
+            line: 3,
+        });
+        graph.insert_edges_batch(&[edge]).unwrap();
+        let src = "import requests\ndef load(url):\n    response = requests.get(url)\n    data = response.json()\n    return data[\"name\"]\n";
+        let emissions = detect_emissions("client.py", src, Lang::Python, &graph, &BTreeMap::new());
+        assert_eq!(emissions.len(), 1, "one emission per consumer call site");
+        assert_eq!(emissions[0].call_id, "call-1");
+        assert_eq!(emissions[0].sender_id, "fn-load");
+    }
+
+    #[test]
     fn innermost_function_is_the_smallest_span_containing_the_line() {
         // 1-based lines: outer spans 1..4, inner spans 2..3.
         let src = "def outer():\n    def inner():\n        return 1\n    return inner\n";
