@@ -169,3 +169,47 @@ pub async fn run_reindex(config: PathBuf, workspace: Option<String>, verbose: bo
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::run_reindex;
+
+    /// `lain reindex` must actually rebuild: a successful return with no
+    /// federated graph on disk would report success for a no-op.
+    #[tokio::test]
+    async fn reindex_writes_the_federated_graph() {
+        let work = tempfile::tempdir().unwrap();
+        let repo_path = work.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        let repo = git2::Repository::init(&repo_path).unwrap();
+        std::fs::write(repo_path.join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("reindex-test", "reindex-test@lain").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "fixture", &tree, &[])
+            .unwrap();
+        let repo = repo_path;
+
+        let data_dir = work.path().join("data");
+        let config = work.path().join("repos.yaml");
+        std::fs::write(
+            &config,
+            format!(
+                "data_dir: {}\nrepos:\n  - id: fixture\n    source:\n      type: workspace_dir\n      path: {}\n",
+                data_dir.display(),
+                repo.display()
+            ),
+        )
+        .unwrap();
+
+        run_reindex(config, None, false).await.unwrap();
+        assert!(
+            data_dir.join("federated_graph.bin").exists(),
+            "reindex must write the federated graph"
+        );
+    }
+}

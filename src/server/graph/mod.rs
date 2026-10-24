@@ -5197,6 +5197,46 @@ mod mutant_kills {
     }
 
     #[test]
+    fn a_retracted_sensor_node_stays_gone_after_reopen() {
+        use crate::federation::contracts::model::{
+            ContractFact, HttpMethod, ProviderFact, ProviderOrigin,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+        let route = {
+            let mut node = GraphNode::new(
+                NodeType::HttpRoute,
+                "GET /api/users".into(),
+                "openapi.yaml".into(),
+            );
+            node.contract = vec![ContractFact::Provider(ProviderFact {
+                method: HttpMethod::Get,
+                template: "/api/users".into(),
+                handler: None,
+                operation_id: Some("listUsers".into()),
+                origin: ProviderOrigin::OpenApi,
+            })];
+            node
+        };
+        {
+            let db = GraphDatabase::new(&path).unwrap();
+            db.replace_sensor_output(SensorOwner::OpenApiSensor, &[route], &[])
+                .unwrap();
+            db.save_to_disk_sync().unwrap();
+            // Retract the route without saving: only the WAL records it.
+            let removed = db
+                .replace_sensor_output(SensorOwner::OpenApiSensor, &[], &[])
+                .unwrap();
+            assert_eq!(removed, 1);
+        }
+        let reopened = GraphDatabase::new(&path).unwrap();
+        assert!(
+            reopened.find_node_by_name("GET /api/users").is_none(),
+            "the retraction must survive a restart"
+        );
+    }
+
+    #[test]
     fn cached_static_refs_round_trip_and_update_only_when_present() {
         let (_dir, db) = db();
         assert!(db.get_cached_static_refs().is_none());

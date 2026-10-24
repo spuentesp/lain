@@ -2195,6 +2195,51 @@ mod readiness_progress_tests {
         root
     }
 
+    /// More files than one scan batch: every chunk must be applied, in order,
+    /// so the progress counters cover all of them. A regression here drops the
+    /// batches after the first without any error.
+    #[tokio::test]
+    async fn build_core_memory_applies_every_chunk_in_order() {
+        let root = git_fixture_with_one_file();
+        const FILES: usize = 120;
+        for i in 0..FILES {
+            std::fs::write(
+                root.path().join(format!("f{i}.rs")),
+                format!("pub fn f{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        assert!(std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "many files"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            server.build_core_memory(),
+        )
+        .await
+        .expect("build_core_memory must not hang past the test's own budget")
+        .unwrap();
+
+        let snapshot = server.readiness().snapshot();
+        assert_eq!(snapshot.files_failed, 0);
+        let total = snapshot.files_total.unwrap_or(0);
+        assert_eq!(snapshot.files_completed, total, "every chunk is applied");
+        assert!(total >= FILES as u64, "all files were scanned");
+    }
+
     /// When the server's cancel token fires during the LSP
     /// prewarm phase, `build_core_memory` returns
     /// `LainError::Cancelled` AND the readiness snapshot's `phase`

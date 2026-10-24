@@ -5156,6 +5156,24 @@ mod tests {
     }
 
     #[test]
+    fn a_consumer_call_site_yields_an_emission_for_its_sending_function() {
+        let src = "import requests\ndef load(url):\n    response = requests.get(url)\n    data = response.json()\n    return data[\"name\"]\n";
+        let mut calls = BTreeMap::new();
+        calls.insert(
+            "fn-load".to_string(),
+            CallSite {
+                call_id: "call-1".to_string(),
+                consumer_path: "client.py".to_string(),
+                consumer_line: 3,
+            },
+        );
+        let emissions = detect_emissions_with_http_calls("client.py", src, Lang::Python, &calls);
+        assert_eq!(emissions.len(), 1, "one emission per consumer call site");
+        assert_eq!(emissions[0].call_id, "call-1");
+        assert_eq!(emissions[0].sender_id, "fn-load");
+    }
+
+    #[test]
     fn innermost_function_is_the_smallest_span_containing_the_line() {
         // 1-based lines: outer spans 1..4, inner spans 2..3.
         let src = "def outer():\n    def inner():\n        return 1\n    return inner\n";
