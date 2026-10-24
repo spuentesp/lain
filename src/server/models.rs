@@ -15,6 +15,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::server::error::LainError;
+use crate::server::nlp::Pooling;
 
 const BUILTIN: &str = include_str!("models.toml");
 
@@ -35,7 +36,14 @@ pub struct ModelSpec {
     pub revision: String,
     #[serde(default)]
     pub license: String,
+    /// `mean` or `cls`: how the model's token outputs become one vector.
+    #[serde(default = "default_pooling")]
+    pub pooling: String,
     pub files: Vec<FileSpec>,
+}
+
+fn default_pooling() -> String {
+    "mean".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -199,21 +207,23 @@ pub fn install_into(spec: &ModelSpec, root: &Path) -> Result<PathBuf, LainError>
     Ok(dir)
 }
 
-/// The installed default model's `(model, tokenizer)` paths, when the
-/// catalog's default is installed and verified. Never downloads.
-pub fn installed_default() -> Option<(PathBuf, PathBuf)> {
+/// The installed default model's `(model, tokenizer)` paths and its declared
+/// pooling, when the catalog's default is installed and verified. Never
+/// downloads.
+pub fn installed_default() -> Option<(PathBuf, PathBuf, Pooling)> {
     installed_default_in(&install_root()?)
 }
 
 /// [`installed_default`] under an explicit root.
-pub fn installed_default_in(root: &Path) -> Option<(PathBuf, PathBuf)> {
+pub fn installed_default_in(root: &Path) -> Option<(PathBuf, PathBuf, Pooling)> {
     let catalog = Catalog::load().ok()?;
     let spec = catalog.default_model()?;
     let dir = model_dir_in(root, spec);
     if !is_installed(spec, &dir) {
         return None;
     }
-    Some((dir.join("model.onnx"), dir.join("tokenizer.json")))
+    let pooling = Pooling::parse(&spec.pooling).unwrap_or(Pooling::Mean);
+    Some((dir.join("model.onnx"), dir.join("tokenizer.json"), pooling))
 }
 
 #[cfg(test)]
@@ -234,6 +244,18 @@ mod tests {
         let m = &c.models[0];
         assert_eq!(m.revision.len(), 40, "pinned to a full commit");
         assert!(m.files.iter().all(|f| f.sha256.len() == 64));
+    }
+
+    #[test]
+    fn the_default_model_declares_cls_pooling() {
+        let spec = builtin_spec();
+        assert_eq!(Pooling::parse(&spec.pooling), Some(Pooling::Cls));
+    }
+
+    #[test]
+    fn an_unknown_pooling_name_is_rejected() {
+        assert_eq!(Pooling::parse("max"), None);
+        assert_eq!(Pooling::parse(" CLS "), Some(Pooling::Cls));
     }
 
     #[test]

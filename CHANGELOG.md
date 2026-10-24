@@ -19,6 +19,12 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- Embeddings use each model's declared pooling. Granite small r2 is trained
+  with CLS pooling and lain averaged tokens, so its vectors were not the ones
+  the model was fit to produce. The manifest declares `pooling` per model; an
+  explicitly named model uses `LAIN_EMBEDDING_POOLING` (`mean` by default).
+  On Sock Shop the same suggestion scores 0.955 under CLS against 0.915 under
+  mean.
 - Verbless HTTP routes whose path starts with a method (`GET /health`, from Go
   1.22 mux patterns and tracing labels) take that method instead of `ANY`.
 - The embedder passes `token_type_ids` only to models that declare it, so

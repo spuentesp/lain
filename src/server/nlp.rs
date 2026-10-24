@@ -91,6 +91,36 @@ fn takes_token_type_ids(session: &Session) -> bool {
         .any(|i| i.name() == "token_type_ids")
 }
 
+/// How token outputs become one sentence vector. Each model is trained with
+/// one of these, and using the other gives vectors the model was never fit to
+/// produce. Granite and most sentence-transformers exports use `Cls`; the
+/// MiniLM family uses `Mean`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pooling {
+    Mean,
+    Cls,
+}
+
+impl Pooling {
+    /// `"mean"` or `"cls"`, case-insensitive. Anything else is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mean" => Some(Self::Mean),
+            "cls" => Some(Self::Cls),
+            _ => None,
+        }
+    }
+
+    /// `LAIN_EMBEDDING_POOLING` for an explicitly named model; mean when unset
+    /// or unrecognized, as before.
+    pub fn from_env() -> Self {
+        std::env::var("LAIN_EMBEDDING_POOLING")
+            .ok()
+            .and_then(|v| Self::parse(&v))
+            .unwrap_or(Self::Mean)
+    }
+}
+
 #[derive(Clone)]
 pub struct NlpEmbedder {
     inner: EmbedInner,
@@ -104,6 +134,8 @@ pub struct NlpEmbedder {
     /// correctly omitted it. [`Self::embed_query`] makes the choice
     /// explicit, so a new call site has to pick one.
     query_prefix: String,
+    /// How the token outputs become a sentence vector. See [`Pooling`].
+    pooling: Pooling,
 }
 
 impl NlpEmbedder {
@@ -198,8 +230,12 @@ impl NlpEmbedder {
             None
         };
         #[cfg(test)]
-        let installed: Option<(PathBuf, PathBuf)> = None;
-        let (model_path, tokenizer_path) = installed.unwrap_or((model_path, tokenizer_path));
+        let installed: Option<(PathBuf, PathBuf, Pooling)> = None;
+        let declared = installed.as_ref().map(|(_, _, p)| *p);
+        let (model_path, tokenizer_path) = match installed {
+            Some((m, t, _)) => (m, t),
+            None => (model_path, tokenizer_path),
+        };
 
         if !model_path.exists() || !tokenizer_path.exists() {
             tracing::warn!(
@@ -218,7 +254,11 @@ impl NlpEmbedder {
             tracing::warn!("ORT initialization returned false - may indicate already initialized");
         }
 
-        Self::with_max_threads(&model_path, &tokenizer_path, max_threads)
+        let mut embedder = Self::with_max_threads(&model_path, &tokenizer_path, max_threads)?;
+        if let Some(p) = declared {
+            embedder.set_pooling(p);
+        }
+        Ok(embedder)
     }
     // `new_with_paths` forwarded to `with_max_threads` and had no caller;
     // production builds embedders via `with_max_threads` / `new_with_threads`.
@@ -263,6 +303,7 @@ impl NlpEmbedder {
 
         Ok(Self {
             query_prefix: String::new(),
+            pooling: Pooling::from_env(),
             inner: EmbedInner::Onnx {
                 session: Arc::new(Mutex::new(session)),
                 tokenizer: Arc::new(tokenizer),
@@ -314,6 +355,7 @@ impl NlpEmbedder {
         Self {
             inner: EmbedInner::Stub { embedding_dim: 384 },
             query_prefix: String::new(),
+            pooling: Pooling::Mean,
         }
     }
 
@@ -353,6 +395,16 @@ impl NlpEmbedder {
 
     /// Install the configured query prefix. Called once when the
     /// embedder is built, from the tuning config.
+    /// Set how token outputs become sentence vectors. Set from the model's
+    /// declared pooling when the default model is installed.
+    pub fn set_pooling(&mut self, pooling: Pooling) {
+        self.pooling = pooling;
+    }
+
+    pub fn pooling(&self) -> Pooling {
+        self.pooling
+    }
+
     pub fn set_query_prefix(&mut self, prefix: impl Into<String>) {
         self.query_prefix = prefix.into();
     }
@@ -485,6 +537,10 @@ impl NlpEmbedder {
             let mut emb = vec![0.0f32; embedding_dim];
             let mut count = 0usize;
             for i in 0..out_seq_len {
+                // CLS pooling reads the first token only; it is never padding.
+                if self.pooling == Pooling::Cls && i > 0 {
+                    break;
+                }
                 // attention_mask==0 at this position means [PAD] — skip.
                 // batch_mask may be shorter than out_seq_len for short
                 // inputs; in that case treat as padded.
