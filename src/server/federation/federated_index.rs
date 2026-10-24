@@ -111,6 +111,16 @@ pub struct FederatedIndex {
     /// The active contract config. Set via `set_contract_config`;
     /// the joiner reads it inside `rejoin_contracts_if_dirty`.
     contract_config: RwLock<Option<Arc<ContractFederationConfig>>>,
+    /// Run parameters (`params:` in repos.yaml) that resolve service env names.
+    service_params: RwLock<std::collections::BTreeMap<String, String>>,
+    /// Service references per repo, recomputed each time the repo is projected,
+    /// so they follow the same revision as the rest of the view.
+    service_refs: RwLock<
+        std::collections::BTreeMap<
+            RepoId,
+            Vec<crate::federation::contracts::service_refs::ServiceRef>,
+        >,
+    >,
     /// Atomic `(contract_index, binds)` pair (TLA+ RejoinProtocol
     /// variant (c) — epoch-stamped atomic publish). The rejoin
     /// produces both halves in one write-lock acquisition; readers
@@ -190,6 +200,8 @@ impl FederatedIndex {
             contracts_dirty: crate::sync::DirtyFlag::new(false),
             contract_node_ids: DashMap::new(),
             contract_config: RwLock::new(None),
+            service_params: RwLock::new(std::collections::BTreeMap::new()),
+            service_refs: RwLock::new(std::collections::BTreeMap::new()),
             contract_snapshot: RwLock::new(None),
             client_defs_cache: DashMap::new(),
         }
@@ -382,6 +394,7 @@ impl FederatedIndex {
                 .filter(|id| id.starts_with(&prefix))
                 .collect();
             self.backend.remove_nodes(&ids)?;
+            self.service_refs.write().remove(id);
             if let Some(repo) = self.repos.write().remove(id) {
                 repo.deactivate();
             }
@@ -518,6 +531,7 @@ impl FederatedIndex {
     pub async fn project_repo(&self, id: &RepoId) -> Result<(), LainError> {
         self.project_nodes(id).await?;
         self.project_edges(id).await?;
+        self.refresh_service_refs(id);
         Ok(())
     }
 
@@ -1039,6 +1053,59 @@ impl FederatedIndex {
     /// consumes. The federation owns the config so a hot reload can
     /// swap it atomically: a config-load failure on the hot path
     /// leaves the previous config in place (§7.1).
+    /// Install the run parameters that resolve service env names to hosts.
+    pub fn set_service_params(&self, params: std::collections::BTreeMap<String, String>) {
+        *self.service_params.write() = params;
+    }
+
+    /// Service references found in one repo, as of its last projection.
+    pub fn service_refs(
+        &self,
+        id: &RepoId,
+    ) -> Vec<crate::federation::contracts::service_refs::ServiceRef> {
+        self.service_refs
+            .read()
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Recompute the service references of one repo from its workspace, the
+    /// deployment config, and the call sites the graph already holds.
+    pub fn refresh_service_refs(&self, id: &RepoId) {
+        use crate::federation::contracts::service_refs::scan_workspace;
+        let Some(repo) = self.get_repo(id) else {
+            self.service_refs.write().remove(id);
+            return;
+        };
+        let services = self
+            .contract_config
+            .read()
+            .as_ref()
+            .map(|c| c.services.clone())
+            .unwrap_or_default();
+        let owner = services
+            .iter()
+            .find(|s| s.repo == id.as_str())
+            .map(|s| crate::federation::contracts::model::ServiceName(s.name.clone()));
+        let call_sites: std::collections::HashSet<(String, u32)> = repo
+            .db()
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == crate::schema::NodeType::HttpClientCall)
+            .map(|n| (n.path.clone(), n.line_start.unwrap_or(0)))
+            .collect();
+        let params = self.service_params.read().clone();
+        let refs = scan_workspace(
+            repo.source().local_path(),
+            &services,
+            &params,
+            owner.as_ref(),
+            &call_sites,
+        );
+        self.service_refs.write().insert(id.clone(), refs);
+    }
+
     pub fn set_contract_config(&self, config: ContractFederationConfig) {
         *self.contract_config.write() = Some(Arc::new(config));
         // A config change invalidates the current join.

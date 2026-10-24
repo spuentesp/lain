@@ -198,6 +198,57 @@ pub fn extract_service_refs(
     refs
 }
 
+/// Every service reference in one repo's workspace.
+///
+/// Paths in the result are relative to `root`, the form the graph uses, so a
+/// reference can be matched with a sensor's call at the same path and line.
+/// `owner` is the service that owns this repo. `call_sites` are the
+/// `(relative path, line)` pairs where a sensor already detected a call.
+pub fn scan_workspace(
+    root: &std::path::Path,
+    services: &[ServiceDecl],
+    params: &BTreeMap<String, String>,
+    owner: Option<&ServiceName>,
+    call_sites: &std::collections::HashSet<(String, u32)>,
+) -> Vec<ServiceRef> {
+    let scope = EnvScope::new(services, params);
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let abs = entry.path();
+        let Ok(rel) = abs.strip_prefix(root) else {
+            continue;
+        };
+        if rel.components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some(".git" | "node_modules" | "target")
+            )
+        }) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(abs) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let has_call_at = |path: &str, line: u32| call_sites.contains(&(path.to_string(), line));
+        out.extend(extract_service_refs(
+            &rel_str,
+            &content,
+            &scope,
+            owner,
+            &has_call_at,
+        ));
+    }
+    out.sort_by(|a, b| (a.path.as_str(), a.line).cmp(&(b.path.as_str(), b.line)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +459,21 @@ mod tests {
             &seen,
         );
         assert!(!unlinked[0].linked_to_call);
+    }
+
+    #[test]
+    fn a_workspace_scan_reports_repo_relative_paths_and_links_known_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/app.js"), "a\n\"http://user/x\"\n").unwrap();
+        let services = [svc("user", &["user"], &[]), svc("carts", &["carts"], &[])];
+        let calls: std::collections::HashSet<(String, u32)> =
+            [("src/app.js".to_string(), 2u32)].into_iter().collect();
+        let refs = scan_workspace(dir.path(), &services, &BTreeMap::new(), None, &calls);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].path, "src/app.js");
+        assert_eq!(refs[0].line, 2);
+        assert!(refs[0].linked_to_call);
     }
 }
 

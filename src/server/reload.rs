@@ -261,6 +261,7 @@ pub async fn run_rebuild(
                         repos_file.repos.iter().map(|r| r.id.clone()).collect();
                     if cfg.validate(&repo_ids).is_ok() {
                         fed.set_contract_config(cfg);
+                        fed.set_service_params(repos_file.params.clone());
                     }
                 }
             }

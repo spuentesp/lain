@@ -1344,3 +1344,49 @@ async fn a_cross_repo_target_that_already_has_a_signature_is_not_rewritten() {
     );
     drop(dirs);
 }
+
+#[tokio::test]
+async fn projecting_a_repo_records_its_service_references() {
+    use crate::federation::contracts::config::ContractFederationConfig;
+    use crate::federation::contracts::service_refs::RefOutcome;
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    std::fs::create_dir_all(src_dir.path().join("front")).unwrap();
+    std::fs::write(
+        src_dir.path().join("front/endpoints.js"),
+        "const u = \"http://user/customers\";\n",
+    )
+    .unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(
+            RepoId::new("front-end").unwrap(),
+            src_dir.path().to_path_buf(),
+        )
+        .unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+    let contract = ContractFederationConfig::load_from_str(
+        "services:\n  - name: front-end\n    repo: front-end\n    hosts: [\"front-end\"]\n  - name: user\n    repo: user\n    hosts: [\"user\"]\n",
+    )
+    .unwrap();
+    fed.set_contract_config(contract);
+    fed.project_repo(&RepoId::new("front-end").unwrap())
+        .await
+        .unwrap();
+
+    let refs = fed.service_refs(&RepoId::new("front-end").unwrap());
+    assert_eq!(refs.len(), 1, "one URL literal in the workspace");
+    assert_eq!(
+        refs[0].path, "front/endpoints.js",
+        "paths are repo-relative"
+    );
+    assert_eq!(
+        refs[0].outcome,
+        RefOutcome::Resolved(crate::federation::contracts::model::ServiceName(
+            "user".into()
+        ))
+    );
+    assert!(refs[0].self_reference == false);
+}
