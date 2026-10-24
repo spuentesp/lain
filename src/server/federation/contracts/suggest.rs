@@ -305,8 +305,23 @@ mod on_disk {
             }
         }
         let embed = |t: &str| embedder.embed(t).ok();
-        let got = suggest_routes(&refs, &routes, &embed, 0.6, 2);
-        println!("references: {}, suggestions: {}", refs.len(), got.len());
+        let threshold = std::env::var("SUG_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.6);
+        let resolved_production = refs
+            .iter()
+            .filter(|r| {
+                matches!(r.outcome, RefOutcome::Resolved(_)) && r.usage == Usage::Production
+            })
+            .count();
+        let got = suggest_routes(&refs, &routes, &embed, threshold, 2);
+        println!(
+            "references: {}, resolved production: {}, threshold {threshold}, suggestions: {}",
+            refs.len(),
+            resolved_production,
+            got.len()
+        );
         for g in &got {
             println!(
                 "{:.3}  {}:{}  {}  ->  {} {}",
