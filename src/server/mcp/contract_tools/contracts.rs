@@ -810,7 +810,10 @@ pub(crate) fn snapshot_label(args_map: &Map<String, Value>) -> String {
     view_snapshot_label(args_map)
 }
 
-fn parse_limit(args_map: &Map<String, Value>, started: Instant) -> Result<usize, ToolOutcome> {
+pub(crate) fn parse_limit(
+    args_map: &Map<String, Value>,
+    started: Instant,
+) -> Result<usize, ToolOutcome> {
     let snap = snapshot_label(args_map);
     let raw = args_map.get("limit").and_then(|v| v.as_u64());
     match raw {
@@ -833,7 +836,7 @@ fn parse_limit(args_map: &Map<String, Value>, started: Instant) -> Result<usize,
     }
 }
 
-fn parse_cursor(
+pub(crate) fn parse_cursor(
     args_map: &Map<String, Value>,
     started: Instant,
 ) -> Result<Option<super::paging::CursorPayload>, ToolOutcome> {
