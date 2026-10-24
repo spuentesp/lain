@@ -5,8 +5,20 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+### Added
+
+- Semantic search model is fetched on first use: when no embedding model is
+  named (`--embedding-model`, `LAIN_EMBEDDING_MODEL`), lain downloads the pinned
+  default (granite-embedding-small-english-r2, Apache-2.0, about 195 MB) into the
+  user cache, or `LAIN_MODEL_CACHE`. Each file is verified against its SHA-256
+  before use. Without network, semantic search stays off, as before.
+
 ### Fixed
 
+- Verbless HTTP routes whose path starts with a method (`GET /health`, from Go
+  1.22 mux patterns and tracing labels) take that method instead of `ANY`.
+- The embedder passes `token_type_ids` only to models that declare it, so
+  encoders without that input load instead of falling back to the stub.
 - Large-workspace indexing: GraphQL SDL keyword probes now reuse validated
   strings instead of validating the entire schema for every token. HTTP route
   and client scans reuse compiled tree-sitter queries per framework within a

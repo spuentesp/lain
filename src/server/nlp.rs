@@ -188,6 +188,24 @@ impl NlpEmbedder {
                 )
             };
 
+        // With no model named anywhere, the pinned default is fetched on first
+        // use. Tests stay offline and use the stub.
+        let default_model = std::env::var_os("LAIN_EMBEDDING_MODEL").is_none();
+        #[cfg(not(test))]
+        let fetched = if default_model {
+            crate::server::model_fetch::ensure_default_model()
+                .map_err(|e| tracing::warn!("default embedding model unavailable: {e}"))
+                .ok()
+        } else {
+            None
+        };
+        #[cfg(test)]
+        let fetched: Option<(PathBuf, PathBuf)> = {
+            let _ = default_model;
+            None
+        };
+        let (model_path, tokenizer_path) = fetched.unwrap_or((model_path, tokenizer_path));
+
         if !model_path.exists() || !tokenizer_path.exists() {
             tracing::warn!(
                 "NLP model files not found at {:?}, using stub embedder",
