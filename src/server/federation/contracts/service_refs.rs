@@ -48,8 +48,11 @@ pub struct ServiceRef {
     pub path: String,
     /// 1-based line of the literal.
     pub line: u32,
-    /// The literal exactly as it appears in the source, scheme included.
+    /// The scheme and host as written, e.g. `http://user`.
     pub value: String,
+    /// The whole URL literal as written, path included, e.g.
+    /// `http://user%s/customers`. Used to compare with the target's routes.
+    pub url: String,
     pub host: String,
     pub outcome: RefOutcome,
     pub usage: Usage,
@@ -109,7 +112,7 @@ fn url_host_re() -> &'static Regex {
     RE.get_or_init(|| {
         // scheme, then a host made of DNS-like characters. Stops at the
         // first character that cannot appear in a host (`/`, `:`, quote, `%`).
-        Regex::new(r"https?://([A-Za-z0-9_][A-Za-z0-9_.\-]*)").expect("valid regex")
+        Regex::new(r#"https?://([A-Za-z0-9_][A-Za-z0-9_.\-]*)[^\s"'`<>]*"#).expect("valid regex")
     })
 }
 
@@ -187,7 +190,12 @@ pub fn extract_service_refs(
         refs.push(ServiceRef {
             path: path.to_string(),
             line,
-            value: whole.as_str().to_string(),
+            value: format!(
+                "{}://{}",
+                whole.as_str().split("://").next().unwrap_or("http"),
+                host
+            ),
+            url: whole.as_str().to_string(),
             host,
             outcome,
             usage,

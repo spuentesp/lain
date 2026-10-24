@@ -140,6 +140,7 @@ mod tests {
             path: path.into(),
             line,
             value: "http://x".into(),
+            url: "http://x".into(),
             host: "x".into(),
             outcome,
             usage: Usage::Production,
