@@ -81,6 +81,16 @@ fn prefixed_query(prefix: &str, query: &str) -> String {
     format!("{prefix}{query}")
 }
 
+/// Whether the model takes a `token_type_ids` input. BERT-family exports do;
+/// several newer encoders (the Granite embedding family, for one) do not, and
+/// feeding them one is an error that fails the whole model load.
+fn takes_token_type_ids(session: &Session) -> bool {
+    session
+        .inputs()
+        .iter()
+        .any(|i| i.name() == "token_type_ids")
+}
+
 #[derive(Clone)]
 pub struct NlpEmbedder {
     inner: EmbedInner,
@@ -262,11 +272,18 @@ impl NlpEmbedder {
         let type_tensor =
             Tensor::from_array(([1, 3], dummy_types)).map_err(|e| LainError::Nlp(e.to_string()))?;
 
-        let inputs = ort::inputs![
-            "input_ids" => ids_tensor,
-            "attention_mask" => mask_tensor,
-            "token_type_ids" => type_tensor,
-        ];
+        let inputs = if takes_token_type_ids(&session) {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+                "token_type_ids" => type_tensor,
+            ]
+        } else {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+            ]
+        };
 
         let outputs = session
             .run(inputs)
@@ -423,13 +440,19 @@ impl NlpEmbedder {
         let mask_tensor = Tensor::from_array(([n, batch_seq_len], masks_flat))?;
         let type_tensor = Tensor::from_array(([n, batch_seq_len], types_flat))?;
 
-        let inputs = ort::inputs![
-            "input_ids" => ids_tensor,
-            "attention_mask" => mask_tensor,
-            "token_type_ids" => type_tensor,
-        ];
-
         let mut session = session.lock();
+        let inputs = if takes_token_type_ids(&session) {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+                "token_type_ids" => type_tensor,
+            ]
+        } else {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+            ]
+        };
         let outputs = session.run(inputs)?;
 
         let last_hidden_state = outputs["last_hidden_state"].try_extract_tensor::<f32>()?;
@@ -609,13 +632,19 @@ impl CrossEncoder {
         let mask_tensor = Tensor::from_array(([1, seq_len], attention_mask))?;
         let type_tensor = Tensor::from_array(([1, seq_len], token_type_ids))?;
 
-        let inputs = ort::inputs![
-            "input_ids" => ids_tensor,
-            "attention_mask" => mask_tensor,
-            "token_type_ids" => type_tensor,
-        ];
-
         let mut session = inner.session.lock();
+        let inputs = if takes_token_type_ids(&session) {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+                "token_type_ids" => type_tensor,
+            ]
+        } else {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+            ]
+        };
         let outputs = session.run(inputs)?;
 
         // ms-marco-MiniLM-L-6-v2 outputs shape [1, 1] — a single logit.

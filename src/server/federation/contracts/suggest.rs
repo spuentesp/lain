@@ -266,6 +266,10 @@ mod on_disk {
             ContractFederationConfig::load_from_str(&std::fs::read_to_string(&config).unwrap())
                 .unwrap()
                 .services;
+        let (m, t) = NlpEmbedder::resolve_model_paths(&model);
+        if let Err(e) = NlpEmbedder::with_max_threads(&m, &t, 4) {
+            panic!("load error: {e}");
+        }
         let embedder = NlpEmbedder::load_or_stub(Some(&model), 4);
         assert!(!embedder.is_stub(), "the model did not load from {model:?}");
 
