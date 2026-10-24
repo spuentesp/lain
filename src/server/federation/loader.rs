@@ -54,7 +54,7 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     // already; a hot-reload failure later keeps this one in
     // place.
     fed.set_contract_config(config.contract.clone());
-    fed.set_service_params(config.params.clone());
+    fed.set_service_params(config.effective_params());
 
     let sources = config.build_sources()?;
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
@@ -283,7 +283,7 @@ pub async fn load_federation_with_workspace(
     // already; a hot-reload failure later keeps this one in
     // place.
     fed.set_contract_config(config.contract.clone());
-    fed.set_service_params(config.params.clone());
+    fed.set_service_params(config.effective_params());
 
     // Cold-start orchestration (Codex finding #4). Same Phase 0/1/2
     // split as `load_federation`: register every repo in parallel,
