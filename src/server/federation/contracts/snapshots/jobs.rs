@@ -41,13 +41,7 @@ type IndexedJobPayload = (
 
 /// Default worker count (`§8.4`): `LAIN_SNAPSHOT_WORKERS` or 2.
 pub fn snapshot_workers() -> usize {
-    match std::env::var("LAIN_SNAPSHOT_WORKERS") {
-        Ok(s) if !s.trim().is_empty() => match s.trim().parse::<usize>() {
-            Ok(v) if v > 0 => v,
-            _ => DEFAULT_SNAPSHOT_WORKERS,
-        },
-        _ => DEFAULT_SNAPSHOT_WORKERS,
-    }
+    crate::server::env_util::positive_env("LAIN_SNAPSHOT_WORKERS", DEFAULT_SNAPSHOT_WORKERS)
 }
 
 /// Hard queue cap (`§8.4`): 64. Beyond this, `prepare_snapshot`

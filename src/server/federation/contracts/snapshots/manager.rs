@@ -52,13 +52,7 @@ use super::record::{
 /// `diff_contracts` (`diff_contracts` is PR 13 territory); PR 11
 /// only needs one.
 pub fn snapshot_resident_cap() -> usize {
-    match std::env::var("LAIN_SNAPSHOT_RESIDENT") {
-        Ok(s) if !s.trim().is_empty() => match s.trim().parse::<usize>() {
-            Ok(v) if v > 0 => v,
-            _ => DEFAULT_SNAPSHOT_RESIDENT,
-        },
-        _ => DEFAULT_SNAPSHOT_RESIDENT,
-    }
+    crate::server::env_util::positive_env("LAIN_SNAPSHOT_RESIDENT", DEFAULT_SNAPSHOT_RESIDENT)
 }
 
 pub const DEFAULT_SNAPSHOT_RESIDENT: usize = 2;
@@ -66,13 +60,10 @@ pub const DEFAULT_SNAPSHOT_RESIDENT: usize = 2;
 /// `LAIN_SNAPSHOT_RETENTION_DAYS` (`§8.4`): records older than 7
 /// days after their last access are deleted.
 pub fn snapshot_retention_days() -> u64 {
-    match std::env::var("LAIN_SNAPSHOT_RETENTION_DAYS") {
-        Ok(s) if !s.trim().is_empty() => match s.trim().parse::<u64>() {
-            Ok(v) if v > 0 => v,
-            _ => DEFAULT_SNAPSHOT_RETENTION_DAYS,
-        },
-        _ => DEFAULT_SNAPSHOT_RETENTION_DAYS,
-    }
+    crate::server::env_util::positive_env(
+        "LAIN_SNAPSHOT_RETENTION_DAYS",
+        DEFAULT_SNAPSHOT_RETENTION_DAYS,
+    )
 }
 
 pub const DEFAULT_SNAPSHOT_RETENTION_DAYS: u64 = 7;

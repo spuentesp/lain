@@ -1179,73 +1179,47 @@ pub(crate) fn diff_fields(
     }
 }
 
-fn removed_paths(
-    base: &BTreeMap<JsonPath, FieldMeta>,
-    head: &BTreeMap<JsonPath, FieldMeta>,
+/// Paths present in `from` and absent from `to`, except those below an
+/// ancestor that is also in `from` and absent from `to`: the topmost removed
+/// (or added) ancestor reports the whole subtree.
+fn only_in(
+    from: &BTreeMap<JsonPath, FieldMeta>,
+    to: &BTreeMap<JsonPath, FieldMeta>,
 ) -> BTreeSet<JsonPath> {
     let mut out: BTreeSet<JsonPath> = BTreeSet::new();
-    for path in base.keys() {
-        if head.contains_key(path) {
-            continue;
-        }
-        // Nested-field rule: if any ancestor of `path` was also
-        // removed, this path is reported by the topmost ancestor and
-        // is skipped here.
-        if has_removed_ancestor(path, base, head) {
+    for path in from.keys() {
+        if to.contains_key(path) || has_ancestor_only_in(path, from, to) {
             continue;
         }
         out.insert(path.clone());
     }
     out
+}
+
+fn removed_paths(
+    base: &BTreeMap<JsonPath, FieldMeta>,
+    head: &BTreeMap<JsonPath, FieldMeta>,
+) -> BTreeSet<JsonPath> {
+    only_in(base, head)
 }
 
 fn added_paths(
     base: &BTreeMap<JsonPath, FieldMeta>,
     head: &BTreeMap<JsonPath, FieldMeta>,
 ) -> BTreeSet<JsonPath> {
-    let mut out: BTreeSet<JsonPath> = BTreeSet::new();
-    for path in head.keys() {
-        if base.contains_key(path) {
-            continue;
-        }
-        if has_added_ancestor(path, base, head) {
-            continue;
-        }
-        out.insert(path.clone());
-    }
-    out
+    only_in(head, base)
 }
 
-fn has_removed_ancestor(
+/// Whether a strict ancestor of `path` is in `from` and absent from `to`.
+fn has_ancestor_only_in(
     path: &JsonPath,
-    base: &BTreeMap<JsonPath, FieldMeta>,
-    head: &BTreeMap<JsonPath, FieldMeta>,
+    from: &BTreeMap<JsonPath, FieldMeta>,
+    to: &BTreeMap<JsonPath, FieldMeta>,
 ) -> bool {
     let mut prefix = JsonPath(Vec::new());
-    for (i, _) in path.0.iter().enumerate() {
-        if i == 0 {
-            continue;
-        }
+    for i in 1..path.0.len() {
         prefix.0 = path.0[..i].to_vec();
-        if base.contains_key(&prefix) && !head.contains_key(&prefix) {
-            return true;
-        }
-    }
-    false
-}
-
-fn has_added_ancestor(
-    path: &JsonPath,
-    base: &BTreeMap<JsonPath, FieldMeta>,
-    head: &BTreeMap<JsonPath, FieldMeta>,
-) -> bool {
-    let mut prefix = JsonPath(Vec::new());
-    for (i, _) in path.0.iter().enumerate() {
-        if i == 0 {
-            continue;
-        }
-        prefix.0 = path.0[..i].to_vec();
-        if head.contains_key(&prefix) && !base.contains_key(&prefix) {
+        if from.contains_key(&prefix) && !to.contains_key(&prefix) {
             return true;
         }
     }
