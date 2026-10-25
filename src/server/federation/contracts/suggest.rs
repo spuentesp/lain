@@ -315,6 +315,13 @@ mod on_disk {
                 matches!(r.outcome, RefOutcome::Resolved(_)) && r.usage == Usage::Production
             })
             .count();
+        if std::env::var_os("SUG_DUMP").is_some() {
+            for r in refs.iter().filter(|r| r.usage == Usage::Production) {
+                if let RefOutcome::Resolved(svc) = &r.outcome {
+                    println!("DUMP {}:{}  {}  ->  {}", r.path, r.line, r.url, svc.0);
+                }
+            }
+        }
         let got = suggest_routes(&refs, &routes, &embed, threshold, 2);
         println!(
             "references: {}, resolved production: {}, threshold {threshold}, suggestions: {}",

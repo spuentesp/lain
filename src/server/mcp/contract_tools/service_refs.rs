@@ -20,7 +20,7 @@ inventory::submit!(ContractToolEntry {
     handler: list_service_refs_handle,
 });
 
-const USAGE_VALUES: &[&str] = &["production", "test", "configuration"];
+const USAGE_VALUES: &[&str] = &["production", "test", "configuration", "documentation"];
 const OUTCOME_VALUES: &[&str] = &["resolved", "ambiguous", "unknown"];
 
 fn object_or_empty(args: Value) -> Map<String, Value> {
@@ -59,6 +59,7 @@ fn usage_name(u: Usage) -> &'static str {
         Usage::Production => "production",
         Usage::Test => "test",
         Usage::Configuration => "configuration",
+        Usage::Documentation => "documentation",
     }
 }
 

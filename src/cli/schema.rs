@@ -39,8 +39,9 @@ pub fn run(action: SchemaAction) -> Result<()> {
 /// `semantic_search` even when the embedder is a stub, while
 /// `tools/list` would not — drift on every CI run.
 fn dump(out: &std::path::Path) -> Result<()> {
-    let embedder = crate::server::nlp::NlpEmbedder::new_with_threads(0)
-        .context("init stub embedder for schema dump")?;
+    // Always the stub, never an installed model: the schema must not depend
+    // on what is installed on the machine that dumps it.
+    let embedder = crate::server::nlp::NlpEmbedder::new_stub();
     let inert = crate::server::mcp::handler::inert_tool_names(&embedder);
     let tools = crate::server::mcp::definitions::dump_tools_schema(inert);
     let pretty = serde_json::to_string_pretty(&tools).context("serialize schema dump")?;

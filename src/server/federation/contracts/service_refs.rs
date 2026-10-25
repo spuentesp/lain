@@ -17,6 +17,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use crate::federation::contracts::config::ServiceDecl;
+use crate::federation::contracts::deployment::{parse_compose, producer_claims};
 use crate::federation::contracts::model::ServiceName;
 use crate::federation::contracts::url_resolution::{
     endpoint_from_parts, endpoint_matches, endpoint_pattern, Endpoint,
@@ -42,6 +43,8 @@ pub enum Usage {
     Test,
     /// Deployment or environment configuration.
     Configuration,
+    /// Prose: READMEs, docs, changelogs. A literal there is an example, not a call.
+    Documentation,
 }
 
 /// One URL literal found in a source file.
@@ -92,6 +95,12 @@ impl EnvScope {
         Self { claims }
     }
 
+    /// Add claims derived from outside the service declarations, such as a
+    /// compose file's published ports.
+    fn add_claims(&mut self, claims: Vec<(String, ServiceName)>) {
+        self.claims.extend(claims);
+    }
+
     /// Services whose hosts (declared or from the environment) claim `ep`.
     fn claimants(&self, ep: &Endpoint) -> Vec<ServiceName> {
         let mut out: Vec<ServiceName> = Vec::new();
@@ -135,6 +144,25 @@ pub fn classify_usage(path: &str) -> Usage {
         || name.starts_with("test_")
     {
         return Usage::Test;
+    }
+    // `testcontainer.sh`, `endpoints_test`: the stem names a test.
+    let stem = p
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if stem.starts_with("test") || stem.ends_with("test") {
+        return Usage::Test;
+    }
+    let doc_ext = matches!(
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("md" | "rst" | "txt" | "adoc")
+    );
+    if doc_ext || name.starts_with("readme") || name.starts_with("changelog") {
+        return Usage::Documentation;
     }
     if name.starts_with("docker-compose")
         || name.starts_with("dockerfile")
@@ -208,6 +236,51 @@ pub fn extract_service_refs(
     refs
 }
 
+fn is_compose_file(path: &std::path::Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    (name.starts_with("docker-compose") || name.starts_with("compose"))
+        && (name.ends_with(".yml") || name.ends_with(".yaml"))
+}
+
+/// Address claims from every compose file under `root`, for the repo's owner.
+fn compose_producer_claims(
+    root: &std::path::Path,
+    owner: &ServiceName,
+) -> Vec<(String, ServiceName)> {
+    let mut claims = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file() && is_compose_file(e.path()))
+    {
+        let abs = entry.path();
+        let Ok(rel) = abs.strip_prefix(root) else {
+            continue;
+        };
+        if rel.components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some(".git" | "node_modules" | "target")
+            )
+        }) {
+            continue;
+        }
+        let dir = rel
+            .parent()
+            .map(|d| d.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let Ok(text) = std::fs::read_to_string(abs) else {
+            continue;
+        };
+        if let Ok(svcs) = parse_compose(&text) {
+            claims.extend(producer_claims(&dir, &svcs, owner));
+        }
+    }
+    claims
+}
+
 /// Every service reference in one repo's workspace.
 ///
 /// Paths in the result are relative to `root`, the form the graph uses, so a
@@ -221,7 +294,12 @@ pub fn scan_workspace(
     owner: Option<&ServiceName>,
     call_sites: &std::collections::HashSet<(String, u32)>,
 ) -> Vec<ServiceRef> {
-    let scope = EnvScope::new(services, params);
+    let mut scope = EnvScope::new(services, params);
+    // Producer addresses from this repo's compose files come first, so every
+    // reference is resolved against them whatever the walk order.
+    if let Some(owner) = owner {
+        scope.add_claims(compose_producer_claims(root, owner));
+    }
     let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
@@ -257,6 +335,33 @@ pub fn scan_workspace(
     }
     out.sort_by(|a, b| (a.path.as_str(), a.line).cmp(&(b.path.as_str(), b.line)));
     out
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn prose_is_documentation_not_production() {
+        assert_eq!(classify_usage("user/README.md"), Usage::Documentation);
+        assert_eq!(classify_usage("docs/API.rst"), Usage::Documentation);
+        assert_eq!(classify_usage("CHANGELOG.md"), Usage::Documentation);
+    }
+
+    #[test]
+    fn a_test_named_script_is_test() {
+        assert_eq!(classify_usage("user/scripts/testcontainer.sh"), Usage::Test);
+        assert_eq!(classify_usage("src/endpoints_test.go"), Usage::Test);
+    }
+
+    #[test]
+    fn shipped_code_and_compose_are_unchanged() {
+        assert_eq!(
+            classify_usage("front-end/api/endpoints.js"),
+            Usage::Production
+        );
+        assert_eq!(classify_usage("docker-compose.yml"), Usage::Configuration);
+    }
 }
 
 #[cfg(test)]

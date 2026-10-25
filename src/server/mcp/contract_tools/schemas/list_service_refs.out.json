@@ -59,7 +59,8 @@
             "enum": [
               "production",
               "test",
-              "configuration"
+              "configuration",
+            "documentation"
             ]
           },
           "self_reference": {

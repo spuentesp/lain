@@ -21,7 +21,8 @@
       "enum": [
         "production",
         "test",
-        "configuration"
+        "configuration",
+      "documentation"
       ],
       "description": "Filter by where the literal lives."
     },

@@ -61,6 +61,7 @@ pub mod clients;
 pub mod config;
 pub mod coverage;
 pub mod coverage_matrix;
+pub mod deployment;
 pub mod diff;
 pub mod digest;
 pub mod field_join;

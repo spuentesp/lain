@@ -17,8 +17,20 @@ All notable changes to LAIN are documented here. Versions follow
   the state. Models install under the user data directory, or `LAIN_MODEL_DIR`.
   Installers skip the model when `LAIN_SKIP_MODEL_INSTALL=1` is set.
 
+### Changed
+
+- Service references from prose (READMEs, docs, changelogs) are classified as
+  `documentation`, not `production`. Test scripts named by their stem
+  (`testcontainer.sh`) are `test`. `list_service_refs` accepts the new value.
+- A compose file's build context and published ports name the producer of an
+  address: `localhost:<published>` and `<service>:<container port>` resolve to
+  the repo's service when the service builds from that repo. Image-only
+  services and unpublished ports are not claimed.
+
 ### Fixed
 
+- `lain schema dump` always uses the stub embedder, so the tool schema does not
+  depend on which model is installed.
 - Embeddings use each model's declared pooling. Granite small r2 is trained
   with CLS pooling and lain averaged tokens, so its vectors were not the ones
   the model was fit to produce. The manifest declares `pooling` per model; an

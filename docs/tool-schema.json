@@ -1713,7 +1713,8 @@
           "enum": [
             "production",
             "test",
-            "configuration"
+            "configuration",
+            "documentation"
           ],
           "type": "string"
         }
@@ -1786,7 +1787,8 @@
                 "enum": [
                   "production",
                   "test",
-                  "configuration"
+                  "configuration",
+                  "documentation"
                 ],
                 "type": "string"
               },
