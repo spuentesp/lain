@@ -483,13 +483,6 @@ impl ChangedFilesSource for StaticRepoChangedFiles {
     }
 }
 
-/// `BTreeSet`-based source injected into `diff_contracts`. Same shape
-/// as the `StaticChangedFiles` indirection; kept distinct so PR 13
-/// can replace the trait without breaking test call sites.
-pub fn changed_files_set(set: BTreeSet<String>) -> impl ChangedFilesSource {
-    StaticChangedFiles(set)
-}
-
 // ─── diff_contracts (§9.2) ────────────────────────────────────────────
 
 /// Diff provider-side endpoints between `base` and `head` (§9.2).
