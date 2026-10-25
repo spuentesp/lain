@@ -262,6 +262,14 @@ mod on_disk {
         let root = std::path::PathBuf::from(std::env::var("SUG_ROOT").expect("set SUG_ROOT"));
         let routes_path = std::env::var("SUG_ROUTES").expect("set SUG_ROUTES");
         let model = std::path::PathBuf::from(std::env::var("SUG_MODEL").expect("set SUG_MODEL"));
+        // The run parameters from the same repos.yaml: `params:` gives the env
+        // vars that services declare their values, as `--param` does.
+        let params: BTreeMap<String, String> =
+            serde_yaml::from_str::<serde_yaml::Value>(&std::fs::read_to_string(&config).unwrap())
+                .ok()
+                .and_then(|doc| doc.get("params").cloned())
+                .and_then(|p| serde_yaml::from_value(p).ok())
+                .unwrap_or_default();
         let services =
             ContractFederationConfig::load_from_str(&std::fs::read_to_string(&config).unwrap())
                 .unwrap()
@@ -293,13 +301,7 @@ mod on_disk {
                 continue;
             }
             let owner = ServiceName(s.name.clone());
-            for mut r in scan_workspace(
-                &dir,
-                &services,
-                &BTreeMap::new(),
-                Some(&owner),
-                &HashSet::new(),
-            ) {
+            for mut r in scan_workspace(&dir, &services, &params, Some(&owner), &HashSet::new()) {
                 r.path = format!("{}/{}", s.repo, r.path);
                 refs.push(r);
             }

@@ -126,6 +126,11 @@ fn url_host_re() -> &'static Regex {
 /// Classify a path by its components and file name.
 pub fn classify_usage(path: &str) -> Usage {
     const TEST_DIRS: &[&str] = &["test", "tests", "__tests__", "spec", "e2e", "mock", "mocks"];
+    // Folder names that mark test support: `testUtils`, `fixtures`, `testdata`.
+    fn is_test_support_dir(c: &str) -> bool {
+        let c = c.to_ascii_lowercase();
+        c.starts_with("test") || c.contains("fixture") || c.contains("mock")
+    }
     const CONFIG_EXTS: &[&str] = &["yml", "yaml", "env", "properties", "toml", "ini", "conf"];
     let p = std::path::Path::new(path);
     let name = p
@@ -133,9 +138,10 @@ pub fn classify_usage(path: &str) -> Usage {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if p.components()
-        .any(|c| TEST_DIRS.contains(&c.as_os_str().to_str().unwrap_or("")))
-    {
+    if p.components().any(|c| {
+        let c = c.as_os_str().to_str().unwrap_or("");
+        TEST_DIRS.contains(&c) || is_test_support_dir(c)
+    }) {
         return Usage::Test;
     }
     if name.contains("_test.")
@@ -151,9 +157,10 @@ pub fn classify_usage(path: &str) -> Usage {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if stem.starts_with("test") || stem.ends_with("test") {
+    if stem.starts_with("test") || stem.ends_with("test") || stem.contains("fixture") {
         return Usage::Test;
     }
+
     let doc_ext = matches!(
         p.extension()
             .and_then(|e| e.to_str())
@@ -352,6 +359,14 @@ mod usage_tests {
     fn a_test_named_script_is_test() {
         assert_eq!(classify_usage("user/scripts/testcontainer.sh"), Usage::Test);
         assert_eq!(classify_usage("src/endpoints_test.go"), Usage::Test);
+        assert_eq!(
+            classify_usage("saleor-dashboard/src/orders/fixtures.ts"),
+            Usage::Test
+        );
+        assert_eq!(
+            classify_usage("saleor-dashboard/testUtils/setup.ts"),
+            Usage::Test
+        );
     }
 
     #[test]
