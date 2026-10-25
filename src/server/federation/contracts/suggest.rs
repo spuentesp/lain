@@ -6,7 +6,29 @@
 //! whose path differs from every route of their service are considered.
 
 use crate::federation::contracts::model::ServiceName;
+use crate::federation::contracts::normalize::{normalize as normalize_url, UrlPart};
 use crate::federation::contracts::service_refs::{RefOutcome, ServiceRef, Usage};
+
+/// The route template of a URL literal, normalized the way served routes are
+/// (see `normalize.rs`). A `%s` in the literal is a hole, as the scan records it.
+pub fn template_of(url: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for (i, piece) in url.split("%s").enumerate() {
+        if i > 0 {
+            parts.push(UrlPart::Hole("%s".into()));
+        }
+        if !piece.is_empty() {
+            parts.push(UrlPart::Literal(piece.into()));
+        }
+    }
+    normalize_url(&parts).template
+}
+
+/// The template of a served route selector such as `GET /carts/{}`.
+fn route_template(selector: &str) -> Option<String> {
+    let path = selector.split_once(' ').map_or(selector, |(_, p)| p);
+    normalize_url(&[UrlPart::Literal(path.into())]).template
+}
 
 /// One proposed route for a reference. Not a fact about the code.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,46 +43,6 @@ pub struct RouteSuggestion {
     pub score: f32,
 }
 
-/// The path of a URL literal, without scheme, host, query or fragment.
-pub fn path_of(url: &str) -> &str {
-    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let path_start = after_scheme.find('/').unwrap_or(after_scheme.len());
-    let path = &after_scheme[path_start..];
-    let end = path.find(['?', '#']).unwrap_or(path.len());
-    &path[..end]
-}
-
-/// Normalize a path for comparison: placeholders become `{}`, a trailing
-/// slash is dropped.
-pub fn normalize(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    let mut chars = path.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '%' if chars.peek() == Some(&'s') => {
-                chars.next();
-                out.push_str("{}");
-            }
-            '{' => {
-                for inner in chars.by_ref() {
-                    if inner == '}' {
-                        break;
-                    }
-                }
-                out.push_str("{}");
-            }
-            _ => out.push(c),
-        }
-    }
-    if out.len() > 1 {
-        out = out.trim_end_matches('/').to_string();
-    }
-    if out.is_empty() {
-        out.push('/');
-    }
-    out
-}
-
 fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.len() != b.len() || a.is_empty() {
         return None;
@@ -72,11 +54,6 @@ fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
         return None;
     }
     Some(dot / (na * nb))
-}
-
-/// The route path of a `METHOD /template` selector.
-fn route_path(selector: &str) -> &str {
-    selector.split_once(' ').map(|(_, p)| p).unwrap_or(selector)
 }
 
 /// Suggest, for each resolved reference whose path matches no route of its
@@ -102,17 +79,21 @@ pub fn suggest_routes(
         if r.usage != Usage::Production {
             continue;
         }
-        let path = path_of(&r.url);
-        if path.is_empty() || path == "/" {
+        let Some(wanted) = template_of(&r.url) else {
+            continue;
+        };
+        if wanted == "/" {
             continue;
         }
-        let wanted = normalize(path);
         let own: Vec<&String> = routes
             .iter()
             .filter(|(s, _)| s == service)
             .map(|(_, sel)| sel)
             .collect();
-        if own.iter().any(|sel| normalize(route_path(sel)) == wanted) {
+        if own
+            .iter()
+            .any(|sel| route_template(sel).as_deref() == Some(&wanted))
+        {
             continue;
         }
         let Some(query) = embed(&wanted) else {
@@ -121,7 +102,7 @@ pub fn suggest_routes(
         let mut scored: Vec<(f32, &String)> = own
             .iter()
             .filter_map(|sel| {
-                let candidate = embed(&normalize(route_path(sel)))?;
+                let candidate = embed(&route_template(sel)?)?;
                 Some((cosine(&query, &candidate)?, *sel))
             })
             .filter(|(score, _)| *score >= threshold)
@@ -161,20 +142,32 @@ mod tests {
     }
 
     #[test]
-    fn path_is_what_follows_the_host_without_query() {
-        assert_eq!(path_of("http://user%s/customers?x=1"), "/customers");
-        assert_eq!(path_of("http://catalogue"), "");
+    fn a_reference_becomes_its_canonical_template() {
         assert_eq!(
-            path_of("http://orders:8080/orders/{}/items#top"),
-            "/orders/{}/items"
+            template_of("http://user%s/customers?x=1").as_deref(),
+            Some("/customers")
+        );
+        assert_eq!(template_of("http://catalogue").as_deref(), Some("/"));
+        assert_eq!(
+            template_of("http://orders:8080/orders/{id}/items#top").as_deref(),
+            Some("/orders/{}/items")
+        );
+        assert_eq!(
+            template_of("http://carts%s/carts/%s/items/").as_deref(),
+            Some("/carts/{}/items")
         );
     }
 
     #[test]
-    fn normalization_unifies_placeholders_and_trailing_slashes() {
-        assert_eq!(normalize("/carts/%s/items/"), "/carts/{}/items");
-        assert_eq!(normalize("/customers/{id}"), "/customers/{}");
-        assert_eq!(normalize("/"), "/");
+    fn a_served_route_and_a_reference_meet_in_the_same_form() {
+        assert_eq!(
+            route_template("GET /customers/:id").as_deref(),
+            Some("/customers/{}")
+        );
+        assert_eq!(
+            template_of("http://user%s/customers/%s").as_deref(),
+            route_template("GET /customers/{id}").as_deref()
+        );
     }
 
     /// Vectors per normalized path, so the similarity is known exactly.

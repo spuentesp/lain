@@ -1273,33 +1273,13 @@ fn parse_consumer_call_shape(
 ) {
     let name = call_id.name().unwrap_or_default();
     let parts: Vec<&str> = name.split_whitespace().collect();
-    let method = match parts.first().copied() {
-        Some("GET") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Get,
-        ),
-        Some("POST") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Post,
-        ),
-        Some("PUT") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Put,
-        ),
-        Some("PATCH") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Patch,
-        ),
-        Some("DELETE") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Delete,
-        ),
-        Some("HEAD") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Head,
-        ),
-        Some("OPTIONS") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Options,
-        ),
-        Some("ANY") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Any,
-        ),
-        _ => crate::federation::contracts::model::MethodSpec::Unknown,
-    };
+    let method = parts
+        .first()
+        .and_then(|v| crate::federation::contracts::model::HttpMethod::parse(v))
+        .map_or(
+            crate::federation::contracts::model::MethodSpec::Unknown,
+            crate::federation::contracts::model::MethodSpec::Known,
+        );
     (method, parts.get(1).map(|s| s.to_string()))
 }
 

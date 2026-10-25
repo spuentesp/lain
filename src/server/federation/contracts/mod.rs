@@ -67,7 +67,6 @@ pub mod digest;
 pub mod field_join;
 pub mod index;
 pub mod index_cache;
-pub mod interaction;
 pub mod joiner;
 pub mod key_compat;
 pub mod mirrors;

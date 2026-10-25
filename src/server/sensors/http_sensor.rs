@@ -113,7 +113,7 @@ fn extract_routes(pattern: &RoutePattern, content: &str, file_path: &str) -> Vec
             .and_then(|re| re.captures(line))
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_uppercase())
-            .map(method_from_str)
+            .map(|v| HttpMethod::parse(&v).unwrap_or(HttpMethod::Any))
             .unwrap_or_else(|| pattern.default_method());
 
         // Prefer a handler on the declaring line (Gin, Express);
@@ -163,19 +163,12 @@ fn split_method_prefix(method: HttpMethod, path: String) -> (HttpMethod, String)
     if method != HttpMethod::Any {
         return (method, path);
     }
-    for (verb, m) in [
-        ("GET ", HttpMethod::Get),
-        ("POST ", HttpMethod::Post),
-        ("PUT ", HttpMethod::Put),
-        ("PATCH ", HttpMethod::Patch),
-        ("DELETE ", HttpMethod::Delete),
-        ("HEAD ", HttpMethod::Head),
-        ("OPTIONS ", HttpMethod::Options),
-    ] {
-        if let Some(rest) = path.strip_prefix(verb) {
-            if rest.starts_with('/') {
+    if let Some((verb, rest)) = path.split_once(' ') {
+        match HttpMethod::parse(verb) {
+            Some(m) if m != HttpMethod::Any && rest.starts_with('/') => {
                 return (m, rest.to_string());
             }
+            _ => {}
         }
     }
     (method, path)
@@ -211,19 +204,6 @@ mod method_prefix_tests {
             split_method_prefix(HttpMethod::Any, "GET health".into()),
             (HttpMethod::Any, "GET health".into())
         );
-    }
-}
-
-fn method_from_str(s: String) -> HttpMethod {
-    match s.as_str() {
-        "GET" => HttpMethod::Get,
-        "POST" => HttpMethod::Post,
-        "PUT" => HttpMethod::Put,
-        "PATCH" => HttpMethod::Patch,
-        "DELETE" => HttpMethod::Delete,
-        "HEAD" => HttpMethod::Head,
-        "OPTIONS" => HttpMethod::Options,
-        _ => HttpMethod::Any,
     }
 }
 
@@ -479,7 +459,7 @@ fn try_treesitter_extract(
         };
 
         let method = verb_text
-            .map(|v| method_from_str(v.to_uppercase()))
+            .map(|v| HttpMethod::parse(&v.to_uppercase()).unwrap_or(HttpMethod::Any))
             .unwrap_or(HttpMethod::Any);
 
         let line = path_idx
