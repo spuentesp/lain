@@ -26,7 +26,8 @@ All notable changes to LAIN are documented here. Versions follow
 - HTTP client and route detection run in parallel over blocks of 256 files,
   each block against one shared, read-only query set. Saleor 3-repo federation,
   cold reindex: 51.3 s to 37.5 s (clients) and 37.5 s to 30.4 s (routes). Peak
-  RSS is about 1.7 GB on that federation, up from about 1.4 GB.
+  RSS is about 2.7 GB on that federation (measured on current `dev`). Earlier
+  figures of 1.4 to 1.7 GB could not be reproduced later on the same code.
 - Field-access sensors find the enclosing function from one per-file span list
   instead of walking the whole tree for each call site.
 - Federated projection clones only the node types a cross-repo matcher can
