@@ -210,7 +210,16 @@ pub struct SnapshotManager {
 impl SnapshotManager {
     pub fn new(data_dir: &Path, cache: IndexCache) -> Arc<Self> {
         let cap = snapshot_resident_cap();
-        Self::with_cap(data_dir, cache, cap)
+        let mgr = Self::with_cap(data_dir, cache, cap);
+        // §8.4: records not accessed within the retention window are deleted.
+        // Run once when the manager is built, so the window is enforced for
+        // every server start and every workspace handoff that builds one.
+        match mgr.apply_retention() {
+            Ok(0) => {}
+            Ok(n) => info!("snapshot retention removed {n} expired record(s)"),
+            Err(e) => warn!("snapshot retention could not run: {e}"),
+        }
+        mgr
     }
 
     /// Constructor with an explicit residency cap. The MCP server
@@ -2004,6 +2013,37 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn building_the_manager_removes_records_past_the_retention_window() {
+        use super::super::record::{snapshot_path, write_record, SnapshotRecord, SnapshotState};
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |id: &str, last_access_unix: i64| SnapshotRecord {
+            id: id.into(),
+            repos: BTreeMap::new(),
+            excluded: vec![],
+            refs_: BTreeMap::new(),
+            join_config: serde_json::json!({}),
+            config_hash: "h".into(),
+            analyzer_version: "0.9.0+c1".into(),
+            state: SnapshotState::Pending,
+            repo_states: BTreeMap::new(),
+            created_unix: last_access_unix,
+            last_access_unix,
+        };
+        let now = now_unix();
+        write_record(dir.path(), &mk("snap_old", 100)).unwrap();
+        write_record(dir.path(), &mk("snap_recent", now)).unwrap();
+        let _mgr = SnapshotManager::new(dir.path(), IndexCache::new(dir.path()));
+        assert!(
+            !snapshot_path(dir.path(), "snap_old").exists(),
+            "expired record is deleted"
+        );
+        assert!(
+            snapshot_path(dir.path(), "snap_recent").exists(),
+            "recent record is kept"
+        );
+    }
 
     #[test]
     fn env_defaults() {
