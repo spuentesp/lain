@@ -123,9 +123,8 @@ pub fn scan_workspace_entry_points(
 /// silently skips it; the next scan will pick it up).
 fn find_function_node(graph: &GraphDatabase, path: &str, name: &str) -> Option<GraphNode> {
     graph
-        .get_all_nodes()
+        .get_nodes_in_path(path)
         .into_iter()
-        .filter(|n| n.path == path)
         .filter(|n| n.name == name)
         .filter(|n| matches!(n.node_type, NodeType::Function | NodeType::Method))
         .min_by(|a, b| a.id.cmp(&b.id))

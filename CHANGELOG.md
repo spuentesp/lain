@@ -3,6 +3,53 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.12.0 — 2026-10-25
+
+### Fixed
+
+- Large-workspace indexing: GraphQL SDL keyword probes now reuse validated
+  strings instead of validating the entire schema for every token. HTTP route
+  and client scans reuse compiled tree-sitter queries per framework within a
+  scan, and rebuild them after loading each scan's configuration. Fixed router
+  prefix regexes and bundled WebSocket idioms compile once instead of once
+  per file. Event scans compile topic and schedule idioms once per language
+  per scan, preserving repository-local overrides. Field-access scans collect
+  outbound call sites once instead of cloning the graph for each file. Source
+  locations, provider/consumer facts and per-repository overrides retain their
+  existing semantics.
+
+### Changed
+
+- Reindex defers the whole-graph checkpoint to one write at the end instead of
+  rewriting the federated graph after every batch. Saleor 3-repo federation,
+  cold reindex: 54.8 s to 52.5 s.
+- HTTP client and route detection run in parallel over blocks of 256 files,
+  each block against one shared, read-only query set. Saleor 3-repo federation,
+  cold reindex: 51.3 s to 37.5 s (clients) and 37.5 s to 30.4 s (routes). Peak
+  RSS is about 2.7 GB on that federation (measured on current `dev`). Earlier
+  figures of 1.4 to 1.7 GB could not be reproduced later on the same code.
+- Field-access sensors find the enclosing function from one per-file span list
+  instead of walking the whole tree for each call site.
+- Federated projection clones only the node types a cross-repo matcher can
+  use.
+- mimalloc is the global allocator.
+- Optional shared tree-sitter parse cache, bounded by `parse_cache_mb` in the
+  federation config (default `0`, disabled). With the cache at 256 MB, cold
+  reindex is faster by about 12 % and RSS grows by about 1.2 GB, so it stays
+  off by default.
+
+### Fixed
+
+- The federated graph content is now the same on every reindex of the same
+  tree. Persisted index maps and federated repo maps are ordered, ingestion
+  applies chunk results in chunk order, path removals run in sorted order, and
+  a name shared by several nodes in one repo resolves to the smallest id. The
+  file bytes still differ between runs (node-index order and the
+  `last_lsp_sync` / `last_git_sync` stamps); `canonical_federated_graph_diff`
+  compares graphs by content and ignores the stamps. The on-disk format is
+  unchanged, so no `FEDERATION_GRAPH_VERSION` bump and no `lain reindex` is
+  needed.
+
 ## 0.11.0 — 2026-10-20
 
 ### Added

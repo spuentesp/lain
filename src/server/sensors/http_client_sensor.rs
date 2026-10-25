@@ -52,9 +52,17 @@ use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::patterns::{FrameworkDef, Patterns};
 use crate::server::sensors::util::{language_for, parse_for_lang, Lang};
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::path::Path;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
+
+type OutboundQueries = BTreeMap<String, Option<Query>>;
+
+#[cfg(test)]
+thread_local! {
+    static QUERY_COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 // ─── Public sensor shape ───────────────────────────────────────────────
 
@@ -120,6 +128,7 @@ pub fn scan_workspace_clients(
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     let patterns = Patterns::with_overrides(root)?;
     let patterns: &Patterns = &patterns;
+    let mut queries = OutboundQueries::new();
 
     let by_lang = |p: &Path| match p.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "py" => Some(Lang::Python),
@@ -132,13 +141,36 @@ pub fn scan_workspace_clients(
         "kt" | "kts" => Some(Lang::Kotlin),
         _ => None,
     };
-    for (path, content, lang) in crate::server::sensors::util::scan_files(root, by_lang) {
-        let calls = detect_calls(&path, &content, lang, patterns);
-        for mut call in calls {
-            call.path = graph_path(root, Path::new(&call.path));
-            let (nodes, edges) = build_graph(graph, &call, namespace);
-            all_nodes.extend(nodes);
-            all_edges.extend(edges);
+    // Detection is independent per file, so each block of files runs on the
+    // rayon pool against the shared, read-only query set. Blocks keep memory
+    // bounded and come back in file order, so the graph build below sees the
+    // same sequence as the old sequential loop.
+    const DETECT_BLOCK_FILES: usize = 256;
+    let mut files = crate::server::sensors::util::scan_files(root, by_lang);
+    loop {
+        let block: Vec<_> = files.by_ref().take(DETECT_BLOCK_FILES).collect();
+        if block.is_empty() {
+            break;
+        }
+        for (_, _, lang) in &block {
+            ensure_outbound_queries(&mut queries, patterns, *lang);
+        }
+        let shared = &queries;
+        let detected: Vec<Vec<HttpClientCall>> = block
+            .par_iter()
+            .map(|(path, content, lang)| {
+                crate::server::sensors::util::with_current_patterns(patterns, || {
+                    detect_calls_with_queries(path, content, *lang, patterns, shared)
+                })
+            })
+            .collect();
+        for calls in detected {
+            for mut call in calls {
+                call.path = graph_path(root, Path::new(&call.path));
+                let (nodes, edges) = build_graph(graph, &call, namespace);
+                all_nodes.extend(nodes);
+                all_edges.extend(edges);
+            }
         }
     }
 
@@ -179,6 +211,42 @@ pub fn detect_calls(
     lang: Lang,
     patterns: &Patterns,
 ) -> Vec<HttpClientCall> {
+    let mut queries = OutboundQueries::new();
+    ensure_outbound_queries(&mut queries, patterns, lang);
+    detect_calls_with_queries(path, content, lang, patterns, &queries)
+}
+
+// A cache belongs to one scan's immutable Patterns, never to a process or
+// pointer address. The next scan loads overrides before creating a new cache.
+/// Compile every outbound query for `lang` that is not compiled yet. Runs on
+/// the scan's own thread, before the parallel detection that reads the set, so
+/// each query compiles once per scan.
+fn ensure_outbound_queries(queries: &mut OutboundQueries, patterns: &Patterns, lang: Lang) {
+    let grammar = language_for(lang);
+    let lang_yaml = lang_yaml_key(lang);
+    for framework in patterns.outbound_patterns(lang) {
+        let Some(body) = compiled_query_body(patterns, lang_yaml, framework.id.as_str()) else {
+            continue;
+        };
+        if !has_query_content(body) {
+            continue;
+        }
+        let key = format!("{lang_yaml}/{}", framework.id);
+        queries.entry(key).or_insert_with(|| {
+            #[cfg(test)]
+            QUERY_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
+            Query::new(&grammar, body).ok()
+        });
+    }
+}
+
+fn detect_calls_with_queries(
+    path: &Path,
+    content: &str,
+    lang: Lang,
+    patterns: &Patterns,
+    queries: &OutboundQueries,
+) -> Vec<HttpClientCall> {
     let Some(tree) = parse_for_lang(lang, content) else {
         return Vec::new();
     };
@@ -187,7 +255,6 @@ pub fn detect_calls(
     let ctx = FileContext::collect(tree.root_node(), src, lang);
 
     let mut calls: Vec<HttpClientCall> = Vec::new();
-    let grammar = language_for(lang);
     let lang_yaml = lang_yaml_key(lang);
 
     // Track calls we've already emitted by (path, line) so the
@@ -205,7 +272,8 @@ pub fn detect_calls(
         if !has_query_content(body) {
             continue;
         }
-        let Ok(query) = Query::new(&grammar, body) else {
+        let key = format!("{lang_yaml}/{}", framework.id);
+        let Some(query) = queries.get(&key).and_then(Option::as_ref) else {
             continue;
         };
 
@@ -216,7 +284,7 @@ pub fn detect_calls(
         let url_idx = query.capture_index_for_name("url");
 
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&query, tree.root_node(), src);
+        let mut matches = cursor.matches(query, tree.root_node(), src);
 
         while let Some(m) = matches.next() {
             let call_node = call_idx.and_then(|i| m.nodes_for_capture_index(i).next());
@@ -1972,6 +2040,67 @@ fn enclosing_sends_http_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_reuses_outbound_queries_and_reloads_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..16 {
+            std::fs::write(
+                root.path().join(format!("client_{i}.py")),
+                format!(
+                    "import requests\nresponse = requests.get(\"http://orders/api/order{i}\")\n"
+                ),
+            )
+            .unwrap();
+        }
+        let graph = GraphDatabase::new(&root.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+        let repo = RepoId::new("outbound-query-reuse").unwrap();
+        let patterns = Patterns::patterns();
+        let frameworks: Vec<_> = patterns.outbound_patterns(Lang::Python).collect();
+        QUERY_COMPILE_COUNT.with(|count| count.set(0));
+        assert_eq!(
+            scan_workspace_clients(&graph, root.path(), &ns, &repo).unwrap(),
+            16
+        );
+        let compilations = QUERY_COMPILE_COUNT.with(std::cell::Cell::get);
+        assert!(
+            compilations > 0 && compilations <= frameworks.len(),
+            "{compilations} compilations for {} frameworks and 16 files",
+            frameworks.len()
+        );
+        assert_eq!(
+            graph
+                .get_all_nodes()
+                .iter()
+                .filter(|node| node.node_type == NodeType::HttpClientCall)
+                .count(),
+            16
+        );
+
+        let overrides = root.path().join(".lain/patterns/python");
+        std::fs::create_dir_all(&overrides).unwrap();
+        for framework in frameworks {
+            std::fs::write(
+                overrides.join(format!("{}.scm", framework.id)),
+                "; no outbound query\n",
+            )
+            .unwrap();
+        }
+        QUERY_COMPILE_COUNT.with(|count| count.set(0));
+        assert_eq!(
+            scan_workspace_clients(&graph, root.path(), &ns, &repo).unwrap(),
+            0
+        );
+        assert_eq!(QUERY_COMPILE_COUNT.with(std::cell::Cell::get), 0);
+        assert!(
+            !graph
+                .get_all_nodes()
+                .iter()
+                .any(|node| node.node_type == NodeType::HttpClientCall),
+            "updated .scm bodies must retract the previous consumer facts"
+        );
+    }
 
     #[test]
     fn truncate_url_expr_caps_at_200_chars() {

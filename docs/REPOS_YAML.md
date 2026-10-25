@@ -44,6 +44,7 @@ block startup.
 data_dir: <path>                    # optional, default: ./.lain/federation (relative to this file)
 max_concurrent_indexers: <usize>    # optional, default: 8
 ready_threshold: <float 0.0..1.0>   # optional, default: 0.8
+parse_cache_mb: <usize>             # optional, default: 0 (disabled)
 share: <bool>                       # optional, default: true (false = private instance)
 repos:
   - id: <string>                    # required
@@ -55,6 +56,7 @@ repos:
 | `data_dir`             | path string      | no       | `./.lain/federation`   | Per-repo clones and `.lain/graph.bin`-style state files live here. Each repo gets a subdirectory named after its `id`. |
 | `max_concurrent_indexers` | unsigned int  | no       | `8`                    | Caps how many repos index in parallel at startup. |
 | `ready_threshold`      | float 0.0–1.0    | no       | `0.8`                  | Fraction of repos that must reach `Ready` health before the federation reports `healthy`. |
+| `parse_cache_mb`       | unsigned int MB | no     | `0`                    | Budget for the shared tree-sitter parse cache (ingestion and sensors reuse parse trees for identical text). `0` disables it. Process-wide: the last config loaded sets it. On a 3-repo, ~3000-file federation, `256` cut cold reindex by about 12 % but added about 1.2 GB RSS, so it stays off unless you have memory to spare. |
 | `share`                | bool             | no       | `true`                 | Whether the instance takes part in the shared-daemon pool (pinned at startup — edit + restart to change). `false` = private instance: `lain mcp` discovery skips it (it reports `shared: false` on `lain/daemon_info` and is never attached to) and `add_workspaces` refuses the workspace handoff with a typed `not_shared` error. Same property as `lain mcp --no-share` / `LAIN_MCP_NO_SHARE=1`. A non-bool value is a config error. |
 | `repos`                | list of `RepoConfig` | yes   | —                      | At least one repo is required for a useful federation. |
 

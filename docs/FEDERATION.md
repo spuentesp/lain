@@ -377,6 +377,17 @@ lain reindex --config ./repos.yaml          # all workspaces
 lain reindex --config ./repos.yaml --workspace backend-team
 ```
 
+`lain reindex` rebuilds every repo's graph from source and writes one
+`federated_graph.bin`. The result is deterministic in content: two runs on the
+same tree produce the same nodes and edges. The file bytes are not identical
+between runs, because node-index order and the `last_lsp_sync` / `last_git_sync`
+timestamps vary. Compare two graphs by content, not by hash. The on-disk
+format is unchanged, so an existing graph does not need a reindex to load.
+
+On a 3-repo Saleor federation (about 91k nodes, 232k edges), cold reindex takes
+about 30 s and peaks near 2.7 GB RSS (measured on current `dev`). The optional parse cache (`parse_cache_mb`
+in `repos.yaml`) is off by default; see `docs/REPOS_YAML.md`.
+
 It backs the old graph up to `federated_graph.bin.bak`, removes stale
 sidecar state, and rebuilds every repo's per-repo graph plus the
 federation backend. See `CHANGELOG.md` for which releases bump the

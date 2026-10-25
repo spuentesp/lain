@@ -4,7 +4,7 @@ use crate::federation::repo_source::RepoSource;
 use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::{HierarchicalSymbol, LspPool};
-use crate::schema::{GraphEdge, GraphNode};
+use crate::schema::{GraphEdge, GraphNode, NodeType};
 use crate::server::ingest::ingestion::index_one_repo;
 use crate::server::overlay::VolatileOverlay;
 use parking_lot::RwLock;
@@ -501,6 +501,11 @@ impl RepoIndex {
 
     pub fn nodes(&self) -> Vec<GraphNode> {
         self.db.all_nodes()
+    }
+
+    /// Only the nodes whose type is in `types`; see [`GraphDatabase::nodes_of_types`].
+    pub fn nodes_of_types(&self, types: &[NodeType]) -> Vec<GraphNode> {
+        self.db.nodes_of_types(types)
     }
 
     pub fn edges(&self) -> Vec<GraphEdge> {
