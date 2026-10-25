@@ -437,7 +437,7 @@ impl SnapshotManager {
         if let Ok(Some(record)) = read_record(&self.data_dir, &id) {
             if matches!(record.state, SnapshotState::Ready | SnapshotState::Failed) {
                 let _ = touch_last_access(&self.data_dir, &id, now_unix());
-                let snapshot = self.build_view(&record).await;
+                let snapshot = build_view_sync(&record);
                 return Ok(PrepareOutcome {
                     record,
                     view: snapshot,
@@ -531,7 +531,7 @@ impl SnapshotManager {
                     write_record(&self.data_dir, &record)
                         .map_err(|e| PrepareError::Other(e.to_string()))?;
                     let _ = touch_last_access(&self.data_dir, &id, now_unix());
-                    let view = self.build_view(&record).await;
+                    let view = build_view_sync(&record);
                     return Ok(PrepareOutcome { record, view });
                 }
                 _ => {}
@@ -541,7 +541,7 @@ impl SnapshotManager {
                 // state and return what we have.
                 write_record(&self.data_dir, &record)
                     .map_err(|e| PrepareError::Other(e.to_string()))?;
-                let view = self.build_view(&record).await;
+                let view = build_view_sync(&record);
                 return Ok(PrepareOutcome { record, view });
             }
             // Sleep briefly then re-check. The wait/notify pair
@@ -604,13 +604,13 @@ impl SnapshotManager {
             match record.state {
                 SnapshotState::Ready | SnapshotState::Failed => {
                     let _ = touch_last_access(&self.data_dir, snapshot_id, now_unix());
-                    let view = self.build_view(&record).await;
+                    let view = build_view_sync(&record);
                     return Ok(PrepareOutcome { record, view });
                 }
                 _ => {}
             }
             if Instant::now() >= deadline {
-                let view = self.build_view(&record).await;
+                let view = build_view_sync(&record);
                 return Ok(PrepareOutcome { record, view });
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -678,40 +678,6 @@ impl SnapshotManager {
         };
         let view = build_view_sync(&record);
         PrepareOutcome { record, view }
-    }
-
-    /// Build the JSON-shaped view the tool returns. Wraps the
-    /// record + per-repo state + readiness in a stable shape
-    /// (`§12`).
-    async fn build_view(self: &Arc<Self>, record: &SnapshotRecord) -> serde_json::Value {
-        let repos_view: Vec<serde_json::Value> = record
-            .repo_states
-            .iter()
-            .map(|(repo, state)| match state {
-                RepoSnapshotState::Cached { commit } => {
-                    serde_json::json!({"repo": repo, "commit": commit, "state": "cached"})
-                }
-                RepoSnapshotState::Queued { commit } => {
-                    serde_json::json!({"repo": repo, "commit": commit, "state": "queued"})
-                }
-                RepoSnapshotState::Indexing { commit } => {
-                    serde_json::json!({"repo": repo, "commit": commit, "state": "indexing"})
-                }
-                RepoSnapshotState::Failed { commit, error } => {
-                    serde_json::json!({"repo": repo, "commit": commit, "state": "failed", "error": error})
-                }
-                RepoSnapshotState::Excluded => {
-                    serde_json::json!({"repo": repo, "state": "excluded"})
-                }
-            })
-            .collect();
-        serde_json::json!({
-            "snapshot": record.id,
-            "state": record.state.as_str(),
-            "repos": repos_view,
-            "created_unix": record.created_unix,
-            "last_access_unix": record.last_access_unix,
-        })
     }
 
     /// Read each job's status and roll it up into the snapshot's
