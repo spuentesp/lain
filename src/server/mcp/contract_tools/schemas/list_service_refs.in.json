@@ -22,7 +22,7 @@
         "production",
         "test",
         "configuration",
-      "documentation"
+        "documentation"
       ],
       "description": "Filter by where the literal lives."
     },
@@ -44,6 +44,16 @@
       "minimum": 1,
       "maximum": 1000,
       "description": "Max items per page (default 100, max 1000)."
+    },
+    "suggestions": {
+      "type": "boolean",
+      "description": "Also return suggested routes for production references that match no route of their service. Suggestions are proposals with a score, never links. Needs an installed embedding model."
+    },
+    "min_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Lowest score a suggestion may have. Default 0.6."
     }
   },
   "required": [

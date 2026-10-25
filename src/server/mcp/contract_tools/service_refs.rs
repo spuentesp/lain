@@ -10,9 +10,14 @@ use super::envelope::{check_api_version, error_outcome, outcome, success_envelop
 use super::paging::{apply_limit, fingerprint};
 use super::view::{resolve_view, snapshot_label};
 use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
+use crate::federation::contracts::index::ContractIndex;
+use crate::federation::contracts::model::ServiceName;
 use crate::federation::contracts::service_refs::{RefOutcome, ServiceRef, Usage};
+use crate::federation::contracts::suggest::suggest_routes;
+use crate::federation::federated_index::FederatedIndex;
 use crate::server::mcp::handler::McpContext;
 use serde_json::{json, Map, Value};
+use std::sync::Arc;
 use std::time::Instant;
 
 inventory::submit!(ContractToolEntry {
@@ -22,6 +27,10 @@ inventory::submit!(ContractToolEntry {
 
 const USAGE_VALUES: &[&str] = &["production", "test", "configuration", "documentation"];
 const OUTCOME_VALUES: &[&str] = &["resolved", "ambiguous", "unknown"];
+/// Default score a suggestion must reach. Matches the on-disk measurement.
+const DEFAULT_MIN_SCORE: f32 = 0.6;
+/// Routes proposed per reference, best first.
+const SUGGESTIONS_PER_REF: usize = 2;
 
 fn object_or_empty(args: Value) -> Map<String, Value> {
     match args {
@@ -69,6 +78,59 @@ fn outcome_kind(o: &RefOutcome) -> &'static str {
         RefOutcome::Ambiguous(_) => "ambiguous",
         RefOutcome::UnknownHost => "unknown",
     }
+}
+
+/// Suggested routes for the production references of the repos in scope.
+/// These are proposals, never links: each carries `suggested: true` and a
+/// score. `status` says why there are none when there are none: no server
+/// context, no contract index, or no embedding model installed.
+fn suggestions_for(
+    ctx: &McpContext<'_>,
+    federation: &FederatedIndex,
+    index: Option<Arc<ContractIndex>>,
+    repo_filter: Option<&str>,
+    min_score: f32,
+) -> (Vec<Value>, &'static str) {
+    let Some(server) = ctx.server else {
+        return (Vec::new(), "no_server_context");
+    };
+    let embedder = server.ingest().embedder();
+    if embedder.is_stub() {
+        return (Vec::new(), "no_embedding_model");
+    }
+    let Some(index) = index else {
+        return (Vec::new(), "no_contract_index");
+    };
+    let routes: Vec<(ServiceName, String)> = index
+        .endpoints
+        .iter()
+        .filter_map(|(id, _)| {
+            let key = id.1.to_string();
+            key.strip_prefix("http:")
+                .map(|selector| (id.0.clone(), selector.to_string()))
+        })
+        .collect();
+    let embed = |text: &str| embedder.embed(text).ok();
+    let mut out = Vec::new();
+    for (repo_id, _) in federation.list_repos() {
+        if repo_filter.is_some_and(|r| repo_id.as_str() != r) {
+            continue;
+        }
+        let refs = federation.service_refs(&repo_id);
+        for s in suggest_routes(&refs, &routes, &embed, min_score, SUGGESTIONS_PER_REF) {
+            out.push(json!({
+                "repo": repo_id.as_str(),
+                "path": s.path,
+                "line": s.line,
+                "url": s.url,
+                "service": s.service.0,
+                "route": s.route,
+                "score": s.score,
+                "suggested": true,
+            }));
+        }
+    }
+    (out, "ok")
 }
 
 fn ref_json(repo: &str, r: &ServiceRef) -> Value {
@@ -154,6 +216,24 @@ async fn run_list_service_refs(
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    let want_suggestions = args_map
+        .get("suggestions")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let min_score = match args_map.get("min_score").and_then(|v| v.as_f64()) {
+        None => DEFAULT_MIN_SCORE,
+        Some(x) if (0.0..=1.0).contains(&x) => x as f32,
+        Some(x) => {
+            return Err(error_outcome(
+                "invalid_argument",
+                format!("min_score {x} is outside [0, 1]"),
+                Some(json!({"arg": "min_score", "reason": "out_of_range"})),
+                &label,
+                started,
+            ))
+        }
+    };
+
     let resolved = resolve_view(ctx, &args_map, started).await?;
     let limit = parse_limit(&args_map, started)?;
     let cursor = parse_cursor(&args_map, started)?;
@@ -198,6 +278,17 @@ async fn run_list_service_refs(
     let mut data = json!({"items": page});
     if let Some(tok) = next_cursor {
         data["cursor"] = json!(tok);
+    }
+    if want_suggestions {
+        let (suggestions, status) = suggestions_for(
+            ctx,
+            federation,
+            resolved.index().cloned(),
+            repo_filter.as_deref(),
+            min_score,
+        );
+        data["suggestions"] = json!(suggestions);
+        data["suggestions_status"] = json!(status);
     }
     data["scope"] = resolved.scope().clone();
     let envelope = success_envelope_with_view(

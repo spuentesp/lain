@@ -17,6 +17,14 @@ All notable changes to LAIN are documented here. Versions follow
   the state. Models install under the user data directory, or `LAIN_MODEL_DIR`.
   Installers skip the model when `LAIN_SKIP_MODEL_INSTALL=1` is set.
 
+### Added
+
+- `list_service_refs` takes `suggestions: true` to also return suggested routes
+  for production references that match no route of their service. Each carries
+  `suggested: true` and a score; they are proposals, never links. `min_score`
+  (default 0.6) sets the cut-off. `suggestions_status` says why there are none
+  when a server context, a contract index or an embedding model is missing.
+
 ### Changed
 
 - Service references from prose (READMEs, docs, changelogs) are classified as

@@ -11,7 +11,6 @@ use crate::federation::contracts::service_refs::{RefOutcome, ServiceRef, Usage};
 /// One proposed route for a reference. Not a fact about the code.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteSuggestion {
-    pub repo: String,
     pub path: String,
     pub line: u32,
     pub url: String,
@@ -130,7 +129,6 @@ pub fn suggest_routes(
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         for (score, sel) in scored.into_iter().take(top_k) {
             out.push(RouteSuggestion {
-                repo: String::new(),
                 path: r.path.clone(),
                 line: r.line,
                 url: r.url.clone(),

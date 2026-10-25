@@ -1688,6 +1688,12 @@
           "minimum": 1,
           "type": "integer"
         },
+        "min_score": {
+          "description": "Lowest score a suggestion may have. Default 0.6.",
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
         "outcome": {
           "description": "Filter by what the host identifies.",
           "enum": [
@@ -1707,6 +1713,10 @@
             "live"
           ],
           "type": "string"
+        },
+        "suggestions": {
+          "description": "Also return suggested routes for production references that match no route of their service. Suggestions are proposals with a score, never links. Needs an installed embedding model.",
+          "type": "boolean"
         },
         "usage": {
           "description": "Filter by where the literal lives.",
@@ -1814,6 +1824,60 @@
         },
         "scope": {
           "type": "object"
+        },
+        "suggestions": {
+          "description": "Only when `suggestions` is true. Proposals, never links.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "line": {
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              },
+              "route": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              },
+              "service": {
+                "type": "string"
+              },
+              "suggested": {
+                "const": true,
+                "type": "boolean"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "path",
+              "line",
+              "url",
+              "service",
+              "route",
+              "score",
+              "suggested"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "suggestions_status": {
+          "enum": [
+            "ok",
+            "no_server_context",
+            "no_contract_index",
+            "no_embedding_model"
+          ],
+          "type": "string"
         }
       },
       "required": [

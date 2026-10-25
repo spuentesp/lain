@@ -60,7 +60,7 @@
               "production",
               "test",
               "configuration",
-            "documentation"
+              "documentation"
             ]
           },
           "self_reference": {
@@ -88,6 +88,60 @@
     },
     "scope": {
       "type": "object"
+    },
+    "suggestions": {
+      "type": "array",
+      "description": "Only when `suggestions` is true. Proposals, never links.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          },
+          "suggested": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "repo",
+          "path",
+          "line",
+          "url",
+          "service",
+          "route",
+          "score",
+          "suggested"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "suggestions_status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "no_server_context",
+        "no_contract_index",
+        "no_embedding_model"
+      ]
     }
   },
   "required": [
