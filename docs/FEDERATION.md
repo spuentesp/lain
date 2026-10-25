@@ -385,7 +385,7 @@ timestamps vary. Compare two graphs by content, not by hash. The on-disk
 format is unchanged, so an existing graph does not need a reindex to load.
 
 On a 3-repo Saleor federation (about 91k nodes, 232k edges), cold reindex takes
-about 30 s and peaks near 1.7 GB RSS. The optional parse cache (`parse_cache_mb`
+about 30 s and peaks near 2.7 GB RSS (measured on current `dev`). The optional parse cache (`parse_cache_mb`
 in `repos.yaml`) is off by default; see `docs/REPOS_YAML.md`.
 
 It backs the old graph up to `federated_graph.bin.bak`, removes stale
