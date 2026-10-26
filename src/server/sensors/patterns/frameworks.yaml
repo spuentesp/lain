@@ -549,6 +549,10 @@ languages:
       kind: topic_consumer
       broker: amqp
       path_regex: '\.setQueueNames\s*\(\s*(?:this\.)?(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: kafka-consumer-subscribe-list-java
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '\.subscribe\s*\(\s*(?:Arrays\.asList|Collections\.singletonList|List\.of)\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
   csharp:
     - id: aspnet-route
       kind: route
@@ -569,6 +573,14 @@ languages:
       deny_methods: [IsSuccessStatusCode, StatusCode, Headers, GetValues, DownloadString, DownloadStringTaskAsync]
 
   # ── Ruby ─────────────────────────────────────────────────────────
+    - id: confluent-consumer-subscribe
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '(?i)consumer\w*\s*\.\s*Subscribe\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: confluent-producer-produce
+      kind: topic_producer
+      broker: kafka
+      path_regex: '(?i)producer\w*\s*\.\s*Produce(?:Async)?\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
   ruby:
     - id: sinatra-route
       kind: route
@@ -637,3 +649,11 @@ languages:
       display_name: okhttp
       lib_match: '^OkHttpClient$'
       deny_methods: [statusCode, call, headers, body]
+    - id: kafka-consumer-subscribe-list
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '\bsubscribe\s*\(\s*listOf\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: kafka-record-producer
+      kind: topic_producer
+      broker: kafka
+      path_regex: '\bProducerRecord\s*(?:<[^>]*>)?\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'

@@ -213,6 +213,60 @@ impl ScalarBindingIndex {
     }
 }
 
+/// What the scalar channel says about one variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvLookup {
+    /// Every source gives this one value.
+    Resolved(String),
+    /// Sources disagree; no value is safe to use.
+    Ambiguous,
+    /// No source names the variable.
+    Unmapped,
+}
+
+impl ScalarBindingIndex {
+    /// Classify `var` against the scalar channel.
+    pub fn lookup(&self, var: &str) -> EnvLookup {
+        let distinct = self.distinct_values(var);
+        match distinct.len() {
+            0 => EnvLookup::Unmapped,
+            1 => EnvLookup::Resolved(distinct[0].to_string()),
+            _ => EnvLookup::Ambiguous,
+        }
+    }
+}
+
+/// An environment read inside a source expression: the variable it names,
+/// and the literal default written next to it (`?? "x"`, `|| "x"`, `?: "x"`,
+/// `, "x")`, `unwrap_or("x")`). `None` when the expression reads no variable by
+/// name. Covers C# and TS `??`, Kotlin `?:`, JS `||`, Python `os.getenv` /
+/// `os.environ`, Go and Java `getenv`, Rust `env::var`, and `process.env.X`.
+pub fn env_read_in(expr: &str) -> Option<(String, Option<String>)> {
+    static READ: OnceLock<regex::Regex> = OnceLock::new();
+    static DEFAULT: OnceLock<regex::Regex> = OnceLock::new();
+    let read = READ.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?:GetEnvironmentVariable|[Gg]etenv|env::var|environ(?:\.get)?)\s*[(\[]\s*"(\w+)"|process\.env\.(\w+)"#,
+        )
+        .expect("env read pattern")
+    });
+    let default = DEFAULT.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?:\?\?|\|\||\?:|,|unwrap_or(?:_else)?\s*\((?:\s*\|_\|)?)\s*(?:"([^"]*)"|'([^']*)'|`([^`]*)`)"#,
+        )
+        .expect("env default pattern")
+    });
+    let caps = read.captures(expr)?;
+    let var = caps.get(1).or_else(|| caps.get(2))?.as_str().to_string();
+    let end = caps.get(0)?.end();
+    let rest = expr[end..].split(';').next().unwrap_or("");
+    let literal = default
+        .captures(rest)
+        .and_then(|c| c.get(1).or_else(|| c.get(2)).or_else(|| c.get(3)))
+        .map(|m| m.as_str().to_string());
+    Some((var, literal))
+}
+
 /// Record that the joiner referenced `var` but the env_sensor has
 /// no binding for it (in the per-repo index for `root`). The
 /// orchestrator retrieves these via [`take_unmapped_records`] after
@@ -1174,6 +1228,75 @@ spec:
 #[cfg(test)]
 mod scalar_tests {
     use super::*;
+
+    #[test]
+    fn env_read_extracts_the_name_and_the_default_per_language() {
+        let cases = [
+            (
+                r#"Environment.GetEnvironmentVariable("KAFKA_TOPIC") ?? "orders""#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"System.getenv("KAFKA_TOPIC") ?: "orders""#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"process.env.KAFKA_TOPIC || 'orders'"#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"os.getenv("KAFKA_TOPIC", "orders")"#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"os.environ.get("KAFKA_TOPIC", "orders")"#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"std::env::var("KAFKA_TOPIC").unwrap_or_else(|_| "orders".into())"#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (r#"System.getenv("KAFKA_TOPIC")"#, "KAFKA_TOPIC", None),
+            (r#"os.environ["KAFKA_TOPIC"]"#, "KAFKA_TOPIC", None),
+        ];
+        for (expr, var, default) in cases {
+            let got = env_read_in(expr).unwrap_or_else(|| panic!("no read in {expr}"));
+            assert_eq!(got.0, var, "{expr}");
+            assert_eq!(got.1.as_deref(), default, "{expr}");
+        }
+        assert!(
+            env_read_in(r#""orders""#).is_none(),
+            "a plain literal reads no variable"
+        );
+    }
+
+    #[test]
+    fn lookup_classifies_resolved_ambiguous_and_unmapped() {
+        let dir = workspace(&[(".env", "KAFKA_TOPIC=orders\n")]);
+        let idx = index_of(dir.path());
+        assert_eq!(
+            idx.lookup("KAFKA_TOPIC"),
+            EnvLookup::Resolved("orders".into())
+        );
+        assert_eq!(idx.lookup("OTHER"), EnvLookup::Unmapped);
+        let dir = workspace(&[
+            (".env", "KAFKA_TOPIC=orders\n"),
+            (
+                "compose.yaml",
+                "services:\n  x:\n    environment:\n      KAFKA_TOPIC: orders-v2\n",
+            ),
+        ]);
+        assert_eq!(
+            index_of(dir.path()).lookup("KAFKA_TOPIC"),
+            EnvLookup::Ambiguous
+        );
+    }
 
     fn workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

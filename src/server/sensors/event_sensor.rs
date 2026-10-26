@@ -65,6 +65,7 @@ use crate::federation::contracts::coverage::UnresolvedRecord;
 use crate::federation::contracts::model::{SourceSite, UnresolvedReason};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::env_sensor::{self, EnvLookup, ScalarBindingIndex};
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::payload_schema::{parse_avro_schema, parse_json_schema};
 use crate::server::sensors::util::{self, Lang};
@@ -190,6 +191,8 @@ pub fn scan_workspace_event_with_report(
     // share the hub).
     let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
     let mut dynamic_producers = DynamicProducers::default();
+    // The env sensor runs first (phase 0), so its scalar channel is populated.
+    let env = env_sensor::scalar_bindings_for(root);
 
     let any_ext = |p: &Path| {
         Some(
@@ -214,7 +217,7 @@ pub fn scan_workspace_event_with_report(
                 idioms.len() - 1
             });
         let path_str = graph_path(root, &path);
-        let constants = collect_same_file_constants(&content, ext);
+        let constants = collect_same_file_constants(&content, ext, &env);
         let sites = detect_sites(&content, ext, &constants, &idioms[index].1);
         for site in sites
             .iter()
@@ -438,7 +441,11 @@ fn scan_payload_schemas(
 /// module level (Python), and `[modifiers] Type NAME = "value";` (Java). Keys must be identifiers and values must be
 /// string literals. Both single- and double-quoted forms are
 /// supported.
-fn collect_same_file_constants(content: &str, ext: &str) -> BTreeMap<String, String> {
+fn collect_same_file_constants(
+    content: &str,
+    ext: &str,
+    env: &ScalarBindingIndex,
+) -> BTreeMap<String, String> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     for line in content.lines() {
         let trimmed = line.trim_start();
@@ -450,44 +457,63 @@ fn collect_same_file_constants(content: &str, ext: &str) -> BTreeMap<String, Str
             None => continue,
         };
         let rhs = rhs.trim().trim_end_matches(';').trim();
+        let Some(name) = constant_name(lhs, ext) else {
+            continue;
+        };
+        // A literal is its own value. An environment read takes the value the
+        // env channel resolved; a conflict yields no constant, and a missing
+        // variable falls back to the literal default written in the code.
         let value = match extract_string_literal(rhs) {
             Some(v) => v,
-            None => continue,
+            None => match env_fallback(rhs, env) {
+                Some(v) => v,
+                None => continue,
+            },
         };
-        // Strip TS/JS keywords; Python has no keyword on bare assignments.
-        let kw_stripped = lhs
-            .trim()
-            .strip_prefix("const ")
-            .or_else(|| lhs.trim().strip_prefix("let "))
-            .or_else(|| lhs.trim().strip_prefix("var "));
-        let name = match kw_stripped {
-            Some(n) => n.trim().to_string(),
-            None => {
-                if ext == "py" {
-                    let n = lhs.trim();
-                    if !n.is_empty() && is_ident(n) && !n.contains(' ') {
-                        n.to_string()
-                    } else {
-                        continue;
-                    }
-                } else if ext == "java" {
-                    // Java field or local: `[modifiers] Type name = "value";`.
-                    // The name is the last token; the type and modifiers come before it.
-                    match lhs.split_whitespace().collect::<Vec<_>>().as_slice() {
-                        [_, .., name] => (*name).to_string(),
-                        _ => continue,
-                    }
-                } else {
-                    continue;
-                }
-            }
-        };
-        if name.is_empty() || !is_ident(&name) {
-            continue;
-        }
         out.insert(name, value);
     }
     out
+}
+
+/// The name a constant declaration binds, by language. Returns `None` when the
+/// left-hand side is not a plain declaration of an identifier.
+fn constant_name(lhs: &str, ext: &str) -> Option<String> {
+    let lhs = lhs.trim();
+    let name = match ext {
+        "py" => lhs.to_string(),
+        "kt" | "kts" => lhs
+            .split(':')
+            .next()?
+            .split_whitespace()
+            .last()?
+            .to_string(),
+        "java" | "cs" => {
+            // `[modifiers] Type NAME =`: the name is the last token.
+            let tokens: Vec<&str> = lhs.split_whitespace().collect();
+            if tokens.len() < 2 {
+                return None;
+            }
+            tokens[tokens.len() - 1].to_string()
+        }
+        _ => lhs
+            .strip_prefix("const ")
+            .or_else(|| lhs.strip_prefix("let "))
+            .or_else(|| lhs.strip_prefix("var "))?
+            .trim()
+            .to_string(),
+    };
+    (!name.is_empty() && is_ident(&name)).then_some(name)
+}
+
+/// The value of an environment read in `rhs`, as the env channel sees it, or
+/// the literal default when the channel has no value for the variable.
+fn env_fallback(rhs: &str, env: &ScalarBindingIndex) -> Option<String> {
+    let (var, default) = env_sensor::env_read_in(rhs)?;
+    match env.lookup(&var) {
+        EnvLookup::Resolved(value) => Some(value),
+        EnvLookup::Ambiguous => None,
+        EnvLookup::Unmapped => default,
+    }
 }
 
 fn extract_string_literal(s: &str) -> Option<String> {
@@ -606,6 +632,8 @@ fn ext_to_lang(ext: &str) -> Option<Lang> {
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
         "py" => Some(Lang::Python),
         "rs" => Some(Lang::Rust),
+        "cs" => Some(Lang::CSharp),
+        "kt" | "kts" => Some(Lang::Kotlin),
         "go" => Some(Lang::Go),
         "rb" => Some(Lang::Ruby),
         "java" => Some(Lang::Java),
@@ -1809,7 +1837,7 @@ producer.send({ topic: 'orders.created' });
     #[test]
     fn collect_constants_extracts_const_and_let() {
         let src = "const A = 'foo';\nlet B = \"bar\";\nconst c = 'baz';\n";
-        let constants = collect_same_file_constants(src, "ts");
+        let constants = collect_same_file_constants(src, "ts", &ScalarBindingIndex::default());
         assert_eq!(constants.get("A"), Some(&"foo".to_string()));
         assert_eq!(constants.get("B"), Some(&"bar".to_string()));
         assert_eq!(constants.get("c"), Some(&"baz".to_string()));
@@ -1818,7 +1846,7 @@ producer.send({ topic: 'orders.created' });
     #[test]
     fn collect_constants_for_python_module_level_assignments() {
         let src = "TOPIC = \"orders.created\"\n";
-        let constants = collect_same_file_constants(src, "py");
+        let constants = collect_same_file_constants(src, "py", &ScalarBindingIndex::default());
         assert_eq!(constants.get("TOPIC"), Some(&"orders.created".to_string()));
     }
 

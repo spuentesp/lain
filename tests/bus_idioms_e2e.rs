@@ -766,3 +766,115 @@ fn dynamic_consumer_is_left_to_the_joiner_sentinel() {
         "a dynamic consumer must not be counted here; got {records:?}"
     );
 }
+
+// Environment-backed topic names. The env sensor runs first and fills the
+// scalar channel; the event sensor resolves constants through it.
+
+fn fixture_files(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("lain_bus_env_{}_{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, content) in files {
+        let file = dir.join(rel);
+        std::fs::create_dir_all(file.parent().expect("parent")).unwrap();
+        std::fs::write(&file, content).unwrap();
+    }
+    dir
+}
+
+/// Topic names minted with the env channel populated for `root`.
+fn topics_with_env(root: &Path) -> Vec<String> {
+    let graph = GraphDatabase::new(&root.join("graph.bin")).expect("open graph");
+    let ns = RepoNamespace::for_test();
+    lain::server::sensors::env_sensor::scan_workspace_env(&graph, root, &ns).expect("env scan");
+    scan_workspace_event(&graph, root, &ns).expect("event scan");
+    let mut names: Vec<String> = graph
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| n.node_type == NodeType::Topic)
+        .map(|n| n.name)
+        .collect();
+    names.sort();
+    names
+}
+
+// Adapted from open-telemetry/opentelemetry-demo, src/accounting/Consumer.cs
+// (Apache-2.0): the topic is an env read with a literal default.
+#[test]
+fn csharp_env_default_topic_resolves_through_the_dotenv() {
+    let root = fixture_files(
+        "cs_accounting",
+        &[
+            (".env", "KAFKA_TOPIC=orders\n"),
+            (
+                "src/Consumer.cs",
+                "internal class Consumer {\n    private static readonly string TopicName = Environment.GetEnvironmentVariable(\"KAFKA_TOPIC\") ?? \"orders\";\n    void Run() { _consumer.Subscribe(TopicName); }\n}\n",
+            ),
+        ],
+    );
+    let names = topics_with_env(&root);
+    assert!(names.iter().any(|n| n == "kafka/orders"), "got {names:?}");
+}
+
+// Adapted from open-telemetry/opentelemetry-demo, src/fraud-detection
+// (Apache-2.0): a Kotlin `val` with an env read and a fallback, subscribed as a
+// list. No .env here, so the code default is the only source.
+#[test]
+fn kotlin_env_default_topic_resolves_to_the_fallback() {
+    let root = fixture_files(
+        "kt_fraud",
+        &[(
+            "src/main/kotlin/main.kt",
+            "val topic: String = System.getenv(\"KAFKA_TOPIC\") ?: \"orders\"\nfun run(consumer: KafkaConsumer<String, ByteArray>) {\n    consumer.subscribe(listOf(topic))\n}\n",
+        )],
+    );
+    let names = topics_with_env(&root);
+    assert!(names.iter().any(|n| n == "kafka/orders"), "got {names:?}");
+}
+
+#[test]
+fn a_conflicting_env_value_mints_no_topic_from_the_default() {
+    let root = fixture_files(
+        "cs_conflict",
+        &[
+            (".env", "KAFKA_TOPIC=orders\n"),
+            ("compose.yaml", "services:\n  x:\n    environment:\n      KAFKA_TOPIC: orders-v2\n"),
+            (
+                "src/Consumer.cs",
+                "internal class Consumer {\n    private static readonly string TopicName = Environment.GetEnvironmentVariable(\"KAFKA_TOPIC\") ?? \"orders\";\n    void Run() { _consumer.Subscribe(TopicName); }\n}\n",
+            ),
+        ],
+    );
+    let names = topics_with_env(&root);
+    assert!(
+        !names.iter().any(|n| n.starts_with("kafka/")),
+        "a conflict is not a value, and the default must not stand in for it; got {names:?}"
+    );
+}
+
+#[test]
+fn an_env_read_with_no_value_and_no_default_mints_nothing() {
+    let root = fixture_files(
+        "cs_unmapped",
+        &[(
+            "src/Consumer.cs",
+            "internal class Consumer {\n    private static readonly string TopicName = Environment.GetEnvironmentVariable(\"KAFKA_TOPIC\");\n    void Run() { _consumer.Subscribe(TopicName); }\n}\n",
+        )],
+    );
+    let names = topics_with_env(&root);
+    assert!(
+        names.is_empty(),
+        "an unmapped var with no default is not a topic; got {names:?}"
+    );
+}
+
+// Adapted from open-telemetry/opentelemetry-demo, src/fraud-detection
+// (Apache-2.0): inside `.apply { }` the call has no receiver.
+#[test]
+fn kotlin_subscribe_inside_apply_has_no_receiver_and_still_matches() {
+    expect_topic(
+        "kt_apply",
+        "src/main/kotlin/main.kt",
+        "val consumer = KafkaConsumer<String, ByteArray>(props).apply {\n    subscribe(listOf(\"orders\"))\n}\n",
+        "kafka/orders",
+    );
+}
