@@ -391,3 +391,65 @@ fn go_nats_subscribe_mints_a_nats_topic() {
         "nats/orders.created",
     );
 }
+
+// Ruby and Java, batch 3
+
+#[test]
+fn ruby_sidekiq_push_mints_a_sidekiq_queue() {
+    expect_topic(
+        "rb_sidekiq_push",
+        "app/jobs/notify.rb",
+        "Sidekiq::Client.push('class' => 'Mailer', 'queue' => 'emails', 'args' => [1])\n",
+        "sidekiq/emails",
+    );
+}
+
+#[test]
+fn ruby_sidekiq_options_mints_a_sidekiq_queue() {
+    expect_topic(
+        "rb_sidekiq_opts",
+        "app/workers/mailer.rb",
+        "class Mailer\n  include Sidekiq::Worker\n  sidekiq_options queue: 'emails'\nend\n",
+        "sidekiq/emails",
+    );
+}
+
+#[test]
+fn ruby_resque_enqueue_to_mints_a_resque_queue() {
+    expect_topic(
+        "rb_resque_to",
+        "app/jobs/notify.rb",
+        "Resque.enqueue_to('emails', Mailer, 1)\n",
+        "resque/emails",
+    );
+}
+
+#[test]
+fn ruby_resque_queue_ivar_mints_a_resque_queue() {
+    expect_topic(
+        "rb_resque_ivar",
+        "app/jobs/mailer.rb",
+        "class Mailer\n  @queue = :emails\nend\n",
+        "resque/emails",
+    );
+}
+
+#[test]
+fn java_spring_kafka_listener_mints_a_kafka_topic() {
+    expect_topic(
+        "java_listener",
+        "src/main/java/Orders.java",
+        "class Orders {\n  @KafkaListener(topics = \"orders\")\n  void on(String m) {}\n}\n",
+        "kafka/orders",
+    );
+}
+
+#[test]
+fn java_kafka_template_send_mints_a_kafka_topic() {
+    expect_topic(
+        "java_template",
+        "src/main/java/Orders.java",
+        "class Orders {\n  void f() { kafkaTemplate.send(\"orders\", v); }\n}\n",
+        "kafka/orders",
+    );
+}

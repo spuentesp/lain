@@ -481,6 +481,14 @@ languages:
       deny_methods: [getStatusCode, statusCode, getHeaders, headers, firstValue, getMessage, message, body, code]
 
   # ── C# ───────────────────────────────────────────────────────────
+    - id: spring-kafka-listener
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '@KafkaListener\s*\([^)]*?topics\s*=\s*\{?\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: spring-kafka-template-send
+      kind: topic_producer
+      broker: kafka
+      path_regex: 'kafkaTemplate\.send\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
   csharp:
     - id: aspnet-route
       kind: route
@@ -529,6 +537,22 @@ languages:
       lib_match: '^RestClient$'
 
   # ── Kotlin ───────────────────────────────────────────────────────
+    - id: sidekiq-push
+      kind: topic_producer
+      broker: sidekiq
+      path_regex: 'Sidekiq::Client\.push\s*\([^)]*?["'']queue["'']\s*=>\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sidekiq-options
+      kind: topic_consumer
+      broker: sidekiq
+      path_regex: 'sidekiq_options\s+(?:queue:\s*|["'']queue["'']\s*=>\s*)(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: resque-enqueue-to
+      kind: topic_producer
+      broker: resque
+      path_regex: 'Resque\.enqueue_to\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: resque-queue-ivar
+      kind: topic_consumer
+      broker: resque
+      path_regex: '@queue\s*=\s*:(\w+)'
   kotlin:
     - id: ktor-route
       kind: route

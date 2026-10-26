@@ -522,6 +522,8 @@ fn ext_to_lang(ext: &str) -> Option<Lang> {
         "py" => Some(Lang::Python),
         "rs" => Some(Lang::Rust),
         "go" => Some(Lang::Go),
+        "rb" => Some(Lang::Ruby),
+        "java" => Some(Lang::Java),
         _ => None,
     }
 }
