@@ -193,6 +193,14 @@ pub fn scan_workspace_event_with_report(
     let mut dynamic_producers = DynamicProducers::default();
     // The env sensor runs first (phase 0), so its scalar channel is populated.
     let env = env_sensor::scalar_bindings_for(root);
+    // Go package scope is read from every `.go` file before the site walk, so a
+    // reference to another package's value resolves regardless of walk order.
+    let go_files: Vec<(std::path::PathBuf, String)> = util::scan_files(root, |p| {
+        (p.extension().and_then(|e| e.to_str()) == Some("go")).then_some(())
+    })
+    .map(|(p, c, _)| (p, c))
+    .collect();
+    let go_scopes = go_constant_scopes(root, &go_files, &env);
 
     let any_ext = |p: &Path| {
         Some(
@@ -217,7 +225,16 @@ pub fn scan_workspace_event_with_report(
                 idioms.len() - 1
             });
         let path_str = graph_path(root, &path);
-        let constants = collect_same_file_constants(&content, ext, &env);
+        let mut constants = collect_same_file_constants(&content, ext, &env);
+        if ext == "go" {
+            if let Some(scope) = go_scopes.get(&dir_key(root, &path)) {
+                for (key, value) in scope {
+                    constants
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+        }
         let sites = detect_sites(&content, ext, &constants, &idioms[index].1);
         for site in sites
             .iter()
@@ -475,6 +492,131 @@ fn collect_same_file_constants(
     out
 }
 
+/// The directory a file sits in, relative to the workspace root. Go packages
+/// are directories, so this is the package scope.
+fn dir_key(root: &Path, path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Go package scope for every directory with `.go` files: the exported
+/// package-level values declared there, under their own name, plus the values
+/// of every other package under `package.Name` (the import alias a caller uses).
+/// A package name shared by two directories is left unqualified.
+fn go_constant_scopes(
+    root: &Path,
+    files: &[(std::path::PathBuf, String)],
+    env: &ScalarBindingIndex,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut decls: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for (path, content) in files {
+        let dir = dir_key(root, path);
+        let names = go_package_values(content, &dir, files, root, env);
+        let entry = decls.entry(dir).or_default();
+        for (name, value) in names {
+            entry.insert(name, value);
+        }
+    }
+    let mut qualified: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for (dir, names) in &decls {
+        let base = dir.rsplit('/').next().unwrap_or("");
+        for (name, value) in names {
+            qualified
+                .entry(format!("{base}.{name}"))
+                .and_modify(|v| *v = None)
+                .or_insert_with(|| Some(value.clone()));
+        }
+    }
+    decls
+        .keys()
+        .map(|dir| {
+            let mut scope = decls.get(dir).cloned().unwrap_or_default();
+            for (key, value) in &qualified {
+                if let Some(value) = value {
+                    scope.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
+            (dir.clone(), scope)
+        })
+        .collect()
+}
+
+/// Exported `Name = value` declarations in one Go file. A value is a string
+/// literal, or a call to a function in the same package that returns one.
+fn go_package_values(
+    content: &str,
+    dir: &str,
+    files: &[(std::path::PathBuf, String)],
+    root: &Path,
+    env: &ScalarBindingIndex,
+) -> Vec<(String, String)> {
+    static DECL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let decl = DECL.get_or_init(|| {
+        regex::Regex::new(r"^\s*(?:var\s+)?([A-Z]\w*)\s*=\s*(.+?)\s*$").expect("go decl")
+    });
+    let call = CALL.get_or_init(|| regex::Regex::new(r"^([a-z_]\w*)\(\)$").expect("go call"));
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let Some(c) = decl.captures(line) else {
+            continue;
+        };
+        let name = c[1].to_string();
+        let rhs = c[2].trim();
+        if let Some(value) = extract_string_literal(rhs) {
+            out.push((name, value));
+        } else if let Some(f) = call.captures(rhs) {
+            if let Some(value) = go_function_value(&f[1], dir, files, root, env) {
+                out.push((name, value));
+            }
+        }
+    }
+    out
+}
+
+/// The value a Go function returns when it is a simple environment lookup with
+/// a fallback: the env channel's value for the variable it reads, or, when the
+/// variable has none, the last string literal the function returns.
+fn go_function_value(
+    name: &str,
+    dir: &str,
+    files: &[(std::path::PathBuf, String)],
+    root: &Path,
+    env: &ScalarBindingIndex,
+) -> Option<String> {
+    let header = format!("func {name}()");
+    let body = files
+        .iter()
+        .filter(|(p, _)| dir_key(root, p) == dir)
+        .find_map(|(_, content)| {
+            let mut found = false;
+            let mut body: Vec<&str> = Vec::new();
+            for line in content.lines() {
+                if !found {
+                    found = line.starts_with(&header);
+                    continue;
+                }
+                if line == "}" {
+                    return Some(body.join("\n"));
+                }
+                body.push(line);
+            }
+            None
+        })?;
+    let (var, _) = env_sensor::env_read_in(&body)?;
+    match env.lookup(&var) {
+        EnvLookup::Resolved(value) => Some(value),
+        EnvLookup::Ambiguous => None,
+        EnvLookup::Unmapped => body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("return "))
+            .filter_map(extract_string_literal)
+            .last(),
+    }
+}
+
 /// The name a constant declaration binds, by language. Returns `None` when the
 /// left-hand side is not a plain declaration of an identifier.
 fn constant_name(lhs: &str, ext: &str) -> Option<String> {
@@ -539,6 +681,15 @@ fn detect_sites(
 ) -> Vec<DetectedSite> {
     let mut out: Vec<DetectedSite> = Vec::new();
     let (producers, consumers, scheduled) = idioms;
+    // An entry with `requires` applies only to files that contain its marker
+    // (the Go client's import path, say), so a bare `Topic:` field elsewhere
+    // is not read as a producer.
+    let applies =
+        |i: &util::CompiledIdiom| i.requires.as_deref().is_none_or(|r| content.contains(r));
+    let producers: Vec<util::CompiledIdiom> =
+        producers.iter().filter(|i| applies(i)).cloned().collect();
+    let consumers: Vec<util::CompiledIdiom> =
+        consumers.iter().filter(|i| applies(i)).cloned().collect();
     let lines: Vec<&str> = content.lines().collect();
     for (idx, raw) in lines.iter().enumerate() {
         let line_num = idx as u32 + 1;
@@ -550,7 +701,7 @@ fn detect_sites(
         if trimmed.is_empty() {
             continue;
         }
-        for m in util::walk_idioms(producers, line, line_num) {
+        for m in util::walk_idioms(&producers, line, line_num) {
             // A producer whose topic cannot be resolved stays a `topic: None`
             // site: `emit_sites` drops it (no hub to anchor on), and the scan
             // counts it into the coverage report as `DynamicTopic`.
@@ -562,7 +713,7 @@ fn detect_sites(
                 owner_name: None,
             });
         }
-        for m in util::walk_idioms(consumers, line, line_num) {
+        for m in util::walk_idioms(&consumers, line, line_num) {
             match resolve_idiom_capture(&m, constants) {
                 Some(value) => out.push(DetectedSite {
                     kind: SiteKind::Consumes,

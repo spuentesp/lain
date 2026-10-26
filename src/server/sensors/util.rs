@@ -734,7 +734,10 @@ use crate::federation::contracts::model::{
 /// `kind` is the `FrameworkKind` discriminator (the walker uses
 /// it only to route the capture into the right field of the
 /// returned [`IdiomMatch`]; it does not filter on `kind`).
+#[derive(Clone)]
 pub struct CompiledIdiom {
+    /// File-content gate copied from the definition.
+    pub requires: Option<String>,
     pub kind: crate::server::sensors::patterns::FrameworkKind,
     pub id: String,
     pub broker: Option<String>,
@@ -749,6 +752,7 @@ impl CompiledIdiom {
             id: def.id.clone(),
             kind: def.kind,
             broker: def.broker.clone(),
+            requires: def.requires.clone(),
             regex,
         })
     }

@@ -878,3 +878,53 @@ fn kotlin_subscribe_inside_apply_has_no_receiver_and_still_matches() {
         "kafka/orders",
     );
 }
+
+// Adapted from open-telemetry/opentelemetry-demo, src/checkout (Apache-2.0):
+// the producer names `kafka.Topic`, a package value in another directory
+// whose function reads the environment with a fallback.
+const CHECKOUT_PRODUCER: &str = "package kafka\n\nimport (\n\t\"os\"\n\n\t\"github.com/IBM/sarama\"\n)\n\nvar (\n\tTopic           = getTopic()\n\tProtocolVersion = sarama.V3_0_0_0\n)\n\nfunc getTopic() string {\n\tif topic := os.Getenv(\"KAFKA_TOPIC\"); topic != \"\" {\n\t\treturn topic\n\t}\n\treturn \"orders\"\n}\n";
+
+const CHECKOUT_SEND: &str = "package main\n\nimport (\n\t\"github.com/IBM/sarama\"\n\t\"example/checkout/kafka\"\n)\n\nfunc send(v []byte) {\n\tmsg := sarama.ProducerMessage{\n\t\tTopic: kafka.Topic,\n\t\tValue: sarama.ByteEncoder(v),\n\t}\n\t_ = msg\n}\n";
+
+#[test]
+fn go_checkout_producer_resolves_across_packages_through_the_env() {
+    let root = fixture_files(
+        "go_checkout_env",
+        &[
+            (".env", "KAFKA_TOPIC=orders\n"),
+            ("checkout/kafka/producer.go", CHECKOUT_PRODUCER),
+            ("checkout/main.go", CHECKOUT_SEND),
+        ],
+    );
+    let names = topics_with_env(&root);
+    assert!(names.iter().any(|n| n == "kafka/orders"), "got {names:?}");
+}
+
+#[test]
+fn go_checkout_producer_falls_back_to_the_function_default() {
+    let root = fixture_files(
+        "go_checkout_default",
+        &[
+            ("checkout/kafka/producer.go", CHECKOUT_PRODUCER),
+            ("checkout/main.go", CHECKOUT_SEND),
+        ],
+    );
+    let names = topics_with_env(&root);
+    assert!(names.iter().any(|n| n == "kafka/orders"), "got {names:?}");
+}
+
+#[test]
+fn a_bare_topic_field_without_the_client_import_mints_nothing() {
+    let root = fixture_files(
+        "go_no_sarama",
+        &[(
+            "billing/cfg.go",
+            "package billing\n\nvar cfg = Config{\n\tTopic: \"billing\",\n}\n",
+        )],
+    );
+    let names = topics_with_env(&root);
+    assert!(
+        names.is_empty(),
+        "a struct field outside the client must not mint a topic; got {names:?}"
+    );
+}

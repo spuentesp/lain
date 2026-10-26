@@ -68,6 +68,10 @@ pub struct FrameworkDef {
     /// `redis`, `mqtt`, …). `None` means the default broker (`kafka`).
     #[serde(default)]
     pub broker: Option<String>,
+    /// Substring the source file must contain for this entry to apply (the Go
+    /// import path `sarama`, say). `None` applies to every file.
+    #[serde(default)]
+    pub requires: Option<String>,
     /// Verbs the framework's call shape can take. Lower-case strings
     /// (`get`, `post`, …). Empty for outbound definitions where the
     /// verb is a kwarg or first-arg kind.

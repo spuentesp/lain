@@ -504,6 +504,11 @@ languages:
       kind: topic_consumer
       broker: asynq
       path_regex: '\bQueues:\s*map\[string\]int\s*\{\s*"([^"]+)"'
+    - id: go-sarama-producer-topic
+      kind: topic_producer
+      broker: kafka
+      requires: sarama
+      path_regex: '^\s*Topic:\s*(?:"([^"]+)"|([A-Za-z_][\w.]*))\s*,?\s*$'
   java:
     - id: spring-route
       kind: route
