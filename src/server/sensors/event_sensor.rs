@@ -509,12 +509,8 @@ fn detect_sites(
 /// framework, never the filename. The joiner's `default_broker_for`
 /// parses the prefix back into `ContractKey::Topic { broker, .. }`
 /// (`joiner/endpoints.rs:224`), so no joiner change is needed.
-fn broker_for(m: &util::IdiomMatch) -> &'static str {
-    if m.framework_id.starts_with("pika") || m.framework_id.starts_with("amqplib") {
-        "amqp"
-    } else {
-        DEFAULT_BROKER
-    }
+fn broker_for(m: &util::IdiomMatch) -> &str {
+    m.broker.as_deref().unwrap_or(DEFAULT_BROKER)
 }
 
 /// Map a file extension to the Tier-1 `Lang` the walker uses for
