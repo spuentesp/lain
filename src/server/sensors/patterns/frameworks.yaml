@@ -212,6 +212,14 @@ languages:
       kind: topic_producer
       broker: kafka
       path_regex: '\bproducer\.send\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: huey-instance
+      kind: topic_consumer
+      broker: huey
+      path_regex: '\b(?:Redis|Sqlite|File|Mini)?Huey\s*\(\s*(?:name\s*=\s*)?(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: redis-xreadgroup
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\.xreadgroup\s*\([^)]*?\{\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
   tsjs:
     - id: express-route
       kind: route
@@ -367,6 +375,14 @@ languages:
       kind: topic_consumer
       broker: inngest
       path_regex: 'triggers\s*:\s*\[\s*\{\s*event\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: ioredis-xadd
+      kind: topic_producer
+      broker: redis
+      path_regex: '\.xadd\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: ioredis-xreadgroup
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\.xreadgroup\s*\([^)]*?STREAMS''?\s*,\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
   rust:
     - id: axum-route
       kind: route
@@ -456,6 +472,14 @@ languages:
       kind: topic_consumer
       broker: nats
       path_regex: '\b(?:nc|nats\w*)\.Subscribe\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: go-redis-xadd
+      kind: topic_producer
+      broker: redis
+      path_regex: '\bStream\s*:\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: go-redis-xreadgroup
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\bStreams\s*:\s*\[\]string\{\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
   java:
     - id: spring-route
       kind: route

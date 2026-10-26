@@ -453,3 +453,97 @@ fn java_kafka_template_send_mints_a_kafka_topic() {
         "kafka/orders",
     );
 }
+
+// Huey and Redis Streams, batch 4
+
+#[test]
+fn python_huey_instance_mints_a_huey_queue() {
+    expect_topic(
+        "py_huey",
+        "worker/tasks.py",
+        "from huey import RedisHuey\nhuey = RedisHuey('emails')\n",
+        "huey/emails",
+    );
+}
+
+#[test]
+fn python_redis_stream_group_read_mints_a_redis_topic() {
+    expect_topic(
+        "py_xreadgroup",
+        "svc/events.py",
+        "msgs = r.xreadgroup(\"billing\", \"w1\", {\"orders\": \">\"}, count=10)\n",
+        "redis/orders",
+    );
+}
+
+#[test]
+fn ts_ioredis_xadd_mints_a_redis_topic() {
+    expect_topic(
+        "ts_xadd",
+        "src/events.ts",
+        "await redis.xadd('orders', '*', 'id', id);\n",
+        "redis/orders",
+    );
+}
+
+#[test]
+fn ts_ioredis_xreadgroup_mints_a_redis_topic() {
+    expect_topic(
+        "ts_xreadgroup",
+        "src/events.ts",
+        "await redis.xreadgroup('GROUP', 'billing', 'w1', 'STREAMS', 'orders', '>');\n",
+        "redis/orders",
+    );
+}
+
+#[test]
+fn go_redis_xadd_mints_a_redis_topic() {
+    expect_topic(
+        "go_xadd",
+        "svc/events.go",
+        "package svc\n\nfunc f() { rdb.XAdd(ctx, &redis.XAddArgs{Stream: \"orders\", Values: v}) }\n",
+        "redis/orders",
+    );
+}
+
+#[test]
+fn go_redis_xreadgroup_mints_a_redis_topic() {
+    expect_topic(
+        "go_xreadgroup",
+        "svc/events.go",
+        "package svc\n\nfunc f() { rdb.XReadGroup(ctx, &redis.XReadGroupArgs{Streams: []string{\"orders\", \">\"}}) }\n",
+        "redis/orders",
+    );
+}
+
+// Real-shape negatives, copied from code in the test-repos corpus. Each one is
+// a call whose queue is not a literal at the call site, or a non-queue API
+// that shares the method name. None may mint a topic.
+
+#[test]
+fn saleor_style_dynamic_sqs_send_mints_nothing() {
+    // saleor/saleor/core/sqs.py: the queue URL lives in kwargs, not a literal.
+    let root = fixture(
+        "saleor_sqs",
+        "core/sqs.py",
+        "c = self.sqs(queue=name)\nc.send_message(**kwargs)\n",
+    );
+    assert!(
+        topics(&root).is_empty(),
+        "dynamic SQS send must not mint a topic"
+    );
+}
+
+#[test]
+fn email_service_send_message_mints_nothing() {
+    // microservices-demo emailservice: a mail API, not a queue.
+    let root = fixture(
+        "email_send",
+        "emailservice/email_server.py",
+        "response = client.send_message(sender = client.sender_path(p, r, s), envelope_from_authority = '')\n",
+    );
+    assert!(
+        topics(&root).is_empty(),
+        "a mail send must not mint a topic"
+    );
+}

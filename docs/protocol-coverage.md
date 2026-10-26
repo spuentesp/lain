@@ -252,13 +252,12 @@ stays a pure drop.
 `src/server/sensors/patterns/frameworks.yaml`, each with a `broker:`
 label. Covered: Redis (pub/sub, Streams), MQTT, AWS SQS, SNS, Kinesis,
 EventBridge, NATS, Pulsar, GCP Pub/Sub, Temporal, Dramatiq, Inngest,
-Sidekiq, Resque, Kafka (kafka-python, Spring Kafka), and AMQP (already
-present). Tests: `tests/bus_idioms_e2e.rs`. Not implemented in 0.13.0,
+Sidekiq, Resque, Huey (instance queue), Redis Streams (XADD, XREADGROUP),
+Kafka (kafka-python, Spring Kafka), and AMQP (already present). Tests: `tests/bus_idioms_e2e.rs`. Not implemented in 0.13.0,
 with reasons: **Quartz** (`@Scheduled` defines a schedule, not a named
 topic; needs a design for scheduled sites), **ZeroMQ** (subscription
 prefixes, not call-shaped topics), **Debezium** (connector configuration,
-not code), **Huey** (Python, not yet covered by idiom entries),
-**Redis Streams consumers in TS/Go**.
+not code).
 
 None of these is a `ContractKey` problem — `Topic { broker, name }`
 is broker-generic, the binding grammar (`topic:<broker>:<name>`) is
