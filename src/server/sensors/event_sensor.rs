@@ -653,7 +653,7 @@ fn go_function_value(
         .lines()
         .filter_map(|l| l.trim().strip_prefix("return "))
         .filter_map(extract_string_literal)
-        .last();
+        .next_back();
     Some(match env.lookup(&var) {
         EnvLookup::Resolved(value) => Ok(value),
         EnvLookup::Ambiguous => Err(UnresolvedReason::EnvAmbiguous),

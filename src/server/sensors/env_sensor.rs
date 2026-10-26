@@ -1272,7 +1272,7 @@ mod scalar_tests {
         }
         assert!(
             env_read_in(r#""orders""#).is_none(),
-            "a plain literal reads no variable"
+            "a bare quoted string reads no variable"
         );
     }
 
@@ -1391,7 +1391,7 @@ mod scalar_tests {
         )]);
         let idx = index_of(dir.path());
         for var in ["PORT", "DEBUG", "CACHE", "LOG_DIR", "TOKEN"] {
-            assert!(idx.by_var.get(var).is_none(), "{var} must be dropped");
+            assert!(!idx.by_var.contains_key(var), "{var} must be dropped");
         }
         assert_eq!(idx.unique_value("ORDER_TOPIC"), Some("orders-events"));
     }
