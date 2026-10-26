@@ -3,6 +3,24 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.12.1 — 2026-10-26
+
+No product code changes. Test, CI and documentation only.
+
+### Changed
+
+- Federation blast-radius latency is enforced (`LAIN_BENCH_ENFORCE=1`) only on
+  `--release` builds, where it measures p99 about 66 ms against a 100 ms target.
+  The earlier 142 ms reading came from the unoptimized test profile.
+- The incremental mutation gate is no longer a CI job. It runs locally before a
+  merge, in file batches, because a large PR diff ran past the job's time limit.
+
+### Fixed
+
+- A flaky presence attribution test polls for the auto-claim to a deadline
+  instead of asserting after a fixed delay.
+- Two equivalent mutants are excluded in `.cargo/mutants.toml`, with reasons.
+
 ## 0.12.0 — 2026-10-25
 
 ### Fixed
