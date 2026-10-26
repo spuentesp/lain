@@ -928,3 +928,88 @@ fn a_bare_topic_field_without_the_client_import_mints_nothing() {
         "a struct field outside the client must not mint a topic; got {names:?}"
     );
 }
+
+// Producers whose topic is an environment read the env channel cannot resolve
+// are reported with that reason, not as a generic dynamic topic.
+
+fn producer_reports_with_env(
+    root: &Path,
+) -> Vec<lain::federation::contracts::coverage::UnresolvedRecord> {
+    let graph = GraphDatabase::new(&root.join("graph.bin")).expect("open graph");
+    let ns = RepoNamespace::for_test();
+    lain::server::sensors::env_sensor::scan_workspace_env(&graph, root, &ns).expect("env scan");
+    lain::server::sensors::event_sensor::scan_workspace_event_with_report(&graph, root, &ns)
+        .expect("event scan")
+        .unresolved
+}
+
+#[test]
+fn unmapped_env_topic_on_a_producer_is_reported_as_env_unmapped() {
+    let root = fixture_files(
+        "cs_unmapped_producer",
+        &[(
+            "src/Publisher.cs",
+            "internal class Publisher {\n    private static readonly string TopicName = Environment.GetEnvironmentVariable(\"KAFKA_TOPIC\");\n    void Run() { _producer.Produce(TopicName, msg); }\n}\n",
+        )],
+    );
+    let records = producer_reports_with_env(&root);
+    assert_eq!(records.len(), 1, "one record; got {records:?}");
+    assert!(matches!(
+        records[0].reason,
+        lain::federation::contracts::model::UnresolvedReason::EnvUnmapped
+    ));
+    assert_eq!(
+        records[0].sample_ids,
+        vec!["src/Publisher.cs:3".to_string()]
+    );
+}
+
+#[test]
+fn conflicting_env_topic_on_a_producer_is_reported_as_env_ambiguous() {
+    let root = fixture_files(
+        "cs_ambiguous_producer",
+        &[
+            (".env", "KAFKA_TOPIC=orders\n"),
+            ("compose.yaml", "services:\n  x:\n    environment:\n      KAFKA_TOPIC: orders-v2\n"),
+            (
+                "src/Publisher.cs",
+                "internal class Publisher {\n    private static readonly string TopicName = Environment.GetEnvironmentVariable(\"KAFKA_TOPIC\") ?? \"orders\";\n    void Run() { _producer.Produce(TopicName, msg); }\n}\n",
+            ),
+        ],
+    );
+    let records = producer_reports_with_env(&root);
+    assert_eq!(records.len(), 1, "one record; got {records:?}");
+    assert!(matches!(
+        records[0].reason,
+        lain::federation::contracts::model::UnresolvedReason::EnvAmbiguous
+    ));
+}
+
+#[test]
+fn conflicting_env_value_reaches_a_cross_package_go_producer_as_ambiguous() {
+    let root = fixture_files(
+        "go_checkout_ambiguous",
+        &[
+            (".env", "KAFKA_TOPIC=orders\n"),
+            (
+                "compose.yaml",
+                "services:\n  checkout:\n    environment:\n      KAFKA_TOPIC: orders-v2\n",
+            ),
+            ("checkout/kafka/producer.go", CHECKOUT_PRODUCER),
+            ("checkout/main.go", CHECKOUT_SEND),
+        ],
+    );
+    let records = producer_reports_with_env(&root);
+    assert!(
+        records.iter().any(|r| matches!(
+            r.reason,
+            lain::federation::contracts::model::UnresolvedReason::EnvAmbiguous
+        )),
+        "checkout's producer must report the env conflict; got {records:?}"
+    );
+    let names = topics_with_env(&root);
+    assert!(
+        !names.iter().any(|n| n.starts_with("kafka/")),
+        "no topic from a conflict; got {names:?}"
+    );
+}

@@ -190,7 +190,7 @@ pub fn scan_workspace_event_with_report(
     // (per REPO scan, not per file: two files publishing one topic
     // share the hub).
     let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
-    let mut dynamic_producers = DynamicProducers::default();
+    let mut producer_gaps = ProducerGaps::default();
     // The env sensor runs first (phase 0), so its scalar channel is populated.
     let env = env_sensor::scalar_bindings_for(root);
     // Go package scope is read from every `.go` file before the site walk, so a
@@ -226,21 +226,34 @@ pub fn scan_workspace_event_with_report(
             });
         let path_str = graph_path(root, &path);
         let mut constants = collect_same_file_constants(&content, ext, &env);
+        let mut gaps = collect_env_gaps(&content, ext, &env);
         if ext == "go" {
             if let Some(scope) = go_scopes.get(&dir_key(root, &path)) {
-                for (key, value) in scope {
+                for (key, value) in &scope.values {
                     constants
                         .entry(key.clone())
                         .or_insert_with(|| value.clone());
                 }
+                for (key, reason) in &scope.gaps {
+                    gaps.entry(key.clone()).or_insert(*reason);
+                }
             }
         }
-        let sites = detect_sites(&content, ext, &constants, &idioms[index].1);
-        for site in sites
-            .iter()
-            .filter(|s| s.kind == SiteKind::Produces && s.topic.is_none())
-        {
-            dynamic_producers.record(format!("{path_str}:{}", site.line));
+        let mut unresolved_producers: Vec<(u32, Option<String>)> = Vec::new();
+        let sites = detect_sites(
+            &content,
+            ext,
+            &constants,
+            &idioms[index].1,
+            &mut unresolved_producers,
+        );
+        for (line, identifier) in unresolved_producers {
+            let reason = identifier
+                .as_ref()
+                .and_then(|id| gaps.get(id))
+                .copied()
+                .unwrap_or(UnresolvedReason::DynamicTopic);
+            producer_gaps.record(reason, format!("{path_str}:{line}"));
         }
         let (nodes, edges) =
             emit_sites(&sites, &path_str, namespace, graph, &mut emitted_topic_ids);
@@ -286,38 +299,39 @@ pub fn scan_workspace_event_with_report(
     Ok(ScanReport {
         emitted: all_nodes.len(),
         error: None,
-        unresolved: dynamic_producers.into_records(),
+        unresolved: producer_gaps.into_records(),
     })
 }
 
-/// Producer sites whose topic is not a literal or a same-file constant.
-/// Counted per scan; the first few `path:line` ids are kept as samples, the
-/// same way the SQL sensor keeps its unresolved samples.
+/// Producer sites whose topic did not resolve, by the reason each earns: an
+/// environment variable that is ambiguous or unmapped, or a dynamic topic.
+/// Each reason keeps a count and the first few `path:line` ids, the same way
+/// the SQL sensor keeps its unresolved samples.
 #[derive(Default)]
-struct DynamicProducers {
-    count: usize,
-    samples: Vec<String>,
+struct ProducerGaps {
+    by_reason: BTreeMap<UnresolvedReason, (usize, Vec<String>)>,
 }
 
-impl DynamicProducers {
+impl ProducerGaps {
     const MAX_SAMPLES: usize = 5;
 
-    fn record(&mut self, site: String) {
-        self.count += 1;
-        if self.samples.len() < Self::MAX_SAMPLES {
-            self.samples.push(site);
+    fn record(&mut self, reason: UnresolvedReason, site: String) {
+        let (count, samples) = self.by_reason.entry(reason).or_default();
+        *count += 1;
+        if samples.len() < Self::MAX_SAMPLES {
+            samples.push(site);
         }
     }
 
     fn into_records(self) -> Vec<UnresolvedRecord> {
-        if self.count == 0 {
-            return Vec::new();
-        }
-        vec![UnresolvedRecord {
-            reason: UnresolvedReason::DynamicTopic,
-            count: self.count,
-            sample_ids: self.samples,
-        }]
+        self.by_reason
+            .into_iter()
+            .map(|(reason, (count, sample_ids))| UnresolvedRecord {
+                reason,
+                count,
+                sample_ids,
+            })
+            .collect()
     }
 }
 
@@ -501,64 +515,86 @@ fn dir_key(root: &Path, path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Go package scope for every directory with `.go` files: the exported
-/// package-level values declared there, under their own name, plus the values
-/// of every other package under `package.Name` (the import alias a caller uses).
-/// A package name shared by two directories is left unqualified.
+/// One Go package's scope: the values its exported names resolve to, and the
+/// names whose environment read the env channel cannot give a value.
+#[derive(Debug, Clone, Default)]
+struct GoScope {
+    values: BTreeMap<String, String>,
+    gaps: BTreeMap<String, UnresolvedReason>,
+}
+
+/// Go package scope for every directory with `.go` files: its own exported
+/// package-level names, plus those of every other package under
+/// `package.Name` (the import alias a caller uses). A package name shared by
+/// two directories is not qualified at all, so the reference stays unresolved.
 fn go_constant_scopes(
     root: &Path,
     files: &[(std::path::PathBuf, String)],
     env: &ScalarBindingIndex,
-) -> BTreeMap<String, BTreeMap<String, String>> {
-    let mut decls: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+) -> BTreeMap<String, GoScope> {
+    let mut own: BTreeMap<String, GoScope> = BTreeMap::new();
     for (path, content) in files {
         let dir = dir_key(root, path);
-        let names = go_package_values(content, &dir, files, root, env);
-        let entry = decls.entry(dir).or_default();
-        for (name, value) in names {
-            entry.insert(name, value);
-        }
+        let (values, gaps) = go_package_values(content, &dir, files, root, env);
+        let scope = own.entry(dir).or_default();
+        scope.values.extend(values);
+        scope.gaps.extend(gaps);
     }
-    let mut qualified: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for (dir, names) in &decls {
+    let mut bases: BTreeMap<&str, usize> = BTreeMap::new();
+    for dir in own.keys() {
+        *bases
+            .entry(dir.rsplit('/').next().unwrap_or(""))
+            .or_default() += 1;
+    }
+    let mut qualified = GoScope::default();
+    for (dir, scope) in &own {
         let base = dir.rsplit('/').next().unwrap_or("");
-        for (name, value) in names {
+        if bases.get(base).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        for (name, value) in &scope.values {
             qualified
-                .entry(format!("{base}.{name}"))
-                .and_modify(|v| *v = None)
-                .or_insert_with(|| Some(value.clone()));
+                .values
+                .insert(format!("{base}.{name}"), value.clone());
+        }
+        for (name, reason) in &scope.gaps {
+            qualified.gaps.insert(format!("{base}.{name}"), *reason);
         }
     }
-    decls
-        .keys()
-        .map(|dir| {
-            let mut scope = decls.get(dir).cloned().unwrap_or_default();
-            for (key, value) in &qualified {
-                if let Some(value) = value {
-                    scope.entry(key.clone()).or_insert_with(|| value.clone());
-                }
+    own.into_iter()
+        .map(|(dir, mut scope)| {
+            for (key, value) in &qualified.values {
+                scope
+                    .values
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
             }
-            (dir.clone(), scope)
+            for (key, reason) in &qualified.gaps {
+                scope.gaps.entry(key.clone()).or_insert(*reason);
+            }
+            (dir, scope)
         })
         .collect()
 }
 
 /// Exported `Name = value` declarations in one Go file. A value is a string
-/// literal, or a call to a function in the same package that returns one.
+/// literal, or a call to a function in the same package that returns one. A
+/// call that reads the environment without a value is a gap, not a value.
 fn go_package_values(
     content: &str,
     dir: &str,
     files: &[(std::path::PathBuf, String)],
     root: &Path,
     env: &ScalarBindingIndex,
-) -> Vec<(String, String)> {
+) -> (BTreeMap<String, String>, BTreeMap<String, UnresolvedReason>) {
     static DECL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let decl = DECL.get_or_init(|| {
         regex::Regex::new(r"^\s*(?:var\s+)?([A-Z]\w*)\s*=\s*(.+?)\s*$").expect("go decl")
     });
     let call = CALL.get_or_init(|| regex::Regex::new(r"^([a-z_]\w*)\(\)$").expect("go call"));
-    let mut out = Vec::new();
+    let mut values = BTreeMap::new();
+    let mut gaps = BTreeMap::new();
     for line in content.lines() {
         let Some(c) = decl.captures(line) else {
             continue;
@@ -566,26 +602,33 @@ fn go_package_values(
         let name = c[1].to_string();
         let rhs = c[2].trim();
         if let Some(value) = extract_string_literal(rhs) {
-            out.push((name, value));
+            values.insert(name, value);
         } else if let Some(f) = call.captures(rhs) {
-            if let Some(value) = go_function_value(&f[1], dir, files, root, env) {
-                out.push((name, value));
+            match go_function_value(&f[1], dir, files, root, env) {
+                Some(Ok(value)) => {
+                    values.insert(name, value);
+                }
+                Some(Err(reason)) => {
+                    gaps.insert(name, reason);
+                }
+                None => {}
             }
         }
     }
-    out
+    (values, gaps)
 }
 
-/// The value a Go function returns when it is a simple environment lookup with
-/// a fallback: the env channel's value for the variable it reads, or, when the
-/// variable has none, the last string literal the function returns.
+/// What a Go function returns when it is a simple environment lookup with a
+/// fallback. `None` when the function is not one. Otherwise the env channel's
+/// value for the variable it reads; when the channel has none, the last string
+/// literal the function returns. Failing both, the reason it cannot resolve.
 fn go_function_value(
     name: &str,
     dir: &str,
     files: &[(std::path::PathBuf, String)],
     root: &Path,
     env: &ScalarBindingIndex,
-) -> Option<String> {
+) -> Option<Result<String, UnresolvedReason>> {
     let header = format!("func {name}()");
     let body = files
         .iter()
@@ -606,15 +649,58 @@ fn go_function_value(
             None
         })?;
     let (var, _) = env_sensor::env_read_in(&body)?;
-    match env.lookup(&var) {
-        EnvLookup::Resolved(value) => Some(value),
-        EnvLookup::Ambiguous => None,
-        EnvLookup::Unmapped => body
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("return "))
-            .filter_map(extract_string_literal)
-            .last(),
+    let fallback = body
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("return "))
+        .filter_map(extract_string_literal)
+        .last();
+    Some(match env.lookup(&var) {
+        EnvLookup::Resolved(value) => Ok(value),
+        EnvLookup::Ambiguous => Err(UnresolvedReason::EnvAmbiguous),
+        EnvLookup::Unmapped => fallback.ok_or(UnresolvedReason::EnvUnmapped),
+    })
+}
+
+/// Constants whose environment read the env channel cannot give a value to,
+/// with the reason: `EnvAmbiguous` when the sources disagree, `EnvUnmapped`
+/// when no source names the variable and the code gives no default.
+fn collect_env_gaps(
+    content: &str,
+    ext: &str,
+    env: &ScalarBindingIndex,
+) -> BTreeMap<String, UnresolvedReason> {
+    let mut out: BTreeMap<String, UnresolvedReason> = BTreeMap::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let rhs = rhs.trim().trim_end_matches(';').trim();
+        let Some(name) = constant_name(lhs, ext) else {
+            continue;
+        };
+        if extract_string_literal(rhs).is_some() {
+            continue;
+        }
+        let Some((var, default)) = env_sensor::env_read_in(rhs) else {
+            continue;
+        };
+        match env.lookup(&var) {
+            EnvLookup::Resolved(_) => {}
+            EnvLookup::Ambiguous => {
+                out.insert(name, UnresolvedReason::EnvAmbiguous);
+            }
+            EnvLookup::Unmapped => {
+                if default.is_none() {
+                    out.insert(name, UnresolvedReason::EnvUnmapped);
+                }
+            }
+        }
     }
+    out
 }
 
 /// The name a constant declaration binds, by language. Returns `None` when the
@@ -678,6 +764,7 @@ fn detect_sites(
     ext: &str,
     constants: &BTreeMap<String, String>,
     idioms: &TopicIdioms,
+    unresolved_producers: &mut Vec<(u32, Option<String>)>,
 ) -> Vec<DetectedSite> {
     let mut out: Vec<DetectedSite> = Vec::new();
     let (producers, consumers, scheduled) = idioms;
@@ -703,11 +790,15 @@ fn detect_sites(
         }
         for m in util::walk_idioms(&producers, line, line_num) {
             // A producer whose topic cannot be resolved stays a `topic: None`
-            // site: `emit_sites` drops it (no hub to anchor on), and the scan
-            // counts it into the coverage report as `DynamicTopic`.
+            // site: `emit_sites` drops it (no hub to anchor on). The scan counts
+            // it into the coverage report, under the reason its identifier earns.
+            let topic = resolve_idiom_capture(&m, constants);
+            if topic.is_none() {
+                unresolved_producers.push((line_num, m.identifier.clone()));
+            }
             out.push(DetectedSite {
                 kind: SiteKind::Produces,
-                topic: resolve_idiom_capture(&m, constants),
+                topic,
                 broker: broker_for(&m).into(),
                 line: line_num,
                 owner_name: None,
