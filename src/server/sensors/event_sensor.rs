@@ -357,8 +357,8 @@ fn scan_payload_schemas(
 
 // ─── Detection (regex-first, language-dispatched) ────────────────────
 
-/// `const NAME = "value";` (TS / JS / Go) and `NAME = "value"` at
-/// module level (Python). Keys must be identifiers and values must be
+/// `const NAME = "value";` (TS / JS / Go), `NAME = "value"` at
+/// module level (Python), and `[modifiers] Type NAME = "value";` (Java). Keys must be identifiers and values must be
 /// string literals. Both single- and double-quoted forms are
 /// supported.
 fn collect_same_file_constants(content: &str, ext: &str) -> BTreeMap<String, String> {
@@ -392,6 +392,13 @@ fn collect_same_file_constants(content: &str, ext: &str) -> BTreeMap<String, Str
                         n.to_string()
                     } else {
                         continue;
+                    }
+                } else if ext == "java" {
+                    // Java field or local: `[modifiers] Type name = "value";`.
+                    // The name is the last token; the type and modifiers come before it.
+                    match lhs.split_whitespace().collect::<Vec<_>>().as_slice() {
+                        [_, .., name] => (*name).to_string(),
+                        _ => continue,
                     }
                 } else {
                     continue;

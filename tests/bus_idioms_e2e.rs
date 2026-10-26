@@ -547,3 +547,104 @@ fn email_service_send_message_mints_nothing() {
         "a mail send must not mint a topic"
     );
 }
+
+// BullMQ, Bull, RQ and RabbitMQ, batch 5
+
+#[test]
+fn ts_bullmq_queue_mints_a_bullmq_queue() {
+    expect_topic(
+        "ts_bullmq_queue",
+        "src/queues.ts",
+        "export const emails = new Queue('emails', { connection });\n",
+        "bullmq/emails",
+    );
+}
+
+#[test]
+fn ts_bullmq_worker_mints_a_bullmq_queue() {
+    expect_topic(
+        "ts_bullmq_worker",
+        "src/workers.ts",
+        "new Worker('emails', async (job) => send(job.data), { connection });\n",
+        "bullmq/emails",
+    );
+}
+
+#[test]
+fn ts_legacy_bull_queue_mints_a_bull_queue() {
+    expect_topic(
+        "ts_bull",
+        "src/queues.ts",
+        "const q = new Bull('emails');\n",
+        "bull/emails",
+    );
+}
+
+#[test]
+fn ts_queue_built_from_a_variable_mints_nothing() {
+    let root = fixture(
+        "ts_bullmq_var",
+        "src/queues.ts",
+        "const q = new Queue(name, { connection });\n",
+    );
+    assert!(
+        topics(&root).is_empty(),
+        "a non-literal queue name must not mint a topic"
+    );
+}
+
+#[test]
+fn python_rq_queue_mints_an_rq_queue() {
+    expect_topic(
+        "py_rq",
+        "worker/jobs.py",
+        "q = Queue('emails', connection=redis)\n",
+        "rq/emails",
+    );
+}
+
+#[test]
+fn python_stdlib_queue_mints_nothing() {
+    let root = fixture(
+        "py_stdlib_queue",
+        "worker/jobs.py",
+        "q = queue.Queue(maxsize=10)\n",
+    );
+    assert!(
+        topics(&root).is_empty(),
+        "stdlib queue.Queue must not mint an rq topic"
+    );
+}
+
+#[test]
+fn java_rabbit_convert_and_send_mints_an_amqp_topic() {
+    expect_topic(
+        "java_rabbit_send",
+        "src/main/java/Shipping.java",
+        "class S {\n  void f() { rabbitTemplate.convertAndSend(\"shipping-task\", shipment); }\n}\n",
+        "amqp/shipping-task",
+    );
+}
+
+#[test]
+fn java_rabbit_listener_annotation_mints_an_amqp_topic() {
+    expect_topic(
+        "java_rabbit_listener",
+        "src/main/java/Consumer.java",
+        "class C {\n  @RabbitListener(queues = \"shipping-task\")\n  void on(String m) {}\n}\n",
+        "amqp/shipping-task",
+    );
+}
+
+// Real-shape case, adapted from Weaveworks Sock Shop (Apache-2.0), queue-master
+// ShippingConsumerConfiguration: the queue name is a constant field read back
+// through `this.queueName`.
+#[test]
+fn sock_shop_set_queue_names_resolves_the_constant_field() {
+    expect_topic(
+        "sock_shop_consumer",
+        "src/main/java/works/weave/socks/queuemaster/configuration/ShippingConsumerConfiguration.java",
+        "class ShippingConsumerConfiguration {\n    protected final String queueName = \"shipping-task\";\n    SimpleMessageListenerContainer listenerContainer() {\n        SimpleMessageListenerContainer container = new SimpleMessageListenerContainer();\n        container.setQueueNames(this.queueName);\n        return container;\n    }\n}\n",
+        "amqp/shipping-task",
+    );
+}

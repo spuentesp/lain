@@ -220,6 +220,10 @@ languages:
       kind: topic_consumer
       broker: redis
       path_regex: '\.xreadgroup\s*\([^)]*?\{\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: rq-queue
+      kind: topic_consumer
+      broker: rq
+      path_regex: '\b(?:rq\.)?Queue\s*\(\s*(?:name\s*=\s*)?(?:["'']([^"'']+)["''])'
   tsjs:
     - id: express-route
       kind: route
@@ -383,6 +387,18 @@ languages:
       kind: topic_consumer
       broker: redis
       path_regex: '\.xreadgroup\s*\([^)]*?STREAMS''?\s*,\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: bullmq-queue
+      kind: topic_producer
+      broker: bullmq
+      path_regex: '\bnew\s+Queue\s*\(\s*(?:["'']([^"'']+)["''])'
+    - id: bullmq-worker
+      kind: topic_consumer
+      broker: bullmq
+      path_regex: '\bnew\s+Worker\s*\(\s*(?:["'']([^"'']+)["''])'
+    - id: bull-queue
+      kind: topic_producer
+      broker: bull
+      path_regex: '\bnew\s+Bull\s*\(\s*(?:["'']([^"'']+)["''])'
   rust:
     - id: axum-route
       kind: route
@@ -513,6 +529,18 @@ languages:
       kind: topic_producer
       broker: kafka
       path_regex: 'kafkaTemplate\.send\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: rabbit-convert-and-send
+      kind: topic_producer
+      broker: amqp
+      path_regex: '\.convertAndSend\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: rabbit-listener
+      kind: topic_consumer
+      broker: amqp
+      path_regex: '@RabbitListener\s*\(\s*(?:queues\s*=\s*)?\{?\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: rabbit-set-queue-names
+      kind: topic_consumer
+      broker: amqp
+      path_regex: '\.setQueueNames\s*\(\s*(?:this\.)?(?:"([^"]+)"|([A-Za-z_]\w*))'
   csharp:
     - id: aspnet-route
       kind: route
