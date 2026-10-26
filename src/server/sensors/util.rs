@@ -734,9 +734,13 @@ use crate::federation::contracts::model::{
 /// `kind` is the `FrameworkKind` discriminator (the walker uses
 /// it only to route the capture into the right field of the
 /// returned [`IdiomMatch`]; it does not filter on `kind`).
+#[derive(Clone)]
 pub struct CompiledIdiom {
+    /// File-content gate copied from the definition.
+    pub requires: Option<String>,
     pub kind: crate::server::sensors::patterns::FrameworkKind,
     pub id: String,
+    pub broker: Option<String>,
     regex: regex::Regex,
 }
 
@@ -747,6 +751,8 @@ impl CompiledIdiom {
         Some(Self {
             id: def.id.clone(),
             kind: def.kind,
+            broker: def.broker.clone(),
+            requires: def.requires.clone(),
             regex,
         })
     }
@@ -780,6 +786,8 @@ impl CompiledIdiom {
 pub struct IdiomMatch {
     pub framework_id: String,
     pub kind: crate::server::sensors::patterns::FrameworkKind,
+    /// Broker label from the matched entry; `None` is the default broker.
+    pub broker: Option<String>,
     /// String-literal capture (e.g. the contents of `"orders"`).
     /// Populated when the matched regex's literal-form group
     /// captured a non-empty value.
@@ -888,6 +896,7 @@ pub fn walk_idioms(idioms: &[CompiledIdiom], line: &str, line_no: u32) -> Vec<Id
             out.push(IdiomMatch {
                 framework_id: idiom.id.clone(),
                 kind: idiom.kind,
+                broker: idiom.broker.clone(),
                 literal,
                 identifier,
                 line: line_no,

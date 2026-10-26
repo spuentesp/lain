@@ -103,15 +103,19 @@ languages:
     # identifier (resolved against same-file constants).
     - id: pika-publish
       kind: topic_producer
+      broker: amqp
       path_regex: '\.basic_publish\s*\([^)]*?routing_key\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
     - id: pika-consume
       kind: topic_consumer
+      broker: amqp
       path_regex: '\.basic_consume\s*\([^)]*?queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
     - id: pika-queue-declare
       kind: topic_producer
+      broker: amqp
       path_regex: '\.queue_declare\s*\([^)]*?queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
     - id: pika-queue-bind
       kind: topic_consumer
+      broker: amqp
       # `channel.queue_bind(queue=..., exchange=..., routing_key=...)`
       # declares the repo's use of the queue — the acceptance
       # fixtures' ONLY AMQP consumer idiom (no basic_consume /
@@ -120,6 +124,106 @@ languages:
       path_regex: '\.queue_bind\s*\([^)]*?queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
 
   # ── TypeScript / JavaScript ─────────────────────────────────────
+    - id: redis-publish
+      kind: topic_producer
+      broker: redis
+      path_regex: '\b(?:redis\w*|r|cache)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: redis-subscribe
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\b(?:pubsub|redis\w*|r)\.(?:subscribe|psubscribe)\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: redis-xadd
+      kind: topic_producer
+      broker: redis
+      path_regex: '\b(?:redis\w*|r)\.xadd\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: mqtt-publish
+      kind: topic_producer
+      broker: mqtt
+      path_regex: '\b(?:mqtt\w*|client)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: mqtt-subscribe
+      kind: topic_consumer
+      broker: mqtt
+      path_regex: '\b(?:mqtt\w*|client)\.subscribe\s*\(\s*\[?\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sqs-send
+      kind: topic_producer
+      broker: sqs
+      path_regex: '\.send_message\s*\([^)]*?QueueUrl\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sqs-receive
+      kind: topic_consumer
+      broker: sqs
+      path_regex: '\.receive_message\s*\([^)]*?QueueUrl\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sns-publish
+      kind: topic_producer
+      broker: sns
+      path_regex: '\.publish\s*\([^)]*?TopicArn\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sns-subscribe
+      kind: topic_consumer
+      broker: sns
+      path_regex: '\.subscribe\s*\([^)]*?TopicArn\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: nats-publish
+      kind: topic_producer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: nats-subscribe
+      kind: topic_consumer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.subscribe\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kinesis-put-record
+      kind: topic_producer
+      broker: kinesis
+      path_regex: '\.put_record\s*\([^)]*?StreamName\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kinesis-get-shard-iterator
+      kind: topic_consumer
+      broker: kinesis
+      path_regex: '\.get_shard_iterator\s*\([^)]*?StreamName\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: eventbridge-put-events
+      kind: topic_producer
+      broker: eventbridge
+      path_regex: '\.put_events\s*\([^)]*?EventBusName["'']?\s*[:=]\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pulsar-create-producer
+      kind: topic_producer
+      broker: pulsar
+      path_regex: '\.create_producer\s*\(\s*(?:topic\s*=\s*)?(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pulsar-subscribe
+      kind: topic_consumer
+      broker: pulsar
+      path_regex: '\.subscribe\s*\(\s*(?:topic\s*=\s*)?(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))\s*,\s*subscription_name'
+    - id: pubsub-topic-path
+      kind: topic_producer
+      broker: pubsub
+      path_regex: '\.topic_path\s*\(\s*["''][^"'']*["'']\s*,\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: temporal-worker
+      kind: topic_consumer
+      broker: temporal
+      path_regex: '\bWorker\s*\([^)]*?task_queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: temporal-start-workflow
+      kind: topic_producer
+      broker: temporal
+      path_regex: '\.start_workflow\s*\([^)]*?task_queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: dramatiq-actor
+      kind: topic_consumer
+      broker: dramatiq
+      path_regex: '@dramatiq\.actor\s*\([^)]*?queue_name\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kafka-python-consumer
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '\bKafkaConsumer\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kafka-python-producer
+      kind: topic_producer
+      broker: kafka
+      path_regex: '\bproducer\.send\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: huey-instance
+      kind: topic_consumer
+      broker: huey
+      path_regex: '\b(?:Redis|Sqlite|File|Mini)?Huey\s*\(\s*(?:name\s*=\s*)?(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: redis-xreadgroup
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\.xreadgroup\s*\([^)]*?\{\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: rq-queue
+      kind: topic_consumer
+      broker: rq
+      path_regex: '\b(?:rq\.)?Queue\s*\(\s*(?:name\s*=\s*)?(?:["'']([^"'']+)["''])'
   tsjs:
     - id: express-route
       kind: route
@@ -162,6 +266,7 @@ languages:
     # `amqp/<queue>` topics instead of `kafka/…`.
     - id: amqplib-publish
       kind: topic_producer
+      broker: amqp
       # amqplib `channel.publish(exchange, routingKey, content, …)` —
       # the routing key is argument 2. The trailing `\s*,` requires
       # the mandatory content argument, keeping unrelated two-argument
@@ -170,17 +275,20 @@ languages:
       path_regex: '\.publish\s*\([^,]+,\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))\s*,'
     - id: amqplib-consume
       kind: topic_consumer
+      broker: amqp
       # amqplib `channel.consume(queue, onMessage, …)` — the queue is
       # argument 1; argument 2 is the callback and is never a queue
       # name. Group 1: string literal. Group 2: bare identifier.
       path_regex: '\.consume\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
     - id: amqplib-queue-declare
       kind: topic_producer
+      broker: amqp
       # amqplib `channel.assertQueue(queue, options)` — the queue is
       # argument 1 (the queue.declare sibling of pika's queue_declare).
       path_regex: '\.assertQueue\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
     - id: amqplib-queue-bind
       kind: topic_consumer
+      broker: amqp
       # amqplib `channel.bindQueue(queue, source, pattern, args)` —
       # binding the queue declares the repo's use of it (the sibling
       # of pika's queue_bind); the queue is argument 1.
@@ -211,6 +319,86 @@ languages:
       path_regex: '(on(?:open|message|close|error))\s*[=:]\s*(\w+)'
 
   # ── Rust ─────────────────────────────────────────────────────────
+    - id: ioredis-publish
+      kind: topic_producer
+      broker: redis
+      path_regex: '\b(?:redis\w*|ioredis|pub)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: ioredis-subscribe
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\b(?:redis\w*|ioredis|sub)\.(?:subscribe|psubscribe)\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: mqtt-js-publish
+      kind: topic_producer
+      broker: mqtt
+      path_regex: '\b(?:mqtt\w*|client)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: mqtt-js-subscribe
+      kind: topic_consumer
+      broker: mqtt
+      path_regex: '\b(?:mqtt\w*|client)\.subscribe\s*\(\s*\[?\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sqs-v3-send
+      kind: topic_producer
+      broker: sqs
+      path_regex: 'SendMessageCommand\s*\(\s*\{[^}]*?QueueUrl\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sqs-v3-receive
+      kind: topic_consumer
+      broker: sqs
+      path_regex: 'ReceiveMessageCommand\s*\(\s*\{[^}]*?QueueUrl\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sns-v3-publish
+      kind: topic_producer
+      broker: sns
+      path_regex: 'PublishCommand\s*\(\s*\{[^}]*?TopicArn\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sns-v3-subscribe
+      kind: topic_consumer
+      broker: sns
+      path_regex: 'SubscribeCommand\s*\(\s*\{[^}]*?TopicArn\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: nats-js-publish
+      kind: topic_producer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: nats-js-subscribe
+      kind: topic_consumer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.subscribe\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: eventbridge-v3-put-events
+      kind: topic_producer
+      broker: eventbridge
+      path_regex: 'PutEventsCommand\s*\(\s*\{[^}]*?EventBusName\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kinesis-v3-put-record
+      kind: topic_producer
+      broker: kinesis
+      path_regex: 'PutRecordCommand\s*\(\s*\{[^}]*?StreamName\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pubsub-js-topic
+      kind: topic_producer
+      broker: pubsub
+      path_regex: '\.topic\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))\s*\)\s*\.publishMessage'
+    - id: inngest-send
+      kind: topic_producer
+      broker: inngest
+      path_regex: '\binngest\.send\s*\(\s*\{[^}]*?name\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: inngest-trigger
+      kind: topic_consumer
+      broker: inngest
+      path_regex: 'triggers\s*:\s*\[\s*\{\s*event\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: ioredis-xadd
+      kind: topic_producer
+      broker: redis
+      path_regex: '\.xadd\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: ioredis-xreadgroup
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\.xreadgroup\s*\([^)]*?STREAMS''?\s*,\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: bullmq-queue
+      kind: topic_producer
+      broker: bullmq
+      path_regex: '\bnew\s+Queue\s*\(\s*(?:["'']([^"'']+)["''])'
+    - id: bullmq-worker
+      kind: topic_consumer
+      broker: bullmq
+      path_regex: '\bnew\s+Worker\s*\(\s*(?:["'']([^"'']+)["''])'
+    - id: bull-queue
+      kind: topic_producer
+      broker: bull
+      path_regex: '\bnew\s+Bull\s*\(\s*(?:["'']([^"'']+)["''])'
   rust:
     - id: axum-route
       kind: route
@@ -284,6 +472,43 @@ languages:
       path_regex: 'SubscribeTopics\s*\(\s*["'']([^"'']+)["'']'
 
   # ── Java ─────────────────────────────────────────────────────────
+    - id: go-redis-publish
+      kind: topic_producer
+      broker: redis
+      path_regex: '\b(?:rdb|redis\w*|client)\.Publish\s*\(\s*\w+\s*,\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: go-redis-subscribe
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\b(?:rdb|redis\w*|client)\.Subscribe\s*\(\s*\w+\s*,\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: nats-go-publish
+      kind: topic_producer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.Publish\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: nats-go-subscribe
+      kind: topic_consumer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.Subscribe\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: go-redis-xadd
+      kind: topic_producer
+      broker: redis
+      path_regex: '\bStream\s*:\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: go-redis-xreadgroup
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\bStreams\s*:\s*\[\]string\{\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: asynq-queue-option
+      kind: topic_producer
+      broker: asynq
+      path_regex: '\basynq\.Queue\s*\(\s*"([^"]+)"'
+    - id: asynq-server-queues
+      kind: topic_consumer
+      broker: asynq
+      path_regex: '\bQueues:\s*map\[string\]int\s*\{\s*"([^"]+)"'
+    - id: go-sarama-producer-topic
+      kind: topic_producer
+      broker: kafka
+      requires: sarama
+      path_regex: '^\s*Topic:\s*(?:"([^"]+)"|([A-Za-z_][\w.]*))\s*,?\s*$'
   java:
     - id: spring-route
       kind: route
@@ -309,6 +534,30 @@ languages:
       deny_methods: [getStatusCode, statusCode, getHeaders, headers, firstValue, getMessage, message, body, code]
 
   # ── C# ───────────────────────────────────────────────────────────
+    - id: spring-kafka-listener
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '@KafkaListener\s*\([^)]*?topics\s*=\s*\{?\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: spring-kafka-template-send
+      kind: topic_producer
+      broker: kafka
+      path_regex: 'kafkaTemplate\.send\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: rabbit-convert-and-send
+      kind: topic_producer
+      broker: amqp
+      path_regex: '\.convertAndSend\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: rabbit-listener
+      kind: topic_consumer
+      broker: amqp
+      path_regex: '@RabbitListener\s*\(\s*(?:queues\s*=\s*)?\{?\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: rabbit-set-queue-names
+      kind: topic_consumer
+      broker: amqp
+      path_regex: '\.setQueueNames\s*\(\s*(?:this\.)?(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: kafka-consumer-subscribe-list-java
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '\.subscribe\s*\(\s*(?:Arrays\.asList|Collections\.singletonList|List\.of)\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
   csharp:
     - id: aspnet-route
       kind: route
@@ -329,6 +578,14 @@ languages:
       deny_methods: [IsSuccessStatusCode, StatusCode, Headers, GetValues, DownloadString, DownloadStringTaskAsync]
 
   # ── Ruby ─────────────────────────────────────────────────────────
+    - id: confluent-consumer-subscribe
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '(?i)consumer\w*\s*\.\s*Subscribe\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: confluent-producer-produce
+      kind: topic_producer
+      broker: kafka
+      path_regex: '(?i)producer\w*\s*\.\s*Produce(?:Async)?\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
   ruby:
     - id: sinatra-route
       kind: route
@@ -357,6 +614,30 @@ languages:
       lib_match: '^RestClient$'
 
   # ── Kotlin ───────────────────────────────────────────────────────
+    - id: sidekiq-push
+      kind: topic_producer
+      broker: sidekiq
+      path_regex: 'Sidekiq::Client\.push\s*\([^)]*?["'']queue["'']\s*=>\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sidekiq-options
+      kind: topic_consumer
+      broker: sidekiq
+      path_regex: 'sidekiq_options\s+(?:queue:\s*|["'']queue["'']\s*=>\s*)(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: resque-enqueue-to
+      kind: topic_producer
+      broker: resque
+      path_regex: 'Resque\.enqueue_to\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: resque-queue-ivar
+      kind: topic_consumer
+      broker: resque
+      path_regex: '@queue\s*=\s*:(\w+)'
+    - id: activejob-queue-as
+      kind: topic_consumer
+      broker: activejob
+      path_regex: '\bqueue_as\s+:?(\w+)'
+    - id: activejob-set-queue
+      kind: topic_producer
+      broker: activejob
+      path_regex: '\bset\s*\(\s*queue:\s*(?:''|:)?(\w+)'
   kotlin:
     - id: ktor-route
       kind: route
@@ -373,3 +654,11 @@ languages:
       display_name: okhttp
       lib_match: '^OkHttpClient$'
       deny_methods: [statusCode, call, headers, body]
+    - id: kafka-consumer-subscribe-list
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '\bsubscribe\s*\(\s*listOf\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: kafka-record-producer
+      kind: topic_producer
+      broker: kafka
+      path_regex: '\bProducerRecord\s*(?:<[^>]*>)?\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'

@@ -87,6 +87,8 @@ struct RepoEnv {
     /// var are kept so the joiner can detect the conflict; it
     /// resolves them to "ambiguous" or "unmapped" itself.
     bindings: BTreeMap<String, Vec<EnvBinding>>,
+    /// `var -> [scalar value]` for non-URL values (topic names and the like).
+    scalars: BTreeMap<String, Vec<ScalarBinding>>,
     /// vars the joiner asked about but could not find here.
     unmapped: BTreeMap<String, u32>,
 }
@@ -163,6 +165,108 @@ pub fn env_bindings_for(root: &Path) -> EnvBindingIndex {
     }
 }
 
+/// Snapshot of the scalar (non-URL) env values for `root`. Read it with
+/// [`ScalarBindingIndex::unique_value`]: a var with two distinct values is a
+/// conflict, not a value.
+pub fn scalar_bindings_for(root: &Path) -> ScalarBindingIndex {
+    let key = repo_key(root);
+    let guard = match global().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let Some(repo) = guard.get(&key) else {
+        return ScalarBindingIndex::default();
+    };
+    ScalarBindingIndex {
+        by_var: repo.scalars.clone(),
+    }
+}
+
+/// Scalar env values by var, as the sensor saw them in one repo.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScalarBindingIndex {
+    pub by_var: BTreeMap<String, Vec<ScalarBinding>>,
+}
+
+impl ScalarBindingIndex {
+    /// The one value every source agrees on. `None` when the var is unmapped
+    /// or its sources disagree.
+    pub fn unique_value(&self, var: &str) -> Option<&str> {
+        let distinct = self.distinct_values(var);
+        if distinct.len() == 1 {
+            Some(distinct[0])
+        } else {
+            None
+        }
+    }
+
+    /// Every distinct value any source gives `var`, sorted.
+    pub fn distinct_values(&self, var: &str) -> Vec<&str> {
+        let mut out: Vec<&str> = self
+            .by_var
+            .get(var)
+            .map(|v| v.iter().map(|b| b.value.as_str()).collect())
+            .unwrap_or_default();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+/// What the scalar channel says about one variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvLookup {
+    /// Every source gives this one value.
+    Resolved(String),
+    /// Sources disagree; no value is safe to use.
+    Ambiguous,
+    /// No source names the variable.
+    Unmapped,
+}
+
+impl ScalarBindingIndex {
+    /// Classify `var` against the scalar channel.
+    pub fn lookup(&self, var: &str) -> EnvLookup {
+        let distinct = self.distinct_values(var);
+        match distinct.len() {
+            0 => EnvLookup::Unmapped,
+            1 => EnvLookup::Resolved(distinct[0].to_string()),
+            _ => EnvLookup::Ambiguous,
+        }
+    }
+}
+
+/// An environment read inside a source expression: the variable it names,
+/// and the literal default written next to it (`?? "x"`, `|| "x"`, `?: "x"`,
+/// `, "x")`, `unwrap_or("x")`). `None` when the expression reads no variable by
+/// name. Covers C# and TS `??`, Kotlin `?:`, JS `||`, Python `os.getenv` /
+/// `os.environ`, Go and Java `getenv`, Rust `env::var`, and `process.env.X`.
+pub fn env_read_in(expr: &str) -> Option<(String, Option<String>)> {
+    static READ: OnceLock<regex::Regex> = OnceLock::new();
+    static DEFAULT: OnceLock<regex::Regex> = OnceLock::new();
+    let read = READ.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?:GetEnvironmentVariable|[Gg]etenv|env::var|environ(?:\.get)?)\s*[(\[]\s*"(\w+)"|process\.env\.(\w+)"#,
+        )
+        .expect("env read pattern")
+    });
+    let default = DEFAULT.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?:\?\?|\|\||\?:|,|unwrap_or(?:_else)?\s*\((?:\s*\|_\|)?)\s*(?:"([^"]*)"|'([^']*)'|`([^`]*)`)"#,
+        )
+        .expect("env default pattern")
+    });
+    let caps = read.captures(expr)?;
+    let var = caps.get(1).or_else(|| caps.get(2))?.as_str().to_string();
+    let end = caps.get(0)?.end();
+    let rest = expr[end..].split(';').next().unwrap_or("");
+    let literal = default
+        .captures(rest)
+        .and_then(|c| c.get(1).or_else(|| c.get(2)).or_else(|| c.get(3)))
+        .map(|m| m.as_str().to_string());
+    Some((var, literal))
+}
+
 /// Record that the joiner referenced `var` but the env_sensor has
 /// no binding for it (in the per-repo index for `root`). The
 /// orchestrator retrieves these via [`take_unmapped_records`] after
@@ -205,84 +309,85 @@ pub fn take_unmapped_records(root: &Path) -> Vec<UnresolvedRecord> {
 
 // ─── Workspace scan ──────────────────────────────────────────────────
 
-/// Walk `root` and parse every supported env-var source. The
-/// returned `Vec<EnvBinding>` is the per-repo result. The function
-/// is pure (no I/O outside the workspace, no `&mut`); tests exercise
-/// it directly.
-pub fn scan(root: &Path) -> Vec<EnvBinding> {
-    let mut bindings: Vec<EnvBinding> = Vec::new();
+/// One `KEY=value` pair from an env source, before it is judged as a URL
+/// binding or a scalar. Each file is read and parsed once; both channels are
+/// derived from this list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawPair {
+    var: String,
+    value: String,
+    source: EnvSource,
+}
+
+/// One scalar (non-URL) value for an env var, after `${VAR}` interpolation
+/// and hygiene. The same var may carry several values from several sources;
+/// the index reports a conflict instead of choosing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScalarBinding {
+    pub var: String,
+    pub value: String,
+    pub source: EnvSource,
+}
+
+/// Output of one workspace pass: the URL bindings the joiner resolves hosts
+/// with (unchanged contract), and the scalar bindings (topic names and other
+/// non-URL values).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvScan {
+    pub urls: Vec<EnvBinding>,
+    pub scalars: Vec<ScalarBinding>,
+}
+
+/// Walk `root`, read every supported env-var source once, and derive both
+/// channels from the same pairs.
+pub fn scan_all(root: &Path) -> EnvScan {
+    let mut pairs: Vec<RawPair> = Vec::new();
     for (rel, source) in env_file_candidates(root) {
         if let Ok(content) = std::fs::read_to_string(&rel) {
             for line in content.lines() {
-                if let Some(b) = parse_env_value(line, source) {
-                    bindings.push(b);
+                if let Some((var, value)) = parse_dotenv_line(line) {
+                    pairs.push(RawPair { var, value, source });
                 }
             }
         }
     }
-    for (rel, source) in compose_file_candidates(root) {
+    let yaml_sources = [
+        compose_file_candidates(root),
+        helm_file_candidates(root),
+        k8s_file_candidates(root),
+    ];
+    for (rel, source) in yaml_sources.into_iter().flatten() {
         if let Ok(content) = std::fs::read_to_string(&rel) {
             if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                bindings.extend(walk_yaml_env_block(&value, source));
+                collect_pairs(&value, source, &mut pairs);
             }
         }
     }
-    for (rel, source) in helm_file_candidates(root) {
-        if let Ok(content) = std::fs::read_to_string(&rel) {
-            if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                bindings.extend(walk_yaml_env_block(&value, source));
-            }
-        }
+    let urls = pairs
+        .iter()
+        .filter_map(|p| {
+            url_host_from(&p.value).map(|host| EnvBinding {
+                var: p.var.clone(),
+                host,
+                source: p.source,
+            })
+        })
+        .collect();
+    EnvScan {
+        urls,
+        scalars: build_scalars(&pairs),
     }
-    for (rel, source) in k8s_file_candidates(root) {
-        if let Ok(content) = std::fs::read_to_string(&rel) {
-            if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                bindings.extend(walk_yaml_env_block(&value, source));
-            }
-        }
-    }
-    bindings
 }
 
-/// Build one [`EnvBinding`] from a single dotenv-style `KEY=value`
-/// line, or `None` when the line is blank, a comment, or its value
-/// is not a URL-shaped host. Replaces the four
-/// `parse_dotenv_line → url_host_from → EnvBinding` blocks the
-/// pre-refactor scan function carried in each source branch (D9).
-fn parse_env_value(raw: &str, source: EnvSource) -> Option<EnvBinding> {
-    let (var, value) = parse_dotenv_line(raw)?;
-    let host = url_host_from(&value)?;
-    Some(EnvBinding { var, host, source })
+/// The URL bindings only: the `scan` contract the joiner depends on.
+pub fn scan(root: &Path) -> Vec<EnvBinding> {
+    scan_all(root).urls
 }
 
-/// Walk a `serde_yaml::Value` recursively, collecting every
-/// env-bearing block as [`EnvBinding`]s. Replaces the four
-/// per-format YAML walkers (D10):
-///
-/// - **Helm / values.yaml**: any `env:` mapping is treated as
-///   `KEY: value` pairs.
-/// - **docker-compose**: a service's `environment:` may be a
-///   mapping (`KEY: value`) or a sequence of `KEY=value` strings
-///   (or a sequence of `{KEY: value}` maps).
-/// - **k8s**: a `containers:` / `initContainers:` entry's `env:`
-///   is a sequence of `{name, value}` maps; the walker descends
-///   into each container and recognises this shape by the
-///   `name` + `value` keys.
-///
-/// The walker also computes the host from each value via
-/// [`url_host_from`] so non-URL env vars (`LOG_LEVEL=info`)
-/// silently drop out — matching the previous `scan` behaviour.
-fn walk_yaml_env_block(value: &serde_yaml::Value, source: EnvSource) -> Vec<EnvBinding> {
-    let mut out: Vec<EnvBinding> = Vec::new();
-    walk_yaml_env_recursive(value, source, &mut out);
-    out
-}
-
-fn walk_yaml_env_recursive(
-    value: &serde_yaml::Value,
-    source: EnvSource,
-    out: &mut Vec<EnvBinding>,
-) {
+/// Visit a YAML document and collect every env block's pairs, wherever the
+/// block sits (Helm's nested `env:`, k8s' `containers[*].env:`, compose
+/// `services[*].environment:`).
+fn collect_pairs(value: &serde_yaml::Value, source: EnvSource, out: &mut Vec<RawPair>) {
     match value {
         serde_yaml::Value::Mapping(map) => {
             for (k, v) in map {
@@ -291,67 +396,37 @@ fn walk_yaml_env_recursive(
                         collect_env_block(v, source, out);
                     }
                 }
-                // Recurse so k8s' `containers[*].env:` is reached
-                // and Helm's nested `env:` blocks are picked up.
-                walk_yaml_env_recursive(v, source, out);
+                collect_pairs(v, source, out);
             }
         }
         serde_yaml::Value::Sequence(seq) => {
             for item in seq {
-                walk_yaml_env_recursive(item, source, out);
+                collect_pairs(item, source, out);
             }
         }
         _ => {}
     }
 }
 
-/// Process a single env block value (the contents of an `env:` or
-/// `environment:` key). Three sub-shapes are accepted:
-///
-/// - **Mapping** (`{KEY: value, ...}`): each entry is a candidate
-///   env var; non-URL values are dropped via [`url_host_from`].
-/// - **Sequence of strings** (`[KEY=value, ...]`): each string is
-///   parsed via [`parse_dotenv_line`] and dropped on URL failure.
-/// - **Sequence of mappings** (`[{KEY: value}, ...]` or
-///   `[{name: K, value: V}, ...]`): the k8s `{name, value}` shape
-///   is recognised by the two keys; the compose `{KEY: value}`
-///   shape falls through to a nested mapping walk.
-fn collect_env_block(value: &serde_yaml::Value, source: EnvSource, out: &mut Vec<EnvBinding>) {
+/// The contents of one `env:` / `environment:` key. Accepted shapes: a
+/// mapping (`KEY: value`), a sequence of `KEY=value` strings, a sequence of
+/// k8s `{name, value}` maps, and a sequence of compose `{KEY: value}` maps.
+fn collect_env_block(value: &serde_yaml::Value, source: EnvSource, out: &mut Vec<RawPair>) {
     match value {
         serde_yaml::Value::Mapping(map) => {
             for (k, v) in map {
-                if let Some(key) = k.as_str() {
-                    if is_valid_env_name(key) {
-                        if let Some(s) = v.as_str() {
-                            if !s.is_empty() {
-                                if let Some(host) = url_host_from(s) {
-                                    out.push(EnvBinding {
-                                        var: key.to_string(),
-                                        host,
-                                        source,
-                                    });
-                                }
-                            }
-                        }
-                    }
+                if let (Some(key), Some(s)) = (k.as_str(), v.as_str()) {
+                    push_pair(out, key, s, source);
                 }
             }
         }
         serde_yaml::Value::Sequence(seq) => {
             for entry in seq {
                 if let Some(s) = entry.as_str() {
-                    // compose `- KEY=value` form.
-                    if let Some((k, v)) = parse_dotenv_line(s) {
-                        if let Some(host) = url_host_from(&v) {
-                            out.push(EnvBinding {
-                                var: k,
-                                host,
-                                source,
-                            });
-                        }
+                    if let Some((var, value)) = parse_dotenv_line(s) {
+                        out.push(RawPair { var, value, source });
                     }
                 } else if let Some(map) = entry.as_mapping() {
-                    // Detect k8s `{name, value}` by the two keys.
                     let name = map
                         .get(serde_yaml::Value::String("name".into()))
                         .and_then(|v| v.as_str());
@@ -359,30 +434,11 @@ fn collect_env_block(value: &serde_yaml::Value, source: EnvSource, out: &mut Vec
                         .get(serde_yaml::Value::String("value".into()))
                         .and_then(|v| v.as_str());
                     if let (Some(name), Some(val)) = (name, val) {
-                        if is_valid_env_name(name) && !val.is_empty() {
-                            if let Some(host) = url_host_from(val) {
-                                out.push(EnvBinding {
-                                    var: name.to_string(),
-                                    host,
-                                    source,
-                                });
-                            }
-                        }
+                        push_pair(out, name, val, source);
                     } else {
-                        // compose `[{KEY: value}]` shape.
                         for (k, v) in map {
-                            if let Some(key) = k.as_str() {
-                                if let Some(s) = v.as_str() {
-                                    if is_valid_env_name(key) && !s.is_empty() {
-                                        if let Some(host) = url_host_from(s) {
-                                            out.push(EnvBinding {
-                                                var: key.to_string(),
-                                                host,
-                                                source,
-                                            });
-                                        }
-                                    }
-                                }
+                            if let (Some(key), Some(s)) = (k.as_str(), v.as_str()) {
+                                push_pair(out, key, s, source);
                             }
                         }
                     }
@@ -391,6 +447,136 @@ fn collect_env_block(value: &serde_yaml::Value, source: EnvSource, out: &mut Vec
         }
         _ => {}
     }
+}
+
+fn push_pair(out: &mut Vec<RawPair>, key: &str, value: &str, source: EnvSource) {
+    if is_valid_env_name(key) && !value.is_empty() {
+        out.push(RawPair {
+            var: key.to_string(),
+            value: value.to_string(),
+            source,
+        });
+    }
+}
+
+/// `${NAME}`, `${NAME:-default}` or `$NAME`: a reference to another env var,
+/// with the compose-style default when there is one.
+fn reference_of(value: &str) -> Option<(&str, Option<&str>)> {
+    if let Some(inner) = value.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
+        return match inner.split_once(":-") {
+            Some((name, default)) if is_valid_env_name(name) => Some((name, Some(default))),
+            None if is_valid_env_name(inner) => Some((inner, None)),
+            _ => None,
+        };
+    }
+    let name = value.strip_prefix('$')?;
+    is_valid_env_name(name).then_some((name, None))
+}
+
+/// Resolve every pair to the scalar values it can stand for. A literal stands
+/// for itself. A reference stands for the literal values of the variable it
+/// names, from any source, as compose does; with no literal anywhere, its
+/// default. A reference with neither a literal nor a default is dropped.
+fn build_scalars(pairs: &[RawPair]) -> Vec<ScalarBinding> {
+    let mut literals: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for p in pairs {
+        if reference_of(&p.value).is_none() {
+            literals
+                .entry(p.var.as_str())
+                .or_default()
+                .push(p.value.as_str());
+        }
+    }
+    let mut out: Vec<ScalarBinding> = Vec::new();
+    for p in pairs {
+        let values: Vec<&str> = match reference_of(&p.value) {
+            None => vec![p.value.as_str()],
+            Some((name, default)) => match literals.get(name) {
+                Some(found) => found.clone(),
+                None => default.into_iter().collect(),
+            },
+        };
+        for value in values {
+            if is_scalar_candidate(value) {
+                out.push(ScalarBinding {
+                    var: p.var.clone(),
+                    value: value.to_string(),
+                    source: p.source,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Hygiene for the scalar channel. Drops values that are not a configuration
+/// value worth naming: booleans, numbers and sizes, local paths, placeholders,
+/// unresolved references, and anything with a URL scheme (those belong to the
+/// URL channel). A bare word such as `orders` is a valid scalar even though
+/// the URL channel also reads it as a host.
+fn is_scalar_candidate(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "true" | "false" | "yes" | "no" | "on" | "off"
+    ) {
+        return false;
+    }
+    if is_number_or_size(value) {
+        return false;
+    }
+    if value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with('~')
+    {
+        return false;
+    }
+    if matches!(
+        lower.as_str(),
+        "changeme" | "xxx" | "todo" | "tbd" | "placeholder" | "none" | "null"
+    ) {
+        return false;
+    }
+    if value.starts_with('<') && value.ends_with('>') {
+        return false;
+    }
+    if value.contains('$') || value.contains("://") {
+        return false;
+    }
+    true
+}
+
+/// A plain number, optionally followed by a time or size unit (`8080`,
+/// `5000ms`, `160MiB`).
+fn is_number_or_size(value: &str) -> bool {
+    let digits_end = value
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(value.len());
+    if digits_end == 0 {
+        return false;
+    }
+    let suffix = &value[digits_end..];
+    suffix.is_empty()
+        || matches!(
+            suffix,
+            "ms" | "s"
+                | "m"
+                | "h"
+                | "d"
+                | "K"
+                | "M"
+                | "G"
+                | "Ki"
+                | "Mi"
+                | "Gi"
+                | "KB"
+                | "MB"
+                | "GB"
+                | "KiB"
+                | "MiB"
+                | "GiB"
+        )
 }
 
 /// The sensor's `scan` entry point. Reads the workspace, updates
@@ -404,21 +590,26 @@ pub fn scan_workspace_env(
     _namespace: &RepoNamespace,
 ) -> Result<usize, LainError> {
     let key = repo_key(root);
-    let bindings = scan(root);
+    let found = scan_all(root);
     let mut guard = match global().lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
     let mut by_var: BTreeMap<String, Vec<EnvBinding>> = BTreeMap::new();
-    for b in bindings {
+    for b in found.urls.iter().cloned() {
         by_var.entry(b.var.clone()).or_default().push(b);
     }
+    let mut scalars: BTreeMap<String, Vec<ScalarBinding>> = BTreeMap::new();
+    for b in found.scalars {
+        scalars.entry(b.var.clone()).or_default().push(b);
+    }
     let count: usize = by_var.values().map(|v| v.len()).sum();
-    if by_var.is_empty() {
+    if by_var.is_empty() && scalars.is_empty() {
         guard.remove(&key);
     } else {
         let entry = guard.entry(key).or_default();
         entry.bindings = by_var;
+        entry.scalars = scalars;
     }
     Ok(count)
 }
@@ -503,6 +694,8 @@ fn compose_file_candidates(root: &Path) -> Vec<(std::path::PathBuf, EnvSource)> 
             "docker-compose.yaml",
             "compose.yml",
             "compose.yaml",
+            "compose.full.yml",
+            "compose.full.yaml",
         ],
         EnvSource::DockerCompose,
     )
@@ -1029,5 +1222,185 @@ spec:
         let hosts = idx.distinct_hosts("ORDERS_API_URL");
         assert_eq!(hosts, vec!["a".to_string(), "b".to_string()]);
         clear_index_for(&root);
+    }
+}
+
+#[cfg(test)]
+mod scalar_tests {
+    use super::*;
+
+    #[test]
+    fn env_read_extracts_the_name_and_the_default_per_language() {
+        let cases = [
+            (
+                r#"Environment.GetEnvironmentVariable("KAFKA_TOPIC") ?? "orders""#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"System.getenv("KAFKA_TOPIC") ?: "orders""#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"process.env.KAFKA_TOPIC || 'orders'"#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"os.getenv("KAFKA_TOPIC", "orders")"#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"os.environ.get("KAFKA_TOPIC", "orders")"#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (
+                r#"std::env::var("KAFKA_TOPIC").unwrap_or_else(|_| "orders".into())"#,
+                "KAFKA_TOPIC",
+                Some("orders"),
+            ),
+            (r#"System.getenv("KAFKA_TOPIC")"#, "KAFKA_TOPIC", None),
+            (r#"os.environ["KAFKA_TOPIC"]"#, "KAFKA_TOPIC", None),
+        ];
+        for (expr, var, default) in cases {
+            let got = env_read_in(expr).unwrap_or_else(|| panic!("no read in {expr}"));
+            assert_eq!(got.0, var, "{expr}");
+            assert_eq!(got.1.as_deref(), default, "{expr}");
+        }
+        assert!(
+            env_read_in(r#""orders""#).is_none(),
+            "a bare quoted string reads no variable"
+        );
+    }
+
+    #[test]
+    fn lookup_classifies_resolved_ambiguous_and_unmapped() {
+        let dir = workspace(&[(".env", "KAFKA_TOPIC=orders\n")]);
+        let idx = index_of(dir.path());
+        assert_eq!(
+            idx.lookup("KAFKA_TOPIC"),
+            EnvLookup::Resolved("orders".into())
+        );
+        assert_eq!(idx.lookup("OTHER"), EnvLookup::Unmapped);
+        let dir = workspace(&[
+            (".env", "KAFKA_TOPIC=orders\n"),
+            (
+                "compose.yaml",
+                "services:\n  x:\n    environment:\n      KAFKA_TOPIC: orders-v2\n",
+            ),
+        ]);
+        assert_eq!(
+            index_of(dir.path()).lookup("KAFKA_TOPIC"),
+            EnvLookup::Ambiguous
+        );
+    }
+
+    fn workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (rel, body) in files {
+            let path = dir.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, body).unwrap();
+        }
+        dir
+    }
+
+    fn index_of(dir: &Path) -> ScalarBindingIndex {
+        let mut by_var: BTreeMap<String, Vec<ScalarBinding>> = BTreeMap::new();
+        for b in scan_all(dir).scalars {
+            by_var.entry(b.var.clone()).or_default().push(b);
+        }
+        ScalarBindingIndex { by_var }
+    }
+
+    #[test]
+    fn dotenv_topic_name_is_a_scalar() {
+        let dir = workspace(&[(".env", "KAFKA_TOPIC=orders\n")]);
+        assert_eq!(
+            index_of(dir.path()).unique_value("KAFKA_TOPIC"),
+            Some("orders")
+        );
+    }
+
+    #[test]
+    fn compose_reference_resolves_through_the_dotenv_value() {
+        let dir = workspace(&[
+            (".env", "KAFKA_TOPIC=orders\n"),
+            (
+                "compose.full.yaml",
+                "services:\n  checkout:\n    environment:\n      - KAFKA_TOPIC=${KAFKA_TOPIC}\n",
+            ),
+        ]);
+        let idx = index_of(dir.path());
+        assert_eq!(idx.distinct_values("KAFKA_TOPIC"), vec!["orders"]);
+        assert_eq!(idx.unique_value("KAFKA_TOPIC"), Some("orders"));
+    }
+
+    #[test]
+    fn compose_default_applies_only_when_the_var_is_unset() {
+        let dir = workspace(&[(
+            "compose.yaml",
+            "services:\n  accounting:\n    environment:\n      KAFKA_TOPIC: ${KAFKA_TOPIC:-orders}\n",
+        )]);
+        assert_eq!(
+            index_of(dir.path()).unique_value("KAFKA_TOPIC"),
+            Some("orders")
+        );
+    }
+
+    #[test]
+    fn a_literal_that_conflicts_with_the_dotenv_is_ambiguous() {
+        let dir = workspace(&[
+            (".env", "KAFKA_TOPIC=orders\n"),
+            (
+                "compose.yaml",
+                "services:\n  x:\n    environment:\n      KAFKA_TOPIC: orders-v2\n",
+            ),
+        ]);
+        let idx = index_of(dir.path());
+        assert_eq!(
+            idx.distinct_values("KAFKA_TOPIC"),
+            vec!["orders", "orders-v2"]
+        );
+        assert_eq!(
+            idx.unique_value("KAFKA_TOPIC"),
+            None,
+            "a conflict is not a value"
+        );
+    }
+
+    #[test]
+    fn a_reference_with_no_value_and_no_default_is_dropped() {
+        let dir = workspace(&[(
+            "compose.yaml",
+            "services:\n  x:\n    environment:\n      KAFKA_TOPIC: ${KAFKA_TOPIC}\n",
+        )]);
+        assert_eq!(index_of(dir.path()).unique_value("KAFKA_TOPIC"), None);
+    }
+
+    #[test]
+    fn hygiene_drops_flags_numbers_sizes_paths_and_placeholders() {
+        let dir = workspace(&[(
+            ".env",
+            "PORT=8080\nDEBUG=true\nCACHE=160MiB\nLOG_DIR=./logs\nTOKEN=changeme\nORDER_TOPIC=orders-events\n",
+        )]);
+        let idx = index_of(dir.path());
+        for var in ["PORT", "DEBUG", "CACHE", "LOG_DIR", "TOKEN"] {
+            assert!(!idx.by_var.contains_key(var), "{var} must be dropped");
+        }
+        assert_eq!(idx.unique_value("ORDER_TOPIC"), Some("orders-events"));
+    }
+
+    #[test]
+    fn urls_stay_on_the_url_channel_and_out_of_the_scalars() {
+        let dir = workspace(&[(".env", "ORDERS_API_URL=http://orders:8080\n")]);
+        let found = scan_all(dir.path());
+        assert_eq!(found.urls.len(), 1, "the URL is still a URL binding");
+        assert!(found.scalars.is_empty(), "a URL must not also be a scalar");
     }
 }

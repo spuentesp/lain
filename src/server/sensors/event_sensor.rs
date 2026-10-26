@@ -61,13 +61,17 @@
 //! rescan retracts only its own previous output (§6.1).
 
 use crate::error::LainError;
-use crate::federation::contracts::model::SourceSite;
+use crate::federation::contracts::coverage::UnresolvedRecord;
+use crate::federation::contracts::model::{SourceSite, UnresolvedReason};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::server::sensors::env_sensor::{self, EnvLookup, ScalarBindingIndex};
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::payload_schema::{parse_avro_schema, parse_json_schema};
 use crate::server::sensors::util::{self, Lang};
 use crate::server::sensors::util_tokenize::strip_line_comment;
+use crate::server::sensors::ScanReport;
+use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -124,13 +128,34 @@ pub struct EventSensor;
 // Topic events ride on the `EntryPoints` bucket so counts surface in
 // `run_all` without growing the enum. Phase 2 (§6.7 / §7.7): needs the
 // joiner's service table to know which repo a `Topic` belongs to.
-crate::server::sensors::register_sensor!(
-    EventSensor,
-    "event",
-    EntryPoints,
-    2,
-    scan_workspace_event
-);
+impl crate::server::sensors::Sensor for EventSensor {
+    fn name(&self) -> &'static str {
+        "event"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::EntryPoints
+    }
+    fn phase(&self) -> u8 {
+        2
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace_event(graph, root, namespace)
+    }
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<ScanReport, LainError> {
+        scan_workspace_event_with_report(graph, root, namespace)
+    }
+}
+inventory::submit!(SensorEntry(&EventSensor));
 
 // ─── Workspace scan ──────────────────────────────────────────────────
 
@@ -139,8 +164,20 @@ pub fn scan_workspace_event(
     root: &Path,
     namespace: &RepoNamespace,
 ) -> Result<usize, LainError> {
+    scan_workspace_event_with_report(graph, root, namespace).map(|r| r.emitted)
+}
+
+/// Like [`scan_workspace_event`], and also reports the producer sites whose
+/// topic could not be resolved, as `UnresolvedReason::DynamicTopic`, for the
+/// coverage ledger. Consumer sites are not counted here: they reach the
+/// joiner through the dynamic-topic sentinel node and are reported there.
+pub fn scan_workspace_event_with_report(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+) -> Result<ScanReport, LainError> {
     if graph.is_read_only() {
-        return Ok(0);
+        return Ok(ScanReport::default());
     }
 
     // Load once per scan so every site uses the same repo-local patterns.
@@ -154,6 +191,17 @@ pub fn scan_workspace_event(
     // (per REPO scan, not per file: two files publishing one topic
     // share the hub).
     let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
+    let mut producer_gaps = ProducerGaps::default();
+    // The env sensor runs first (phase 0), so its scalar channel is populated.
+    let env = env_sensor::scalar_bindings_for(root);
+    // Go package scope is read from every `.go` file before the site walk, so a
+    // reference to another package's value resolves regardless of walk order.
+    let go_files: Vec<(std::path::PathBuf, String)> = util::scan_files(root, |p| {
+        (p.extension().and_then(|e| e.to_str()) == Some("go")).then_some(())
+    })
+    .map(|(p, c, _)| (p, c))
+    .collect();
+    let go_scopes = go_constant_scopes(root, &go_files, &env);
 
     let any_ext = |p: &Path| {
         Some(
@@ -178,8 +226,36 @@ pub fn scan_workspace_event(
                 idioms.len() - 1
             });
         let path_str = graph_path(root, &path);
-        let constants = collect_same_file_constants(&content, ext);
-        let sites = detect_sites(&content, ext, &constants, &idioms[index].1);
+        let mut constants = collect_same_file_constants(&content, ext, &env);
+        let mut gaps = collect_env_gaps(&content, ext, &env);
+        if ext == "go" {
+            if let Some(scope) = go_scopes.get(&dir_key(root, &path)) {
+                for (key, value) in &scope.values {
+                    constants
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+                for (key, reason) in &scope.gaps {
+                    gaps.entry(key.clone()).or_insert(*reason);
+                }
+            }
+        }
+        let mut unresolved_producers: Vec<(u32, Option<String>)> = Vec::new();
+        let sites = detect_sites(
+            &content,
+            ext,
+            &constants,
+            &idioms[index].1,
+            &mut unresolved_producers,
+        );
+        for (line, identifier) in unresolved_producers {
+            let reason = identifier
+                .as_ref()
+                .and_then(|id| gaps.get(id))
+                .copied()
+                .unwrap_or(UnresolvedReason::DynamicTopic);
+            producer_gaps.record(reason, format!("{path_str}:{line}"));
+        }
         let (nodes, edges) =
             emit_sites(&sites, &path_str, namespace, graph, &mut emitted_topic_ids);
         all_nodes.extend(nodes);
@@ -221,7 +297,43 @@ pub fn scan_workspace_event(
     scan_payload_schemas(&mut all_nodes, &mut all_edges, root, namespace);
 
     graph.replace_sensor_output(SensorOwner::EventSensor, &all_nodes, &all_edges)?;
-    Ok(all_nodes.len())
+    Ok(ScanReport {
+        emitted: all_nodes.len(),
+        error: None,
+        unresolved: producer_gaps.into_records(),
+    })
+}
+
+/// Producer sites whose topic did not resolve, by the reason each earns: an
+/// environment variable that is ambiguous or unmapped, or a dynamic topic.
+/// Each reason keeps a count and the first few `path:line` ids, the same way
+/// the SQL sensor keeps its unresolved samples.
+#[derive(Default)]
+struct ProducerGaps {
+    by_reason: BTreeMap<UnresolvedReason, (usize, Vec<String>)>,
+}
+
+impl ProducerGaps {
+    const MAX_SAMPLES: usize = 5;
+
+    fn record(&mut self, reason: UnresolvedReason, site: String) {
+        let (count, samples) = self.by_reason.entry(reason).or_default();
+        *count += 1;
+        if samples.len() < Self::MAX_SAMPLES {
+            samples.push(site);
+        }
+    }
+
+    fn into_records(self) -> Vec<UnresolvedRecord> {
+        self.by_reason
+            .into_iter()
+            .map(|(reason, (count, sample_ids))| UnresolvedRecord {
+                reason,
+                count,
+                sample_ids,
+            })
+            .collect()
+    }
 }
 
 // ─── Payload schemas (Avro / JSON Schema → Topic → Schema) ───────────
@@ -357,11 +469,15 @@ fn scan_payload_schemas(
 
 // ─── Detection (regex-first, language-dispatched) ────────────────────
 
-/// `const NAME = "value";` (TS / JS / Go) and `NAME = "value"` at
-/// module level (Python). Keys must be identifiers and values must be
+/// `const NAME = "value";` (TS / JS / Go), `NAME = "value"` at
+/// module level (Python), and `[modifiers] Type NAME = "value";` (Java). Keys must be identifiers and values must be
 /// string literals. Both single- and double-quoted forms are
 /// supported.
-fn collect_same_file_constants(content: &str, ext: &str) -> BTreeMap<String, String> {
+fn collect_same_file_constants(
+    content: &str,
+    ext: &str,
+    env: &ScalarBindingIndex,
+) -> BTreeMap<String, String> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     for line in content.lines() {
         let trimmed = line.trim_start();
@@ -373,37 +489,260 @@ fn collect_same_file_constants(content: &str, ext: &str) -> BTreeMap<String, Str
             None => continue,
         };
         let rhs = rhs.trim().trim_end_matches(';').trim();
+        let Some(name) = constant_name(lhs, ext) else {
+            continue;
+        };
+        // A literal is its own value. An environment read takes the value the
+        // env channel resolved; a conflict yields no constant, and a missing
+        // variable falls back to the literal default written in the code.
         let value = match extract_string_literal(rhs) {
             Some(v) => v,
-            None => continue,
+            None => match env_fallback(rhs, env) {
+                Some(v) => v,
+                None => continue,
+            },
         };
-        // Strip TS/JS keywords; Python has no keyword on bare assignments.
-        let kw_stripped = lhs
-            .trim()
-            .strip_prefix("const ")
-            .or_else(|| lhs.trim().strip_prefix("let "))
-            .or_else(|| lhs.trim().strip_prefix("var "));
-        let name = match kw_stripped {
-            Some(n) => n.trim().to_string(),
-            None => {
-                if ext == "py" {
-                    let n = lhs.trim();
-                    if !n.is_empty() && is_ident(n) && !n.contains(' ') {
-                        n.to_string()
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-        };
-        if name.is_empty() || !is_ident(&name) {
-            continue;
-        }
         out.insert(name, value);
     }
     out
+}
+
+/// The directory a file sits in, relative to the workspace root. Go packages
+/// are directories, so this is the package scope.
+fn dir_key(root: &Path, path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// One Go package's scope: the values its exported names resolve to, and the
+/// names whose environment read the env channel cannot give a value.
+#[derive(Debug, Clone, Default)]
+struct GoScope {
+    values: BTreeMap<String, String>,
+    gaps: BTreeMap<String, UnresolvedReason>,
+}
+
+/// Go package scope for every directory with `.go` files: its own exported
+/// package-level names, plus those of every other package under
+/// `package.Name` (the import alias a caller uses). A package name shared by
+/// two directories is not qualified at all, so the reference stays unresolved.
+fn go_constant_scopes(
+    root: &Path,
+    files: &[(std::path::PathBuf, String)],
+    env: &ScalarBindingIndex,
+) -> BTreeMap<String, GoScope> {
+    let mut own: BTreeMap<String, GoScope> = BTreeMap::new();
+    for (path, content) in files {
+        let dir = dir_key(root, path);
+        let (values, gaps) = go_package_values(content, &dir, files, root, env);
+        let scope = own.entry(dir).or_default();
+        scope.values.extend(values);
+        scope.gaps.extend(gaps);
+    }
+    let mut bases: BTreeMap<&str, usize> = BTreeMap::new();
+    for dir in own.keys() {
+        *bases
+            .entry(dir.rsplit('/').next().unwrap_or(""))
+            .or_default() += 1;
+    }
+    let mut qualified = GoScope::default();
+    for (dir, scope) in &own {
+        let base = dir.rsplit('/').next().unwrap_or("");
+        if bases.get(base).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        for (name, value) in &scope.values {
+            qualified
+                .values
+                .insert(format!("{base}.{name}"), value.clone());
+        }
+        for (name, reason) in &scope.gaps {
+            qualified.gaps.insert(format!("{base}.{name}"), *reason);
+        }
+    }
+    own.into_iter()
+        .map(|(dir, mut scope)| {
+            for (key, value) in &qualified.values {
+                scope
+                    .values
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            for (key, reason) in &qualified.gaps {
+                scope.gaps.entry(key.clone()).or_insert(*reason);
+            }
+            (dir, scope)
+        })
+        .collect()
+}
+
+/// Exported `Name = value` declarations in one Go file. A value is a string
+/// literal, or a call to a function in the same package that returns one. A
+/// call that reads the environment without a value is a gap, not a value.
+fn go_package_values(
+    content: &str,
+    dir: &str,
+    files: &[(std::path::PathBuf, String)],
+    root: &Path,
+    env: &ScalarBindingIndex,
+) -> (BTreeMap<String, String>, BTreeMap<String, UnresolvedReason>) {
+    static DECL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let decl = DECL.get_or_init(|| {
+        regex::Regex::new(r"^\s*(?:var\s+)?([A-Z]\w*)\s*=\s*(.+?)\s*$").expect("go decl")
+    });
+    let call = CALL.get_or_init(|| regex::Regex::new(r"^([a-z_]\w*)\(\)$").expect("go call"));
+    let mut values = BTreeMap::new();
+    let mut gaps = BTreeMap::new();
+    for line in content.lines() {
+        let Some(c) = decl.captures(line) else {
+            continue;
+        };
+        let name = c[1].to_string();
+        let rhs = c[2].trim();
+        if let Some(value) = extract_string_literal(rhs) {
+            values.insert(name, value);
+        } else if let Some(f) = call.captures(rhs) {
+            match go_function_value(&f[1], dir, files, root, env) {
+                Some(Ok(value)) => {
+                    values.insert(name, value);
+                }
+                Some(Err(reason)) => {
+                    gaps.insert(name, reason);
+                }
+                None => {}
+            }
+        }
+    }
+    (values, gaps)
+}
+
+/// What a Go function returns when it is a simple environment lookup with a
+/// fallback. `None` when the function is not one. Otherwise the env channel's
+/// value for the variable it reads; when the channel has none, the last string
+/// literal the function returns. Failing both, the reason it cannot resolve.
+fn go_function_value(
+    name: &str,
+    dir: &str,
+    files: &[(std::path::PathBuf, String)],
+    root: &Path,
+    env: &ScalarBindingIndex,
+) -> Option<Result<String, UnresolvedReason>> {
+    let header = format!("func {name}()");
+    let body = files
+        .iter()
+        .filter(|(p, _)| dir_key(root, p) == dir)
+        .find_map(|(_, content)| {
+            let mut found = false;
+            let mut body: Vec<&str> = Vec::new();
+            for line in content.lines() {
+                if !found {
+                    found = line.starts_with(&header);
+                    continue;
+                }
+                if line == "}" {
+                    return Some(body.join("\n"));
+                }
+                body.push(line);
+            }
+            None
+        })?;
+    let (var, _) = env_sensor::env_read_in(&body)?;
+    let fallback = body
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("return "))
+        .filter_map(extract_string_literal)
+        .next_back();
+    Some(match env.lookup(&var) {
+        EnvLookup::Resolved(value) => Ok(value),
+        EnvLookup::Ambiguous => Err(UnresolvedReason::EnvAmbiguous),
+        EnvLookup::Unmapped => fallback.ok_or(UnresolvedReason::EnvUnmapped),
+    })
+}
+
+/// Constants whose environment read the env channel cannot give a value to,
+/// with the reason: `EnvAmbiguous` when the sources disagree, `EnvUnmapped`
+/// when no source names the variable and the code gives no default.
+fn collect_env_gaps(
+    content: &str,
+    ext: &str,
+    env: &ScalarBindingIndex,
+) -> BTreeMap<String, UnresolvedReason> {
+    let mut out: BTreeMap<String, UnresolvedReason> = BTreeMap::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let rhs = rhs.trim().trim_end_matches(';').trim();
+        let Some(name) = constant_name(lhs, ext) else {
+            continue;
+        };
+        if extract_string_literal(rhs).is_some() {
+            continue;
+        }
+        let Some((var, default)) = env_sensor::env_read_in(rhs) else {
+            continue;
+        };
+        match env.lookup(&var) {
+            EnvLookup::Resolved(_) => {}
+            EnvLookup::Ambiguous => {
+                out.insert(name, UnresolvedReason::EnvAmbiguous);
+            }
+            EnvLookup::Unmapped => {
+                if default.is_none() {
+                    out.insert(name, UnresolvedReason::EnvUnmapped);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The name a constant declaration binds, by language. Returns `None` when the
+/// left-hand side is not a plain declaration of an identifier.
+fn constant_name(lhs: &str, ext: &str) -> Option<String> {
+    let lhs = lhs.trim();
+    let name = match ext {
+        "py" => lhs.to_string(),
+        "kt" | "kts" => lhs
+            .split(':')
+            .next()?
+            .split_whitespace()
+            .last()?
+            .to_string(),
+        "java" | "cs" => {
+            // `[modifiers] Type NAME =`: the name is the last token.
+            let tokens: Vec<&str> = lhs.split_whitespace().collect();
+            if tokens.len() < 2 {
+                return None;
+            }
+            tokens[tokens.len() - 1].to_string()
+        }
+        _ => lhs
+            .strip_prefix("const ")
+            .or_else(|| lhs.strip_prefix("let "))
+            .or_else(|| lhs.strip_prefix("var "))?
+            .trim()
+            .to_string(),
+    };
+    (!name.is_empty() && is_ident(&name)).then_some(name)
+}
+
+/// The value of an environment read in `rhs`, as the env channel sees it, or
+/// the literal default when the channel has no value for the variable.
+fn env_fallback(rhs: &str, env: &ScalarBindingIndex) -> Option<String> {
+    let (var, default) = env_sensor::env_read_in(rhs)?;
+    match env.lookup(&var) {
+        EnvLookup::Resolved(value) => Some(value),
+        EnvLookup::Ambiguous => None,
+        EnvLookup::Unmapped => default,
+    }
 }
 
 fn extract_string_literal(s: &str) -> Option<String> {
@@ -426,9 +765,19 @@ fn detect_sites(
     ext: &str,
     constants: &BTreeMap<String, String>,
     idioms: &TopicIdioms,
+    unresolved_producers: &mut Vec<(u32, Option<String>)>,
 ) -> Vec<DetectedSite> {
     let mut out: Vec<DetectedSite> = Vec::new();
     let (producers, consumers, scheduled) = idioms;
+    // An entry with `requires` applies only to files that contain its marker
+    // (the Go client's import path, say), so a bare `Topic:` field elsewhere
+    // is not read as a producer.
+    let applies =
+        |i: &util::CompiledIdiom| i.requires.as_deref().is_none_or(|r| content.contains(r));
+    let producers: Vec<util::CompiledIdiom> =
+        producers.iter().filter(|i| applies(i)).cloned().collect();
+    let consumers: Vec<util::CompiledIdiom> =
+        consumers.iter().filter(|i| applies(i)).cloned().collect();
     let lines: Vec<&str> = content.lines().collect();
     for (idx, raw) in lines.iter().enumerate() {
         let line_num = idx as u32 + 1;
@@ -440,18 +789,23 @@ fn detect_sites(
         if trimmed.is_empty() {
             continue;
         }
-        for m in util::walk_idioms(producers, line, line_num) {
-            if let Some(value) = resolve_idiom_capture(&m, constants) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(value),
-                    broker: broker_for(&m).into(),
-                    line: line_num,
-                    owner_name: None,
-                });
+        for m in util::walk_idioms(&producers, line, line_num) {
+            // A producer whose topic cannot be resolved stays a `topic: None`
+            // site: `emit_sites` drops it (no hub to anchor on). The scan counts
+            // it into the coverage report, under the reason its identifier earns.
+            let topic = resolve_idiom_capture(&m, constants);
+            if topic.is_none() {
+                unresolved_producers.push((line_num, m.identifier.clone()));
             }
+            out.push(DetectedSite {
+                kind: SiteKind::Produces,
+                topic,
+                broker: broker_for(&m).into(),
+                line: line_num,
+                owner_name: None,
+            });
         }
-        for m in util::walk_idioms(consumers, line, line_num) {
+        for m in util::walk_idioms(&consumers, line, line_num) {
             match resolve_idiom_capture(&m, constants) {
                 Some(value) => out.push(DetectedSite {
                     kind: SiteKind::Consumes,
@@ -509,12 +863,8 @@ fn detect_sites(
 /// framework, never the filename. The joiner's `default_broker_for`
 /// parses the prefix back into `ContractKey::Topic { broker, .. }`
 /// (`joiner/endpoints.rs:224`), so no joiner change is needed.
-fn broker_for(m: &util::IdiomMatch) -> &'static str {
-    if m.framework_id.starts_with("pika") || m.framework_id.starts_with("amqplib") {
-        "amqp"
-    } else {
-        DEFAULT_BROKER
-    }
+fn broker_for(m: &util::IdiomMatch) -> &str {
+    m.broker.as_deref().unwrap_or(DEFAULT_BROKER)
 }
 
 /// Map a file extension to the Tier-1 `Lang` the walker uses for
@@ -525,7 +875,11 @@ fn ext_to_lang(ext: &str) -> Option<Lang> {
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Lang::TsJs),
         "py" => Some(Lang::Python),
         "rs" => Some(Lang::Rust),
+        "cs" => Some(Lang::CSharp),
+        "kt" | "kts" => Some(Lang::Kotlin),
         "go" => Some(Lang::Go),
+        "rb" => Some(Lang::Ruby),
+        "java" => Some(Lang::Java),
         _ => None,
     }
 }
@@ -1726,7 +2080,7 @@ producer.send({ topic: 'orders.created' });
     #[test]
     fn collect_constants_extracts_const_and_let() {
         let src = "const A = 'foo';\nlet B = \"bar\";\nconst c = 'baz';\n";
-        let constants = collect_same_file_constants(src, "ts");
+        let constants = collect_same_file_constants(src, "ts", &ScalarBindingIndex::default());
         assert_eq!(constants.get("A"), Some(&"foo".to_string()));
         assert_eq!(constants.get("B"), Some(&"bar".to_string()));
         assert_eq!(constants.get("c"), Some(&"baz".to_string()));
@@ -1735,7 +2089,7 @@ producer.send({ topic: 'orders.created' });
     #[test]
     fn collect_constants_for_python_module_level_assignments() {
         let src = "TOPIC = \"orders.created\"\n";
-        let constants = collect_same_file_constants(src, "py");
+        let constants = collect_same_file_constants(src, "py", &ScalarBindingIndex::default());
         assert_eq!(constants.get("TOPIC"), Some(&"orders.created".to_string()));
     }
 
