@@ -28,7 +28,7 @@ languages:
     - id: fastapi-route
       kind: route
       verbs: [get, post, put, delete, patch, head, options]
-      path_regex: '@[\w\.]+\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["'']([^"'']+)["'']'
+      path_regex: '@[\w\.]+\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''](/[^"'']*)["'']'
       handler_regex: '(?:async\s+)?def\s+(\w+)\s*\('
     - id: flask-route
       kind: route

@@ -1230,6 +1230,35 @@ async def list_orders():
         );
     }
 
+    #[test]
+    fn a_mock_patch_target_is_not_a_fastapi_route() {
+        let src = "\
+from unittest import mock
+
+@mock.patch(\"saleor.checkout.calculations.calculate_checkout_total\")
+def test_total(m):
+    pass
+
+@app.patch('/orders/{id}')
+async def update_order(id):
+    pass
+";
+        let r = scan_file_for_routes(
+            std::path::Path::new("test_checkout.py"),
+            src,
+            Patterns::patterns(),
+        );
+        let paths: Vec<&str> = r.iter().map(|x| x.path.as_str()).collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("saleor.checkout")),
+            "mock.patch target must not become a route: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("/orders")),
+            "the real route must still be found: {paths:?}"
+        );
+    }
+
     // ─── Workstream 5: Java Spring, JAX-RS, ASP.NET, Sinatra, Rails, Ktor.
 
     #[test]
