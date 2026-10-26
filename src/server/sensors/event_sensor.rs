@@ -71,6 +71,7 @@ use crate::server::sensors::payload_schema::{parse_avro_schema, parse_json_schem
 use crate::server::sensors::util::{self, Lang};
 use crate::server::sensors::util_tokenize::strip_line_comment;
 use crate::server::sensors::ScanReport;
+use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -154,7 +155,7 @@ impl crate::server::sensors::Sensor for EventSensor {
         scan_workspace_event_with_report(graph, root, namespace)
     }
 }
-inventory::submit!(crate::server::sensors::SensorEntry(&EventSensor));
+inventory::submit!(SensorEntry(&EventSensor));
 
 // ─── Workspace scan ──────────────────────────────────────────────────
 
