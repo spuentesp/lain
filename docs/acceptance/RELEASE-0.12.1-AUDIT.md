@@ -15,8 +15,8 @@ Date: 2026-10-26. Base: `dev` (includes PR #351). Release branch:
 
 ## Verification on this tree
 
-- `cargo test --workspace --no-fail-fast`: see the release log for totals.
-- `scripts/demo.sh`: see the release log for totals.
+- `cargo test --workspace --no-fail-fast`: **94 targets, 3543 passed, 0 failed, 8 ignored**.
+- `scripts/demo.sh`: **166 passed, 2 skipped, 0 failed** (exit 0).
 - `scripts/check-release-version.py --tag v0.12.1`: OK.
 
 ## Deferrals written down
