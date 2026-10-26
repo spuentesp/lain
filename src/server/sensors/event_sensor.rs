@@ -61,13 +61,15 @@
 //! rescan retracts only its own previous output (§6.1).
 
 use crate::error::LainError;
-use crate::federation::contracts::model::SourceSite;
+use crate::federation::contracts::coverage::UnresolvedRecord;
+use crate::federation::contracts::model::{SourceSite, UnresolvedReason};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::payload_schema::{parse_avro_schema, parse_json_schema};
 use crate::server::sensors::util::{self, Lang};
 use crate::server::sensors::util_tokenize::strip_line_comment;
+use crate::server::sensors::ScanReport;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -124,13 +126,34 @@ pub struct EventSensor;
 // Topic events ride on the `EntryPoints` bucket so counts surface in
 // `run_all` without growing the enum. Phase 2 (§6.7 / §7.7): needs the
 // joiner's service table to know which repo a `Topic` belongs to.
-crate::server::sensors::register_sensor!(
-    EventSensor,
-    "event",
-    EntryPoints,
-    2,
-    scan_workspace_event
-);
+impl crate::server::sensors::Sensor for EventSensor {
+    fn name(&self) -> &'static str {
+        "event"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::EntryPoints
+    }
+    fn phase(&self) -> u8 {
+        2
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace_event(graph, root, namespace)
+    }
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<ScanReport, LainError> {
+        scan_workspace_event_with_report(graph, root, namespace)
+    }
+}
+inventory::submit!(crate::server::sensors::SensorEntry(&EventSensor));
 
 // ─── Workspace scan ──────────────────────────────────────────────────
 
@@ -139,8 +162,20 @@ pub fn scan_workspace_event(
     root: &Path,
     namespace: &RepoNamespace,
 ) -> Result<usize, LainError> {
+    scan_workspace_event_with_report(graph, root, namespace).map(|r| r.emitted)
+}
+
+/// Like [`scan_workspace_event`], and also reports the producer sites whose
+/// topic could not be resolved, as `UnresolvedReason::DynamicTopic`, for the
+/// coverage ledger. Consumer sites are not counted here: they reach the
+/// joiner through the dynamic-topic sentinel node and are reported there.
+pub fn scan_workspace_event_with_report(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+) -> Result<ScanReport, LainError> {
     if graph.is_read_only() {
-        return Ok(0);
+        return Ok(ScanReport::default());
     }
 
     // Load once per scan so every site uses the same repo-local patterns.
@@ -154,6 +189,7 @@ pub fn scan_workspace_event(
     // (per REPO scan, not per file: two files publishing one topic
     // share the hub).
     let mut emitted_topic_ids: BTreeSet<String> = BTreeSet::new();
+    let mut dynamic_producers = DynamicProducers::default();
 
     let any_ext = |p: &Path| {
         Some(
@@ -180,6 +216,12 @@ pub fn scan_workspace_event(
         let path_str = graph_path(root, &path);
         let constants = collect_same_file_constants(&content, ext);
         let sites = detect_sites(&content, ext, &constants, &idioms[index].1);
+        for site in sites
+            .iter()
+            .filter(|s| s.kind == SiteKind::Produces && s.topic.is_none())
+        {
+            dynamic_producers.record(format!("{path_str}:{}", site.line));
+        }
         let (nodes, edges) =
             emit_sites(&sites, &path_str, namespace, graph, &mut emitted_topic_ids);
         all_nodes.extend(nodes);
@@ -221,7 +263,42 @@ pub fn scan_workspace_event(
     scan_payload_schemas(&mut all_nodes, &mut all_edges, root, namespace);
 
     graph.replace_sensor_output(SensorOwner::EventSensor, &all_nodes, &all_edges)?;
-    Ok(all_nodes.len())
+    Ok(ScanReport {
+        emitted: all_nodes.len(),
+        error: None,
+        unresolved: dynamic_producers.into_records(),
+    })
+}
+
+/// Producer sites whose topic is not a literal or a same-file constant.
+/// Counted per scan; the first few `path:line` ids are kept as samples, the
+/// same way the SQL sensor keeps its unresolved samples.
+#[derive(Default)]
+struct DynamicProducers {
+    count: usize,
+    samples: Vec<String>,
+}
+
+impl DynamicProducers {
+    const MAX_SAMPLES: usize = 5;
+
+    fn record(&mut self, site: String) {
+        self.count += 1;
+        if self.samples.len() < Self::MAX_SAMPLES {
+            self.samples.push(site);
+        }
+    }
+
+    fn into_records(self) -> Vec<UnresolvedRecord> {
+        if self.count == 0 {
+            return Vec::new();
+        }
+        vec![UnresolvedRecord {
+            reason: UnresolvedReason::DynamicTopic,
+            count: self.count,
+            sample_ids: self.samples,
+        }]
+    }
 }
 
 // ─── Payload schemas (Avro / JSON Schema → Topic → Schema) ───────────
@@ -448,15 +525,16 @@ fn detect_sites(
             continue;
         }
         for m in util::walk_idioms(producers, line, line_num) {
-            if let Some(value) = resolve_idiom_capture(&m, constants) {
-                out.push(DetectedSite {
-                    kind: SiteKind::Produces,
-                    topic: Some(value),
-                    broker: broker_for(&m).into(),
-                    line: line_num,
-                    owner_name: None,
-                });
-            }
+            // A producer whose topic cannot be resolved stays a `topic: None`
+            // site: `emit_sites` drops it (no hub to anchor on), and the scan
+            // counts it into the coverage report as `DynamicTopic`.
+            out.push(DetectedSite {
+                kind: SiteKind::Produces,
+                topic: resolve_idiom_capture(&m, constants),
+                broker: broker_for(&m).into(),
+                line: line_num,
+                owner_name: None,
+            });
         }
         for m in util::walk_idioms(consumers, line, line_num) {
             match resolve_idiom_capture(&m, constants) {

@@ -703,3 +703,66 @@ fn ruby_plain_job_without_a_queue_mints_nothing() {
         "a job with no queue declaration must not mint a topic"
     );
 }
+
+// Coverage exposure: producers whose topic is not a literal are reported as
+// `DynamicTopic`; consumers keep their own path (the joiner's sentinel).
+
+fn report_for(
+    tag: &str,
+    rel: &str,
+    content: &str,
+) -> Vec<lain::federation::contracts::coverage::UnresolvedRecord> {
+    let root = fixture(tag, rel, content);
+    let graph = GraphDatabase::new(&root.join("graph.bin")).expect("open graph");
+    lain::server::sensors::event_sensor::scan_workspace_event_with_report(
+        &graph,
+        &root,
+        &RepoNamespace::for_test(),
+    )
+    .expect("event scan")
+    .unresolved
+}
+
+#[test]
+fn dynamic_producer_topic_is_reported_as_dynamic_topic() {
+    let records = report_for(
+        "dyn_producer",
+        "src/events.ts",
+        "producer.send({ topic: topicName, messages: [m] });\n",
+    );
+    assert_eq!(records.len(), 1, "one DynamicTopic record; got {records:?}");
+    assert!(matches!(
+        records[0].reason,
+        lain::federation::contracts::model::UnresolvedReason::DynamicTopic
+    ));
+    assert_eq!(records[0].count, 1);
+    assert_eq!(records[0].sample_ids, vec!["src/events.ts:1".to_string()]);
+}
+
+#[test]
+fn literal_producer_topic_is_not_reported() {
+    let records = report_for(
+        "lit_producer",
+        "src/events.ts",
+        "producer.send({ topic: 'orders.created', messages: [m] });\n",
+    );
+    assert!(
+        records.is_empty(),
+        "a resolved topic is not a coverage gap; got {records:?}"
+    );
+}
+
+#[test]
+fn dynamic_consumer_is_left_to_the_joiner_sentinel() {
+    // Consumers already reach the joiner as the dynamic-topic sentinel; the
+    // producer report must not count them a second time.
+    let records = report_for(
+        "dyn_consumer",
+        "src/events.ts",
+        "consumer.subscribe({ topic: topicName });\n",
+    );
+    assert!(
+        records.is_empty(),
+        "a dynamic consumer must not be counted here; got {records:?}"
+    );
+}
