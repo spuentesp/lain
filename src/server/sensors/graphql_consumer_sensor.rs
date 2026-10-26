@@ -841,6 +841,63 @@ fn is_ident_continue(b: u8) -> bool {
     (b as char).is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Remove each `fragment <Name> on <Type> { ... }` definition whose `<Type>` is
+/// not `Query`, `Mutation` or `Subscription`. A fragment on one of those root
+/// types keeps its text, because its top-level fields are root fields.
+fn without_non_root_fragments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = find_fragment_keyword(rest) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at..];
+        let Some(open) = after.find('{') else {
+            break;
+        };
+        let root_type = matches!(
+            after[..open].split_whitespace().nth(3),
+            Some("Query" | "Mutation" | "Subscription")
+        );
+        if root_type {
+            out.push_str(&after[..=open]);
+            rest = &after[open + 1..];
+            continue;
+        }
+        let mut depth: u32 = 0;
+        let mut close = None;
+        for (i, b) in after.bytes().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = close else {
+            break;
+        };
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Byte offset of the next `fragment` keyword in `text`, on a word boundary.
+fn find_fragment_keyword(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    text.match_indices("fragment").map(|(i, _)| i).find(|&i| {
+        let before_ok = i == 0 || !is_ident_continue(bytes[i - 1]);
+        let after_ok = bytes
+            .get(i + "fragment".len())
+            .is_some_and(|b| b.is_ascii_whitespace());
+        before_ok && after_ok
+    })
+}
+
 fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<GraphqlConsumerField> {
     // The body has the operation type implicit when the
     // shorthand `{ orders { id } }` is used. We treat it
@@ -858,6 +915,11 @@ fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<Graph
         });
         return out;
     }
+    // A fragment on an object type is not a root operation: its fields are
+    // reached through the operation that spreads it. Strip those first, so
+    // the first `{` below is the operation's, whatever order they come in.
+    let body = without_non_root_fragments(body);
+    let body = body.as_str();
     let op = if body.contains("mutation") {
         GraphqlOp::Mutation
     } else if body.contains("subscription") {
@@ -918,6 +980,37 @@ fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<Graph
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn root_fields(ts: &str) -> Vec<String> {
+        detect_in_code(ts, "shop.ts")
+            .into_iter()
+            .map(|f| f.field)
+            .collect()
+    }
+
+    #[test]
+    fn a_fragment_only_template_names_no_root_field() {
+        let ts = "const P = gql`\n  fragment ProductFields on Product {\n    id\n    name\n    slug\n  }\n`;\n";
+        assert!(root_fields(ts).is_empty(), "got {:?}", root_fields(ts));
+    }
+
+    #[test]
+    fn a_fragment_after_the_operation_adds_no_root_field() {
+        let ts = "const Q = gql`\n  query GetProduct { product { ...ProductFields } }\n  fragment ProductFields on Product { id name slug }\n`;\n";
+        assert_eq!(root_fields(ts), vec!["product".to_string()]);
+    }
+
+    #[test]
+    fn a_fragment_before_the_operation_adds_no_root_field() {
+        let ts = "const Q = gql`\n  fragment ProductFields on Product { id name slug }\n  query GetProduct { product { ...ProductFields } }\n`;\n";
+        assert_eq!(root_fields(ts), vec!["product".to_string()]);
+    }
+
+    #[test]
+    fn a_fragment_on_query_keeps_its_root_fields() {
+        let ts = "const Q = gql`\n  fragment CartRoot on Query { cart(id: $id) { id } }\n`;\n";
+        assert_eq!(root_fields(ts), vec!["cart".to_string()]);
+    }
 
     #[test]
     fn parse_document_emits_one_consumer_per_top_field() {
