@@ -648,3 +648,58 @@ fn sock_shop_set_queue_names_resolves_the_constant_field() {
         "amqp/shipping-task",
     );
 }
+
+// ActiveJob (Ruby) and asynq (Go), batch 6
+
+#[test]
+fn ruby_activejob_queue_as_mints_an_activejob_queue() {
+    expect_topic(
+        "rb_queue_as",
+        "app/jobs/mailer_job.rb",
+        "class MailerJob < ApplicationJob\n  queue_as :emails\nend\n",
+        "activejob/emails",
+    );
+}
+
+#[test]
+fn ruby_activejob_set_queue_mints_an_activejob_queue() {
+    expect_topic(
+        "rb_set_queue",
+        "app/jobs/notify.rb",
+        "MailerJob.set(queue: :emails).perform_later(user)\n",
+        "activejob/emails",
+    );
+}
+
+#[test]
+fn go_asynq_queue_option_mints_an_asynq_queue() {
+    expect_topic(
+        "go_asynq_opt",
+        "svc/jobs.go",
+        "package svc\n\nfunc f() { client.Enqueue(task, asynq.Queue(\"critical\")) }\n",
+        "asynq/critical",
+    );
+}
+
+#[test]
+fn go_asynq_server_queues_mints_an_asynq_queue() {
+    expect_topic(
+        "go_asynq_server",
+        "svc/worker.go",
+        "package svc\n\nfunc f() { asynq.Config{Queues: map[string]int{\"critical\": 6, \"default\": 3}} }\n",
+        "asynq/critical",
+    );
+}
+
+#[test]
+fn ruby_plain_job_without_a_queue_mints_nothing() {
+    let root = fixture(
+        "rb_no_queue",
+        "app/jobs/plain_job.rb",
+        "class PlainJob < ApplicationJob\n  def perform; end\nend\n",
+    );
+    assert!(
+        topics(&root).is_empty(),
+        "a job with no queue declaration must not mint a topic"
+    );
+}

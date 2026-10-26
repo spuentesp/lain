@@ -496,6 +496,14 @@ languages:
       kind: topic_consumer
       broker: redis
       path_regex: '\bStreams\s*:\s*\[\]string\{\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: asynq-queue-option
+      kind: topic_producer
+      broker: asynq
+      path_regex: '\basynq\.Queue\s*\(\s*"([^"]+)"'
+    - id: asynq-server-queues
+      kind: topic_consumer
+      broker: asynq
+      path_regex: '\bQueues:\s*map\[string\]int\s*\{\s*"([^"]+)"'
   java:
     - id: spring-route
       kind: route
@@ -605,6 +613,14 @@ languages:
       kind: topic_consumer
       broker: resque
       path_regex: '@queue\s*=\s*:(\w+)'
+    - id: activejob-queue-as
+      kind: topic_consumer
+      broker: activejob
+      path_regex: '\bqueue_as\s+:?(\w+)'
+    - id: activejob-set-queue
+      kind: topic_producer
+      broker: activejob
+      path_regex: '\bset\s*\(\s*queue:\s*(?:''|:)?(\w+)'
   kotlin:
     - id: ktor-route
       kind: route
