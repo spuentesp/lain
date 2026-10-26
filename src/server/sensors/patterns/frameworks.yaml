@@ -160,6 +160,58 @@ languages:
       kind: topic_consumer
       broker: sns
       path_regex: '\.subscribe\s*\([^)]*?TopicArn\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: nats-publish
+      kind: topic_producer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: nats-subscribe
+      kind: topic_consumer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.subscribe\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kinesis-put-record
+      kind: topic_producer
+      broker: kinesis
+      path_regex: '\.put_record\s*\([^)]*?StreamName\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kinesis-get-shard-iterator
+      kind: topic_consumer
+      broker: kinesis
+      path_regex: '\.get_shard_iterator\s*\([^)]*?StreamName\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: eventbridge-put-events
+      kind: topic_producer
+      broker: eventbridge
+      path_regex: '\.put_events\s*\([^)]*?EventBusName["'']?\s*[:=]\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pulsar-create-producer
+      kind: topic_producer
+      broker: pulsar
+      path_regex: '\.create_producer\s*\(\s*(?:topic\s*=\s*)?(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pulsar-subscribe
+      kind: topic_consumer
+      broker: pulsar
+      path_regex: '\.subscribe\s*\(\s*(?:topic\s*=\s*)?(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))\s*,\s*subscription_name'
+    - id: pubsub-topic-path
+      kind: topic_producer
+      broker: pubsub
+      path_regex: '\.topic_path\s*\(\s*["''][^"'']*["'']\s*,\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: temporal-worker
+      kind: topic_consumer
+      broker: temporal
+      path_regex: '\bWorker\s*\([^)]*?task_queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: temporal-start-workflow
+      kind: topic_producer
+      broker: temporal
+      path_regex: '\.start_workflow\s*\([^)]*?task_queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: dramatiq-actor
+      kind: topic_consumer
+      broker: dramatiq
+      path_regex: '@dramatiq\.actor\s*\([^)]*?queue_name\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kafka-python-consumer
+      kind: topic_consumer
+      broker: kafka
+      path_regex: '\bKafkaConsumer\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kafka-python-producer
+      kind: topic_producer
+      broker: kafka
+      path_regex: '\bproducer\.send\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
   tsjs:
     - id: express-route
       kind: route
@@ -287,6 +339,34 @@ languages:
       kind: topic_consumer
       broker: sns
       path_regex: 'SubscribeCommand\s*\(\s*\{[^}]*?TopicArn\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: nats-js-publish
+      kind: topic_producer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: nats-js-subscribe
+      kind: topic_consumer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.subscribe\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: eventbridge-v3-put-events
+      kind: topic_producer
+      broker: eventbridge
+      path_regex: 'PutEventsCommand\s*\(\s*\{[^}]*?EventBusName\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: kinesis-v3-put-record
+      kind: topic_producer
+      broker: kinesis
+      path_regex: 'PutRecordCommand\s*\(\s*\{[^}]*?StreamName\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: pubsub-js-topic
+      kind: topic_producer
+      broker: pubsub
+      path_regex: '\.topic\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))\s*\)\s*\.publishMessage'
+    - id: inngest-send
+      kind: topic_producer
+      broker: inngest
+      path_regex: '\binngest\.send\s*\(\s*\{[^}]*?name\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: inngest-trigger
+      kind: topic_consumer
+      broker: inngest
+      path_regex: 'triggers\s*:\s*\[\s*\{\s*event\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
   rust:
     - id: axum-route
       kind: route
@@ -368,6 +448,14 @@ languages:
       kind: topic_consumer
       broker: redis
       path_regex: '\b(?:rdb|redis\w*|client)\.Subscribe\s*\(\s*\w+\s*,\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: nats-go-publish
+      kind: topic_producer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.Publish\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: nats-go-subscribe
+      kind: topic_consumer
+      broker: nats
+      path_regex: '\b(?:nc|nats\w*)\.Subscribe\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
   java:
     - id: spring-route
       kind: route
