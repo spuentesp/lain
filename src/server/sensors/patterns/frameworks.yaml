@@ -124,6 +124,42 @@ languages:
       path_regex: '\.queue_bind\s*\([^)]*?queue\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
 
   # ── TypeScript / JavaScript ─────────────────────────────────────
+    - id: redis-publish
+      kind: topic_producer
+      broker: redis
+      path_regex: '\b(?:redis\w*|r|cache)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: redis-subscribe
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\b(?:pubsub|redis\w*|r)\.(?:subscribe|psubscribe)\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: redis-xadd
+      kind: topic_producer
+      broker: redis
+      path_regex: '\b(?:redis\w*|r)\.xadd\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: mqtt-publish
+      kind: topic_producer
+      broker: mqtt
+      path_regex: '\b(?:mqtt\w*|client)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: mqtt-subscribe
+      kind: topic_consumer
+      broker: mqtt
+      path_regex: '\b(?:mqtt\w*|client)\.subscribe\s*\(\s*\[?\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sqs-send
+      kind: topic_producer
+      broker: sqs
+      path_regex: '\.send_message\s*\([^)]*?QueueUrl\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sqs-receive
+      kind: topic_consumer
+      broker: sqs
+      path_regex: '\.receive_message\s*\([^)]*?QueueUrl\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sns-publish
+      kind: topic_producer
+      broker: sns
+      path_regex: '\.publish\s*\([^)]*?TopicArn\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sns-subscribe
+      kind: topic_consumer
+      broker: sns
+      path_regex: '\.subscribe\s*\([^)]*?TopicArn\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
   tsjs:
     - id: express-route
       kind: route
@@ -219,6 +255,38 @@ languages:
       path_regex: '(on(?:open|message|close|error))\s*[=:]\s*(\w+)'
 
   # ── Rust ─────────────────────────────────────────────────────────
+    - id: ioredis-publish
+      kind: topic_producer
+      broker: redis
+      path_regex: '\b(?:redis\w*|ioredis|pub)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: ioredis-subscribe
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\b(?:redis\w*|ioredis|sub)\.(?:subscribe|psubscribe)\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: mqtt-js-publish
+      kind: topic_producer
+      broker: mqtt
+      path_regex: '\b(?:mqtt\w*|client)\.publish\s*\(\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: mqtt-js-subscribe
+      kind: topic_consumer
+      broker: mqtt
+      path_regex: '\b(?:mqtt\w*|client)\.subscribe\s*\(\s*\[?\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sqs-v3-send
+      kind: topic_producer
+      broker: sqs
+      path_regex: 'SendMessageCommand\s*\(\s*\{[^}]*?QueueUrl\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sqs-v3-receive
+      kind: topic_consumer
+      broker: sqs
+      path_regex: 'ReceiveMessageCommand\s*\(\s*\{[^}]*?QueueUrl\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sns-v3-publish
+      kind: topic_producer
+      broker: sns
+      path_regex: 'PublishCommand\s*\(\s*\{[^}]*?TopicArn\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    - id: sns-v3-subscribe
+      kind: topic_consumer
+      broker: sns
+      path_regex: 'SubscribeCommand\s*\(\s*\{[^}]*?TopicArn\s*:\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
   rust:
     - id: axum-route
       kind: route
@@ -292,6 +360,14 @@ languages:
       path_regex: 'SubscribeTopics\s*\(\s*["'']([^"'']+)["'']'
 
   # ── Java ─────────────────────────────────────────────────────────
+    - id: go-redis-publish
+      kind: topic_producer
+      broker: redis
+      path_regex: '\b(?:rdb|redis\w*|client)\.Publish\s*\(\s*\w+\s*,\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+    - id: go-redis-subscribe
+      kind: topic_consumer
+      broker: redis
+      path_regex: '\b(?:rdb|redis\w*|client)\.Subscribe\s*\(\s*\w+\s*,\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
   java:
     - id: spring-route
       kind: route
