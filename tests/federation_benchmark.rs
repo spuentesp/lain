@@ -7,7 +7,7 @@
 //! - `small_fixture_blast_radius_under_100ms_p99`: 10 repos x 5 000 nodes,
 //!   runs with the ordinary test suite. It checks every answer and reports
 //!   the latency. The 100 ms p99 target is enforced with
-//!   `LAIN_BENCH_ENFORCE=1`.
+//!   `LAIN_BENCH_ENFORCE=1` on a `--release` build.
 //! - `large_fixture_health_at_scale`: 200 repos x 50 000 nodes. Ignored by
 //!   default because it needs several gigabytes; run it with
 //!   `cargo test --test federation_benchmark -- --ignored --nocapture`.
@@ -95,8 +95,16 @@ fn small_fixture_blast_radius_under_100ms_p99() {
     eprintln!("small_fixture_blast_radius: p99 = {p99}ms, median = {median}ms, min = {min}ms, max = {max}ms");
     // The latency target is enforced only when asked for. The timing varies
     // with the machine, so a default run reports it and checks correctness;
-    // `LAIN_BENCH_ENFORCE=1` turns a missed target into a failure.
+    // `LAIN_BENCH_ENFORCE=1` turns a missed target into a failure. Enforce it
+    // on an optimized build only: `cargo test --release --test
+    // federation_benchmark` (the default test profile is unoptimized and runs
+    // about twice as slow). On the reference host the release run measures
+    // p99 about 66 ms.
     if std::env::var_os("LAIN_BENCH_ENFORCE").is_some() {
+        assert!(
+            !cfg!(debug_assertions),
+            "LAIN_BENCH_ENFORCE needs an optimized build: run with --release"
+        );
         assert!(
             p99 < 100,
             "p99 = {p99}ms, target < 100ms (median = {median}ms, min = {min}ms, max = {max}ms)"
