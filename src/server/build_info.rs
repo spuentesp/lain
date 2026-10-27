@@ -22,6 +22,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Short git SHA stamped by `build.rs`, with a `-dirty` suffix when the
 /// tree had uncommitted changes at build time.
 pub const GIT_SHA: &str = env!("LAIN_GIT_SHA");
+/// Identity of the indexing code: the version plus a hash of every source
+/// file under `src/`, committed or not. A persisted graph records the identity
+/// of the build that wrote it; a different identity means it is rebuilt.
+pub const INDEX_BUILD_ID: &str = env!("LAIN_INDEX_BUILD_ID");
 
 static STARTUP_EXE_MTIME: OnceLock<Option<u64>> = OnceLock::new();
 

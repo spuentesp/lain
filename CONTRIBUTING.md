@@ -52,8 +52,8 @@ The two-branch model is described in detail in
 3. CI must be green. The rollup check that matters is
    `lain/agent-contract`; lint, fmt, and clippy are enforced on the
    same run but not on the rollup.
-4. One approving review from a maintainer is required before merge
-   (`dev` itself doesn't require reviews; `main` does, see step 6).
+4. `dev` has no review requirement. CI must be green, and the merge
+   goes through the normal PR flow.
 5. After merging to `dev`, your change is in the next release.
 6. Releases are cut by a maintainer opening a `release/vX.Y.Z` PR
    from `dev` into `main`. That PR needs one approval + a green
@@ -61,21 +61,18 @@ The two-branch model is described in detail in
 
 ### Hotfix path
 
-For something that can't wait for the next release:
+For something that can't wait for the next release, land it on `dev`
+first, same as any change, then ship it through a release:
 
 ```bash
-git switch main
+git switch dev && git pull --ff-only
 git switch -c hotfix/<short-kebab-name>
-# … fix, push, open PR against main …
-gh pr create --base main --head hotfix/<short-kebab-name>
+# … fix, push, open PR against dev …
+gh pr create --base dev --head hotfix/<short-kebab-name>
 ```
 
-After merge, fast-forward `dev` to catch up:
-
-```bash
-git switch dev
-git merge --ff-only main
-```
+Once merged, cut a `release/vX.Y.Z` PR from `dev` into `main` to ship
+it. Don't open a PR against `main` for the fix itself.
 
 ## Issue triage
 

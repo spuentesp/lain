@@ -331,14 +331,13 @@ impl FederatedIndex {
         if let Some(overlay) = self.federation_overlay.read().clone() {
             index.set_overlay(overlay);
         }
+        let mut replaced = None;
         {
             let _guard = self.projection_lock.lock();
             // Clone `id` before the insert moves it, so the
             // post-lock overlay re-check below can use it.
             let id_for_recheck = id.clone();
-            if let Some(previous) = self.repos.write().insert(id, index) {
-                previous.deactivate();
-            }
+            replaced = self.repos.write().insert(id, index);
             self.rebuild_symbol_index();
             // PR-4 — re-check `federation_overlay` under the
             // `projection_lock` and re-apply it. The pre-fix code
@@ -363,6 +362,13 @@ impl FederatedIndex {
             // provider). Mark dirty; the lock guards against
             // concurrent reads.
             self.contracts_dirty.mark();
+        }
+        if let Some(previous) = replaced {
+            previous.deactivate();
+            // The replaced index's language servers would outlive it: the
+            // overlay and other handles still reference the pool, so dropping
+            // the index does not stop the processes. Stop them explicitly.
+            tokio::spawn(async move { previous.shutdown_lsp().await });
         }
         // Refresh the on-disk manifest so a runtime add survives a
         // restart. Best-effort; a save failure doesn't fail the add.

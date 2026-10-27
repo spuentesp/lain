@@ -166,6 +166,7 @@ proptest! {
         let terminal = match &resolution.target {
             Some(ConsumerTarget::Binds { .. }) => 1,
             Some(ConsumerTarget::External { .. }) => 1,
+            Some(ConsumerTarget::Internal) => 1,
             Some(ConsumerTarget::Unresolved { .. }) => 1,
             None => 0,
         };
@@ -375,8 +376,8 @@ fn every_websocket_call_lands_in_exactly_one_terminal_state() {
         .next()
         .expect("consumer must be recorded");
     assert!(
-        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
-        "(c) same-service WS consumer must be Unresolved (I5), got: {:?}",
+        matches!(res.target, Some(ConsumerTarget::Internal)),
+        "(c) same-service WS consumer must resolve Internal (I5 holds: no Binds), got: {:?}",
         res.target
     );
     assert!(
@@ -463,8 +464,8 @@ fn every_topic_call_lands_in_exactly_one_terminal_state() {
         .next()
         .expect("consumer must be recorded");
     assert!(
-        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
-        "(c) same-service topic consumer must be Unresolved (I5), got: {:?}",
+        matches!(res.target, Some(ConsumerTarget::Internal)),
+        "(c) same-service topic consumer must resolve Internal (I5 holds: no Binds), got: {:?}",
         res.target
     );
     assert!(out.binds.is_empty());
@@ -590,6 +591,7 @@ proptest! {
                 r1.target,
                 Some(ConsumerTarget::Binds { .. })
                     | Some(ConsumerTarget::External { .. })
+                    | Some(ConsumerTarget::Internal)
                     | Some(ConsumerTarget::Unresolved { .. })
             ),
             "pass 1 must produce a terminal state"
@@ -599,6 +601,7 @@ proptest! {
                 r2.target,
                 Some(ConsumerTarget::Binds { .. })
                     | Some(ConsumerTarget::External { .. })
+                    | Some(ConsumerTarget::Internal)
                     | Some(ConsumerTarget::Unresolved { .. })
             ),
             "pass 2 must produce a terminal state"
@@ -644,6 +647,7 @@ fn rank_of_resolution(res: &lain::federation::contracts::index::ConsumerResoluti
             }
         }
         Some(ConsumerTarget::External { .. }) => 0,
+        Some(ConsumerTarget::Internal) => 0,
         Some(ConsumerTarget::Unresolved { .. }) => 0,
         None => 0,
     }

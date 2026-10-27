@@ -454,25 +454,16 @@ fn e5_same_service_call_does_not_bind() {
     let Some(resolution) = out.index.consumer(&consumer_id) else {
         panic!("consumer must be recorded");
     };
-    // I5: the call must NOT bind — same-service binds are
-    // explicitly disallowed.
-    assert!(
-        resolution.bound_endpoints.is_empty(),
-        "same-service stub call must not bind (I5)"
-    );
-    let Some(ConsumerTarget::Unresolved { reason, .. }) = resolution.target.as_ref() else {
-        panic!(
-            "same-service call must be Unresolved, got {:?}",
-            resolution.target
-        );
-    };
-    assert!(
-        matches!(reason, UnresolvedReason::RpcStubUnknown),
-        "expected RpcStubUnknown, got {reason:?}"
-    );
+    // I5: no Binds edge crosses into the consumer's own service. The call
+    // resolves Internal, with its own-service endpoint recorded.
     assert!(
         out.binds.is_empty(),
         "no Binds edges may be emitted for same-service calls"
+    );
+    assert!(
+        matches!(resolution.target, Some(ConsumerTarget::Internal)),
+        "same-service call must resolve Internal, got {:?}",
+        resolution.target
     );
 }
 
