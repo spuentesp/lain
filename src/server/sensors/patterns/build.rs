@@ -47,6 +47,52 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tree_sitter::Language;
 
+/// FNV-1a over every file under `root`, in relative-path order: each file's
+/// relative path, then its bytes. The same sources give the same value in any
+/// checkout.
+fn source_fingerprint(root: &Path) -> u64 {
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    let mut entries: Vec<(String, PathBuf)> = files
+        .into_iter()
+        .map(|p| {
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            (rel, p)
+        })
+        .collect();
+    entries.sort();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for (rel, path) in &entries {
+        feed(rel.as_bytes());
+        feed(&fs::read(path).unwrap_or_default());
+    }
+    hash
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
 fn main() {
     // ── Phase 1: git SHA capture (moved from the package-root
     // build.rs by Task 1). Re-emit on HEAD and any tracked source
@@ -73,6 +119,15 @@ fn main() {
         sha.push_str("-dirty");
     }
     println!("cargo:rustc-env=LAIN_GIT_SHA={sha}");
+
+    // ── Phase 1b: index build identity. A persisted graph records the
+    // identity of the build that wrote it, and a different identity means the
+    // graph is rebuilt. Unlike LAIN_GIT_SHA, this changes with any edit under
+    // src/, committed or not, so two dirty states never share an identity.
+    let version = env_mod::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let src_dir = PathBuf::from(env_mod::var("CARGO_MANIFEST_DIR").unwrap()).join("src");
+    let fingerprint = source_fingerprint(&src_dir);
+    println!("cargo:rustc-env=LAIN_INDEX_BUILD_ID={version}-{fingerprint:016x}");
 
     // ── Phase 2: patterns OUT_DIR query generation.
     let manifest_dir = PathBuf::from(env_mod::var("CARGO_MANIFEST_DIR").unwrap());

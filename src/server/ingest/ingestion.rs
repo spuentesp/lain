@@ -105,6 +105,18 @@ impl LainServer {
             self.ingest().graph().reset()?;
             last_commit = None;
         }
+        // The same commit under a different Lain build is not up to date: the
+        // sensors that wrote the graph may differ. The "already up to date"
+        // shortcut below would keep the old graph.
+        let build = crate::server::build_info::INDEX_BUILD_ID;
+        if last_commit.is_some() && !self.ingest().graph().was_written_by_build(build) {
+            info!(
+                "Persisted graph was written by another Lain build (stamp {:?}, this build {build}); rebuilding it",
+                self.ingest().graph().stored_index_build()
+            );
+            self.ingest().graph().reset()?;
+            last_commit = None;
+        }
         self.readiness().update(|snapshot| {
             snapshot.target_commit = Some(latest_commit.clone());
         });

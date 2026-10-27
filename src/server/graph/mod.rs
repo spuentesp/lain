@@ -2726,8 +2726,39 @@ impl GraphDatabase {
         crate::cli::io::tokio_write_file_atomic(&persistence_path, &data)
             .await
             .map_err(|e| LainError::Database(e.to_string()))?;
+        self.write_index_build_stamp()?;
 
         Ok(())
+    }
+
+    /// The identity of the build that wrote the persisted graph, read from the
+    /// stamp beside it. `None` when no stamp exists, as for graphs saved before
+    /// stamps were written.
+    pub fn stored_index_build(&self) -> Option<String> {
+        std::fs::read_to_string(self.index_build_stamp_path())
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Whether the persisted graph was written by the build `build`. Anything
+    /// else (another build, or no stamp) means the graph must be rebuilt.
+    pub fn was_written_by_build(&self, build: &str) -> bool {
+        self.stored_index_build().as_deref() == Some(build)
+    }
+
+    fn index_build_stamp_path(&self) -> PathBuf {
+        let mut name = self.persistence_path.as_os_str().to_owned();
+        name.push(".build");
+        PathBuf::from(name)
+    }
+
+    fn write_index_build_stamp(&self) -> Result<(), LainError> {
+        std::fs::write(
+            self.index_build_stamp_path(),
+            crate::server::build_info::INDEX_BUILD_ID,
+        )
+        .map_err(|e| LainError::Database(format!("index build stamp: {e}")))
     }
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
@@ -2761,6 +2792,7 @@ impl GraphDatabase {
             .map_err(|e| LainError::Database(e.to_string()))?;
         crate::cli::io::write_file_atomic(&self.persistence_path, &data)
             .map_err(|e| LainError::Database(e.to_string()))?;
+        self.write_index_build_stamp()?;
         // The snapshot is durable and covers the retired log.
         if logging {
             wal::discard_prev(&wal_path)
@@ -5271,5 +5303,40 @@ mod mutant_kills {
             !names.contains(&"h"),
             "untracked refs are pruned: {names:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod index_build_stamp_tests {
+    use super::*;
+
+    #[test]
+    fn a_saved_graph_is_stamped_with_the_build_that_wrote_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        db.set_last_commit("abc".into()).unwrap();
+        db.save_to_disk_sync().unwrap();
+        let build = crate::server::build_info::INDEX_BUILD_ID;
+        assert_eq!(db.stored_index_build().as_deref(), Some(build));
+        assert!(db.was_written_by_build(build));
+    }
+
+    #[test]
+    fn a_graph_stamped_by_another_build_is_not_this_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        db.set_last_commit("abc".into()).unwrap();
+        db.save_to_disk_sync().unwrap();
+        assert!(!db.was_written_by_build("0.0.0-deadbeef"));
+    }
+
+    #[test]
+    fn a_graph_without_a_stamp_is_not_this_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        db.set_last_commit("abc".into()).unwrap();
+        db.save_to_disk_sync().unwrap();
+        std::fs::remove_file(db.index_build_stamp_path()).unwrap();
+        assert!(!db.was_written_by_build(crate::server::build_info::INDEX_BUILD_ID));
     }
 }
