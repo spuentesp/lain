@@ -128,6 +128,7 @@ fn main() {
     let src_dir = PathBuf::from(env_mod::var("CARGO_MANIFEST_DIR").unwrap()).join("src");
     let fingerprint = source_fingerprint(&src_dir);
     println!("cargo:rustc-env=LAIN_INDEX_BUILD_ID={version}-{fingerprint:016x}");
+    println!("cargo:rustc-env=LAIN_SOURCE_FINGERPRINT={fingerprint:016x}");
 
     // ── Phase 2: patterns OUT_DIR query generation.
     let manifest_dir = PathBuf::from(env_mod::var("CARGO_MANIFEST_DIR").unwrap());
