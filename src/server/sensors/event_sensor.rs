@@ -977,9 +977,10 @@ fn lookahead_for_function(lines: &[&str], start: usize, ext: &str) -> Option<Str
         if (ext == "py" && ahead.starts_with('#')) || (ext != "py" && ahead.starts_with("//")) {
             continue;
         }
-        // Stop at the next decorator — it's not the function.
+        // Another decorator stacked on the same function (`@allow_writer()`
+        // under `@app.task`) is not the function: look past it.
         if ahead.starts_with('@') {
-            return None;
+            continue;
         }
         let name = match ext {
             "py" => {
@@ -1885,6 +1886,33 @@ producer.send({ topic: 'orders.created' });
             .filter(|n| n.node_type == NodeType::Topic)
             .collect();
         assert!(!topics.is_empty(), "expected at least one scheduled Topic");
+    }
+
+    /// A Celery task with another decorator stacked under `@app.task` is still
+    /// named after its function. Before this, the lookahead stopped at the
+    /// second decorator, so the task had no name and became a dynamic consumer.
+    #[test]
+    fn celery_task_under_a_stacked_decorator_keeps_its_function_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tasks.py"),
+            "@app.task\n@allow_writer()\ndef recalculate_order(order_id):\n    pass\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        let ns = RepoNamespace::for_test();
+        scan_workspace_event(&graph, dir.path(), &ns).unwrap();
+
+        let names: Vec<String> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .map(|n| n.name)
+            .collect();
+        assert!(
+            names.contains(&"celery/recalculate_order".to_string()),
+            "got {names:?}"
+        );
     }
 
     /// NestJS `@Cron('0 0 * * *')` emits a scheduled topic.
