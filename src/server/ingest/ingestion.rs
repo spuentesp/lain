@@ -1692,7 +1692,22 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     // `IngestHandle::start_git_sensor_watchdog` (handles/ingest.rs:48-52)
     // is now reachable from this path too.
     let (latest_commit, latest_time) = git.try_get_latest_commit_info()?;
+    // A graph written by another Lain build may hold output from sensors that
+    // have since changed. The commit match below cannot tell that apart, so
+    // start from an empty graph in that case, as the workspace path does.
     let last_commit = graph.get_last_commit()?;
+    let last_commit = if last_commit.is_some()
+        && !graph.was_written_by_build(crate::server::build_info::INDEX_BUILD_ID)
+    {
+        info!(
+            "[federation] {:?} was written by another Lain build; rebuilding it",
+            path
+        );
+        graph.reset()?;
+        None
+    } else {
+        last_commit
+    };
 
     // Snapshot mode (`§8.2`) forces a full re-scan regardless of
     // `force` and regardless of the commit hash the DB has
