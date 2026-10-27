@@ -146,6 +146,10 @@ pub enum ConsumerTarget {
     External {
         host: String,
     },
+    /// The call's provider is in the consumer's own service. Resolved, but
+    /// not a cross-service `Binds` edge (invariant I5): the join is internal
+    /// to the service, so no `BindsEdge` is recorded.
+    Internal,
     Unresolved {
         reason: UnresolvedReason,
         /// `Some(s)` when the joiner knew the target service but
