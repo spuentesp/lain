@@ -288,7 +288,7 @@ impl IngestionConfig {
 impl Default for IngestionConfig {
     fn default() -> Self {
         Self {
-            lsp_pool_size: 4,
+            lsp_pool_size: 1,
             files_per_batch: 50,
             max_files_per_scan: 5000,
             ingest_batch_size: 100,
