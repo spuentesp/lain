@@ -66,6 +66,7 @@ use crate::federation::contracts::model::{SourceSite, UnresolvedReason};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::sensors::env_sensor::{self, EnvLookup, ScalarBindingIndex};
+use crate::server::sensors::event_wrappers::{self, WrapperDef, WrapperIndex};
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::payload_schema::{parse_avro_schema, parse_json_schema};
 use crate::server::sensors::util::{self, Lang};
@@ -202,29 +203,16 @@ pub fn scan_workspace_event_with_report(
     .map(|(p, c, _)| (p, c))
     .collect();
     let go_scopes = go_constant_scopes(root, &go_files, &env);
+    // Wrappers are read in a pass of their own, so a call site in one file
+    // resolves against a wrapper defined in any other file.
+    let wrappers = collect_wrappers(root, &patterns, &mut idioms);
 
-    let any_ext = |p: &Path| {
-        Some(
-            p.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_string(),
-        )
-    };
-    for (path, content, ext) in crate::server::sensors::util::scan_files(root, any_ext) {
+    for (path, content, ext) in crate::server::sensors::util::scan_files(root, file_extension) {
         let ext = ext.as_str();
         let Some(lang) = ext_to_lang(ext) else {
             continue;
         };
-        let index = idioms
-            .iter()
-            .position(|(cached_lang, _)| *cached_lang == lang)
-            .unwrap_or_else(|| {
-                #[cfg(test)]
-                IDIOM_SET_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
-                idioms.push((lang, util::topic_idioms_for(&patterns, lang)));
-                idioms.len() - 1
-            });
+        let index = topic_idioms_index(&mut idioms, &patterns, lang);
         let path_str = graph_path(root, &path);
         let mut constants = collect_same_file_constants(&content, ext, &env);
         let mut gaps = collect_env_gaps(&content, ext, &env);
@@ -246,6 +234,7 @@ pub fn scan_workspace_event_with_report(
             ext,
             &constants,
             &idioms[index].1,
+            &wrappers,
             &mut unresolved_producers,
         );
         for (line, identifier) in unresolved_producers {
@@ -765,19 +754,14 @@ fn detect_sites(
     ext: &str,
     constants: &BTreeMap<String, String>,
     idioms: &TopicIdioms,
+    wrappers: &WrapperIndex,
     unresolved_producers: &mut Vec<(u32, Option<String>)>,
 ) -> Vec<DetectedSite> {
     let mut out: Vec<DetectedSite> = Vec::new();
     let (producers, consumers, scheduled) = idioms;
-    // An entry with `requires` applies only to files that contain its marker
-    // (the Go client's import path, say), so a bare `Topic:` field elsewhere
-    // is not read as a producer.
-    let applies =
-        |i: &util::CompiledIdiom| i.requires.as_deref().is_none_or(|r| content.contains(r));
-    let producers: Vec<util::CompiledIdiom> =
-        producers.iter().filter(|i| applies(i)).cloned().collect();
-    let consumers: Vec<util::CompiledIdiom> =
-        consumers.iter().filter(|i| applies(i)).cloned().collect();
+    let producers = applicable(producers, content);
+    let consumers = applicable(consumers, content);
+    let lang = ext_to_lang(ext);
     let lines: Vec<&str> = content.lines().collect();
     for (idx, raw) in lines.iter().enumerate() {
         let line_num = idx as u32 + 1;
@@ -804,6 +788,19 @@ fn detect_sites(
                 line: line_num,
                 owner_name: None,
             });
+        }
+        // A call to a wrapper with a literal topic is a producer site for
+        // that topic. Its own producer line stays in `unresolved_producers`.
+        if let Some(lang) = lang {
+            for (broker, topic) in event_wrappers::wrapper_calls(line, lang, wrappers) {
+                out.push(DetectedSite {
+                    kind: SiteKind::Produces,
+                    topic: Some(topic),
+                    broker,
+                    line: line_num,
+                    owner_name: None,
+                });
+            }
         }
         for m in util::walk_idioms(&consumers, line, line_num) {
             match resolve_idiom_capture(&m, constants) {
@@ -853,6 +850,71 @@ fn detect_sites(
         }
     }
     out
+}
+
+/// The idioms that apply to a file. An entry with `requires` applies only to
+/// files that contain its marker (the Go client's import path, say), so a bare
+/// `Topic:` field elsewhere is not read as a producer.
+fn applicable(idioms: &[util::CompiledIdiom], content: &str) -> Vec<util::CompiledIdiom> {
+    idioms
+        .iter()
+        .filter(|i| i.requires.as_deref().is_none_or(|r| content.contains(r)))
+        .cloned()
+        .collect()
+}
+
+/// The index of `lang`'s topic idioms in `idioms`, compiling them on first use.
+fn topic_idioms_index(
+    idioms: &mut Vec<(Lang, TopicIdioms)>,
+    patterns: &Patterns,
+    lang: Lang,
+) -> usize {
+    idioms
+        .iter()
+        .position(|(cached_lang, _)| *cached_lang == lang)
+        .unwrap_or_else(|| {
+            #[cfg(test)]
+            IDIOM_SET_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
+            idioms.push((lang, util::topic_idioms_for(patterns, lang)));
+            idioms.len() - 1
+        })
+}
+
+/// Read every wrapper in the repo. A name defined more than once is dropped:
+/// two `publish` wrappers cannot both be the target of one call.
+fn collect_wrappers(
+    root: &Path,
+    patterns: &Patterns,
+    idioms: &mut Vec<(Lang, TopicIdioms)>,
+) -> WrapperIndex {
+    let mut found: BTreeMap<String, Vec<WrapperDef>> = BTreeMap::new();
+    for (_path, content, ext) in util::scan_files(root, file_extension) {
+        let Some(lang) = ext_to_lang(&ext) else {
+            continue;
+        };
+        let index = topic_idioms_index(idioms, patterns, lang);
+        let producers = applicable(&idioms[index].1 .0, &content);
+        for (name, def) in
+            event_wrappers::wrappers_in_file(&content, lang, &producers, DEFAULT_BROKER)
+        {
+            found.entry(name).or_default().push(def);
+        }
+    }
+    found
+        .into_iter()
+        .filter_map(|(name, mut defs)| (defs.len() == 1).then(|| (name, defs.remove(0))))
+        .collect()
+}
+
+/// The extension of a path, empty when it has none. Every file is walked, and
+/// `ext_to_lang` picks the ones an event walker handles.
+fn file_extension(p: &Path) -> Option<String> {
+    Some(
+        p.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string(),
+    )
 }
 
 /// Broker label for a produce/consume idiom match. The AMQP clients
@@ -1930,6 +1992,76 @@ producer.send({ topic: 'orders.created' });
             topics.iter().any(|t| t.name == "kafka/orders.created"),
             "got {:?}",
             topics.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+    }
+
+    const SQS_WRAPPER: &str = "import boto3\nc = boto3.client(\"sqs\")\n\ndef publish(queue_name, payload):\n    c.send_message(QueueUrl=queue_name, MessageBody=payload)\n";
+
+    fn topic_names(graph: &GraphDatabase) -> Vec<String> {
+        graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == NodeType::Topic)
+            .map(|n| n.name)
+            .collect()
+    }
+
+    /// A wrapper whose topic is a parameter of its SDK call: the literal
+    /// passed at a call site in another file is the producer's topic.
+    #[test]
+    fn wrapper_call_site_in_another_file_resolves_its_literal_topic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("sqs.py"), SQS_WRAPPER).unwrap();
+        std::fs::write(
+            dir.path().join("checkout.py"),
+            "from sqs import publish\n\ndef place(order):\n    publish(\"orders-created\", order)\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test()).unwrap();
+        assert!(
+            topic_names(&graph).contains(&"sqs/orders-created".to_string()),
+            "got {:?}",
+            topic_names(&graph)
+        );
+    }
+
+    /// A non-literal argument at the wrapper's position names no topic.
+    #[test]
+    fn wrapper_call_site_with_a_variable_topic_names_no_topic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("sqs.py"), SQS_WRAPPER).unwrap();
+        std::fs::write(
+            dir.path().join("checkout.py"),
+            "from sqs import publish\n\ndef place(order):\n    publish(order.queue, order)\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test()).unwrap();
+        assert!(
+            topic_names(&graph).is_empty(),
+            "got {:?}",
+            topic_names(&graph)
+        );
+    }
+
+    /// Two wrappers with one name are ambiguous, so neither expands.
+    #[test]
+    fn a_wrapper_name_defined_twice_is_not_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("sqs.py"), SQS_WRAPPER).unwrap();
+        std::fs::write(dir.path().join("sns.py"), SQS_WRAPPER).unwrap();
+        std::fs::write(
+            dir.path().join("checkout.py"),
+            "from sqs import publish\n\ndef place(order):\n    publish(\"orders-created\", order)\n",
+        )
+        .unwrap();
+        let graph = empty_db();
+        scan_workspace_event(&graph, dir.path(), &RepoNamespace::for_test()).unwrap();
+        assert!(
+            topic_names(&graph).is_empty(),
+            "got {:?}",
+            topic_names(&graph)
         );
     }
 
