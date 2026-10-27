@@ -208,10 +208,94 @@ pub fn scan_file_for_routes(
     scan_file_for_routes_with_queries(path, content, patterns, &queries)
 }
 
+/// Next.js App Router: `app/<dir>/route.ts` serves `/<dir>`, and each exported
+/// HTTP-verb function in it is one endpoint. Route groups `(name)` are not part
+/// of the URL, `[id]` is `:id`, and `[...slug]` / `[[...slug]]` are `*`.
+pub fn nextjs_app_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let Some(dir) = nextjs_route_dir(&normalized) else {
+        return Vec::new();
+    };
+    let url_path = format!(
+        "/{}",
+        dir.split('/')
+            .filter(|seg| !seg.is_empty() && !(seg.starts_with('(') && seg.ends_with(')')))
+            .map(nextjs_segment)
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    let mut routes = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        let Some(verb) = exported_http_verb(line) else {
+            continue;
+        };
+        routes.push(HttpRoute {
+            method: method_from_str(verb.to_string()),
+            path: url_path.clone(),
+            handler_path: path.to_string_lossy().to_string(),
+            handler_name: verb.to_string(),
+            line: idx as u32 + 1,
+        });
+    }
+    routes
+}
+
+/// The directory between `app/` and the `route.<ext>` file, or `None` for any
+/// other file. `app/route.ts` gives the empty directory (the site root).
+fn nextjs_route_dir(normalized: &str) -> Option<&str> {
+    let rest = normalized
+        .rsplit_once("/app/")
+        .map(|(_, r)| r)
+        .or_else(|| normalized.strip_prefix("app/"))?;
+    let (dir, file) = rest.rsplit_once('/').unwrap_or(("", rest));
+    let is_route_file = matches!(file, "route.ts" | "route.tsx" | "route.js" | "route.jsx");
+    is_route_file.then_some(dir)
+}
+
+fn nextjs_segment(seg: &str) -> String {
+    if seg.starts_with("[...") || seg.starts_with("[[...") {
+        return "*".to_string();
+    }
+    match seg.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        Some(param) => format!(":{param}"),
+        None => seg.to_string(),
+    }
+}
+
+/// The HTTP verb a line exports, as `export function POST`, `export async
+/// function POST` or `export const POST =`.
+fn exported_http_verb(line: &str) -> Option<&'static str> {
+    const VERBS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    let rest = line.trim_start().strip_prefix("export ")?.trim_start();
+    let rest = rest.strip_prefix("async ").unwrap_or(rest).trim_start();
+    let after = rest
+        .strip_prefix("function ")
+        .or_else(|| rest.strip_prefix("const "))?
+        .trim_start();
+    VERBS.into_iter().find(|verb| {
+        after.strip_prefix(verb).is_some_and(|tail| {
+            tail.starts_with(|c: char| c == '(' || c == ' ' || c == '=' || c == ':')
+        })
+    })
+}
+
 // Owned by one workspace scan and its fixed Patterns instance. A rescan
 // rebuilds the cache after loading overrides, so no query can outlive its
 // configuration or leak into another repository.
 fn scan_file_for_routes_with_queries(
+    path: &std::path::Path,
+    content: &str,
+    patterns: &Patterns,
+    queries: &RouteQueries,
+) -> Vec<HttpRoute> {
+    let mut routes = nextjs_app_routes(path, content);
+    routes.extend(decorator_routes_with_queries(
+        path, content, patterns, queries,
+    ));
+    routes
+}
+
+fn decorator_routes_with_queries(
     path: &std::path::Path,
     content: &str,
     patterns: &Patterns,
@@ -1257,6 +1341,62 @@ async def update_order(id):
             paths.iter().any(|p| p.contains("/orders")),
             "the real route must still be found: {paths:?}"
         );
+    }
+
+    fn nextjs_app_route_path_comes_from_the_file_and_verb_from_the_export() {
+        let r = nextjs_app_routes(
+            std::path::Path::new("src/app/api/auth/login/route.ts"),
+            "import { NextResponse } from 'next/server';\nexport async function POST(req: Request) {\n  return NextResponse.json({});\n}\n",
+        );
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].method, HttpMethod::Post);
+        assert_eq!(r[0].path, "/api/auth/login");
+        assert_eq!(r[0].handler_name, "POST");
+        assert_eq!(r[0].line, 2);
+    }
+
+    #[test]
+    fn nextjs_route_groups_are_not_in_the_url_and_params_are_colon_segments() {
+        let r = nextjs_app_routes(
+            std::path::Path::new("app/(shop)/api/listing/[id]/route.ts"),
+            "export const GET = async () => new Response();\nexport async function DELETE(r) {}\n",
+        );
+        let shape: Vec<(HttpMethod, &str)> =
+            r.iter().map(|x| (x.method, x.path.as_str())).collect();
+        assert_eq!(
+            shape,
+            vec![
+                (HttpMethod::Get, "/api/listing/:id"),
+                (HttpMethod::Delete, "/api/listing/:id"),
+            ]
+        );
+    }
+
+    #[test]
+    fn nextjs_catch_all_segments_become_a_wildcard_and_root_is_slash() {
+        let docs = nextjs_app_routes(
+            std::path::Path::new("app/docs/[...slug]/route.ts"),
+            "export function GET() {}\n",
+        );
+        assert_eq!(docs[0].path, "/docs/*");
+        let root = nextjs_app_routes(
+            std::path::Path::new("app/route.ts"),
+            "export function GET() {}\n",
+        );
+        assert_eq!(root[0].path, "/");
+    }
+
+    #[test]
+    fn a_page_or_a_library_file_is_not_a_nextjs_route() {
+        let page = nextjs_app_routes(
+            std::path::Path::new("app/page.tsx"),
+            "export async function POST() {}\n",
+        );
+        let lib = nextjs_app_routes(
+            std::path::Path::new("src/lib/x.ts"),
+            "export async function POST() {}\n",
+        );
+        assert!(page.is_empty() && lib.is_empty(), "{page:?} {lib:?}");
     }
 
     // ─── Workstream 5: Java Spring, JAX-RS, ASP.NET, Sinatra, Rails, Ktor.
