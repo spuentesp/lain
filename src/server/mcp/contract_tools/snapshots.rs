@@ -96,12 +96,21 @@ async fn run_prepare_snapshot(
         )
     })?;
 
-    let repos = parse_repos(&args_map).map_err(|m| invalid_argument(m, started))?;
     let excluded = parse_excluded(&args_map);
     let from = args_map
         .get("from")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let repos = parse_repos(&args_map).map_err(|m| invalid_argument(m, started))?;
+    let repos = match ctx.federation {
+        Some(fed) => default_repo_refs(
+            repos,
+            args_map.contains_key("repos"),
+            from.as_deref(),
+            fed.list_repos().into_iter().map(|(id, _)| id.to_string()),
+        ),
+        None => repos,
+    };
     let max_base_age_s = args_map.get("max_base_age_s").and_then(|v| v.as_u64());
     let wait_ms = args_map
         .get("wait_ms")
@@ -406,6 +415,21 @@ fn parse_repos(args: &Map<String, Value>) -> Result<BTreeMap<String, String>, St
     Ok(out)
 }
 
+/// "Pin every repo to a commit": with no `repos` argument and no `from` base,
+/// every configured repo is pinned at its HEAD. Without this an omitted
+/// `repos` produced a snapshot with no repos at all.
+fn default_repo_refs(
+    given: BTreeMap<String, String>,
+    repos_arg_present: bool,
+    from: Option<&str>,
+    configured: impl Iterator<Item = String>,
+) -> BTreeMap<String, String> {
+    if repos_arg_present || from.is_some() || !given.is_empty() {
+        return given;
+    }
+    configured.map(|id| (id, "HEAD".to_string())).collect()
+}
+
 fn parse_excluded(args: &Map<String, Value>) -> Vec<String> {
     match args.get("exclude") {
         Some(Value::Array(items)) => items
@@ -486,6 +510,44 @@ mod tests {
         let parsed = parse_repos(&m).unwrap();
         assert_eq!(parsed.get("orders"), Some(&"main".to_string()));
         assert_eq!(parsed.get("billing"), Some(&"abc1234".to_string()));
+    }
+
+    #[test]
+    fn omitted_repos_pin_every_configured_repo_at_head() {
+        let refs = default_repo_refs(
+            BTreeMap::new(),
+            false,
+            None,
+            ["saleor", "storefront"].iter().map(|s| s.to_string()),
+        );
+        assert_eq!(refs.get("saleor").map(String::as_str), Some("HEAD"));
+        assert_eq!(refs.get("storefront").map(String::as_str), Some("HEAD"));
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[test]
+    fn explicit_repos_are_kept_as_given() {
+        let mut given = BTreeMap::new();
+        given.insert("saleor".to_string(), "abc1234".to_string());
+        let refs = default_repo_refs(
+            given,
+            true,
+            None,
+            ["saleor", "storefront"].iter().map(|s| s.to_string()),
+        );
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs.get("saleor").map(String::as_str), Some("abc1234"));
+    }
+
+    #[test]
+    fn a_derived_snapshot_does_not_pull_in_every_repo() {
+        let refs = default_repo_refs(
+            BTreeMap::new(),
+            false,
+            Some("snap_0000000000000000"),
+            ["saleor"].iter().map(|s| s.to_string()),
+        );
+        assert!(refs.is_empty());
     }
 
     #[test]
