@@ -3,7 +3,7 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## 0.13.0 — 2026-10-26
+## 0.13.0 — 2026-10-27
 
 Message-bus and job-queue detection, and environment-backed topic names.
 No federation schema change: `FEDERATION_GRAPH_VERSION` stays at 4, and no
