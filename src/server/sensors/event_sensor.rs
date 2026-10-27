@@ -2093,6 +2093,30 @@ producer.send({ topic: 'orders.created' });
         );
     }
 
+    /// `task.delay(...)` enqueues the Celery task the `@app.task` consumer names,
+    /// so the call is a producer of the same `celery/<name>` hub.
+    #[test]
+    fn celery_delay_call_produces_the_task_topic() {
+        let caller = "from tasks import set_order_search\n\ndef place(order):\n    set_order_search.delay(order.id)\n";
+        let idioms = util::topic_idioms_for(Patterns::patterns(), Lang::Python);
+        let mut unresolved = Vec::new();
+        let sites = detect_sites(
+            caller,
+            "py",
+            &BTreeMap::new(),
+            &idioms,
+            &WrapperIndex::new(),
+            &mut unresolved,
+        );
+        let produced: Vec<&DetectedSite> = sites
+            .iter()
+            .filter(|s| s.kind == SiteKind::Produces)
+            .collect();
+        assert_eq!(produced.len(), 1, "{sites:?}");
+        assert_eq!(produced[0].topic.as_deref(), Some("set_order_search"));
+        assert_eq!(produced[0].broker, "celery");
+    }
+
     /// rdkafka: `FutureRecord::to("orders.created")` is the canonical
     /// publish shape. The detector pulls the topic name out of the
     /// first argument.
