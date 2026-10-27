@@ -14,7 +14,7 @@ includes the bus sensors (#354) and the fixes and features of #355–#364.
 | Dependabot PRs #305, #332–#343 | Deferred in writing | Major-version and toolchain bumps (`jsonschema` 0.29→0.60, `ort` rc.13→rc.15, `inventory` 0.2→0.3, `tree-sitter-swift`, GitHub Actions). Each needs its own change and test pass. |
 | Acceptance findings register, open items (`docs/acceptance/FINDINGS-2026-10-11.md`) | Scoped out | Runtime-only coupling, scale beyond the tested band, and the README reframe. These are documented limits, not defects in this release. |
 | Known test flakes | None accepted | The battery passed on the release tree (see Verification). |
-| Uncommitted WIP | Not in this release | The main checkout's WIP (AGENTS.md, CONTRIBUTING.md, docs/BRANCHING.md, `.github/workflows/ci.yml`) is a dev-review policy change. It is preserved on `release/v0.13.0-wip-backup` and goes in its own PR, not in this release. |
+| Uncommitted WIP | Included | The dev-review policy (AGENTS.md, CONTRIBUTING.md, docs/BRANCHING.md) and the CI change that runs the capability job on main only are part of this release. The live `dev` protection still requires one approval; changing that setting is tracked separately. The WIP is preserved on `release/v0.13.0-wip-backup`. |
 
 ## Verification (on the exact release tree)
 
