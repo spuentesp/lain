@@ -679,18 +679,17 @@ fn graphql_same_service_does_not_bind() {
     let Some(resolution) = out.index.consumer(&consumer_id) else {
         panic!("consumer must be recorded (even when same-service)");
     };
+    // I5: no Binds edge crosses into the consumer's own service. The call
+    // resolves Internal, with its own-service endpoint recorded.
     assert!(
-        resolution.bound_endpoints.is_empty(),
-        "same-service consumer must NOT bind (I5)"
+        out.binds.is_empty(),
+        "same-service consumer must NOT produce a Binds edge (I5)"
     );
-    let Some(ConsumerTarget::Unresolved { reason, .. }) = resolution.target.as_ref() else {
-        panic!(
-            "same-service must be Unresolved, got {:?}",
-            resolution.target
-        );
-    };
-    assert!(matches!(reason, UnresolvedReason::GraphqlNoOp));
-    assert!(out.binds.is_empty());
+    assert!(
+        matches!(resolution.target, Some(ConsumerTarget::Internal)),
+        "same-service consumer must resolve Internal, got {:?}",
+        resolution.target
+    );
 }
 
 // ─── Sanity: GraphqlHandler → SymbolKey projection ───────────────────

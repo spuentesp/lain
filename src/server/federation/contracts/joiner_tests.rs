@@ -2028,11 +2028,14 @@ fn t9_consumer_protocol_topic_same_service_endpoint_is_skipped() {
         .map(|(_, r)| r)
         .next()
         .expect("consumer must be recorded");
+    // Resolved internally: the endpoint is recorded, but no cross-service
+    // `Binds` edge exists (asserted above).
     assert!(
-        matches!(res.target, Some(ConsumerTarget::Unresolved { .. })),
-        "same-service topic consumer must be Unresolved, got: {:?}",
+        matches!(res.target, Some(ConsumerTarget::Internal)),
+        "same-service topic consumer must resolve Internal, got: {:?}",
         res.target
     );
+    assert_eq!(res.bound_endpoints.len(), 1, "{:?}", res.bound_endpoints);
 }
 
 #[test]

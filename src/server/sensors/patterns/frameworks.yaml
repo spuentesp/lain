@@ -89,6 +89,13 @@ languages:
       # `.send(topic="…", …)` / `.send_and_wait(topic="…", …)`.
       # Group 1: literal. Group 2: bare identifier.
       path_regex: '(?:\.send_and_wait|\.send)\s*\(\s*[^)]*?topic\s*=\s*(?:["'']([^"'']+)["'']|([A-Za-z_]\w*))'
+    # `task.delay(...)` / `task.apply_async(...)` enqueues the task named by
+    # the receiver. The name is the function name the `celery-task` scheduled
+    # entry gives the consumer, so both sides meet on `celery/<name>`.
+    - id: celery-delay
+      kind: topic_producer
+      broker: celery
+      path_regex: '\b(\w+)\.(?:delay|apply_async)\s*\('
     - id: celery-task
       kind: scheduled
       # `@app.task` / `@shared_task` — the walker performs a
