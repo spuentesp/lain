@@ -402,13 +402,8 @@ async fn run_get_service(
         .map(|(_, k)| k.to_string())
         .collect();
     let backend = resolved.backend();
-    let consumers = build_consumer_rows(
-        backend.as_ref(),
-        &idx,
-        info.clone(),
-        depth,
-        &commit_by_repo,
-    );
+    let consumers =
+        build_consumer_rows(backend.as_ref(), &idx, info.clone(), depth, &commit_by_repo);
 
     let unresolved_candidates = build_unresolved_candidates(&idx, info, &commit_by_repo);
 

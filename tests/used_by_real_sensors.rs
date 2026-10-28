@@ -155,5 +155,8 @@ async fn used_by_is_populated_for_consumers_found_by_the_real_sensors() {
         .iter()
         .filter_map(|e| e["name"].as_str())
         .collect();
-    assert!(names.contains(&"report"), "walk must reach `report`: {names:?}");
+    assert!(
+        names.contains(&"report"),
+        "walk must reach `report`: {names:?}"
+    );
 }
