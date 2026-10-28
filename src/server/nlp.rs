@@ -11,6 +11,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokenizers::{Encoding, Tokenizer};
 
+/// Keep the one process-wide environment alive and share it between the
+/// embedder and reranker. ORT rejects a second environment, even after the
+/// first handle is dropped, so initialization (including failure) is cached.
+fn ort_environment() -> Result<&'static ort::environment::Environment, LainError> {
+    static ENV: std::sync::OnceLock<Result<ort::environment::Environment, String>> =
+        std::sync::OnceLock::new();
+    ENV.get_or_init(|| {
+        ort::init()
+            .with_name("lain-nlp")
+            .with_execution_providers([ort::ep::CPU::default().build()])
+            .build()
+            .map_err(|error| error.to_string())
+    })
+    .as_ref()
+    .map_err(|error| LainError::Nlp(error.clone()))
+}
+
 #[derive(Clone)]
 enum EmbedInner {
     Onnx {
@@ -186,15 +203,6 @@ impl NlpEmbedder {
             return Ok(Self::new_stub());
         }
 
-        // Initialize ORT global logging once
-        if !ort::init()
-            .with_name("lain-nlp")
-            .with_execution_providers([ort::ep::CPU::default().build()])
-            .commit()
-        {
-            tracing::warn!("ORT initialization returned false - may indicate already initialized");
-        }
-
         Self::with_max_threads(&model_path, &tokenizer_path, max_threads)
     }
     // `new_with_paths` forwarded to `with_max_threads` and had no caller;
@@ -228,7 +236,7 @@ impl NlpEmbedder {
             "NLP embedder: using {} intra-op thread(s) per call",
             threads
         );
-        let mut session = Session::builder()?
+        let mut session = Session::builder(ort_environment()?)?
             .with_intra_threads(threads)?
             .commit_from_file(model_path)?;
         let embedding_dim = Self::detect_embedding_dim(&mut session)?;
@@ -538,7 +546,14 @@ impl CrossEncoder {
             "Cross-encoder: using {} intra-op thread(s) per call",
             threads
         );
-        let session = match Session::builder() {
+        let environment = match ort_environment() {
+            Ok(env) => env,
+            Err(e) => {
+                tracing::warn!("Failed to initialize ONNX Runtime: {}", e);
+                return Self { inner: None };
+            }
+        };
+        let session = match Session::builder(environment) {
             Ok(b) => match b.with_intra_threads(threads) {
                 Ok(mut b) => match b.commit_from_file(&model_path) {
                     Ok(s) => Arc::new(Mutex::new(s)),
@@ -557,17 +572,6 @@ impl CrossEncoder {
                 return Self { inner: None };
             }
         };
-
-        // Same global ORT init as the embedder; second call is a no-op.
-        if !ort::init()
-            .with_name("lain-cross-encoder")
-            .with_execution_providers([ort::ep::CPU::default().build()])
-            .commit()
-        {
-            tracing::debug!(
-                "ORT init returned false for cross-encoder (may be already initialized)"
-            );
-        }
 
         tracing::info!("Cross-encoder reranker loaded from {:?}", dir);
         Self {
