@@ -217,6 +217,7 @@ fn test_graph_edge_all_types() {
         EdgeType::CoChangedWith,
         EdgeType::Pattern,
         EdgeType::CallsHttp,
+        EdgeType::CallsGraphql,
         EdgeType::Produces,
         EdgeType::Consumes,
         EdgeType::DeployedTo,

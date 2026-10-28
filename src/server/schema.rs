@@ -267,6 +267,7 @@ pub enum EdgeType {
     Pattern,       // Semantic boundary indicator (path prefixes, topic names)
     // Cross-runtime edge types
     CallsHttp,           // HTTP route -> handler (method, path pattern)
+    CallsGraphql,        // GraphQL root-field provider (SDL) -> resolver function
     Produces,            // Producer -> Topic (Kafka producer, event emitter)
     Consumes,            // Consumer -> Topic (Kafka consumer, queue listener)
     DeployedTo,          // IaC resource -> cloud resource (k8s, AWS, etc.)
@@ -335,6 +336,7 @@ impl EdgeType {
             EdgeType::CoChangedWith,
             EdgeType::Pattern,
             EdgeType::CallsHttp,
+            EdgeType::CallsGraphql,
             EdgeType::Produces,
             EdgeType::Consumes,
             EdgeType::DeployedTo,
@@ -371,6 +373,8 @@ impl EdgeType {
             // runs from both ingest pipelines, so both reach a real graph.
             | EdgeType::Implements
             | EdgeType::CallsHttp
+            // `graphql_resolver_link_sensor` emits CallsGraphql.
+            | EdgeType::CallsGraphql
             // `dynamic_dispatch_sensor` emits the three heuristic
             // edge types. They are real indexed data; consumers must
             // read `GraphEdge::provenance` to learn they are heuristic.
@@ -429,6 +433,9 @@ impl EdgeType {
             }
             EdgeType::Pattern => "A semantic boundary indicator (path prefix, topic name)",
             EdgeType::CallsHttp => "An HTTP route points at its handler",
+            EdgeType::CallsGraphql => {
+                "A GraphQL root field (SDL provider) points at the resolver function that serves it"
+            }
             EdgeType::Produces => "A producer writes to a topic",
             EdgeType::Consumes => "A consumer reads from a topic",
             EdgeType::DeployedTo => "An IaC resource maps to a cloud resource",
@@ -508,6 +515,7 @@ impl EdgeType {
             EdgeType::Imports | EdgeType::Pattern => &[NodeType::File],
             EdgeType::CoChangedWith => &[NodeType::File],
             EdgeType::CallsHttp => &[NodeType::HttpRoute],
+            EdgeType::CallsGraphql => &[NodeType::Module],
             EdgeType::Produces | EdgeType::Consumes => &[NodeType::Function, NodeType::Method],
             EdgeType::DeployedTo => &[NodeType::Resource],
             EdgeType::CrossRepoSameSymbol => &[NodeType::Function, NodeType::Method],
@@ -591,7 +599,7 @@ impl EdgeType {
             ],
             EdgeType::Implements => &[NodeType::Interface, NodeType::Trait],
             EdgeType::Imports | EdgeType::CoChangedWith | EdgeType::Pattern => &[NodeType::File],
-            EdgeType::CallsHttp => &[NodeType::Function, NodeType::Method],
+            EdgeType::CallsHttp | EdgeType::CallsGraphql => &[NodeType::Function, NodeType::Method],
             EdgeType::Produces | EdgeType::Consumes => &[NodeType::Topic],
             EdgeType::DeployedTo => &[NodeType::Resource],
             EdgeType::CrossRepoSameSymbol => &[NodeType::Function, NodeType::Method],

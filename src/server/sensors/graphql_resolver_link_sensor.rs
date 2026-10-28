@@ -51,7 +51,9 @@ use crate::federation::contracts::model::{
 };
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path as compute_graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{
+    EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, StaticSource,
+};
 use std::path::{Path, PathBuf};
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -100,6 +102,8 @@ pub fn scan_workspace_resolver_link(
     };
     let mut total = 0usize;
     let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
+    let providers = graphql_provider_ids(graph);
     let detectors = default_resolver_detectors(root, &repo_id);
     for (path, content, ext) in crate::server::sensors::util::scan_files(root, code_ext) {
         for detector in &detectors {
@@ -135,6 +139,7 @@ pub fn scan_workspace_resolver_link(
                 })];
                 all_nodes.push(node);
                 total += 1;
+                push_resolver_edges(graph, &providers, &link, &graph_path_str, &mut all_edges);
             }
         }
     }
@@ -146,9 +151,63 @@ pub fn scan_workspace_resolver_link(
     graph.replace_sensor_output(
         SensorOwner::GraphqlResolverLinkSensor,
         &all_nodes,
-        &[] as &[GraphEdge],
+        &all_edges,
     )?;
     Ok(total)
+}
+
+/// `(op, field)` → ids of the SDL provider nodes that declare it.
+fn graphql_provider_ids(
+    graph: &GraphDatabase,
+) -> std::collections::BTreeMap<(GraphqlOp, String), Vec<String>> {
+    let mut out: std::collections::BTreeMap<(GraphqlOp, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+    for n in graph.get_nodes_by_type(NodeType::Module).unwrap_or_default() {
+        for fact in &n.contract {
+            if let ContractFact::GraphqlProvider(p) = fact {
+                out.entry((p.op, p.field.clone()))
+                    .or_default()
+                    .push(n.id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Emit `CallsGraphql` from every SDL provider of `link`'s root field to
+/// the resolver function the detector found. The resolver is the
+/// function/method enclosing the detector's `site_line`; when the
+/// indexer has no such symbol, or the SDL isn't indexed in this repo,
+/// no edge is emitted (the fact stays on the handler-link node).
+fn push_resolver_edges(
+    graph: &GraphDatabase,
+    providers: &std::collections::BTreeMap<(GraphqlOp, String), Vec<String>>,
+    link: &GraphqlHandlerLink,
+    graph_path: &str,
+    edges: &mut Vec<GraphEdge>,
+) {
+    let Some(provider_ids) = providers.get(&(link.op, link.field.clone())) else {
+        return;
+    };
+    let Some(handler) =
+        crate::server::sensors::util::enclosing_symbol(graph, graph_path, link.site_line)
+    else {
+        return;
+    };
+    for provider_id in provider_ids {
+        let mut edge = GraphEdge::new(
+            EdgeType::CallsGraphql,
+            provider_id.clone(),
+            handler.id.clone(),
+        );
+        // Matched by framework naming convention, not by following a
+        // reference: static, regex-grade evidence.
+        edge.provenance = Some(EdgeProvenance::Static {
+            source: StaticSource::Regex,
+        });
+        edge.weight = Some(0.9);
+        edges.push(edge);
+    }
 }
 
 // ─── Detection ─────────────────────────────────────────────────────────
@@ -909,6 +968,116 @@ class Q(graphene.ObjectType):
         pass
 ";
         assert!(detect_resolver_links(src, "py", "s.py", &repo()).is_empty());
+    }
+
+    // ─── CallsGraphql edge emission ─────────────────────────────────
+
+    const GRAPHENE_SRC: &str = "\
+import graphene
+
+class ProductQueries(graphene.ObjectType):
+    @staticmethod
+    def resolve_product(_root, info):
+        return None
+";
+
+    fn graph_with_provider_and_resolver(
+        tmp: &tempfile::TempDir,
+        resolver_line: u32,
+    ) -> (GraphDatabase, String, String) {
+        use crate::federation::contracts::model::GraphqlProviderFact;
+        let g = GraphDatabase::new(&tmp.path().join("db.bin")).expect("db");
+        let ns = RepoNamespace::for_test();
+        let mut provider = GraphNode::new_in(
+            NodeType::Module,
+            "query:product".into(),
+            "schema.graphql".into(),
+            &ns,
+        );
+        provider.line_start = Some(3);
+        provider.line_end = Some(3);
+        provider.id = GraphNode::generate_id(
+            &NodeType::Module,
+            "schema.graphql",
+            "query:product",
+            Some(3),
+            &ns,
+        );
+        provider.contract = vec![ContractFact::GraphqlProvider(GraphqlProviderFact {
+            op: GraphqlOp::Query,
+            field: "product".into(),
+            return_type: "Product".into(),
+        })];
+        let mut resolver = GraphNode::new_in(
+            NodeType::Method,
+            "resolve_product".into(),
+            "schema.py".into(),
+            &ns,
+        );
+        resolver.line_start = Some(resolver_line);
+        resolver.line_end = Some(resolver_line + 1);
+        resolver.id = GraphNode::generate_id(
+            &NodeType::Method,
+            "schema.py",
+            "resolve_product",
+            Some(resolver_line),
+            &ns,
+        );
+        g.insert_nodes_batch(&[provider.clone(), resolver.clone()])
+            .unwrap();
+        (g, provider.id, resolver.id)
+    }
+
+    #[test]
+    fn graphene_resolver_gets_a_calls_graphql_edge_from_the_sdl_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("schema.py"), GRAPHENE_SRC).unwrap();
+        let (g, provider_id, resolver_id) = graph_with_provider_and_resolver(&tmp, 5);
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_resolver_link(&g, tmp.path(), &ns).unwrap();
+        // A rescan must not duplicate the edge.
+        scan_workspace_resolver_link(&g, tmp.path(), &ns).unwrap();
+
+        let edges: Vec<_> = g
+            .get_edges_from(&provider_id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::CallsGraphql)
+            .collect();
+        assert_eq!(edges.len(), 1, "exactly one provider→resolver edge");
+        assert_eq!(edges[0].target_id, resolver_id);
+    }
+
+    #[test]
+    fn no_edge_when_the_sdl_field_is_not_indexed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("schema.py"),
+            GRAPHENE_SRC.replace("resolve_product", "resolve_other"),
+        )
+        .unwrap();
+        let (g, provider_id, _) = graph_with_provider_and_resolver(&tmp, 5);
+        scan_workspace_resolver_link(&g, tmp.path(), &RepoNamespace::for_test()).unwrap();
+        assert!(g
+            .get_edges_from(&provider_id)
+            .unwrap()
+            .iter()
+            .all(|e| e.edge_type != EdgeType::CallsGraphql));
+    }
+
+    #[test]
+    fn no_edge_when_the_indexer_has_no_resolver_symbol() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("schema.py"), GRAPHENE_SRC).unwrap();
+        // Resolver node sits far from the detected `def` line.
+        let (g, provider_id, _) = graph_with_provider_and_resolver(&tmp, 100);
+        scan_workspace_resolver_link(&g, tmp.path(), &RepoNamespace::for_test()).unwrap();
+        assert!(g
+            .get_edges_from(&provider_id)
+            .unwrap()
+            .iter()
+            .all(|e| e.edge_type != EdgeType::CallsGraphql));
     }
 
     #[test]

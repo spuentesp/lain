@@ -672,6 +672,9 @@ pub fn impact_propagation(e: &EdgeType) -> Propagation {
     match e {
         EdgeType::Calls
         | EdgeType::CallsHttp
+        // SDL provider -> resolver: a resolver change reaches the
+        // contract the same way a handler change reaches its route.
+        | EdgeType::CallsGraphql
         | EdgeType::SendsHttp
         | EdgeType::Binds
         | EdgeType::RequestSchema
