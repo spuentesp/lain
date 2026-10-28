@@ -131,3 +131,69 @@ pub const MAX_DEPTH: u8 = 8;
 
 /// Hard cap on the rendered text (`§10.2`).
 pub const TEXT_CAP_CHARS: usize = 2000;
+
+/// Run synchronous, potentially long work (snapshot hydration, the
+/// residency `Condvar` waits, contract diffing) without pinning a
+/// runtime worker.
+///
+/// These calls used to run inline in the tool future. Every in-flight
+/// call then held one tokio worker for its whole duration, and joiners
+/// of an in-flight snapshot build parked on a `std::sync::Condvar` —
+/// a few concurrent (or retried) calls on a small worker pool starved
+/// every other task, `/health` included.
+///
+/// `block_in_place` hands the worker's queue to a replacement thread
+/// while `f` runs and, unlike `spawn_blocking`, accepts closures that
+/// borrow the `McpContext`. It panics on a current-thread runtime, so
+/// there (unit tests, single-thread setups) `f` runs inline.
+pub(crate) fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
+#[cfg(test)]
+mod run_blocking_tests {
+    use super::run_blocking;
+    use std::time::{Duration, Instant};
+
+    /// More blocking calls than workers must not starve an unrelated
+    /// async task (the `/health` stand-in).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_calls_do_not_starve_other_tasks() {
+        let blockers: Vec<_> = (0..4)
+            .map(|_| {
+                tokio::spawn(async {
+                    run_blocking(|| std::thread::sleep(Duration::from_millis(600)));
+                })
+            })
+            .collect();
+        // Let every blocker start before probing.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let probe = Instant::now();
+        tokio::spawn(async { tokio::time::sleep(Duration::from_millis(10)).await })
+            .await
+            .unwrap();
+        let latency = probe.elapsed();
+        assert!(
+            latency < Duration::from_millis(300),
+            "probe task waited {latency:?} behind blocking calls"
+        );
+        for b in blockers {
+            b.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn runs_inline_on_a_current_thread_runtime() {
+        assert_eq!(run_blocking(|| 7), 7);
+    }
+
+    #[test]
+    fn runs_inline_without_a_runtime() {
+        assert_eq!(run_blocking(|| 7), 7);
+    }
+}

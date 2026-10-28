@@ -177,24 +177,25 @@ pub async fn resolve_view<'a>(
         .get(&label, wait_ms)
         .await
         .map_err(|error| prepare_error_outcome(error, &label, started))?;
-    let (federation, hold) = manager
-        .from_snapshot_with_wait_ms(&outcome.record, wait_ms)
-        .map_err(|error| match error {
-            crate::error::LainError::SnapshotResidencyBusy { retry_after_ms } => error_outcome(
-                "busy",
-                "snapshot residency busy",
-                Some(json!({"retry_after_ms": retry_after_ms})),
-                &label,
-                started,
-            ),
-            other => error_outcome(
-                "invalid_argument",
-                format!("from_snapshot failed: {other}"),
-                None,
-                &label,
-                started,
-            ),
-        })?;
+    // Hydrating a snapshot (and waiting on residency) is blocking work.
+    let (federation, hold) =
+        super::run_blocking(|| manager.from_snapshot_with_wait_ms(&outcome.record, wait_ms))
+            .map_err(|error| match error {
+                crate::error::LainError::SnapshotResidencyBusy { retry_after_ms } => error_outcome(
+                    "busy",
+                    "snapshot residency busy",
+                    Some(json!({"retry_after_ms": retry_after_ms})),
+                    &label,
+                    started,
+                ),
+                other => error_outcome(
+                    "invalid_argument",
+                    format!("from_snapshot failed: {other}"),
+                    None,
+                    &label,
+                    started,
+                ),
+            })?;
     let index = federation.contract_index.read().clone();
     let backend: Arc<dyn GraphBackend> = federation.backend.clone();
     let scope = snapshot_scope(&outcome.record);
