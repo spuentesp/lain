@@ -579,7 +579,8 @@ pub fn find_handler_in_graph(graph: &GraphDatabase, name: &str) -> Option<GraphN
 }
 
 /// The `Function` or `Method` in `path` with the smallest range
-/// `line_start..=line_end` that contains `line` (§6.1).
+/// `line_start..=line_end` that contains `line` (§6.1). `line` is
+/// 1-based; the stored range is 0-based (see the comparison below).
 ///
 /// Ties (two symbols span the same number of lines) go to the
 /// symbol whose `line_start` is later — a nested function is more
@@ -599,7 +600,11 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
             )
         })
         .filter_map(|n| match (n.line_start, n.line_end) {
-            (Some(s), Some(e)) if s <= line && e >= line => Some((n, e.saturating_sub(s))),
+            // The indexer stores tree-sitter rows (0-based); `line` is the
+            // 1-based line a sensor reports. Compare in the same base, or
+            // a call on a function's last line misses it and one on the
+            // line above it hits.
+            (Some(s), Some(e)) if s + 1 <= line && e + 1 >= line => Some((n, e.saturating_sub(s))),
             _ => None,
         })
         .min_by(|a, b| {
@@ -1136,6 +1141,36 @@ mod tests {
     /// surrounding one for a line inside both — otherwise the
     /// joiner (PR 7) would attach every `SendsHttp` to the
     /// outermost symbol.
+    /// The indexer stores 0-based rows; sensors query with 1-based
+    /// lines. A function on source lines 10..=14 is stored as 9..=13.
+    #[test]
+    fn enclosing_symbol_maps_one_based_lines_onto_zero_based_ranges() {
+        let g = db("enclosing_line_base");
+        let f = fn_with_range("f", "src/x.py", 9, 13);
+        g.insert_nodes_batch(std::slice::from_ref(&f)).unwrap();
+        assert_eq!(
+            enclosing_symbol(&g, "src/x.py", 10).unwrap().id,
+            f.id,
+            "first line"
+        );
+        assert_eq!(
+            enclosing_symbol(&g, "src/x.py", 14).unwrap().id,
+            f.id,
+            "last line"
+        );
+        assert!(enclosing_symbol(&g, "src/x.py", 9).is_none(), "line above");
+        assert!(enclosing_symbol(&g, "src/x.py", 15).is_none(), "line below");
+    }
+
+    #[test]
+    fn enclosing_symbol_finds_a_one_line_function() {
+        let g = db("enclosing_one_liner");
+        let f = fn_with_range("f", "src/x.py", 4, 4); // source line 5
+        g.insert_nodes_batch(std::slice::from_ref(&f)).unwrap();
+        assert_eq!(enclosing_symbol(&g, "src/x.py", 5).unwrap().id, f.id);
+        assert!(enclosing_symbol(&g, "src/x.py", 4).is_none());
+    }
+
     #[test]
     fn enclosing_symbol_returns_the_smallest_range() {
         let g = db("enclosing_smallest");

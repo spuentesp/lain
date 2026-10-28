@@ -162,7 +162,10 @@ fn graphql_provider_ids(
 ) -> std::collections::BTreeMap<(GraphqlOp, String), Vec<String>> {
     let mut out: std::collections::BTreeMap<(GraphqlOp, String), Vec<String>> =
         std::collections::BTreeMap::new();
-    for n in graph.get_nodes_by_type(NodeType::Module).unwrap_or_default() {
+    for n in graph
+        .get_nodes_by_type(NodeType::Module)
+        .unwrap_or_default()
+    {
         for fact in &n.contract {
             if let ContractFact::GraphqlProvider(p) = fact {
                 out.entry((p.op, p.field.clone()))
@@ -926,7 +929,10 @@ class Unrelated:
         pass
 ";
         let links = detect_resolver_links(src, "py", "schema.py", &repo());
-        let fields: Vec<_> = links.iter().map(|l| (l.field.as_str(), l.site_line)).collect();
+        let fields: Vec<_> = links
+            .iter()
+            .map(|l| (l.field.as_str(), l.site_line))
+            .collect();
         assert_eq!(fields, vec![("product", 8), ("productVariants", 12)]);
         assert!(links.iter().all(|l| l.op == GraphqlOp::Query));
         assert!(links
@@ -952,8 +958,14 @@ class OrderSubscription(graphene.ObjectType):
 ";
         let links = detect_resolver_links(src, "py", "s.py", &repo());
         assert_eq!(links.len(), 2);
-        assert_eq!((links[0].op, links[0].field.as_str()), (GraphqlOp::Mutation, "x"));
-        assert_eq!((links[1].op, links[1].field.as_str()), (GraphqlOp::Subscription, "yZ"));
+        assert_eq!(
+            (links[0].op, links[0].field.as_str()),
+            (GraphqlOp::Mutation, "x")
+        );
+        assert_eq!(
+            (links[1].op, links[1].field.as_str()),
+            (GraphqlOp::Subscription, "yZ")
+        );
     }
 
     #[test]
@@ -1014,13 +1026,15 @@ class ProductQueries(graphene.ObjectType):
             "schema.py".into(),
             &ns,
         );
-        resolver.line_start = Some(resolver_line);
-        resolver.line_end = Some(resolver_line + 1);
+        // The indexer stores 0-based rows; `resolver_line` is the 1-based
+        // source line of the `def`.
+        resolver.line_start = Some(resolver_line - 1);
+        resolver.line_end = Some(resolver_line);
         resolver.id = GraphNode::generate_id(
             &NodeType::Method,
             "schema.py",
             "resolve_product",
-            Some(resolver_line),
+            Some(resolver_line - 1),
             &ns,
         );
         g.insert_nodes_batch(&[provider.clone(), resolver.clone()])
