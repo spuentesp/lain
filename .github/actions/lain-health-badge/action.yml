@@ -24,7 +24,7 @@ inputs:
     # refuses to build — a deadlock (the release cannot publish itself
     # to make the badge green). Bump to the new version right after the
     # tag is published, together with the Formula checksum fill.
-    default: 'v0.12.0'
+    default: 'v0.12.1'
   reindex-timeout:
     description: 'Seconds to wait for the cold-start re-index. Lain defaults to 300s; the action bumps to 600s because the first run on a repo pays the full cost.'
     required: false
