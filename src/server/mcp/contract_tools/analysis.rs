@@ -2120,7 +2120,7 @@ fn graph_path_to_value(p: &GraphImpactPath) -> Value {
     })
 }
 
-fn provenance_label(p: Option<&EdgeProvenance>) -> Value {
+pub(super) fn provenance_label(p: Option<&EdgeProvenance>) -> Value {
     let Some(p) = p else {
         // A legacy edge with no recorded provenance. Treated as 0.0
         // here and in `traverse_impact`, because confidence must be

@@ -886,6 +886,13 @@ pub const CAPABILITIES: &[Capability] = &[
         "asking how a change in one place reaches the rest of the federation",
     ),
     c(
+        "trace_flow",
+        Package::Contracts,
+        Level::Power,
+        "one path from an endpoint, symbol or table across the contract boundary, with gaps",
+        "tracing a value from the table to its consumers (or back) and seeing where the chain breaks",
+    ),
+    c(
         "get_coverage",
         Package::Contracts,
         Level::Power,

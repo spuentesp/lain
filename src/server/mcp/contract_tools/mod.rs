@@ -54,6 +54,7 @@ pub mod paging;
 pub mod scope;
 pub mod services;
 pub mod snapshots;
+pub mod trace_flow;
 pub mod used_by;
 pub mod view;
 

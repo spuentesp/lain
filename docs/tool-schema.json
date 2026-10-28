@@ -2775,6 +2775,234 @@
     }
   },
   {
+    "description": "One path across the contract boundary: from an endpoint, symbol or table, follow Calls/Binds/CallsGraphql/SendsHttp/ReadsTable edges downstream (toward the data) or upstream (toward consumers). Returns ranked chains with per-hop provenance and explicit `gaps` where the chain stops and why.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `trace_flow`. `from` takes exactly one of endpoint / symbol / table. `direction` defaults to `upstream` for a table and `downstream` otherwise.",
+      "properties": {
+        "cap": {
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "depth": {
+          "maximum": 12,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "direction": {
+          "enum": [
+            "downstream",
+            "upstream"
+          ],
+          "type": "string"
+        },
+        "from": {
+          "description": "Exactly one of `endpoint`, `symbol`, `table` must be set.",
+          "properties": {
+            "endpoint": {
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "service": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "repo_id": {
+              "description": "Restrict a symbol name to one repository.",
+              "type": "string"
+            },
+            "symbol": {
+              "description": "A node id, or a symbol name (ambiguous names are rejected with candidates).",
+              "type": "string"
+            },
+            "table": {
+              "description": "A table name, with or without the `table:` prefix.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "snapshot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from"
+      ],
+      "title": "trace_flow input",
+      "type": "object"
+    },
+    "name": "trace_flow",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `trace_flow` envelope (§10.2). Paths are root-to-leaf chains ranked by contract-boundary hops desc, min_confidence desc, length desc, leaf id. `gaps` lists where the chain stops and why.",
+      "properties": {
+        "direction": {
+          "enum": [
+            "downstream",
+            "upstream"
+          ],
+          "type": "string"
+        },
+        "from": {
+          "type": "object"
+        },
+        "gaps": {
+          "items": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "no_handler",
+                  "no_consumers",
+                  "unbound_consumer",
+                  "unlinked_call_site",
+                  "no_table_access",
+                  "no_data_sink",
+                  "dangling_edge"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "node",
+              "name",
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "nodes_visited": {
+          "type": "integer"
+        },
+        "paths": {
+          "items": {
+            "properties": {
+              "boundary_hops": {
+                "type": "integer"
+              },
+              "hops": {
+                "items": {
+                  "properties": {
+                    "edge_type": {
+                      "description": "The edge that led to this hop; null for the seed.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "engine_fact": {
+                      "description": "True when the edge is a static/confirmed engine fact; false for heuristic, runtime or provenance-less edges. The seed is always true.",
+                      "type": "boolean"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "line": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "node_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "provenance": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "repo": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "node_type",
+                    "edge_type",
+                    "engine_fact"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "min_confidence": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "min_confidence",
+              "boundary_hops",
+              "hops"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "type": "object"
+        },
+        "seeds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "truncation_reasons": {
+          "items": {
+            "enum": [
+              "depth",
+              "cap",
+              "node_budget"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "from",
+        "direction",
+        "seeds",
+        "paths",
+        "gaps",
+        "truncated",
+        "truncation_reasons",
+        "nodes_visited",
+        "scope"
+      ],
+      "title": "trace_flow data",
+      "type": "object"
+    }
+  },
+  {
     "description": "What the view saw and what it could not resolve (§9.7). With an `endpoint`, `complete` reflects the could-match gate.",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",

@@ -137,6 +137,7 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "check_binding"
             | "diff_contracts"
             | "trace_impact"
+            | "trace_flow"
             | "get_coverage"
             | "resolve_evidence"
             | "read_source"

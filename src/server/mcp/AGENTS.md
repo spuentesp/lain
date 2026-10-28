@@ -32,11 +32,11 @@ The short version:
   Dispatch lives in `invoke_contract_inventory` inside
   `handler.rs::dispatch_tool_call` (right after `invoke_inventory`).
   **Don't add a new match arm to `dispatch_tool_call`** —
-  `scripts/check-mcp-dispatch-shape.py` rejects it. The 13
+  `scripts/check-mcp-dispatch-shape.py` rejects it. The 14
   contract tools (`list_services`, `get_service`,
   `prepare_snapshot`, `get_snapshot`, `list_contracts`,
   `get_contract`, `list_unresolved`, `check_binding`,
-  `diff_contracts`, `trace_impact`, `get_coverage`,
+  `diff_contracts`, `trace_impact`, `trace_flow`, `get_coverage`,
   `resolve_evidence`, `read_source`) are the full table;
   follow the existing file split (`services.rs`, `snapshots.rs`,
   `contracts.rs`, `analysis.rs`, `evidence.rs`) when adding a
