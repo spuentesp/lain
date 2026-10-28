@@ -3,6 +3,14 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Cargo watches pattern inputs at their actual locations and resolves Git HEAD
+  in worktrees. Repeated commands reuse the build instead of rerunning the
+  build script because its watched paths do not exist.
+
 ## 0.13.0 — 2026-10-27
 
 Message-bus and job-queue detection, and environment-backed topic names.
