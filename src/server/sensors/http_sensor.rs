@@ -1383,6 +1383,7 @@ async def update_order(id):
         );
     }
 
+    #[test]
     fn nextjs_app_route_path_comes_from_the_file_and_verb_from_the_export() {
         let r = nextjs_app_routes(
             std::path::Path::new("src/app/api/auth/login/route.ts"),
