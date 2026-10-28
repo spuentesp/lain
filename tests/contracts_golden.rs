@@ -33,7 +33,7 @@ fn envelope_schema() -> &'static Validator {
 fn validate_envelope(envelope: &Value) -> Result<(), String> {
     let result = envelope_schema().validate(envelope);
     if let Err(error) = result {
-        return Err(format!("{}: {}", error.instance_path, error));
+        return Err(format!("{}: {}", error.instance_path(), error));
     }
     Ok(())
 }
