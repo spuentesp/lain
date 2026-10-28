@@ -775,6 +775,18 @@ mod query_prefix_tests {
 }
 
 #[cfg(test)]
+mod environment_tests {
+    #[test]
+    fn embedder_and_reranker_share_one_environment_under_concurrency() {
+        let threads: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(|| super::ort_environment().unwrap() as *const _ as usize))
+            .collect();
+        let pointers: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+        assert!(pointers.iter().all(|pointer| *pointer == pointers[0]));
+    }
+}
+
+#[cfg(test)]
 mod model_path_tests {
     use super::*;
 
