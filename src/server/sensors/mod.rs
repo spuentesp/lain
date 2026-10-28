@@ -11,6 +11,7 @@
 //! [`docs/CONTRIBUTING_AGENTS.md`](../../../docs/CONTRIBUTING_AGENTS.md#sensor-pattern-one-concern-per-file-one-trait-shared).
 
 pub mod codeowners_sensor;
+pub mod django_orm_sensor;
 pub mod dynamic_dispatch_sensor;
 pub mod entry_point_sensor;
 pub mod env_sensor;

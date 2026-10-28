@@ -3,6 +3,21 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Django ORM table sensor** (`django_orm_sensor`). Maps Django model classes
+  to tables (`Meta.db_table`, else `<app_label>_<classname>`; abstract models
+  have none, proxies use their parent's) and emits `ReadsTable` /
+  `WritesTable` edges from the function that runs `Model.objects…` chains,
+  `get_object_or_404`, or saves a model instance. A chain with only custom
+  manager methods is a heuristic read (confidence 0.6). Anything it cannot
+  resolve (bare `Model.objects`, dynamic receivers, ambiguous model names,
+  non-literal `db_table`) goes on the coverage ledger as `OrmDynamicQuery`.
+  The app label is a path heuristic: a custom `AppConfig.label` is not read.
+  No schema change: `FEDERATION_GRAPH_VERSION` is unchanged.
+
 ## 0.13.0 — 2026-10-27
 
 Message-bus and job-queue detection, and environment-backed topic names.

@@ -1477,6 +1477,26 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
     })];
     rows.push(("sql table", n, Some(SensorOwner::SqlSensor)));
 
+    // The Django ORM sensor's tables are told apart from `sql_sensor`'s
+    // by the `signature` marker, its reader nodes by their own prefix.
+    let mut n = mk(NodeType::Table, "product_product", "src/models.py");
+    n.signature = Some(lain::server::sensors::util::DJANGO_TABLE_MARK.to_string());
+    n.contract = vec![ContractFact::Table(Table {
+        service: String::new(),
+        name: "product_product".into(),
+    })];
+    rows.push(("django orm table", n, Some(SensorOwner::DjangoOrmSensor)));
+
+    let mut n = mk(
+        NodeType::Function,
+        &format!("{}src/a.py:3", lain::server::sensors::util::ORM_READ_PREFIX),
+        "src/a.py",
+    );
+    n.contract = vec![ContractFact::TableConsumer(TableConsumerFact {
+        tables: vec!["product_product".into()],
+    })];
+    rows.push(("orm-read site", n, Some(SensorOwner::DjangoOrmSensor)));
+
     let mut n = mk(
         NodeType::Function,
         &format!("{TOPIC_READ_PREFIX}src/a.py:3"),
@@ -1526,6 +1546,7 @@ fn every_owned_node_shape_is_retracted_by_the_sensor_that_makes_it() {
         "EntryPointSensor",
         "EventSensor",
         "SqlSensor",
+        "DjangoOrmSensor",
         "ProtoSensor",
         "GraphqlSensor",
         "GrpcProviderSensor",

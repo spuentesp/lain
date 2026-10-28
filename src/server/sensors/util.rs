@@ -626,6 +626,12 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
 /// protocol that annotates a source site gets its own synthetic node
 /// named `<prefix><path>:<line>`.
 pub const SQL_READ_PREFIX: &str = "sql-read:";
+/// See [`SQL_READ_PREFIX`]. The Django ORM sensor's `TableConsumerFact`
+/// node, kept apart from `sql-read:` so the two sensors never share one.
+pub const ORM_READ_PREFIX: &str = "orm-read:";
+/// `GraphNode.signature` marker on a `Table` node minted by the Django
+/// ORM sensor; `sensor_owner_of` keys ownership on it.
+pub const DJANGO_TABLE_MARK: &str = "orm:django";
 /// See [`SQL_READ_PREFIX`]. Carries `TopicConsumerFact`.
 pub const TOPIC_READ_PREFIX: &str = "topic-read:";
 /// Sentinel for a topic name that the extractor could not resolve to
