@@ -8,7 +8,7 @@ use crate::federation::contracts::config::{
     HttpClientDecl, SchemaDecl, ServiceDecl,
 };
 use crate::federation::contracts::index::{
-    ConsumerTarget, EndpointId, FieldRefResolution, StaleReason, UnresolvedReason,
+    ConsumerTarget, EndpointId, StaleReason, UnresolvedReason,
 };
 use crate::federation::contracts::joiner::{parse_contract_key, ContractJoiner, JoinOutput};
 use crate::federation::contracts::model::{
@@ -22,7 +22,6 @@ use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{
     EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, RouteMatch,
 };
-use std::collections::BTreeSet;
 
 // ─── Builders ─────────────────────────────────────────────────────────
 
@@ -3059,10 +3058,6 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
         "out.binds must contain Binds(field_ref -> field)"
     );
 }
-
-// Silence unused-imports from churn.
-#[allow(dead_code)]
-fn _silence(_: &RepoId, _: &GlobalId, _: &BTreeSet<FieldRefResolution>) {}
 
 // ─── WebSocket consumers need host evidence and ambiguity refusal ────
 //

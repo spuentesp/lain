@@ -827,6 +827,15 @@ main() {
   if verify_installation; then
     echo ""
     info "Installation complete!"
+    # Semantic search needs the default embedding model. A failed download
+    # does not fail the install: `lain models install` retries it later.
+    if [ "${LAIN_SKIP_MODEL_INSTALL:-}" != "1" ]; then
+      echo ""
+      echo "Installing the semantic search model (LAIN_SKIP_MODEL_INSTALL=1 skips it)..."
+      if ! "${INSTALL_DIR}/${BIN_NAME}" models install; then
+        warn "Model install failed. Retry later with: ${INSTALL_DIR}/${BIN_NAME} models install"
+      fi
+    fi
     echo ""
     echo "Next steps:"
     local rc_hint="~/.bashrc"

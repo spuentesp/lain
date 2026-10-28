@@ -844,6 +844,13 @@ pub const CAPABILITIES: &[Capability] = &[
         "waiting on a prepare_snapshot you kicked off, or auditing a snapshot id",
     ),
     c(
+        "list_service_refs",
+        Package::Contracts,
+        Level::Power,
+        "URL literals that name a declared service, per repo, with usage and call linkage",
+        "checking which services a repo's code points at, or finding references the sensors did not turn into calls",
+    ),
+    c(
         "list_contracts",
         Package::Contracts,
         Level::Power,

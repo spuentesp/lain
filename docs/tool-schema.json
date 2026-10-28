@@ -1672,6 +1672,223 @@
     }
   },
   {
+    "description": "URL literals in the federation's repos that name a declared service: where each one lives, what its host resolves to, and whether a sensor saw a call there. Live view only.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `list_service_refs`. URL literals that name a declared service, per repo. Live view only.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque paging cursor.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max items per page (default 100, max 1000).",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "min_score": {
+          "description": "Lowest score a suggestion may have. Default 0.6.",
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "outcome": {
+          "description": "Filter by what the host identifies.",
+          "enum": [
+            "resolved",
+            "ambiguous",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "repo": {
+          "description": "Filter by repo id.",
+          "type": "string"
+        },
+        "snapshot": {
+          "description": "Only `live` is served.",
+          "enum": [
+            "live"
+          ],
+          "type": "string"
+        },
+        "suggestions": {
+          "description": "Also return suggested routes for production references that match no route of their service. Suggestions are proposals with a score, never links. Needs an installed embedding model.",
+          "type": "boolean"
+        },
+        "usage": {
+          "description": "Filter by where the literal lives.",
+          "enum": [
+            "production",
+            "test",
+            "configuration",
+            "documentation"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "list_service_refs input",
+      "type": "object"
+    },
+    "name": "list_service_refs",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `list_service_refs` envelope. Items sorted by (repo, path, line, value). A reference is evidence of a target, not of a call; `linked_to_call` says whether a sensor also saw a call at that line.",
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "line": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "linked_to_call": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "resolved",
+                      "ambiguous",
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  "service": {
+                    "type": "string"
+                  },
+                  "services": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "path": {
+                "description": "Repo-relative path.",
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              },
+              "self_reference": {
+                "type": "boolean"
+              },
+              "usage": {
+                "enum": [
+                  "production",
+                  "test",
+                  "configuration",
+                  "documentation"
+                ],
+                "type": "string"
+              },
+              "value": {
+                "description": "The URL literal as written.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "path",
+              "line",
+              "value",
+              "host",
+              "outcome",
+              "usage",
+              "self_reference",
+              "linked_to_call"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "type": "object"
+        },
+        "suggestions": {
+          "description": "Only when `suggestions` is true. Proposals, never links.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "line": {
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              },
+              "route": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              },
+              "service": {
+                "type": "string"
+              },
+              "suggested": {
+                "const": true,
+                "type": "boolean"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "path",
+              "line",
+              "url",
+              "service",
+              "route",
+              "score",
+              "suggested"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "suggestions_status": {
+          "enum": [
+            "ok",
+            "no_server_context",
+            "no_contract_index",
+            "no_embedding_model"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "items",
+        "scope"
+      ],
+      "title": "list_service_refs data",
+      "type": "object"
+    }
+  },
+  {
     "description": "Endpoints the federation exposes, filterable by service, repo, and kind (http/topic).",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",

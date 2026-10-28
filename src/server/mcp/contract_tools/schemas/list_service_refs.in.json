@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "list_service_refs input",
+  "description": "Input for `list_service_refs`. URL literals that name a declared service, per repo. Live view only.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": {
+      "type": "string",
+      "enum": [
+        "live"
+      ],
+      "description": "Only `live` is served."
+    },
+    "repo": {
+      "type": "string",
+      "description": "Filter by repo id."
+    },
+    "usage": {
+      "type": "string",
+      "enum": [
+        "production",
+        "test",
+        "configuration",
+        "documentation"
+      ],
+      "description": "Filter by where the literal lives."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "resolved",
+        "ambiguous",
+        "unknown"
+      ],
+      "description": "Filter by what the host identifies."
+    },
+    "cursor": {
+      "type": "string",
+      "description": "Opaque paging cursor."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "Max items per page (default 100, max 1000)."
+    },
+    "suggestions": {
+      "type": "boolean",
+      "description": "Also return suggested routes for production references that match no route of their service. Suggestions are proposals with a score, never links. Needs an installed embedding model."
+    },
+    "min_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Lowest score a suggestion may have. Default 0.6."
+    }
+  },
+  "required": [
+    "snapshot"
+  ]
+}

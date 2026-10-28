@@ -39,6 +39,9 @@ mod battery_mcp_tools;
 #[path = "use_cases/battery_federation.rs"]
 mod battery_federation;
 
+#[path = "use_cases/service_refs.rs"]
+mod service_refs;
+
 #[path = "use_cases/battery_cli.rs"]
 mod battery_cli;
 

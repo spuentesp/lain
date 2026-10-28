@@ -80,15 +80,6 @@ pub fn canonical_digest_hex(db: &GraphDatabase) -> String {
     canonical_digest(db).to_hex().to_string()
 }
 
-/// The same digest as [`canonical_digest_hex`] but restricted to
-/// the *first 16 hex characters* — the same prefix length the
-/// `snapshot_id` (`§8.4`) uses. Kept here so the snapshot identity
-/// computation and the analyzer-digest fixture share the helper.
-pub fn canonical_digest_prefix16(db: &GraphDatabase) -> String {
-    let hex = canonical_digest_hex(db);
-    hex[..32.min(hex.len())].to_string()
-}
-
 fn edge_sort_key(
     edge_type: &EdgeType,
     source_id: &str,
@@ -310,13 +301,5 @@ mod tests {
         assert!(err.contains("missing digest"), "got {err}");
         let err = ParsedDigestFixture::parse("digest: deadbeef\n").unwrap_err();
         assert!(err.contains("missing analyzer_rev"), "got {err}");
-    }
-
-    #[test]
-    fn prefix16_is_first_32_hex() {
-        let db = empty_db();
-        let full = canonical_digest_hex(&db);
-        let prefix = canonical_digest_prefix16(&db);
-        assert_eq!(prefix, &full[..32]);
     }
 }
