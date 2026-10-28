@@ -3,6 +3,52 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- Embedding models are declared in `models.toml` (built in; a user file at
+  `~/.config/lain/models.toml` can add models or change the default). The
+  default, granite-embedding-small-english-r2 (Apache-2.0, about 195 MB), is
+  installed with `lain models install`, which the installers run. Each file is
+  checked against its pinned SHA-256 before it is kept or loaded. The server
+  never downloads: without an installed model, semantic search is off and the
+  log says how to install one. `lain models list` and `lain models path` show
+  the state. Models install under the user data directory, or `LAIN_MODEL_DIR`.
+  Installers skip the model when `LAIN_SKIP_MODEL_INSTALL=1` is set.
+
+### Added
+
+- `list_service_refs` takes `suggestions: true` to also return suggested routes
+  for production references that match no route of their service. Each carries
+  `suggested: true` and a score; they are proposals, never links. `min_score`
+  (default 0.6) sets the cut-off. `suggestions_status` says why there are none
+  when a server context, a contract index or an embedding model is missing.
+
+### Changed
+
+- Service references from prose (READMEs, docs, changelogs) are classified as
+  `documentation`, not `production`. Test scripts named by their stem
+  (`testcontainer.sh`) are `test`. `list_service_refs` accepts the new value.
+- A compose file's build context and published ports name the producer of an
+  address: `localhost:<published>` and `<service>:<container port>` resolve to
+  the repo's service when the service builds from that repo. Image-only
+  services and unpublished ports are not claimed.
+
+### Fixed
+
+- `lain schema dump` always uses the stub embedder, so the tool schema does not
+  depend on which model is installed.
+- Embeddings use each model's declared pooling. Granite small r2 is trained
+  with CLS pooling and lain averaged tokens, so its vectors were not the ones
+  the model was fit to produce. The manifest declares `pooling` per model; an
+  explicitly named model uses `LAIN_EMBEDDING_POOLING` (`mean` by default).
+  On Sock Shop the same suggestion scores 0.955 under CLS against 0.915 under
+  mean.
+- Verbless HTTP routes whose path starts with a method (`GET /health`, from Go
+  1.22 mux patterns and tracing labels) take that method instead of `ANY`.
+- The embedder passes `token_type_ids` only to models that declare it, so
+  encoders without that input load instead of falling back to the stub.
 ## 0.13.0 — 2026-10-27
 
 Message-bus and job-queue detection, and environment-backed topic names.
@@ -109,50 +155,8 @@ No product code changes. Test, CI and documentation only.
 
 ## 0.12.0 — 2026-10-25
 
-### Added
-
-- Embedding models are declared in `models.toml` (built in; a user file at
-  `~/.config/lain/models.toml` can add models or change the default). The
-  default, granite-embedding-small-english-r2 (Apache-2.0, about 195 MB), is
-  installed with `lain models install`, which the installers run. Each file is
-  checked against its pinned SHA-256 before it is kept or loaded. The server
-  never downloads: without an installed model, semantic search is off and the
-  log says how to install one. `lain models list` and `lain models path` show
-  the state. Models install under the user data directory, or `LAIN_MODEL_DIR`.
-  Installers skip the model when `LAIN_SKIP_MODEL_INSTALL=1` is set.
-
-### Added
-
-- `list_service_refs` takes `suggestions: true` to also return suggested routes
-  for production references that match no route of their service. Each carries
-  `suggested: true` and a score; they are proposals, never links. `min_score`
-  (default 0.6) sets the cut-off. `suggestions_status` says why there are none
-  when a server context, a contract index or an embedding model is missing.
-
-### Changed
-
-- Service references from prose (READMEs, docs, changelogs) are classified as
-  `documentation`, not `production`. Test scripts named by their stem
-  (`testcontainer.sh`) are `test`. `list_service_refs` accepts the new value.
-- A compose file's build context and published ports name the producer of an
-  address: `localhost:<published>` and `<service>:<container port>` resolve to
-  the repo's service when the service builds from that repo. Image-only
-  services and unpublished ports are not claimed.
-
 ### Fixed
 
-- `lain schema dump` always uses the stub embedder, so the tool schema does not
-  depend on which model is installed.
-- Embeddings use each model's declared pooling. Granite small r2 is trained
-  with CLS pooling and lain averaged tokens, so its vectors were not the ones
-  the model was fit to produce. The manifest declares `pooling` per model; an
-  explicitly named model uses `LAIN_EMBEDDING_POOLING` (`mean` by default).
-  On Sock Shop the same suggestion scores 0.955 under CLS against 0.915 under
-  mean.
-- Verbless HTTP routes whose path starts with a method (`GET /health`, from Go
-  1.22 mux patterns and tracing labels) take that method instead of `ANY`.
-- The embedder passes `token_type_ids` only to models that declare it, so
-  encoders without that input load instead of falling back to the stub.
 - Large-workspace indexing: GraphQL SDL keyword probes now reuse validated
   strings instead of validating the entire schema for every token. HTTP route
   and client scans reuse compiled tree-sitter queries per framework within a

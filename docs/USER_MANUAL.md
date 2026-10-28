@@ -32,6 +32,7 @@ reference, tuning options, and day-to-day operating notes.
 | `lain capabilities` | Print readiness of symbols, the call graph, git history and semantic search. Add `--json` for scripts. |
 | `lain status` | Print repository, index, and MCP readiness. Add `--json` for scripts. |
 | `lain schema` | Write the MCP tool schema used by schema-drift CI. |
+| `lain models` | List declared embedding models, install a model with `lain models install [name]`, or print the default model directory with `lain models path`. Installation verifies pinned SHA-256 hashes; the server never downloads models. |
 | `lain reindex` | Rebuild the federated graph from source after a schema bump. Backs up `federated_graph.bin` first. Add `--workspace <name>` to scope the rebuild. |
 
 Run `lain <command> --help` for flags. The generated MCP tool schema lives at
