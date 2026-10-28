@@ -3,6 +3,13 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Go message producers resolve package-level environment values on Windows.
+  Package scope keys now use forward slashes, matching the cross-package lookup.
+
 ## 0.13.0 — 2026-10-27
 
 Message-bus and job-queue detection, and environment-backed topic names.
