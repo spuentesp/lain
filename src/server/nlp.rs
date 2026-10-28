@@ -781,7 +781,10 @@ mod environment_tests {
         let threads: Vec<_> = (0..8)
             .map(|_| std::thread::spawn(|| super::ort_environment().unwrap() as *const _ as usize))
             .collect();
-        let pointers: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+        let pointers: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
         assert!(pointers.iter().all(|pointer| *pointer == pointers[0]));
     }
 }
