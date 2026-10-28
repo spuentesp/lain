@@ -116,10 +116,12 @@ impl EnvScope {
 fn url_host_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // scheme, then a host made of DNS-like characters. Stops at the
-        // first character that cannot appear in a host (`/`, `:`, quote, `%`).
-        Regex::new(r#"https?://(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_][A-Za-z0-9_.\-]*)[^\s"'`<>]*"#)
-            .expect("valid regex")
+        // scheme, optional userinfo@, then a host made of DNS-like characters.
+        // Stops at the first character that cannot appear in a host (`/`, `:`, quote, `%`).
+        Regex::new(
+            r#"https?://(?:[^\s"'`<>@/?#]+@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_][A-Za-z0-9_.\-]*)[^\s"'`<>]*"#,
+        )
+        .expect("valid regex")
     })
 }
 
@@ -204,7 +206,9 @@ pub fn extract_service_refs(
     let mut refs = Vec::new();
     for caps in url_host_re().captures_iter(content) {
         let whole = caps.get(0).expect("group 0 always present");
-        let host = caps[1].to_string();
+        let host_match = caps.get(1).expect("group 1 always present");
+        let raw_host = host_match.as_str();
+        let host = raw_host.to_ascii_lowercase();
         let line = content[..whole.start()]
             .bytes()
             .filter(|b| *b == b'\n')
@@ -212,7 +216,7 @@ pub fn extract_service_refs(
             + 1;
         let literal = whole.as_str();
         let scheme = literal.split_once("://").map_or("http", |(s, _)| s);
-        let after_host = &literal[literal.find(&host).map_or(0, |i| i + host.len())..];
+        let after_host = &content[host_match.end()..whole.end()];
         let endpoint = endpoint_from_parts(scheme, &host, after_host);
         let candidates = scope.claimants(&endpoint);
         let self_reference = match (owner, candidates.as_slice()) {
@@ -227,11 +231,7 @@ pub fn extract_service_refs(
         refs.push(ServiceRef {
             path: path.to_string(),
             line,
-            value: format!(
-                "{}://{}",
-                whole.as_str().split("://").next().unwrap_or("http"),
-                host
-            ),
+            value: format!("{scheme}://{raw_host}"),
             url: whole.as_str().to_string(),
             host,
             outcome,
@@ -604,6 +604,54 @@ mod tests {
         assert_eq!(refs[0].path, "src/app.js");
         assert_eq!(refs[0].line, 2);
         assert!(refs[0].linked_to_call);
+    }
+
+    #[test]
+    fn userinfo_prefix_is_skipped_when_extracting_the_authority_host() {
+        let services = [svc("orders", &["orders"], &[])];
+        let external = extract_service_refs(
+            "x.js",
+            "\"http://orders@external.example/api\"",
+            &scope(&services),
+            None,
+            &none,
+        );
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].host, "external.example");
+        assert_eq!(external[0].outcome, RefOutcome::UnknownHost);
+
+        let internal = extract_service_refs(
+            "x.js",
+            "\"http://orders:secret@orders:8080/api\"",
+            &scope(&services),
+            None,
+            &none,
+        );
+        assert_eq!(internal.len(), 1);
+        assert_eq!(internal[0].host, "orders");
+        assert_eq!(
+            internal[0].outcome,
+            RefOutcome::Resolved(ServiceName("orders".into()))
+        );
+    }
+
+    #[test]
+    fn uppercase_hosts_normalize_to_lowercase_for_resolution() {
+        let services = [svc("orders", &["orders"], &[])];
+        let refs = extract_service_refs(
+            "x.js",
+            "\"https://ORDERS/api\"",
+            &scope(&services),
+            None,
+            &none,
+        );
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].host, "orders");
+        assert_eq!(refs[0].value, "https://ORDERS");
+        assert_eq!(
+            refs[0].outcome,
+            RefOutcome::Resolved(ServiceName("orders".into()))
+        );
     }
 }
 
