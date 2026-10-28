@@ -18,6 +18,9 @@ name: CI
 #   main push / PR-to-main: full matrix + capability + coverage
 #                          + version-drift + action-contracts (~20 min)
 #
+# `capability` (demo.sh) is main-only. `agent-contract` counts a skipped
+# capability job as passing, so the dev rollup stays green without it.
+#
 # The mutation gate is no longer a CI job. It runs locally before a PR is
 # merged (`scripts/mutation-gate.sh origin/dev`, in file batches), because a
 # large PR diff ran past the job's time limit on CI.
@@ -406,7 +409,7 @@ jobs:
     needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev'))) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
     steps:

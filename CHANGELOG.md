@@ -3,7 +3,111 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.13.0 — 2026-10-27
+
+Message-bus and job-queue detection, and environment-backed topic names.
+No federation schema change: `FEDERATION_GRAPH_VERSION` stays at 4, and no
+persisted node or edge shape changed. Recovery is not needed.
+
+### Added
+
+- **Bus and job-queue idioms**, as data in `frameworks.yaml`. Redis (pub/sub,
+  Streams with `XADD` and `XREADGROUP`), MQTT, AWS SQS and SNS, Kinesis,
+  EventBridge, NATS, Pulsar, GCP Pub/Sub, Temporal, Dramatiq, Inngest, Sidekiq,
+  Resque, Huey, BullMQ, Bull, RQ, ActiveJob, asynq, Kafka (kafka-python, Spring,
+  Confluent.Kafka, Kotlin, Sarama) and RabbitMQ (Spring `convertAndSend`,
+  `@RabbitListener`, `setQueueNames`). The broker is a field on the entry.
+- **Environment scalar channel** in `env_sensor`, next to the URL channel. It
+  resolves `${VAR}`, `${VAR:-default}` and `$VAR` with compose semantics, and
+  drops flags, numbers, sizes, local paths and placeholders.
+- **Environment-backed topics.** A constant or Go helper that reads the
+  environment resolves through the scalar channel. The C# and Kotlin walkers are
+  back for `.cs` and `.kt` files.
+- **Go producers across packages.** A value such as `kafka.Topic` resolves to a
+  package-level value in another directory. A pattern entry can require a
+  marker (`requires: sarama`), so a bare `Topic:` field elsewhere mints nothing.
+- **Coverage reasons for producers.** An unresolved producer is reported as
+  `EnvAmbiguous` (sources disagree), `EnvUnmapped` (no source and no code
+  default) or `DynamicTopic`, with `path:line` samples.
+- `compose.full.yaml` and `compose.full.yml` are read by the env sensor.
+
+### Changed
+
+- The broker label is data on the pattern entry. The hard-coded AMQP prefix
+  match in `broker_for` is gone.
+- The env sensor reads each file once and derives both channels from it.
+- `EventSensor` registers by hand, so it can report coverage through
+  `scan_with_report`. The registration uses the conventional `SensorEntry` form.
+- **URL channel:** `compose.full.yaml` is now read for URL bindings too. This is
+  the one change to that channel: repos that use that file name gain URL bindings.
+
+### Added (fixes and new detection, after the bus sensors)
+
+- **Celery producers.** `task.delay(...)` and `task.apply_async(...)` produce
+  `celery/<name>`, the topic the task's `@app.task` consumer already names.
+- **Next.js App Router.** A `route.ts` under `app/` is an HTTP provider for its
+  directory's URL, one per exported verb. Route groups are not in the URL;
+  `[id]` is `:id`; `[...slug]` is `*`. Pages Router is not covered.
+- **Wrapper call sites.** A producer whose topic is a parameter of its function
+  (`def publish(queue_name, ...)`) is expanded at each literal call site in the
+  repo. Python and TS/JS, one hop, one line per call.
+- **Same-service providers.** A call whose only provider is in its own service
+  resolves as `Internal`, with no cross-service `Binds` edge (invariant I5).
+
+### Fixed
+
+- A FastAPI route path must start with `/`, so `@mock.patch("pkg.module.fn")`
+  no longer becomes an HTTP route.
+- A GraphQL fragment on an object type is not a root operation; its fields no
+  longer appear as `Query.<field>` consumers. Fragments on `Query`, `Mutation`
+  or `Subscription` keep their fields.
+- A `.gitignore` negation such as `!.semgrep/` no longer pulls tooling
+  directories into the sensor walk.
+- A Celery task under a stacked decorator (`@app.task` then `@allow_writer()`)
+  keeps its function name.
+- `prepare_snapshot` with no `repos` pins every configured repo at `HEAD`.
+  Before, it produced a snapshot with no repos.
+- One language server per repo root. Before, each repo ran four `rust-analyzer`
+  instances over the same workspace, and a replaced repo's servers were never
+  stopped.
+
+### Changed (behavior to know)
+
+- **Index rebuilds on a Lain build change.** A persisted graph records the build
+  that wrote it (`<graph>.build`). A different build, or no stamp, rebuilds the
+  graph once with a log line. No manual `lain reindex` is needed for this.
+- **Snapshot and cache identity include the source.** `analyzer_version` now
+  carries a hash of `src/`, so snapshots and cache entries built before a change
+  are not reused after it.
+- `lsp_pool_size` defaults to 1 (was 4).
+
+### Not in 0.13.0 (deferred in writing, see `docs/acceptance/RELEASE-0.13.0-AUDIT.md`)
+
+- Quartz, ZeroMQ, Debezium connector configuration, Terraform and SNS-to-SQS
+  fan-out, Kubernetes CronJob, webhook entry points.
+- Consumers keep the joiner's dynamic-topic sentinel; they do not carry
+  `EnvAmbiguous` or `EnvUnmapped`.
+- Code defaults used for environment reads are not flagged as assumed.
+
+## 0.12.1 — 2026-10-26
+
+No product code changes. Test, CI and documentation only.
+
+### Changed
+
+- Federation blast-radius latency is enforced (`LAIN_BENCH_ENFORCE=1`) only on
+  `--release` builds, where it measures p99 about 66 ms against a 100 ms target.
+  The earlier 142 ms reading came from the unoptimized test profile.
+- The incremental mutation gate is no longer a CI job. It runs locally before a
+  merge, in file batches, because a large PR diff ran past the job's time limit.
+
+### Fixed
+
+- A flaky presence attribution test polls for the auto-claim to a deadline
+  instead of asserting after a fixed delay.
+- Two equivalent mutants are excluded in `.cargo/mutants.toml`, with reasons.
+
+## 0.12.0 — 2026-10-25
 
 ### Added
 
@@ -68,7 +172,8 @@ All notable changes to LAIN are documented here. Versions follow
 - HTTP client and route detection run in parallel over blocks of 256 files,
   each block against one shared, read-only query set. Saleor 3-repo federation,
   cold reindex: 51.3 s to 37.5 s (clients) and 37.5 s to 30.4 s (routes). Peak
-  RSS is about 1.7 GB on that federation, up from about 1.4 GB.
+  RSS is about 2.7 GB on that federation (measured on current `dev`). Earlier
+  figures of 1.4 to 1.7 GB could not be reproduced later on the same code.
 - Field-access sensors find the enclosing function from one per-file span list
   instead of walking the whole tree for each call site.
 - Federated projection clones only the node types a cross-repo matcher can

@@ -16,7 +16,8 @@ hotfix/x ─────┘
 - **Feature branches** (`feature/<name>`, `fix/<name>`, `chore/<name>`)
   branch off `dev` and target `dev` when opened as PRs.
 - **`dev`** is the always-green integration branch. It receives all
-  feature work; PRs to `dev` require one approval and the fast CI lane.
+  feature work and hotfixes; PRs to `dev` need no review, only the fast
+  CI lane.
 - **`main`** is the protected release line. PRs from `dev` → `main`
   require one approving review and the full cross-platform CI lane.
 
@@ -30,8 +31,8 @@ that. We turned on:
 
 - `main` requires one approval, `lain/agent-contract`, lint, and the
   Ubuntu/macOS/Windows Cargo tests.
-- `dev` requires one approval, `lain/agent-contract`, lint, and the Ubuntu
-  Cargo test.
+- `dev` requires `lain/agent-contract`, lint, and the Ubuntu Cargo test,
+  with no review requirement.
 - Force pushes and direct deletion are blocked on both.
 
 **These settings alone did not move the score to 10.** Confirmed
@@ -67,15 +68,19 @@ Last verified through the GitHub API on 2026-09-20.
 
 | Setting | Value |
 |---|---|
-| Required approving reviews | 1 |
+| Required approving reviews | 0 (target; live setting is still 1, see note) |
 | Require status checks | `lain/agent-contract`, lint, Ubuntu Cargo tests |
 | Require branches up to date before merge | yes |
 | Allow force pushes | no |
 | Allow deletions | no |
 
-`dev` is still the faster integration lane, but branch protection now requires
-one approval as well as the fast-lane checks. `main` adds the cross-platform
-test contexts and is reserved for release PRs.
+`dev` is the faster integration lane. It gates on the fast-lane checks
+only, with no review requirement. `main` adds the cross-platform test
+contexts and is reserved for release PRs, which need one approval.
+
+> **Note:** the live `dev` protection still requires one approving review
+> (checked 2026-10-27). Changing it is a repo-settings change, so it is
+> tracked separately and not part of this docs update.
 
 ## What counts as "agent contract"
 
@@ -103,7 +108,7 @@ git switch -c feature/some-name
 
 # ... work, commit ...
 
-# Open a PR targeting dev. Once approval, CI, and the rollup are green,
+# Open a PR targeting dev. Once CI and the rollup are green,
 # merge.
 gh pr create --base dev --head feature/some-name
 

@@ -4,26 +4,26 @@
 class Lain < Formula
   desc "Structural code intelligence for AI agents"
   homepage "https://github.com/spuentesp/lain"
-  version "0.11.0"
+  version "0.13.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/spuentesp/lain/releases/download/v0.11.0/lain-0.11.0-aarch64-apple-darwin.tar.gz"
-      sha256 "b02ff20a58d9633302f2deb3ff40f2b9f535099d13d7b7759cc53c9e9172c857"
+      url "https://github.com/spuentesp/lain/releases/download/v0.13.0/lain-0.13.0-aarch64-apple-darwin.tar.gz"
+      sha256 "699685aa3e990412f74476d2bda6696a46bf6ac727d9caf1e8e8fd6e01003b0e"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/spuentesp/lain/releases/download/v0.11.0/lain-0.11.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "e3487f2d7e2cfe1fa80b2e3f6f8816da8757d37c961590b97e8e2ed6de57258a"
+      url "https://github.com/spuentesp/lain/releases/download/v0.13.0/lain-0.13.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "a30892c3162003f03cad4dc33d18d8ac5106a727215c11211524dd84cc9122fe"
     end
   end
 
   on_windows do
     on_intel do
-      url "https://github.com/spuentesp/lain/releases/download/v0.11.0/lain-0.11.0-x86_64-pc-windows-msvc.tar.gz"
-      sha256 "ffc9c6a8af7e69a45b5f615962bc831bab63f7f18d24ce4c2529c40041575e79"
+      url "https://github.com/spuentesp/lain/releases/download/v0.13.0/lain-0.13.0-x86_64-pc-windows-msvc.tar.gz"
+      sha256 "c93792b4a08446c7b2b64948f621ded6439f1f5686dd4de8fb18cf5ae8817d49"
     end
   end
 

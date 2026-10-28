@@ -11,10 +11,13 @@
 ; `patterns/build.rs` caught the double-`attribute` wrapper and
 ; the off-by-one path — see data-driven-sensor-patterns plan Task 6.
 
+; A route path starts with `/` (Starlette asserts it). This drops
+; `@mock.patch("pkg.module.fn")`, which has the same decorator shape.
 (decorator
   (call
     function: (attribute
       attribute: (identifier) @verb)
     arguments: (argument_list
       (string
-        (string_content) @path))))
+        (string_content) @path)))
+  (#match? @path "^/"))

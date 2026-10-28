@@ -111,7 +111,15 @@ pub const CONTRACT_ANALYZER_REV: u32 = 6;
 /// before this constant lands is mechanically distinct from one
 /// derived after.
 pub fn analyzer_version() -> String {
-    format!("{}+c{}", env!("CARGO_PKG_VERSION"), CONTRACT_ANALYZER_REV)
+    // The source fingerprint, not only the manual revision: a change under
+    // src/ changes what the analyzer computes, and a snapshot or cache entry
+    // keyed on this string must not be served across that change.
+    format!(
+        "{}+{}+c{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("LAIN_SOURCE_FINGERPRINT"),
+        CONTRACT_ANALYZER_REV
+    )
 }
 
 #[cfg(test)]
@@ -126,3 +134,17 @@ mod joiner_tests;
 mod model_tests;
 #[cfg(test)]
 mod scenario_tests;
+
+#[cfg(test)]
+mod analyzer_identity_tests {
+    #[test]
+    fn analyzer_version_carries_the_source_fingerprint() {
+        let v = super::analyzer_version();
+        assert!(v.starts_with(env!("CARGO_PKG_VERSION")), "{v}");
+        assert!(v.contains(env!("LAIN_SOURCE_FINGERPRINT")), "{v}");
+        assert!(
+            v.ends_with(&format!("+c{}", super::CONTRACT_ANALYZER_REV)),
+            "{v}"
+        );
+    }
+}

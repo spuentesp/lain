@@ -1,5 +1,19 @@
 # AGENTS.md — for AI agents working in this Lain checkout
 
+
+
+Standard instructions
+
+
+
+Check skills before working a task and look for a useful one
+
+memory cleanliness is important. review we didnt fill the ram or the ssd with garbage data we can regenerate
+
+testing is critical. we alwaya assume someone didnt do the job thats why we test
+
+Add always at the start of each message this "Answer:"
+
 ## Branch policy
 
 Two-branch model:
@@ -95,16 +109,8 @@ cancels superseded runs for the same ref.
 - Don't commit secrets, even test fixtures. Use `hooks/<agent>/` to
   claim files before editing.
 - Don't push tags without a release PR.
-- The OpenSSF Scorecard is the public supply-chain signal; current
+- The OpenSSF Scorecard is the public supply-chain signal; current  
   goal is **9+ composite**. Rolling state in `docs/SCORECARD.md`.
-
-## Background
-
-The pre-2026-09-15 `AGENTS.md` was a release-tracking note about
-a v0.7.0 incident where the upstream tarball shipped a binary
-whose `--version` reported `0.6.1` (a missed `Cargo.toml` bump).
-That incident was resolved by PR #43. This file now supersedes
-that note with the current branching, CI, and release policy.
 
 ## Federation schema bumps (2026-09-07 onwards)
 

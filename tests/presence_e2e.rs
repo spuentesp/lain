@@ -61,10 +61,19 @@ fn e2e_attribution_via_real_child_pid() {
     std::thread::sleep(Duration::from_millis(800));
     let _ = child.wait();
 
-    // The agent should now have an auto-claim on auth.rs.
-    let sessions = presence.list_active(true);
-    assert_eq!(sessions.len(), 1);
-    let claims = occupancy.list_for_agent(sessions[0].name.as_str());
+    // The agent should now have an auto-claim on auth.rs. The watcher handles
+    // the write asynchronously, and a fixed sleep is not enough under load
+    // (CI coverage builds were slow enough to miss it), so poll to a deadline.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let claims = loop {
+        let sessions = presence.list_active(true);
+        assert_eq!(sessions.len(), 1);
+        let claims = occupancy.list_for_agent(sessions[0].name.as_str());
+        if !claims.is_empty() || std::time::Instant::now() >= deadline {
+            break claims;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert!(
         !claims.is_empty(),
         "expected auto-claim after child write; got: {claims:?}"

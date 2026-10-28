@@ -66,4 +66,11 @@ exclude_re = [
     # Drop's final fsync is power-loss durability only — unobservable without a
     # crash (same class as the `created` guard above).
     'wal\.rs.*replace <impl Drop for WalWriter>::drop with',
+    # Nested function spans: a child's end/start is never larger than its
+    # parent's, so `-` vs `/` picks the same innermost span. Equal spans tie
+    # and the first in walk order wins under both.
+    'field_access_sensor\.rs.*replace - with / in innermost_function_at',
+    # With the parse cache disabled the lookup has no slot, so negating the
+    # enabled check takes the same path and returns the same tree.
+    'parse_cache\.rs.*delete ! in get_or_parse',
 ]

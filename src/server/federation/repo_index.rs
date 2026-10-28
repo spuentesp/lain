@@ -282,7 +282,10 @@ impl RepoIndex {
         // defaults when absent) rather than hard-coding. The LSP poll
         // settings in particular were documented knobs that nothing read.
         let runtime = crate::tuning::load_tuning_config(&local_path).runtime;
-        let lsp = LspPool::new(&local_path, 4, &runtime)?;
+        // One language server per repo root. Each multiplexer runs its own
+        // rust-analyzer over the same workspace, so 4 cost 4x the memory for
+        // the same answers.
+        let lsp = LspPool::new(&local_path, 1, &runtime)?;
         let git = Arc::new(AnyGitSensor::from_env(&local_path)?);
         // Read the namespace *before* moving `source` into the struct —
         // we need the source's id, and `Box<dyn RepoSource>` isn't
@@ -463,6 +466,12 @@ impl RepoIndex {
     /// last-updated age honest on a freshly-indexed server. The
     /// Mutex<Arc> makes the swap atomic w.r.t. concurrent `index()`
     /// calls (each one clones the Arc inside the lock).
+    /// Stop this repo's language servers. Dropping the index does not do it:
+    /// the pool is shared with other handles, so it must be told to shut down.
+    pub async fn shutdown_lsp(&self) {
+        self.lsp.shutdown_all().await;
+    }
+
     pub fn set_overlay(&self, overlay: Arc<VolatileOverlay>) {
         *self.server_overlay.lock() = overlay;
     }
@@ -1547,13 +1556,12 @@ mod tests {
             )
             .unwrap(),
         );
-        for _ in 0..4 {
-            repo.lsp
-                .next()
-                .lock()
-                .await
-                .mark_unavailable("rust-analyzer");
-        }
+        // The pool has one multiplexer, so one mark covers every request.
+        repo.lsp
+            .next()
+            .lock()
+            .await
+            .mark_unavailable("rust-analyzer");
         repo.sync_overlay().await.unwrap();
         let overlay = repo.server_overlay.lock().clone();
         assert_eq!(overlay.get_all_nodes().len(), 1);
@@ -1565,9 +1573,8 @@ mod tests {
         overlay.insert_node(unrelated.clone());
         repo.start_watcher().await.unwrap();
         let mut lsp_guards = Vec::new();
-        for _ in 0..4 {
-            lsp_guards.push(repo.lsp.next().lock_owned().await);
-        }
+        // One multiplexer: locking it twice would wait on itself.
+        lsp_guards.push(repo.lsp.next().lock_owned().await);
         let scanning = repo.clone();
         let mut in_flight = tokio::spawn(async move { scanning.sync_overlay().await });
         assert!(

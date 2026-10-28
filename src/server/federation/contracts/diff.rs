@@ -235,6 +235,13 @@ fn consumer_to_def(
             endpoints: resolution.bound_endpoints.clone(),
             provenance: provenance.clone(),
         },
+        // An in-service endpoint is still the call's endpoint on the surface.
+        Some(IndexConsumerTarget::Internal) => SurfaceResolution::Binds {
+            endpoints: resolution.bound_endpoints.clone(),
+            provenance: EdgeProvenance::Static {
+                source: crate::schema::StaticSource::Regex,
+            },
+        },
         Some(IndexConsumerTarget::External { host }) => {
             SurfaceResolution::External { host: host.clone() }
         }
@@ -272,10 +279,12 @@ fn consumer_key(call_id: &GlobalId, resolution: &ConsumerResolution) -> Consumer
         name: call_id.name().unwrap_or_default(),
     };
     let target = match &resolution.target {
-        Some(IndexConsumerTarget::Binds { .. }) => match resolution.bound_endpoints.first() {
-            Some((_, key)) => ConsumerTargetKey::Contract(key.clone()),
-            None => ConsumerTargetKey::UrlExpr(call_id.name().unwrap_or_default()),
-        },
+        Some(IndexConsumerTarget::Binds { .. }) | Some(IndexConsumerTarget::Internal) => {
+            match resolution.bound_endpoints.first() {
+                Some((_, key)) => ConsumerTargetKey::Contract(key.clone()),
+                None => ConsumerTargetKey::UrlExpr(call_id.name().unwrap_or_default()),
+            }
+        }
         Some(IndexConsumerTarget::External { host }) => ConsumerTargetKey::UrlExpr(host.clone()),
         Some(IndexConsumerTarget::Unresolved { .. }) => {
             ConsumerTargetKey::UrlExpr(call_id.name().unwrap_or_default())

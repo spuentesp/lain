@@ -15,6 +15,7 @@ pub mod dynamic_dispatch_sensor;
 pub mod entry_point_sensor;
 pub mod env_sensor;
 pub mod event_sensor;
+pub mod event_wrappers;
 pub mod field_access_sensor;
 pub mod graphql_consumer_sensor;
 pub mod graphql_provider_sensor;

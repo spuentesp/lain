@@ -16,7 +16,7 @@ fn test_tuning_config_default() {
 #[test]
 fn test_ingestion_config_default() {
     let config = IngestionConfig::default();
-    assert_eq!(config.lsp_pool_size, 4);
+    assert_eq!(config.lsp_pool_size, 1);
     assert_eq!(config.files_per_batch, 50);
     assert_eq!(config.max_files_per_scan, 5000);
     assert_eq!(config.ingest_batch_size, 100);

@@ -336,6 +336,10 @@ pub fn walk_workspace(root: &Path) -> impl Iterator<Item = WalkedFile> {
             seen.insert(p.clone());
         })
         .collect();
+    // A `.gitignore` negation such as `!.semgrep/` re-includes hidden paths in
+    // the walk above. Those are tooling, not source, so the hidden-path rule
+    // applies to them here as it does to git-tracked files below.
+    files.retain(|p| !has_hidden_segment_below(root, p));
     if let Ok(repo) = git2::Repository::open(root) {
         if let (Ok(index), Some(workdir)) = (repo.index(), repo.workdir()) {
             // Compare canonical forms (macOS `/var` → `/private/var`,
@@ -371,6 +375,15 @@ pub fn walk_workspace(root: &Path) -> impl Iterator<Item = WalkedFile> {
         }
     });
     files.into_iter().map(WalkedFile)
+}
+
+/// Whether any directory or file name between `root` and `path` starts with a
+/// dot. Only the components below `root` count, so a root under a dotted
+/// directory (`/tmp/.tmpXYZ`) is not hidden.
+fn has_hidden_segment_below(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root).unwrap_or(path).components().any(
+        |c| matches!(c, std::path::Component::Normal(s) if s.to_string_lossy().starts_with('.')),
+    )
 }
 
 /// `CamelCase` / `mixedCase` → `snake_case`. Each non-initial uppercase
@@ -734,9 +747,13 @@ use crate::federation::contracts::model::{
 /// `kind` is the `FrameworkKind` discriminator (the walker uses
 /// it only to route the capture into the right field of the
 /// returned [`IdiomMatch`]; it does not filter on `kind`).
+#[derive(Clone)]
 pub struct CompiledIdiom {
+    /// File-content gate copied from the definition.
+    pub requires: Option<String>,
     pub kind: crate::server::sensors::patterns::FrameworkKind,
     pub id: String,
+    pub broker: Option<String>,
     regex: regex::Regex,
 }
 
@@ -747,6 +764,8 @@ impl CompiledIdiom {
         Some(Self {
             id: def.id.clone(),
             kind: def.kind,
+            broker: def.broker.clone(),
+            requires: def.requires.clone(),
             regex,
         })
     }
@@ -780,6 +799,8 @@ impl CompiledIdiom {
 pub struct IdiomMatch {
     pub framework_id: String,
     pub kind: crate::server::sensors::patterns::FrameworkKind,
+    /// Broker label from the matched entry; `None` is the default broker.
+    pub broker: Option<String>,
     /// String-literal capture (e.g. the contents of `"orders"`).
     /// Populated when the matched regex's literal-form group
     /// captured a non-empty value.
@@ -888,6 +909,7 @@ pub fn walk_idioms(idioms: &[CompiledIdiom], line: &str, line_no: u32) -> Vec<Id
             out.push(IdiomMatch {
                 framework_id: idiom.id.clone(),
                 kind: idiom.kind,
+                broker: idiom.broker.clone(),
                 literal,
                 identifier,
                 line: line_no,
@@ -1017,6 +1039,31 @@ pub fn emit_graphql_field_refs(
 mod tests {
     use super::*;
     use crate::schema::{GraphNode, NodeType, RepoNamespace};
+
+    /// A `!.semgrep/` negation in `.gitignore` must not pull tooling
+    /// directories into the sensor walk; source files still come through.
+    #[test]
+    fn a_gitignore_negation_does_not_re_include_a_hidden_directory() {
+        let root = tempfile::tempdir().unwrap();
+        // The negation only matters inside a git repository, as in a checkout.
+        let _ = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(root.path())
+            .status();
+        std::fs::write(root.path().join(".gitignore"), "!.semgrep/\n").unwrap();
+        std::fs::create_dir_all(root.path().join(".semgrep")).unwrap();
+        std::fs::write(root.path().join(".semgrep/rule.py"), "x").unwrap();
+        std::fs::write(root.path().join("app.py"), "y").unwrap();
+        let walked: Vec<String> = walk_workspace(root.path())
+            .map(|f| f.0.strip_prefix(root.path()).unwrap().display().to_string())
+            .collect();
+        assert!(walked.contains(&"app.py".to_string()), "{walked:?}");
+        assert!(
+            !walked.iter().any(|p| p.contains(".semgrep")),
+            "hidden tooling must stay out: {walked:?}"
+        );
+    }
 
     fn db(_name: &str) -> GraphDatabase {
         // `tempfile::tempdir()` gives each test its own directory

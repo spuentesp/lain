@@ -248,6 +248,22 @@ stays a pure drop.
 
 ### Bus and job-queue systems (detection patterns only)
 
+**Status (0.13.0):** implemented as YAML pattern entries in
+`src/server/sensors/patterns/frameworks.yaml`, each with a `broker:`
+label. Covered: Redis (pub/sub, Streams), MQTT, AWS SQS, SNS, Kinesis,
+EventBridge, NATS, Pulsar, GCP Pub/Sub, Temporal, Dramatiq, Inngest,
+Sidekiq, Resque, Huey (instance queue), Redis Streams (XADD, XREADGROUP),
+BullMQ and Bull (`new Queue`, `new Worker`, `new Bull`), RQ (`Queue('name')`,
+quoted names only), Kafka (kafka-python, Spring Kafka), and AMQP (pika,
+amqplib, Spring `convertAndSend`, `@RabbitListener`, `setQueueNames`).
+Java same-file string constants (`protected final String queueName = "…"`)
+resolve for the identifier form. RQ producers (`q.enqueue(…)`) are not
+detected: the queue name lives on the `Queue` object, not at the call. Tests: `tests/bus_idioms_e2e.rs`. Not implemented in 0.13.0,
+with reasons: **Quartz** (`@Scheduled` defines a schedule, not a named
+topic; needs a design for scheduled sites), **ZeroMQ** (subscription
+prefixes, not call-shaped topics), **Debezium** (connector configuration,
+not code).
+
 None of these is a `ContractKey` problem — `Topic { broker, name }`
 is broker-generic, the binding grammar (`topic:<broker>:<name>`) is
 already there, and the hub model (one canonical hub per

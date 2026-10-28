@@ -91,11 +91,17 @@ where
     F: Fn(&(ServiceName, ContractKey)) -> bool,
 {
     let mut candidates: Vec<(ServiceName, ContractKey, GlobalId)> = Vec::new();
+    // Providers in the consumer's own service. They never become `Binds`
+    // (I5), but a single one resolves the call as internal.
+    let mut own: Vec<(ServiceName, ContractKey, GlobalId)> = Vec::new();
     for ((svc, key), providers) in endpoints {
         if !candidate_filter(&(svc.clone(), key.clone())) {
             continue;
         }
         if svc == own_service {
+            if let Some(provider) = providers.first() {
+                own.push((svc.clone(), key.clone(), provider.id.clone()));
+            }
             continue;
         }
         if let Some(provider) = providers.first() {
@@ -103,7 +109,9 @@ where
         }
     }
 
+    let internal = candidates.is_empty() && own.len() == 1;
     let target = match (&ambiguity_policy, candidates.len()) {
+        _ if internal => Some(ConsumerTarget::Internal),
         (AmbiguityPolicy::NoMatch, 0) => Some(ConsumerTarget::Unresolved {
             reason: UnresolvedReason::NoMatch,
             target_service: None,
@@ -129,6 +137,11 @@ where
     };
 
     let mut bound: Vec<(ServiceName, ContractKey)> = Vec::new();
+    if internal {
+        // The single own-service provider is the call's endpoint, recorded
+        // without a `BindsEdge`.
+        bound.extend(own.iter().map(|(svc, key, _)| (svc.clone(), key.clone())));
+    }
     if matches!(target, Some(ConsumerTarget::Binds { .. })) {
         for (svc, key, provider_id) in &candidates {
             binds.push(crate::federation::contracts::joiner::BindsEdge {
