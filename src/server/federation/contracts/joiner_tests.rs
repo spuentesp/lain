@@ -775,8 +775,9 @@ fn dynamic_path_with_external_literal_host_lands_in_external_not_unnormalized() 
 
 #[test]
 fn rule_6_own_service_skip() {
-    // A billing consumer calling billing's own route should NOT
-    // produce a Binds edge (own-service skip).
+    // A billing consumer calling billing's own route via a relative
+    // URL resolves as Internal (own-service endpoint recorded, no
+    // cross-service Binds edge per I5).
     let p = provider_node(
         "billing",
         "src/billing.py",
@@ -799,10 +800,20 @@ fn rule_6_own_service_skip() {
     let mut cfg = default_config();
     cfg.services[0].name = "billing".into();
     cfg.services[0].repo = "billing".into();
-    let out = ContractJoiner::run(&[p, c], &[], &cfg);
-    // The own-service skip fires for rule 6; the call is
-    // unresolved no_match.
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
     assert!(out.binds.is_empty(), "own-service call is not a contract");
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
+    assert!(
+        matches!(resolution.target, Some(ConsumerTarget::Internal)),
+        "same-service relative HTTP call must resolve Internal, got {:?}",
+        resolution.target
+    );
+    assert_eq!(resolution.bound_endpoints.len(), 1);
+    assert_eq!(
+        resolution.bound_endpoints[0].0,
+        ServiceName("billing".into())
+    );
 }
 
 #[test]

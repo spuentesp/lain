@@ -259,6 +259,29 @@ pub(super) fn resolve_consumer(
         };
     }
 
+    // A relative URL (`fetch("/api/x")`, no host) is same-origin: it calls the
+    // service that serves the code. Match that service's own endpoints, as an
+    // `Internal` resolution, never a cross-service `Binds` edge (I5).
+    if matches!(consumer.url.host, HostPart::None) {
+        if let Some(tmpl) = target_template.as_deref() {
+            if tmpl.starts_with('/') {
+                if let Some((key, detail)) =
+                    best_provider_for(own_service, &target_method, Some(tmpl), endpoints)
+                {
+                    if detail.kind != RouteMatch::PrefixStripped {
+                        return ConsumerResolution {
+                            call_id: call_id.clone(),
+                            service: own_service.clone(),
+                            target: Some(ConsumerTarget::Internal),
+                            bound_endpoints: vec![(own_service.clone(), key)],
+                            reads_complete: consumer.reads_complete,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
     let generic_keys: BTreeSet<ContractKey> = config
         .all_generic_keys()
         .into_iter()
