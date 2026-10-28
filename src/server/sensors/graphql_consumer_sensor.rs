@@ -1273,6 +1273,7 @@ const CREATE = gql`mutation { createOrder(input: {}) { id } }`;
         assert_eq!(refs.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![1, 4]);
     }
 
+    /// `start`/`end` are 0-based, as the indexer stores them.
     fn fn_node(name: &str, path: &str, start: u32, end: u32) -> GraphNode {
         let ns = RepoNamespace::for_test();
         let mut n = GraphNode::new_in(
@@ -1313,8 +1314,8 @@ const CREATE = gql`mutation { createOrder(input: {}) { id } }`;
         std::fs::write(tmp.path().join("src/ProductDetails.graphql"), DOC).unwrap();
         std::fs::write(tmp.path().join("src/user.ts"), USER_TS).unwrap();
         let g = GraphDatabase::new(&tmp.path().join("db.bin")).unwrap();
-        let user = fn_node("getProductData", "src/user.ts", 3, 5);
-        let other = fn_node("unrelated", "src/user.ts", 7, 9);
+        let user = fn_node("getProductData", "src/user.ts", 2, 4);
+        let other = fn_node("unrelated", "src/user.ts", 6, 8);
         g.insert_nodes_batch(&[user.clone(), other.clone()])
             .unwrap();
         let ns = RepoNamespace::for_test();
@@ -1346,7 +1347,7 @@ const CREATE = gql`mutation { createOrder(input: {}) { id } }`;
         )
         .unwrap();
         let g = GraphDatabase::new(&tmp.path().join("db.bin")).unwrap();
-        let f = fn_node("f", "user.ts", 1, 3);
+        let f = fn_node("f", "user.ts", 0, 2);
         g.insert_nodes_batch(std::slice::from_ref(&f)).unwrap();
         scan_workspace_graphql_consumer(&g, tmp.path(), &RepoNamespace::for_test()).unwrap();
         assert!(calls_to_consumer(&g, &f).is_empty());
@@ -1366,7 +1367,7 @@ const CREATE = gql`mutation { createOrder(input: {}) { id } }`;
         )
         .unwrap();
         let g = GraphDatabase::new(&tmp.path().join("db.bin")).unwrap();
-        let f = fn_node("f", "user.ts", 1, 3);
+        let f = fn_node("f", "user.ts", 0, 2);
         g.insert_nodes_batch(std::slice::from_ref(&f)).unwrap();
         scan_workspace_graphql_consumer(&g, tmp.path(), &RepoNamespace::for_test()).unwrap();
         assert!(calls_to_consumer(&g, &f).is_empty());
