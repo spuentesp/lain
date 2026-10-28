@@ -11,6 +11,7 @@ import importlib.util
 import sys
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,8 @@ def fake_server_command(body: str) -> list:
             if not line:
                 continue
             req = json.loads(line)
+            if req.get('method') == 'notifications/initialized':
+                continue
             resp = handle(req)
             if resp is not None:
                 sys.stdout.write(json.dumps(resp) + "\\n")
@@ -44,13 +47,26 @@ def fake_server_command(body: str) -> list:
 
 
 def capability_envelope(state, retry_after_ms=None):
-    indexing = {"state": state}
+    capability = {"state": state, "optional": False}
     if retry_after_ms is not None:
-        indexing["retry_after_ms"] = retry_after_ms
-    return {"indexing": indexing}
+        capability["retry_after_ms"] = retry_after_ms
+    return {"schema_version": 1, "capabilities": {
+        "symbols": capability, "call_graph": capability,
+        "semantic_search": {"state": "unavailable_optional", "optional": True},
+    }}
 
 
 class CleanRoomCheckTests(unittest.TestCase):
+    def test_resolves_npm_command_before_launching_on_windows(self):
+        # Windows CreateProcess cannot find bare `npx`; which applies
+        # PATHEXT and returns the absolute npx.cmd path.
+        with mock.patch.object(check.shutil, "which", return_value="C:/node/npx.cmd"), \
+             mock.patch.object(check.subprocess, "Popen", side_effect=OSError("stop")) as popen:
+            with self.assertRaises(OSError):
+                check.run_check(["npx", "-y", "@spuentesp/lain-mcp", "mcp"], 5, 5)
+        self.assertEqual(popen.call_args.args[0],
+                         ["C:/node/npx.cmd", "-y", "@spuentesp/lain-mcp", "mcp"])
+
     def test_happy_path_passes(self):
         import json as _json
 
@@ -94,7 +110,7 @@ class CleanRoomCheckTests(unittest.TestCase):
                     if name == 'get_capabilities':
                         calls['n'] += 1
                         state = 'warming_up' if calls['n'] < 3 else 'ready'
-                        text = json.dumps({'indexing': {'state': state, 'retry_after_ms': 10}})
+                        text = json.dumps({'capabilities': {name: {'state': state, 'retry_after_ms': 10} for name in ('symbols', 'call_graph')}})
                     else:
                         text = 'Anchors: found 1'
                     return {'jsonrpc': '2.0', 'id': req['id'],
@@ -117,7 +133,7 @@ class CleanRoomCheckTests(unittest.TestCase):
                 if m == 'tools/list':
                     return {'jsonrpc': '2.0', 'id': req['id'], 'result': {'tools': [{'name': 'x'}]}}
                 if m == 'tools/call':
-                    text = json.dumps({'indexing': {'state': 'warming_up', 'retry_after_ms': 50}})
+                    text = json.dumps({'capabilities': {name: {'state': 'warming_up', 'retry_after_ms': 50} for name in ('symbols', 'call_graph')}})
                     return {'jsonrpc': '2.0', 'id': req['id'],
                             'result': {'content': [{'type': 'text', 'text': text}]}}
                 return None
@@ -184,7 +200,7 @@ class CleanRoomCheckTests(unittest.TestCase):
                 if m == 'tools/call':
                     name = req['params']['name']
                     if name == 'get_capabilities':
-                        text = '{{"indexing": {{"state": "ready"}}}}'
+                        text = '{{"capabilities": {{"symbols": {{"state": "ready"}}, "call_graph": {{"state": "ready"}}}}}}'
                     else:
                         text = {gated!r}
                     return {{'jsonrpc': '2.0', 'id': req['id'],

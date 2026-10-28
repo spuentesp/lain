@@ -16,9 +16,6 @@ All notable changes to LAIN are documented here. Versions follow
   log says how to install one. `lain models list` and `lain models path` show
   the state. Models install under the user data directory, or `LAIN_MODEL_DIR`.
   Installers skip the model when `LAIN_SKIP_MODEL_INSTALL=1` is set.
-
-### Added
-
 - `list_service_refs` takes `suggestions: true` to also return suggested routes
   for production references that match no route of their service. Each carries
   `suggested: true` and a score; they are proposals, never links. `min_score`
@@ -49,6 +46,10 @@ All notable changes to LAIN are documented here. Versions follow
   1.22 mux patterns and tracing labels) take that method instead of `ANY`.
 - The embedder passes `token_type_ids` only to models that declare it, so
   encoders without that input load instead of falling back to the stub.
+- Cargo watches pattern inputs at their actual locations and resolves Git HEAD
+  in worktrees. Repeated commands reuse the build instead of rerunning the
+  build script because its watched paths do not exist.
+
 ## 0.13.0 — 2026-10-27
 
 Message-bus and job-queue detection, and environment-backed topic names.
