@@ -343,7 +343,7 @@ impl FederatedIndex {
         if let Some(overlay) = self.federation_overlay.read().clone() {
             index.set_overlay(overlay);
         }
-        let mut replaced = None;
+        let replaced;
         {
             let _guard = self.projection_lock.lock();
             // Clone `id` before the insert moves it, so the

@@ -269,7 +269,7 @@ pub fn nextjs_app_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute
             continue;
         };
         routes.push(HttpRoute {
-            method: method_from_str(verb.to_string()),
+            method: HttpMethod::parse(verb).unwrap_or(HttpMethod::Any),
             path: url_path.clone(),
             handler_path: path.to_string_lossy().to_string(),
             handler_name: verb.to_string(),
