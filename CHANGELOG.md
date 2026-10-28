@@ -7,6 +7,9 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- Cargo watches pattern inputs at their actual locations and resolves Git HEAD
+  in worktrees. Repeated commands reuse the build instead of rerunning the
+  build script because its watched paths do not exist.
 - Go message producers resolve package-level environment values on Windows.
   Package scope keys now use forward slashes, matching the cross-package lookup.
 

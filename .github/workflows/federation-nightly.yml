@@ -35,6 +35,18 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Install coordination core
+        run: |
+          npm install -g @spuentesp/zoanthrope@0.1.6
+          zoanthrope --version
+          REAL_BIN=$(find "$HOME/.cache/zoanthrope" -type f -name zoanthrope | head -1)
+          test -n "$REAL_BIN"
+          echo "ZOANTHROPE_BIN=$REAL_BIN" >> "$GITHUB_ENV"
+
       - name: Build release binary
         run: cargo build --release
 
