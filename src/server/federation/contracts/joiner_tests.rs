@@ -817,6 +817,50 @@ fn rule_6_own_service_skip() {
 }
 
 #[test]
+fn rule_6_own_service_unknown_method_stays_unresolved() {
+    // An unknown-method relative call (`fetch("/api/ping", { method: verb })`)
+    // has heuristic confidence (0.6) and must not be promoted to a certain
+    // `Internal` binding.
+    let p = provider_node(
+        "billing",
+        "src/billing.py",
+        "do_it",
+        10,
+        HttpMethod::Get,
+        "/api/ping",
+    );
+    let c = consumer_node(
+        "billing",
+        "src/billing.py",
+        "ping_self_unknown_method",
+        1,
+        MethodSpec::Unknown,
+        url_with_host_method(HostPart::None, Some("/api/ping")),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    let mut cfg = default_config();
+    cfg.services[0].name = "billing".into();
+    cfg.services[0].repo = "billing".into();
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
+    assert!(out.binds.is_empty());
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
+    assert!(
+        matches!(
+            resolution.target,
+            Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                ..
+            })
+        ),
+        "unknown-method same-service call must remain Unresolved, got {:?}",
+        resolution.target
+    );
+}
+
+#[test]
 fn rule_6_skips_generic_keys() {
     let p = provider_node(
         "orders",

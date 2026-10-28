@@ -260,15 +260,17 @@ pub(super) fn resolve_consumer(
     }
 
     // A relative URL (`fetch("/api/x")`, no host) is same-origin: it calls the
-    // service that serves the code. Match that service's own endpoints, as an
-    // `Internal` resolution, never a cross-service `Binds` edge (I5).
+    // service that serves the code. Match that service's own endpoints as an
+    // `Internal` resolution only when the match is certain (known HTTP method
+    // and non-prefix-stripped route, confidence == 1.0), never a cross-service
+    // `Binds` edge (I5).
     if matches!(consumer.url.host, HostPart::None) {
         if let Some(tmpl) = target_template.as_deref() {
             if tmpl.starts_with('/') {
                 if let Some((key, detail)) =
                     best_provider_for(own_service, &target_method, Some(tmpl), endpoints)
                 {
-                    if detail.kind != RouteMatch::PrefixStripped {
+                    if (detail.confidence - 1.0).abs() < f32::EPSILON {
                         return ConsumerResolution {
                             call_id: call_id.clone(),
                             service: own_service.clone(),
