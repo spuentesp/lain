@@ -29,10 +29,17 @@ CYCLES="${CYCLES:-20}"
 
 # Real symbols + files from the subject repo (defaults match lain itself).
 SYMS=(run_claim_files serve_sse get_blast_radius PresenceEvent LainServer
-      OccupancyMap replay_after emit_presence_event run_register_agent
+      CoordinationProxy replay_after emit_presence_event run_register_agent
       EventsLog)
 FILES=(src/server/presence.rs src/server/sse.rs src/server/ingest/mod.rs
        src/server/events_log.rs src/server/mcp/handler.rs)
+
+ZOANTHROPE_BIN="${ZOANTHROPE_BIN:-$(command -v zoanthrope || true)}"
+if [ -z "$ZOANTHROPE_BIN" ] || ! "$ZOANTHROPE_BIN" --version; then
+    echo "FAIL: install zoanthrope or set ZOANTHROPE_BIN; this benchmark requires real claim arbitration" >&2
+    exit 1
+fi
+export ZOANTHROPE_BIN
 
 if [ ! -x "$LAIN" ]; then
     echo "release binary missing, building (cargo build --release)..."
@@ -47,10 +54,13 @@ repos:
     source: { type: workspace_dir, path: $SUBJECT }
 EOF
 
-# Kill any previous server on this port/workdir, start fresh.
-pkill -f "lain server.*--port $PORT" 2>/dev/null || true
-sleep 1
-(cd "$WORK" && "$LAIN" server --config "$WORK/repos.yaml" --transport http --port "$PORT" > "$WORK/server.log" 2>&1 &)
+if curl -s -m 1 "$URL/health" >/dev/null 2>&1; then
+    echo "FAIL: port $PORT is already serving a workspace; choose another PORT" >&2
+    exit 1
+fi
+(cd "$WORK" && exec "$LAIN" server --config "$WORK/repos.yaml" --transport http --port "$PORT" > "$WORK/server.log" 2>&1) &
+server_pid=$!
+trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
 echo "server starting (first run indexes $(du -sh --exclude=target --exclude=.git "$SUBJECT" 2>/dev/null | cut -f1) of source)..."
 for i in $(seq 1 300); do
     if curl -s -m 1 "$URL/health" >/dev/null 2>&1; then break; fi
@@ -111,6 +121,25 @@ except Exception:
     print("{}")
 ' "$1"; }
 
+metric() { python3 -c '
+import json, sys
+try:
+    response = json.load(open(sys.argv[1]))
+    result = response["result"]
+    if result.get("isError"):
+        raise ValueError(result)
+    if sys.argv[2] == "claim_files":
+        claim = json.loads(result["content"][0]["text"])
+        if claim.get("degraded") or claim.get("advisories"):
+            raise ValueError(claim)
+        print(len(claim["conflicts"]))
+    else:
+        print(0)
+except Exception as error:
+    print("invalid benchmark response:", error, file=sys.stderr)
+    print("ERROR")
+' "$1" "$2"; }
+
 worker() {
     local i=$1
     local log="$WORK/raw/agent-$i.csv"
@@ -140,31 +169,32 @@ worker() {
         # conflicts actually happen between concurrent agents.
         t=$(call_tool claim_files "{\"agent_id\":\"$agent_id\",\"session_token\":\"$token\",\"files\":[{\"path\":\"$file\",\"symbols\":[\"$sym\"]}]}" "$resp")
         local nconf
-        nconf=$(inner "$resp" | python3 -c 'import sys,json; print(len(json.load(sys.stdin).get("conflicts",[])))' 2>/dev/null || echo 0)
+        nconf=$(metric "$resp" claim_files)
         echo "claim_files,$t,$nconf" >> "$log"
 
         t=$(call_tool search_org "{\"query\":\"$sym\",\"limit\":5}" "$resp")
-        echo "search_org,$t,$(grep -c '"isError":true' "$resp" || true)" >> "$log"
+        echo "search_org,$t,$(metric "$resp" search_org)" >> "$log"
 
         t=$(call_tool get_blast_radius "{\"symbol\":\"$sym\"}" "$resp")
-        echo "get_blast_radius,$t,$(grep -c '"isError":true' "$resp" || true)" >> "$log"
+        echo "get_blast_radius,$t,$(metric "$resp" get_blast_radius)" >> "$log"
 
         t=$(call_tool heartbeat "{\"agent_id\":\"$agent_id\",\"session_token\":\"$token\"}" "$resp")
-        echo "heartbeat,$t,0" >> "$log"
+        echo "heartbeat,$t,$(metric "$resp" heartbeat)" >> "$log"
 
         # Think time happens WHILE HOLDING the claim — the contention
         # window is the whole cycle, not the ~1ms of the claim call.
         sleep "0.$((RANDOM % 4))"
 
         t=$(call_tool release_files "{\"agent_id\":\"$agent_id\",\"session_token\":\"$token\",\"files\":[{\"path\":\"$file\"}]}" "$resp")
-        echo "release_files,$t,0" >> "$log"
+        echo "release_files,$t,$(metric "$resp" release_files)" >> "$log"
     done
 }
 
 echo "spawning $AGENTS agents x $CYCLES cycles against $URL ..."
 START=$(date +%s)
-for i in $(seq 1 "$AGENTS"); do worker "$i" & done
-wait
+worker_pids=()
+for i in $(seq 1 "$AGENTS"); do worker "$i" & worker_pids+=("$!"); done
+for pid in "${worker_pids[@]}"; do wait "$pid" || exit 1; done
 END=$(date +%s)
 echo "wall time: $((END - START))s"
 
@@ -203,7 +233,7 @@ for op in sorted(ops):
     print(f"| {op} | {len(s)} | {errors if op == sorted(ops)[0] else 0} | {pct(s,.5)*1000:.1f} ms | {pct(s,.9)*1000:.1f} ms | {pct(s,.99)*1000:.1f} ms | {max(s)*1000:.1f} ms |")
 print(f"\ntotal advisory conflicts detected: {conflicts}")
 print(f"total errored calls (excluded): {errors}")
-print(f"\nverdict: {'PASS' if worst < 2.0 and conflicts > 0 else 'CHECK'} (p99 budget 2000 ms, conflicts must be > 0)")
+print(f"\nverdict: {'PASS' if worst < 2.0 and conflicts > 0 and errors == 0 else 'CHECK'} (p99 budget 2000 ms, conflicts must be > 0, errors must be 0)")
 PYEOF
 
 cat "$WORK/report.md"
