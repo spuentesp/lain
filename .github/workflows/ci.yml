@@ -55,6 +55,11 @@ on:
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
+    inputs:
+      cross_platform:
+        description: 'Run macOS and Windows tests on this ref'
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
@@ -315,7 +320,7 @@ jobs:
     # completes and seeds the cache, after which runs take ~10 min and
     # this number can come back down.
     timeout-minutes: 180
-    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'workflow_dispatch' && inputs.cross_platform)) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
     strategy:
