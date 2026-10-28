@@ -504,9 +504,21 @@ mod tests {
             cancel.clone(),
         ));
 
-        // Hold the mutex for > threshold + a few poll intervals.
+        // Wait for the watchdog's warning, rather than assuming a fixed
+        // sleep gives its task enough CPU time on a loaded test runner.
         let _held = git.lock();
-        tokio::time::sleep(threshold * 4).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if String::from_utf8_lossy(&buffer.lock().unwrap())
+                    .contains("GitSensor parking_lot mutex has been continuously held")
+                {
+                    break;
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+        })
+        .await
+        .expect("watchdog did not warn while the mutex was held");
 
         // While the mutex is held past the threshold, the watchdog
         // must publish a non-zero `busy_since` so `get_health` can
@@ -521,9 +533,15 @@ mod tests {
 
         drop(_held);
 
-        // Give the watchdog one more cycle to observe the free mutex
-        // and clear `held_since`/`warned` (covers the cleanup branch).
-        tokio::time::sleep(poll_interval * 2).await;
+        // Observe the cleanup itself instead of guessing when its next
+        // polling cycle will be scheduled.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while busy_since.load(Ordering::Relaxed) != 0 {
+                tokio::time::sleep(poll_interval).await;
+            }
+        })
+        .await
+        .expect("watchdog did not clear busy_since after releasing the mutex");
 
         // Once the mutex is free, the watchdog must clear
         // `busy_since` so a subsequent hold starts fresh.
