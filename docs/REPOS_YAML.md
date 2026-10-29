@@ -460,6 +460,25 @@ hand-written binding are interchangeable. The short HTTP form (`POST /chat`)
 is accepted too. A declaration that names an unknown service, or a key that
 does not parse, is refused at load time.
 
+### `host_aliases` (list)
+
+Static analysis sees a consumer's URL as `${UPSTREAM_HTTP_ORIGIN}/chat`, but
+not the value that name is built from. An operator states which service the
+host expression dials. A known path binds like any other target. A dynamic path
+(a transparent proxy forwards whatever the client asked for) resolves to
+`no_route_in_service` with the service attached, not to a bind.
+
+```yaml
+host_aliases:
+  - host: UPSTREAM_HTTP_ORIGIN       # the host expression, as the analyzer records it
+    service: nat                     # a declared service, or an implicit repo-id service
+    source: "nat-ui proxy/server.js (NAT_BACKEND_URL)"
+```
+
+Without an alias, the joiner's `unbound_host` heuristic can still bind a call
+whose path matches a single provider. That bind is at confidence 0.6, weaker
+evidence than a declared alias.
+
 ### Declaring providers at runtime
 
 The `apply_contract_context` MCP tool adds entries to `provides` without a

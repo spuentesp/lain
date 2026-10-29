@@ -6,7 +6,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use lain::federation::contracts::config::{ContractFederationConfig, ProviderDecl, ServiceDecl};
+use lain::federation::contracts::config::{
+    ContractFederationConfig, HostAliasDecl, ProviderDecl, ServiceDecl,
+};
 use lain::federation::contracts::index::{ConsumerResolution, ConsumerTarget, ContractIndex};
 use lain::federation::federated_index::FederatedIndex;
 use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
@@ -56,6 +58,7 @@ async fn join(
     files: &[(&str, &str)],
     services: Vec<ServiceDecl>,
     provides: Vec<ProviderDecl>,
+    host_aliases: Vec<HostAliasDecl>,
 ) -> Arc<ContractIndex> {
     let root = tempfile::tempdir().unwrap();
     let repo_dir = root.path().join("nat");
@@ -88,6 +91,7 @@ async fn join(
     fed.set_contract_config(ContractFederationConfig {
         services,
         provides,
+        host_aliases,
         ..Default::default()
     });
 
@@ -112,6 +116,7 @@ async fn declared_provider_lands_in_the_endpoint_table() {
         &[("src/app.py", "x = 1\n")],
         vec![service("nat", &[], &["nat.svc"])],
         vec![declared("nat", "http:POST /chat/stream")],
+        vec![],
     )
     .await;
     let found = index
@@ -133,6 +138,7 @@ async fn declared_and_detected_providers_merge_into_one_endpoint() {
         &[("src/app.py", app)],
         vec![service("nat", &[], &["nat.svc"])],
         vec![declared("nat", "http:POST /chat/stream")],
+        vec![],
     )
     .await;
     let matching: Vec<_> = index
@@ -164,6 +170,7 @@ async fn consumer_binds_to_a_declared_provider() {
             service("client", &["client"], &[]),
         ],
         vec![declared("nat", "http:POST /chat/stream")],
+        vec![],
     )
     .await;
     let bound = index
@@ -292,6 +299,48 @@ async fn apply_writes_backs_up_and_serves_the_declaration() {
     assert!(served, "the re-joined index must serve the declaration");
 }
 
+/// A host alias is contract context too: the runtime tool declares it, the
+/// file carries it, and the re-joined index runs against it.
+#[tokio::test]
+async fn apply_declares_a_host_alias_at_runtime() {
+    let (fed, path, _root) = write_fixture(INITIAL).await;
+    let env = call_apply(
+        &fed,
+        json!({"snapshot": "live", "dry_run": false,
+               "host_aliases": [{"host": "UPSTREAM_HTTP_ORIGIN", "service": "nat",
+                                 "source": "agent"}]}),
+    )
+    .await;
+    assert_eq!(env["data"]["applied"], json!(true), "{env}");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("host_aliases"), "{text}");
+    assert!(text.contains("UPSTREAM_HTTP_ORIGIN"), "{text}");
+    // The live contract config carries the alias the joiner ran against.
+    let live = fed.contract_config().unwrap();
+    assert!(
+        live.host_aliases
+            .iter()
+            .any(|a| { a.host.as_deref() == Some("UPSTREAM_HTTP_ORIGIN") && a.service == "nat" }),
+        "the alias must be live in the contract config"
+    );
+}
+
+/// An alias naming an undeclared service is refused, and the file stays
+/// byte-identical.
+#[tokio::test]
+async fn a_host_alias_for_an_unknown_service_is_refused() {
+    let (fed, path, _root) = write_fixture(INITIAL).await;
+    let env = call_apply(
+        &fed,
+        json!({"snapshot": "live", "dry_run": false,
+               "host_aliases": [{"host": "UPSTREAM_HTTP_ORIGIN", "service": "nowhere"}]}),
+    )
+    .await;
+    assert_eq!(env["error"]["code"], json!("invalid_argument"), "{env}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), INITIAL);
+    assert!(!lain::federation::contracts::context::backup_path(&path).exists());
+}
+
 /// Review focus #1 and #5: an undeclared service is refused, and the file stays
 /// byte-identical with no backup left behind.
 #[tokio::test]
@@ -343,4 +392,160 @@ async fn snapshots_other_than_live_are_refused() {
     let (fed, _path, _root) = write_fixture(INITIAL).await;
     let env = call_apply(&fed, json!({"snapshot": "snap_abc", "provides": []})).await;
     assert_eq!(env["error"]["code"], json!("invalid_argument"), "{env}");
+}
+
+/// The NAT UI proxy dials `${UPSTREAM_HTTP_ORIGIN}/chat`. Static analysis sees
+/// the identifier, not the value it is built from. A declared host alias says
+/// which service that expression dials, so the call resolves to that service
+/// instead of `no_match`.
+#[tokio::test]
+async fn a_declared_host_alias_routes_an_expression_host_to_its_service() {
+    let proxy = "const UPSTREAM_HTTP_ORIGIN = `${upstream.protocol}//${upstream.host}`;\n\
+                 const targetUrl = `${UPSTREAM_HTTP_ORIGIN}/chat`;\n\
+                 const res = await fetch(targetUrl, { method: 'POST' });\n";
+    let aliases = vec![HostAliasDecl {
+        host: Some("UPSTREAM_HTTP_ORIGIN".into()),
+        file: None,
+        service: "nat".into(),
+        source: Some("proxy/server.js".into()),
+    }];
+    let index = join(
+        &[("ui/proxy/server.js", proxy)],
+        vec![
+            service("nat", &[], &["nat.svc"]),
+            service("nat-ui", &["ui"], &[]),
+        ],
+        vec![declared("nat", "http:POST /chat")],
+        aliases,
+    )
+    .await;
+    let resolutions: Vec<&ConsumerResolution> = index.consumers.values().flatten().collect();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "expected one consumer, got {resolutions:?}"
+    );
+    let target = &resolutions[0].target;
+    assert!(
+        !matches!(
+            target,
+            Some(ConsumerTarget::Unresolved {
+                reason: lain::federation::contracts::index::UnresolvedReason::NoMatch,
+                ..
+            })
+        ),
+        "the alias should route the call to nat, got {target:?}"
+    );
+}
+
+/// Without the alias the joiner's existing `unbound_host` heuristic still binds
+/// a call whose path matches a single provider, at confidence 0.6. This pins
+/// that behaviour: a path-only bind is weaker evidence than a declared alias.
+#[tokio::test]
+async fn without_the_alias_only_the_path_heuristic_binds() {
+    let proxy = "const UPSTREAM_HTTP_ORIGIN = `${upstream.protocol}//${upstream.host}`;\n\
+                 const targetUrl = `${UPSTREAM_HTTP_ORIGIN}/chat`;\n\
+                 const res = await fetch(targetUrl, { method: 'POST' });\n";
+    let index = join(
+        &[("ui/proxy/server.js", proxy)],
+        vec![
+            service("nat", &[], &["nat.svc"]),
+            service("nat-ui", &["ui"], &[]),
+        ],
+        vec![declared("nat", "http:POST /chat")],
+        vec![],
+    )
+    .await;
+    let resolutions: Vec<&ConsumerResolution> = index.consumers.values().flatten().collect();
+    match &resolutions[0].target {
+        Some(ConsumerTarget::Binds {
+            provenance,
+            confidence,
+            ..
+        }) => {
+            assert!(
+                format!("{provenance:?}").contains("unbound_host") && *confidence < 1.0,
+                "the path-only bind must be the 0.6 heuristic, got {provenance:?} at {confidence}"
+            );
+        }
+        other => panic!("expected the unbound_host heuristic to bind, got {other:?}"),
+    }
+}
+
+/// The NAT UI proxy is a transparent reverse proxy: its path is whatever the
+/// client asked for. With an alias the honest verdict is "known service,
+/// unknown route", not a bind.
+#[tokio::test]
+async fn a_transparent_proxy_with_an_alias_is_known_service_unknown_route() {
+    let proxy = "const UPSTREAM_HTTP_ORIGIN = `${upstream.protocol}//${upstream.host}`;\n\
+                 const backendPath = pathname.substring(3) || '/';\n\
+                 const targetUrl = `${UPSTREAM_HTTP_ORIGIN}${backendPath}`;\n\
+                 const res = await fetch(targetUrl, { method: 'POST' });\n";
+    let index = join(
+        &[("ui/proxy/server.js", proxy)],
+        vec![
+            service("nat", &[], &["nat.svc"]),
+            service("nat-ui", &["ui"], &[]),
+        ],
+        vec![declared("nat", "http:POST /chat")],
+        vec![HostAliasDecl {
+            host: Some("UPSTREAM_HTTP_ORIGIN".into()),
+            file: None,
+            service: "nat".into(),
+            source: None,
+        }],
+    )
+    .await;
+    let resolutions: Vec<&ConsumerResolution> = index.consumers.values().flatten().collect();
+    assert!(
+        matches!(
+            resolutions[0].target,
+            Some(ConsumerTarget::Unresolved {
+                reason: lain::federation::contracts::index::UnresolvedReason::NoRouteInService,
+                ..
+            })
+        ),
+        "expected no_route_in_service, got {:?}",
+        resolutions[0].target
+    );
+}
+
+/// A transparent proxy whose host the analyzer cannot follow: declaring the
+/// file dials `nat` routes its calls there, with no host expression needed.
+#[tokio::test]
+async fn a_declared_file_routes_its_unknown_host_calls_to_its_service() {
+    let proxy = "const backendPath = pathname.substring(3) || '/';\n\
+                 const res = await fetch(backendPath, { method: 'POST' });\n";
+    let index = join(
+        &[("ui/proxy/server.js", proxy)],
+        vec![
+            service("nat", &[], &["nat.svc"]),
+            service("nat-ui", &["ui"], &[]),
+        ],
+        vec![],
+        vec![HostAliasDecl {
+            host: None,
+            file: Some("ui/proxy/server.js".into()),
+            service: "nat".into(),
+            source: Some("declared".into()),
+        }],
+    )
+    .await;
+    let resolutions: Vec<&ConsumerResolution> = index.consumers.values().flatten().collect();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "expected one consumer, got {resolutions:?}"
+    );
+    assert!(
+        matches!(
+            resolutions[0].target,
+            Some(ConsumerTarget::Unresolved {
+                reason: lain::federation::contracts::index::UnresolvedReason::NoRouteInService,
+                target_service: Some(_),
+            })
+        ),
+        "a declared file should resolve to its service, got {:?}",
+        resolutions[0].target
+    );
 }

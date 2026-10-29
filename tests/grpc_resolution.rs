@@ -162,6 +162,7 @@ fn rpc_handler_node(
 
 fn config_with_orders_host(host: &str) -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),
@@ -183,6 +184,7 @@ fn config_with_orders_host(host: &str) -> ContractFederationConfig {
 
 fn config_empty() -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: Vec::new(),
         http_clients: vec![],
@@ -652,6 +654,7 @@ service Orders {
 
 fn config_with_orders_env(env_var: &str) -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),

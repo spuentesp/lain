@@ -47,6 +47,26 @@ pub struct ProviderDecl {
     pub source: Option<String>,
 }
 
+/// Declares which service an HTTP consumer's URL host expression dials.
+/// Static analysis sees `${UPSTREAM_HTTP_ORIGIN}/chat`, but not the value
+/// `UPSTREAM_HTTP_ORIGIN` is built from. The operator states the mapping.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostAliasDecl {
+    /// The host expression as the analyzer records it (`HostPart::Expr`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A repo-relative file. Every HTTP call in it whose host is unknown
+    /// dials `service`. Use this when the host is built in a way the
+    /// analyzer cannot follow, as in a transparent reverse proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// A declared service, or an implicit repo-id service.
+    pub service: String,
+    /// Where the mapping was established. Free-form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContractFederationConfig {
     #[serde(default)]
@@ -66,6 +86,9 @@ pub struct ContractFederationConfig {
     /// never declare one keep their existing hash.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provides: Vec<ProviderDecl>,
+    /// Host expressions the operator maps to a service. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_aliases: Vec<HostAliasDecl>,
 }
 
 /// One database declaration in `repos.yaml#databases` (Gap 23).
@@ -262,6 +285,10 @@ impl ContractFederationConfig {
                     out.provides = serde_yaml::from_value(v.clone())
                         .map_err(|e| LainError::Config(format!("provides: {e}")))?
                 }
+                "host_aliases" => {
+                    out.host_aliases = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("host_aliases: {e}")))?
+                }
                 "contract" => {
                     let nested: ContractFederationConfig = serde_yaml::from_value(v.clone())
                         .map_err(|e| LainError::Config(format!("contract: {e}")))?;
@@ -432,6 +459,19 @@ impl ContractFederationConfig {
                 )));
             }
             validate_key(&format!("provides[{i}]"), &p.key)?;
+        }
+        for (i, a) in self.host_aliases.iter().enumerate() {
+            if a.host.is_none() && a.file.is_none() {
+                return Err(LainError::Config(format!(
+                    "host_aliases[{i}]: needs a host or a file"
+                )));
+            }
+            if !known_services.contains(a.service.as_str()) {
+                return Err(LainError::Config(format!(
+                    "host_aliases[{i}]: unknown service '{svc}'",
+                    svc = a.service
+                )));
+            }
         }
 
         // Rule 9: path_arg > 5 (also covered below for http_clients).
@@ -657,6 +697,9 @@ impl ContractFederationConfig {
         });
         if !self.provides.is_empty() {
             canonical["provides"] = serde_json::json!(self.provides);
+        }
+        if !self.host_aliases.is_empty() {
+            canonical["host_aliases"] = serde_json::json!(self.host_aliases);
         }
         let s = canonical.to_string();
         blake3::hash(s.as_bytes()).to_hex().to_string()

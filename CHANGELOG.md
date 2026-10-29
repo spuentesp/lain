@@ -10,11 +10,37 @@ All notable changes to LAIN are documented here. Versions follow
 - **Python gRPC consumers are detected through stub handles.** `self._stub`
   and `stub` receivers bind to the service their constructor names, and a
   channel whose address is a constructor parameter resolves through the file's
-  one env read (two or more env reads stay unresolved). OpenShell's Python SDK
-  is the first target. `FEDERATION_GRAPH_VERSION` is unchanged.
+  env read: one env var is taken as is, and with several only an
+  address-shaped one (`GATEWAY`, `HOST`, `URL`, `ADDR`, `ENDPOINT`, `SERVER`)
+  is taken — two or more address-shaped names stay unresolved. The bind is
+  service-level: the variable names a gateway, not a verified dial address.
+  OpenShell's Python SDK is the first target. `FEDERATION_GRAPH_VERSION` is
+  unchanged.
 - **`repos[].packages`** lists the package names a repo publishes (npm, PyPI,
   crates.io, Go modules). A consumer whose manifest names one links to that
   repo even when the name does not contain the repo id.
+- **`provides:` declares endpoints the analyzer cannot see.** A service whose
+  routes are registered from a runtime configuration file (FastAPI's
+  `add_api_route(path=…)` with a path from a Pydantic model, a mesh spec) has
+  no route in the source for a static sensor to find. The operator states the
+  endpoint — `provides: [{service, key, source}]` — in the shared key grammar
+  (`http:POST /chat/stream`, `ws:/websocket`, `topic:kafka/orders.created`),
+  and the joiner treats it exactly like a detected provider: it binds
+  consumers, it counts for coverage, and `bindings` can attach to it.
+- **`host_aliases:` declares which service a host expression dials.** A
+  consumer whose URL the analyzer cannot follow — a transparent reverse proxy
+  builds its target from a chain of variables — is routed by the operator:
+  `host_aliases: [{host, file, service, source}]`. A known path binds like any
+  other target; a dynamic path resolves to `no_route_in_service` with the
+  service attached, not to a bind.
+- **`apply_contract_context` writes contract context at runtime.** The MCP
+  tool takes `provides` and `host_aliases` (or a hand-written binding) and
+  applies them to the federation's `repos.yaml` without a restart. Dry-run by
+  default: it returns the YAML it would write and touches nothing. With
+  `dry_run=false` it validates the whole result, writes atomically with a
+  `.bak`, re-joins the contract index, and reports `applied: true` only when
+  the declaration is served — a failed re-join restores the file. A write
+  that loses a race with another writer is refused.
 
 - **GraphQL provider -> resolver edge** (`CallsGraphql`, appended last in
   `EdgeType` so stored discriminants are unchanged). The resolver-link sensor

@@ -1930,14 +1930,13 @@ fn apply_base_url(parts: Vec<UrlPart>, base_url: Option<&str>) -> Vec<UrlPart> {
 /// we don't mutate the parts — the normalizer's host step handles
 /// the literal host extraction.
 fn host_for(parts: &[UrlPart]) -> HostPart {
-    // Find the longest prefix of holes at the start.
-    let mut hole_text = String::new();
-    for part in parts {
-        match part {
-            UrlPart::Hole(h) => hole_text.push_str(h),
-            UrlPart::Literal(_) => break,
-        }
-    }
+    // The host is the first hole. A second hole right after it starts the
+    // path (`${UPSTREAM_HTTP_ORIGIN}${backendPath}`), so the two are not
+    // one host expression.
+    let hole_text = match parts.first() {
+        Some(UrlPart::Hole(h)) => h.clone(),
+        _ => String::new(),
+    };
     if hole_text.is_empty() {
         return HostPart::None;
     }

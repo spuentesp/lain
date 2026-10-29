@@ -113,6 +113,7 @@ fn library_consumer_node(
 
 fn orders_config() -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),

@@ -148,6 +148,7 @@ fn http_route_node(repo: &str, path: &str, template: &str, line: u32) -> GraphNo
 
 fn config_with_service(name: &str) -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: vec![ServiceDecl {
             name: name.to_string(),
@@ -169,6 +170,7 @@ fn config_with_service(name: &str) -> ContractFederationConfig {
 
 fn config_with_two_services(a: &str, b: &str) -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: vec![
             ServiceDecl {

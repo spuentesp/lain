@@ -2704,16 +2704,44 @@
     }
   },
   {
-    "description": "Declare providers the analyzer cannot see (a runtime-configured route, a mesh spec) into the federation's repos.yaml. Dry-run by default: returns the YAML that would be written. With dry_run=false it validates the whole result, writes atomically with a .bak, re-joins the contract index, and reports applied=true only when the declaration is served; a failed re-join restores the file.",
+    "description": "Declare the contract context the analyzer cannot see into the federation's repos.yaml: `provides` for an endpoint a service exposes (a runtime-configured route, a mesh spec) and `host_aliases` for which service a host expression dials (a consumer whose URL the analyzer cannot follow). Dry-run by default: returns the YAML that would be written. With dry_run=false it validates the whole result, writes atomically with a .bak, re-joins the contract index, and reports applied=true only when the declaration is served; a failed re-join restores the file.",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `apply_contract_context`. Declares providers the analyzer cannot see into the federation's repos.yaml. Dry-run by default; `snapshot` must be `live`.",
+      "description": "Input for `apply_contract_context`. Declares the contract context the analyzer cannot see into the federation's repos.yaml: endpoints a service exposes (`provides`) and which service a host expression dials (`host_aliases`). Dry-run by default; `snapshot` must be `live`.",
       "properties": {
         "dry_run": {
           "default": true,
           "description": "When true (the default), return the YAML that would be written and touch nothing.",
           "type": "boolean"
+        },
+        "host_aliases": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "file": {
+                "description": "A repo-relative file. Every HTTP call in it whose host is unknown dials `service`.",
+                "type": "string"
+              },
+              "host": {
+                "description": "The host expression as the analyzer records it (`HostPart::Expr`), e.g. `UPSTREAM_HTTP_ORIGIN`.",
+                "type": "string"
+              },
+              "service": {
+                "description": "A declared service, or an implicit repo-id service.",
+                "type": "string"
+              },
+              "source": {
+                "description": "Where the mapping was established. Free-form.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "service"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         },
         "provides": {
           "items": {
@@ -2759,10 +2787,35 @@
       "description": "`data` field of the `apply_contract_context` envelope.",
       "properties": {
         "added": {
+          "description": "The declared providers that were added.",
           "items": {
             "properties": {
               "key": {
                 "type": "string"
+              },
+              "service": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "added_host_aliases": {
+          "description": "The declared host aliases that were added.",
+          "items": {
+            "properties": {
+              "file": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "host": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "service": {
                 "type": "string"

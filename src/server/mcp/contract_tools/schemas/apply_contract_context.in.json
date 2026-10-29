@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "apply_contract_context input",
-  "description": "Input for `apply_contract_context`. Declares providers the analyzer cannot see into the federation's repos.yaml. Dry-run by default; `snapshot` must be `live`.",
+  "description": "Input for `apply_contract_context`. Declares the contract context the analyzer cannot see into the federation's repos.yaml: endpoints a service exposes (`provides`) and which service a host expression dials (`host_aliases`). Dry-run by default; `snapshot` must be `live`.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -17,6 +17,20 @@
           "source": { "type": "string", "description": "Where the declaration came from. Free-form." }
         },
         "required": ["service", "key"]
+      }
+    },
+    "host_aliases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "host": { "type": "string", "description": "The host expression as the analyzer records it (`HostPart::Expr`), e.g. `UPSTREAM_HTTP_ORIGIN`." },
+          "file": { "type": "string", "description": "A repo-relative file. Every HTTP call in it whose host is unknown dials `service`." },
+          "service": { "type": "string", "description": "A declared service, or an implicit repo-id service." },
+          "source": { "type": "string", "description": "Where the mapping was established. Free-form." }
+        },
+        "required": ["service"]
       }
     },
     "dry_run": { "type": "boolean", "default": true, "description": "When true (the default), return the YAML that would be written and touch nothing." }

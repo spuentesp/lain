@@ -12,7 +12,20 @@
       "items": {
         "type": "object",
         "properties": { "service": { "type": "string" }, "key": { "type": "string" } }
-      }
+      },
+      "description": "The declared providers that were added."
+    },
+    "added_host_aliases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "host": { "type": ["string", "null"] },
+          "file": { "type": ["string", "null"] },
+          "service": { "type": "string" }
+        }
+      },
+      "description": "The declared host aliases that were added."
     },
     "yaml": { "type": "string", "description": "The full repos.yaml that would be written (dry run)." },
     "backup": { "type": "string", "description": "The .bak file holding the previous content (applied)." },

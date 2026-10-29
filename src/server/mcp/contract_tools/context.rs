@@ -1,5 +1,11 @@
-//! `apply_contract_context`: declare providers the analyzer cannot see, into
-//! the federation's `repos.yaml`, without a restart.
+//! `apply_contract_context`: declare the contract context the analyzer
+//! cannot see, into the federation's `repos.yaml`, without a restart.
+//!
+//! Two kinds of declaration are accepted:
+//! - `provides` — an endpoint the service exposes (a route registered from
+//!   a runtime config file, for instance).
+//! - `host_aliases` — which service a host expression dials, for a consumer
+//!   whose URL the analyzer cannot follow (a transparent reverse proxy).
 //!
 //! Dry-run by default: the tool returns the YAML it would write and touches
 //! nothing. With `dry_run: false` it validates the whole result, writes
@@ -14,8 +20,10 @@ use serde_json::{json, Map, Value};
 use super::envelope::{error_outcome, outcome, success_envelope};
 use super::view::snapshot_label;
 use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
-use crate::federation::contracts::config::{ContractFederationConfig, ProviderDecl};
-use crate::federation::contracts::context::{merge_provides, restore, write_guarded};
+use crate::federation::contracts::config::{ContractFederationConfig, HostAliasDecl, ProviderDecl};
+use crate::federation::contracts::context::{
+    merge_host_aliases, merge_provides, restore, write_guarded,
+};
 use crate::server::mcp::handler::McpContext;
 
 inventory::submit!(ContractToolEntry {
@@ -76,6 +84,16 @@ fn run_apply(
         })?,
         None => Vec::new(),
     };
+    let incoming_aliases: Vec<HostAliasDecl> = match args.get("host_aliases") {
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+            fail(
+                "invalid_argument",
+                format!("host_aliases does not parse: {e}"),
+                json!({"arg": "host_aliases"}),
+            )
+        })?,
+        None => Vec::new(),
+    };
     let dry_run = args.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
 
     let original = std::fs::read(&config_path).map_err(|e| {
@@ -109,6 +127,15 @@ fn run_apply(
             candidate.provides.push(decl.clone());
         }
     }
+    for alias in &incoming_aliases {
+        if !candidate
+            .host_aliases
+            .iter()
+            .any(|a| a.host == alias.host && a.file == alias.file && a.service == alias.service)
+        {
+            candidate.host_aliases.push(alias.clone());
+        }
+    }
     let repo_ids: Vec<String> = fed
         .list_repos()
         .into_iter()
@@ -124,6 +151,8 @@ fn run_apply(
 
     let added = merge_provides(&mut doc, &incoming)
         .map_err(|e| fail("invalid_config", e.to_string(), json!({})))?;
+    let added_aliases = merge_host_aliases(&mut doc, &incoming_aliases)
+        .map_err(|e| fail("invalid_config", e.to_string(), json!({})))?;
     let new_yaml = serde_yaml::to_string(&doc)
         .map_err(|e| fail("internal", format!("serialize repos.yaml: {e}"), json!({})))?;
 
@@ -133,6 +162,11 @@ fn run_apply(
             "dry_run": dry_run,
             "config_path": config_path.display().to_string(),
             "added": added.iter().map(|d| json!({"service": d.service, "key": d.key})).collect::<Vec<_>>(),
+            "added_host_aliases": added_aliases.iter().map(|a| json!({
+                "host": a.host,
+                "file": a.file,
+                "service": a.service,
+            })).collect::<Vec<_>>(),
         });
         if let (Some(b), Value::Object(e)) = (base.as_object_mut(), extra) {
             b.extend(e);
@@ -140,8 +174,8 @@ fn run_apply(
         base
     };
 
-    if dry_run || added.is_empty() {
-        let note = if added.is_empty() {
+    if dry_run || (added.is_empty() && added_aliases.is_empty()) {
+        let note = if added.is_empty() && added_aliases.is_empty() {
             "every declaration is already present; nothing to write"
         } else {
             "dry run: nothing written; pass dry_run=false to apply"
@@ -161,13 +195,33 @@ fn run_apply(
     // Apply in-process now, rather than waiting for the file watcher.
     fed.set_contract_config(candidate);
     let rejoin = fed.rejoin_contracts_if_dirty();
-    let served = fed.contract_index().is_some_and(|index| {
-        index.endpoints.values().any(|e| {
-            e.providers
-                .iter()
-                .any(|p| p.node_id.as_str().contains("repos.yaml#provides["))
-        })
-    });
+    let index = fed.contract_index();
+    // The declaration must be *served* before the tool claims success:
+    // a declared provider must show up in the endpoint table, a declared
+    // host alias must be live in the contract config the joiner just ran
+    // against. Either way the contract index must exist.
+    let providers_served = incoming.is_empty()
+        || index.as_ref().is_some_and(|index| {
+            index.endpoints.values().any(|e| {
+                e.providers
+                    .iter()
+                    .any(|p| p.node_id.as_str().contains("repos.yaml#provides["))
+                    && incoming.iter().any(|d| {
+                        declared_key_template(&d.key)
+                            .map(|t| t == e.template)
+                            .unwrap_or(true)
+                    })
+            })
+        });
+    let aliases_served = incoming_aliases.is_empty()
+        || fed.contract_config().is_some_and(|c| {
+            c.host_aliases.iter().any(|a| {
+                incoming_aliases
+                    .iter()
+                    .any(|d| a.host == d.host && a.file == d.file && a.service == d.service)
+            })
+        });
+    let served = index.is_some() && providers_served && aliases_served;
     if rejoin.is_err() || !served {
         // Roll the file and the live config back. Nothing claims success.
         let _ = restore(&config_path, &original);
@@ -198,4 +252,13 @@ fn run_apply(
 fn respond(data: Value, started: Instant, text: &str) -> ToolOutcome {
     let envelope = success_envelope(data.clone(), "live", false, started);
     outcome(envelope, &data, text.to_string())
+}
+
+/// The path template of an HTTP key: `http:POST /chat/stream` →
+/// `/chat/stream`. `None` for a key of another kind, which has no
+/// template to compare an endpoint against.
+fn declared_key_template(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("http:")?;
+    let (_, template) = rest.split_once(' ')?;
+    Some(template)
 }

@@ -35,6 +35,9 @@ provides:
   - {service: nat, key: "http:POST /chat/stream", source: "nat config.yaml (general.endpoint.path)"}
   - {service: nat, key: "http:POST /chat", source: "nat config.yaml"}
   - {service: nat, key: "ws:/websocket", source: "nat config.yaml (general.endpoint.websocket_path)"}
+# The UI proxy dials the host expression UPSTREAM_HTTP_ORIGIN, built from NAT_BACKEND_URL.
+host_aliases:
+  - {host: UPSTREAM_HTTP_ORIGIN, service: nat, source: "nat-ui proxy/server.js (NAT_BACKEND_URL)"}
 EOF
 
 LAIN_INDEX_TIMEOUT="$INDEX_TIMEOUT" "$LAIN_BIN" server --config "$WORK/repos.yaml" \

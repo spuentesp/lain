@@ -1558,6 +1558,7 @@ mod tests {
             ContractFederationConfig, SchemaDecl, ServiceDecl,
         };
         ContractFederationConfig {
+            host_aliases: Vec::new(),
             provides: Vec::new(),
             services: services
                 .iter()
@@ -1589,6 +1590,7 @@ mod tests {
     ) -> crate::federation::contracts::config::ContractFederationConfig {
         use crate::federation::contracts::config::{ContractFederationConfig, ServiceDecl};
         ContractFederationConfig {
+            host_aliases: Vec::new(),
             provides: Vec::new(),
             services: services
                 .iter()

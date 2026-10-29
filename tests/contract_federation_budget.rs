@@ -62,6 +62,7 @@ async fn rejoin_budget_on_tokio_bytes() {
         panic!("fixture script produced no repos.yaml");
     }
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: vec![
             ServiceDecl {

@@ -98,6 +98,7 @@ async fn build_three_repo_federation(
     let fed = Arc::new(FederatedIndex::new(backend));
 
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: vec![
             ServiceDecl {
@@ -2667,6 +2668,7 @@ mod pr14_check_binding_graphql {
     /// the `(op, field)` provider key space.
     pub(super) fn graphql_federation_config() -> ContractFederationConfig {
         ContractFederationConfig {
+            host_aliases: Vec::new(),
             provides: Vec::new(),
             services: vec![
                 ServiceDecl {
@@ -3453,6 +3455,7 @@ mod pr15_event {
         let fed = Arc::new(FederatedIndex::new(backend));
 
         let cfg = ContractFederationConfig {
+            host_aliases: Vec::new(),
             provides: Vec::new(),
             services: vec![
                 ServiceDecl {
@@ -4785,6 +4788,7 @@ mod pr18_operation_id {
 
     fn sdk_config() -> lain::federation::contracts::config::ContractFederationConfig {
         lain::federation::contracts::config::ContractFederationConfig {
+            host_aliases: Vec::new(),
             provides: Vec::new(),
             services: vec![ServiceDecl {
                 name: "orders".into(),

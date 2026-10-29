@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::error::LainError;
-use crate::federation::contracts::config::ProviderDecl;
+use crate::federation::contracts::config::{HostAliasDecl, ProviderDecl};
 
 /// Serializes writes within this process. Cross-process races are caught
 /// by the byte comparison in [`write_guarded`].
@@ -53,6 +53,52 @@ pub fn merge_provides(
         if !present {
             let value = serde_yaml::to_value(decl)
                 .map_err(|e| LainError::Config(format!("provides entry: {e}")))?;
+            sequence.push(value);
+            added.push(decl.clone());
+        }
+    }
+    Ok(added)
+}
+
+/// Append the aliases `incoming` to the `host_aliases` sequence of a
+/// `repos.yaml` document, skipping any already present (same host, file
+/// and service). Returns the aliases actually added. Other sections are
+/// left untouched, so operator-written content survives the merge.
+pub fn merge_host_aliases(
+    doc: &mut serde_yaml::Value,
+    incoming: &[HostAliasDecl],
+) -> Result<Vec<HostAliasDecl>, LainError> {
+    let mapping = doc
+        .as_mapping_mut()
+        .ok_or_else(|| LainError::Config("repos.yaml is not a YAML mapping".to_string()))?;
+    let key = serde_yaml::Value::String("host_aliases".to_string());
+    if !mapping.contains_key(&key) {
+        mapping.insert(key.clone(), serde_yaml::Value::Sequence(Vec::new()));
+    }
+    let sequence = mapping
+        .get_mut(&key)
+        .and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| LainError::Config("host_aliases: must be a list".to_string()))?;
+
+    let existing: Vec<HostAliasDecl> = sequence
+        .iter()
+        .map(|v| {
+            serde_yaml::from_value(v.clone())
+                .map_err(|e| LainError::Config(format!("host_aliases: {e}")))
+        })
+        .collect::<Result<_, _>>()?;
+
+    let mut added = Vec::new();
+    for decl in incoming {
+        let present = existing
+            .iter()
+            .chain(added.iter())
+            .any(|e: &HostAliasDecl| {
+                e.host == decl.host && e.file == decl.file && e.service == decl.service
+            });
+        if !present {
+            let value = serde_yaml::to_value(decl)
+                .map_err(|e| LainError::Config(format!("host_aliases entry: {e}")))?;
             sequence.push(value);
             added.push(decl.clone());
         }
@@ -132,6 +178,24 @@ mod tests {
         assert_eq!(merge_provides(&mut d, &patch).unwrap().len(), 1);
         assert_eq!(merge_provides(&mut d, &patch).unwrap().len(), 0);
         assert_eq!(d["provides"].as_sequence().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_appends_host_aliases_and_is_idempotent() {
+        let mut d = doc("repos: []\n");
+        let alias = HostAliasDecl {
+            host: Some("UPSTREAM_HTTP_ORIGIN".into()),
+            file: None,
+            service: "nat".into(),
+            source: Some("agent".into()),
+        };
+        let added = merge_host_aliases(&mut d, std::slice::from_ref(&alias)).unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(d["host_aliases"].as_sequence().unwrap().len(), 1);
+        // The same alias again is a no-op.
+        let again = merge_host_aliases(&mut d, std::slice::from_ref(&alias)).unwrap();
+        assert!(again.is_empty());
+        assert_eq!(d["host_aliases"].as_sequence().unwrap().len(), 1);
     }
 
     #[test]

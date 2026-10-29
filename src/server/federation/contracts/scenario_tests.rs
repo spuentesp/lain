@@ -108,6 +108,7 @@ fn consumer(
 
 fn orders_config() -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),
@@ -336,6 +337,7 @@ fn scenario_16_shipping_to_inventory_one_binds_cross_repo_false() {
         },
     );
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
         provides: Vec::new(),
         services: vec![
             ServiceDecl {
