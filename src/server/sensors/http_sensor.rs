@@ -334,28 +334,6 @@ fn route_path_from_source(file_path: &str, source: &str) -> Option<Option<String
     }
 }
 
-/// Next.js pages-router API routes: `pages/api/x/y.ts` serves `/api/x/y`
-/// and `pages/api/x/index.ts` serves `/api/x`. The file's default export is
-/// the handler; a module under `pages/api` without one is a helper, not an
-/// endpoint. Dynamic segments reuse the App Router's `nextjs_segment`.
-///
-/// Configured via the `nextjs-pages-route` pattern in `frameworks.yaml`
-/// (with `source`, `path_regex`, and `handler_regex` overrideable under
-/// `<repo>/.lain/patterns/`).
-pub fn nextjs_pages_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute> {
-    let Some(pattern) = get_route_patterns(Patterns::patterns()).get("tsjs-nextjs-pages-route")
-    else {
-        return Vec::new();
-    };
-    if !route_prefixes(path)
-        .iter()
-        .any(|p| "tsjs-nextjs-pages-route".starts_with(p))
-    {
-        return Vec::new();
-    }
-    extract_routes(pattern, content, &path.to_string_lossy())
-}
-
 /// The directory between `app/` and the `route.<ext>` file, or `None` for any
 /// other file. `app/route.ts` gives the empty directory (the site root).
 fn nextjs_route_dir(normalized: &str) -> Option<&str> {
