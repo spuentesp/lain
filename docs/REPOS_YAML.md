@@ -399,6 +399,25 @@ services:
     provides_graphql: false
 ```
 
+A gRPC provider and its SDK consumers often live in one repo. Split
+them into two services with disjoint `paths`, or the consumer's call
+to its own gateway never binds (invariant I5):
+
+```yaml
+services:
+  # The gRPC gateway: the .proto surface plus the server crates.
+  - name: openshell-gateway
+    repo: openshell
+    paths: [proto, crates]
+    hosts: [localhost, 127.0.0.1]
+    env: [OPENSHELL_GATEWAY]
+  # The SDKs that call it. A consumer in the gateway's own service
+  # never binds — the SDK needs its own service for the join to happen.
+  - name: openshell-sdk
+    repo: openshell
+    paths: [python, sdk]
+```
+
 ### `http_clients` (list)
 
 Wrapper-client candidates the joiner keeps (§6.3 / §7.3 rule 1).
