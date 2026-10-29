@@ -564,6 +564,11 @@ static LANGS: &[LangSpec] = &[
         calls: &[
             "(call_expression (simple_identifier) @name)",
             "(call_expression (navigation_expression suffix: (navigation_suffix suffix: (simple_identifier) @name)))",
+            // Swift 0.7.4 attaches a call suffix to the enclosing binary
+            // expression in `a + store.load()` / `a + helper()`. Only
+            // the right operand is called; the left may be a property.
+            "(call_expression (_ rhs: (navigation_expression suffix: (navigation_suffix suffix: (simple_identifier) @name))))",
+            "(call_expression (_ rhs: (simple_identifier) @name))",
             // Implicit member: `session.request(.basicAuth())`, the type
             // coming from context.
             "(call_expression (prefix_expression \".\" (simple_identifier) @name))",
@@ -2298,6 +2303,17 @@ export class Ky {
                 .unwrap_or_else(|| panic!("{want} missing"));
             assert!(r.foreign_receiver, "{want}: the implied type is not self");
         }
+    }
+
+    #[test]
+    fn swift_binary_operands_keep_calls_without_calling_properties() {
+        let src = "func run() -> Int { return helper(1) + store.load() }\n\
+                   func other() -> Int { return store.value + helper(2) }\n";
+        let calls = call_names("App.swift", src);
+        for name in ["helper", "load"] {
+            assert!(calls.iter().any(|call| call == name), "{name}: {calls:?}");
+        }
+        assert!(!calls.iter().any(|call| call == "value"), "{calls:?}");
     }
 
     #[test]
