@@ -1397,6 +1397,13 @@
                     "used_by": {
                       "$ref": "#/$defs/EntryPointList"
                     },
+                    "used_by_status": {
+                      "description": "The caller could not be resolved in the selected graph; used_by was not evaluated.",
+                      "enum": [
+                        "caller_unavailable"
+                      ],
+                      "type": "string"
+                    },
                     "used_by_truncated": {
                       "type": "boolean"
                     }
@@ -2722,6 +2729,12 @@
         "head": {
           "description": "Snapshot id (`snap_<hex>`); must be `ready`. `live` is invalid (`invalid_argument`, `live_not_supported`).",
           "type": "string"
+        },
+        "max_hops": {
+          "description": "Maximum impact path depth (default 10). Paths that reach the depth limit are marked truncated.",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
         },
         "min_impact": {
           "enum": [

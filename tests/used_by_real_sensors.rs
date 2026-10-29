@@ -159,4 +159,67 @@ async fn used_by_is_populated_for_consumers_found_by_the_real_sensors() {
         names.contains(&"report"),
         "walk must reach `report`: {names:?}"
     );
+
+    // GraphQL document links use Calls rather than SendsHttp. A caller
+    // connected by either edge type must remain resolvable.
+    let caller_id = uses[0]["caller"]["id"].as_str().unwrap().to_string();
+    let call_id = uses[0]["site"]["id"].as_str().unwrap().to_string();
+    let backend = fed.backend();
+    let http_edges = backend
+        .edges_to(&call_id, lain::schema::EdgeType::SendsHttp)
+        .unwrap();
+    assert!(!http_edges.is_empty());
+    backend.remove_edges(&http_edges).unwrap();
+    backend
+        .upsert_edges_batch(&[lain::schema::GraphEdge::new(
+            lain::schema::EdgeType::Calls,
+            caller_id.clone(),
+            call_id.clone(),
+        )])
+        .unwrap();
+    let mut other = backend.get_node(&caller_id).unwrap().unwrap();
+    other.id = caller_id.replace("fetch_orders", "other_caller");
+    other.name = "other_caller".to_string();
+    backend.upsert_nodes_batch(&[other.clone()]).unwrap();
+    backend
+        .upsert_edges_batch(&[lain::schema::GraphEdge::new(
+            lain::schema::EdgeType::Calls,
+            other.id.clone(),
+            call_id,
+        )])
+        .unwrap();
+    let graphql_linked = get_service(&fed, "orders").await;
+    let billing = graphql_linked["data"]["consumers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["service"] == "billing")
+        .unwrap();
+    assert_eq!(billing["uses"][0]["caller"]["id"], caller_id);
+    assert!(billing["uses"][0].get("used_by_status").is_none());
+    let names: Vec<_> = billing["uses"][0]["used_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert!(names.contains(&"report"));
+    assert!(names.contains(&"other_caller"));
+
+    // The contract index can outlive a graph node during reprojection. A
+    // missing caller must not be presented as an unreferenced call site.
+    assert_eq!(
+        fed.backend().remove_nodes(&[caller_id, other.id]).unwrap(),
+        2
+    );
+    let missing = get_service(&fed, "orders").await;
+    let billing = missing["data"]["consumers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["service"] == "billing")
+        .unwrap();
+    let use_row = &billing["uses"][0];
+    assert_eq!(use_row["used_by_status"], "caller_unavailable");
+    assert!(use_row["used_by"].as_array().unwrap().is_empty());
 }

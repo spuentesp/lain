@@ -516,7 +516,13 @@ fn build_consumer_rows(
         };
 
         let consumer_service = resolution.service.0.clone();
-        let caller_node = call_caller_node_backend(backend, call_id)
+        let resolved_caller = call_caller_node_backend(backend, call_id);
+        let walk_from_call = resolved_caller
+            .as_ref()
+            .is_some_and(|(_, walk_from_call)| *walk_from_call);
+        let caller_found = resolved_caller.is_some();
+        let caller_node = resolved_caller
+            .map(|(caller, _)| caller)
             .unwrap_or_else(|| default_caller_node(call_id));
         let caller_repo = caller_node
             .id
@@ -529,15 +535,19 @@ fn build_consumer_rows(
             .unwrap_or("");
         let site = call_site_meta(call_id, &caller_node, commit);
 
-        if backend.get_node(&caller_node.id).ok().flatten().is_none() {
-            tracing::warn!(
-                caller = %caller_node.id,
-                "get_service: consumer caller is not in the graph; used_by will be empty"
-            );
-        }
-        let used_by = walk_used_by_backend(backend, &caller_node.id, depth);
-        let used_by_truncated = used_by.truncated;
-        let mut used_by_entries = used_by.entries.clone();
+        // The call-site fallback is evidence, not a caller. Walking it would
+        // incorrectly label the call-site as an unreferenced function.
+        let walk_start = if walk_from_call {
+            call_id.as_str()
+        } else {
+            &caller_node.id
+        };
+        let used_by = caller_found.then(|| walk_used_by_backend(backend, walk_start, depth));
+        let caller_unavailable = used_by
+            .as_ref()
+            .is_none_or(|result| result.start_unavailable);
+        let used_by_truncated = used_by.as_ref().is_some_and(|result| result.truncated);
+        let mut used_by_entries = used_by.map(|result| result.entries).unwrap_or_default();
         enrich_used_by_with_owners(&mut used_by_entries);
         for entry in &mut used_by_entries {
             if let Some(ref_obj) = entry.get_mut("ref").and_then(|v| v.as_object_mut()) {
@@ -582,7 +592,7 @@ fn build_consumer_rows(
         // resolved to several endpoints (e.g. the same route declared
         // in code and in OpenAPI), and each carries its own fields.
         for endpoint in bound {
-            let use_value = json!({
+            let mut use_value = json!({
                 "endpoint": {"service": endpoint.id.0.0.as_str(), "key": &endpoint.id.1.to_string()},
                 "site": site,
                 "caller": caller_node_evidence(&caller_node, commit),
@@ -593,6 +603,10 @@ fn build_consumer_rows(
                 "used_by": used_by_entries,
                 "used_by_truncated": used_by_truncated,
             });
+
+            if caller_unavailable {
+                use_value["used_by_status"] = json!("caller_unavailable");
+            }
 
             let row = by_consumer.entry(consumer_service.clone()).or_default();
             let caller_key = caller_node.id.clone();
@@ -667,23 +681,33 @@ struct CallerNode {
     line: u32,
 }
 
-fn call_caller_node_backend(backend: &dyn GraphBackend, call_id: &GlobalId) -> Option<CallerNode> {
-    // One indexed lookup. This runs once per consumer row, so it must not
-    // clone and scan every edge in the federation. Smallest source id wins:
-    // a deterministic pick when a call site has more than one sender.
-    let sends_source_id = backend
+fn call_caller_node_backend(
+    backend: &dyn GraphBackend,
+    call_id: &GlobalId,
+) -> Option<(CallerNode, bool)> {
+    // Indexed lookups avoid cloning and scanning every federation edge.
+    // The smallest source id supplies deterministic caller evidence; for
+    // shared Calls targets the walk still starts at the call site, so all
+    // linked caller chains are included.
+    let mut callers = backend
         .edges_to(call_id.as_str(), EdgeType::SendsHttp)
-        .ok()?
-        .into_iter()
-        .map(|e| e.source_id)
-        .min()?;
+        .ok()?;
+    // Generated GraphQL document links use Calls rather than SendsHttp.
+    let walk_from_call = callers.is_empty();
+    if walk_from_call {
+        callers = backend.edges_to(call_id.as_str(), EdgeType::Calls).ok()?;
+    }
+    let sends_source_id = callers.into_iter().map(|e| e.source_id).min()?;
     let caller = backend.get_node(&sends_source_id).ok().flatten()?;
-    Some(CallerNode {
-        id: caller.id,
-        path: caller.path,
-        line: caller.line_start.unwrap_or(0),
-        name: caller.name,
-    })
+    Some((
+        CallerNode {
+            id: caller.id,
+            path: caller.path,
+            line: caller.line_start.unwrap_or(0),
+            name: caller.name,
+        },
+        walk_from_call,
+    ))
 }
 
 fn default_caller_node(call_id: &GlobalId) -> CallerNode {
@@ -862,6 +886,11 @@ fn render_get_service(data: &Value) -> String {
                 u["used_by"].as_array().map(|a| a.len()).unwrap_or(0),
                 u["used_by_truncated"].as_bool().unwrap_or(false),
             ));
+            if u["used_by_status"] == "caller_unavailable" {
+                out.push_str(
+                    "    Caller unavailable in the graph; used_by could not be evaluated.\n",
+                );
+            }
         }
     }
     cap_2000(out)
