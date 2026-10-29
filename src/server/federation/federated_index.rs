@@ -31,6 +31,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// The global id a node gets once its owning repo is known: `GlobalId::new`
@@ -103,6 +104,13 @@ pub struct FederatedIndex {
     /// Package names each repo publishes (`repos[].packages`), keyed by
     /// repo id. Read by [`Self::repo_depends_on`] as extra identifiers.
     declared_packages: DashMap<String, Vec<String>>,
+    /// Repo index passes running right now, and the most that ran at
+    /// once. Bounded by `max_concurrent_indexers`; see [`Self::index_all`].
+    index_concurrency_now: AtomicUsize,
+    index_concurrency_peak: AtomicUsize,
+    /// Bound on concurrent repo index passes. Set by the loader from
+    /// `FederationConfig::max_concurrent_indexers`.
+    max_concurrent_indexers: AtomicUsize,
     /// Set by `project_nodes` / `project_edges` whenever the
     /// projected graph could change `Binds` outcomes. Cleared by
     /// `rejoin_contracts_if_dirty` after the join lands (§5.3).
@@ -200,6 +208,11 @@ impl FederatedIndex {
             projection_lock: parking_lot::Mutex::new(()),
             depends_cache: DashMap::new(),
             declared_packages: DashMap::new(),
+            index_concurrency_now: AtomicUsize::new(0),
+            index_concurrency_peak: AtomicUsize::new(0),
+            max_concurrent_indexers: AtomicUsize::new(
+                crate::federation::config::FederationConfig::default().max_concurrent_indexers,
+            ),
             load_errors: RwLock::new(Vec::new()),
             contracts_dirty: crate::sync::DirtyFlag::new(false),
             contract_node_ids: DashMap::new(),
@@ -1116,6 +1129,88 @@ impl FederatedIndex {
         self.service_refs.write().insert(id.clone(), refs);
     }
 
+    /// Set the bound on concurrent repo index passes.
+    pub fn set_max_concurrent_indexers(&self, limit: usize) {
+        self.max_concurrent_indexers.store(limit, Ordering::SeqCst);
+    }
+
+    /// The bound on concurrent repo index passes.
+    pub fn max_concurrent_indexers(&self) -> usize {
+        self.max_concurrent_indexers.load(Ordering::SeqCst)
+    }
+
+    /// The most repo index passes that ran at the same time. Lets the
+    /// concurrency limit be tested without timing assertions.
+    pub fn observed_index_concurrency(&self) -> usize {
+        self.index_concurrency_peak.load(Ordering::SeqCst)
+    }
+
+    /// Mark the start of a repo index pass. The returned guard ends it
+    /// on drop, so the peak is recorded without a timing assertion.
+    pub fn enter_index_pass(self: &Arc<Self>) -> IndexPassGuard {
+        let now = self.index_concurrency_now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.index_concurrency_peak.fetch_max(now, Ordering::SeqCst);
+        IndexPassGuard { fed: self.clone() }
+    }
+
+    /// Index every repo concurrently, bounded by
+    /// `max_concurrent_indexers`, then project each one. Returns at the
+    /// barrier: every repo is indexed (or degraded) when this resolves,
+    /// so the caller can run the cross-repo glue pass next. The old
+    /// sequential loop let one repo whose language server monopolised
+    /// the runtime starve every repo behind it.
+    pub async fn index_all(self: &Arc<Self>) {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(
+            self.max_concurrent_indexers().max(1),
+        ));
+        let mut handles = Vec::new();
+        for (id, _) in self.list_repos() {
+            let Some(repo) = self.get_repo(&id) else {
+                continue;
+            };
+            let fed = self.clone();
+            let semaphore = semaphore.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("index semaphore is never closed");
+                tracing::info!("lain server: indexing repo '{}'", id.as_str());
+                let pass = fed.enter_index_pass();
+                let indexed = repo.index().await;
+                drop(pass);
+                match indexed {
+                    Ok(()) => {
+                        if let Err(e) = fed.project_repo(&id).await {
+                            tracing::warn!(
+                                "lain server: project_repo for '{}' after indexing failed: {e}",
+                                id.as_str()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // Demote here too: the demotion must not depend on
+                        // `RepoIndex::index` doing it.
+                        repo.set_health(RepoHealth::Degraded);
+                        tracing::warn!(
+                            "lain server: indexing repo '{}' failed: {e} (marking Degraded)",
+                            id.as_str()
+                        );
+                    }
+                }
+                if let Err(e) = repo.start_watcher().await {
+                    tracing::warn!(
+                        "lain server: could not watch repo '{}' for re-index: {e}",
+                        id.as_str()
+                    );
+                }
+            }));
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
     pub fn set_contract_config(&self, config: ContractFederationConfig) {
         *self.contract_config.write() = Some(Arc::new(config));
         // A config change invalidates the current join.
@@ -1597,12 +1692,6 @@ fn parse_node_type(s: &str) -> NodeType {
 }
 
 impl FederatedIndex {
-    /// Whether `source` declares a dependency on `target` in its manifests
-    /// (go.mod, package.json, Cargo.toml, pyproject.toml, requirements,
-    /// pom.xml, Gradle, Gemfile, composer.json, …): one of `target`'s
-    /// identifiers — repo id, directory name, or the module / package name
-    /// it declares — appears there as a whole token. A source with no
-    /// manifest at all cannot say, so it is not restricted.
     /// Record the package names `repo` publishes. A declaration can
     /// link repos the directory and manifest names cannot, so the
     /// cached dependency answers are dropped.
@@ -1612,6 +1701,12 @@ impl FederatedIndex {
         self.depends_cache.clear();
     }
 
+    /// Whether `source` declares a dependency on `target` in its manifests
+    /// (go.mod, package.json, Cargo.toml, pyproject.toml, requirements,
+    /// pom.xml, Gradle, Gemfile, composer.json, …): one of `target`'s
+    /// identifiers — repo id, directory name, or the module / package name
+    /// it declares — appears there as a whole token. A source with no
+    /// manifest at all cannot say, so it is not restricted.
     fn repo_depends_on(&self, source: &RepoId, target: &RepoId) -> bool {
         let key = (source.as_str().to_string(), target.as_str().to_string());
         if let Some(hit) = self.depends_cache.get(&key) {
@@ -1700,10 +1795,6 @@ fn read_manifests(root: &Path) -> String {
 
 /// Names another repo would use to depend on `repo`: its id, its directory,
 /// and the module / package name it declares for itself.
-fn declared_identifiers(repo: &RepoId, root: &Path) -> Vec<String> {
-    declared_identifiers_with_packages(repo, root, &[])
-}
-
 /// The names another repo would use to depend on `repo`: its id, its
 /// directory, the package names it declares, and the module / package
 /// name its root manifest declares for itself.
@@ -1872,6 +1963,19 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
     }
 }
 
+/// Ends a repo index pass when dropped. See [`FederatedIndex::enter_index_pass`].
+pub struct IndexPassGuard {
+    fed: Arc<FederatedIndex>,
+}
+
+impl Drop for IndexPassGuard {
+    fn drop(&mut self) {
+        self.fed
+            .index_concurrency_now
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod phase_b_c_tests {
     use super::*;
@@ -2015,7 +2119,8 @@ mod dependency_tests {
             "module github.com/spf13/pflag\n\ngo 1.12\n",
         )
         .unwrap();
-        let ids = declared_identifiers(&RepoId::new("flags").unwrap(), dir.path());
+        let ids =
+            declared_identifiers_with_packages(&RepoId::new("flags").unwrap(), dir.path(), &[]);
         assert!(ids.contains(&"pflag".to_string()), "{ids:?}");
         assert!(
             ids.contains(&"github.com/spf13/pflag".to_string()),
@@ -2028,7 +2133,8 @@ mod dependency_tests {
             "{\n  \"name\": \"@acme/core\",\n}",
         )
         .unwrap();
-        let ids = declared_identifiers(&RepoId::new("core").unwrap(), dir.path());
+        let ids =
+            declared_identifiers_with_packages(&RepoId::new("core").unwrap(), dir.path(), &[]);
         assert!(ids.contains(&"@acme/core".to_string()), "{ids:?}");
     }
 

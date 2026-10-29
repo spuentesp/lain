@@ -7,6 +7,15 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- **Python gRPC consumers are detected through stub handles.** `self._stub`
+  and `stub` receivers bind to the service their constructor names, and a
+  channel whose address is a constructor parameter resolves through the file's
+  one env read (two or more env reads stay unresolved). OpenShell's Python SDK
+  is the first target. `FEDERATION_GRAPH_VERSION` is unchanged.
+- **`repos[].packages`** lists the package names a repo publishes (npm, PyPI,
+  crates.io, Go modules). A consumer whose manifest names one links to that
+  repo even when the name does not contain the repo id.
+
 - **GraphQL provider -> resolver edge** (`CallsGraphql`, appended last in
   `EdgeType` so stored discriminants are unchanged). The resolver-link sensor
   now links each SDL root field to the function that serves it, and learns
@@ -53,6 +62,14 @@ All notable changes to LAIN are documented here. Versions follow
   when a server context, a contract index or an embedding model is missing.
 
 ### Changed
+
+- **Per-repo index budget is `LAIN_INDEX_TIMEOUT`.** `LAIN_REINDEX_TIMEOUT`
+  now bounds only the startup budget. The per-repo pipeline budget (default
+  60 s) no longer follows it: set `LAIN_INDEX_TIMEOUT` to raise it for a large
+  repo.
+- **Repos index concurrently at startup**, up to `max_concurrent_indexers` at
+  a time, before the cross-repo pass runs. One slow repo no longer holds the
+  rest of the federation behind it.
 
 - Indexing skips files no event idiom can match (a whole-file `RegexSet`
   prefilter in front of the per-line walk; CRLF files and unbuildable sets fall

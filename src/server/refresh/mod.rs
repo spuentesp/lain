@@ -186,7 +186,9 @@ impl Default for RefreshOutcome {
     }
 }
 
-/// Parse the `LAIN_REINDEX_TIMEOUT` env var into a `Duration`.
+/// Parse the `LAIN_REINDEX_TIMEOUT` env var into a `Duration`. This is the
+/// *startup* budget only; the per-repo pipeline budget is
+/// `federation::repo_index::index_timeout` and reads `LAIN_INDEX_TIMEOUT`.
 /// Falls back to the placeholder default of 300s (5min). The user
 /// is expected to measure a real full index and set this to the
 /// measured p95 + headroom before the PR merges — the plan

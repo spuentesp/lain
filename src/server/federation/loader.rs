@@ -65,6 +65,7 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     // place.
     fed.set_contract_config(config.contract.clone());
     register_declared_packages(&fed, &config);
+    fed.set_max_concurrent_indexers(config.max_concurrent_indexers);
     fed.set_service_params(config.effective_params());
 
     let sources = config.build_sources()?;
@@ -295,6 +296,7 @@ pub async fn load_federation_with_workspace(
     // place.
     fed.set_contract_config(config.contract.clone());
     register_declared_packages(&fed, &config);
+    fed.set_max_concurrent_indexers(config.max_concurrent_indexers);
     fed.set_service_params(config.effective_params());
 
     // Cold-start orchestration (Codex finding #4). Same Phase 0/1/2

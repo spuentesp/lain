@@ -6,7 +6,6 @@
 //! `get_federation_health`, `search_org`, etc.) is exposed at
 //! `POST /mcp` exactly like a single-workspace `lain --transport http`.
 
-use crate::federation::health::RepoHealth;
 use crate::federation::loader::{load_federation, load_federation_with_workspace};
 use crate::server::{
     attribution::{AttributionBackend, LsofBackend, NoopBackend, ProcFsBackend},
@@ -333,46 +332,9 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
     // so we explicitly run `repo.index()` on every registered repo here.
     // Failures are logged and demoted to `Degraded`; the federation still comes
     // up so partial results remain queryable.
-    for (id, _) in fed.list_repos() {
-        if let Some(repo) = fed.get_repo(&id) {
-            info!("lain server: indexing repo '{}'", id.as_str());
-            if let Err(e) = repo.index().await {
-                // `RepoIndex::index` already demotes its own health to
-                // `Degraded` on failure, but we re-assert it here so the
-                // demotion is independent of `index()`'s implementation
-                // details (e.g. if a future refactor moves the demotion
-                // out of `index()` callers won't silently lose it).
-                repo.set_health(RepoHealth::Degraded);
-                tracing::warn!(
-                    "lain server: indexing repo '{}' failed: {e} (marking Degraded)",
-                    id.as_str()
-                );
-            } else {
-                // After indexing, re-project so the global backend sees the
-                // newly-extracted nodes/edges.
-                if let Err(e) = fed.project_repo(&id).await {
-                    tracing::warn!(
-                        "lain server: project_repo for '{}' after indexing failed: {e}",
-                        id.as_str()
-                    );
-                }
-            }
-
-            // Re-index this repo when its checkout changes.
-            // `RepoIndex::start_watcher` had a test but no production
-            // caller, so a federated repo was frozen at whatever commit
-            // it was first indexed at — the same staleness that left this
-            // repo's own graph 29 commits behind. The comment above
-            // ("the watcher would eventually pick up filesystem events")
-            // described a watcher that nothing started.
-            if let Err(e) = repo.start_watcher().await {
-                tracing::warn!(
-                    "lain server: could not watch repo '{}' for re-index: {e}",
-                    id.as_str()
-                );
-            }
-        }
-    }
+    // Index every repo (concurrently, bounded) and link calls across repos
+    // at the barrier that `index_all` returns through.
+    fed.index_all().await;
 
     // Second pass: every repo's symbols are now known, so calls from a
     // repo indexed early into one indexed later can finally resolve.
