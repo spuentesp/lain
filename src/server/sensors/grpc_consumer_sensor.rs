@@ -242,22 +242,35 @@ fn detect_channel_env(content: &str, ext: &str) -> Option<String> {
             }
             // The argument is a parameter, not an env-get local (an
             // SDK that takes the gateway address in its constructor).
-            // Fall back to the file's sole env read.
+            // Fall back to the file's gateway-shaped env read.
             return sole_file_env_var(&env_locals);
         }
     }
     None
 }
 
-/// The one env var a file reads, when the file reads exactly one.
-/// Used for a channel whose address arrives as a constructor parameter:
-/// with a single env source the file's own gateway setting is the
-/// best candidate. With two or more the sensor refuses to guess.
+/// The env var a file most plausibly uses as its gateway address, for a
+/// channel whose address arrives as a constructor parameter. One distinct
+/// env var is taken as is. With several, only address-shaped names
+/// (`GATEWAY`, `HOST`, `URL`, `ADDR`, `ENDPOINT`, `SERVER`) count, and the
+/// sensor refuses unless exactly one of those remains. This is a name
+/// heuristic: the var names a gateway, which may resolve to an address
+/// elsewhere, so the binding is service-level, not a verified dial address.
 fn sole_file_env_var(env_locals: &BTreeMap<String, String>) -> Option<String> {
+    const ADDRESS_SHAPED: [&str; 6] = ["GATEWAY", "HOST", "URL", "ADDR", "ENDPOINT", "SERVER"];
     let vars: BTreeSet<&String> = env_locals.values().collect();
-    (vars.len() == 1)
-        .then(|| vars.into_iter().next().cloned())
-        .flatten()
+    if vars.len() == 1 {
+        return vars.into_iter().next().cloned();
+    }
+    let mut address = vars.into_iter().filter(|v| {
+        ADDRESS_SHAPED
+            .iter()
+            .any(|shape| v.to_ascii_uppercase().contains(shape))
+    });
+    match (address.next(), address.next()) {
+        (Some(only), None) => Some(only.clone()),
+        _ => None,
+    }
 }
 
 fn detect_channel_host(content: &str, ext: &str) -> Option<String> {
@@ -713,16 +726,71 @@ class SandboxClient:
             HostPart::Env(ref vars) if vars == &["OPENSHELL_GATEWAY".to_string()]));
     }
 
-    /// Two env reads in one file: the channel must not guess.
+    /// The real OpenShell `sandbox.py` reads two env vars, one of them
+    /// `XDG_CONFIG_HOME`. The gateway-shaped one is the channel's source.
     #[test]
-    fn python_stub_call_with_two_env_reads_stays_unknown() {
+    fn python_stub_call_prefers_the_gateway_env_among_two_reads() {
+        let src = "\
+import os
+import grpc
+import openshell_pb2_grpc
+
+def _xdg_config_home() -> str:
+    configured = os.environ.get(\"XDG_CONFIG_HOME\")
+    return configured
+
+def _resolve_active_cluster() -> str:
+    env_gateway = os.environ.get(\"OPENSHELL_GATEWAY\")
+    return env_gateway
+
+class SandboxClient:
+    def __init__(self, endpoint):
+        self._channel = grpc.insecure_channel(endpoint)
+        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
+
+    def health(self):
+        return self._stub.Health(request)
+";
+        let calls = detect_stub_calls(src, "py", "sandbox.py");
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(&calls[0].channel_host_part,
+            HostPart::Env(ref vars) if vars == &["OPENSHELL_GATEWAY".to_string()]));
+    }
+
+    /// Two env reads that both look like addresses: the channel must not guess.
+    #[test]
+    fn python_stub_call_with_two_address_env_reads_stays_unknown() {
         let src = "\
 import os
 import grpc
 import openshell_pb2_grpc
 
 a = os.environ.get(\"OPENSHELL_GATEWAY\")
-b = os.environ.get(\"XDG_CONFIG_HOME\")
+b = os.environ.get(\"OPENSHELL_ENDPOINT\")
+
+class SandboxClient:
+    def __init__(self, endpoint):
+        self._channel = grpc.insecure_channel(endpoint)
+        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
+
+    def health(self):
+        return self._stub.Health(request)
+";
+        let calls = detect_stub_calls(src, "py", "sandbox.py");
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].channel_host_part, HostPart::None));
+    }
+
+    /// Two env reads, neither address-shaped: the channel must not guess.
+    #[test]
+    fn python_stub_call_with_two_non_address_env_reads_stays_unknown() {
+        let src = "\
+import os
+import grpc
+import openshell_pb2_grpc
+
+a = os.environ.get(\"XDG_CONFIG_HOME\")
+b = os.environ.get(\"HOME\")
 
 class SandboxClient:
     def __init__(self, endpoint):
