@@ -2566,7 +2566,12 @@ mod tests {
     fn timeout_validation_and_wait_budget() {
         let now = Instant::now();
         let mut args = Map::new();
-        assert!(parse_timeout(&args, now).unwrap().is_none());
+        // The default comes from the environment, so this case uses the
+        // explicit form: a `LAIN_DIFF_TIMEOUT_MS` set in the ambient
+        // environment must not decide whether the test passes.
+        assert!(parse_timeout_with(&args, now, None, TIMEOUT_HARD_MAX_MS)
+            .unwrap()
+            .is_none());
         args.insert("timeout_ms".into(), json!(5000));
         let deadline = parse_timeout(&args, now).unwrap();
         assert!(remaining_wait_ms(deadline, 1000) <= 1000);

@@ -1299,23 +1299,6 @@ fn parent_of(p: &JsonPath) -> JsonPath {
 ///   schema does not contain a path the consumer reads and the base
 ///   did not.
 /// - `ConsumerRebound`: same key bound to a different endpoint id.
-#[cfg(test)]
-mod deadline_tests {
-    use super::*;
-
-    #[test]
-    fn expired_deadline_stops_consumer_comparison() {
-        let surface = ContractSurface::default();
-        assert!(
-            diff_consumers_until(&surface, &surface, Some(std::time::Instant::now())).is_none()
-        );
-        assert_eq!(
-            diff_consumers_until(&surface, &surface, None),
-            Some(Vec::new())
-        );
-    }
-}
-
 pub fn diff_consumers(base: &ContractSurface, head: &ContractSurface) -> Vec<Change> {
     diff_consumers_until(base, head, None).expect("unbounded diff completes")
 }
@@ -1428,6 +1411,23 @@ pub(crate) fn diff_consumers_until(
         change_sort_key(&a.service, &a.kind).cmp(&change_sort_key(&b.service, &b.kind))
     });
     Some(out)
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn expired_deadline_stops_consumer_comparison() {
+        let surface = ContractSurface::default();
+        assert!(
+            diff_consumers_until(&surface, &surface, Some(std::time::Instant::now())).is_none()
+        );
+        assert_eq!(
+            diff_consumers_until(&surface, &surface, None),
+            Some(Vec::new())
+        );
+    }
 }
 
 fn consumer_service(key: &ConsumerKey) -> ServiceName {
