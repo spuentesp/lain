@@ -281,13 +281,18 @@ impl PetgraphBackend {
 
     /// Unconditional checkpoint of the whole federated graph to `bin_path`.
     fn write_file(&self) -> Result<(), LainError> {
-        let payload = self.db.save_to_disk_sync_bytes()?;
-        let mut with_header = Vec::with_capacity(FEDERATION_GRAPH_HEADER_LEN + payload.len());
-        with_header.extend_from_slice(FEDERATION_GRAPH_MAGIC);
-        with_header.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
-        with_header.extend_from_slice(&payload);
-        crate::cli::io::write_file_atomic(&self.bin_path, &with_header)?;
-        Ok(())
+        // The database streams its encode to the `.payload` file and, in the
+        // same pass, to `federated_graph.bin` behind the schema envelope: the
+        // two files are byte-identical apart from that header, and neither
+        // the payload nor a headered copy of it is ever held in memory.
+        let mut header = Vec::with_capacity(FEDERATION_GRAPH_HEADER_LEN);
+        header.extend_from_slice(FEDERATION_GRAPH_MAGIC);
+        header.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
+        self.db
+            .save_to_disk_sync_mirrored(Some(crate::graph::PayloadMirror {
+                path: &self.bin_path,
+                prefix: &header,
+            }))
     }
 
     pub fn upsert_node_global(

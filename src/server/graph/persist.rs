@@ -114,6 +114,48 @@ pub(super) fn encode_state(state: &GraphState) -> Result<Vec<u8>, bincode::error
     Ok(out)
 }
 
+/// Borrowed twin of [`GraphState`] for [`encode_state_to`]: the same fields in
+/// the same order, so bincode (positional, no names) writes the same bytes,
+/// but nothing is cloned. `index_map` is generic so the caller can pass any
+/// ordered map-shaped `Serialize` value without first copying it into a
+/// `BTreeMap`; a map encodes as its length then its entries in order,
+/// whatever the container.
+#[derive(Serialize)]
+struct GraphStateRef<'a, M: Serialize> {
+    graph: &'a StableGraph<GraphNode, GraphEdge>,
+    index_map: M,
+    last_commit: &'a Option<String>,
+    path_format_version: u32,
+    /// Always written as present, exactly as [`GraphState::new`] does.
+    calls_published_for: Option<&'a Option<String>>,
+}
+
+/// Stream a snapshot's on-disk byte form into `out` without building it in
+/// memory: the same bytes [`encode_state`] returns (marker, then the bincode
+/// payload), produced a buffer at a time.
+///
+/// `index_map` must serialize as a map ordered by key, so the same graph
+/// always encodes to the same bytes (see `GraphDatabase::build_state`).
+pub(super) fn encode_state_to<W: std::io::Write, M: Serialize>(
+    out: &mut W,
+    graph: &StableGraph<GraphNode, GraphEdge>,
+    index_map: M,
+    last_commit: &Option<String>,
+    calls_published_for: &Option<String>,
+) -> Result<(), bincode::error::EncodeError> {
+    out.write_all(SNAPSHOT_MAGIC)
+        .map_err(|inner| bincode::error::EncodeError::Io { inner, index: 0 })?;
+    let state = GraphStateRef {
+        graph,
+        index_map,
+        last_commit,
+        path_format_version: PATH_FORMAT_VERSION,
+        calls_published_for: Some(calls_published_for),
+    };
+    bincode::serde::encode_into_std_write(&state, out, bincode::config::legacy())?;
+    Ok(())
+}
+
 /// Prefix every snapshot this codec writes, so the decoder can tell a
 /// current-shape file from a pre-stamp one by SHAPE instead of by
 /// guessing at the tail.

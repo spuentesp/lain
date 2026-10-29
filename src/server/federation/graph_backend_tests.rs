@@ -1221,6 +1221,106 @@ fn used_by_walk_on_the_petgraph_backend_reaches_the_entry_point() {
     assert!(!r.truncated);
 }
 
+// ─── streamed save: the files on disk ────────────────────────────────
+
+fn seeded_backend(dir: &std::path::Path, n: usize) -> PetgraphBackend {
+    let b = PetgraphBackend::new(dir).unwrap();
+    let ids: Vec<String> = (0..n)
+        .map(|i| format!("r:Function:src/f{}.py:fn_{i:03}:{i}", i % 7))
+        .collect();
+    let nodes: Vec<GraphNode> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| node(id, &format!("fn_{i:03}"), &format!("src/f{}.py", i % 7)))
+        .collect();
+    b.upsert_nodes_batch(&nodes).unwrap();
+    let edges: Vec<GraphEdge> = ids
+        .windows(2)
+        .map(|w| edge(EdgeType::Calls, w[0].clone(), w[1].clone(), 1.0))
+        .collect();
+    b.upsert_edges_batch(&edges).unwrap();
+    b
+}
+
+/// The save is streamed to two files in one pass. `federated_graph.bin` is the
+/// schema envelope followed by exactly the `.payload` bytes, and a fresh
+/// backend reloads the same graph from it.
+#[test]
+fn streamed_save_writes_header_plus_payload_and_reloads() {
+    use crate::federation::graph_backend::{FEDERATION_GRAPH_HEADER_LEN, FEDERATION_GRAPH_VERSION};
+    let tmp = tempfile::tempdir().unwrap();
+    let b = seeded_backend(tmp.path(), 120);
+    let (nodes, edges) = (b.node_count(), b.edge_count());
+    assert_eq!((nodes, edges), (120, 119));
+    drop(b);
+
+    let bin = std::fs::read(tmp.path().join("federated_graph.bin")).unwrap();
+    let payload = std::fs::read(tmp.path().join("federated_graph.bin.payload")).unwrap();
+    assert_eq!(&bin[..FEDERATION_GRAPH_MAGIC.len()], FEDERATION_GRAPH_MAGIC);
+    assert_eq!(
+        &bin[FEDERATION_GRAPH_MAGIC.len()..FEDERATION_GRAPH_HEADER_LEN],
+        &FEDERATION_GRAPH_VERSION.to_le_bytes()
+    );
+    assert_eq!(&bin[FEDERATION_GRAPH_HEADER_LEN..], payload.as_slice());
+
+    let again = PetgraphBackend::new(tmp.path()).unwrap();
+    assert_eq!((again.node_count(), again.edge_count()), (nodes, edges));
+    let sample = again
+        .get_node("r:Function:src/f3.py:fn_003:3")
+        .unwrap()
+        .unwrap();
+    assert_eq!(sample.name, "fn_003");
+    let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {leftovers:?}"
+    );
+}
+
+/// A federated file written the old way (clone the graph, build the payload
+/// in memory, prepend the header) must still load: the format did not move.
+#[test]
+fn a_file_written_by_the_old_buffered_path_still_loads() {
+    use crate::federation::graph_backend::FEDERATION_GRAPH_VERSION;
+    let src = tempfile::tempdir().unwrap();
+    let source = seeded_backend(src.path(), 80);
+    let old_payload = source.db().encode_snapshot_buffered();
+    let (nodes, edges) = (source.node_count(), source.edge_count());
+    drop(source);
+
+    let dst = tempfile::tempdir().unwrap();
+    let mut old_file = Vec::new();
+    old_file.extend_from_slice(FEDERATION_GRAPH_MAGIC);
+    old_file.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
+    old_file.extend_from_slice(&old_payload);
+    std::fs::write(dst.path().join("federated_graph.bin"), &old_file).unwrap();
+
+    let loaded = PetgraphBackend::new(dst.path()).unwrap();
+    assert_eq!((loaded.node_count(), loaded.edge_count()), (nodes, edges));
+    assert!(loaded
+        .get_node("r:Function:src/f0.py:fn_000:0")
+        .unwrap()
+        .is_some());
+}
+
+/// A torn `.bin` (the old file cut short) is still rejected by the loader,
+/// which is the guard the atomic rename exists to make unreachable.
+#[test]
+fn a_truncated_federated_file_is_still_rejected() {
+    let src = tempfile::tempdir().unwrap();
+    drop(seeded_backend(src.path(), 40));
+    let mut bytes = std::fs::read(src.path().join("federated_graph.bin")).unwrap();
+    bytes.truncate(bytes.len() / 2);
+    let dst = tempfile::tempdir().unwrap();
+    std::fs::write(dst.path().join("federated_graph.bin"), &bytes).unwrap();
+    assert!(PetgraphBackend::new(dst.path()).is_err());
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────
 
 fn node(id: &str, name: &str, path: &str) -> GraphNode {
