@@ -182,6 +182,7 @@ async fn run_diff_contracts(
         Err(o) => return Err(o),
     };
     let cap = parse_cap(&args_map, 50, 500, started)?;
+    let max_hops = parse_max_hops(&args_map, started)?;
     // §12: `repo` and `service` narrow the reported changes; both
     // apply before `min_impact` and before `compatible_changes`
     // counting (a filtered-out change is not counted either).
@@ -432,6 +433,7 @@ async fn run_diff_contracts(
             &base_fed,
             &head_fed,
             cap,
+            max_hops,
             &head_label,
             started,
         )?;
@@ -676,6 +678,22 @@ fn parse_min_impact(args: &Map<String, Value>) -> Result<Option<Class>, ToolOutc
             });
         }
     }))
+}
+
+fn parse_max_hops(args: &Map<String, Value>, started: Instant) -> Result<u32, ToolOutcome> {
+    match args.get("max_hops") {
+        None => Ok(10),
+        Some(value) => match value.as_u64() {
+            Some(n @ 1..=100) => Ok(n as u32),
+            _ => Err(error_outcome(
+                "invalid_argument",
+                "max_hops must be an integer between 1 and 100",
+                Some(json!({"arg": "max_hops", "min": 1, "max": 100})),
+                "live",
+                started,
+            )),
+        },
+    }
 }
 
 fn parse_cap(
@@ -1347,6 +1365,7 @@ fn attach_change_paths(
     base_fed: &crate::federation::contracts::snapshots::SnapshotFederation,
     head_fed: &crate::federation::contracts::snapshots::SnapshotFederation,
     cap: usize,
+    max_hops: u32,
     label: &str,
     started: Instant,
 ) -> Result<(), ToolOutcome> {
@@ -1380,18 +1399,17 @@ fn attach_change_paths(
         &base_fed.backend
     };
     let start_refs: Vec<&str> = starts.iter().map(String::as_str).collect();
-    let outcome: ImpactResult =
-        backend
-            .traverse_impact(&start_refs, 10, cap, 0.0)
-            .map_err(|e| {
-                error_outcome(
-                    "invalid_argument",
-                    format!("traverse_impact failed: {e}"),
-                    None,
-                    label,
-                    started,
-                )
-            })?;
+    let outcome: ImpactResult = backend
+        .traverse_impact(&start_refs, max_hops, cap, 0.0)
+        .map_err(|e| {
+            error_outcome(
+                "invalid_argument",
+                format!("traverse_impact failed: {e}"),
+                None,
+                label,
+                started,
+            )
+        })?;
     let mut paths = outcome.paths;
     paths.sort_by(|a, b| {
         b.min_confidence
@@ -2383,6 +2401,19 @@ mod tests {
     };
     use crate::federation::contracts::model::{JsonPath, SymbolKey};
     use crate::federation::repo_id::RepoId;
+
+    #[test]
+    fn max_hops_defaults_and_rejects_invalid_values() {
+        let started = Instant::now();
+        let mut args = Map::new();
+        assert_eq!(parse_max_hops(&args, started).unwrap(), 10);
+        args.insert("max_hops".into(), json!(3));
+        assert_eq!(parse_max_hops(&args, started).unwrap(), 3);
+        for value in [json!(0), json!(101), json!(-1), json!("3"), Value::Null] {
+            args.insert("max_hops".into(), value);
+            assert!(parse_max_hops(&args, started).is_err());
+        }
+    }
 
     #[test]
     fn direction_of_change_extracts_field_kinds() {

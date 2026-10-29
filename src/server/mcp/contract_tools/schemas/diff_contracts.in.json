@@ -19,7 +19,8 @@
       "type": "string",
       "enum": ["NoKnownImpact", "NeedsInvestigation", "Verified"]
     },
-    "cap": { "type": "integer", "minimum": 1, "maximum": 500 }
+    "cap": { "type": "integer", "minimum": 1, "maximum": 500 },
+    "max_hops": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum impact path depth (default 10). Paths that reach the depth limit are marked truncated." }
   },
   "required": ["base", "head"]
 }
