@@ -1500,6 +1500,9 @@ pub struct RoutePattern {
     method_regex: Option<regex::Regex>,
     path_regex: regex::Regex,
     handler_fn_regex: regex::Regex,
+    /// Optional source-file path filter (`config/routes.rb` for Rails,
+    /// `pages/api/` for Next.js Pages Router).
+    source: Option<String>,
     /// What to emit when the regex above did not capture a verb.
     /// `HttpMethod::Any` for go-std (the route declares no verb);
     /// `HttpMethod::Get` for Flask (whose default verb is GET even
@@ -1519,6 +1522,9 @@ impl RoutePattern {
     }
     pub fn handler_fn_regex(&self) -> &regex::Regex {
         &self.handler_fn_regex
+    }
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
     }
 }
 
@@ -1596,6 +1602,7 @@ fn route_pattern_for(def: &FrameworkDef) -> Option<RoutePattern> {
         method_regex,
         path_regex,
         handler_fn_regex,
+        source: def.source.clone(),
         default_method: default,
     })
 }

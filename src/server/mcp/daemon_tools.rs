@@ -269,6 +269,7 @@ pub async fn run_add_workspaces(server: &LainServer, args: &Value) -> Result<Val
                 source: crate::server::federation::config::SourceConfig::WorkspaceDir {
                     path: path.clone(),
                 },
+                packages: Vec::new(),
             });
         additions.push((id, path.clone()));
     }

@@ -68,6 +68,7 @@ runs:
       shell: bash
       env:
         LAIN_REINDEX_TIMEOUT: ${{ inputs.reindex-timeout }}
+        LAIN_INDEX_TIMEOUT: ${{ inputs.reindex-timeout }}
         INPUT_MIN_FAN_OUT: ${{ inputs.min-fan-out }}
         INPUT_LSP_LANGUAGES: ${{ inputs.lsp-languages }}
         # GITHUB_TOKEN is the GitHub-issued token for this run; we

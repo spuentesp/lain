@@ -47,7 +47,7 @@ use crate::federation::contracts::model::{
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{GraphEdge, GraphNode, RepoNamespace};
 use crate::server::sensors::util::compose_service_name;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -171,7 +171,9 @@ pub fn detect_stub_calls(content: &str, ext: &str, graph_path: &str) -> Vec<Grpc
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ChannelTarget {
     Literal(String),
-    Env(String),
+    /// Candidate env vars the dial address may come from. The joiner
+    /// keeps the one a service declares in `services[].env`.
+    Env(Vec<String>),
 }
 
 /// The channel target for the file: a literal wins (the literal
@@ -214,7 +216,7 @@ fn collect_env_locals(content: &str) -> BTreeMap<String, String> {
 /// The channel constructor's first argument is an env var when it
 /// *is* an env call (`ManagedChannelBuilder.forAddress(System.getenv("X"), …)`)
 /// or a bare identifier bound from one in the same file.
-fn detect_channel_env(content: &str, ext: &str) -> Option<String> {
+fn detect_channel_env(content: &str, ext: &str) -> Option<Vec<String>> {
     let ctor = match ext {
         "go" => "grpc.NewClient(",
         "py" => "grpc.insecure_channel(",
@@ -231,15 +233,21 @@ fn detect_channel_env(content: &str, ext: &str) -> Option<String> {
         // Direct env call as the argument (Java). The shared
         // grammar cuts the name at the call's own `)`.
         if let Some(var) = crate::server::sensors::util::host_env_name(rest) {
-            return Some(var.to_string());
+            return Some(vec![var.to_string()]);
         }
         // Bare identifier argument — resolve against the file's
         // env-get locals.
         let arg = rest.split([',', ')']).next().unwrap_or("").trim();
         if !arg.is_empty() && arg.chars().all(|c| c.is_alphanumeric() || c == '_') {
             if let Some(var) = env_locals.get(arg) {
-                return Some(var.clone());
+                return Some(vec![var.clone()]);
             }
+            // The argument is a parameter, not an env-get local (an SDK
+            // that takes the gateway address in its constructor). Every
+            // env var the file reads is a candidate; the joiner keeps
+            // the one a service declares in `services[].env`.
+            let vars: BTreeSet<String> = env_locals.values().cloned().collect();
+            return (!vars.is_empty()).then(|| vars.into_iter().collect());
         }
     }
     None
@@ -342,12 +350,20 @@ fn detect_python_stub_calls(
     channel: &Option<ChannelTarget>,
     out: &mut Vec<GrpcStubCall>,
 ) {
+    let services = python_stub_services(content);
     for det in crate::server::sensors::util_tokenize::detect_method_calls(
         content,
-        |rcv| rcv.ends_with("Stub"),
+        is_python_stub_receiver,
         |meth| !meth.is_empty(),
     ) {
-        let service = strip_stub_suffix(det.receiver);
+        // A `<Name>Stub` receiver keeps its historical name
+        // (`ordersStub` → `orders`). A handle like `_stub` / `stub`
+        // carries no name, so it takes the service its constructor
+        // was built from.
+        let service = Some(strip_stub_suffix(det.receiver))
+            .filter(|s| !s.is_empty())
+            .or_else(|| services.get(det.receiver).cloned())
+            .unwrap_or_default();
         if service.is_empty() {
             continue;
         }
@@ -363,6 +379,54 @@ fn detect_python_stub_calls(
                 line: det.line_no,
             },
         });
+    }
+}
+
+/// True when the receiver names a gRPC stub handle. The tokenizer
+/// hands over the identifier run before the dot, so `self._stub.Health(`
+/// arrives as `_stub` and `stub.Get(` as `stub`; `ordersStub` is the
+/// generated-client spelling.
+fn is_python_stub_receiver(rcv: &str) -> bool {
+    rcv.to_ascii_lowercase().ends_with("stub")
+}
+
+/// The service each stub handle was built from, keyed by the variable
+/// that holds it. The constructor is the only place a Python SDK names
+/// the service: `self._stub = pb2_grpc.OpenShellStub(ch)` maps `_stub`
+/// to `OpenShell`.
+fn python_stub_services(content: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in content.lines() {
+        let Some(eq) = line.find('=') else { continue };
+        // `==` and friends are comparisons, not bindings.
+        if line[eq + 1..].starts_with('=') {
+            continue;
+        }
+        let lhs = line[..eq].trim();
+        let rhs = line[eq + 1..].trim();
+        let Some(service) = python_stub_constructor_service(rhs) else {
+            continue;
+        };
+        // `self._stub` → `_stub`; `stub` → `stub`.
+        let name = lhs.rsplit('.').next().unwrap_or(lhs);
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        out.insert(name.to_string(), service);
+    }
+    out
+}
+
+/// `openshell_pb2_grpc.OpenShellStub(channel)` → `OpenShell`.
+fn python_stub_constructor_service(rhs: &str) -> Option<String> {
+    let open = rhs.find('(')?;
+    let head = rhs[..open].trim();
+    let last = head.rsplit('.').next()?;
+    let service = last.strip_suffix("Stub")?;
+    if service.is_empty() {
+        None
+    } else {
+        Some(service.to_string())
     }
 }
 
@@ -492,7 +556,7 @@ fn host_parts_from_channel(channel: &Option<ChannelTarget>) -> (Option<String>, 
             };
             (Some(host.clone()), host_part)
         }
-        Some(ChannelTarget::Env(var)) => (None, HostPart::Env(vec![var.clone()])),
+        Some(ChannelTarget::Env(vars)) => (None, HostPart::Env(vars.clone())),
         None => (None, HostPart::None),
     }
 }
@@ -555,6 +619,149 @@ public class Client {
         assert_eq!(calls[0].service, "orders");
         assert_eq!(calls[0].method, "getOrder");
         assert_eq!(calls[0].channel_target.as_deref(), Some("orders"));
+    }
+
+    /// OpenShell's Python SDK keeps the stub on the instance
+    /// (`self._stub = openshell_pb2_grpc.OpenShellStub(...)`) and
+    /// calls through it (`self._stub.Health(...)`). The service
+    /// name lives in the constructor, not the receiver.
+    #[test]
+    fn python_member_receiver_stub_call_is_detected() {
+        let src = "\
+import grpc
+import openshell_pb2_grpc
+
+class SandboxClient:
+    def __init__(self, endpoint):
+        self._channel = grpc.insecure_channel(endpoint)
+        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
+
+    def health(self):
+        return self._stub.Health(openshell_pb2.HealthRequest())
+";
+        let calls = detect_stub_calls(src, "py", "sandbox.py");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].service, "OpenShell");
+        assert_eq!(calls[0].method, "Health");
+    }
+
+    /// The lowercase receiver shape used by OpenShell's e2e tests.
+    #[test]
+    fn python_lowercase_stub_receiver_is_detected() {
+        let src = "\
+import grpc
+import openshell_pb2_grpc
+
+channel = grpc.insecure_channel(\"orders:50051\")
+stub = openshell_pb2_grpc.OpenShellStub(channel)
+resp = stub.GetCurrentUser(request)
+";
+        let calls = detect_stub_calls(src, "py", "client.py");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].service, "OpenShell");
+        assert_eq!(calls[0].method, "GetCurrentUser");
+        assert_eq!(calls[0].channel_target.as_deref(), Some("orders"));
+    }
+
+    /// A stub-shaped receiver with no constructor in the file has no
+    /// service name; emitting a nameless consumer would put a
+    /// phantom into the unresolved ledger.
+    #[test]
+    fn python_stub_receiver_without_constructor_emits_nothing() {
+        let src = "\
+class Client:
+    def health(self):
+        return self._stub.Health(request)
+";
+        let calls = detect_stub_calls(src, "py", "client.py");
+        assert!(calls.is_empty());
+    }
+
+    /// OpenShell's Python SDK takes the gateway address as a
+    /// constructor parameter and reads the gateway name from the
+    /// environment elsewhere in the file. With one env read in the
+    /// file, the channel resolves to that variable.
+    #[test]
+    fn python_stub_call_resolves_channel_from_file_env() {
+        let src = "\
+import os
+import grpc
+import openshell_pb2_grpc
+
+def _resolve_active_cluster() -> str:
+    env_gateway = os.environ.get(\"OPENSHELL_GATEWAY\")
+    return env_gateway
+
+class SandboxClient:
+    def __init__(self, endpoint):
+        self._channel = grpc.insecure_channel(endpoint)
+        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
+
+    def health(self):
+        return self._stub.Health(request)
+";
+        let calls = detect_stub_calls(src, "py", "sandbox.py");
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(&calls[0].channel_host_part,
+            HostPart::Env(ref vars) if vars == &["OPENSHELL_GATEWAY".to_string()]));
+    }
+
+    /// The sensor reports every env var the file reads as a candidate
+    /// for the dial address, sorted. The joiner picks the one a service
+    /// declares in `services[].env`.
+    #[test]
+    fn python_stub_call_lists_every_file_env_candidate() {
+        let src = "\
+import os
+import grpc
+import openshell_pb2_grpc
+
+def _xdg_config_home() -> str:
+    configured = os.environ.get(\"XDG_CONFIG_HOME\")
+    return configured
+
+def _resolve_active_cluster() -> str:
+    env_gateway = os.environ.get(\"OPENSHELL_GATEWAY\")
+    return env_gateway
+
+class SandboxClient:
+    def __init__(self, endpoint):
+        self._channel = grpc.insecure_channel(endpoint)
+        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
+
+    def health(self):
+        return self._stub.Health(request)
+";
+        let calls = detect_stub_calls(src, "py", "sandbox.py");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].channel_host_part,
+            HostPart::Env(vec!["OPENSHELL_GATEWAY".into(), "XDG_CONFIG_HOME".into()])
+        );
+    }
+
+    /// Two locals reading the same variable are still one env read.
+    #[test]
+    fn python_stub_call_with_repeated_env_var_resolves() {
+        let src = "\
+import os
+import grpc
+import openshell_pb2_grpc
+
+a = os.environ.get(\"OPENSHELL_GATEWAY\")
+b = os.getenv(\"OPENSHELL_GATEWAY\")
+
+class SandboxClient:
+    def __init__(self, endpoint):
+        self._channel = grpc.insecure_channel(endpoint)
+        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
+
+    def health(self):
+        return self._stub.Health(request)
+";
+        let calls = detect_stub_calls(src, "py", "sandbox.py");
+        assert!(matches!(&calls[0].channel_host_part,
+            HostPart::Env(ref vars) if vars == &["OPENSHELL_GATEWAY".to_string()]));
     }
 
     #[test]

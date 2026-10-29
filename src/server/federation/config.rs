@@ -54,6 +54,9 @@ fn is_contract_block_default(c: &ContractFederationConfig) -> bool {
         && c.generic_keys.is_empty()
         && c.schemas.is_empty()
         && c.bindings.is_empty()
+        && c.databases.is_empty()
+        && c.provides.is_empty()
+        && c.host_aliases.is_empty()
 }
 
 /// Run parameters given on the command line (`--param KEY=VALUE`). They
@@ -145,6 +148,13 @@ fn is_zero(n: &usize) -> bool {
 pub struct RepoConfig {
     pub id: String,
     pub source: SourceConfig,
+    /// Package names this repo publishes (npm, PyPI, crates.io, Go
+    /// module paths). A consumer repo that depends on one of them is
+    /// linked to this repo even when the name does not contain the
+    /// repo id — the npm scope and the hyphen in
+    /// `@nvidia/openshell-sdk` both defeat the token match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -202,6 +212,15 @@ impl FederationConfig {
             }
             if cfg.contract.bindings.is_empty() {
                 cfg.contract.bindings = top_level_contract.bindings;
+            }
+            if cfg.contract.databases.is_empty() {
+                cfg.contract.databases = top_level_contract.databases;
+            }
+            if cfg.contract.provides.is_empty() {
+                cfg.contract.provides = top_level_contract.provides;
+            }
+            if cfg.contract.host_aliases.is_empty() {
+                cfg.contract.host_aliases = top_level_contract.host_aliases;
             }
         }
         cfg.validate_unique_repo_ids()?;

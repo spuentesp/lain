@@ -24,28 +24,33 @@ use tokio_util::sync::CancellationToken;
 /// polling — the federation stays up.
 pub const INDEX_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Resolved per-repo pipeline timeout. Honors `LAIN_REINDEX_TIMEOUT`
-/// (the same knob [`crate::server::refresh::parse_reindex_timeout`]
-/// reads for the outer startup budget) so operators have one knob to
-/// turn when cold-cache federation indexing overruns the historical
-/// 60s default — e.g. `tokio-rs/tokio` on a cold cache. Falls back to
-/// [`Self::INDEX_TIMEOUT`] (60s) when the env var is unset or
-/// unparseable. Cached per-process via `OnceLock` so the env var is
-/// read exactly once at first call.
+/// Resolved per-repo pipeline timeout. Honors `LAIN_INDEX_TIMEOUT`
+/// (this knob is per repo) and never `LAIN_REINDEX_TIMEOUT`, which is
+/// the *startup* budget read by [`crate::server::refresh::parse_reindex_timeout`].
+/// Raising the startup budget must not give one pathological repo an
+/// unbounded window: the two budgets answer different questions.
+/// Cached per-process via `OnceLock` so the env var is read once.
 pub fn index_timeout() -> Duration {
     static OVERRIDE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *OVERRIDE.get_or_init(|| match std::env::var("LAIN_REINDEX_TIMEOUT") {
-        Ok(s) => match s.parse::<u64>() {
+    *OVERRIDE
+        .get_or_init(|| parse_index_timeout(std::env::var("LAIN_INDEX_TIMEOUT").ok().as_deref()))
+}
+
+/// The per-repo budget for a raw `LAIN_INDEX_TIMEOUT` value. Unset or
+/// unparseable values fall back to [`INDEX_TIMEOUT`].
+fn parse_index_timeout(raw: Option<&str>) -> Duration {
+    match raw {
+        None => INDEX_TIMEOUT,
+        Some(s) => match s.parse::<u64>() {
             Ok(secs) => Duration::from_secs(secs),
             Err(_) => {
                 eprintln!(
-                    "LAIN_REINDEX_TIMEOUT={s:?} is not a valid integer; using default 60s for per-repo pipeline"
+                    "LAIN_INDEX_TIMEOUT={s:?} is not a valid integer; using default 60s for per-repo pipeline"
                 );
                 INDEX_TIMEOUT
             }
         },
-        Err(_) => INDEX_TIMEOUT,
-    })
+    }
 }
 
 /// Run `f` on a fresh OS thread and wait up to `budget` for it to
@@ -1396,6 +1401,21 @@ mod tests {
     use super::*;
     use crate::federation::repo_id::RepoId;
     use crate::federation::repo_source::WorkspaceDirSource;
+
+    #[test]
+    fn index_timeout_defaults_to_the_per_repo_budget() {
+        assert_eq!(parse_index_timeout(None), INDEX_TIMEOUT);
+    }
+
+    #[test]
+    fn index_timeout_honors_its_own_value() {
+        assert_eq!(parse_index_timeout(Some("7")), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn index_timeout_falls_back_on_garbage() {
+        assert_eq!(parse_index_timeout(Some("soon")), INDEX_TIMEOUT);
+    }
 
     #[test]
     fn new_creates_with_indexing_health() {

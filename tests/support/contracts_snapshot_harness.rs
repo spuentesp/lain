@@ -119,6 +119,7 @@ fn federation_config(root: &Path) -> FederationConfig {
     let mut repos = Vec::new();
     for id in FIXTURE_REPOS {
         repos.push(RepoConfig {
+            packages: Vec::new(),
             id: id.to_string(),
             source: SourceConfig::WorkspaceDir {
                 path: root.join(id),

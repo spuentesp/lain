@@ -552,6 +552,7 @@ workspaces:
 
     fn make_config_repo(id: &str) -> crate::federation::config::RepoConfig {
         crate::federation::config::RepoConfig {
+            packages: Vec::new(),
             id: id.to_string(),
             source: crate::federation::config::SourceConfig::WorkspaceDir {
                 path: PathBuf::from("/tmp"),

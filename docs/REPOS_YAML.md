@@ -80,6 +80,25 @@ The `id` becomes the prefix for every global node ID in that repo, so
 pick something stable and human-readable — agents will see it in tool
 output.
 
+**`packages`** (optional list of strings) — the package names this repo
+publishes (npm, PyPI, crates.io, Go module paths). Another repo is
+linked to this one when its manifests name one of these, even if the
+name does not contain the repo `id`:
+
+```yaml
+repos:
+  - id: openshell
+    packages: ["@nvidia/openshell-sdk", "openshell"]
+    source:
+      type: shallow_clone
+      url: https://github.com/NVIDIA/OpenShell.git
+```
+
+The package name is what a consumer's manifest mentions. Declaring it
+makes a cross-repo link intentional instead of accidental: the hyphen
+in `openshell-sdk` defeats a bare `openshell` match, and a directory
+name cannot say that a repo publishes a scoped package.
+
 ---
 
 ## Source kinds
@@ -398,6 +417,91 @@ services:
     # Schema copies only (codegen inputs) — not a GraphQL provider.
     provides_graphql: false
 ```
+
+A gRPC provider and its SDK consumers often live in one repo. Split
+them into two services with disjoint `paths`, or the consumer's call
+to its own gateway never binds (invariant I5):
+
+```yaml
+services:
+  # The gRPC gateway: the .proto surface plus the server crates.
+  - name: openshell-gateway
+    repo: openshell
+    paths: [proto, crates]
+    hosts: [localhost, 127.0.0.1]
+    env: [OPENSHELL_GATEWAY]
+  # The SDKs that call it. A consumer in the gateway's own service
+  # never binds — the SDK needs its own service for the join to happen.
+  - name: openshell-sdk
+    repo: openshell
+    paths: [python, sdk]
+```
+
+### `provides` (list)
+
+A provider the analyzer cannot see. A service's routes often live in a
+runtime configuration file (a FastAPI `add_api_route(path=…)` whose path
+comes from YAML, a gateway route table, a mesh spec). State them here and
+the contract layer treats them like detected providers: they appear in
+`list_contracts`, and consumers can bind to them.
+
+```yaml
+provides:
+  - service: nat                       # a declared service or a repo-id service
+    key: "http:POST /chat/stream"      # the same key grammar check_binding accepts
+    source: "nat config.yaml (general.endpoint.path)"
+  - service: nat
+    key: "ws:/websocket"
+    source: "nat config.yaml (general.endpoint.websocket_path)"
+```
+
+The key grammar is the one `check_binding` accepts, so a declaration and a
+hand-written binding are interchangeable. The short HTTP form (`POST /chat`)
+is accepted too. A declaration that names an unknown service, or a key that
+does not parse, is refused at load time.
+
+### `host_aliases` (list)
+
+Some host expressions the analyzer cannot trace reach the joiner unresolved: a
+name whose value comes from outside the file, a host assembled at runtime. An
+operator states which service such an expression dials. A known path binds
+like any other target. A dynamic path (a transparent proxy forwards whatever
+the client asked for) resolves to `no_route_in_service` with the service
+attached, not to a bind.
+
+```yaml
+host_aliases:
+  - host: UPSTREAM_HTTP_ORIGIN       # the host expression, as the analyzer records it
+    service: nat                     # a declared service, or an implicit repo-id service
+    source: "nat-ui proxy/server.js (NAT_BACKEND_URL)"
+```
+
+A host the analyzer *can* trace needs no alias. A URL built from
+`process.env.X` resolves to that variable — through the names, templates,
+member expressions and constructor arguments it is built from — and the
+service whose `env:` list names it receives the consumer.
+
+Without an alias, the joiner's `unbound_host` heuristic can still bind a call
+whose path matches a single provider. That bind is at confidence 0.6, weaker
+evidence than a declared alias.
+
+### Declaring providers at runtime
+
+The `apply_contract_context` MCP tool adds entries to `provides` without a
+restart. It is dry-run by default: it returns the YAML it would write. With
+`dry_run: false` it validates the whole result, backs up `repos.yaml` to
+`repos.yaml.bak`, writes atomically, and re-joins the contract index. It
+reports `applied: true` only when the re-joined index serves the declaration.
+A refused declaration leaves the file byte-identical. A write to a file that
+changed since it was read is refused. A failed re-join restores the file.
+
+The tool writes the live federation only: `snapshot` must be `live`. Writing
+through `serde_yaml` drops comments in `repos.yaml`; the dry run shows the
+full result before anything is written.
+
+A declared provider has no source node, so a consumer bound to it appears
+in `list_contracts` and `list_unresolved`, but it is not written as a graph
+edge: graph traversal does not follow it.
 
 ### `http_clients` (list)
 

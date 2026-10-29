@@ -410,12 +410,14 @@ mod tests {
         let cfg = crate::federation::config::FederationConfig {
             repos: vec![
                 RepoConfig {
+                    packages: Vec::new(),
                     id: "a".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/a"),
                     },
                 },
                 RepoConfig {
+                    packages: Vec::new(),
                     id: "b".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/b"),
@@ -452,18 +454,21 @@ mod tests {
         let cfg = crate::federation::config::FederationConfig {
             repos: vec![
                 RepoConfig {
+                    packages: Vec::new(),
                     id: "a".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/a"),
                     },
                 },
                 RepoConfig {
+                    packages: Vec::new(),
                     id: "b".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/b"),
                     },
                 },
                 RepoConfig {
+                    packages: Vec::new(),
                     id: "c".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/c"),
@@ -486,6 +491,7 @@ mod tests {
         let handle = FederationHandle::new(None, None, None, None, None, None);
         let tmp = tempfile::tempdir().unwrap();
         let repo = RepoConfig {
+            packages: Vec::new(),
             id: "test".to_string(),
             source: crate::server::federation::config::SourceConfig::WorkspaceDir {
                 path: tmp.path().to_path_buf(),

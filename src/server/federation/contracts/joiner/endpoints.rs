@@ -13,12 +13,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::federation::contracts::config::{ContractFederationConfig, ServiceDecl};
+use crate::federation::contracts::config::{
+    ContractFederationConfig, ServiceDecl, DECLARED_PROVIDER_PATH_PREFIX,
+};
 use crate::federation::contracts::index::EndpointId;
 use crate::federation::contracts::model::{
     ContractFact, ContractKey, HttpMethod, MethodSpec, ProviderFact, ServiceName,
 };
-use crate::federation::repo_id::GlobalId;
+use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::GraphNode;
 
 /// The per-service endpoint table the joiner builds and the
@@ -215,7 +217,66 @@ pub(crate) fn build_endpoints(
             _ => continue,
         }
     }
+
+    // Declared providers: the surface static analysis cannot see. They
+    // enter the table like detected providers, so bindings, coverage and
+    // the dashboard treat them the same. The record id names its source
+    // (`repos.yaml#provides[i]`), so the operator can trace it.
+    for (i, decl) in config.provides.iter().enumerate() {
+        let Some(key) = declared_provider_key(&decl.key) else {
+            continue; // config validation rejects these before the joiner runs
+        };
+        let (template, method) = match &key {
+            ContractKey::Http {
+                method: MethodSpec::Known(m),
+                template,
+            } => (template.clone(), *m),
+            ContractKey::Http { .. } => continue,
+            ContractKey::Topic { name, .. } => (name.clone(), HttpMethod::Any),
+            ContractKey::Rpc { method, .. } => (method.clone(), HttpMethod::Any),
+            other => (other.to_string(), HttpMethod::Any),
+        };
+        let svc = ServiceName(decl.service.clone());
+        let repo_name = config
+            .services
+            .iter()
+            .find(|s| s.name == decl.service)
+            .map(|s| s.repo.clone())
+            .unwrap_or_else(|| decl.service.clone());
+        let Ok(repo_id) = RepoId::new(&repo_name) else {
+            continue;
+        };
+        let id = GlobalId::new(
+            &repo_id,
+            crate::schema::NodeType::HttpRoute,
+            &format!("{DECLARED_PROVIDER_PATH_PREFIX}{i}]"),
+            &decl.key,
+            Some(i as u32),
+        );
+        table
+            .entry((svc, key))
+            .or_default()
+            .push(EndpointProviderRecord {
+                id,
+                fact: None,
+                template,
+                method,
+            });
+    }
     table
+}
+
+/// A declared provider key in the full grammar. The short HTTP form
+/// (`POST /chat`) gets the `http:` prefix the grammar requires.
+fn declared_provider_key(raw: &str) -> Option<ContractKey> {
+    use std::str::FromStr;
+    const PREFIXES: [&str; 6] = ["graphql:", "topic:", "rpc:", "ws:", "websocket:", "table:"];
+    let full = if raw.starts_with("http:") || PREFIXES.iter().any(|p| raw.starts_with(p)) {
+        raw.to_string()
+    } else {
+        format!("http:{raw}")
+    };
+    ContractKey::from_str(&full).ok()
 }
 
 /// `(service, ContractKey)` from a normalized provider template +

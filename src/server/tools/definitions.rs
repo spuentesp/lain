@@ -136,6 +136,7 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "get_contract"
             | "list_unresolved"
             | "check_binding"
+            | "apply_contract_context"
             | "diff_contracts"
             | "trace_impact"
             | "trace_flow"

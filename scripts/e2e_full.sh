@@ -80,6 +80,7 @@ LAIN_STDOUT="$OUT_DIR/server.stdout"
 spawn_server() {
     XDG_STATE_HOME="$STATE_DIR" \
     LAIN_REINDEX_TIMEOUT=30 \
+    LAIN_INDEX_TIMEOUT=30 \
         "$LAIN_BIN" server --config "$REPOS_YAML" --transport http --port "$PORT" \
             >"$LAIN_STDOUT" 2>"$LAIN_STDERR" &
     echo "$!" >"$OUT_DIR/server.pid"
@@ -160,7 +161,7 @@ if [ -f "$OUT_DIR/server.pid" ]; then
     fi
 fi
 # Spawn new — same state dir, same repos.yaml, same port.
-env XDG_STATE_HOME="$STATE_DIR" LAIN_REINDEX_TIMEOUT=30 \
+env XDG_STATE_HOME="$STATE_DIR" LAIN_REINDEX_TIMEOUT=30 LAIN_INDEX_TIMEOUT=30 \
     "$LAIN_BIN" server --config "$REPOS_YAML" --transport http --port "$PORT" \
     >"$LAIN_STDOUT" 2>"$LAIN_STDERR" &
 echo "$!" >"$OUT_DIR/server.pid"

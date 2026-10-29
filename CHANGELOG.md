@@ -7,6 +7,43 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- **Python gRPC consumers are detected through stub handles.** `self._stub`
+  and `stub` receivers bind to the service their constructor names, and a
+  channel whose address is a constructor parameter resolves through the file's
+  env read: one env var is taken as is, and with several only an
+  address-shaped one (`GATEWAY`, `HOST`, `URL`, `ADDR`, `ENDPOINT`, `SERVER`)
+  is taken — two or more address-shaped names stay unresolved. The bind is
+  service-level: the variable names a gateway, not a verified dial address.
+  OpenShell's Python SDK is the first target. `FEDERATION_GRAPH_VERSION` is
+  unchanged.
+- **`repos[].packages`** lists the package names a repo publishes (npm, PyPI,
+  crates.io, Go modules). A consumer whose manifest names one links to that
+  repo even when the name does not contain the repo id.
+- **`provides:` declares endpoints the analyzer cannot see.** A service whose
+  routes are registered from a runtime configuration file (FastAPI's
+  `add_api_route(path=…)` with a path from a Pydantic model, a mesh spec) has
+  no route in the source for a static sensor to find. The operator states the
+  endpoint — `provides: [{service, key, source}]` — in the shared key grammar
+  (`http:POST /chat/stream`, `ws:/websocket`, `topic:kafka/orders.created`),
+  and the joiner treats it exactly like a detected provider: it binds
+  consumers, it counts for coverage, and `bindings` can attach to it.
+- **`host_aliases:` declares which service a host expression dials.** A
+  consumer whose URL the analyzer cannot follow — a transparent reverse proxy
+  builds its target from a chain of variables — is routed by the operator:
+  `host_aliases: [{host, file, service, source}]`. A known path binds like any
+  other target; a dynamic path resolves to `no_route_in_service` with the
+  service attached, not to a bind.
+- **`apply_contract_context` writes contract context at runtime.** The MCP
+  tool takes `provides` and `host_aliases` and applies them to the
+  federation's `repos.yaml` without a restart. A hand-written `bindings:`
+  entry still comes from `check_binding`, which emits the YAML for an
+  operator to paste. Dry-run by default: it returns the YAML it would write
+  and touches nothing. With `dry_run=false` it validates the whole result,
+  writes atomically with a `.bak`, re-joins the contract index, and reports
+  `applied: true` only when the declaration is served — a failed re-join
+  restores the file, and a restore that fails is reported as such rather
+  than claimed. A write that loses a race with another writer is refused.
+
 - **GraphQL provider -> resolver edge** (`CallsGraphql`, appended last in
   `EdgeType` so stored discriminants are unchanged). The resolver-link sensor
   now links each SDL root field to the function that serves it, and learns
@@ -54,6 +91,14 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Changed
 
+- **Per-repo index budget is `LAIN_INDEX_TIMEOUT`.** `LAIN_REINDEX_TIMEOUT`
+  now bounds only the startup budget. The per-repo pipeline budget (default
+  60 s) no longer follows it: set `LAIN_INDEX_TIMEOUT` to raise it for a large
+  repo.
+- **Repos index concurrently at startup**, up to `max_concurrent_indexers` at
+  a time, before the cross-repo pass runs. One slow repo no longer holds the
+  rest of the federation behind it.
+
 - Indexing skips files no event idiom can match (a whole-file `RegexSet`
   prefilter in front of the per-line walk; CRLF files and unbuildable sets fall
   back to the full walk; `LAIN_IDIOM_GATE=0` turns it off). On Saleor in a
@@ -69,6 +114,29 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **A URL built from an enclosing scope did not resolve.** The HTTP client
+  sensor recorded only module-level assignments for JavaScript and
+  TypeScript, and resolved an identifier only against the innermost enclosing
+  function. A `const` in a request handler, fetched from a nested closure —
+  the shape of a reverse proxy — left the call's URL as the bare identifier,
+  so its host was never known. Assignments are now recorded per scope, and
+  an identifier is resolved through the scope chain, innermost first: a name
+  assigned in an enclosing scope is visible in a nested closure, a name
+  assigned in a sibling scope is not, and a name assigned twice in one scope
+  stays unresolved.
+- **A URL built from an environment variable did not say so.** The HTTP client
+  sensor took the host from the hole at the front of the URL, so a URL that
+  *named* its host — `${UPSTREAM_HTTP_ORIGIN}/chat`, a reverse proxy's origin
+  built from `new URL(process.env.NAT_BACKEND_URL)` — was recorded as an
+  unresolved expression and could not be routed to a service. The sensor now
+  follows the name through the file's assignments: a name resolves to the
+  expression it is assigned, a template to the hole that carries the origin, a
+  member expression to its base (`upstream.protocol` → `upstream`), and a call
+  to its arguments (`new URL(NAT_BACKEND_URL)`), stopping at the environment
+  variable that configures the host. Only the origin is followed, so a literal
+  host stays a literal and an env var in the path is never mistaken for the
+  host. A service that declares the variable in `env:` now receives those
+  consumers without an operator declaring them.
 - `get_service` returned an empty `used_by` for every consumer: it looked the
   caller up in the per-repo graph with a global id, found nothing, and walked
   the call-site node instead, silently. It now resolves callers and walks
