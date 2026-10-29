@@ -24,6 +24,7 @@ use crate::federation::contracts::config::{ContractFederationConfig, HostAliasDe
 use crate::federation::contracts::context::{
     merge_host_aliases, merge_provides, restore, write_guarded,
 };
+use crate::federation::federated_index::FederatedIndex;
 use crate::server::mcp::handler::McpContext;
 
 inventory::submit!(ContractToolEntry {
@@ -167,13 +168,27 @@ fn run_apply(
         base
     };
 
-    if dry_run || (added.is_empty() && added_aliases.is_empty()) {
-        let note = if added.is_empty() && added_aliases.is_empty() {
-            "every declaration is already present; nothing to write"
-        } else {
-            "dry run: nothing written; pass dry_run=false to apply"
-        };
+    if dry_run {
+        let note = "dry run: nothing written; pass dry_run=false to apply";
         let body = data(false, json!({"yaml": new_yaml, "note": note}));
+        return Ok(respond(body, started, note));
+    }
+    if added.is_empty() && added_aliases.is_empty() {
+        // Nothing to write — the declarations are already in the file.
+        // `applied` says whether the requested declaration is in effect,
+        // so report what the live index actually serves rather than the
+        // fact that this call wrote nothing. A request that names no
+        // declaration has nothing to be in effect.
+        let requested = !incoming.is_empty() || !incoming_aliases.is_empty();
+        let served = requested && declaration_served(fed, &incoming, &incoming_aliases);
+        let note = if !requested {
+            "no declaration in the request; nothing to write"
+        } else if served {
+            "every declaration is already present and served; nothing to write"
+        } else {
+            "every declaration is already present in the file, but the live index is not serving it"
+        };
+        let body = data(served, json!({"yaml": new_yaml, "note": note}));
         return Ok(respond(body, started, note));
     }
 
@@ -188,11 +203,57 @@ fn run_apply(
     // Apply in-process now, rather than waiting for the file watcher.
     fed.set_contract_config(candidate);
     let rejoin = fed.rejoin_contracts_if_dirty();
+    let served = declaration_served(fed, &incoming, &incoming_aliases);
+    if rejoin.is_err() || !served {
+        // Roll the file and the live config back. Nothing claims success.
+        let restored = restore(&config_path, &original);
+        fed.set_contract_config(current);
+        let _ = fed.rejoin_contracts_if_dirty();
+        let reason = match &rejoin {
+            Err(e) => format!("re-join failed: {e}"),
+            Ok(()) => "the declaration is not served after re-join".to_string(),
+        };
+        // A failed restore must not be reported as a restore: the file on
+        // disk still carries a declaration the federation does not serve.
+        let restored_note = match &restored {
+            Ok(()) => "repos.yaml was restored".to_string(),
+            Err(e) => {
+                format!("repos.yaml could NOT be restored ({e}); it still carries the declaration")
+            }
+        };
+        return Err(fail(
+            "rejoin_failed",
+            format!("{reason}; {restored_note}"),
+            json!({
+                "config_path": config_path.display().to_string(),
+                "restored": restored.is_ok(),
+            }),
+        ));
+    }
+
+    let body = data(
+        true,
+        json!({"backup": crate::federation::contracts::context::backup_path(&config_path).display().to_string()}),
+    );
+    Ok(respond(
+        body,
+        started,
+        "declaration applied and served by the re-joined contract index",
+    ))
+}
+
+/// Whether the live contract index serves the declarations.
+///
+/// The declaration must be *served* before the tool claims success: a
+/// declared provider must show up in the endpoint table, a declared host
+/// alias must be live in the contract config the joiner just ran
+/// against. Either way the contract index must exist.
+fn declaration_served(
+    fed: &FederatedIndex,
+    incoming: &[ProviderDecl],
+    incoming_aliases: &[HostAliasDecl],
+) -> bool {
     let index = fed.contract_index();
-    // The declaration must be *served* before the tool claims success:
-    // a declared provider must show up in the endpoint table, a declared
-    // host alias must be live in the contract config the joiner just ran
-    // against. Either way the contract index must exist.
     let providers_served = incoming.is_empty()
         || index.as_ref().is_some_and(|index| {
             index.endpoints.values().any(|e| {
@@ -214,32 +275,7 @@ fn run_apply(
                     .any(|d| a.host == d.host && a.file == d.file && a.service == d.service)
             })
         });
-    let served = index.is_some() && providers_served && aliases_served;
-    if rejoin.is_err() || !served {
-        // Roll the file and the live config back. Nothing claims success.
-        let _ = restore(&config_path, &original);
-        fed.set_contract_config(current);
-        let _ = fed.rejoin_contracts_if_dirty();
-        let reason = match &rejoin {
-            Err(e) => format!("re-join failed: {e}"),
-            Ok(()) => "the declaration is not served after re-join".to_string(),
-        };
-        return Err(fail(
-            "rejoin_failed",
-            format!("{reason}; repos.yaml was restored"),
-            json!({"config_path": config_path.display().to_string()}),
-        ));
-    }
-
-    let body = data(
-        true,
-        json!({"backup": crate::federation::contracts::context::backup_path(&config_path).display().to_string()}),
-    );
-    Ok(respond(
-        body,
-        started,
-        "declaration applied and served by the re-joined contract index",
-    ))
+    index.is_some() && providers_served && aliases_served
 }
 
 fn respond(data: Value, started: Instant, text: &str) -> ToolOutcome {

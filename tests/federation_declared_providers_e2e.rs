@@ -371,9 +371,12 @@ async fn a_malformed_key_is_refused() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), INITIAL);
 }
 
-/// A second identical declaration adds nothing and writes nothing.
+/// A second identical declaration adds nothing and writes nothing — but
+/// the declaration is still in effect, so the tool reports it as applied.
+/// `applied` answers "is the declaration in effect", not "did this call
+/// write something".
 #[tokio::test]
-async fn reapplying_the_same_declaration_is_a_no_op() {
+async fn reapplying_the_same_declaration_writes_nothing_and_reports_it_in_effect() {
     let (fed, path, _root) = write_fixture(INITIAL).await;
     let args = json!({"snapshot": "live", "dry_run": false,
                       "provides": [{"service": "nat", "key": "http:POST /chat"}]});
@@ -383,8 +386,18 @@ async fn reapplying_the_same_declaration_is_a_no_op() {
     );
     let after_first = std::fs::read_to_string(&path).unwrap();
     let env = call_apply(&fed, args).await;
-    assert_eq!(env["data"]["applied"], json!(false));
+    assert_eq!(env["data"]["applied"], json!(true), "{env}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), after_first);
+}
+
+/// A request that names no declaration has nothing to be in effect: the
+/// tool writes nothing and reports `applied: false`.
+#[tokio::test]
+async fn an_empty_request_declares_nothing() {
+    let (fed, path, _root) = write_fixture(INITIAL).await;
+    let env = call_apply(&fed, json!({"snapshot": "live", "dry_run": false})).await;
+    assert_eq!(env["data"]["applied"], json!(false), "{env}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), INITIAL);
 }
 
 #[tokio::test]
