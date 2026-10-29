@@ -32,15 +32,16 @@ The short version:
   Dispatch lives in `invoke_contract_inventory` inside
   `handler.rs::dispatch_tool_call` (right after `invoke_inventory`).
   **Don't add a new match arm to `dispatch_tool_call`** —
-  `scripts/check-mcp-dispatch-shape.py` rejects it. The 15
+  `scripts/check-mcp-dispatch-shape.py` rejects it. The 16
   contract tools (`list_services`, `get_service`,
   `prepare_snapshot`, `get_snapshot`, `list_service_refs`,
   `list_contracts`, `get_contract`, `list_unresolved`,
-  `check_binding`, `diff_contracts`, `trace_impact`, `trace_flow`,
-  `get_coverage`, `resolve_evidence`, `read_source`) are the full
-  table; follow the existing file split (`services.rs`,
-  `snapshots.rs`, `service_refs.rs`, `contracts.rs`, `analysis.rs`,
-  `trace_flow.rs`, `evidence.rs`) when adding a new tool. Per-tool
+  `check_binding`, `apply_contract_context`, `diff_contracts`,
+  `trace_impact`, `trace_flow`, `get_coverage`, `resolve_evidence`,
+  `read_source`) are the full table; follow the existing file split
+  (`services.rs`, `snapshots.rs`, `service_refs.rs`, `contracts.rs`,
+  `analysis.rs`, `trace_flow.rs`, `evidence.rs`, `context.rs`) when
+  adding a new tool. Per-tool
   JSON Schemas live at
   `contract_tools/schemas/<tool>.{in,out}.json` and are loaded
   with `include_str!` from `CONTRACT_TOOL_DEFS` in

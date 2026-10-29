@@ -34,13 +34,15 @@ All notable changes to LAIN are documented here. Versions follow
   other target; a dynamic path resolves to `no_route_in_service` with the
   service attached, not to a bind.
 - **`apply_contract_context` writes contract context at runtime.** The MCP
-  tool takes `provides` and `host_aliases` (or a hand-written binding) and
-  applies them to the federation's `repos.yaml` without a restart. Dry-run by
-  default: it returns the YAML it would write and touches nothing. With
-  `dry_run=false` it validates the whole result, writes atomically with a
-  `.bak`, re-joins the contract index, and reports `applied: true` only when
-  the declaration is served — a failed re-join restores the file. A write
-  that loses a race with another writer is refused.
+  tool takes `provides` and `host_aliases` and applies them to the
+  federation's `repos.yaml` without a restart. A hand-written `bindings:`
+  entry still comes from `check_binding`, which emits the YAML for an
+  operator to paste. Dry-run by default: it returns the YAML it would write
+  and touches nothing. With `dry_run=false` it validates the whole result,
+  writes atomically with a `.bak`, re-joins the contract index, and reports
+  `applied: true` only when the declaration is served — a failed re-join
+  restores the file, and a restore that fails is reported as such rather
+  than claimed. A write that loses a race with another writer is refused.
 
 - **GraphQL provider -> resolver edge** (`CallsGraphql`, appended last in
   `EdgeType` so stored discriminants are unchanged). The resolver-link sensor

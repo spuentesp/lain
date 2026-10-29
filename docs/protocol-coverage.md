@@ -73,7 +73,7 @@ each kind and are backlog, not silence.
   operator sees a `Coverage.unresolved_refs` entry they can act
   on (inline the schema or onboard the foreign file).
 - **Status.** Complete: detected, joined, confirmable, visible.
-- **Measured on real repositories** (2026-10-29, Lain `6afd2894`,
+- **Measured on real repositories** (2026-10-29, Lain `559ab953`,
   `scripts/eval/nat-http-contract-smoke.sh`, NVIDIA NeMo-Agent-Toolkit,
   -UI and -Examples, three repos `ready`): 12 HTTP endpoints; 1 bound
   consumer, a test client calling the declared `http:POST /chat/stream`;
