@@ -16,6 +16,63 @@ use crate::federation::contracts::config::{HostAliasDecl, ProviderDecl};
 /// by the byte comparison in [`write_guarded`].
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+/// The sequence a declaration of `section` belongs in.
+///
+/// The loader prefers the nested `contract:` block for a section it
+/// defines and the top-level section otherwise, so a declaration has
+/// to land where the loader will read it. A write into the other
+/// place would be reported as applied and then dropped on the next
+/// start.
+fn declaration_sequence<'a>(
+    doc: &'a mut serde_yaml::Value,
+    section: &str,
+) -> Result<&'a mut Vec<serde_yaml::Value>, LainError> {
+    let mapping = doc
+        .as_mapping_mut()
+        .ok_or_else(|| LainError::Config("repos.yaml is not a YAML mapping".to_string()))?;
+    let contract_key = serde_yaml::Value::String("contract".to_string());
+    let section_key = serde_yaml::Value::String(section.to_string());
+    let has_contract_block = mapping.contains_key(&contract_key);
+    let nested_len = mapping
+        .get_mut(&contract_key)
+        .and_then(|v| v.as_mapping_mut())
+        .and_then(|m| m.get_mut(&section_key))
+        .and_then(|v| v.as_sequence_mut())
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let top_len = mapping
+        .get_mut(&section_key)
+        .and_then(|v| v.as_sequence_mut())
+        .map(|s| s.len())
+        .unwrap_or(0);
+    // The nested section wins when it holds declarations; the
+    // top-level one wins when it does and the nested block does not.
+    // With neither, a file that has a `contract:` block takes the
+    // nested section — the block is the file's contract layout.
+    let use_nested = nested_len > 0 || (has_contract_block && top_len == 0);
+    if use_nested {
+        let nested = mapping
+            .get_mut(&contract_key)
+            .and_then(|v| v.as_mapping_mut())
+            .ok_or_else(|| LainError::Config("contract: must be a mapping".to_string()))?;
+        if !nested.contains_key(&section_key) {
+            nested.insert(section_key.clone(), serde_yaml::Value::Sequence(Vec::new()));
+        }
+        nested
+            .get_mut(&section_key)
+            .and_then(|v| v.as_sequence_mut())
+            .ok_or_else(|| LainError::Config(format!("contract.{section}: must be a list")))
+    } else {
+        if !mapping.contains_key(&section_key) {
+            mapping.insert(section_key.clone(), serde_yaml::Value::Sequence(Vec::new()));
+        }
+        mapping
+            .get_mut(&section_key)
+            .and_then(|v| v.as_sequence_mut())
+            .ok_or_else(|| LainError::Config(format!("{section}: must be a list")))
+    }
+}
+
 /// Append the declarations `incoming` to the `provides` sequence of a
 /// `repos.yaml` document, skipping any already present (same service and
 /// key). Returns the declarations actually added. Other sections are left
@@ -24,18 +81,7 @@ pub fn merge_provides(
     doc: &mut serde_yaml::Value,
     incoming: &[ProviderDecl],
 ) -> Result<Vec<ProviderDecl>, LainError> {
-    let mapping = doc
-        .as_mapping_mut()
-        .ok_or_else(|| LainError::Config("repos.yaml is not a YAML mapping".to_string()))?;
-    let key = serde_yaml::Value::String("provides".to_string());
-    if !mapping.contains_key(&key) {
-        mapping.insert(key.clone(), serde_yaml::Value::Sequence(Vec::new()));
-    }
-    let sequence = mapping
-        .get_mut(&key)
-        .and_then(|v| v.as_sequence_mut())
-        .ok_or_else(|| LainError::Config("provides: must be a list".to_string()))?;
-
+    let sequence = declaration_sequence(doc, "provides")?;
     let existing: Vec<ProviderDecl> = sequence
         .iter()
         .map(|v| {
@@ -68,18 +114,7 @@ pub fn merge_host_aliases(
     doc: &mut serde_yaml::Value,
     incoming: &[HostAliasDecl],
 ) -> Result<Vec<HostAliasDecl>, LainError> {
-    let mapping = doc
-        .as_mapping_mut()
-        .ok_or_else(|| LainError::Config("repos.yaml is not a YAML mapping".to_string()))?;
-    let key = serde_yaml::Value::String("host_aliases".to_string());
-    if !mapping.contains_key(&key) {
-        mapping.insert(key.clone(), serde_yaml::Value::Sequence(Vec::new()));
-    }
-    let sequence = mapping
-        .get_mut(&key)
-        .and_then(|v| v.as_sequence_mut())
-        .ok_or_else(|| LainError::Config("host_aliases: must be a list".to_string()))?;
-
+    let sequence = declaration_sequence(doc, "host_aliases")?;
     let existing: Vec<HostAliasDecl> = sequence
         .iter()
         .map(|v| {
@@ -196,6 +231,42 @@ mod tests {
         let again = merge_host_aliases(&mut d, std::slice::from_ref(&alias)).unwrap();
         assert!(again.is_empty());
         assert_eq!(d["host_aliases"].as_sequence().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_into_nested_contract_block_when_active() {
+        let mut d = doc("\
+repos:
+  - id: nat
+contract:
+  services:
+    - name: nat
+      repo: nat
+  provides:
+    - service: nat
+      key: \"http:POST /chat\"
+");
+        let added = merge_provides(&mut d, &[decl("nat", "http:POST /chat/stream")]).unwrap();
+        assert_eq!(added.len(), 1);
+        assert!(
+            d.get("provides").is_none(),
+            "must not write a separate top-level provides list when contract.provides is active"
+        );
+        assert_eq!(d["contract"]["provides"].as_sequence().unwrap().len(), 2);
+
+        let alias = HostAliasDecl {
+            host: Some("UPSTREAM_HTTP_ORIGIN".into()),
+            file: None,
+            service: "nat".into(),
+            source: Some("agent".into()),
+        };
+        let added_aliases = merge_host_aliases(&mut d, std::slice::from_ref(&alias)).unwrap();
+        assert_eq!(added_aliases.len(), 1);
+        assert!(d.get("host_aliases").is_none());
+        assert_eq!(
+            d["contract"]["host_aliases"].as_sequence().unwrap().len(),
+            1
+        );
     }
 
     #[test]

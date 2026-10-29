@@ -92,15 +92,26 @@ pub struct HttpRoute {
 fn extract_routes(pattern: &RoutePattern, content: &str, file_path: &str) -> Vec<HttpRoute> {
     const HANDLER_LOOKAHEAD: usize = 6;
 
+    let file_derived_path = if let Some(source) = pattern.source() {
+        let Some(p) = route_path_from_source(file_path, source) else {
+            return Vec::new();
+        };
+        p
+    } else {
+        None
+    };
+
     let lines: Vec<&str> = content.lines().collect();
     let mut routes = Vec::new();
 
     for (idx, line) in lines.iter().enumerate() {
-        let Some(path) = pattern
-            .path_regex()
-            .captures(line)
-            .and_then(|c| c.get(1))
+        let Some(caps) = pattern.path_regex().captures(line) else {
+            continue;
+        };
+        let Some(path) = caps
+            .get(1)
             .map(|m| m.as_str().to_string())
+            .or_else(|| file_derived_path.clone())
         else {
             continue;
         };
@@ -279,51 +290,70 @@ pub fn nextjs_app_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute
     routes
 }
 
+/// Check `file_path` against a pattern's `source` filter, and derive a
+/// file-based route path when `source` is a directory prefix (ends with `/`).
+///
+/// - For a file filter like `config/routes.rb`, returns `Some(None)` when
+///   `file_path` matches and `None` otherwise.
+/// - For a directory prefix like `pages/api/`, returns `Some(Some(url_path))`
+///   where `pages/api/x/y.ts` maps to `/api/x/y` and `pages/api/x/index.ts`
+///   maps to `/api/x` (reusing [`nextjs_segment`] for dynamic segments).
+fn route_path_from_source(file_path: &str, source: &str) -> Option<Option<String>> {
+    let normalized = file_path.replace('\\', "/");
+    let source = source.trim_start_matches('/');
+    if source.is_empty() {
+        return None;
+    }
+    let slashed = format!("/{source}");
+    if source.ends_with('/') {
+        let rest = normalized
+            .rsplit_once(&slashed)
+            .map(|(_, r)| r)
+            .or_else(|| normalized.strip_prefix(source))?;
+        let (stem, _ext) = rest.rsplit_once('.')?;
+        let stem = if stem == "index" {
+            ""
+        } else {
+            stem.strip_suffix("/index").unwrap_or(stem)
+        };
+        let trimmed = source.trim_end_matches('/');
+        let base_seg = trimmed.rsplit_once('/').map(|(_, b)| b).unwrap_or(trimmed);
+        let url_path = std::iter::once(format!("/{base_seg}"))
+            .chain(
+                stem.split('/')
+                    .filter(|seg| !seg.is_empty())
+                    .map(nextjs_segment),
+            )
+            .collect::<Vec<_>>()
+            .join("/");
+        Some(Some(url_path))
+    } else if normalized == source || normalized.ends_with(&slashed) {
+        Some(None)
+    } else {
+        None
+    }
+}
+
 /// Next.js pages-router API routes: `pages/api/x/y.ts` serves `/api/x/y`
 /// and `pages/api/x/index.ts` serves `/api/x`. The file's default export is
 /// the handler; a module under `pages/api` without one is a helper, not an
 /// endpoint. Dynamic segments reuse the App Router's `nextjs_segment`.
+///
+/// Configured via the `nextjs-pages-route` pattern in `frameworks.yaml`
+/// (with `source`, `path_regex`, and `handler_regex` overrideable under
+/// `<repo>/.lain/patterns/`).
 pub fn nextjs_pages_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute> {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    let rest = normalized
-        .rsplit_once("/pages/api/")
-        .map(|(_, r)| r)
-        .or_else(|| normalized.strip_prefix("pages/api/"));
-    let Some(rest) = rest else {
-        return Vec::new();
-    };
-    let Some((stem, ext)) = rest.rsplit_once('.') else {
-        return Vec::new();
-    };
-    if !matches!(ext, "ts" | "tsx" | "js" | "jsx") {
-        return Vec::new();
-    }
-    let Some(line) = content
-        .lines()
-        .position(|l| l.trim_start().starts_with("export default"))
+    let Some(pattern) = get_route_patterns(Patterns::patterns()).get("tsjs-nextjs-pages-route")
     else {
         return Vec::new();
     };
-    let stem = if stem == "index" {
-        ""
-    } else {
-        stem.strip_suffix("/index").unwrap_or(stem)
-    };
-    let url_path = std::iter::once("/api".to_string())
-        .chain(
-            stem.split('/')
-                .filter(|seg| !seg.is_empty())
-                .map(nextjs_segment),
-        )
-        .collect::<Vec<_>>()
-        .join("/");
-    vec![HttpRoute {
-        method: HttpMethod::Any,
-        path: url_path,
-        handler_path: path.to_string_lossy().to_string(),
-        handler_name: "default".to_string(),
-        line: line as u32 + 1,
-    }]
+    if !route_prefixes(path)
+        .iter()
+        .any(|p| "tsjs-nextjs-pages-route".starts_with(p))
+    {
+        return Vec::new();
+    }
+    extract_routes(pattern, content, &path.to_string_lossy())
 }
 
 /// The directory between `app/` and the `route.<ext>` file, or `None` for any
@@ -375,7 +405,6 @@ fn scan_file_for_routes_with_queries(
     queries: &RouteQueries,
 ) -> Vec<HttpRoute> {
     let mut routes = nextjs_app_routes(path, content);
-    routes.extend(nextjs_pages_routes(path, content));
     routes.extend(decorator_routes_with_queries(
         path, content, patterns, queries,
     ));
@@ -449,6 +478,12 @@ fn decorator_routes_with_queries(
         // the regex missed. An empty body (just a comment line)
         // skips tree-sitter entirely. The pre-parsed tree is
         // reused — `parse_for_lang` ran exactly once above.
+        if pattern
+            .source()
+            .is_some_and(|src| route_path_from_source(&path.to_string_lossy(), src).is_none())
+        {
+            continue;
+        }
         if let Some(ts) =
             try_treesitter_extract(patterns, key, content, path, parsed_tree.as_ref(), queries)
         {
@@ -1095,6 +1130,31 @@ response.headers.set('x-session-id', sessionId);
             Patterns::patterns()
         )
         .is_empty());
+    }
+
+    /// A repository can override or disable `nextjs-pages-route` through
+    /// `.lain/patterns/`.
+    #[test]
+    fn nextjs_pages_route_is_configurable_through_patterns() {
+        let root = tempfile::tempdir().unwrap();
+        let overrides = root.path().join(".lain/patterns");
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(
+            overrides.join("disable-nextjs-pages.yaml"),
+            "languages:\n  tsjs:\n    - id: nextjs-pages-route\n      kind: route\n",
+        )
+        .unwrap();
+        let patterns = Patterns::with_overrides(root.path()).unwrap();
+        let src = "export default function handler(req, res) {}\n";
+        let r = scan_file_for_routes(
+            std::path::Path::new("pages/api/mcp/clients.ts"),
+            src,
+            &patterns,
+        );
+        assert!(
+            r.is_empty(),
+            "overriding nextjs-pages-route without a path_regex disables it: {r:?}"
+        );
     }
 
     /// A real Express route still is one after the verb whitelist.

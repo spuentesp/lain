@@ -54,6 +54,7 @@ fn is_contract_block_default(c: &ContractFederationConfig) -> bool {
         && c.generic_keys.is_empty()
         && c.schemas.is_empty()
         && c.bindings.is_empty()
+        && c.databases.is_empty()
         && c.provides.is_empty()
         && c.host_aliases.is_empty()
 }
@@ -211,6 +212,9 @@ impl FederationConfig {
             }
             if cfg.contract.bindings.is_empty() {
                 cfg.contract.bindings = top_level_contract.bindings;
+            }
+            if cfg.contract.databases.is_empty() {
+                cfg.contract.databases = top_level_contract.databases;
             }
             if cfg.contract.provides.is_empty() {
                 cfg.contract.provides = top_level_contract.provides;

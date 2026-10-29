@@ -111,31 +111,31 @@ fn run_apply(
         )
     })?;
 
-    // Validate the whole result before anything is written. The candidate is
-    // the live contract config plus the new declarations.
+    // The live contract config, kept only for the rollback.
     let current: ContractFederationConfig = fed
         .contract_config()
         .map(|c| (*c).clone())
         .unwrap_or_default();
-    let mut candidate = current.clone();
-    for decl in &incoming {
-        if !candidate
-            .provides
-            .iter()
-            .any(|p| p.service == decl.service && p.key == decl.key)
-        {
-            candidate.provides.push(decl.clone());
-        }
-    }
-    for alias in &incoming_aliases {
-        if !candidate
-            .host_aliases
-            .iter()
-            .any(|a| a.host == alias.host && a.file == alias.file && a.service == alias.service)
-        {
-            candidate.host_aliases.push(alias.clone());
-        }
-    }
+
+    let added = merge_provides(&mut doc, &incoming)
+        .map_err(|e| fail("invalid_config", e.to_string(), json!({})))?;
+    let added_aliases = merge_host_aliases(&mut doc, &incoming_aliases)
+        .map_err(|e| fail("invalid_config", e.to_string(), json!({})))?;
+    let new_yaml = serde_yaml::to_string(&doc)
+        .map_err(|e| fail("internal", format!("serialize repos.yaml: {e}"), json!({})))?;
+
+    // Validate the configuration that is actually written — the merged
+    // document — not the live one. An operator may have edited the file
+    // since the last reload, and validating a different configuration
+    // from the one written would let an invalid declaration stand on
+    // disk while the tool reported success.
+    let candidate = ContractFederationConfig::load_from_str(&new_yaml).map_err(|e| {
+        fail(
+            "invalid_config",
+            format!("the merged configuration does not parse: {e}"),
+            json!({"detail": e.to_string()}),
+        )
+    })?;
     let repo_ids: Vec<String> = fed
         .list_repos()
         .into_iter()
@@ -148,13 +148,6 @@ fn run_apply(
             json!({"detail": e.to_string()}),
         )
     })?;
-
-    let added = merge_provides(&mut doc, &incoming)
-        .map_err(|e| fail("invalid_config", e.to_string(), json!({})))?;
-    let added_aliases = merge_host_aliases(&mut doc, &incoming_aliases)
-        .map_err(|e| fail("invalid_config", e.to_string(), json!({})))?;
-    let new_yaml = serde_yaml::to_string(&doc)
-        .map_err(|e| fail("internal", format!("serialize repos.yaml: {e}"), json!({})))?;
 
     let data = |applied: bool, extra: Value| {
         let mut base = json!({

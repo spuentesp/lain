@@ -242,6 +242,11 @@ languages:
       verbs: [get, post, put, delete, patch, head, options]
       path_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`]([^"''`]+)["''`]'
       handler_regex: '\.(?:get|post|put|delete|patch|head|options)\s*\(\s*["''`][^"''`]+["''`]\s*,\s*(?:async\s*)?(\w+)'
+    - id: nextjs-pages-route
+      kind: route
+      source: 'pages/api/'
+      path_regex: '^\s*export\s+default\b'
+      handler_regex: '^\s*export\s+(default)\b'
     - id: fetch-outbound
       kind: outbound
       lib_match: '^(fetch|globalThis\.fetch)$'

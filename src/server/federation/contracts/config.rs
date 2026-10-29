@@ -247,6 +247,7 @@ impl ContractFederationConfig {
             None => return Ok(Self::default()),
         };
         let mut out = Self::default();
+        let mut nested: Option<Self> = None;
         for (k, v) in mapping {
             let key_str = match k.as_str() {
                 Some(s) => s,
@@ -290,32 +291,53 @@ impl ContractFederationConfig {
                         .map_err(|e| LainError::Config(format!("host_aliases: {e}")))?
                 }
                 "contract" => {
-                    let nested: ContractFederationConfig = serde_yaml::from_value(v.clone())
-                        .map_err(|e| LainError::Config(format!("contract: {e}")))?;
-                    if out.services.is_empty() {
-                        out.services = nested.services;
-                    }
-                    if out.http_clients.is_empty() {
-                        out.http_clients = nested.http_clients;
-                    }
-                    if out.generic_keys.is_empty() {
-                        out.generic_keys = nested.generic_keys;
-                    }
-                    if out.schemas.is_empty() {
-                        out.schemas = nested.schemas;
-                    }
-                    if out.bindings.is_empty() {
-                        out.bindings = nested.bindings;
-                    }
-                    if out.databases.is_empty() {
-                        out.databases = nested.databases;
-                    }
+                    nested = Some(
+                        serde_yaml::from_value(v.clone())
+                            .map_err(|e| LainError::Config(format!("contract: {e}")))?,
+                    );
                 }
                 // Other top-level keys are the existing
                 // `FederationConfig`'s. They're handled by the
                 // federation loader, not by us; here we just skip
                 // them so a single load can serve both.
                 _ => {}
+            }
+        }
+        // The nested `contract:` block wins for every section it
+        // defines; the top-level section fills one it leaves empty.
+        // The precedence does not depend on the order the keys appear
+        // in the file, and it matches `FederationConfig::load_from_str`
+        // — the two loaders must agree, or a hot reload would install
+        // a different configuration than the one the server started
+        // with.
+        if let Some(nested) = nested {
+            if !nested.services.is_empty() {
+                out.services = nested.services;
+            }
+            if !nested.http_clients.is_empty() {
+                out.http_clients = nested.http_clients;
+            }
+            if !nested.generic_keys.is_empty() {
+                out.generic_keys = nested.generic_keys;
+            }
+            if !nested.schemas.is_empty() {
+                out.schemas = nested.schemas;
+            }
+            if !nested.bindings.is_empty() {
+                out.bindings = nested.bindings;
+            }
+            if !nested.databases.is_empty() {
+                out.databases = nested.databases;
+            }
+            // The declared sections are where a runtime declaration
+            // lands. Without them here a hot reload would install a
+            // config with no declared providers and no host aliases,
+            // and silently drop what the operator declared.
+            if !nested.provides.is_empty() {
+                out.provides = nested.provides;
+            }
+            if !nested.host_aliases.is_empty() {
+                out.host_aliases = nested.host_aliases;
             }
         }
         Ok(out)
@@ -853,6 +875,32 @@ mod tests {
         assert_eq!(cfg.provides.len(), 1);
         assert_eq!(cfg.provides[0].key, "http:POST /chat/stream");
         assert_eq!(cfg.provides[0].source.as_deref(), Some("nat config.yaml"));
+    }
+
+    /// A nested `contract:` block preserves `provides` and `host_aliases` in
+    /// the contract-only loader (used on hot reload), regardless of key order.
+    #[test]
+    fn nested_contract_block_preserves_provides_and_host_aliases() {
+        let yaml = "\
+contract:
+  provides:
+    - service: alpha-api
+      key: \"http:POST /chat/stream\"
+  host_aliases:
+    - host: UPSTREAM_HTTP_ORIGIN
+      service: alpha-api
+provides:
+  - service: alpha-api
+    key: \"http:GET /top-level-ignored\"
+";
+        let cfg = ContractFederationConfig::load_from_str(yaml).expect("parse");
+        assert_eq!(cfg.provides.len(), 1);
+        assert_eq!(cfg.provides[0].key, "http:POST /chat/stream");
+        assert_eq!(cfg.host_aliases.len(), 1);
+        assert_eq!(
+            cfg.host_aliases[0].host.as_deref(),
+            Some("UPSTREAM_HTTP_ORIGIN")
+        );
     }
 
     /// Adding the section must not move the hash of configs that never use it.

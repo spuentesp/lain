@@ -394,6 +394,36 @@ async fn snapshots_other_than_live_are_refused() {
     assert_eq!(env["error"]["code"], json!("invalid_argument"), "{env}");
 }
 
+/// If `repos.yaml` on disk was edited to include an invalid service declaration
+/// before the watcher reloaded it, `apply_contract_context` validates the merged
+/// on-disk document rather than the stale in-memory config, and refuses to write.
+#[tokio::test]
+async fn apply_validates_the_merged_document_on_disk() {
+    let edited = "\
+repos:
+  - id: nat
+    source: {type: workspace_dir, path: /nowhere}
+services:
+  - name: nat
+    repo: nat
+  - name: broken
+    repo: does-not-exist
+";
+    let (fed, path, _root) = write_fixture(edited).await;
+    let env = call_apply(
+        &fed,
+        json!({"snapshot": "live", "dry_run": false,
+               "provides": [{"service": "nat", "key": "http:POST /chat"}]}),
+    )
+    .await;
+    assert_eq!(env["error"]["code"], json!("invalid_argument"), "{env}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        edited,
+        "an invalid on-disk config must not be overwritten"
+    );
+}
+
 /// The NAT UI proxy dials `${UPSTREAM_HTTP_ORIGIN}/chat`. Static analysis sees
 /// the identifier, not the value it is built from. A declared host alias says
 /// which service that expression dials, so the call resolves to that service
