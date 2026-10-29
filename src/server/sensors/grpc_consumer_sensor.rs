@@ -171,7 +171,9 @@ pub fn detect_stub_calls(content: &str, ext: &str, graph_path: &str) -> Vec<Grpc
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ChannelTarget {
     Literal(String),
-    Env(String),
+    /// Candidate env vars the dial address may come from. The joiner
+    /// keeps the one a service declares in `services[].env`.
+    Env(Vec<String>),
 }
 
 /// The channel target for the file: a literal wins (the literal
@@ -214,7 +216,7 @@ fn collect_env_locals(content: &str) -> BTreeMap<String, String> {
 /// The channel constructor's first argument is an env var when it
 /// *is* an env call (`ManagedChannelBuilder.forAddress(System.getenv("X"), …)`)
 /// or a bare identifier bound from one in the same file.
-fn detect_channel_env(content: &str, ext: &str) -> Option<String> {
+fn detect_channel_env(content: &str, ext: &str) -> Option<Vec<String>> {
     let ctor = match ext {
         "go" => "grpc.NewClient(",
         "py" => "grpc.insecure_channel(",
@@ -231,46 +233,24 @@ fn detect_channel_env(content: &str, ext: &str) -> Option<String> {
         // Direct env call as the argument (Java). The shared
         // grammar cuts the name at the call's own `)`.
         if let Some(var) = crate::server::sensors::util::host_env_name(rest) {
-            return Some(var.to_string());
+            return Some(vec![var.to_string()]);
         }
         // Bare identifier argument — resolve against the file's
         // env-get locals.
         let arg = rest.split([',', ')']).next().unwrap_or("").trim();
         if !arg.is_empty() && arg.chars().all(|c| c.is_alphanumeric() || c == '_') {
             if let Some(var) = env_locals.get(arg) {
-                return Some(var.clone());
+                return Some(vec![var.clone()]);
             }
-            // The argument is a parameter, not an env-get local (an
-            // SDK that takes the gateway address in its constructor).
-            // Fall back to the file's gateway-shaped env read.
-            return sole_file_env_var(&env_locals);
+            // The argument is a parameter, not an env-get local (an SDK
+            // that takes the gateway address in its constructor). Every
+            // env var the file reads is a candidate; the joiner keeps
+            // the one a service declares in `services[].env`.
+            let vars: BTreeSet<String> = env_locals.values().cloned().collect();
+            return (!vars.is_empty()).then(|| vars.into_iter().collect());
         }
     }
     None
-}
-
-/// The env var a file most plausibly uses as its gateway address, for a
-/// channel whose address arrives as a constructor parameter. One distinct
-/// env var is taken as is. With several, only address-shaped names
-/// (`GATEWAY`, `HOST`, `URL`, `ADDR`, `ENDPOINT`, `SERVER`) count, and the
-/// sensor refuses unless exactly one of those remains. This is a name
-/// heuristic: the var names a gateway, which may resolve to an address
-/// elsewhere, so the binding is service-level, not a verified dial address.
-fn sole_file_env_var(env_locals: &BTreeMap<String, String>) -> Option<String> {
-    const ADDRESS_SHAPED: [&str; 6] = ["GATEWAY", "HOST", "URL", "ADDR", "ENDPOINT", "SERVER"];
-    let vars: BTreeSet<&String> = env_locals.values().collect();
-    if vars.len() == 1 {
-        return vars.into_iter().next().cloned();
-    }
-    let mut address = vars.into_iter().filter(|v| {
-        ADDRESS_SHAPED
-            .iter()
-            .any(|shape| v.to_ascii_uppercase().contains(shape))
-    });
-    match (address.next(), address.next()) {
-        (Some(only), None) => Some(only.clone()),
-        _ => None,
-    }
 }
 
 fn detect_channel_host(content: &str, ext: &str) -> Option<String> {
@@ -576,7 +556,7 @@ fn host_parts_from_channel(channel: &Option<ChannelTarget>) -> (Option<String>, 
             };
             (Some(host.clone()), host_part)
         }
-        Some(ChannelTarget::Env(var)) => (None, HostPart::Env(vec![var.clone()])),
+        Some(ChannelTarget::Env(vars)) => (None, HostPart::Env(vars.clone())),
         None => (None, HostPart::None),
     }
 }
@@ -726,10 +706,11 @@ class SandboxClient:
             HostPart::Env(ref vars) if vars == &["OPENSHELL_GATEWAY".to_string()]));
     }
 
-    /// The real OpenShell `sandbox.py` reads two env vars, one of them
-    /// `XDG_CONFIG_HOME`. The gateway-shaped one is the channel's source.
+    /// The sensor reports every env var the file reads as a candidate
+    /// for the dial address, sorted. The joiner picks the one a service
+    /// declares in `services[].env`.
     #[test]
-    fn python_stub_call_prefers_the_gateway_env_among_two_reads() {
+    fn python_stub_call_lists_every_file_env_candidate() {
         let src = "\
 import os
 import grpc
@@ -753,56 +734,10 @@ class SandboxClient:
 ";
         let calls = detect_stub_calls(src, "py", "sandbox.py");
         assert_eq!(calls.len(), 1);
-        assert!(matches!(&calls[0].channel_host_part,
-            HostPart::Env(ref vars) if vars == &["OPENSHELL_GATEWAY".to_string()]));
-    }
-
-    /// Two env reads that both look like addresses: the channel must not guess.
-    #[test]
-    fn python_stub_call_with_two_address_env_reads_stays_unknown() {
-        let src = "\
-import os
-import grpc
-import openshell_pb2_grpc
-
-a = os.environ.get(\"OPENSHELL_GATEWAY\")
-b = os.environ.get(\"OPENSHELL_ENDPOINT\")
-
-class SandboxClient:
-    def __init__(self, endpoint):
-        self._channel = grpc.insecure_channel(endpoint)
-        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
-
-    def health(self):
-        return self._stub.Health(request)
-";
-        let calls = detect_stub_calls(src, "py", "sandbox.py");
-        assert_eq!(calls.len(), 1);
-        assert!(matches!(calls[0].channel_host_part, HostPart::None));
-    }
-
-    /// Two env reads, neither address-shaped: the channel must not guess.
-    #[test]
-    fn python_stub_call_with_two_non_address_env_reads_stays_unknown() {
-        let src = "\
-import os
-import grpc
-import openshell_pb2_grpc
-
-a = os.environ.get(\"XDG_CONFIG_HOME\")
-b = os.environ.get(\"HOME\")
-
-class SandboxClient:
-    def __init__(self, endpoint):
-        self._channel = grpc.insecure_channel(endpoint)
-        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
-
-    def health(self):
-        return self._stub.Health(request)
-";
-        let calls = detect_stub_calls(src, "py", "sandbox.py");
-        assert_eq!(calls.len(), 1);
-        assert!(matches!(calls[0].channel_host_part, HostPart::None));
+        assert_eq!(
+            calls[0].channel_host_part,
+            HostPart::Env(vec!["OPENSHELL_GATEWAY".into(), "XDG_CONFIG_HOME".into()])
+        );
     }
 
     /// Two locals reading the same variable are still one env read.

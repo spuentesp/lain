@@ -225,3 +225,73 @@ async fn service_paths_do_not_claim_files_outside_their_prefix() {
         "the gateway's proto/ prefix must not own the python SDK file"
     );
 }
+
+/// The real OpenShell `sandbox.py` reads two env vars. Only one is
+/// declared in `services[].env`, so the call binds through that one.
+#[tokio::test]
+async fn a_declared_env_candidate_picks_the_dial_var_among_two_reads() {
+    let sdk = SDK.replace(
+        "env_gateway = os.environ.get(\"OPENSHELL_GATEWAY\")\n",
+        "env_gateway = os.environ.get(\"OPENSHELL_GATEWAY\")\nconfigured = os.environ.get(\"XDG_CONFIG_HOME\")\n",
+    );
+    let index = join_repo(
+        &[
+            ("proto/openshell.proto", PROTO),
+            ("python/openshell/sandbox.py", &sdk),
+        ],
+        gateway_and_sdk(),
+    )
+    .await;
+    let resolutions: Vec<&ConsumerResolution> = index.consumers.values().flatten().collect();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "expected one consumer, got {resolutions:?}"
+    );
+    assert!(
+        matches!(resolutions[0].target, Some(ConsumerTarget::Binds { .. })),
+        "expected a bind through the declared env var, got {:?}",
+        resolutions[0].target
+    );
+}
+
+/// When two declared env candidates each lead to a service that exposes
+/// the same provider, the joiner cannot tell which one dials the
+/// gateway, so the call stays unbound.
+#[tokio::test]
+async fn two_declared_env_candidates_stay_unbound() {
+    let sdk = SDK.replace(
+        "env_gateway = os.environ.get(\"OPENSHELL_GATEWAY\")\n",
+        "env_gateway = os.environ.get(\"OPENSHELL_GATEWAY\")\nconfigured = os.environ.get(\"XDG_CONFIG_HOME\")\n",
+    );
+    let services = vec![
+        service(
+            "openshell-gateway",
+            &["proto"],
+            &["localhost"],
+            &["OPENSHELL_GATEWAY"],
+        ),
+        service("openshell-mirror", &["mirror"], &[], &["XDG_CONFIG_HOME"]),
+        service("openshell-sdk", &["python"], &[], &[]),
+    ];
+    let index = join_repo(
+        &[
+            ("proto/openshell.proto", PROTO),
+            ("mirror/openshell.proto", PROTO),
+            ("python/openshell/sandbox.py", &sdk),
+        ],
+        services,
+    )
+    .await;
+    let resolutions: Vec<&ConsumerResolution> = index.consumers.values().flatten().collect();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "expected one consumer, got {resolutions:?}"
+    );
+    assert!(
+        !matches!(resolutions[0].target, Some(ConsumerTarget::Binds { .. })),
+        "two declared candidates must not bind, got {:?}",
+        resolutions[0].target
+    );
+}

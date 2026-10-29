@@ -120,6 +120,13 @@ where
             reason: UnresolvedReason::RpcStubUnknown,
             target_service: None,
         }),
+        // Several candidate services expose the method: the stub's
+        // dial target cannot pick one, so the call must not bind to
+        // all of them.
+        (AmbiguityPolicy::RpcStubUnknown, n) if n > 1 => Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::RpcStubUnknown,
+            target_service: None,
+        }),
         (AmbiguityPolicy::GraphqlNoOp { route_owner }, n) if n != 1 => {
             Some(ConsumerTarget::Unresolved {
                 reason: UnresolvedReason::GraphqlNoOp,
@@ -327,7 +334,25 @@ pub fn resolve_rpc_consumer(
             return rpc_stub_unknown(call_id, own_service);
         }
         HostPart::Env(vars) => {
-            // services[].env dispatch — the same match
+            // A file that reads several env vars may dial through
+            // only one of them (an SDK reads `XDG_CONFIG_HOME` and its
+            // gateway var). When exactly one candidate is declared in
+            // `services[].env`, that is the dial var. Declared
+            // candidates are the config's answer, not a name guess.
+            let declared: Vec<&String> = vars
+                .iter()
+                .filter(|v| {
+                    config
+                        .services
+                        .iter()
+                        .any(|s| s.env.iter().any(|e| e == *v))
+                })
+                .collect();
+            let vars: Vec<String> = match declared.as_slice() {
+                [only] => vec![(*only).clone()],
+                _ => vars.clone(),
+            };
+            // services[].env dispatch: the same match
             // `url_resolution::target_service_from_env` performs
             // for HTTP consumers. Every var must be declared by
             // some service, or the whole consumer is
@@ -338,7 +363,7 @@ pub fn resolve_rpc_consumer(
             for var in vars {
                 let mut declared = false;
                 for s in &config.services {
-                    if s.env.iter().any(|e| e == var) {
+                    if s.env.iter().any(|e| e == &var) {
                         declared = true;
                         let name = ServiceName(s.name.clone());
                         if !svcs.contains(&name) {
