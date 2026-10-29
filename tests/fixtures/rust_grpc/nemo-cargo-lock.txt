@@ -1,0 +1,7 @@
+// Exact upstream excerpts. See provenance.json; not a compilable crate.
+
+// Upstream Cargo.lock:1600-1603
+[[package]]
+name = "openshell-sdk"
+version = "0.0.0"
+source = "git+https://github.com/NVIDIA/OpenShell?rev=6648bd0c290efbc41ba131ee9831ee45cd431f94#6648bd0c290efbc41ba131ee9831ee45cd431f94"

@@ -50,6 +50,15 @@ use crate::server::sensors::util::compose_service_name;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+/// Rust discovery is deliberately separate from `RpcConsumer` emission.
+/// It supplies syntactic candidates, without claiming semantic binding.
+#[path = "grpc_consumer_sensor/rust.rs"]
+mod rust;
+pub use rust::{
+    detect_rust_grpc_candidates, discover_rust_grpc_candidates, RustGrpcCandidate, RustGrpcConfig,
+    RustGrpcEvidence, RustGrpcSite,
+};
+
 // ─── Public sensor shape ───────────────────────────────────────────────
 
 /// One detected stub call site.
