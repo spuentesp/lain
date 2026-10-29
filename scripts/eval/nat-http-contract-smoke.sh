@@ -36,12 +36,11 @@ provides:
   - {service: nat, key: "http:POST /chat", source: "nat config.yaml"}
   - {service: nat, key: "ws:/websocket", source: "nat config.yaml (general.endpoint.websocket_path)"}
 # The UI proxy dials the host expression UPSTREAM_HTTP_ORIGIN, built from
-# NAT_BACKEND_URL. The analyzer records the fetch's URL as the identifier
-# targetUrl — the const lives in the request handler and the call sits in
-# a nested closure, so the expression is not followed — so the alias names
-# the file, which is what the analyzer can match today.
+# NAT_BACKEND_URL. The const lives in the request handler and the fetch
+# sits in a nested closure; the analyzer follows the const across the
+# scope, so the host expression is known and the alias names it.
 host_aliases:
-  - {host: UPSTREAM_HTTP_ORIGIN, file: proxy/server.js, service: nat,
+  - {host: UPSTREAM_HTTP_ORIGIN, service: nat,
      source: "nat-ui proxy/server.js (NAT_BACKEND_URL)"}
 EOF
 

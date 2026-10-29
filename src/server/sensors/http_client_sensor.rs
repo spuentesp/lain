@@ -1032,21 +1032,20 @@ impl FileContext {
         ctx
     }
 
-    fn resolve_identifier(&self, name: &str, enclosing_fn_line: Option<u32>) -> Option<String> {
-        // Same-function wins when unique.
-        if let Some(line) = enclosing_fn_line {
-            for ((l, n), c) in &self.fn_assign_counts {
-                if *l == line && n == name && *c == 1 {
-                    let key = (*l, name.to_string());
-                    return self.fn_assignments.get(&key).cloned();
-                }
+    fn resolve_identifier(&self, name: &str, scope_chain: &[u32]) -> Option<String> {
+        // The scope chain is searched innermost first: a name assigned
+        // in an enclosing scope is visible in a nested closure, which is
+        // the lexical rule every one of these languages follows. A
+        // name assigned twice in the same scope stays unresolved.
+        for line in scope_chain {
+            let key = (*line, name.to_string());
+            if self.fn_assign_counts.get(&key) == Some(&1) {
+                return self.fn_assignments.get(&key).cloned();
             }
         }
         // Module-level: single assignment only.
-        if let Some(c) = self.module_assign_counts.get(name) {
-            if *c == 1 {
-                return self.module_assignments.get(name).cloned();
-            }
+        if self.module_assign_counts.get(name) == Some(&1) {
+            return self.module_assignments.get(name).cloned();
         }
         None
     }
@@ -1200,25 +1199,24 @@ fn is_client_ctor(lib: &str, ctor: &str) -> bool {
 fn collect_tsjs_context(root: Node, src: &[u8], ctx: &mut FileContext) {
     walk(root, &mut |node| match node.kind() {
         "lexical_declaration" | "variable_declaration" => {
-            if !is_module_level(node) {
-                return;
-            }
+            // A declaration inside a function is in that function's
+            // scope; one at the top level is module level. Before,
+            // only module-level declarations were recorded, so a
+            // `const` in a request handler never resolved.
+            let scope = assignment_scope(node);
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 if child.kind() == "variable_declarator" {
                     if let Some((name, value)) = read_var_declarator(child, src) {
-                        ctx.module_assignments.insert(name.clone(), value);
-                        *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
+                        record_assignment(ctx, &scope, &name, &value);
                     }
                 }
             }
         }
         "assignment_expression" => {
-            // Bare `BASE = "..."` (no keyword) at module level. Some
-            // grammars also emit `assignment`; we accept both.
-            if !is_module_level(node) {
-                return;
-            }
+            // Bare `BASE = "..."` (no keyword). Some grammars also
+            // emit `assignment`; we accept both.
+            let scope = assignment_scope(node);
             let left = match node.child_by_field_name("left") {
                 Some(l) => l,
                 None => return,
@@ -1231,14 +1229,11 @@ fn collect_tsjs_context(root: Node, src: &[u8], ctx: &mut FileContext) {
                 None => return,
             };
             if let (Some(name), Some(value)) = (text_of(left, src), text_of(right, src)) {
-                ctx.module_assignments.insert(name.clone(), value);
-                *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
+                record_assignment(ctx, &scope, &name, &value);
             }
         }
         "assignment" => {
-            if !is_module_level(node) {
-                return;
-            }
+            let scope = assignment_scope(node);
             let left = match node.child_by_field_name("left") {
                 Some(l) => l,
                 None => return,
@@ -1251,12 +1246,32 @@ fn collect_tsjs_context(root: Node, src: &[u8], ctx: &mut FileContext) {
                 None => return,
             };
             if let (Some(name), Some(value)) = (text_of(left, src), text_of(right, src)) {
-                ctx.module_assignments.insert(name.clone(), value);
-                *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
+                record_assignment(ctx, &scope, &name, &value);
             }
         }
         _ => {}
     });
+}
+
+/// Record an assignment in the scope it belongs to. A name assigned
+/// twice in the same scope is counted twice, so it stays unresolved —
+/// the §6.3 rule, applied per scope.
+fn record_assignment(ctx: &mut FileContext, scope: &AssignmentScope, name: &str, value: &str) {
+    match scope {
+        AssignmentScope::Module => {
+            ctx.module_assignments
+                .insert(name.to_string(), value.to_string());
+            *ctx.module_assign_counts
+                .entry(name.to_string())
+                .or_insert(0) += 1;
+        }
+        AssignmentScope::Function(line) => {
+            let key = (*line, name.to_string());
+            ctx.fn_assignments.insert(key.clone(), value.to_string());
+            *ctx.fn_assign_counts.entry(key).or_insert(0) += 1;
+        }
+        AssignmentScope::Skip => {}
+    }
 }
 
 fn read_var_declarator(node: Node, src: &[u8]) -> Option<(String, String)> {
@@ -1350,6 +1365,64 @@ fn is_module_level(node: Node) -> bool {
         cur = p.parent();
     }
     true
+}
+
+/// The scope chain of a node: the innermost enclosing function-like
+/// ancestor first, then outward. A name assigned in an enclosing
+/// scope is visible in a nested closure — the lexical rule.
+///
+/// Python's `lambda` and Java's nested class are scopes here too, so
+/// the chain means the same thing in every language the sensor
+/// reads.
+fn scope_chain(node: Node) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        if is_scope_kind(p.kind()) {
+            out.push(p.start_position().row as u32);
+        }
+        cur = p.parent();
+    }
+    out
+}
+
+/// The kinds that open a scope. JavaScript's are the ones the TS/JS
+/// grammar emits; Python's and Java's are here so the chain means the
+/// same thing in every language.
+fn is_scope_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_definition" // Python
+        | "async_function_definition" // Python
+        | "lambda" // Python
+        | "method_declaration" // Java
+        | "arrow_function" // JS/TS
+        | "function" // JS/TS (grammar-generic)
+        | "function_expression" // JS/TS
+        | "function_declaration" // JS/TS
+        | "generator_function_declaration" // JS/TS
+        | "method_definition" // JS/TS
+    )
+}
+
+/// Where an assignment lives: the module level, the innermost
+/// enclosing function, or nowhere we track (a class body).
+enum AssignmentScope {
+    Module,
+    Function(u32),
+    Skip,
+}
+
+fn assignment_scope(node: Node) -> AssignmentScope {
+    if is_module_level(node) {
+        return AssignmentScope::Module;
+    }
+    match scope_chain(node).first().copied() {
+        Some(line) => AssignmentScope::Function(line),
+        // Inside a class body, or any other construct that opens a
+        // block but not a scope we resolve names in.
+        None => AssignmentScope::Skip,
+    }
 }
 
 fn enclosing_function_line(node: Node) -> Option<u32> {
@@ -1667,7 +1740,7 @@ fn parts_from_node_inner(
             call_urljoin_parts(node, src, ctx, enclosing_fn_line)
         }
         // Identifier: resolve once if possible.
-        "identifier" => identifier_parts(node, src, ctx, enclosing_fn_line),
+        "identifier" => identifier_parts(node, src, ctx),
         // Python attribute / TS member expression: emit as a Hole with
         // its full source text.
         "attribute" | "member_expression" | "subscript" | "subscript_expression" => {
@@ -1820,18 +1893,16 @@ fn call_urljoin_parts(
     out
 }
 
-fn identifier_parts(
-    node: Node,
-    src: &[u8],
-    ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
-) -> Vec<UrlPart> {
+fn identifier_parts(node: Node, src: &[u8], ctx: &FileContext) -> Vec<UrlPart> {
     let name = match text_of(node, src) {
         Some(n) => n,
         None => return Vec::new(),
     };
-    match ctx.resolve_identifier(&name, enclosing_fn_line) {
-        Some(resolved) => parts_from_node_inner_string(&resolved, ctx, enclosing_fn_line),
+    // The scope chain of the *use* site: a name assigned in an
+    // enclosing scope is visible here.
+    let chain = scope_chain(node);
+    match ctx.resolve_identifier(&name, &chain) {
+        Some(resolved) => parts_from_node_inner_string(&resolved, ctx, &chain),
         None => vec![UrlPart::Hole(name)],
     }
 }
@@ -1843,7 +1914,7 @@ fn identifier_parts(
 fn parts_from_node_inner_string(
     text: &str,
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    scope_chain: &[u32],
 ) -> Vec<UrlPart> {
     let bytes = text.as_bytes();
     if bytes.len() >= 2 {
@@ -1864,9 +1935,9 @@ fn parts_from_node_inner_string(
     // Strip and treat as identifier again (one-step chains are out
     // of scope; we only resolve once).
     let trimmed = text.trim();
-    if let Some(resolved) = ctx.resolve_identifier(trimmed, enclosing_fn_line) {
+    if let Some(resolved) = ctx.resolve_identifier(trimmed, scope_chain) {
         if resolved != text {
-            return parts_from_node_inner_string(&resolved, ctx, enclosing_fn_line);
+            return parts_from_node_inner_string(&resolved, ctx, scope_chain);
         }
     }
     vec![UrlPart::Hole(text.to_string())]
@@ -2528,6 +2599,72 @@ got(\"/api/y\", { method: \"PUT\" });
             other => panic!("expected Env, got {other:?}"),
         }
         assert_eq!(c.url.template.as_deref(), Some("/invoices/{}"));
+    }
+
+    /// A `const` in an enclosing scope is visible in a nested closure:
+    /// the lexical rule. The NAT UI proxy is this shape — the URL is
+    /// built in the request handler and fetched from a nested arrow
+    /// function — and before this the fetch's URL stayed the bare
+    /// identifier, so the host was never known.
+    #[test]
+    fn ts_const_in_an_enclosing_scope_resolves_in_a_nested_closure() {
+        let src = "\
+const handler = async (req, res) => {
+  const targetUrl = `${UPSTREAM_HTTP_ORIGIN}/chat`;
+  const doFetch = async () => {
+    const backendRes = await fetch(targetUrl, { method: 'POST' });
+  };
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        match &c.url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "UPSTREAM_HTTP_ORIGIN"),
+            other => panic!("expected Expr, got {other:?}"),
+        }
+        assert_eq!(c.url.template.as_deref(), Some("/chat"));
+    }
+
+    /// The other half of the rule: a name assigned in a *sibling*
+    /// scope is not visible here. Without this, the chain lookup would
+    /// resolve any name assigned once in the file.
+    #[test]
+    fn ts_const_in_a_sibling_scope_does_not_resolve() {
+        let src = "\
+const first = async () => {
+  const targetUrl = 'https://example.com/one';
+};
+const second = async () => {
+  const backendRes = await fetch(targetUrl);
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        match &c.url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "targetUrl"),
+            other => panic!("expected the unresolved identifier, got {other:?}"),
+        }
+    }
+
+    /// A name assigned twice in the same scope stays unresolved — the
+    /// §6.3 rule, now applied per scope.
+    #[test]
+    fn ts_name_assigned_twice_in_one_scope_stays_unresolved() {
+        let src = "\
+const handler = async () => {
+  let targetUrl = 'https://example.com/one';
+  targetUrl = 'https://example.com/two';
+  const backendRes = await fetch(targetUrl);
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        match &calls[0].url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "targetUrl"),
+            other => panic!("expected the unresolved identifier, got {other:?}"),
+        }
     }
 
     #[test]

@@ -112,6 +112,16 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **A URL built from an enclosing scope did not resolve.** The HTTP client
+  sensor recorded only module-level assignments for JavaScript and
+  TypeScript, and resolved an identifier only against the innermost enclosing
+  function. A `const` in a request handler, fetched from a nested closure —
+  the shape of a reverse proxy — left the call's URL as the bare identifier,
+  so its host was never known. Assignments are now recorded per scope, and
+  an identifier is resolved through the scope chain, innermost first: a name
+  assigned in an enclosing scope is visible in a nested closure, a name
+  assigned in a sibling scope is not, and a name assigned twice in one scope
+  stays unresolved.
 - `get_service` returned an empty `used_by` for every consumer: it looked the
   caller up in the per-repo graph with a global id, found nothing, and walked
   the call-site node instead, silently. It now resolves callers and walks

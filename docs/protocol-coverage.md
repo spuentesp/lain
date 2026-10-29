@@ -84,11 +84,9 @@ each kind and are backlog, not silence.
   declared `host_aliases:` entry: it resolves to `no_route_in_service`
   with the service attached, not to a bind — a transparent proxy forwards
   whatever the client asked for, so the route is dynamic. The alias names
-  the *file*, because the analyzer records the fetch's URL as the
-  identifier `targetUrl` (the const lives in the request handler and the
-  call sits in a nested closure, so the expression is not followed);
-  naming the host expression instead works only when the analyzer can
-  reach it. Declared providers come from `provides:` (or
+  the host expression `UPSTREAM_HTTP_ORIGIN`; the analyzer reaches it
+  because a `const` in an enclosing scope is visible in a nested closure.
+  Declared providers come from `provides:` (or
   `apply_contract_context`), since NAT registers its routes from a
   runtime config file.
 
