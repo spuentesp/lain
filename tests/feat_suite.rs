@@ -272,6 +272,23 @@ fn feat_suite_end_to_end() {
         Some("ok"),
         "/health status: {health}"
     );
+    // The readiness probe is reachable without auth and reports per-repo state.
+    let index_raw = http_request(
+        &host,
+        &format!("GET /health/index-status HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"),
+    );
+    let index: serde_json::Value =
+        serde_json::from_str(&index_raw.1).expect("index status body not JSON");
+    let repos = index["repos"].as_array().expect("missing repo states");
+    let expected = if repos.iter().any(|r| r["health"] == "indexing") {
+        202
+    } else if repos.is_empty() || repos.iter().any(|r| r["health"] != "ready") {
+        503
+    } else {
+        200
+    };
+    assert_eq!(index_raw.0, expected, "index status: {index}");
+
     // `/health` reports `ToolRegistry::definitions().len()` — the
     // inventory-registered handlers only. The full surface (which
     // tools/list appends with special/federation/workspace/server
