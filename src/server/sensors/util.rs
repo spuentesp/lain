@@ -604,7 +604,7 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
             // 1-based line a sensor reports. Compare in the same base, or
             // a call on a function's last line misses it and one on the
             // line above it hits.
-            (Some(s), Some(e)) if s + 1 <= line && e + 1 >= line => Some((n, e.saturating_sub(s))),
+            (Some(s), Some(e)) if s < line && e + 1 >= line => Some((n, e.saturating_sub(s))),
             _ => None,
         })
         .min_by(|a, b| {

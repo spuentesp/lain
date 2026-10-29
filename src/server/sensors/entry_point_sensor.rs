@@ -5,7 +5,7 @@
 //!
 //! | `EntryKind` | Detection |
 //! | --- | --- |
-//! | `HttpHandler` | Target of a `CallsHttp` edge (route → handler) |
+//! | `HttpHandler` | Target of a `CallsHttp` edge (route → handler) or a `CallsGraphql` edge (SDL field → resolver) |
 //! | `Scheduled`   | node-cron `cron.schedule(expr, fn)`; module-level `setInterval(fn, …)`; APScheduler `@<x>.scheduled_job(…)` and `add_job(fn, …)`; Celery `@<x>.task` and `@shared_task`; NestJS `@Cron(…)` |
 //! | `Cli`        | click `@click.command` and `@<group>.command`, typer `@<app>.command`, commander `.command(…).action(fn)` |
 //! | `Main`       | functions named `main` or `App`; the enclosing module of an `if __name__ == "__main__":` block |
@@ -103,6 +103,16 @@ pub fn scan_workspace_entry_points(
         by_id
             .entry(handler_id.clone())
             .or_insert_with(|| ("<http_handler>".to_string(), EntryKind::HttpHandler));
+    }
+
+    // Step B' — a GraphQL resolver is reached by a request to the schema's
+    // endpoint, so `used_by` reports it as an `HttpHandler` instead of
+    // calling the code under it "unreferenced". `graphql_resolver_link_sensor`
+    // (phase 1) emitted the `CallsGraphql` edges.
+    for (_provider_id, resolver_id) in graph.calls_graphql_pairs() {
+        by_id
+            .entry(resolver_id.clone())
+            .or_insert_with(|| ("<graphql_resolver>".to_string(), EntryKind::HttpHandler));
     }
 
     // Step C — stamp the detections.
@@ -1314,6 +1324,42 @@ def other():
         let _ = run_scan(&g, &tmp);
         let h = g.get_node(&handler_id).unwrap().unwrap();
         assert_eq!(h.entry, Some(EntryKind::HttpHandler));
+    }
+
+    // ─── HttpHandler (from CallsGraphql edges) ──────────────────────
+
+    #[test]
+    fn tags_resolver_from_calls_graphql_edge() {
+        let (tmp, g) = temp_graph("gql_resolver");
+        write_src(
+            &tmp,
+            "src/schema.py",
+            "def resolve_product(root, info):\n    pass\n",
+        );
+        let resolver = make_function(&g, "resolve_product", "src/schema.py", 1);
+        let resolver_id = resolver.id.clone();
+        let other = make_function(&g, "helper", "src/schema.py", 20);
+        let other_id = other.id.clone();
+        let ns = RepoNamespace::for_test();
+        let provider = GraphNode::new_in(
+            NodeType::Module,
+            "query:product".to_string(),
+            "schema.graphql".to_string(),
+            &ns,
+        );
+        let provider_id = provider.id.clone();
+        g.insert_nodes_batch(&[resolver, other, provider]).unwrap();
+        g.insert_edges_batch(&[GraphEdge::new(
+            EdgeType::CallsGraphql,
+            provider_id,
+            resolver_id.clone(),
+        )])
+        .unwrap();
+        let _ = run_scan(&g, &tmp);
+        let r = g.get_node(&resolver_id).unwrap().unwrap();
+        assert_eq!(r.entry, Some(EntryKind::HttpHandler));
+        let o = g.get_node(&other_id).unwrap().unwrap();
+        assert_eq!(o.entry, None, "only the resolver is an entry point");
     }
 
     // ─── Clear-and-reset ─────────────────────────────────────────────
