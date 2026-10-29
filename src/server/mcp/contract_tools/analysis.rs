@@ -643,12 +643,11 @@ fn find_field_node(
     // from the endpoint's provider nodes instead. A repo-wide name
     // scan would pick an arbitrary endpoint's field (the fixture's
     // `customer_id` appears in four schemas).
-    let edges = backend.all_edges().ok()?;
-    let mut targets: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)
-        .filter(|e| e.source_id == schema.node_id.as_str())
-        .map(|e| e.target_id.clone())
+    let mut targets: Vec<String> = backend
+        .edges_from(schema.node_id.as_str(), crate::schema::EdgeType::HasField)
+        .ok()?
+        .into_iter()
+        .map(|e| e.target_id)
         .collect();
     targets.sort();
     for target in &targets {
@@ -1543,27 +1542,32 @@ fn enclosing_sender(
     if call_ids.is_empty() {
         return None;
     }
-    let edges = backend.all_edges().ok()?;
+    // Indexed lookups by target: this used to clone every edge in the
+    // federation and scan it three times to answer a question about one
+    // call site.
+    let sources_into =
+        |ids: &[String], edge_type: crate::schema::EdgeType| -> Option<Vec<String>> {
+            let mut out = Vec::new();
+            for id in ids {
+                out.extend(
+                    backend
+                        .edges_to(id, edge_type.clone())
+                        .ok()?
+                        .into_iter()
+                        .map(|e| e.source_id),
+                );
+            }
+            Some(out)
+        };
     // FieldRefs that read from this call.
-    let field_refs: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsFrom)
-        .filter(|e| call_ids.contains(&e.target_id))
-        .map(|e| e.source_id.clone())
-        .collect();
-    let mut readers: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsField)
-        .filter(|e| field_refs.contains(&e.target_id))
-        .map(|e| e.source_id.clone())
-        .collect();
+    let mut field_refs = sources_into(&call_ids, crate::schema::EdgeType::ReadsFrom)?;
+    // Membership semantics, as before: a FieldRef that reads from two of
+    // these calls must still yield its readers once.
+    field_refs.sort();
+    field_refs.dedup();
+    let mut readers = sources_into(&field_refs, crate::schema::EdgeType::ReadsField)?;
     readers.sort();
-    let mut senders: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::SendsHttp)
-        .filter(|e| call_ids.contains(&e.target_id))
-        .map(|e| e.source_id.clone())
-        .collect();
+    let mut senders = sources_into(&call_ids, crate::schema::EdgeType::SendsHttp)?;
     senders.sort();
     let sender = senders.first().cloned();
     // Candidate readers: functions other than the sending function
@@ -1916,18 +1920,21 @@ async fn run_trace_impact(
         // see its own schema, and the response would look complete.
         // The standing rule is never claim absent when unanalysed —
         // silently degrading the seed set is the same failure.
-        let edges = backend.all_edges().map_err(|e| ToolOutcome {
-            structured: json!({}),
-            text: format!("could not enumerate edges for the schema seed: {e}"),
-            is_error: true,
-        })?;
         {
-            let mut field_ids: Vec<String> = edges
-                .iter()
-                .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)
-                .filter(|e| schema_ids.contains(&e.source_id))
-                .map(|e| e.target_id.clone())
-                .collect();
+            let mut field_ids: Vec<String> = Vec::new();
+            let mut seen_schemas: std::collections::HashSet<&String> =
+                std::collections::HashSet::new();
+            for schema_id in schema_ids.iter().filter(|id| seen_schemas.insert(id)) {
+                // Indexed by source: no clone of the whole edge set.
+                let fields = backend
+                    .edges_from(schema_id, crate::schema::EdgeType::HasField)
+                    .map_err(|e| ToolOutcome {
+                        structured: json!({}),
+                        text: format!("could not enumerate edges for the schema seed: {e}"),
+                        is_error: true,
+                    })?;
+                field_ids.extend(fields.into_iter().map(|e| e.target_id));
+            }
             field_ids.sort();
             starts.extend(field_ids);
         }
