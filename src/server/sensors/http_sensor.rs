@@ -981,6 +981,34 @@ mod tests {
         assert_eq!(r[0].handler_name, "loginHandler");
     }
 
+    /// A logging call or a header setter is not a route, even though it
+    /// has the `obj.name('string', identifier)` shape. The live NAT UI run
+    /// turned `console.error('ERROR: …', err)` and
+    /// `headers.set('x-session-id', id)` into `ANY` routes.
+    #[test]
+    fn logging_and_header_calls_are_not_routes() {
+        let ts = "\
+console.error('ERROR: Invalid NEXT_INTERNAL_URL format:', target);
+response.headers.set('x-session-id', sessionId);
+";
+        let r = scan_file_for_routes(
+            std::path::Path::new("proxy/server.ts"),
+            ts,
+            Patterns::patterns(),
+        );
+        assert!(r.is_empty(), "non-route calls captured as routes: {r:?}");
+    }
+
+    /// A real Express route still is one after the verb whitelist.
+    #[test]
+    fn express_route_with_a_path_is_still_a_route() {
+        let ts = "app.get(\"/api/items\", listItems);\n";
+        let r = scan_file_for_routes(std::path::Path::new("server.ts"), ts, Patterns::patterns());
+        assert_eq!(r.len(), 1, "express GET route should be found: {r:?}");
+        assert_eq!(r[0].method, HttpMethod::Get);
+        assert_eq!(r[0].path, "/api/items");
+    }
+
     #[test]
     fn gin_routes_work_with_any_receiver_name() {
         for src in [
