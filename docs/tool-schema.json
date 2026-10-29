@@ -2992,7 +2992,7 @@
     }
   },
   {
-    "description": "One path across the contract boundary: from an endpoint, symbol or table, follow Calls/Binds/CallsGraphql/SendsHttp/ReadsTable edges downstream (toward the data) or upstream (toward consumers). Returns ranked chains with per-hop provenance and explicit `gaps` where the chain stops and why.",
+    "description": "One path across the contract boundary: from an endpoint, symbol or table, follow Calls/Binds/CallsGraphql/SendsHttp/ReadsTable edges downstream (toward the data) or upstream (toward consumers). Returns ranked chains with per-hop provenance and explicit `gaps` where the chain stops and why. `strategy` picks `breadth` (default: everything one hop at a time, nearest first) or `depth` (follow each chain to its end before backtracking).",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
@@ -3046,6 +3046,14 @@
         },
         "snapshot": {
           "type": "string"
+        },
+        "strategy": {
+          "description": "`breadth` (default): everything one hop at a time, nearest first, each node reached once. `depth`: follow each chain to its end (leaf, data sink or depth limit) before backtracking, so chains that share a node are all reported.",
+          "enum": [
+            "breadth",
+            "depth"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -3081,7 +3089,8 @@
                   "unlinked_call_site",
                   "no_table_access",
                   "no_data_sink",
-                  "dangling_edge"
+                  "dangling_edge",
+                  "consumers_pending"
                 ],
                 "type": "string"
               },
@@ -3180,6 +3189,13 @@
           },
           "type": "array"
         },
+        "repos_not_ready": {
+          "description": "Present only when the view lists repos still indexing (`scope.unreviewed`), as `repo (reason)`. A `no_consumers` gap becomes `consumers_pending` in that case: retry once the repos are ready.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "scope": {
           "type": "object"
         },
@@ -3188,6 +3204,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "strategy": {
+          "description": "Present only when `strategy: depth` was requested; the default `breadth` walk omits it.",
+          "enum": [
+            "depth"
+          ],
+          "type": "string"
         },
         "truncated": {
           "type": "boolean"

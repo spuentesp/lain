@@ -113,7 +113,8 @@
               "unlinked_call_site",
               "no_table_access",
               "no_data_sink",
-              "dangling_edge"
+              "dangling_edge",
+              "consumers_pending"
             ]
           },
           "reason": {
@@ -144,6 +145,20 @@
     },
     "nodes_visited": {
       "type": "integer"
+    },
+    "strategy": {
+      "type": "string",
+      "enum": [
+        "depth"
+      ],
+      "description": "Present only when `strategy: depth` was requested; the default `breadth` walk omits it."
+    },
+    "repos_not_ready": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Present only when the view lists repos still indexing (`scope.unreviewed`), as `repo (reason)`. A `no_consumers` gap becomes `consumers_pending` in that case: retry once the repos are ready."
     },
     "scope": {
       "type": "object"

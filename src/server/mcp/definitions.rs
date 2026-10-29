@@ -263,9 +263,9 @@ pub const CONTRACT_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "trace_flow",
-        description: "One path across the contract boundary: from an endpoint, symbol or table, follow Calls/Binds/CallsGraphql/SendsHttp/ReadsTable edges downstream (toward the data) or upstream (toward consumers). Returns ranked chains with per-hop provenance and explicit `gaps` where the chain stops and why.",
+        description: "One path across the contract boundary: from an endpoint, symbol or table, follow Calls/Binds/CallsGraphql/SendsHttp/ReadsTable edges downstream (toward the data) or upstream (toward consumers). Returns ranked chains with per-hop provenance and explicit `gaps` where the chain stops and why. `strategy` picks `breadth` (default: everything one hop at a time, nearest first) or `depth` (follow each chain to its end before backtracking).",
         required_args: &["from"],
-        optional_args: &["snapshot", "direction", "depth", "cap"],
+        optional_args: &["snapshot", "direction", "strategy", "depth", "cap"],
         input_schema: Some(include_str!("contract_tools/schemas/trace_flow.in.json")),
         output_schema: Some(include_str!("contract_tools/schemas/trace_flow.out.json")),
     },

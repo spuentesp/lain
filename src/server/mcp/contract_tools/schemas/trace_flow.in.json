@@ -44,6 +44,14 @@
         "upstream"
       ]
     },
+    "strategy": {
+      "type": "string",
+      "enum": [
+        "breadth",
+        "depth"
+      ],
+      "description": "`breadth` (default): everything one hop at a time, nearest first, each node reached once. `depth`: follow each chain to its end (leaf, data sink or depth limit) before backtracking, so chains that share a node are all reported."
+    },
     "depth": {
       "type": "integer",
       "minimum": 1,

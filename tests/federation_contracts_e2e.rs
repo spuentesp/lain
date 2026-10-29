@@ -630,6 +630,74 @@ async fn trace_flow_crosses_the_contract_boundary_both_ways() {
     assert_eq!(both["error"]["code"], json!("invalid_argument"));
 }
 
+/// `strategy: depth` through the real handler returns the same full chain
+/// and says which strategy ran; the default call omits the field; an
+/// unknown value is an `invalid_argument` that lists the allowed ones.
+#[tokio::test]
+async fn trace_flow_strategy_switch_through_the_handler() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = build_three_repo_federation(tmp.path(), RepoHealth::Ready).await;
+    let endpoint = json!({"service": "billing", "key": "http:GET /invoices/{}"});
+
+    let default = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "downstream"}),
+    )
+    .await;
+    assert!(default["data"].get("strategy").is_none());
+
+    let depth = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "downstream", "strategy": "depth"}),
+    )
+    .await;
+    assert_eq!(depth["data"]["strategy"], json!("depth"));
+    assert_eq!(depth["data"]["paths"], default["data"]["paths"]);
+
+    let bad = call_trace_flow(
+        fed,
+        json!({"from": {"endpoint": endpoint}, "strategy": "sideways"}),
+    )
+    .await;
+    assert_eq!(bad["error"]["code"], json!("invalid_argument"));
+    assert_eq!(
+        bad["error"]["details"]["expected"],
+        json!(["breadth", "depth"])
+    );
+}
+
+/// While a repo is still indexing, an upstream trace names it instead of
+/// claiming no consumer exists.
+#[tokio::test]
+async fn trace_flow_names_repos_that_are_still_indexing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = build_three_repo_federation(tmp.path(), RepoHealth::Indexing).await;
+    let up = call_trace_flow(
+        fed,
+        json!({
+            "from": {"endpoint": {"service": "billing", "key": "http:GET /invoices/{}"}},
+            "direction": "upstream"
+        }),
+    )
+    .await;
+    let data = &up["data"];
+    let pending = data["repos_not_ready"].as_array().expect("repos_not_ready");
+    assert!(
+        pending
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").starts_with("reports")),
+        "{data:#}"
+    );
+    assert!(
+        data["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|g| g["kind"] != json!("no_consumers")),
+        "a missing consumer while repos index must not read as 'none exist': {data:#}"
+    );
+}
+
 #[tokio::test]
 async fn scenario_18_get_service_orders_unreviewed_when_indexing() {
     let tmp = tempfile::tempdir().unwrap();

@@ -432,3 +432,277 @@ fn output_value_matches_the_published_shape() {
         "{text}"
     );
 }
+
+// ─── strategy: breadth vs depth ───────────────────────────────────────
+
+/// root -> a, root -> b, a -> shared, b -> shared, shared -ReadsTable-> t.
+fn diamond(f: &Fixture) -> String {
+    let root = f.add(node("api", NodeType::Function, "root", "api/d.py", 0));
+    let a = f.add(node("api", NodeType::Function, "a", "api/d.py", 10));
+    let b = f.add(node("api", NodeType::Function, "b", "api/d.py", 20));
+    let shared = f.add(node("api", NodeType::Function, "shared", "api/d.py", 30));
+    let t = f.add(node("api", NodeType::Table, "t", "api/db.py", 0));
+    f.edge(EdgeType::Calls, &root, &a);
+    f.edge(EdgeType::Calls, &root, &b);
+    f.edge(EdgeType::Calls, &a, &shared);
+    f.edge(EdgeType::Calls, &b, &shared);
+    f.edge(EdgeType::ReadsTable, &shared, &t);
+    root
+}
+
+fn call_chain(f: &Fixture, len: u32) -> Vec<String> {
+    let ids: Vec<String> = (0..len)
+        .map(|i| {
+            f.add(node(
+                "api",
+                NodeType::Function,
+                &format!("f{i}"),
+                "api/c.py",
+                i * 10,
+            ))
+        })
+        .collect();
+    for w in ids.windows(2) {
+        f.edge(EdgeType::Calls, &w[0], &w[1]);
+    }
+    ids
+}
+
+fn sorted_names(r: &FlowResult) -> Vec<Vec<String>> {
+    let mut v: Vec<Vec<String>> = r
+        .paths
+        .iter()
+        .map(|p| p.hops.iter().map(|h| h.node.name.clone()).collect())
+        .collect();
+    v.sort();
+    v
+}
+
+fn walk(f: &Fixture, seed: &str, strategy: FlowStrategy, depth: u32, cap: usize) -> FlowResult {
+    compute_flow_with(
+        &f.backend,
+        &[seed.to_string()],
+        FlowDirection::Downstream,
+        depth,
+        cap,
+        strategy,
+        NODE_BUDGET,
+    )
+    .unwrap()
+}
+
+#[test]
+fn depth_reports_both_chains_through_a_shared_node_where_breadth_reports_one() {
+    let f = fixture();
+    let root = diamond(&f);
+
+    let breadth = walk(&f, &root, FlowStrategy::Breadth, 8, 50);
+    let through_shared = breadth
+        .paths
+        .iter()
+        .filter(|p| names(p).contains(&"shared"))
+        .count();
+    assert_eq!(through_shared, 1, "breadth reaches `shared` once");
+
+    let depth = walk(&f, &root, FlowStrategy::Depth, 8, 50);
+    assert_eq!(
+        sorted_names(&depth),
+        vec![
+            vec!["root", "a", "shared", "t"],
+            vec!["root", "b", "shared", "t"],
+        ]
+    );
+    assert!(depth.truncation_reasons.is_empty());
+    assert_eq!(depth.strategy, FlowStrategy::Depth);
+    // `nodes_visited` counts distinct nodes, not node entries.
+    assert_eq!(depth.nodes_visited, 5);
+}
+
+#[test]
+fn depth_follows_a_chain_to_its_end_and_flags_the_depth_limit() {
+    let f = fixture();
+    let ids = call_chain(&f, 6);
+    let r = walk(&f, &ids[0], FlowStrategy::Depth, 3, 50);
+    assert_eq!(r.truncation_reasons, vec!["depth"]);
+    assert_eq!(names(&r.paths[0]), vec!["f0", "f1", "f2", "f3"]);
+    let r = walk(&f, &ids[0], FlowStrategy::Depth, 8, 50);
+    assert!(r.truncation_reasons.is_empty());
+    assert_eq!(names(&r.paths[0]).len(), 6);
+}
+
+#[test]
+fn depth_is_cycle_safe() {
+    let f = fixture();
+    let a = f.add(node("api", NodeType::Function, "a", "api/c.py", 0));
+    let b = f.add(node("api", NodeType::Function, "b", "api/c.py", 10));
+    let c = f.add(node("api", NodeType::Function, "c", "api/c.py", 20));
+    f.edge(EdgeType::Calls, &a, &b);
+    f.edge(EdgeType::Calls, &b, &c);
+    f.edge(EdgeType::Calls, &c, &a);
+    let r = walk(&f, &a, FlowStrategy::Depth, 12, 50);
+    assert_eq!(sorted_names(&r), vec![vec!["a", "b", "c"]]);
+    assert!(r.truncation_reasons.is_empty());
+}
+
+#[test]
+fn depth_node_budget_truncation_is_flagged() {
+    let f = fixture();
+    let ids = call_chain(&f, 6);
+    let r = compute_flow_with(
+        &f.backend,
+        &[ids[0].clone()],
+        FlowDirection::Downstream,
+        12,
+        50,
+        FlowStrategy::Depth,
+        3,
+    )
+    .unwrap();
+    assert_eq!(r.truncation_reasons, vec!["node_budget"]);
+    assert!(r.nodes_visited <= 3);
+}
+
+#[test]
+fn breadth_node_budget_truncation_is_flagged_too() {
+    let f = fixture();
+    let root = diamond(&f);
+    let r = compute_flow_with(
+        &f.backend,
+        &[root],
+        FlowDirection::Downstream,
+        8,
+        50,
+        FlowStrategy::Breadth,
+        2,
+    )
+    .unwrap();
+    assert!(r.truncation_reasons.contains(&"node_budget"));
+}
+
+#[test]
+fn depth_cap_keeps_the_boundary_chain_and_is_deterministic() {
+    let f = fixture();
+    let root = f.add(node("api", NodeType::Function, "root", "api/c.py", 0));
+    let leaf = f.add(node("api", NodeType::Function, "aaa", "api/c.py", 10));
+    let t = f.add(node("api", NodeType::Table, "t", "api/db.py", 0));
+    f.edge(EdgeType::Calls, &root, &leaf);
+    f.edge(EdgeType::ReadsTable, &root, &t);
+    let first = walk(&f, &root, FlowStrategy::Depth, 8, 1);
+    let second = walk(&f, &root, FlowStrategy::Depth, 8, 1);
+    assert_eq!(first.truncation_reasons, vec!["cap"]);
+    assert_eq!(first.paths.len(), 1);
+    assert_eq!(names(&first.paths[0]), vec!["root", "t"]);
+    assert_eq!(sorted_names(&first), sorted_names(&second));
+}
+
+#[test]
+fn depth_walks_the_full_component_to_table_chain_upstream() {
+    let f = fixture();
+    let c = full_chain(&f);
+    let r = compute_flow_with(
+        &f.backend,
+        &[c.table.clone()],
+        FlowDirection::Upstream,
+        12,
+        50,
+        FlowStrategy::Depth,
+        NODE_BUDGET,
+    )
+    .unwrap();
+    assert_eq!(
+        names(&r.paths[0]),
+        vec![
+            "product",
+            "load_product",
+            "resolve_product",
+            "query:product",
+            "graphql-call:query:product",
+            "useProductDetailsQuery",
+        ]
+    );
+}
+
+#[test]
+fn default_strategy_is_breadth_and_the_output_shape_is_unchanged() {
+    let f = fixture();
+    let root = diamond(&f);
+    let default = compute_flow(
+        &f.backend,
+        &[root.clone()],
+        FlowDirection::Downstream,
+        8,
+        50,
+    )
+    .unwrap();
+    let explicit = walk(&f, &root, FlowStrategy::Breadth, 8, 50);
+    assert_eq!(sorted_names(&default), sorted_names(&explicit));
+    assert_eq!(default.truncation_reasons, explicit.truncation_reasons);
+    assert_eq!(default.gaps, explicit.gaps);
+    assert_eq!(default.nodes_visited, explicit.nodes_visited);
+
+    let scope = json!({"reviewed": [], "unreviewed": [], "configured_only": true});
+    let v = flow_to_value(
+        &json!({"symbol": "root"}),
+        FlowDirection::Downstream,
+        &[root.clone()],
+        &default,
+        &scope,
+    );
+    assert!(v.get("strategy").is_none(), "default output omits strategy");
+    assert!(v.get("repos_not_ready").is_none());
+
+    let depth = walk(&f, &root, FlowStrategy::Depth, 8, 50);
+    let v = flow_to_value(
+        &json!({"symbol": "root"}),
+        FlowDirection::Downstream,
+        &[root],
+        &depth,
+        &scope,
+    );
+    assert_eq!(v["strategy"], json!("depth"));
+}
+
+// ─── repos still indexing ─────────────────────────────────────────────
+
+#[test]
+fn no_consumers_while_repos_are_indexing_is_reported_as_pending() {
+    let f = fixture();
+    let provider = f.add(provider_node("api", "product"));
+    let mut r = compute_flow(&f.backend, &[provider], FlowDirection::Upstream, 8, 50).unwrap();
+    assert_eq!(r.gaps[0].kind, "no_consumers");
+
+    // Every repo reviewed: the gap is left exactly as it was.
+    let ready = json!({"reviewed": [], "unreviewed": [], "configured_only": true});
+    mark_pending_gaps(&mut r, &ready);
+    assert_eq!(r.gaps[0].kind, "no_consumers");
+    assert!(r.gaps[0].reason.contains("does not index"));
+
+    let warming = json!({
+        "reviewed": [],
+        "unreviewed": [
+            {"repo": "storefront", "reason": "not_ready"},
+            {"repo": "saleor-dashboard", "reason": "not_ready"}
+        ],
+        "configured_only": true
+    });
+    mark_pending_gaps(&mut r, &warming);
+    assert_eq!(r.gaps[0].kind, "consumers_pending");
+    let reason = &r.gaps[0].reason;
+    assert!(reason.contains("still indexing"), "{reason}");
+    assert!(reason.contains("saleor-dashboard (not_ready)"), "{reason}");
+    assert!(reason.contains("storefront (not_ready)"), "{reason}");
+    assert!(!reason.contains("does not index"), "{reason}");
+
+    let v = flow_to_value(
+        &json!({"endpoint": {}}),
+        FlowDirection::Upstream,
+        &[],
+        &r,
+        &warming,
+    );
+    assert_eq!(
+        v["repos_not_ready"],
+        json!(["saleor-dashboard (not_ready)", "storefront (not_ready)"])
+    );
+    assert_eq!(v["gaps"][0]["kind"], json!("consumers_pending"));
+}
