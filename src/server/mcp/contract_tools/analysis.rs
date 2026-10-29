@@ -2584,7 +2584,9 @@ mod tests {
     fn timeout_default_and_cap_apply() {
         let now = Instant::now();
         let mut args = Map::new();
-        let d = parse_timeout_with(&args, now, Some(50), 100).unwrap().unwrap();
+        let d = parse_timeout_with(&args, now, Some(50), 100)
+            .unwrap()
+            .unwrap();
         assert_eq!(d - now, std::time::Duration::from_millis(50));
         args.insert("timeout_ms".into(), json!(101));
         assert!(parse_timeout_with(&args, now, Some(50), 100).is_err());
