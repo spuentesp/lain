@@ -4,7 +4,7 @@
 #
 # Usage: scripts/eval/openshell-contract-smoke.sh <workspace-dir> [port]
 # <workspace-dir> must contain the NVIDIA clones:
-#   OpenShell/ NeMo-Fabric/
+#   OpenShell/ NeMo-Fabric/ NemoClaw/
 set -euo pipefail
 
 LAIN_BIN="${LAIN_BIN:-./target/release/lain}"
@@ -28,6 +28,11 @@ repos:
     source:
       type: workspace_dir
       path: $WS/NeMo-Fabric
+  - id: nemoclaw
+    packages: ["nemoclaw"]
+    source:
+      type: workspace_dir
+      path: $WS/NemoClaw
 services:
   - name: openshell-gateway
     repo: openshell
@@ -39,6 +44,8 @@ services:
     paths: [python, sdk]
   - name: nemo-fabric
     repo: nemo-fabric
+  - name: nemoclaw
+    repo: nemoclaw
 EOF
 
 LAIN_INDEX_TIMEOUT="$INDEX_TIMEOUT" "$LAIN_BIN" server --config "$WORK/repos.yaml" \
@@ -117,3 +124,16 @@ if [ "$BOUND" -lt 1 ]; then
   exit 1
 fi
 echo "PASS: at least one RPC contract binds a consumer"
+
+# NeMo-Fabric's Rust provider calls OpenShell's `parse_sandbox_policy`
+# (openshell_policy, a git dependency). The cross-repo callers of that
+# symbol must include nemo-fabric.
+CROSS=$(call get_cross_repo_blast_radius_for_repo '{"symbol":"parse_sandbox_policy","depth":"1..4","repo_id":"openshell"}')
+printf '%s' "$CROSS" | python3 -c '
+import json, sys
+text = json.load(sys.stdin)["result"]["content"][0]["text"]
+repos = json.loads(text)["by_repo"]
+print("parse_sandbox_policy callers by repo:", {k: len(v) for k, v in repos.items()})
+sys.exit(0 if "nemo-fabric" in repos else 1)
+' || { echo "FAIL: nemo-fabric does not call into openshell" >&2; exit 1; }
+echo "PASS: nemo-fabric calls into openshell"

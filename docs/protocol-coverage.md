@@ -145,15 +145,19 @@ each kind and are backlog, not silence.
   dashboard filter. **Backlog.**
 - **Status.** Detected, joined, confirmable.
 - **Measured on real repositories** (2026-10-29, Lain `4b6cafad`,
-  `scripts/eval/openshell-contract-smoke.sh`, NVIDIA/OpenShell and
-  NVIDIA/NeMo-Fabric shallow clones): 120 RPC contracts from the
-  `openshell.v1` proto services, 21 with a bound consumer, both repos
-  `ready`. The bound consumers come from the Python SDK's `self._stub`
-  / `stub` handles. Their channel resolves through the file's
-  gateway-shaped env read (`OPENSHELL_GATEWAY`, chosen over
-  `XDG_CONFIG_HOME`). That var names a gateway, so the bind is
-  service-level, not a verified dial address. Re-run the script to
-  reproduce.
+  `scripts/eval/openshell-contract-smoke.sh`, NVIDIA/OpenShell,
+  NVIDIA/NeMo-Fabric and NVIDIA/NemoClaw shallow clones, three repos
+  `ready` in about 230 s): 120 RPC contracts from the `openshell.v1`
+  proto services, 21 with a bound consumer. The bound consumers come
+  from the Python SDK's `self._stub` / `stub` handles. Their channel
+  resolves through the file's gateway-shaped env read
+  (`OPENSHELL_GATEWAY`, chosen over `XDG_CONFIG_HOME`). That var names
+  a gateway, so the bind is service-level, not a verified dial address.
+  NeMo-Fabric's Rust provider is a cross-repo dependent through call
+  edges: 42 of its functions call OpenShell's `parse_sandbox_policy`.
+  Its use of the proto client (`openshell_sdk::raw::proto`) is not a
+  contract consumer, because no Rust consumer sensor exists yet. Re-run
+  the script to reproduce.
 
 ## websocket
 
