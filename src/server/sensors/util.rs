@@ -406,7 +406,7 @@ pub fn to_camel_case(name: &str) -> String {
     let mut capitalize = false;
     for c in name.chars() {
         if c == '_' {
-            capitalize = true;
+            capitalize = !result.is_empty();
         } else if capitalize {
             result.push(c.to_ascii_uppercase());
             capitalize = false;

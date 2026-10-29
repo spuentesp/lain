@@ -638,23 +638,6 @@ impl GrapheneDetector {
     }
 }
 
-/// `resolve_product_variants` → `productVariants`.
-fn snake_to_camel(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut upper = false;
-    for c in s.chars() {
-        if c == '_' {
-            upper = !out.is_empty();
-        } else if upper {
-            out.push(c.to_ascii_uppercase());
-            upper = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 fn graphene_op_for_class(class: &str) -> GraphqlOp {
     if class.ends_with("Mutations") || class == "Mutation" {
         GraphqlOp::Mutation
@@ -721,7 +704,7 @@ impl ResolverLinkDetector for GrapheneDetector {
             }
             out.push(GraphqlHandlerLink {
                 op: graphene_op_for_class(class),
-                field: snake_to_camel(field),
+                field: crate::server::sensors::util::to_camel_case(field),
                 handler_function: SymbolKey {
                     repo: self.repo_id.clone(),
                     path: graph_path.clone(),

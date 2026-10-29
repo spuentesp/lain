@@ -53,8 +53,9 @@
 //! `SensorOwner`, so a rescan of either SQL sensor never retracts the
 //! other's output.
 //!
-//! The method lists below are fixed Django vocabulary, not per-repo
-//! shapes, so they are constants rather than `.lain/patterns` config.
+//! Model bases and manager/queryset method lists live in
+//! `src/server/sensors/patterns/frameworks.yaml` under `django_orm:` and
+//! layer additively with per-repo `<root>/.lain/patterns/*.yaml` overrides.
 
 use crate::error::LainError;
 use crate::federation::contracts::coverage::UnresolvedRecord;
@@ -65,98 +66,11 @@ use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{
     EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, StaticSource,
 };
+use crate::server::sensors::patterns::{DjangoOrmShapes, Patterns};
 use crate::server::sensors::SensorEntry;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-
-// ─── Django vocabulary ─────────────────────────────────────────────────
-
-/// Last-segment base names that make a class a Django model.
-const MODEL_BASES: &[&str] = &[
-    "Model",
-    "AbstractUser",
-    "AbstractBaseUser",
-    "MPTTModel",
-    "PolymorphicModel",
-];
-
-/// Manager / queryset methods that read the table.
-const READ_METHODS: &[&str] = &[
-    "get",
-    "filter",
-    "exclude",
-    "all",
-    "first",
-    "last",
-    "count",
-    "exists",
-    "values",
-    "values_list",
-    "select_related",
-    "prefetch_related",
-    "only",
-    "defer",
-    "annotate",
-    "aggregate",
-    "in_bulk",
-    "iterator",
-    "order_by",
-    "distinct",
-    "earliest",
-    "latest",
-    "select_for_update",
-    "raw",
-    "none",
-];
-
-/// Manager / queryset methods that write the table.
-const WRITE_METHODS: &[&str] = &[
-    "create",
-    "bulk_create",
-    "update",
-    "bulk_update",
-    "delete",
-    "update_or_create",
-    "get_or_create",
-];
-
-/// Methods that also read before they write.
-const READ_WRITE_METHODS: &[&str] = &["update_or_create", "get_or_create"];
-
-/// Methods after which the chain no longer addresses the queryset
-/// (it returned an instance, a number or nothing), so a following
-/// `.something(` is not a queryset method.
-const TERMINAL_METHODS: &[&str] = &[
-    "get",
-    "first",
-    "last",
-    "create",
-    "get_or_create",
-    "update_or_create",
-    "count",
-    "exists",
-    "delete",
-    "update",
-    "bulk_create",
-    "bulk_update",
-    "aggregate",
-    "in_bulk",
-    "earliest",
-    "latest",
-    "iterator",
-];
-
-/// Terminal methods that return a model instance.
-const INSTANCE_METHODS: &[&str] = &[
-    "get",
-    "first",
-    "last",
-    "create",
-    "earliest",
-    "latest",
-    "get_or_create",
-    "update_or_create",
-];
 
 /// Confidence of a `ReadsTable` whose access kind is inferred from a
 /// custom manager method.
@@ -293,6 +207,14 @@ pub fn scan_workspace_django_orm_with_report(
 /// find access sites. Nothing is retained between passes but the (small)
 /// class table.
 pub fn analyze_workspace(root: &Path) -> Analysis {
+    let patterns = Patterns::with_overrides(root).unwrap_or_else(|e| {
+        tracing::warn!(
+            "django_orm_sensor: {}: override load failed ({e}); using bundled patterns",
+            root.display()
+        );
+        Cow::Borrowed(Patterns::patterns())
+    });
+    let shapes = patterns.django_orm_shapes();
     let py = |p: &Path| (p.extension().and_then(|e| e.to_str()) == Some("py")).then_some(());
 
     let mut classes: Vec<ClassDef> = Vec::new();
@@ -301,7 +223,7 @@ pub fn analyze_workspace(root: &Path) -> Analysis {
         let masked = mask_python(&content);
         classes.extend(collect_classes(&gp, &content, &masked));
     }
-    let models = ModelMap::build(classes);
+    let models = ModelMap::build(classes, shapes);
 
     let mut out = Analysis {
         models_total: models.is_model.iter().filter(|m| **m).count(),
@@ -320,7 +242,7 @@ pub fn analyze_workspace(root: &Path) -> Analysis {
     }
     for (path, content, ()) in crate::server::sensors::util::scan_files(root, py) {
         let gp = graph_path(root, &path);
-        analyze_file(&models, &gp, &content, &mut out);
+        analyze_file(&models, shapes, &gp, &content, &mut out);
     }
     out.sites.sort_by(|a, b| {
         (&a.path, a.line, &a.table, a.access).cmp(&(&b.path, b.line, &b.table, b.access))
@@ -473,7 +395,7 @@ fn app_of_path(path: &str) -> String {
 }
 
 impl ModelMap {
-    fn build(classes: Vec<ClassDef>) -> Self {
+    fn build(classes: Vec<ClassDef>, shapes: &DjangoOrmShapes) -> Self {
         let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (i, c) in classes.iter().enumerate() {
             by_name.entry(c.name.clone()).or_default().push(i);
@@ -486,7 +408,7 @@ impl ModelMap {
                     continue;
                 }
                 let hit = classes[i].bases.iter().any(|b| {
-                    MODEL_BASES.contains(&b.as_str())
+                    shapes.has_model_base(b)
                         || by_name
                             .get(b)
                             .is_some_and(|v| v.iter().any(|&j| j != i && is_model[j]))
@@ -891,7 +813,7 @@ impl ModelMap {
 /// Parse `.name(args)` links starting at `i` (just after `.objects` or a
 /// previous link). Returns the method names and stops after a terminal
 /// method. Whitespace and newlines before a `.` are skipped.
-fn parse_chain(m: &str, mut i: usize) -> Vec<String> {
+fn parse_chain(m: &str, mut i: usize, shapes: &DjangoOrmShapes) -> Vec<String> {
     let b = m.as_bytes();
     let n = b.len();
     let mut methods = Vec::new();
@@ -933,7 +855,7 @@ fn parse_chain(m: &str, mut i: usize) -> Vec<String> {
             }
             methods.push(name.to_string());
             i = k;
-            if TERMINAL_METHODS.contains(&name) {
+            if shapes.is_terminal_method(name) {
                 break;
             }
         } else {
@@ -943,15 +865,12 @@ fn parse_chain(m: &str, mut i: usize) -> Vec<String> {
     methods
 }
 
-/// `Some((access list, heuristic))` for a method chain, `None` when it
-/// names no method at all (a bare manager).
-fn classify_chain(methods: &[String]) -> Option<(Vec<OrmAccess>, bool)> {
-    let known = |m: &&String, list: &[&str]| list.contains(&m.as_str());
-    let writes = methods.iter().any(|m| known(&m, WRITE_METHODS));
-    let reads = methods.iter().any(|m| known(&m, READ_METHODS));
-    let both = methods.iter().any(|m| known(&m, READ_WRITE_METHODS));
+fn classify_chain(methods: &[String], shapes: &DjangoOrmShapes) -> Option<(Vec<OrmAccess>, bool)> {
+    let writes = methods.iter().any(|m| shapes.is_write_method(m));
+    let reads = methods.iter().any(|m| shapes.is_read_method(m));
+    let both = methods.iter().any(|m| shapes.is_read_write_method(m));
     let custom = methods.iter().any(|m| {
-        !known(&m, WRITE_METHODS) && !known(&m, READ_METHODS) && m != "using" && m != "db_manager"
+        !shapes.is_write_method(m) && !shapes.is_read_method(m) && m != "using" && m != "db_manager"
     });
     if writes {
         let mut a = vec![OrmAccess::Writes];
@@ -989,7 +908,13 @@ fn def_scopes(masked: &str) -> Vec<u32> {
     scopes
 }
 
-fn analyze_file(models: &ModelMap, path: &str, orig: &str, out: &mut Analysis) {
+fn analyze_file(
+    models: &ModelMap,
+    shapes: &DjangoOrmShapes,
+    path: &str,
+    orig: &str,
+    out: &mut Analysis,
+) {
     let masked = mask_python(orig);
     let m = masked.as_str();
     if !m.contains(".objects")
@@ -1015,7 +940,19 @@ fn analyze_file(models: &ModelMap, path: &str, orig: &str, out: &mut Analysis) {
             .chain(ctx.imports.names.values().map(|(mo, _)| mo))
             .any(|mo| mo.ends_with("models") || mo.contains(".models."));
 
-    let mut bound: BTreeMap<(u32, String), usize> = BTreeMap::new();
+    // Per-(scope, var) assignment history keyed by LHS byte offset (`Some(model)`
+    // when bound to a model instance, `None` when reassigned to something else).
+    let mut bound: BTreeMap<(u32, String), Vec<(usize, Option<usize>)>> = BTreeMap::new();
+    let mut set_binding = |scope: u32, var: String, off: usize, model: Option<usize>| {
+        let entries = bound.entry((scope, var)).or_default();
+        if let Some(existing) = entries.iter_mut().find(|(o, _)| *o == off) {
+            if model.is_some() {
+                existing.1 = model;
+            }
+        } else {
+            entries.push((off, model));
+        }
+    };
 
     let record =
         |out: &mut Analysis, line: u32, model: usize, access: Vec<OrmAccess>, heuristic: bool| {
@@ -1086,8 +1023,8 @@ fn analyze_file(models: &ModelMap, path: &str, orig: &str, out: &mut Analysis) {
             }
             Resolved::One(j) => j,
         };
-        let methods = parse_chain(m, after);
-        let Some((access, heuristic)) = classify_chain(&methods) else {
+        let methods = parse_chain(m, after, shapes);
+        let Some((access, heuristic)) = classify_chain(&methods, shapes) else {
             out.unresolved.push(OrmUnresolved {
                 path: path.to_string(),
                 line,
@@ -1096,13 +1033,12 @@ fn analyze_file(models: &ModelMap, path: &str, orig: &str, out: &mut Analysis) {
             continue;
         };
         record(out, line, model, access, heuristic);
-        if methods
-            .last()
-            .is_some_and(|l| INSTANCE_METHODS.contains(&l.as_str()))
-        {
-            if let Some(var) = assigned_var(m, &starts, s) {
-                bound.insert((scope_at(line), var), model);
-            }
+        if let Some((assign_off, var)) = assigned_var(m, &starts, s) {
+            let bound_model = methods
+                .last()
+                .is_some_and(|l| shapes.is_instance_method(l))
+                .then_some(model);
+            set_binding(scope_at(line), var, assign_off, bound_model);
         }
     }
 
@@ -1138,44 +1074,76 @@ fn analyze_file(models: &ModelMap, path: &str, orig: &str, out: &mut Analysis) {
                 }),
                 Resolved::One(j) => {
                     record(out, line, j, vec![OrmAccess::Reads], false);
-                    if needle == "get_object_or_404(" {
-                        if let Some(var) = assigned_var(m, &starts, idx) {
-                            bound.insert((scope_at(line), var), j);
-                        }
+                    if let Some((assign_off, var)) = assigned_var(m, &starts, idx) {
+                        let bound_model = (needle == "get_object_or_404(").then_some(j);
+                        set_binding(scope_at(line), var, assign_off, bound_model);
                     }
                 }
             }
         }
     }
 
-    // Instance creation: `x = Model(...)`.
+    // Instance creation (`x = Model(...)`) and plain reassignments that
+    // aren't already handled by `.objects` or `get_object_or_404`.
     for (idx, line_text) in m.lines().enumerate() {
-        let t = line_text.trim_start();
-        let Some((target, rhs)) = t.split_once('=') else {
-            continue;
-        };
-        let target = target.trim();
-        if target.is_empty() || !target.bytes().all(is_ident_byte) || rhs.starts_with('=') {
-            continue;
+        let line_no = (idx + 1) as u32;
+        let line_start = starts[idx];
+        let scope = scope_at(line_no);
+        let mut cursor = 0usize;
+        for stmt in line_text.split(';') {
+            let stmt_start = line_start + cursor;
+            cursor += stmt.len() + 1;
+            let trimmed = stmt.trim_start();
+            let ws_len = stmt.len() - trimmed.len();
+            let Some((target, rhs)) = trimmed.split_once('=') else {
+                continue;
+            };
+            if target.ends_with([
+                '!', '<', '>', '=', ':', '+', '-', '*', '/', '%', '&', '|', '^',
+            ]) || rhs.starts_with('=')
+            {
+                continue;
+            }
+            let target = target.trim();
+            if target.is_empty() || !target.bytes().all(is_ident_byte) {
+                continue;
+            }
+            let lhs_off = stmt_start + ws_len;
+            let rhs = rhs.trim_start();
+            let rhs = rhs.strip_prefix("await ").unwrap_or(rhs);
+            // Skip `.objects` and `get_*_or_404` RHS — those passes record
+            // the binding themselves at the exact `lhs_off`.
+            if rhs.contains(".objects")
+                || rhs.starts_with("get_object_or_404(")
+                || rhs.starts_with("get_list_or_404(")
+            {
+                continue;
+            }
+            let head: String = rhs
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                .collect();
+            let bound_model = if !head.is_empty() && rhs[head.len()..].starts_with('(') {
+                let segs: Vec<&str> = head.split('.').collect();
+                let last = segs[segs.len() - 1];
+                if upper_first(last) {
+                    let qualifier = (segs.len() >= 2).then(|| segs[segs.len() - 2]);
+                    match models.resolve_class(last, qualifier, &ctx) {
+                        Resolved::One(j) => Some(j),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            set_binding(scope, target.to_string(), lhs_off, bound_model);
         }
-        let rhs = rhs.trim_start();
-        let rhs = rhs.strip_prefix("await ").unwrap_or(rhs);
-        let head: String = rhs
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
-            .collect();
-        if !rhs[head.len()..].starts_with('(') {
-            continue;
-        }
-        let segs: Vec<&str> = head.split('.').collect();
-        let last = segs[segs.len() - 1];
-        if !upper_first(last) {
-            continue;
-        }
-        let qualifier = (segs.len() >= 2).then(|| segs[segs.len() - 2]);
-        if let Resolved::One(j) = models.resolve_class(last, qualifier, &ctx) {
-            bound.insert((scope_at((idx + 1) as u32), target.to_string()), j);
-        }
+    }
+
+    for entries in bound.values_mut() {
+        entries.sort_by_key(|(off, _)| *off);
     }
 
     // Pass B: `.save()` / `.delete()` on a resolved instance.
@@ -1206,7 +1174,17 @@ fn analyze_file(models: &ModelMap, path: &str, orig: &str, out: &mut Analysis) {
                 }
                 continue;
             }
-            if let Some(&j) = bound.get(&(scope_at(line), recv.to_string())) {
+            let resolved_model =
+                bound
+                    .get(&(scope_at(line), recv.to_string()))
+                    .and_then(|entries| {
+                        entries
+                            .iter()
+                            .rev()
+                            .find(|(off, _)| *off < s)
+                            .and_then(|(_, model)| *model)
+                    });
+            if let Some(j) = resolved_model {
                 record(out, line, j, vec![OrmAccess::Writes], false);
             } else if is_save && mentions_orm {
                 out.unresolved.push(OrmUnresolved {
@@ -1219,22 +1197,33 @@ fn analyze_file(models: &ModelMap, path: &str, orig: &str, out: &mut Analysis) {
     }
 }
 
-/// The variable a statement starting at/near `recv_start` assigns to:
-/// `x = <recv>…`, `x, created = <recv>…`, or the previous line ending in
-/// `x =` / `x = (`.
-fn assigned_var(m: &str, starts: &[usize], recv_start: usize) -> Option<String> {
+/// The `(lhs_offset, variable_name)` a statement starting at/near `recv_start`
+/// assigns to: `x = <recv>…`, `x, created = <recv>…`, or the previous line
+/// ending in `x =` / `x = (`.
+fn assigned_var(m: &str, starts: &[usize], recv_start: usize) -> Option<(usize, String)> {
     let line_no = line_of(starts, recv_start) as usize;
     let ls = starts[line_no - 1];
-    let before = m[ls..recv_start].trim();
+    // Respect `;` statement boundaries on the same line.
+    let seg_rel_start = m[ls..recv_start].rfind(';').map_or(0, |p| p + 1);
+    let seg_start = ls + seg_rel_start;
+    let raw_before = &m[seg_start..recv_start];
+    let trimmed_start = raw_before.trim_start();
+    let leading_ws = raw_before.len() - trimmed_start.len();
+    let before = trimmed_start.trim_end();
     let before = before.strip_suffix("await").map_or(before, str::trim);
-    let candidate = if before.is_empty() || before == "(" {
-        let prev = (1..line_no)
+    let (assign_off, candidate) = if before.is_empty() || before == "(" {
+        let prev_line = (1..line_no)
             .rev()
-            .map(|n| m[starts[n - 1]..starts[n]].trim())
-            .find(|l| !l.is_empty())?;
-        prev.to_string()
+            .find(|&n| !m[starts[n - 1]..starts[n]].trim().is_empty())?;
+        let raw_prev = &m[starts[prev_line - 1]..starts[prev_line]];
+        let prev_trimmed = raw_prev.trim_start();
+        let prev_ws = raw_prev.len() - prev_trimmed.len();
+        (
+            starts[prev_line - 1] + prev_ws,
+            prev_trimmed.trim_end().to_string(),
+        )
     } else {
-        before.to_string()
+        (seg_start + leading_ws, before.to_string())
     };
     let lhs = candidate
         .trim_end_matches('(')
@@ -1242,7 +1231,7 @@ fn assigned_var(m: &str, starts: &[usize], recv_start: usize) -> Option<String> 
         .strip_suffix('=')?
         .trim();
     let first = lhs.split(',').next()?.trim();
-    (!first.is_empty() && first.bytes().all(is_ident_byte)).then(|| first.to_string())
+    (!first.is_empty() && first.bytes().all(is_ident_byte)).then(|| (assign_off, first.to_string()))
 }
 
 // ─── Graph emission ────────────────────────────────────────────────────
@@ -1793,6 +1782,76 @@ class Product(SeoModel):
             .get_all_nodes()
             .iter()
             .all(|n| !n.name.starts_with("orm-read:")));
+    }
+
+    #[test]
+    fn reassigned_instance_variable_resolves_per_access_site() {
+        let a = analyze(&[
+            (
+                "shop/models.py",
+                "from django.db import models\n\
+                 class Product(models.Model):\n    pass\n\
+                 class Order(models.Model):\n    pass\n",
+            ),
+            (
+                "shop/use.py",
+                "from shop.models import Product, Order\n\
+                 def update_both():\n\
+                 \x20   item = Product.objects.get(pk=1)\n\
+                 \x20   item.save()\n\
+                 \x20   item = Order.objects.get(pk=2)\n\
+                 \x20   item.save()\n\
+                 def cleared_after_non_model_reassignment():\n\
+                 \x20   item = Product.objects.get(pk=1)\n\
+                 \x20   item = build_non_model()\n\
+                 \x20   item.save()\n",
+            ),
+        ]);
+        // Line 4 (`item.save()`) must resolve to `shop_product`, NOT `shop_order`.
+        assert_eq!(
+            site(&a, 4),
+            vec![("shop_product".into(), OrmAccess::Writes, false)]
+        );
+        // Line 6 (`item.save()`) after reassignment to `Order` resolves to `shop_order`.
+        assert_eq!(
+            site(&a, 6),
+            vec![("shop_order".into(), OrmAccess::Writes, false)]
+        );
+        // Line 10 (`item.save()`) after reassignment to non-model is not attributed to `shop_product`.
+        assert!(site(&a, 10).is_empty(), "{:?}", site(&a, 10));
+        assert!(
+            a.unresolved
+                .iter()
+                .any(|u| u.line == 10 && u.why == "unresolved save() receiver"),
+            "{:?}",
+            a.unresolved
+        );
+    }
+
+    #[test]
+    fn pattern_overrides_extend_model_bases_and_methods() {
+        let a = analyze(&[
+            (
+                ".lain/patterns/django.yaml",
+                "django_orm:\n  model_bases:\n    - CustomAuditBase\n  write_methods:\n    - archive_all\n  terminal_methods:\n    - archive_all\n",
+            ),
+            (
+                "shop/models.py",
+                "from core.db import CustomAuditBase\n\
+                 class Invoice(CustomAuditBase):\n    pass\n",
+            ),
+            (
+                "shop/use.py",
+                "from shop.models import Invoice\n\
+                 def run():\n\
+                 \x20   Invoice.objects.filter(paid=True).archive_all()\n",
+            ),
+        ]);
+        assert!(a.tables.contains_key("shop_invoice"), "{:?}", a.tables);
+        assert_eq!(
+            site(&a, 3),
+            vec![("shop_invoice".into(), OrmAccess::Writes, false)]
+        );
     }
 
     /// Real-data sanity check, opt-in:

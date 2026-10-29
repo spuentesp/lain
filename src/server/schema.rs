@@ -267,7 +267,6 @@ pub enum EdgeType {
     Pattern,       // Semantic boundary indicator (path prefixes, topic names)
     // Cross-runtime edge types
     CallsHttp,           // HTTP route -> handler (method, path pattern)
-    CallsGraphql,        // GraphQL root-field provider (SDL) -> resolver function
     Produces,            // Producer -> Topic (Kafka producer, event emitter)
     Consumes,            // Consumer -> Topic (Kafka consumer, queue listener)
     DeployedTo,          // IaC resource -> cloud resource (k8s, AWS, etc.)
@@ -313,6 +312,9 @@ pub enum EdgeType {
     // into v3 — `FEDERATION_GRAPH_VERSION` stays at 3.
     ReadsTable,
     WritesTable,
+    // Append-only: bincode encodes `EdgeType` by declaration index, so new
+    // variants must be added at the end to preserve existing discriminants.
+    CallsGraphql, // GraphQL root-field provider (SDL) -> resolver function
 }
 
 impl EdgeType {
@@ -336,7 +338,6 @@ impl EdgeType {
             EdgeType::CoChangedWith,
             EdgeType::Pattern,
             EdgeType::CallsHttp,
-            EdgeType::CallsGraphql,
             EdgeType::Produces,
             EdgeType::Consumes,
             EdgeType::DeployedTo,
@@ -355,6 +356,7 @@ impl EdgeType {
             EdgeType::Binds,
             EdgeType::ReadsTable,
             EdgeType::WritesTable,
+            EdgeType::CallsGraphql,
         ]
     }
 

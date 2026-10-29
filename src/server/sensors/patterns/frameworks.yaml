@@ -669,3 +669,76 @@ languages:
       kind: topic_producer
       broker: kafka
       path_regex: '\bProducerRecord\s*(?:<[^>]*>)?\s*\(\s*(?:"([^"]+)"|([A-Za-z_]\w*))'
+
+django_orm:
+  model_bases:
+    - Model
+    - AbstractUser
+    - AbstractBaseUser
+    - MPTTModel
+    - PolymorphicModel
+  read_methods:
+    - get
+    - filter
+    - exclude
+    - all
+    - first
+    - last
+    - count
+    - exists
+    - values
+    - values_list
+    - select_related
+    - prefetch_related
+    - only
+    - defer
+    - annotate
+    - aggregate
+    - in_bulk
+    - iterator
+    - order_by
+    - distinct
+    - earliest
+    - latest
+    - select_for_update
+    - raw
+    - none
+  write_methods:
+    - create
+    - bulk_create
+    - update
+    - bulk_update
+    - delete
+    - update_or_create
+    - get_or_create
+  read_write_methods:
+    - update_or_create
+    - get_or_create
+  terminal_methods:
+    - get
+    - first
+    - last
+    - create
+    - get_or_create
+    - update_or_create
+    - count
+    - exists
+    - delete
+    - update
+    - bulk_create
+    - bulk_update
+    - aggregate
+    - in_bulk
+    - earliest
+    - latest
+    - iterator
+  instance_methods:
+    - get
+    - first
+    - last
+    - create
+    - earliest
+    - latest
+    - get_or_create
+    - update_or_create
+
