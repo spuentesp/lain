@@ -946,6 +946,66 @@ where
         .collect()
 }
 
+/// Whole-file prefilter over a group of idioms: one `RegexSet` pass that says
+/// whether *any* idiom could match *somewhere* in a file, so the per-line walk
+/// (every idiom regex against every line) is skipped for the many files that
+/// cannot contain a site.
+///
+/// It may only err toward "yes". Each pattern is compiled `multi_line`, so a
+/// match on a single line is also a match inside the whole file with `^`/`$`
+/// at the same line boundaries; the file-wide form is strictly more permissive
+/// (`\s` and negated classes can cross lines), never less. Two cases fall back
+/// to "yes" because that guarantee does not hold: a file containing `\r` (`$`
+/// stops before `\n`, not `\r\n`) and a set the regex engine refuses to
+/// build. `LAIN_IDIOM_GATE=0` turns the gate off for A/B checks.
+pub struct IdiomGate {
+    set: Option<regex::RegexSet>,
+}
+
+impl IdiomGate {
+    /// Gate over every idiom in `groups`. An empty group list gates
+    /// everything out (no idiom can match).
+    pub fn new(groups: &[&[CompiledIdiom]]) -> Self {
+        let patterns: Vec<&str> = groups
+            .iter()
+            .flat_map(|g| g.iter())
+            .map(|i| i.regex.as_str())
+            .collect();
+        Self::from_patterns(&patterns)
+    }
+
+    /// Gate over literal strings (wrapper names), matched anywhere.
+    pub fn for_literals<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let patterns: Vec<String> = names.into_iter().map(regex::escape).collect();
+        let refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+        Self::from_patterns(&refs)
+    }
+
+    fn from_patterns(patterns: &[&str]) -> Self {
+        let set = regex::RegexSetBuilder::new(patterns)
+            .multi_line(true)
+            .build()
+            .ok();
+        Self { set }
+    }
+
+    /// `false` only when no idiom can match anywhere in `content`.
+    pub fn may_match(&self, content: &str) -> bool {
+        if !idiom_gate_enabled() || content.contains('\r') {
+            return true;
+        }
+        match &self.set {
+            Some(set) => set.is_match(content),
+            None => true,
+        }
+    }
+}
+
+fn idiom_gate_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("LAIN_IDIOM_GATE").map_or(true, |v| v != "0"))
+}
+
 /// Build the full per-`Lang` idiom set in one shot: every
 /// Tier-1 entry in the registry, partitioned by the call site
 /// (the caller iterates lines and calls [`walk_idioms`] with
