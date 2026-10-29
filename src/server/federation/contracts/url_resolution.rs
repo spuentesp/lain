@@ -183,3 +183,193 @@ pub(crate) fn host_matches_pattern(pattern: &str, host: &str) -> bool {
         pattern == host
     }
 }
+
+/// Where a URL points: its host (IPv6 kept in brackets) and effective port.
+/// The effective port is the explicit one, else the scheme's default
+/// (80 for http, 443 for https), else none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+fn default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    }
+}
+
+/// Split `host[:port]` or `[v6][:port]` into its host and explicit port.
+/// A trailing `:digits` is a port only when nothing else in the authority
+/// could be a host separator, so `[::1]` has no port and `[::1]:8000` has one.
+fn split_host_port(authority: &str) -> Option<(String, Option<u16>)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = format!("[{}]", &rest[..end]);
+        let after = &rest[end + 1..];
+        return match after.strip_prefix(':') {
+            None if after.is_empty() => Some((host, None)),
+            Some(p) => Some((host, Some(p.parse().ok()?))),
+            None => None,
+        };
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') && !port.is_empty() => {
+            Some((host.to_string(), Some(port.parse().ok()?)))
+        }
+        Some((_, _)) => None,
+        None => Some((authority.to_string(), None)),
+    }
+}
+
+/// The endpoint a URL literal addresses. `None` when the URL has no scheme or
+/// its authority cannot be read.
+pub fn endpoint_of_url(url: &str) -> Option<Endpoint> {
+    let (scheme, rest) = url.split_once("://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = rest[..end]
+        .rsplit_once('@')
+        .map_or(&rest[..end], |(_, a)| a);
+    let (host, explicit) = split_host_port(authority)?;
+    Some(endpoint_with_default(scheme, host, explicit))
+}
+
+/// The endpoint for a host that was already read from a URL, when the text
+/// after it is known. Used where the literal itself carries template markers
+/// (`http://user%s`) that are not part of the authority.
+pub fn endpoint_from_parts(scheme: &str, host: &str, after_host: &str) -> Endpoint {
+    let explicit = after_host
+        .strip_prefix(':')
+        .map(|r| {
+            r.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+        })
+        .and_then(|digits| digits.parse().ok());
+    endpoint_with_default(scheme, host.to_string(), explicit)
+}
+
+fn endpoint_with_default(scheme: &str, host: String, explicit: Option<u16>) -> Endpoint {
+    Endpoint {
+        host,
+        port: explicit.or_else(|| default_port(&scheme.to_ascii_lowercase())),
+    }
+}
+
+/// The `host` or `host:port` form a service declares or an env var implies.
+/// Used to compare against an [`Endpoint`].
+pub fn endpoint_pattern(url: &str) -> Option<String> {
+    let ep = endpoint_of_url(url)?;
+    Some(match ep.port {
+        Some(p) => format!("{}:{p}", ep.host),
+        None => ep.host,
+    })
+}
+
+/// Whether a declared `host` or `host:port` pattern matches an endpoint. A
+/// pattern without a port matches any port, as before. A pattern with a port
+/// matches only that effective port.
+pub fn endpoint_matches(pattern: &str, ep: &Endpoint) -> bool {
+    let Some((host, port)) = split_host_port(pattern) else {
+        return false;
+    };
+    if let Some(p) = port {
+        if ep.port != Some(p) {
+            return false;
+        }
+    }
+    host_matches_pattern(&host, &ep.host)
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    fn ep(url: &str) -> Endpoint {
+        endpoint_of_url(url).unwrap()
+    }
+
+    #[test]
+    fn explicit_port_is_the_effective_port() {
+        assert_eq!(ep("http://localhost:8000/graphql/").port, Some(8000));
+    }
+
+    #[test]
+    fn scheme_default_ports_apply_when_none_is_written() {
+        assert_eq!(ep("http://localhost/graphql/").port, Some(80));
+        assert_eq!(ep("https://localhost/graphql/").port, Some(443));
+        assert_eq!(ep("ftp://localhost/x").port, None);
+    }
+
+    #[test]
+    fn ipv6_hosts_keep_their_brackets_and_port() {
+        assert_eq!(
+            ep("http://[::1]:8000/x"),
+            Endpoint {
+                host: "[::1]".into(),
+                port: Some(8000)
+            }
+        );
+        assert_eq!(
+            ep("http://[::1]/x"),
+            Endpoint {
+                host: "[::1]".into(),
+                port: Some(80)
+            }
+        );
+    }
+
+    #[test]
+    fn userinfo_is_not_part_of_the_host() {
+        assert_eq!(ep("http://user:pw@orders:8080/x").host, "orders");
+    }
+
+    #[test]
+    fn a_port_pattern_matches_only_that_effective_port() {
+        assert!(endpoint_matches(
+            "localhost:8000",
+            &ep("http://localhost:8000/graphql/")
+        ));
+        assert!(!endpoint_matches(
+            "localhost:8000",
+            &ep("http://localhost/graphql/")
+        ));
+        assert!(endpoint_matches(
+            "localhost:80",
+            &ep("http://localhost/graphql/")
+        ));
+        assert!(!endpoint_matches(
+            "localhost:80",
+            &ep("https://localhost/graphql/")
+        ));
+        assert!(endpoint_matches(
+            "localhost:443",
+            &ep("https://localhost/graphql/")
+        ));
+    }
+
+    #[test]
+    fn a_host_pattern_without_a_port_matches_any_port() {
+        assert!(endpoint_matches(
+            "localhost",
+            &ep("http://localhost:8000/x")
+        ));
+        assert!(endpoint_matches("localhost", &ep("http://localhost/x")));
+    }
+
+    #[test]
+    fn ipv6_patterns_match_with_and_without_a_port() {
+        assert!(endpoint_matches("[::1]:8000", &ep("http://[::1]:8000/x")));
+        assert!(!endpoint_matches("[::1]:8000", &ep("http://[::1]:9000/x")));
+        assert!(endpoint_matches("[::1]", &ep("http://[::1]:9000/x")));
+    }
+
+    #[test]
+    fn a_pattern_built_from_a_url_round_trips() {
+        let pat = endpoint_pattern("http://localhost:8000/graphql/").unwrap();
+        assert_eq!(pat, "localhost:8000");
+        assert!(endpoint_matches(&pat, &ep("http://localhost:8000/other")));
+    }
+}

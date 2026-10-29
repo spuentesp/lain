@@ -1269,17 +1269,8 @@ fn parse_method_template(name: &str) -> (MethodSpec, Option<String>) {
     let mut parts = trimmed.splitn(2, ' ');
     let verb = parts.next().unwrap_or("");
     let tmpl = parts.next().map(str::to_string);
-    let method = match verb.to_ascii_uppercase().as_str() {
-        "GET" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Get),
-        "POST" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Post),
-        "PUT" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Put),
-        "PATCH" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Patch),
-        "DELETE" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Delete),
-        "HEAD" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Head),
-        "OPTIONS" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Options),
-        "ANY" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any),
-        _ => MethodSpec::Unknown,
-    };
+    let method = crate::federation::contracts::model::HttpMethod::parse(&verb.to_ascii_uppercase())
+        .map_or(MethodSpec::Unknown, MethodSpec::Known);
     (method, tmpl)
 }
 

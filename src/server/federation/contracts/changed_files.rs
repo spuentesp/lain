@@ -408,13 +408,7 @@ impl ChangedFilesSource for MultiRepoChangedFiles {
     }
 
     fn unavailable_repos(&self) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        for (repo, res) in &self.by_repo {
-            if res.is_unavailable() {
-                out.insert(repo.clone());
-            }
-        }
-        out
+        MultiRepoChangedFiles::unavailable_repos(self)
     }
 }
 

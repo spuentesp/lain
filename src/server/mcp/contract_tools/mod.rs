@@ -52,6 +52,7 @@ pub mod envelope;
 pub mod evidence;
 pub mod paging;
 pub mod scope;
+pub mod service_refs;
 pub mod services;
 pub mod snapshots;
 pub mod used_by;

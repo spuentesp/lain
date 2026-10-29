@@ -501,7 +501,7 @@ fn collect_same_file_constants(
 fn dir_key(root: &Path, path: &Path) -> String {
     path.parent()
         .and_then(|p| p.strip_prefix(root).ok())
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(crate::server::path_util::posix_string)
         .unwrap_or_default()
 }
 

@@ -206,6 +206,14 @@ pub const CONTRACT_TOOL_DEFS: &[ToolDef] = &[
         output_schema: Some(include_str!("contract_tools/schemas/get_snapshot.out.json")),
     },
     ToolDef {
+        name: "list_service_refs",
+        description: "URL literals in the federation's repos that name a declared service: where each one lives, what its host resolves to, and whether a sensor saw a call there. Live view only.",
+        required_args: &["snapshot"],
+        optional_args: &["repo", "usage", "outcome", "cursor", "limit"],
+        input_schema: Some(include_str!("contract_tools/schemas/list_service_refs.in.json")),
+        output_schema: Some(include_str!("contract_tools/schemas/list_service_refs.out.json")),
+    },
+    ToolDef {
         name: "list_contracts",
         description: "Endpoints the federation exposes, filterable by service, repo, and kind (http/topic).",
         required_args: &["snapshot"],

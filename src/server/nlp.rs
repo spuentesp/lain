@@ -98,6 +98,46 @@ fn prefixed_query(prefix: &str, query: &str) -> String {
     format!("{prefix}{query}")
 }
 
+/// Whether the model takes a `token_type_ids` input. BERT-family exports do;
+/// several newer encoders (the Granite embedding family, for one) do not, and
+/// feeding them one is an error that fails the whole model load.
+fn takes_token_type_ids(session: &Session) -> bool {
+    session
+        .inputs()
+        .iter()
+        .any(|i| i.name() == "token_type_ids")
+}
+
+/// How token outputs become one sentence vector. Each model is trained with
+/// one of these, and using the other gives vectors the model was never fit to
+/// produce. Granite and most sentence-transformers exports use `Cls`; the
+/// MiniLM family uses `Mean`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pooling {
+    Mean,
+    Cls,
+}
+
+impl Pooling {
+    /// `"mean"` or `"cls"`, case-insensitive. Anything else is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mean" => Some(Self::Mean),
+            "cls" => Some(Self::Cls),
+            _ => None,
+        }
+    }
+
+    /// `LAIN_EMBEDDING_POOLING` for an explicitly named model; mean when unset
+    /// or unrecognized, as before.
+    pub fn from_env() -> Self {
+        std::env::var("LAIN_EMBEDDING_POOLING")
+            .ok()
+            .and_then(|v| Self::parse(&v))
+            .unwrap_or(Self::Mean)
+    }
+}
+
 #[derive(Clone)]
 pub struct NlpEmbedder {
     inner: EmbedInner,
@@ -111,6 +151,8 @@ pub struct NlpEmbedder {
     /// correctly omitted it. [`Self::embed_query`] makes the choice
     /// explicit, so a new call site has to pick one.
     query_prefix: String,
+    /// How the token outputs become a sentence vector. See [`Pooling`].
+    pooling: Pooling,
 }
 
 impl NlpEmbedder {
@@ -195,15 +237,36 @@ impl NlpEmbedder {
                 )
             };
 
+        // With no model named anywhere, use the catalog's default if it is
+        // installed. The server never downloads; `lain models install` does.
+        // Tests stay on the stub.
+        #[cfg(not(test))]
+        let installed = if std::env::var_os("LAIN_EMBEDDING_MODEL").is_none() {
+            crate::server::models::installed_default()
+        } else {
+            None
+        };
+        #[cfg(test)]
+        let installed: Option<(PathBuf, PathBuf, Pooling)> = None;
+        let declared = installed.as_ref().map(|(_, _, p)| *p);
+        let (model_path, tokenizer_path) = match installed {
+            Some((m, t, _)) => (m, t),
+            None => (model_path, tokenizer_path),
+        };
+
         if !model_path.exists() || !tokenizer_path.exists() {
             tracing::warn!(
-                "NLP model files not found at {:?}, using stub embedder",
+                "NLP model files not found at {:?}, using stub embedder (run `lain models install`)",
                 model_path
             );
             return Ok(Self::new_stub());
         }
 
-        Self::with_max_threads(&model_path, &tokenizer_path, max_threads)
+        let mut embedder = Self::with_max_threads(&model_path, &tokenizer_path, max_threads)?;
+        if let Some(p) = declared {
+            embedder.set_pooling(p);
+        }
+        Ok(embedder)
     }
     // `new_with_paths` forwarded to `with_max_threads` and had no caller;
     // production builds embedders via `with_max_threads` / `new_with_threads`.
@@ -248,6 +311,7 @@ impl NlpEmbedder {
 
         Ok(Self {
             query_prefix: String::new(),
+            pooling: Pooling::from_env(),
             inner: EmbedInner::Onnx {
                 session: Arc::new(Mutex::new(session)),
                 tokenizer: Arc::new(tokenizer),
@@ -270,11 +334,18 @@ impl NlpEmbedder {
         let type_tensor =
             Tensor::from_array(([1, 3], dummy_types)).map_err(|e| LainError::Nlp(e.to_string()))?;
 
-        let inputs = ort::inputs![
-            "input_ids" => ids_tensor,
-            "attention_mask" => mask_tensor,
-            "token_type_ids" => type_tensor,
-        ];
+        let inputs = if takes_token_type_ids(&session) {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+                "token_type_ids" => type_tensor,
+            ]
+        } else {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+            ]
+        };
 
         let outputs = session
             .run(inputs)
@@ -292,6 +363,7 @@ impl NlpEmbedder {
         Self {
             inner: EmbedInner::Stub { embedding_dim: 384 },
             query_prefix: String::new(),
+            pooling: Pooling::Mean,
         }
     }
 
@@ -331,6 +403,16 @@ impl NlpEmbedder {
 
     /// Install the configured query prefix. Called once when the
     /// embedder is built, from the tuning config.
+    /// Set how token outputs become sentence vectors. Set from the model's
+    /// declared pooling when the default model is installed.
+    pub fn set_pooling(&mut self, pooling: Pooling) {
+        self.pooling = pooling;
+    }
+
+    pub fn pooling(&self) -> Pooling {
+        self.pooling
+    }
+
     pub fn set_query_prefix(&mut self, prefix: impl Into<String>) {
         self.query_prefix = prefix.into();
     }
@@ -431,13 +513,19 @@ impl NlpEmbedder {
         let mask_tensor = Tensor::from_array(([n, batch_seq_len], masks_flat))?;
         let type_tensor = Tensor::from_array(([n, batch_seq_len], types_flat))?;
 
-        let inputs = ort::inputs![
-            "input_ids" => ids_tensor,
-            "attention_mask" => mask_tensor,
-            "token_type_ids" => type_tensor,
-        ];
-
         let mut session = session.lock();
+        let inputs = if takes_token_type_ids(&session) {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+                "token_type_ids" => type_tensor,
+            ]
+        } else {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+            ]
+        };
         let outputs = session.run(inputs)?;
 
         let last_hidden_state = outputs["last_hidden_state"].try_extract_tensor::<f32>()?;
@@ -457,6 +545,10 @@ impl NlpEmbedder {
             let mut emb = vec![0.0f32; embedding_dim];
             let mut count = 0usize;
             for i in 0..out_seq_len {
+                // CLS pooling reads the first token only; it is never padding.
+                if self.pooling == Pooling::Cls && i > 0 {
+                    break;
+                }
                 // attention_mask==0 at this position means [PAD] — skip.
                 // batch_mask may be shorter than out_seq_len for short
                 // inputs; in that case treat as padded.
@@ -613,13 +705,19 @@ impl CrossEncoder {
         let mask_tensor = Tensor::from_array(([1, seq_len], attention_mask))?;
         let type_tensor = Tensor::from_array(([1, seq_len], token_type_ids))?;
 
-        let inputs = ort::inputs![
-            "input_ids" => ids_tensor,
-            "attention_mask" => mask_tensor,
-            "token_type_ids" => type_tensor,
-        ];
-
         let mut session = inner.session.lock();
+        let inputs = if takes_token_type_ids(&session) {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+                "token_type_ids" => type_tensor,
+            ]
+        } else {
+            ort::inputs![
+                "input_ids" => ids_tensor,
+                "attention_mask" => mask_tensor,
+            ]
+        };
         let outputs = session.run(inputs)?;
 
         // ms-marco-MiniLM-L-6-v2 outputs shape [1, 1] — a single logit.

@@ -19,6 +19,7 @@ violation, not a warning.
 import argparse
 import json
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -98,6 +99,10 @@ def _tool_text(response, tool_name):
 
 
 def run_check(command, index_budget_seconds, request_timeout):
+    # Popen on Windows does not search PATHEXT for npm's npx.cmd.
+    executable = shutil.which(command[0])
+    if executable:
+        command = [executable, *command[1:]]
     proc = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
@@ -126,6 +131,7 @@ def run_check(command, index_budget_seconds, request_timeout):
         )
         if "result" not in init:
             raise ProtocolError(f"initialize did not return a result: {init}")
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
         print("initialize: ok")
 
         listed = call("tools/list", {})
@@ -145,24 +151,31 @@ def run_check(command, index_budget_seconds, request_timeout):
                     f"this tool): {text!r}"
                 ) from e
 
-        caps = get_capabilities()
         deadline = time.monotonic() + index_budget_seconds
-        while caps.get("indexing", {}).get("state") == "warming_up":
+        while True:
+            caps = get_capabilities()
+            # Optional embeddings/mirrors need not be available.
+            structural = [caps.get("capabilities", {}).get(name, {})
+                          for name in ("symbols", "call_graph")]
+            states = [item.get("state") for item in structural]
+            if all(state == "ready" for state in states):
+                break
+            if any(state not in ("ready", "warming_up") for state in states):
+                raise ProtocolError(f"structural capabilities are not ready: {caps}")
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"indexing never reached ready within {index_budget_seconds}s; "
                     f"last capabilities: {caps}"
                 )
-            retry_after_ms = caps.get("indexing", {}).get("retry_after_ms") or 1000
+            retry_after_ms = max(item.get("retry_after_ms") or 1000
+                                 for item in structural if item.get("state") == "warming_up")
             time.sleep(retry_after_ms / 1000.0)
-            caps = get_capabilities()
-        state = caps.get("indexing", {}).get("state")
-        if state != "ready":
-            raise ProtocolError(f"indexing ended in {state!r}, not ready: {caps}")
         print("get_capabilities: ok (indexing ready)")
 
         query = call("tools/call", {"name": "find_anchors", "arguments": {"limit": 5}})
         text = _tool_text(query, "find_anchors")
+        if query.get("result", {}).get("isError"):
+            raise ProtocolError(f"find_anchors returned an error: {text}")
         if not text.strip():
             raise ProtocolError("find_anchors returned an empty answer")
         try:
