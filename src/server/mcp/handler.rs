@@ -2051,6 +2051,23 @@ fn prewarm_outcome_to_json(outcome: &crate::server::lsp::PrewarmOutcome) -> serd
     }
 }
 
+/// Summarize index readiness without walking the graph or probing language servers.
+fn index_status(repos: &[(String, crate::federation::health::RepoHealth)]) -> (StatusCode, Value) {
+    use crate::federation::health::RepoHealth;
+    let status = if repos.iter().any(|(_, h)| *h == RepoHealth::Indexing) {
+        StatusCode::ACCEPTED
+    } else if repos.is_empty() || repos.iter().any(|(_, h)| *h != RepoHealth::Ready) {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    let repos: Vec<Value> = repos
+        .iter()
+        .map(|(id, health)| serde_json::json!({"id": id, "health": health.as_str()}))
+        .collect();
+    (status, serde_json::json!({"repos": repos}))
+}
+
 /// Render the federation summary embedded in `/health`. The
 /// `memory_estimate_bytes` figure is a rough heuristic
 /// (200 bytes/node + 100 bytes/edge) — sufficient for the dashboard's
@@ -2219,7 +2236,7 @@ async fn handle_request(
     // (operational probe). All other endpoints — including `/mcp` and
     // `/events` — require a valid `Authorization: Bearer <key>` and
     // respect the per-key rate limit. Stdio callers bypass this entirely.
-    if !(method == Method::GET && path == "/health") {
+    if !(method == Method::GET && (path == "/health" || path == "/health/index-status")) {
         let auth_header = req
             .headers()
             .get("authorization")
@@ -2261,6 +2278,33 @@ async fn handle_request(
     // GET / is now served by the Command Center SPA shell (PR 4, Task 4.3).
     // The pre-PR-1 /federation-dashboard.html asset was dropped in PR 1
     // (Task 1.3) and is not restored here; the SPA replaces it.
+
+    // A cheap readiness probe that remains responsive while graphs are indexing.
+    if method == Method::GET && path == "/health/index-status" {
+        use crate::federation::health::RepoHealth;
+        use crate::server::readiness::IndexState;
+        let repos = match federation.as_deref() {
+            Some(fed) => fed
+                .list_repos()
+                .into_iter()
+                .map(|(id, health)| (id.to_string(), health))
+                .collect(),
+            None => vec![(
+                "local".to_string(),
+                match executor.ctx.readiness.snapshot().state {
+                    IndexState::Ready => RepoHealth::Ready,
+                    IndexState::WarmingUp => RepoHealth::Indexing,
+                    IndexState::UnavailableError => RepoHealth::Unavailable,
+                },
+            )],
+        };
+        let (status, body) = index_status(&repos);
+        return Ok(Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(full_body(Bytes::from(body.to_string())))
+            .unwrap());
+    }
 
     // GET /health -> health check with graph stats
     if method == Method::GET && path == "/health" {
@@ -3051,6 +3095,25 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn index_status_reports_ready_indexing_and_failures() {
+        use crate::federation::health::RepoHealth::{Degraded, Indexing, Ready, Unavailable};
+        use hyper::StatusCode;
+        let repo = |id: &str, h| (id.to_string(), h);
+        assert_eq!(super::index_status(&[]).0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(super::index_status(&[repo("a", Ready)]).0, StatusCode::OK);
+        assert_eq!(
+            super::index_status(&[repo("a", Ready), repo("b", Indexing)]).0,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            super::index_status(&[repo("a", Indexing), repo("b", Unavailable)]).0,
+            StatusCode::ACCEPTED
+        );
+        let (status, body) = super::index_status(&[repo("a", Degraded)]);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["repos"][0]["health"], "degraded");
+    }
     use super::*;
     use crate::error::LainError;
     use crate::federation::federated_index::FederatedIndex;
