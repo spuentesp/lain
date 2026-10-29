@@ -16,6 +16,8 @@ pub struct HashMapBackend {
     /// How many times `all_edges` (a full clone) was called, so a test can
     /// prove a per-item path stays on `edges_to`.
     all_edges_calls: std::sync::atomic::AtomicUsize,
+    /// Same for `list_nodes`.
+    list_nodes_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl HashMapBackend {
@@ -24,11 +26,22 @@ impl HashMapBackend {
             nodes: RwLock::new(HashMap::new()),
             edges: RwLock::new(Vec::new()),
             all_edges_calls: std::sync::atomic::AtomicUsize::new(0),
+            list_nodes_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    fn all_edges_calls(&self) -> usize {
+    pub(crate) fn all_edges_calls(&self) -> usize {
         self.all_edges_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Number of stored edges, without going through the counted accessor.
+    pub(crate) fn edges_to_total_for_test(&self) -> usize {
+        self.edges.read().unwrap().len()
+    }
+
+    pub(crate) fn list_nodes_calls(&self) -> usize {
+        self.list_nodes_calls
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
@@ -115,7 +128,36 @@ impl GraphBackend for HashMapBackend {
             .collect())
     }
     fn list_nodes(&self) -> Result<Vec<GraphNode>, LainError> {
+        self.list_nodes_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(self.nodes.read().unwrap().values().cloned().collect())
+    }
+    // By-reference visits, like the petgraph backend's: no clone, no counter.
+    fn visit_edges(&self, f: &mut dyn FnMut(&GraphEdge)) -> Result<(), LainError> {
+        for e in self.edges.read().unwrap().iter() {
+            f(e);
+        }
+        Ok(())
+    }
+    fn visit_nodes(&self, f: &mut dyn FnMut(&GraphNode)) -> Result<(), LainError> {
+        for n in self.nodes.read().unwrap().values() {
+            f(n);
+        }
+        Ok(())
+    }
+    fn edges_from(
+        &self,
+        source_id: &str,
+        edge_type: EdgeType,
+    ) -> Result<Vec<GraphEdge>, LainError> {
+        Ok(self
+            .edges
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|e| e.edge_type == edge_type && e.source_id == source_id)
+            .cloned()
+            .collect())
     }
     fn all_edges(&self) -> Result<Vec<GraphEdge>, LainError> {
         self.all_edges_calls
@@ -1319,6 +1361,468 @@ fn a_truncated_federated_file_is_still_rejected() {
     let dst = tempfile::tempdir().unwrap();
     std::fs::write(dst.path().join("federated_graph.bin"), &bytes).unwrap();
     assert!(PetgraphBackend::new(dst.path()).is_err());
+}
+
+// ─── edge/node visitors and indexed lookups ──────────────────────────
+
+fn seeded_backends(dir: &std::path::Path) -> (PetgraphBackend, HashMapBackend) {
+    let petgraph = PetgraphBackend::new(dir).unwrap();
+    let simple = HashMapBackend::new();
+    for b in [&petgraph as &dyn GraphBackend, &simple as &dyn GraphBackend] {
+        b.upsert_nodes_batch(&[
+            node("r:Function:a.py:a:0", "a", "a.py"),
+            node("r:Function:b.py:b:0", "b", "b.py"),
+            node("r:Function:t.py:t:0", "t", "t.py"),
+        ])
+        .unwrap();
+        b.upsert_edges_batch(&[
+            edge(
+                EdgeType::Calls,
+                "r:Function:a.py:a:0".into(),
+                "r:Function:t.py:t:0".into(),
+                1.0,
+            ),
+            edge(
+                EdgeType::Calls,
+                "r:Function:b.py:b:0".into(),
+                "r:Function:t.py:t:0".into(),
+                1.0,
+            ),
+            edge(
+                EdgeType::SendsHttp,
+                "r:Function:a.py:a:0".into(),
+                "r:Function:b.py:b:0".into(),
+                1.0,
+            ),
+            edge(
+                EdgeType::Calls,
+                "r:Function:t.py:t:0".into(),
+                "r:Function:a.py:a:0".into(),
+                1.0,
+            ),
+        ])
+        .unwrap();
+    }
+    (petgraph, simple)
+}
+
+/// `visit_edges` / `visit_nodes` see exactly what `all_edges` / `list_nodes`
+/// return, in the same order, on the indexed and the default implementation.
+#[test]
+fn visitors_see_what_the_cloning_accessors_return() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (petgraph, simple) = seeded_backends(tmp.path());
+    for b in [&petgraph as &dyn GraphBackend, &simple as &dyn GraphBackend] {
+        let mut visited_edges: Vec<(String, String, String)> = Vec::new();
+        b.visit_edges(&mut |e| {
+            visited_edges.push((
+                e.source_id.clone(),
+                e.target_id.clone(),
+                format!("{:?}", e.edge_type),
+            ))
+        })
+        .unwrap();
+        let listed_edges: Vec<(String, String, String)> = b
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.source_id, e.target_id, format!("{:?}", e.edge_type)))
+            .collect();
+        assert_eq!(visited_edges, listed_edges);
+        assert_eq!(visited_edges.len(), 4);
+
+        let mut visited_nodes: Vec<String> = Vec::new();
+        b.visit_nodes(&mut |n| visited_nodes.push(n.id.clone()))
+            .unwrap();
+        let mut listed_nodes: Vec<String> =
+            b.list_nodes().unwrap().into_iter().map(|n| n.id).collect();
+        // The simple backend lists a HashMap (no order); the contract is the
+        // same set, and the same order as `list_nodes` on petgraph.
+        visited_nodes.sort();
+        listed_nodes.sort();
+        assert_eq!(visited_nodes, listed_nodes);
+        assert_eq!(visited_nodes.len(), 3);
+    }
+}
+
+/// `edges_from` filters by source AND type on both implementations.
+#[test]
+fn edges_from_filters_by_source_and_type_on_both_backends() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (petgraph, simple) = seeded_backends(tmp.path());
+    for b in [&petgraph as &dyn GraphBackend, &simple as &dyn GraphBackend] {
+        let calls: Vec<String> = b
+            .edges_from("r:Function:a.py:a:0", EdgeType::Calls)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.target_id)
+            .collect();
+        assert_eq!(calls, vec!["r:Function:t.py:t:0".to_string()]);
+        assert_eq!(
+            b.edges_from("r:Function:a.py:a:0", EdgeType::SendsHttp)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(b
+            .edges_from("r:Function:b.py:b:0", EdgeType::SendsHttp)
+            .unwrap()
+            .is_empty());
+        assert!(b.edges_from("nope", EdgeType::Calls).unwrap().is_empty());
+    }
+}
+
+// ─── traverse_impact: the rewrite must equal the code it replaced ────
+
+// The pre-rewrite implementation, verbatim apart from taking the backend as
+// an argument. It clones every node and every qualifying edge per call —
+// the cost the rewrite removed — and stays here only as the oracle.
+#[allow(clippy::type_complexity)]
+fn reference_traverse_impact(
+    backend: &dyn GraphBackend,
+    starts: &[&str],
+    depth: u32,
+    cap: usize,
+    min_confidence: f32,
+) -> Result<ImpactResult, LainError> {
+    // Snapshot the relevant data up front so the BFS walks a
+    // borrowed view rather than holding the graph lock across the
+    // whole traversal. `all_edges` is `O(E)` per call, but the
+    // federation's BFS hot path runs against a snapshot the
+    // server already keeps in memory; the per-call overhead is
+    // acceptable here, and `MemgraphBackend` (the deferred escape
+    // hatch called out in `federation/AGENTS.md`) can override this
+    // with index-only walks without changing the signature.
+    let mut nodes: std::collections::HashMap<String, GraphNode> = backend
+        .list_nodes()?
+        .into_iter()
+        .map(|n| (n.id.clone(), n))
+        .collect();
+    let edges = backend.all_edges()?;
+    let mut by_target: std::collections::HashMap<String, Vec<(f32, String, GraphEdge)>> =
+        std::collections::HashMap::new();
+    for e in edges {
+        // Confidence must be evidence-backed. Explicit weights win;
+        // otherwise derive it from provenance. A legacy edge with
+        // neither is unknown (0.0), not implicitly verified static data.
+        let conf = e.weight.unwrap_or(match e.provenance.as_ref() {
+            Some(crate::schema::EdgeProvenance::Static { .. })
+            | Some(crate::schema::EdgeProvenance::Confirmed { .. }) => 1.0,
+            Some(crate::schema::EdgeProvenance::Heuristic { confidence, .. }) => *confidence,
+            Some(crate::schema::EdgeProvenance::Runtime { .. }) => 0.9,
+            None => 0.0,
+        });
+        if conf < min_confidence {
+            continue;
+        }
+        match impact_propagation(&e.edge_type) {
+            Propagation::Incoming => by_target.entry(e.target_id.clone()).or_default().push((
+                conf,
+                e.source_id.clone(),
+                e,
+            )),
+            Propagation::Outgoing => by_target.entry(e.source_id.clone()).or_default().push((
+                conf,
+                e.target_id.clone(),
+                e,
+            )),
+            Propagation::Stop => {}
+        }
+    }
+    // Stable predecessor selection: each entry holds the
+    // candidate's confidence and source id; the BFS picks the
+    // highest-confidence, then lexicographically smallest id.
+    for entries in by_target.values_mut() {
+        entries.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+    }
+
+    // BFS from every start at distance 0. The brief: "an endpoint
+    // has one start per provider node" — every entry of `starts`
+    // is seeded independently.
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+    for s in starts {
+        if nodes.contains_key(*s) && visited.insert((*s).to_string()) {
+            queue.push_back(((*s).to_string(), 0));
+        }
+    }
+
+    let mut paths: Vec<ImpactPath> = Vec::new();
+    let mut truncated = false;
+
+    // For each visited node, remember (predecessor id, incoming
+    // edge, min_confidence so far). Used to reconstruct paths
+    // when a leaf is reached. The first predecessor to claim a
+    // node wins (already ordered by the sort above), so output
+    // is deterministic.
+    let mut pred: std::collections::HashMap<String, (String, GraphEdge, f32)> =
+        std::collections::HashMap::new();
+
+    while let Some((current, current_depth)) = queue.pop_front() {
+        let successors = by_target.get(&current);
+        let has_unvisited_successor = successors
+            .map(|v| v.iter().any(|(_, id, _)| !visited.contains(id)))
+            .unwrap_or(false);
+
+        // §5.2 emission rule: emit a path when (a) at `depth` or
+        // (b) no unvisited successor. The seed itself, when it
+        // has no edges, also satisfies (b).
+        let at_depth = current_depth >= depth;
+        if at_depth || !has_unvisited_successor {
+            if paths.len() >= cap {
+                truncated = true;
+            } else {
+                paths.push(reference_reconstruct_path(&current, &pred, &mut nodes));
+            }
+        }
+
+        if at_depth {
+            truncated = true;
+            continue;
+        }
+
+        if let Some(successors) = successors {
+            for (conf, next_id, edge) in successors {
+                if !visited.insert(next_id.clone()) {
+                    continue;
+                }
+                // Edge confidence already passed the floor at
+                // indexing time. The `min_confidence` carried on
+                // the path is the minimum of every edge on it,
+                // updated here as we descend.
+                let new_min_conf = if let Some((_, _, prev_conf)) = pred.get(&current) {
+                    conf.min(*prev_conf)
+                } else {
+                    *conf
+                };
+                pred.insert(
+                    next_id.clone(),
+                    (current.clone(), edge.clone(), new_min_conf),
+                );
+                queue.push_back((next_id.clone(), current_depth + 1));
+            }
+        }
+    }
+
+    // Sort by min_confidence desc, then length asc, then leaf id.
+    paths.sort_by(|a, b| {
+        b.min_confidence
+            .partial_cmp(&a.min_confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.hops.len().cmp(&b.hops.len()))
+            .then_with(|| {
+                let a_leaf = a.hops.last().map(|h| h.node.id.as_str()).unwrap_or("");
+                let b_leaf = b.hops.last().map(|h| h.node.id.as_str()).unwrap_or("");
+                a_leaf.cmp(b_leaf)
+            })
+    });
+
+    Ok(ImpactResult { paths, truncated })
+}
+
+fn reference_reconstruct_path(
+    leaf: &str,
+    pred: &std::collections::HashMap<String, (String, GraphEdge, f32)>,
+    nodes: &mut std::collections::HashMap<String, GraphNode>,
+) -> ImpactPath {
+    // Walk back through `pred` from `leaf` to the seed. Hops are
+    // emitted in seed → leaf order so callers can read them as a
+    // story: "the seed, reached via edge E1, then node N1, via edge
+    // E2, then node N2, …".
+    let mut rev: Vec<ImpactHop> = Vec::new();
+    let mut current = leaf.to_string();
+    let mut min_conf = 1.0_f32;
+    while let Some((prev_id, edge, conf)) = pred.get(&current) {
+        // The hop carries the node we arrived AT (i.e. `current`),
+        // not the predecessor.
+        let node = nodes.get(&current).cloned().unwrap_or_else(|| {
+            // Defensive: an entry in `pred` whose node vanished
+            // between edge indexing and path emission would be a
+            // torn-write we cannot recover from. Surface an empty
+            // placeholder so the test still parses; the emit path is
+            // deterministic and the trace will point at this hop.
+            let mut n = GraphNode::new(NodeType::Function, String::new(), String::new());
+            n.id = current.clone();
+            n
+        });
+        rev.push(ImpactHop {
+            edge: edge.clone(),
+            node,
+        });
+        min_conf = min_conf.min(*conf);
+        current = prev_id.clone();
+    }
+    if rev.is_empty() {
+        // Degenerate path: the leaf IS a seed (or has no predecessors).
+        // Emit a single self-loop hop so callers can read the path's
+        // node without unwrapping an empty `hops` vec. The edge
+        // carries the same id as source and target so it doesn't
+        // masquerade as a real edge in any consumer.
+        let node = nodes.get(leaf).cloned().unwrap_or_else(|| {
+            let mut n = GraphNode::new(NodeType::Function, String::new(), String::new());
+            n.id = leaf.to_string();
+            n
+        });
+        let mut placeholder_edge =
+            GraphEdge::new(EdgeType::Calls, leaf.to_string(), leaf.to_string());
+        placeholder_edge.weight = Some(1.0);
+        rev.push(ImpactHop {
+            edge: placeholder_edge,
+            node,
+        });
+    } else {
+        rev.reverse();
+    }
+    ImpactPath {
+        hops: rev,
+        min_confidence: if pred.is_empty() { 1.0 } else { min_conf },
+    }
+}
+
+type PathSig = (Vec<(String, String, String, Option<u32>, String)>, u32);
+
+/// Everything observable about a result: every hop's edge identity and
+/// weight, the node reached, each path's min confidence, and `truncated`.
+fn impact_signature(r: &ImpactResult) -> (bool, Vec<PathSig>) {
+    let paths = r
+        .paths
+        .iter()
+        .map(|p| {
+            let hops = p
+                .hops
+                .iter()
+                .map(|h| {
+                    (
+                        h.edge.source_id.clone(),
+                        h.edge.target_id.clone(),
+                        format!("{:?}", h.edge.edge_type),
+                        h.edge.weight.map(f32::to_bits),
+                        h.node.id.clone(),
+                    )
+                })
+                .collect();
+            (hops, p.min_confidence.to_bits())
+        })
+        .collect();
+    (r.truncated, paths)
+}
+
+struct Xorshift(u64);
+impl Xorshift {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+/// Randomized graphs with parallel edges of different types, self loops,
+/// many equal-confidence ties, every provenance kind, and edge types of all
+/// three propagation classes: the new index-based `traverse_impact` returns
+/// exactly what the old clone-everything one did, query for query.
+#[test]
+fn traverse_impact_equals_the_reference_on_random_graphs() {
+    use crate::schema::{EdgeProvenance, StaticSource};
+    let types = [
+        EdgeType::Calls,
+        EdgeType::CallsHttp,
+        EdgeType::CallsGraphql,
+        EdgeType::SendsHttp,
+        EdgeType::Binds,
+        EdgeType::HasField,
+        EdgeType::ReadsTable,
+        EdgeType::WritesTable,
+        EdgeType::BusTopic,
+        EdgeType::RouteMatches,
+        EdgeType::Consumes,
+        EdgeType::Produces,
+        EdgeType::Contains,
+    ];
+    let mut compared = 0usize;
+    let mut nonempty = 0usize;
+    for seed in 1..=40u64 {
+        let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0xA24B_AED4_963E_E407));
+        let n = 12 + rng.below(40);
+        let ids: Vec<String> = (0..n)
+            .map(|i| format!("r:Function:f{i}.py:n{i}:0"))
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = PetgraphBackend::new(tmp.path()).unwrap();
+        backend
+            .upsert_nodes_batch(
+                &ids.iter()
+                    .enumerate()
+                    .map(|(i, id)| node(id, &format!("n{i}"), &format!("f{i}.py")))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let mut seen = std::collections::HashSet::new();
+        let mut edges = Vec::new();
+        for _ in 0..(n * 4) {
+            let (s, t) = (rng.below(n), rng.below(n));
+            let ty = types[rng.below(types.len())].clone();
+            if !seen.insert((s, t, format!("{ty:?}"))) {
+                continue;
+            }
+            let mut e = GraphEdge::new(ty, ids[s].clone(), ids[t].clone());
+            e.weight = [None, Some(0.3), Some(0.6), Some(0.9), Some(1.0)][rng.below(5)];
+            e.provenance = match rng.below(4) {
+                0 => None,
+                1 => Some(EdgeProvenance::Static {
+                    source: StaticSource::Regex,
+                }),
+                2 => Some(EdgeProvenance::Heuristic {
+                    detector: "d".into(),
+                    confidence: [0.2, 0.5, 0.8][rng.below(3)],
+                }),
+                _ => Some(EdgeProvenance::Runtime {
+                    trace_id: "t".into(),
+                    last_seen_unix: 0,
+                }),
+            };
+            edges.push(e);
+        }
+        backend.upsert_edges_batch(&edges).unwrap();
+
+        for _ in 0..6 {
+            let mut starts: Vec<&str> = (0..1 + rng.below(3))
+                .map(|_| ids[rng.below(n)].as_str())
+                .collect();
+            if rng.below(5) == 0 {
+                starts.push("r:Function:missing.py:ghost:0");
+            }
+            let depth = [1u32, 2, 3, 6][rng.below(4)];
+            let cap = [1usize, 3, 50][rng.below(3)];
+            let min_conf = [0.0f32, 0.5, 0.95][rng.below(3)];
+            let new = backend
+                .traverse_impact(&starts, depth, cap, min_conf)
+                .unwrap();
+            let reference =
+                reference_traverse_impact(&backend, &starts, depth, cap, min_conf).unwrap();
+            assert_eq!(
+                impact_signature(&new),
+                impact_signature(&reference),
+                "seed {seed}: starts={starts:?} depth={depth} cap={cap} min_conf={min_conf}"
+            );
+            compared += 1;
+            if new.paths.iter().any(|p| p.hops.len() > 1) {
+                nonempty += 1;
+            }
+        }
+    }
+    assert_eq!(compared, 240);
+    assert!(
+        nonempty > 40,
+        "the generator must exercise real multi-hop paths, saw {nonempty}"
+    );
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
