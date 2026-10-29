@@ -52,6 +52,22 @@ fn service(name: &str, paths: &[&str], hosts: &[&str]) -> ServiceDecl {
     }
 }
 
+/// A service that also declares the environment variables it answers on.
+/// The env *name* is what routes a consumer whose host the analyzer
+/// resolved to that variable.
+fn service_with_env(name: &str, paths: &[&str], hosts: &[&str], env: &[&str]) -> ServiceDecl {
+    ServiceDecl {
+        name: name.into(),
+        repo: "nat".into(),
+        paths: paths.iter().map(|p| p.to_string()).collect(),
+        hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        env: env.iter().map(|e| e.to_string()).collect(),
+        base_path: None,
+        route_prefixes: vec![],
+        provides_graphql: true,
+    }
+}
+
 /// Index one repo holding `files` under `services` with `provides`, then
 /// return the joined contract index.
 async fn join(
@@ -589,6 +605,79 @@ async fn a_declared_file_routes_its_unknown_host_calls_to_its_service() {
             })
         ),
         "a declared file should resolve to its service, got {:?}",
+        resolutions[0].target
+    );
+}
+
+/// The analyzer resolves a URL built from an environment variable to that
+/// variable, so the joiner routes the consumer to the service that
+/// declares it — with no `host_aliases` entry at all.
+#[tokio::test]
+async fn a_url_built_from_an_env_var_routes_to_the_service_that_declares_it() {
+    let proxy = "const NAT_BACKEND_URL = process.env.NAT_BACKEND_URL;\n\
+                 const upstream = new URL(NAT_BACKEND_URL);\n\
+                 const UPSTREAM_HTTP_ORIGIN = `${upstream.protocol}//${upstream.host}`;\n\
+                 const targetUrl = `${UPSTREAM_HTTP_ORIGIN}/chat`;\n\
+                 const res = await fetch(targetUrl, { method: 'POST' });\n";
+    let index = join(
+        &[("ui/proxy/server.js", proxy)],
+        vec![
+            service_with_env("nat", &[], &[], &["NAT_BACKEND_URL"]),
+            service("nat-ui", &["ui"], &[]),
+        ],
+        vec![declared("nat", "http:POST /chat")],
+        vec![],
+    )
+    .await;
+    let resolutions: Vec<&ConsumerResolution> = index.consumers.values().flatten().collect();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "expected one consumer, got {resolutions:?}"
+    );
+    assert!(
+        matches!(resolutions[0].target, Some(ConsumerTarget::Binds { .. })),
+        "the env-named service must bind the consumer, got {:?}",
+        resolutions[0].target
+    );
+}
+
+/// The transparent proxy's path is whatever the client asked for, so the
+/// honest verdict is "known service, unknown route" — now derived from the
+/// environment variable rather than declared by an operator.
+#[tokio::test]
+async fn a_transparent_proxy_built_from_an_env_var_is_known_service_unknown_route() {
+    let proxy = "const NAT_BACKEND_URL = process.env.NAT_BACKEND_URL;\n\
+                 const upstream = new URL(NAT_BACKEND_URL);\n\
+                 const UPSTREAM_HTTP_ORIGIN = `${upstream.protocol}//${upstream.host}`;\n\
+                 const backendPath = pathname.substring(3) || '/';\n\
+                 const targetUrl = `${UPSTREAM_HTTP_ORIGIN}${backendPath}`;\n\
+                 const res = await fetch(targetUrl, { method: 'POST' });\n";
+    let index = join(
+        &[("ui/proxy/server.js", proxy)],
+        vec![
+            service_with_env("nat", &[], &[], &["NAT_BACKEND_URL"]),
+            service("nat-ui", &["ui"], &[]),
+        ],
+        vec![declared("nat", "http:POST /chat")],
+        vec![],
+    )
+    .await;
+    let resolutions: Vec<&ConsumerResolution> = index.consumers.values().flatten().collect();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "expected one consumer, got {resolutions:?}"
+    );
+    assert!(
+        matches!(
+            resolutions[0].target,
+            Some(ConsumerTarget::Unresolved {
+                reason: lain::federation::contracts::index::UnresolvedReason::NoRouteInService,
+                target_service: Some(_),
+            })
+        ),
+        "expected no_route_in_service with the service attached, got {:?}",
         resolutions[0].target
     );
 }

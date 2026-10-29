@@ -38,7 +38,10 @@ provides:
 # The UI proxy dials the host expression UPSTREAM_HTTP_ORIGIN, built from
 # NAT_BACKEND_URL. The const lives in the request handler and the fetch
 # sits in a nested closure; the analyzer follows the const across the
-# scope, so the host expression is known and the alias names it.
+# scope and then through the assignments that build the origin, so the
+# host resolves to the NAT_BACKEND_URL env var and the `env:` list of the
+# `nat` service routes it. The alias below stays as the fallback for a
+# host the analyzer cannot trace.
 host_aliases:
   - {host: UPSTREAM_HTTP_ORIGIN, service: nat,
      source: "nat-ui proxy/server.js (NAT_BACKEND_URL)"}

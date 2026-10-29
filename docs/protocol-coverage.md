@@ -42,7 +42,11 @@ each kind and are backlog, not silence.
 ## http
 
 - **Sensors.** `http_sensor` (routes), `http_client_sensor` (call
-  sites), `openapi_sensor` (spec-derived routes and schemas).
+  sites), `openapi_sensor` (spec-derived routes and schemas). The client
+  sensor resolves a URL's host expression through the file's assignments —
+  a name, a template, a member expression, a constructor argument — to the
+  environment variable that configures it, so a host built from
+  `process.env.X` is a known env host rather than an unresolved expression.
 - **Resolver.** The HTTP ladder (`consumer_http.rs`) — §7.3 tier by
   tier: exact route, prefix-stripped template, `http_clients`
   wrapper registry, host evidence, env-var dispatch, unbound-host

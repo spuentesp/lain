@@ -600,7 +600,7 @@ fn synthetic_url_call(
         "{}://dynamic",
         framework.effective_id()
     ))];
-    let host = host_for(&raw_parts);
+    let host = host_for(&raw_parts, None);
     let normalized = normalize(&raw_parts);
     let final_url = if matches!(host, HostPart::None) {
         normalized
@@ -648,7 +648,11 @@ fn build_call(
         Some(u) => parts_from_node(u, src, ctx, enclosing_fn_line, base_url_opt),
         None => Vec::new(),
     };
-    let host = host_for(&raw_parts);
+    // The scope chain of the *use* site. A name assigned in an enclosing
+    // scope is visible here, which is what lets a host expression resolve
+    // through the handler it was built in.
+    let url_scope_chain = url.map(scope_chain).unwrap_or_default();
+    let host = host_for(&raw_parts, Some((ctx, &url_scope_chain)));
     let normalized = normalize(&raw_parts);
     let final_url = if matches!(host, HostPart::None) {
         normalized
@@ -2000,7 +2004,13 @@ fn apply_base_url(parts: Vec<UrlPart>, base_url: Option<&str>) -> Vec<UrlPart> {
 /// §6.3 patterns. The result is the host field of the normalized URL;
 /// we don't mutate the parts — the normalizer's host step handles
 /// the literal host extraction.
-fn host_for(parts: &[UrlPart]) -> HostPart {
+///
+/// The hole usually *names* the host rather than being it — `${BASE_URL}/v1`,
+/// a reverse proxy's `${UPSTREAM_HTTP_ORIGIN}` — so `origin`, when given,
+/// carries the file's assignment context and the scope chain of the use
+/// site, and the hole is followed to the environment variable that
+/// configures it (see [`resolve_host_env`]).
+fn host_for(parts: &[UrlPart], origin: Option<(&FileContext, &[u32])>) -> HostPart {
     // The host is the first hole. A second hole right after it starts the
     // path (`${UPSTREAM_HTTP_ORIGIN}${backendPath}`), so the two are not
     // one host expression.
@@ -2016,7 +2026,169 @@ fn host_for(parts: &[UrlPart]) -> HostPart {
     if let Some(name) = crate::server::sensors::util::host_env_name(t) {
         return HostPart::Env(vec![name.to_string()]);
     }
+    // The hole names a value. Follow it to the env var that configures
+    // the host, when the file's assignments say what it is.
+    if let Some((ctx, scope_chain)) = origin {
+        if let Some(var) = resolve_host_env(t, ctx, scope_chain, 0) {
+            return HostPart::Env(vec![var]);
+        }
+    }
     HostPart::Expr(hole_text)
+}
+
+/// Follow a URL's host expression to the environment variable that
+/// configures it.
+///
+/// The hole at the front of a URL usually names a value rather than being
+/// one, so the walk follows the same-file assignment graph:
+///
+/// | shape                          | step                                  |
+/// |--------------------------------|---------------------------------------|
+/// | `BASE_URL`                     | the expression it is assigned          |
+/// | `` `${BASE_URL}/v1` ``         | the hole that carries the origin      |
+/// | `upstream.protocol`            | its base identifier (`upstream`)      |
+/// | `new URL(NAT_BACKEND_URL)`     | its arguments                          |
+///
+/// and stops at an environment-variable read (`process.env.X` and the other
+/// §6.3 shapes), which is the variable that configures the host.
+///
+/// Only the origin is followed, so a URL built from a literal stays a
+/// literal and an env var in the *path* is never mistaken for the host.
+/// What the walk cannot resolve leaves the host as `HostPart::Expr`, where
+/// it was before.
+fn resolve_host_env(
+    text: &str,
+    ctx: &FileContext,
+    scope_chain: &[u32],
+    depth: usize,
+) -> Option<String> {
+    /// A chain this deep is a cycle or a pathological file, not a URL.
+    const MAX_DEPTH: usize = 8;
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let t = text.trim();
+    if let Some(name) = crate::server::sensors::util::host_env_name(t) {
+        return Some(name.to_string());
+    }
+    if is_plain_identifier(t) {
+        let resolved = ctx.resolve_identifier(t, scope_chain)?;
+        return resolve_host_env(&resolved, ctx, scope_chain, depth + 1);
+    }
+    if let Some(body) = template_body(t) {
+        let hole = origin_hole(&template_from_string(body))?;
+        return resolve_host_env(&hole, ctx, scope_chain, depth + 1);
+    }
+    if let Some(base) = member_base(t) {
+        return resolve_host_env(base, ctx, scope_chain, depth + 1);
+    }
+    for arg in call_arguments(t) {
+        if let Some(var) = resolve_host_env(&arg, ctx, scope_chain, depth + 1) {
+            return Some(var);
+        }
+    }
+    None
+}
+
+/// The hole that carries a template's origin, if it has one.
+///
+/// A URL's origin sits between the scheme and the path. In a template that
+/// is the first hole after the `//` that separates them; a template with no
+/// `//` is a path or a bare host, and its first hole is the origin. A
+/// literal that carries a host of its own (`https://api.example.com/…`) has
+/// no hole origin — that literal is the host.
+fn origin_hole(parts: &[UrlPart]) -> Option<String> {
+    let mut first_hole = None;
+    let mut after_separator = false;
+    for part in parts {
+        match part {
+            UrlPart::Literal(literal) => {
+                if let Some((_, after)) = literal.split_once("//") {
+                    // A literal with a host of its own after the `//` has
+                    // no hole origin.
+                    if !after.is_empty() && after != "/" {
+                        return None;
+                    }
+                    after_separator = true;
+                }
+            }
+            UrlPart::Hole(hole) => {
+                if after_separator {
+                    return Some(hole.clone());
+                }
+                if first_hole.is_none() {
+                    first_hole = Some(hole.clone());
+                }
+            }
+        }
+    }
+    first_hole
+}
+
+/// Whether `text` is a bare identifier — a name the assignment table can
+/// answer for.
+fn is_plain_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// The body of a template literal, without its backticks.
+fn template_body(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes[0] == b'`' && bytes[bytes.len() - 1] == b'`' {
+        Some(&text[1..text.len() - 1])
+    } else {
+        None
+    }
+}
+
+/// The identifier a member expression reads from — `upstream.protocol`
+/// reads from `upstream`.
+fn member_base(text: &str) -> Option<&str> {
+    let (base, rest) = text.split_once('.')?;
+    if rest.is_empty() || !is_plain_identifier(base) {
+        return None;
+    }
+    Some(base)
+}
+
+/// The arguments of a call expression, split at top-level commas.
+fn call_arguments(text: &str) -> Vec<String> {
+    let Some(open) = text.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = text.rfind(')') else {
+        return Vec::new();
+    };
+    if close <= open {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in text[open + 1..close].chars() {
+        match ch {
+            '(' | '[' | '{' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => out.push(std::mem::take(&mut current)),
+            _ => current.push(ch),
+        }
+    }
+    out.push(current);
+    out.into_iter()
+        .map(|arg| arg.trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect()
 }
 
 // ─── Graph emission ───────────────────────────────────────────────────
@@ -2334,7 +2506,7 @@ mod tests {
             UrlPart::Hole("os.environ[\"ORDERS_URL\"]".to_string()),
             UrlPart::Literal("/api/orders".to_string()),
         ];
-        match host_for(&parts) {
+        match host_for(&parts, None) {
             HostPart::Env(names) => assert_eq!(names.clone(), vec!["ORDERS_URL".to_string()]),
             other => panic!("expected Env, got {other:?}"),
         }
@@ -2346,7 +2518,7 @@ mod tests {
             UrlPart::Hole("BASE".to_string()),
             UrlPart::Literal("/api/orders".to_string()),
         ];
-        match host_for(&parts) {
+        match host_for(&parts, None) {
             HostPart::Expr(text) => assert_eq!(text, "BASE"),
             other => panic!("expected Expr, got {other:?}"),
         }
@@ -2355,7 +2527,107 @@ mod tests {
     #[test]
     fn host_for_yields_none_for_pure_literal() {
         let parts = vec![UrlPart::Literal("https://orders.svc/api".to_string())];
-        assert!(matches!(host_for(&parts), HostPart::None));
+        assert!(matches!(host_for(&parts, None), HostPart::None));
+    }
+
+    /// A URL whose host is built from an environment variable reaches that
+    /// variable through the file's assignments: the name the URL holds, the
+    /// object it is built from, and the argument that object was built
+    /// with. This is the shape of a reverse proxy that forwards to a
+    /// backend named by an env var.
+    #[test]
+    fn ts_url_built_from_an_env_var_resolves_to_that_var() {
+        let src = "\
+const NAT_BACKEND_URL = process.env.NAT_BACKEND_URL;
+const upstream = new URL(NAT_BACKEND_URL);
+const UPSTREAM_HTTP_ORIGIN = `${upstream.protocol}//${upstream.host}`;
+const targetUrl = `${UPSTREAM_HTTP_ORIGIN}/chat`;
+const res = await fetch(targetUrl, { method: 'POST' });
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Env(names) => {
+                assert_eq!(names, &vec!["NAT_BACKEND_URL".to_string()])
+            }
+            other => panic!("expected Env, got {other:?}"),
+        }
+        assert_eq!(calls[0].url.template.as_deref(), Some("/chat"));
+    }
+
+    /// The same env var, read inline rather than through a named const.
+    #[test]
+    fn ts_url_built_from_an_inline_env_var_resolves_to_that_var() {
+        let src = "\
+const targetUrl = new URL(process.env.NAT_BACKEND_URL);
+const res = await fetch(targetUrl, { method: 'POST' });
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Env(names) => {
+                assert_eq!(names, &vec!["NAT_BACKEND_URL".to_string()])
+            }
+            other => panic!("expected Env, got {other:?}"),
+        }
+    }
+
+    /// The env var is in the *path*, not the host: the URL's origin is the
+    /// literal, so the host is not env-configured and the resolution must
+    /// not claim it is.
+    #[test]
+    fn ts_env_var_in_the_path_does_not_become_the_host() {
+        let src = "\
+const BASE = 'https://api.example.com';
+const targetUrl = `${BASE}/v1/${process.env.VERSION}`;
+const res = await fetch(targetUrl);
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Expr(text) => assert_eq!(text, "BASE"),
+            other => panic!("expected Expr, got {other:?}"),
+        }
+    }
+
+    /// A literal host stays a literal host: the hole after it is in the
+    /// path, and the resolution must not walk into it.
+    #[test]
+    fn ts_literal_host_is_not_replaced_by_a_path_env_var() {
+        let src = "\
+const targetUrl = `https://api.example.com/${process.env.VERSION}`;
+const res = await fetch(targetUrl);
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Literal(host) => assert_eq!(host, "api.example.com"),
+            other => panic!("expected the literal host, got {other:?}"),
+        }
+    }
+
+    /// The resolution follows the scope chain like the identifier
+    /// resolution does: a name assigned in an enclosing scope is visible
+    /// in a nested closure, and one assigned in a sibling scope is not.
+    #[test]
+    fn ts_host_env_resolution_follows_the_scope_chain() {
+        let src = "\
+const NAT_BACKEND_URL = process.env.NAT_BACKEND_URL;
+const handler = async (req, res) => {
+  const targetUrl = `${NAT_BACKEND_URL}/chat`;
+  const doFetch = async () => {
+    const backendRes = await fetch(targetUrl, { method: 'POST' });
+  };
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Env(names) => {
+                assert_eq!(names, &vec!["NAT_BACKEND_URL".to_string()])
+            }
+            other => panic!("expected Env, got {other:?}"),
+        }
     }
 
     // ─── Per-shape detection tests ────────────────────────────────

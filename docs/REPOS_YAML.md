@@ -462,11 +462,12 @@ does not parse, is refused at load time.
 
 ### `host_aliases` (list)
 
-Static analysis sees a consumer's URL as `${UPSTREAM_HTTP_ORIGIN}/chat`, but
-not the value that name is built from. An operator states which service the
-host expression dials. A known path binds like any other target. A dynamic path
-(a transparent proxy forwards whatever the client asked for) resolves to
-`no_route_in_service` with the service attached, not to a bind.
+Some host expressions the analyzer cannot trace reach the joiner unresolved: a
+name whose value comes from outside the file, a host assembled at runtime. An
+operator states which service such an expression dials. A known path binds
+like any other target. A dynamic path (a transparent proxy forwards whatever
+the client asked for) resolves to `no_route_in_service` with the service
+attached, not to a bind.
 
 ```yaml
 host_aliases:
@@ -474,6 +475,11 @@ host_aliases:
     service: nat                     # a declared service, or an implicit repo-id service
     source: "nat-ui proxy/server.js (NAT_BACKEND_URL)"
 ```
+
+A host the analyzer *can* trace needs no alias. A URL built from
+`process.env.X` resolves to that variable — through the names, templates,
+member expressions and constructor arguments it is built from — and the
+service whose `env:` list names it receives the consumer.
 
 Without an alias, the joiner's `unbound_host` heuristic can still bind a call
 whose path matches a single provider. That bind is at confidence 0.6, weaker

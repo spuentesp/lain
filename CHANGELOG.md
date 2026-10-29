@@ -124,6 +124,19 @@ All notable changes to LAIN are documented here. Versions follow
   assigned in an enclosing scope is visible in a nested closure, a name
   assigned in a sibling scope is not, and a name assigned twice in one scope
   stays unresolved.
+- **A URL built from an environment variable did not say so.** The HTTP client
+  sensor took the host from the hole at the front of the URL, so a URL that
+  *named* its host — `${UPSTREAM_HTTP_ORIGIN}/chat`, a reverse proxy's origin
+  built from `new URL(process.env.NAT_BACKEND_URL)` — was recorded as an
+  unresolved expression and could not be routed to a service. The sensor now
+  follows the name through the file's assignments: a name resolves to the
+  expression it is assigned, a template to the hole that carries the origin, a
+  member expression to its base (`upstream.protocol` → `upstream`), and a call
+  to its arguments (`new URL(NAT_BACKEND_URL)`), stopping at the environment
+  variable that configures the host. Only the origin is followed, so a literal
+  host stays a literal and an env var in the path is never mistaken for the
+  host. A service that declares the variable in `env:` now receives those
+  consumers without an operator declaring them.
 - `get_service` returned an empty `used_by` for every consumer: it looked the
   caller up in the per-repo graph with a global id, found nothing, and walked
   the call-site node instead, silently. It now resolves callers and walks

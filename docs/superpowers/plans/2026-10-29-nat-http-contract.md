@@ -29,6 +29,8 @@ Three deviations from this plan, all deliberate and all recorded on the branch: 
 
 One limitation the measurement exposed, and then fixed: the analyzer recorded the proxy's URL as the identifier `targetUrl`, not as the host expression `UPSTREAM_HTTP_ORIGIN` — the const lives in the request handler and the fetch sits in a nested closure, so the expression was not followed. The HTTP client sensor now records assignments per scope and resolves an identifier through the scope chain (innermost first), so a name assigned in an enclosing scope is visible in a nested closure, a name assigned in a sibling scope is not, and a name assigned twice in one scope stays unresolved. The alias therefore names the host expression, which is the natural declaration.
 
+A second step, landed after that: the analyzer now follows the host expression through the file's assignments to the environment variable that configures it — a name resolves to the expression it is assigned, a template to the hole that carries the origin, a member expression to its base (`upstream.protocol` → `upstream`), and a call to its arguments (`new URL(NAT_BACKEND_URL)`) — so the proxy's host resolves to `NAT_BACKEND_URL` on its own and the `nat` service's `env:` list routes it. Only the origin is followed: a literal host stays a literal, and an env var in the path is never mistaken for the host. The operator-declared `host_aliases:` route stays for a host the analyzer cannot trace.
+
 ## Measured baseline
 
 Measured on 2026-10-29 with `lain 0.13.0` (commit `0355a95b`, built from `origin/dev`) against shallow clones of `NVIDIA/NeMo-Agent-Toolkit`, `NVIDIA/NeMo-Agent-Toolkit-UI`, `NVIDIA/NeMo-Agent-Toolkit-Examples`, federated with this `repos.yaml`:
