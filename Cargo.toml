@@ -48,13 +48,8 @@ rayon = "1.10"
 bincode = { version = "2", features = ["serde"] }
 
 # NLP & Machine Learning
-# Exact-pin the prerelease: `^2.0.0-rc.13` also accepts rc.14, whose
-# init/session API broke `src/server/nlp.rs` (EnvironmentBuilder::commit
-# gone, Session::builder now takes an argument). That drift only showed
-# up in the Fuzz Nightly — `fuzz/` is its own workspace and re-resolved
-# the world without the root Cargo.lock. Bump deliberately, together
-# with nlp.rs, when moving past rc.13.
-ort = { version = "=2.0.0-rc.13", features = ["ndarray"] }
+# Keep prerelease upgrades deliberate: the environment/session API can change.
+ort = { version = "=2.0.0-rc.15", features = ["ndarray"] }
 # Disable tokenizers' default `esaxx_fast` feature, which pulls in
 # `esaxx-rs`'s `cc`-built C++ as a static `/MT` archive. That collides
 # at link time on Windows with `ort-sys`'s prebuilt `/MD` C++ runtime
