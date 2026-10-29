@@ -42,7 +42,9 @@
         }
       }
     },
-    "compatible_changes": { "type": "integer" },
+    "compatible_changes": { "type": "integer", "description": "Count observed so far; incomplete when truncated." },
+    "truncated": { "type": "boolean", "description": "True when the analysis timed out and results are incomplete." },
+    "truncation_reason": { "type": "string", "enum": ["timeout"] },
     "coverage": { "type": "object" }
   },
   "required": ["changes", "compatible_changes", "coverage"]
