@@ -513,6 +513,20 @@ pub fn diff_contracts(
     head: &ContractSurface,
     changed_files: &dyn ChangedFilesSource,
 ) -> Vec<Change> {
+    diff_contracts_until(base, head, changed_files, None).expect("unbounded diff completes")
+}
+
+/// Abort incomplete surface comparison at a cooperative deadline. A partial
+/// pairing cannot be classified safely, so it is discarded on timeout.
+pub(crate) fn diff_contracts_until(
+    base: &ContractSurface,
+    head: &ContractSurface,
+    changed_files: &dyn ChangedFilesSource,
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<Change>> {
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return None;
+    }
     let mut changes: Vec<Change> = Vec::new();
     let mut head_remaining: BTreeMap<EndpointId, EndpointDef> = head.endpoints.clone();
     let mut base_remaining: BTreeMap<EndpointId, EndpointDef> = base.endpoints.clone();
@@ -524,6 +538,9 @@ pub fn diff_contracts(
     let mut pairings: Vec<(EndpointId, EndpointId)> = Vec::new();
     let base_ids: Vec<EndpointId> = base.endpoints.keys().cloned().collect();
     for base_id in &base_ids {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         if !base_remaining.contains_key(base_id) {
             continue;
         }
@@ -538,6 +555,9 @@ pub fn diff_contracts(
         }
         let mut paired: Option<EndpointId> = None;
         for head_id in head.endpoints.keys() {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return None;
+            }
             if head_id.0 != base_id.0 {
                 continue;
             }
@@ -559,6 +579,9 @@ pub fn diff_contracts(
 
     // Stage 2 — unpaired removals and additions.
     for base_id in base_remaining.keys() {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         changes.push(Change {
             service: base_id.0.clone(),
             kind: ChangeKind::EndpointRemoved {
@@ -567,6 +590,9 @@ pub fn diff_contracts(
         });
     }
     for head_id in head_remaining.keys() {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         changes.push(Change {
             service: head_id.0.clone(),
             kind: ChangeKind::EndpointAdded {
@@ -588,7 +614,13 @@ pub fn diff_contracts(
     let mut handler_file_anchors: BTreeMap<(String, String), BTreeMap<EndpointId, BTreeSet<u32>>> =
         BTreeMap::new();
     for (eid, def) in base.endpoints.iter().chain(head.endpoints.iter()) {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         for p in &def.providers {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return None;
+            }
             if let Some(h) = p.handler.as_ref() {
                 if p.node_id.path().as_deref() == Some(h.path.as_str()) {
                     if let Some(line) = p.node_id.line_start().filter(|l| *l != 0) {
@@ -606,6 +638,9 @@ pub fn diff_contracts(
 
     // Stage 3 — field-level diffs for paired endpoints.
     for (base_id, head_id) in &pairings {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let base_def = &base.endpoints[base_id];
         let head_def = &head.endpoints[head_id];
         // Anything pushed for THIS endpoint below (path/method rename,
@@ -643,6 +678,9 @@ pub fn diff_contracts(
         }
         // Field-level diff (per direction).
         for direction in [Direction::Request, Direction::Response, Direction::Payload] {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return None;
+            }
             diff_fields(
                 &mut changes,
                 head_id,
@@ -701,6 +739,9 @@ pub fn diff_contracts(
                 note("", &changed_files.changed_files(base_sha, head_sha));
             } else {
                 for repo in &provider_repos {
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        return None;
+                    }
                     match changed_files.changed_files_for_repo(repo, base_sha, head_sha) {
                         // An unavailable diff is a coverage gap, not evidence
                         // that a handler changed. The tool layer records the
@@ -794,7 +835,7 @@ pub fn diff_contracts(
     changes.sort_by(|a, b| {
         change_sort_key(&a.service, &a.kind).cmp(&change_sort_key(&b.service, &b.kind))
     });
-    changes
+    Some(changes)
 }
 
 fn endpoint_provider_repos(base: &EndpointDef, head: &EndpointDef) -> BTreeSet<String> {
@@ -1258,9 +1299,40 @@ fn parent_of(p: &JsonPath) -> JsonPath {
 ///   schema does not contain a path the consumer reads and the base
 ///   did not.
 /// - `ConsumerRebound`: same key bound to a different endpoint id.
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn expired_deadline_stops_consumer_comparison() {
+        let surface = ContractSurface::default();
+        assert!(
+            diff_consumers_until(&surface, &surface, Some(std::time::Instant::now())).is_none()
+        );
+        assert_eq!(
+            diff_consumers_until(&surface, &surface, None),
+            Some(Vec::new())
+        );
+    }
+}
+
 pub fn diff_consumers(base: &ContractSurface, head: &ContractSurface) -> Vec<Change> {
+    diff_consumers_until(base, head, None).expect("unbounded diff completes")
+}
+
+pub(crate) fn diff_consumers_until(
+    base: &ContractSurface,
+    head: &ContractSurface,
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<Change>> {
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return None;
+    }
     let mut out: Vec<Change> = Vec::new();
     for (key, head_def) in &head.consumers {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let base_def = base.consumers.get(key);
         match &head_def.resolution {
             SurfaceResolution::Unresolved { reason, .. } => {
@@ -1313,11 +1385,17 @@ pub fn diff_consumers(base: &ContractSurface, head: &ContractSurface) -> Vec<Cha
                 let base_reads: BTreeSet<crate::federation::contracts::model::JsonPath> =
                     base_def.map(|b| b.reads.clone()).unwrap_or_default();
                 for endpoint_id in endpoints {
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        return None;
+                    }
                     if let Some(endpoint) = head.endpoints.get(endpoint_id) {
                         if !endpoint.has_schema {
                             continue;
                         }
                         for read in &head_def.reads {
+                            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                                return None;
+                            }
                             if base_reads.contains(read) {
                                 continue;
                             }
@@ -1349,7 +1427,7 @@ pub fn diff_consumers(base: &ContractSurface, head: &ContractSurface) -> Vec<Cha
     out.sort_by(|a, b| {
         change_sort_key(&a.service, &a.kind).cmp(&change_sort_key(&b.service, &b.kind))
     });
-    out
+    Some(out)
 }
 
 fn consumer_service(key: &ConsumerKey) -> ServiceName {
