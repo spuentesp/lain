@@ -1397,6 +1397,13 @@
                     "used_by": {
                       "$ref": "#/$defs/EntryPointList"
                     },
+                    "used_by_status": {
+                      "description": "The caller could not be resolved in the selected graph; used_by was not evaluated.",
+                      "enum": [
+                        "caller_unavailable"
+                      ],
+                      "type": "string"
+                    },
                     "used_by_truncated": {
                       "type": "boolean"
                     }
