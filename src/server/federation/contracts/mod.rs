@@ -59,6 +59,7 @@
 pub mod changed_files;
 pub mod clients;
 pub mod config;
+pub mod context;
 pub mod coverage;
 pub mod coverage_matrix;
 pub mod deployment;

@@ -47,6 +47,7 @@
 //! flag is clear.
 
 pub mod analysis;
+pub mod context;
 pub mod contracts;
 pub mod envelope;
 pub mod evidence;

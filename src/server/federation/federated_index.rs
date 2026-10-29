@@ -104,6 +104,8 @@ pub struct FederatedIndex {
     /// Package names each repo publishes (`repos[].packages`), keyed by
     /// repo id. Read by [`Self::repo_depends_on`] as extra identifiers.
     declared_packages: DashMap<String, Vec<String>>,
+    /// The `repos.yaml` the federation was loaded from; see [`Self::set_config_path`].
+    config_path: RwLock<Option<std::path::PathBuf>>,
     /// Repo index passes running right now, and the most that ran at
     /// once. Bounded by `max_concurrent_indexers`; see [`Self::index_all`].
     index_concurrency_now: AtomicUsize,
@@ -208,6 +210,7 @@ impl FederatedIndex {
             projection_lock: parking_lot::Mutex::new(()),
             depends_cache: DashMap::new(),
             declared_packages: DashMap::new(),
+            config_path: RwLock::new(None),
             index_concurrency_now: AtomicUsize::new(0),
             index_concurrency_peak: AtomicUsize::new(0),
             max_concurrent_indexers: AtomicUsize::new(
@@ -241,6 +244,17 @@ impl FederatedIndex {
     /// opt out (the test harness typically does).
     pub fn set_manifest_path(&self, path: Option<std::path::PathBuf>) {
         *self.manifest_path.write() = path;
+    }
+
+    /// Record the `repos.yaml` this federation was loaded from. The
+    /// runtime contract write path (`apply_contract_context`) edits it.
+    pub fn set_config_path(&self, path: std::path::PathBuf) {
+        *self.config_path.write() = Some(path);
+    }
+
+    /// The `repos.yaml` this federation was loaded from, if any.
+    pub fn config_path(&self) -> Option<std::path::PathBuf> {
+        self.config_path.read().clone()
     }
 
     /// Snapshot the federation's current membership to the configured

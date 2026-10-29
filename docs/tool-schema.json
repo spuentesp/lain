@@ -2704,6 +2704,101 @@
     }
   },
   {
+    "description": "Declare providers the analyzer cannot see (a runtime-configured route, a mesh spec) into the federation's repos.yaml. Dry-run by default: returns the YAML that would be written. With dry_run=false it validates the whole result, writes atomically with a .bak, re-joins the contract index, and reports applied=true only when the declaration is served; a failed re-join restores the file.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `apply_contract_context`. Declares providers the analyzer cannot see into the federation's repos.yaml. Dry-run by default; `snapshot` must be `live`.",
+      "properties": {
+        "dry_run": {
+          "default": true,
+          "description": "When true (the default), return the YAML that would be written and touch nothing.",
+          "type": "boolean"
+        },
+        "provides": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "description": "Endpoint key in the shared grammar, e.g. `http:POST /chat/stream`.",
+                "type": "string"
+              },
+              "service": {
+                "description": "A declared service, or an implicit repo-id service.",
+                "type": "string"
+              },
+              "source": {
+                "description": "Where the declaration came from. Free-form.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "service",
+              "key"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "snapshot": {
+          "enum": [
+            "live"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "apply_contract_context input",
+      "type": "object"
+    },
+    "name": "apply_contract_context",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "`data` field of the `apply_contract_context` envelope.",
+      "properties": {
+        "added": {
+          "items": {
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "service": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "applied": {
+          "description": "True only when the declaration was written and the re-joined index serves it.",
+          "type": "boolean"
+        },
+        "backup": {
+          "description": "The .bak file holding the previous content (applied).",
+          "type": "string"
+        },
+        "config_path": {
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string"
+        },
+        "yaml": {
+          "description": "The full repos.yaml that would be written (dry run).",
+          "type": "string"
+        }
+      },
+      "title": "apply_contract_context data",
+      "type": "object"
+    }
+  },
+  {
     "description": "Provider and consumer changes between two snapshots, classified, with impact paths and coverage (§12). `live` is not allowed as base/head.",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",

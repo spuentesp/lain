@@ -460,6 +460,20 @@ hand-written binding are interchangeable. The short HTTP form (`POST /chat`)
 is accepted too. A declaration that names an unknown service, or a key that
 does not parse, is refused at load time.
 
+### Declaring providers at runtime
+
+The `apply_contract_context` MCP tool adds entries to `provides` without a
+restart. It is dry-run by default: it returns the YAML it would write. With
+`dry_run: false` it validates the whole result, backs up `repos.yaml` to
+`repos.yaml.bak`, writes atomically, and re-joins the contract index. It
+reports `applied: true` only when the re-joined index serves the declaration.
+A refused declaration leaves the file byte-identical. A write to a file that
+changed since it was read is refused. A failed re-join restores the file.
+
+The tool writes the live federation only: `snapshot` must be `live`. Writing
+through `serde_yaml` drops comments in `repos.yaml`; the dry run shows the
+full result before anything is written.
+
 A declared provider has no source node, so a consumer bound to it appears
 in `list_contracts` and `list_unresolved`, but it is not written as a graph
 edge: graph traversal does not follow it.

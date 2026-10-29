@@ -59,6 +59,7 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     // / remove_repo persists its mutation. Without this, only the
     // end-of-load save_manifest below sees the file written.
     fed.set_manifest_path(Some(manifest_path.clone()));
+    fed.set_config_path(config_path.to_path_buf());
     // PR-7: install the contract config so the joiner has
     // something to read. Validated by `FederationConfig::load`
     // already; a hot-reload failure later keeps this one in
@@ -290,6 +291,7 @@ pub async fn load_federation_with_workspace(
     // / remove_repo persists its mutation. Without this, only the
     // end-of-load save_manifest below sees the file written.
     fed.set_manifest_path(Some(manifest_path.clone()));
+    fed.set_config_path(config_path.to_path_buf());
     // PR-7: install the contract config so the joiner has
     // something to read. Validated by `FederationConfig::load`
     // already; a hot-reload failure later keeps this one in

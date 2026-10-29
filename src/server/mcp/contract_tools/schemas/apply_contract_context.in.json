@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "apply_contract_context input",
+  "description": "Input for `apply_contract_context`. Declares providers the analyzer cannot see into the federation's repos.yaml. Dry-run by default; `snapshot` must be `live`.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": { "type": "string", "enum": ["live"] },
+    "provides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "service": { "type": "string", "description": "A declared service, or an implicit repo-id service." },
+          "key": { "type": "string", "description": "Endpoint key in the shared grammar, e.g. `http:POST /chat/stream`." },
+          "source": { "type": "string", "description": "Where the declaration came from. Free-form." }
+        },
+        "required": ["service", "key"]
+      }
+    },
+    "dry_run": { "type": "boolean", "default": true, "description": "When true (the default), return the YAML that would be written and touch nothing." }
+  },
+  "required": ["snapshot"]
+}

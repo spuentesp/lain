@@ -879,6 +879,13 @@ pub const CAPABILITIES: &[Capability] = &[
         "reviewing or proposing a confirmed binding",
     ),
     c(
+        "apply_contract_context",
+        Package::Contracts,
+        Level::Power,
+        "declare providers the analyzer cannot see into repos.yaml (dry-run by default)",
+        "declaring a provider static analysis cannot see, without restarting",
+    ),
+    c(
         "diff_contracts",
         Package::Contracts,
         Level::Power,
