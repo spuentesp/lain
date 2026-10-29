@@ -32,6 +32,7 @@ reference, tuning options, and day-to-day operating notes.
 | `lain capabilities` | Print readiness of symbols, the call graph, git history and semantic search. Add `--json` for scripts. |
 | `lain status` | Print repository, index, and MCP readiness. Add `--json` for scripts. |
 | `lain schema` | Write the MCP tool schema used by schema-drift CI. |
+| `lain models` | List declared embedding models, install a model with `lain models install [name]`, or print the default model directory with `lain models path`. Installation verifies pinned SHA-256 hashes; the server never downloads models. |
 | `lain reindex` | Rebuild the federated graph from source after a schema bump. Backs up `federated_graph.bin` first. Add `--workspace <name>` to scope the rebuild. |
 
 Run `lain <command> --help` for flags. The generated MCP tool schema lives at
@@ -67,8 +68,8 @@ registry the server filters with.
 | `ops` | 9 | Server health, reload, LSP install, re-enrichment |
 | `federation` | 5 | Org-wide queries (shown automatically in federation mode) |
 | `workspace` | 4 | Workspace groups (shown automatically when configured) |
-| `contracts` | 14 | Service view across the federation (`list_services`, `get_service`); snapshot pinning (`prepare_snapshot`, `get_snapshot`); contract view (`list_contracts`, `get_contract`, `list_unresolved`, `check_binding`); analysis (`diff_contracts`, `trace_impact`, `trace_flow`, `get_coverage`); evidence (`resolve_evidence`, `read_source`) |
-| `full` | 98 | Every registered tool |
+| `contracts` | 15 | Service view across the federation (`list_services`, `get_service`); snapshot pinning (`prepare_snapshot`, `get_snapshot`); contract view (`list_contracts`, `get_contract`, `list_unresolved`, `check_binding`); service references (`list_service_refs`); analysis (`diff_contracts`, `trace_impact`, `trace_flow`, `get_coverage`); evidence (`resolve_evidence`, `read_source`) |
+| `full` | 99 | Every registered tool |
 
 ### Role recipes
 

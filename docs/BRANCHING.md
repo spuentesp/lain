@@ -162,6 +162,10 @@ to scope themselves to push-to-main and PR-to-main only:
 A workflow-level `concurrency:` block cancels superseded runs for
 the same ref, so rapid-fire commits to `dev` don't pile up.
 
+To verify a platform fix before release, run the cross-platform tests on its
+feature ref with `gh workflow run ci.yml --ref <branch> -f cross_platform=true`.
+The input defaults to false; ordinary PRs to `dev` keep the fast lane.
+
 This tiering keeps the dev → main signal cheap (~5 min on dev)
 while preserving the full battery as the merge gate on main.
 

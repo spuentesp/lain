@@ -8,7 +8,7 @@ use crate::federation::contracts::config::{
     HttpClientDecl, SchemaDecl, ServiceDecl,
 };
 use crate::federation::contracts::index::{
-    ConsumerTarget, EndpointId, FieldRefResolution, StaleReason, UnresolvedReason,
+    ConsumerTarget, EndpointId, StaleReason, UnresolvedReason,
 };
 use crate::federation::contracts::joiner::{parse_contract_key, ContractJoiner, JoinOutput};
 use crate::federation::contracts::model::{
@@ -22,7 +22,6 @@ use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{
     EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, RouteMatch,
 };
-use std::collections::BTreeSet;
 
 // ─── Builders ─────────────────────────────────────────────────────────
 
@@ -775,8 +774,9 @@ fn dynamic_path_with_external_literal_host_lands_in_external_not_unnormalized() 
 
 #[test]
 fn rule_6_own_service_skip() {
-    // A billing consumer calling billing's own route should NOT
-    // produce a Binds edge (own-service skip).
+    // A billing consumer calling billing's own route via a relative
+    // URL resolves as Internal (own-service endpoint recorded, no
+    // cross-service Binds edge per I5).
     let p = provider_node(
         "billing",
         "src/billing.py",
@@ -799,10 +799,64 @@ fn rule_6_own_service_skip() {
     let mut cfg = default_config();
     cfg.services[0].name = "billing".into();
     cfg.services[0].repo = "billing".into();
-    let out = ContractJoiner::run(&[p, c], &[], &cfg);
-    // The own-service skip fires for rule 6; the call is
-    // unresolved no_match.
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
     assert!(out.binds.is_empty(), "own-service call is not a contract");
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
+    assert!(
+        matches!(resolution.target, Some(ConsumerTarget::Internal)),
+        "same-service relative HTTP call must resolve Internal, got {:?}",
+        resolution.target
+    );
+    assert_eq!(resolution.bound_endpoints.len(), 1);
+    assert_eq!(
+        resolution.bound_endpoints[0].0,
+        ServiceName("billing".into())
+    );
+}
+
+#[test]
+fn rule_6_own_service_unknown_method_stays_unresolved() {
+    // An unknown-method relative call (`fetch("/api/ping", { method: verb })`)
+    // has heuristic confidence (0.6) and must not be promoted to a certain
+    // `Internal` binding.
+    let p = provider_node(
+        "billing",
+        "src/billing.py",
+        "do_it",
+        10,
+        HttpMethod::Get,
+        "/api/ping",
+    );
+    let c = consumer_node(
+        "billing",
+        "src/billing.py",
+        "ping_self_unknown_method",
+        1,
+        MethodSpec::Unknown,
+        url_with_host_method(HostPart::None, Some("/api/ping")),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    let mut cfg = default_config();
+    cfg.services[0].name = "billing".into();
+    cfg.services[0].repo = "billing".into();
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
+    assert!(out.binds.is_empty());
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
+    assert!(
+        matches!(
+            resolution.target,
+            Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                ..
+            })
+        ),
+        "unknown-method same-service call must remain Unresolved, got {:?}",
+        resolution.target
+    );
 }
 
 #[test]
@@ -3004,10 +3058,6 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
         "out.binds must contain Binds(field_ref -> field)"
     );
 }
-
-// Silence unused-imports from churn.
-#[allow(dead_code)]
-fn _silence(_: &RepoId, _: &GlobalId, _: &BTreeSet<FieldRefResolution>) {}
 
 // ─── WebSocket consumers need host evidence and ambiguity refusal ────
 //

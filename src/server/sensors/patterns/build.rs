@@ -97,7 +97,19 @@ fn main() {
     // ── Phase 1: git SHA capture (moved from the package-root
     // build.rs by Task 1). Re-emit on HEAD and any tracked source
     // change so worktree dev-loop rebuilds see the dirty marker flip.
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    // Worktrees have a `.git` file, not a directory. Missing watch paths
+    // make Cargo rerun this script on every invocation.
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--git-path", "HEAD"])
+        .output()
+    {
+        if output.status.success() {
+            let head = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            if head.is_file() {
+                println!("cargo:rerun-if-changed={}", head.display());
+            }
+        }
+    }
     println!("cargo:rerun-if-changed=src");
 
     let mut sha = Command::new("git")
@@ -134,8 +146,14 @@ fn main() {
     let manifest_dir = PathBuf::from(env_mod::var("CARGO_MANIFEST_DIR").unwrap());
     let patterns_root = manifest_dir.join("src/server/sensors/patterns");
 
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=frameworks.yaml");
+    println!(
+        "cargo:rerun-if-changed={}",
+        patterns_root.join("build.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        patterns_root.join("frameworks.yaml").display()
+    );
 
     // Walk `patterns/<lang>/` instead of hard-coding a denylist of
     // language directories. New languages are picked up automatically;
@@ -143,7 +161,10 @@ fn main() {
     // dir doesn't get enumerated as a language.
     let lang_dirs = discover_lang_dirs(&patterns_root);
     for lang in &lang_dirs {
-        println!("cargo:rerun-if-changed={lang}");
+        println!(
+            "cargo:rerun-if-changed={}",
+            patterns_root.join(lang).display()
+        );
     }
 
     let mut entries: Vec<(String, String)> = Vec::new();

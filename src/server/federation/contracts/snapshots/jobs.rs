@@ -41,13 +41,7 @@ type IndexedJobPayload = (
 
 /// Default worker count (`§8.4`): `LAIN_SNAPSHOT_WORKERS` or 2.
 pub fn snapshot_workers() -> usize {
-    match std::env::var("LAIN_SNAPSHOT_WORKERS") {
-        Ok(s) if !s.trim().is_empty() => match s.trim().parse::<usize>() {
-            Ok(v) if v > 0 => v,
-            _ => DEFAULT_SNAPSHOT_WORKERS,
-        },
-        _ => DEFAULT_SNAPSHOT_WORKERS,
-    }
+    crate::server::env_util::positive_env("LAIN_SNAPSHOT_WORKERS", DEFAULT_SNAPSHOT_WORKERS)
 }
 
 /// Hard queue cap (`§8.4`): 64. Beyond this, `prepare_snapshot`
@@ -431,6 +425,13 @@ fn run_job_inner(
     if let Err(e) = runner.cache().write_entry(&key, &graph_bytes, &manifest) {
         let _ = worktree_remove(runner.data_dir(), &spec.repo, &sha);
         return Err(e);
+    }
+    // §8.4 budget: the cache may not grow past LAIN_INDEX_CACHE_MB. Evict the
+    // least recently used entries that no analysis holds; entries are
+    // regenerable, so this only costs a rebuild later.
+    let budget = crate::federation::contracts::index_cache::cache_budget_mb();
+    if let Err(e) = runner.cache().evict_lru(budget) {
+        tracing::warn!("index cache could not be bounded to {budget} MiB: {e}");
     }
     // Write the coverage ledger alongside the manifest
     let mut ledger = crate::federation::contracts::coverage::CoverageLedger::default();
