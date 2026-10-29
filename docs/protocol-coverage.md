@@ -144,6 +144,16 @@ each kind and are backlog, not silence.
   (`RequestSchema`/`ResponseSchema`/`HasField`) are outside the
   dashboard filter. **Backlog.**
 - **Status.** Detected, joined, confirmable.
+- **Measured on real repositories** (2026-10-29, Lain `4b6cafad`,
+  `scripts/eval/openshell-contract-smoke.sh`, NVIDIA/OpenShell and
+  NVIDIA/NeMo-Fabric shallow clones): 120 RPC contracts from the
+  `openshell.v1` proto services, 21 with a bound consumer, both repos
+  `ready`. The bound consumers come from the Python SDK's `self._stub`
+  / `stub` handles. Their channel resolves through the file's
+  gateway-shaped env read (`OPENSHELL_GATEWAY`, chosen over
+  `XDG_CONFIG_HOME`). That var names a gateway, so the bind is
+  service-level, not a verified dial address. Re-run the script to
+  reproduce.
 
 ## websocket
 
